@@ -11,24 +11,11 @@ class TVHot : MainAPI() {
     override var lang = "ko"
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie, TvType.AsianDrama, TvType.Anime, TvType.AnimeMovie)
 
-    // ✅ 6개 카테고리만 표시 (1페이지로 제한)
-    override val mainPage = mainPageOf(
-        "/drama" to "드라마",
-        "/ent" to "예능",
-        "/sisa" to "시사/교양",
-        "/movie" to "영화",
-        "/kor_movie" to "한국영화",
-        "/animation" to "애니메이션"
-    )
-
     private fun Element.toSearchResponse(): SearchResponse? {
         val onClick = this.attr("onclick")
         val link = Regex("location\\.href='(.*?)'").find(onClick)?.groupValues?.get(1) ?: return null
-        val titleElement = this.selectFirst("div.title")
-        val title = titleElement?.text()?.trim() ?: return null
-        
-        // 이미지 추출 (다양한 선택자 시도)
-        val poster = this.selectFirst("div.img img, img.thumb, img[src*='file']")?.attr("src")
+        val title = this.selectFirst("div.title")?.text()?.trim() ?: return null
+        val poster = this.selectFirst("div.img img")?.attr("src")
         
         // URL을 기반으로 타입 판단
         val type = determineTypeFromUrl(link)
@@ -64,42 +51,27 @@ class TVHot : MainAPI() {
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        // ✅ 페이지네이션 제한: page가 1보다 크면 빈 리스트 반환
-        if (page > 2) {
-            return newHomePageResponse(
-                list = HomePageList(
-                    name = request.name,
-                    list = emptyList(),
-                    isHorizontalImages = false
-                ),
-                hasNext = false // ✅ 더 이상 페이지 없음
-            )
+        // ▼▼▼ 무한 스크롤 방지: 1페이지만 로드 ▼▼▼
+        if (page > 1) {
+            return newHomePageResponse(emptyList())
+        }
+        // ▲▲▲ 여기까지 추가 ▲▲▲
+
+        val doc = app.get(mainUrl).document
+        val home = mutableListOf<HomePageList>()
+        doc.select("div.mov_type").forEach { section ->
+            var title = section.selectFirst("h2 strong")?.text()?.trim() ?: "추천 목록"
+            title = title.replace("무료 ", "").replace(" 다시보기", "").trim()
+            val listItems = section.select("ul li[onclick]").mapNotNull { it.toSearchResponse() }
+            if (listItems.isNotEmpty()) home.add(HomePageList(title, listItems))
         }
         
-        // 각 카테고리별 첫 페이지만 요청
-        val categoryPath = request.data
-        val url = "$mainUrl$categoryPath" // ✅ page 파라미터 제거
-        
-        val doc = app.get(url).document
-        
-        // 카테고리 페이지에서 아이템 추출
-        val items = doc.select("ul li[onclick]").mapNotNull { it.toSearchResponse() }
-        
-        // ✅ 항상 false 반환 (페이지네이션 비활성화)
-        return newHomePageResponse(
-            list = HomePageList(
-                name = request.name,
-                list = items,
-                isHorizontalImages = false
-            ),
-            hasNext = false // ✅ 무한 스크롤 비활성화
-        )
+        // ▼▼▼ hasNext = false로 설정하여 추가 페이지 로드 방지 ▼▼▼
+        return newHomePageResponse(home, hasNext = false)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
         val doc = app.get("$mainUrl/search?stx=$query").document
-        
-        // 검색 결과 페이지의 아이템 추출
         return doc.select("ul li[onclick]").mapNotNull { it.toSearchResponse() }
     }
 
@@ -115,8 +87,11 @@ class TVHot : MainAPI() {
         }
         
         // 3. 회차 정보 제거 안전장치 (회/화/부 포함)
+        // 패턴 설명: 숫자 + (회|화|부) + 가능한 추가 텍스트 (예: "16화", "3회", "제1부", "에피소드 5")
         title = title?.replace(Regex("\\s*\\d+\\s*(?:회|화|부)\\s*"), "")?.trim()
+        // 추가 패턴: "에피소드 \\d+" 제거
         title = title?.replace(Regex("\\s*에피소드\\s*\\d+\\s*"), "")?.trim()
+        // 괄호 안의 회차 정보 제거 (예: "(16화)", "(제3회)")
         title = title?.replace(Regex("\\s*\\(\\s*(?:제?\\s*)?\\d+\\s*(?:회|화|부)\\s*\\)"), "")?.trim()
         
         // 4. 앞뒤 공백 정리
