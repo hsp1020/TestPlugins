@@ -5,6 +5,7 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.Qualities
 
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "BunnyPoorCdn"
@@ -24,13 +25,14 @@ class BunnyPoorCdn : ExtractorApi() {
         val m3u8Match = m3u8Regex.find(response)
         
         if (m3u8Match != null) {
-            callback(
-                ExtractorLink(
+            // newExtractorLink 함수 사용 (권장 방식)
+            callback.invoke(
+                newExtractorLink(
                     source = name,
-                    name = "BunnyPoorCdn",
+                    name = name,
                     url = m3u8Match.value,
-                    referer = mainUrl,
-                    quality = Qualities.Unknown.value,
+                    referer = referer ?: mainUrl,
+                    quality = Qualities.Unknown.value, // Qualities 객체 사용
                     isM3u8 = true
                 )
             )
