@@ -1,22 +1,24 @@
 [
     {
-        "iconUrl": "https://upload.wikimedia.org/wikipedia/commons/2/2f/Korduene_Logo.png",
+        "iconUrl": "https://tvhot.store/img/logo.png",
         "apiVersion": 1,
-        "repositoryUrl": "https://github.com/recloudstream/TestPlugins",
-        "fileSize": 7311,
+        "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
+        "fileSize": 11872,
         "status": 1,
-        "language": "en",
+        "language": "ko",
         "authors": [
-            "Cloudburst",
-            "Luna712"
+            "hsp1020"
         ],
         "tvTypes": [
-            "Movie"
+            "TvSeries",
+            "Movie",
+            "AsianDrama",
+            "Anime"
         ],
         "version": 1,
-        "internalName": "ExampleProvider",
-        "description": "Lorem ipsum",
-        "url": "https://raw.githubusercontent.com/recloudstream/TestPlugins/builds/ExampleProvider.cs3",
-        "name": "ExampleProvider"
+        "internalName": "TVHotProvider",
+        "description": "\ud55c\uad6d \ub4dc\ub77c\ub9c8 \ubc0f TV \ud504\ub85c\uadf8\ub7a8 \ub2e4\uc2dc\ubcf4\uae30 \uc81c\uacf5",
+        "url": "https://raw.githubusercontent.com/hsp1020/TestPlugins/builds/TVHotProvider.cs3",
+        "name": "TVHotProvider"
     }
 ]
