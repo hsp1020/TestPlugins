@@ -144,59 +144,9 @@ class TVHot : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val doc = app.get(data).document
-        
-        // 방법 1: 주석 처리된 버튼에서 직접 m3u8 URL 추출
-        val scriptContent = doc.toString()
-        
-        // 정규식으로 m3u8 경로 추출 - 다양한 패턴 시도
-        val patterns = listOf(
-            // 패턴 1: 상대 경로 (/v/f/.../index.m3u8)
-            Regex("""['"](/v/f/[^'"]+?/index\.m3u8)['"]"""),
-            // 패턴 2: //로 시작하는 프로토콜 상대 경로
-            Regex("""['"](//v/f/[^'"]+?/index\.m3u8)['"]"""),
-            // 패턴 3: src 속성에 있는 경로
-            Regex("""src=['"](/v/f/[^'"]+?/index\.m3u8)['"]"""),
-            // 패턴 4: 완전한 URL (every9.poorcdn.com)
-            Regex("""(https?://every9\.poorcdn\.com[^'"]*?\.m3u8[^'"]*)"""),
-            // 패턴 5: 다른 poorcdn 도메인
-            Regex("""(https?://[^'"]*?poorcdn\.com[^'"]*?\.m3u8[^'"]*)""")
-        )
-        
-        var m3u8Url: String? = null
-        
-        for (pattern in patterns) {
-            val match = pattern.find(scriptContent)
-            if (match != null) {
-                m3u8Url = match.groupValues[1]
-                
-                // 상대 경로인 경우 절대 URL로 변환
-                if (m3u8Url!!.startsWith("//")) {
-                    m3u8Url = "https:$m3u8Url"
-                } else if (m3u8Url!!.startsWith("/")) {
-                    m3u8Url = "https://every9.poorcdn.com$m3u8Url"
-                }
-                
-                // URL 디버깅 로그 (실제 배포시 제거 가능)
-                println("[TVHot] Found m3u8 URL: $m3u8Url")
-                break
-            }
-        }
-        
-        // m3u8 URL을 찾은 경우 직접 로드
-        if (m3u8Url != null) {
-            try {
-                loadExtractor(m3u8Url, mainUrl, subtitleCallback, callback)
-                return true
-            } catch (e: Exception) {
-                println("[TVHot] Failed to load m3u8 directly: ${e.message}")
-                // 실패시 기존 방식으로 폴백
-            }
-        }
-        
-        // 방법 2: 기존 방식 폴백 (iframe의 data-player1 사용)
         val playerUrl = doc.selectFirst("iframe#view_iframe")?.attr("data-player1") ?: return false
         
-        // BunnyPoorCdn 추출기 사용
+        // BunnyPoorCdn을 불러와서 실행
         BunnyPoorCdn().getUrl(playerUrl, mainUrl, subtitleCallback, callback)
         return true
     }
