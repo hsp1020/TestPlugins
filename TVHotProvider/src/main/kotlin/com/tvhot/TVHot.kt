@@ -69,10 +69,25 @@ class TVHot : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url).document
-        val title = doc.selectFirst("h2#bo_v_title .bo_v_tit")?.text()?.trim() ?: "Unknown"
         
-        // URL을 기반으로 타입 결정
-        val type = determineTypeFromUrl(url)
+        // 1. 우선적으로 이미지의 alt 속성에서 시리즈 전체 제목 추출
+        var title = doc.selectFirst("div.tmdb-card-top img")?.attr("alt")?.trim()
+        
+        // 2. alt 속성이 없으면 기존 방식으로 폴백
+        if (title.isNullOrEmpty()) {
+            title = doc.selectFirst("h2#bo_v_title .bo_v_tit")?.text()?.trim() ?: "Unknown"
+        }
+        
+        // 3. 회차 정보 제거 안전장치 (회/화/부 포함)
+        // 패턴 설명: 숫자 + (회|화|부) + 가능한 추가 텍스트 (예: "16화", "3회", "제1부", "에피소드 5")
+        title = title?.replace(Regex("\\s*\\d+\\s*(?:회|화|부)\\s*"), "")?.trim()
+        // 추가 패턴: "에피소드 \\d+" 제거
+        title = title?.replace(Regex("\\s*에피소드\\s*\\d+\\s*"), "")?.trim()
+        // 괄호 안의 회차 정보 제거 (예: "(16화)", "(제3회)")
+        title = title?.replace(Regex("\\s*\\(\\s*(?:제?\\s*)?\\d+\\s*(?:회|화|부)\\s*\\)"), "")?.trim()
+        
+        // 4. 앞뒤 공백 정리
+        title = title?.trim() ?: "Unknown"
         
         // 에피소드 리스트 추출
         val episodes = doc.select("div#other_list ul li").mapNotNull {
@@ -85,6 +100,9 @@ class TVHot : MainAPI() {
             }
         }
 
+        // URL을 기반으로 타입 결정
+        val type = determineTypeFromUrl(url)
+        
         // 타입별로 다른 LoadResponse 반환
         return when (type) {
             TvType.Movie, TvType.AnimeMovie -> {
