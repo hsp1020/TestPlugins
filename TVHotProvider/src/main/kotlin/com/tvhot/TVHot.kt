@@ -11,19 +11,14 @@ class TVHot : MainAPI() {
     override var lang = "ko"
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie, TvType.AsianDrama, TvType.Anime, TvType.AnimeMovie)
 
-    // 메인 페이지에 표시할 카테고리 정의
+    // ✅ 6개 카테고리만 표시 (1페이지로 제한)
     override val mainPage = mainPageOf(
         "/drama" to "드라마",
-        "/movie" to "영화",
-        "/kor_movie" to "한국영화",
         "/ent" to "예능",
         "/sisa" to "시사/교양",
-        "/old_drama" to "추억의 드라마",
-        "/old_ent" to "추억의 예능",
-        "/world" to "해외 드라마",
-        "/ott_ent" to "해외 예능",
-        "/animation" to "애니메이션",
-        "/ani_movie" to "애니메이션 영화"
+        "/movie" to "영화",
+        "/kor_movie" to "한국영화",
+        "/animation" to "애니메이션"
     )
 
     private fun Element.toSearchResponse(): SearchResponse? {
@@ -69,30 +64,35 @@ class TVHot : MainAPI() {
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        // 각 카테고리별 페이지 요청 (페이지네이션 지원)
-        val categoryPath = request.data
-        val url = if (page == 1) {
-            "$mainUrl$categoryPath"
-        } else {
-            "$mainUrl$categoryPath?page=$page"
+        // ✅ 페이지네이션 제한: page가 1보다 크면 빈 리스트 반환
+        if (page > 2) {
+            return newHomePageResponse(
+                list = HomePageList(
+                    name = request.name,
+                    list = emptyList(),
+                    isHorizontalImages = false
+                ),
+                hasNext = false // ✅ 더 이상 페이지 없음
+            )
         }
+        
+        // 각 카테고리별 첫 페이지만 요청
+        val categoryPath = request.data
+        val url = "$mainUrl$categoryPath" // ✅ page 파라미터 제거
         
         val doc = app.get(url).document
         
         // 카테고리 페이지에서 아이템 추출
         val items = doc.select("ul li[onclick]").mapNotNull { it.toSearchResponse() }
         
-        // 페이지네이션 확인: 다음 페이지 버튼이 있는지 확인
-        val hasNext = doc.select("a.pg_end, a.next, li.next a").isNotEmpty() ||
-                     doc.select("a:contains(다음)").isNotEmpty()
-        
+        // ✅ 항상 false 반환 (페이지네이션 비활성화)
         return newHomePageResponse(
             list = HomePageList(
                 name = request.name,
                 list = items,
                 isHorizontalImages = false
             ),
-            hasNext = hasNext
+            hasNext = false // ✅ 무한 스크롤 비활성화
         )
     }
 
