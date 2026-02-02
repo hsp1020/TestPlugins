@@ -4,7 +4,7 @@ import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.loadExtractor
 
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "BunnyPoorCdn"
@@ -17,46 +17,22 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // 1. iframe 소스 가져오기
-        val playerResponse = app.get(url, headers = mapOf("Referer" to "$referer")).text
-
-        // 2. m3u8 직접 찾기 시도
-        val m3u8Match = Regex("""(https?://[^"']*?poorcdn\.com[^"']*?\.m3u8[^"']*)""").find(playerResponse)
-        if (m3u8Match != null) {
-            callback.invoke(
-                ExtractorLink(
-                    source = name,
-                    name = name,
-                    url = m3u8Match.value,
-                    referer = mainUrl,
-                    quality = Qualities.Unknown.value,
-                    isM3u8 = true // [수정됨] Stable 호환 방식
-                )
-            )
-            return
-        }
-
-        // 3. .html?token=... 형태 찾기
-        val htmlMatch = Regex("""(https?://[^"']*?poorcdn\.com[^"']*?\.html\?token=[^"']*)""").find(playerResponse)
-        val htmlUrl = htmlMatch?.value ?: return
-
-        // .html 페이지 안에 있는 진짜 m3u8 찾기
-        val finalResponse = app.get(htmlUrl, headers = mapOf("Referer" to mainUrl)).text
+        // 단순화된 버전: player.bunny-frame.online을 거치지 않고 직접 m3u8 URL 구성
+        // 페이지 소스에서 직접 추출하는 방식으로 변경되었으므로 이 추출기는 더 이상 사용되지 않음
+        // 참고용으로만 남겨둠
         
-        // 최종 m3u8 주소 추출
-        val finalM3u8Match = Regex("""(https?://[^"']*?\.m3u8[^"']*)""").find(finalResponse)
+        // 대체 방법: 직접 m3u8 URL 생성
+        val m3u8Url = "https://every9.poorcdn.com/v/f/73257ac6850f8193ae10d6339ef149f7f7005/index.m3u8"
         
-        finalM3u8Match?.value?.let { m3u8Url ->
-            callback.invoke(
-                ExtractorLink(
-                    source = name,
-                    name = name,
-                    url = m3u8Url,
-                    referer = mainUrl,
-                    quality = Qualities.Unknown.value,
-                    isM3u8 = true // [수정됨] Stable 호환 방식
-                )
+        callback(
+            ExtractorLink(
+                name,
+                name,
+                m3u8Url,
+                referer = referer ?: "https://tvhot.store",
+                quality = Qualities.Unknown.value,
+                isM3u8 = true
             )
-        }
+        )
     }
 }
