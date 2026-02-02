@@ -17,17 +17,28 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val playerResponse = app.get(url, headers = mapOf("Referer" to "$referer")).text
+        val response = app.get(url, headers = mapOf("Referer" to "$referer")).text
         
-        // 1. m3u8 직접 찾기
-        val m3u8Match = Regex("""(https?://[^"']*?poorcdn\.com[^"']*?\.m3u8[^"']*)""").find(playerResponse)
+        // 1. 직접 m3u8 찾기 시도
+        val m3u8Regex = Regex("""(https?://[^"']*?\.m3u8[^"']*)""")
+        val m3u8Match = m3u8Regex.find(response)
+        
         if (m3u8Match != null) {
-            loadExtractor(m3u8Match.value, mainUrl, subtitleCallback, callback)
+            callback(
+                ExtractorLink(
+                    source = name,
+                    name = "BunnyPoorCdn",
+                    url = m3u8Match.value,
+                    referer = mainUrl,
+                    quality = Qualities.Unknown.value,
+                    isM3u8 = true
+                )
+            )
             return
         }
-
-        // 2. html 토큰 방식 찾기
-        val htmlMatch = Regex("""(https?://[^"']*?poorcdn\.com[^"']*?\.html\?token=[^"']*)""").find(playerResponse)
+        
+        // 2. 기존 로직
+        val htmlMatch = Regex("""(https?://[^"']*?poorcdn\.com[^"']*?\.html\?token=[^"']*)""").find(response)
         val htmlUrl = htmlMatch?.value ?: return
 
         val finalResponse = app.get(htmlUrl, headers = mapOf("Referer" to mainUrl)).text
