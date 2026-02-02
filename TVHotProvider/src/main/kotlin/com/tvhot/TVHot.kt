@@ -9,16 +9,44 @@ class TVHot : MainAPI() {
     override var name = "TVHot"
     override val hasMainPage = true
     override var lang = "ko"
-    override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie, TvType.AsianDrama, TvType.Anime)
+    override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie, TvType.AsianDrama, TvType.Anime, TvType.AnimeMovie)
 
     private fun Element.toSearchResponse(): SearchResponse? {
         val onClick = this.attr("onclick")
         val link = Regex("location\\.href='(.*?)'").find(onClick)?.groupValues?.get(1) ?: return null
         val title = this.selectFirst("div.title")?.text()?.trim() ?: return null
         val poster = this.selectFirst("div.img img")?.attr("src")
+        
+        // URL을 기반으로 타입 판단
+        val type = determineTypeFromUrl(link)
+        
+        return when (type) {
+            TvType.Movie -> newMovieSearchResponse(title, fixUrl(link), TvType.Movie) {
+                this.posterUrl = fixUrl(poster ?: "")
+            }
+            TvType.AnimeMovie -> newMovieSearchResponse(title, fixUrl(link), TvType.AnimeMovie) {
+                this.posterUrl = fixUrl(poster ?: "")
+            }
+            TvType.Anime -> newAnimeSearchResponse(title, fixUrl(link), TvType.Anime) {
+                this.posterUrl = fixUrl(poster ?: "")
+            }
+            else -> newAnimeSearchResponse(title, fixUrl(link), TvType.TvSeries) {
+                this.posterUrl = fixUrl(poster ?: "")
+            }
+        }
+    }
 
-        return newAnimeSearchResponse(title, fixUrl(link), TvType.TvSeries) {
-            this.posterUrl = fixUrl(poster ?: "")
+    // URL을 기반으로 콘텐츠 타입 판단
+    private fun determineTypeFromUrl(url: String): TvType {
+        return when {
+            url.contains("/movie") || url.contains("/kor_movie") -> TvType.Movie
+            url.contains("/ani_movie") -> TvType.AnimeMovie
+            url.contains("/animation") -> TvType.Anime
+            url.contains("/drama") || url.contains("/old_drama") || 
+            url.contains("/ent") || url.contains("/sisa") || 
+            url.contains("/old_ent") || url.contains("/world") || 
+            url.contains("/ott_ent") -> TvType.TvSeries
+            else -> TvType.TvSeries // 기본값
         }
     }
 
@@ -43,6 +71,10 @@ class TVHot : MainAPI() {
         val doc = app.get(url).document
         val title = doc.selectFirst("h2#bo_v_title .bo_v_tit")?.text()?.trim() ?: "Unknown"
         
+        // URL을 기반으로 타입 결정
+        val type = determineTypeFromUrl(url)
+        
+        // 에피소드 리스트 추출
         val episodes = doc.select("div#other_list ul li").mapNotNull {
             val aTag = it.selectFirst("a") ?: return@mapNotNull null
             val href = aTag.attr("href")
@@ -53,9 +85,29 @@ class TVHot : MainAPI() {
             }
         }
 
-        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-            this.posterUrl = fixUrl(doc.selectFirst(".tmdb-card-top img")?.attr("src") ?: "")
-            this.plot = doc.selectFirst(".tmdb-overview")?.text()
+        // 타입별로 다른 LoadResponse 반환
+        return when (type) {
+            TvType.Movie, TvType.AnimeMovie -> {
+                // 영화의 경우 첫 번째 링크 사용
+                val movieLink = episodes.firstOrNull()?.data ?: url
+                newMovieLoadResponse(title, url, type, movieLink) {
+                    this.posterUrl = fixUrl(doc.selectFirst(".tmdb-card-top img")?.attr("src") ?: "")
+                    this.plot = doc.selectFirst(".tmdb-overview")?.text()
+                }
+            }
+            TvType.Anime -> {
+                newAnimeLoadResponse(title, url, TvType.Anime) {
+                    this.posterUrl = fixUrl(doc.selectFirst(".tmdb-card-top img")?.attr("src") ?: "")
+                    this.plot = doc.selectFirst(".tmdb-overview")?.text()
+                    addEpisodes(episodes)
+                }
+            }
+            else -> {
+                newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+                    this.posterUrl = fixUrl(doc.selectFirst(".tmdb-card-top img")?.attr("src") ?: "")
+                    this.plot = doc.selectFirst(".tmdb-overview")?.text()
+                }
+            }
         }
     }
 
