@@ -22,8 +22,8 @@ class TVHot : MainAPI() {
         "/old_ent" to "추억의 예능",
         "/world" to "해외 드라마",
         "/ott_ent" to "해외 예능",
-        "/animation" to "애니메이션"
-        "/ani_movie" to "애니메이션 영화",
+        "/animation" to "애니메이션",
+        "/ani_movie" to "애니메이션 영화"
     )
 
     private fun Element.toSearchResponse(): SearchResponse? {
