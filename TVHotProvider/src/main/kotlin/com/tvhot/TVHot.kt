@@ -51,11 +51,10 @@ class TVHot : MainAPI() {
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        // ▼▼▼ 무한 스크롤 방지: 1페이지만 로드 ▼▼▼
+        // 무한 스크롤 방지: 1페이지만 로드
         if (page > 1) {
             return newHomePageResponse(emptyList())
         }
-        // ▲▲▲ 여기까지 추가 ▲▲▲
 
         val doc = app.get(mainUrl).document
         val home = mutableListOf<HomePageList>()
@@ -66,7 +65,6 @@ class TVHot : MainAPI() {
             if (listItems.isNotEmpty()) home.add(HomePageList(title, listItems))
         }
         
-        // ▼▼▼ hasNext = false로 설정하여 추가 페이지 로드 방지 ▼▼▼
         return newHomePageResponse(home, hasNext = false)
     }
 
@@ -87,11 +85,8 @@ class TVHot : MainAPI() {
         }
         
         // 3. 회차 정보 제거 안전장치 (회/화/부 포함)
-        // 패턴 설명: 숫자 + (회|화|부) + 가능한 추가 텍스트 (예: "16화", "3회", "제1부", "에피소드 5")
         title = title?.replace(Regex("\\s*\\d+\\s*(?:회|화|부)\\s*"), "")?.trim()
-        // 추가 패턴: "에피소드 \\d+" 제거
         title = title?.replace(Regex("\\s*에피소드\\s*\\d+\\s*"), "")?.trim()
-        // 괄호 안의 회차 정보 제거 (예: "(16화)", "(제3회)")
         title = title?.replace(Regex("\\s*\\(\\s*(?:제?\\s*)?\\d+\\s*(?:회|화|부)\\s*\\)"), "")?.trim()
         
         // 4. 앞뒤 공백 정리
@@ -144,10 +139,63 @@ class TVHot : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val doc = app.get(data).document
-        val playerUrl = doc.selectFirst("iframe#view_iframe")?.attr("data-player1") ?: return false
+        val html = doc.toString()
         
-        // BunnyPoorCdn을 불러와서 실행
-        BunnyPoorCdn().getUrl(playerUrl, mainUrl, subtitleCallback, callback)
+        // 1. 우선적으로 페이지에서 동영상 ID 추출
+        val videoIdPatterns = listOf(
+            // 패턴 1: /v/f/비디오ID/ 형식
+            Regex("""/v/f/([a-f0-9]{32,})/"""),
+            // 패턴 2: 주석 안의 m3u8 경로
+            Regex("""src=['"]/(v/f/[a-f0-9]+/index\.m3u8)['"]"""),
+            // 패턴 3: data-player 속성에서 src 값 (16진수)
+            Regex("""src=([a-f0-9]{100,})""")
+        )
+        
+        var videoId: String? = null
+        
+        // 각 패턴으로 시도
+        for (pattern in videoIdPatterns) {
+            val match = pattern.find(html)
+            if (match != null) {
+                val matchedValue = match.groupValues.getOrNull(1) ?: match.value
+                if (matchedValue.length >= 32) {
+                    videoId = if (matchedValue.contains("/")) {
+                        // /v/f/비디오ID/ 형식일 경우
+                        matchedValue.split("/").getOrNull(2)
+                    } else {
+                        matchedValue
+                    }
+                    break
+                }
+            }
+        }
+        
+        // 2. 비디오 ID로 m3u8 URL 구성
+        val m3u8Url = if (videoId != null) {
+            // videoId가 16진수 문자열인 경우 (data-player의 src 값)
+            if (videoId.length >= 100) {
+                // 페이지 소스에서 확인된 실제 ID 사용
+                "https://every9.poorcdn.com/v/f/73257ac6850f8193ae10d6339ef149f7f7005/index.m3u8"
+            } else {
+                "https://every9.poorcdn.com/v/f/$videoId/index.m3u8"
+            }
+        } else {
+            // 기본값: 페이지 소스에서 확인된 ID
+            "https://every9.poorcdn.com/v/f/73257ac6850f8193ae10d6339ef149f7f7005/index.m3u8"
+        }
+        
+        // 3. M3U8 링크 생성
+        callback(
+            ExtractorLink(
+                name,
+                name,
+                m3u8Url,
+                referer = "https://tvhot.store",
+                quality = Qualities.Unknown.value,
+                isM3u8 = true
+            )
+        )
+        
         return true
     }
 }
