@@ -25,9 +25,9 @@ class TVHot : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val doc = app.get(mainUrl).document
         val home = mutableListOf<HomePageList>()
-        
         doc.select("div.mov_type").forEach { section ->
-            val title = section.selectFirst("h2 strong")?.text()?.replace(" 다시보기", "")?.trim() ?: "추천"
+            var title = section.selectFirst("h2 strong")?.text()?.trim() ?: "추천 목록"
+            title = title.replace("무료 ", "").replace(" 다시보기", "").trim()
             val listItems = section.select("ul li[onclick]").mapNotNull { it.toSearchResponse() }
             if (listItems.isNotEmpty()) home.add(HomePageList(title, listItems))
         }
