@@ -4,7 +4,7 @@ import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 
 class BunnyPoorCdn : ExtractorApi() {
@@ -18,36 +18,46 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val response = app.get(url, headers = mapOf("Referer" to "$referer")).text
-        
-        // 1. 직접 m3u8 찾기 시도
-        val m3u8Regex = Regex("""(https?://[^"']*?\.m3u8[^"']*)""")
-        val m3u8Match = m3u8Regex.find(response)
-        
+        // 1. iframe 소스 가져오기
+        val playerResponse = app.get(url, headers = mapOf("Referer" to "$referer")).text
+
+        // 2. m3u8 직접 찾기 시도
+        val m3u8Match = Regex("""(https?://[^"']*?poorcdn\.com[^"']*?\.m3u8[^"']*)""").find(playerResponse)
         if (m3u8Match != null) {
-            // newExtractorLink 함수 사용 (권장 방식)
             callback.invoke(
-                newExtractorLink(
+                ExtractorLink(
                     source = name,
                     name = name,
                     url = m3u8Match.value,
-                    referer = referer ?: mainUrl,
-                    quality = Qualities.Unknown.value, // Qualities 객체 사용
-                    isM3u8 = true
+                    referer = mainUrl,
+                    quality = Qualities.Unknown.value,
+                    type = ExtractorLinkType.M3U8
                 )
             )
             return
         }
-        
-        // 2. 기존 로직
-        val htmlMatch = Regex("""(https?://[^"']*?poorcdn\.com[^"']*?\.html\?token=[^"']*)""").find(response)
+
+        // 3. .html?token=... 형태 찾기 (질문자님 케이스)
+        val htmlMatch = Regex("""(https?://[^"']*?poorcdn\.com[^"']*?\.html\?token=[^"']*)""").find(playerResponse)
         val htmlUrl = htmlMatch?.value ?: return
 
+        // .html 페이지 안에 있는 진짜 m3u8 찾기
         val finalResponse = app.get(htmlUrl, headers = mapOf("Referer" to mainUrl)).text
-        val finalM3u8Match = Regex("""(https?://.*?\.m3u8.*?)["']""").find(finalResponse)
         
-        finalM3u8Match?.groupValues?.get(1)?.let {
-            loadExtractor(it, mainUrl, subtitleCallback, callback)
+        // 최종 m3u8 주소 추출 (따옴표 안에 있는 .m3u8)
+        val finalM3u8Match = Regex("""(https?://[^"']*?\.m3u8[^"']*)""").find(finalResponse)
+        
+        finalM3u8Match?.value?.let { m3u8Url ->
+            callback.invoke(
+                ExtractorLink(
+                    source = name,
+                    name = name,
+                    url = m3u8Url,
+                    referer = mainUrl,
+                    quality = Qualities.Unknown.value,
+                    type = ExtractorLinkType.M3U8
+                )
+            )
         }
     }
 }
