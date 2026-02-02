@@ -4,7 +4,6 @@ import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 
 class BunnyPoorCdn : ExtractorApi() {
@@ -31,20 +30,20 @@ class BunnyPoorCdn : ExtractorApi() {
                     url = m3u8Match.value,
                     referer = mainUrl,
                     quality = Qualities.Unknown.value,
-                    type = ExtractorLinkType.M3U8
+                    isM3u8 = true // [수정됨] Stable 호환 방식
                 )
             )
             return
         }
 
-        // 3. .html?token=... 형태 찾기 (질문자님 케이스)
+        // 3. .html?token=... 형태 찾기
         val htmlMatch = Regex("""(https?://[^"']*?poorcdn\.com[^"']*?\.html\?token=[^"']*)""").find(playerResponse)
         val htmlUrl = htmlMatch?.value ?: return
 
         // .html 페이지 안에 있는 진짜 m3u8 찾기
         val finalResponse = app.get(htmlUrl, headers = mapOf("Referer" to mainUrl)).text
         
-        // 최종 m3u8 주소 추출 (따옴표 안에 있는 .m3u8)
+        // 최종 m3u8 주소 추출
         val finalM3u8Match = Regex("""(https?://[^"']*?\.m3u8[^"']*)""").find(finalResponse)
         
         finalM3u8Match?.value?.let { m3u8Url ->
@@ -55,7 +54,7 @@ class BunnyPoorCdn : ExtractorApi() {
                     url = m3u8Url,
                     referer = mainUrl,
                     quality = Qualities.Unknown.value,
-                    type = ExtractorLinkType.M3U8
+                    isM3u8 = true // [수정됨] Stable 호환 방식
                 )
             )
         }
