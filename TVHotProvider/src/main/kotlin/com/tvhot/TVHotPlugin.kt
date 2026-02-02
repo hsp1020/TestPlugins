@@ -7,9 +7,8 @@ import android.content.Context
 @CloudstreamPlugin
 class TVHotPlugin: Plugin() {
     override fun load(context: Context) {
-        // TVHot 메인 클래스 등록
+        // TVHot 메인 클래스만 등록
         registerMainAPI(TVHot())
-        // BunnyPoorCdn 추출기 등록
-        registerExtractorAPI(BunnyPoorCdn())
+        // BunnyPoorCdn 추출기는 제거 (더 이상 필요 없음)
     }
 }
