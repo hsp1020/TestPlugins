@@ -3,25 +3,18 @@ package com.tvhot
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
-import android.util.Log // 안드로이드 로그용
 
 class TVHot : MainAPI() {
     override var mainUrl = "https://tvhot.store"
-    override var name = "TVHot (Debug)" // 디버그 버전임을 표시
+    override var name = "TVHot"
     override val hasMainPage = true
     override var lang = "ko"
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie, TvType.AsianDrama, TvType.Anime, TvType.AnimeMovie)
 
-    // 로그 출력을 위한 헬퍼 함수
-    private fun debugLog(msg: String) {
-        Log.e("TVHOT_DEBUG", msg)
-        println("TVHOT_DEBUG: $msg")
-    }
-
     private fun Element.toSearchResponse(): SearchResponse? {
         val onClick = this.attr("onclick")
-        // 정규식 수정: location.href 패턴 추출 (코틀린 Raw String 문법 적용)
-        val link = Regex("""location\.href='(.*?)'""").find(onClick)?.groupValues?.get(1) ?: return null
+        // 정규식 수정: location.href 패턴 추출
+        val link = Regex("""location\\\\.href='(.*?)'""").find(onClick)?.groupValues?.get(1) ?: return null
         val title = this.selectFirst("div.title")?.text()?.trim() ?: return null
         val poster = this.selectFirst("div.img img")?.attr("src")
         
@@ -95,13 +88,13 @@ class TVHot : MainAPI() {
             title = doc.selectFirst("h2#bo_v_title .bo_v_tit")?.text()?.trim() ?: "Unknown"
         }
         
-        // 3. 회차 정보 제거 (정규식 정리됨 - Raw String 문법 사용)
+        // 3. 회차 정보 제거 (정규식 정리됨)
         // 숫자 + (회|화|부) 제거
-        title = title?.replace(Regex("""\s*\d+\s*(?:회|화|부)\s*"""), "")?.trim()
+        title = title?.replace(Regex("""\\\\s*\\\\d+\\\\s*(?:회|화|부)\\\\s*"""), "")?.trim()
         // "에피소드 숫자" 제거
-        title = title?.replace(Regex("""\s*에피소드\s*\d+\s*"""), "")?.trim()
+        title = title?.replace(Regex("""\\\\s*에피소드\\\\s*\\\\d+\\\\s*"""), "")?.trim()
         // 괄호 안의 회차 정보 제거 (예: "(16화)", "(제3회)")
-        title = title?.replace(Regex("""\s*\(\s*(?:제?\s*)?\d+\s*(?:회|화|부)\s*\)"""), "")?.trim()
+        title = title?.replace(Regex("""\\\\s*\\\\(\\\\s*(?:제?\\\\s*)?\\\\d+\\\\s*(?:회|화|부)\\\\s*\\\\)"""), "")?.trim()
         
         // 4. 앞뒤 공백 정리
         title = title?.trim() ?: "Unknown"
@@ -152,42 +145,13 @@ class TVHot : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        debugLog("=== loadLinks 시작 ===")
-        debugLog("접속 페이지 URL: $data")
-
         val doc = app.get(data).document
+        // iframe 태그에서 data-player1 속성 추출
+        val playerUrl = doc.selectFirst("iframe#view_iframe")?.attr("data-player1") ?: return false
         
-        // 1. iframe 태그 확인
-        val iframe = doc.selectFirst("iframe#view_iframe")
-        if (iframe == null) {
-            debugLog("[오류] iframe#view_iframe 태그를 찾을 수 없습니다.")
-            // 에러를 던져서 화면에 토스트 메시지가 뜨게 함
-            throw Error("디버그: iframe 태그 없음. HTML 구조 확인 필요.")
-        }
-
-        // 2. data-player1 속성 추출
-        var playerUrl = iframe.attr("data-player1")
-        if (playerUrl.isNullOrEmpty()) {
-            debugLog("[오류] data-player1 속성값이 비어있습니다.")
-            throw Error("디버그: data-player1 속성 비어있음.")
-        }
-
-        debugLog("추출된 원본 URL: $playerUrl")
-
-        // 3. HTML Entity 처리 (&amp; -> &)
-        if (playerUrl.contains("&amp;")) {
-            playerUrl = playerUrl.replace("&amp;", "&")
-            debugLog("디코딩된 URL: $playerUrl")
-        }
-
-        // 4. Extractor 호출 로그
-        debugLog("BunnyPoorCdn 호출 시작...")
-
         // BunnyPoorCdn을 불러와서 실행
-        // loadLinks의 'data' 파라미터(현재 페이지 URL)를 Referer로 사용
+        // loadLinks의 'data' 파라미터(현재 페이지 URL)를 Referer로 사용하기 위해 전달하는 것이 좋음
         BunnyPoorCdn().getUrl(playerUrl, mainUrl, subtitleCallback, callback)
-        
-        debugLog("BunnyPoorCdn 호출 완료됨")
         return true
     }
 }
