@@ -1,0 +1,8 @@
+{
+  "name": "TVHot Repository",
+  "description": "한국 드라마 및 TV 프로그램 다시보기",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://raw.githubusercontent.com/hsp1020/TestPlugins/builds/plugins.json"
+  ]
+}
