@@ -117,10 +117,12 @@ class TVHot : MainAPI() {
                 newAnimeLoadResponse(title, url, TvType.Anime) {
                     this.posterUrl = fixUrl(doc.selectFirst(".tmdb-card-top img")?.attr("src") ?: "")
                     this.plot = doc.selectFirst(".tmdb-overview")?.text()
-                    addEpisodes(episodes)
+                    // 🔴 FIX: addEpisodes에 DubStatus 인자 추가
+                    addEpisodes(DubStatus.Subbed, episodes)
                 }
             }
             else -> {
+                // 🔴 FIX: newTvSeriesLoadResponse는 episodes를 생성자에서 직접 받음
                 newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
                     this.posterUrl = fixUrl(doc.selectFirst(".tmdb-card-top img")?.attr("src") ?: "")
                     this.plot = doc.selectFirst(".tmdb-overview")?.text()
