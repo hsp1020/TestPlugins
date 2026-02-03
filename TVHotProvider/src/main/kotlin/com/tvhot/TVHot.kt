@@ -141,16 +141,33 @@ class TVHot : MainAPI() {
     }
 
     override suspend fun loadLinks(
-        data: String,
-        isCasting: Boolean,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        val doc = app.get(data).document
-        val playerUrl = doc.selectFirst("iframe#view_iframe")?.attr("data-player1") ?: return false
-        
-        // Extractor 호출 (suspend 함수이므로 바로 호출)
-        BunnyPoorCdn().getUrl(playerUrl, mainUrl, subtitleCallback, callback)
-        return true
+    data: String,
+    isCasting: Boolean,
+    subtitleCallback: (SubtitleFile) -> Unit,
+    callback: (ExtractorLink) -> Unit
+): Boolean {
+    val doc = app.get(data).document
+    
+    // iframe#view_iframe에서 data-player1 또는 src 추출
+    val iframe = doc.selectFirst("iframe#view_iframe") ?: return false
+    val playerUrl = iframe.attr("data-player1").takeIf { it.isNotEmpty() }
+        ?: iframe.attr("src")
+    
+    if (playerUrl.isNullOrEmpty()) return false
+
+    // data는 현재 에피소드의 전체 URL입니다 (Referer로 사용됨)
+    val fullPlayerUrl = fixUrl(playerUrl)
+    
+    // Extractor 실행
+    BunnyPoorCdn().getUrl(
+        url = fullPlayerUrl,
+        referer = data, // 현재 페이지 주소를 Referer로 전달
+        subtitleCallback = subtitleCallback,
+        callback = callback
+    )
+    
+    return true
+}
+
     }
 }
