@@ -5,8 +5,7 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
-// 모든 유틸리티(newExtractorLink, ExtractorLinkType 등) import
-import com.lagradost.cloudstream3.utils.* 
+import com.lagradost.cloudstream3.utils.*
 
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "BunnyPoorCdn"
@@ -19,52 +18,50 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // 1. 초기 요청
-        val playerResponse = app.get(url, headers = mapOf("Referer" to "$referer")).text
+        // 1. 플레이어 페이지 요청 (Referer 필수)
+        val response = app.get(url, referer = referer).text
 
-        // 2. m3u8 직접 찾기 시도
-        val m3u8Match = Regex("""(https?://[^"']*?poorcdn\\.com[^"']*?\\.m3u8[^"']*)""").find(playerResponse)
+        // 2. m3u8 직접 찾기 (도메인 제약 제거)
+        // 역슬래시 이스케이프(\/) 처리된 URL까지 고려한 정규식
+        val m3u8Regex = Regex("""https?[:\\]+[/\\/]+[^"' ]+?\.m3u8[^"' ]*""")
+        val m3u8Match = m3u8Regex.find(response)?.value?.replace("\\/", "/")
+
         if (m3u8Match != null) {
             callback.invoke(
                 newExtractorLink(
                     source = name,
                     name = name,
-                    url = m3u8Match.value,
-                    // 인자에는 type만 넣습니다.
+                    url = m3u8Match,
                     type = ExtractorLinkType.M3U8
                 ) {
-                    // referer와 quality는 여기서 설정해야 합니다 (중요)
-                    this.referer = mainUrl
+                    this.referer = "https://player.bunny-frame.online/"
                     this.quality = Qualities.Unknown.value
                 }
             )
             return
         }
 
-        // 3. .html?token=... 형태 찾기
-        val htmlMatch = Regex("""(https?://[^"']*?poorcdn\\.com[^"']*?\\.html\\?token=[^"']*)""").find(playerResponse)
-        val htmlUrl = htmlMatch?.value ?: return
+        // 3. .html?token=... 형태 찾기 (도메인 제약 제거)
+        val htmlRegex = Regex("""https?[:\\]+[/\\/]+[^"' ]+?\.html\?token=[^"' ]*""")
+        val htmlUrl = htmlRegex.find(response)?.value?.replace("\\/", "/")
 
-        // ▼▼▼ 누락되어 에러났던 부분: finalResponse 변수 선언 복구 ▼▼▼
-        val finalResponse = app.get(htmlUrl, headers = mapOf("Referer" to mainUrl)).text
-        
-        // 최종 m3u8 주소 추출
-        val finalM3u8Match = Regex("""(https?://[^"']*?\\.m3u8[^"']*)""").find(finalResponse)
-        
-        finalM3u8Match?.value?.let { m3u8Url ->
-            callback.invoke(
-                newExtractorLink(
-                    source = name,
-                    name = name,
-                    url = m3u8Url,
-                    // 인자에는 type만 넣습니다.
-                    type = ExtractorLinkType.M3U8
-                ) {
-                    // referer와 quality는 여기서 설정해야 합니다 (중요)
-                    this.referer = mainUrl
-                    this.quality = Qualities.Unknown.value
-                }
-            )
+        if (htmlUrl != null) {
+            val finalResponse = app.get(htmlUrl, referer = url).text
+            val finalM3u8 = m3u8Regex.find(finalResponse)?.value?.replace("\\/", "/")
+            
+            finalM3u8?.let { link ->
+                callback.invoke(
+                    newExtractorLink(
+                        source = name,
+                        name = name,
+                        url = link,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = "https://player.bunny-frame.online/"
+                        this.quality = Qualities.Unknown.value
+                    }
+                )
+            }
         }
     }
 }
