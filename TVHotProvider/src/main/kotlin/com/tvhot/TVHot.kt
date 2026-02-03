@@ -167,7 +167,6 @@ class TVHot : MainAPI() {
     )
     
     return true
-}
 
     }
 }
