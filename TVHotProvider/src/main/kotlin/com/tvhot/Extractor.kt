@@ -31,8 +31,7 @@ class BunnyPoorCdn : ExtractorApi() {
             return
         }
 
-        // 3. 사용자가 확인한 .html?token=... 형태의 주소 추출
-        // 도메인을 특정하지 않고 확장자와 파라미터로 검색
+        // 3. .html?token=... 형태의 주소 추출
         val htmlRegex = Regex("""https?[:\\]+[/\\/]+[^"' ]+?\.html\?token=[^"' ]+""")
         val htmlMatch = htmlRegex.find(playerResponse)?.value?.replace("\\/", "/")
 
@@ -49,7 +48,8 @@ class BunnyPoorCdn : ExtractorApi() {
         }
     }
 
-    private fun invokeLink(m3u8Url: String, callback: (ExtractorLink) -> Unit) {
+    // ▼ 빌드 에러 해결을 위해 suspend 키워드 추가 ▼
+    private suspend fun invokeLink(m3u8Url: String, callback: (ExtractorLink) -> Unit) {
         callback.invoke(
             newExtractorLink(
                 source = name,
@@ -57,7 +57,7 @@ class BunnyPoorCdn : ExtractorApi() {
                 url = m3u8Url,
                 type = ExtractorLinkType.M3U8
             ) {
-                // 이 계열 서버는 플레이어 도메인을 Referer로 주지 않으면 403 에러 발생 가능성 높음
+                // 서버 보안 정책 대응: 플레이어 주소를 Referer로 설정
                 this.referer = "https://player.bunny-frame.online/"
                 this.quality = Qualities.Unknown.value
             }
