@@ -35,19 +35,12 @@ class TVHot : MainAPI() {
         val link = Regex("location\\.href='(.*?)'").find(onClick)?.groupValues?.get(1) ?: return null
         val title = this.selectFirst("div.title")?.text()?.trim() ?: return null
         val poster = this.selectFirst("div.img img")?.attr("src")
-        
         val type = determineTypeFromUrl(link)
         
         return when (type) {
-            TvType.Movie, TvType.AnimeMovie -> newMovieSearchResponse(title, fixUrl(link), type) {
-                this.posterUrl = fixUrl(poster ?: "")
-            }
-            TvType.Anime -> newAnimeSearchResponse(title, fixUrl(link), TvType.Anime) {
-                this.posterUrl = fixUrl(poster ?: "")
-            }
-            else -> newAnimeSearchResponse(title, fixUrl(link), TvType.TvSeries) {
-                this.posterUrl = fixUrl(poster ?: "")
-            }
+            TvType.Movie, TvType.AnimeMovie -> newMovieSearchResponse(title, fixUrl(link), type) { this.posterUrl = fixUrl(poster ?: "") }
+            TvType.Anime -> newAnimeSearchResponse(title, fixUrl(link), TvType.Anime) { this.posterUrl = fixUrl(poster ?: "") }
+            else -> newAnimeSearchResponse(title, fixUrl(link), TvType.TvSeries) { this.posterUrl = fixUrl(poster ?: "") }
         }
     }
 
@@ -62,21 +55,13 @@ class TVHot : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         if (page > 1) return newHomePageResponse(emptyList())
-
         val doc = app.get(mainUrl).document
         val home = mutableListOf<HomePageList>()
-        
         doc.select("div.mov_type").forEach { section ->
-            var title = section.selectFirst("h2 strong")?.text()?.trim() ?: "추천 목록"
-            title = title.replace("무료 ", "").replace(" 다시보기", "").trim()
-            
+            val title = section.selectFirst("h2 strong")?.text()?.trim()?.replace("무료 ", "")?.replace(" 다시보기", "") ?: "추천"
             val listItems = section.select("ul li[onclick]").mapNotNull { it.toSearchResponse() }
-            
-            if (listItems.isNotEmpty()) {
-                home.add(HomePageList(title, listItems))
-            }
+            if (listItems.isNotEmpty()) home.add(HomePageList(title, listItems))
         }
-        
         return newHomePageResponse(home, hasNext = false)
     }
 
@@ -87,26 +72,16 @@ class TVHot : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url).document
+        var title = doc.selectFirst("div.tmdb-card-top img")?.attr("alt")?.trim() 
+            ?: doc.selectFirst("h2#bo_v_title .bo_v_tit")?.text()?.trim() ?: "Unknown"
         
-        var title = doc.selectFirst("div.tmdb-card-top img")?.attr("alt")?.trim()
-        if (title.isNullOrEmpty()) {
-            title = doc.selectFirst("h2#bo_v_title .bo_v_tit")?.text()?.trim() ?: "Unknown"
-        }
-        
-        title = title?.replace(Regex("\\s*\\d+\\s*(?:회|화|부)\\s*"), "")?.trim()
-        title = title?.replace(Regex("\\s*에피소드\\s*\\d+\\s*"), "")?.trim()
-        title = title?.replace(Regex("\\s*\\(\\s*(?:제?\\s*)?\\d+\\s*(?:회|화|부)\\s*\\)"), "")?.trim()
-        title = title?.trim() ?: "Unknown"
+        title = title.replace(Regex("\\s*\\d+\\s*(?:회|화|부)\\s*"), "").trim()
         
         val episodes = doc.select("div#other_list ul li").mapNotNull {
             val aTag = it.selectFirst("a") ?: return@mapNotNull null
-            val href = aTag.attr("href")
             val epTitle = it.selectFirst(".title")?.text()?.trim() ?: "Episode"
-            
-            newEpisode(fixUrl(href)) {
-                this.name = epTitle
-            }
-        }.reversed() // 보통 최신화가 위이므로 아래부터 재생되게 반전(선택)
+            newEpisode(fixUrl(aTag.attr("href"))) { this.name = epTitle }
+        }.reversed()
 
         val type = determineTypeFromUrl(url)
         val poster = fixUrl(doc.selectFirst(".tmdb-card-top img")?.attr("src") ?: "")
@@ -115,23 +90,10 @@ class TVHot : MainAPI() {
         return when (type) {
             TvType.Movie, TvType.AnimeMovie -> {
                 val movieLink = episodes.firstOrNull()?.data ?: url
-                newMovieLoadResponse(title, url, type, movieLink) {
-                    this.posterUrl = poster
-                    this.plot = plot
-                }
-            }
-            TvType.Anime -> {
-                newAnimeLoadResponse(title, url, TvType.Anime) {
-                    this.posterUrl = poster
-                    this.plot = plot
-                    addEpisodes(DubStatus.Subbed, episodes)
-                }
+                newMovieLoadResponse(title, url, type, movieLink) { this.posterUrl = poster; this.plot = plot }
             }
             else -> {
-                newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                    this.posterUrl = poster
-                    this.plot = plot
-                }
+                newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) { this.posterUrl = poster; this.plot = plot }
             }
         }
     }
@@ -142,20 +104,25 @@ class TVHot : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val response = app.get(data)
-        val doc = response.document
-        
-        // iframe#view_iframe 태그를 찾음
+        println("DEBUG_MAIN: loadLinks for $data")
+        val doc = app.get(data).document
         val iframe = doc.selectFirst("iframe#view_iframe") ?: return false
         
-        // 중요: data-player1의 &amp;를 일반 &로 변환해야 파라미터가 정상 인식됨
-        val playerUrl = iframe.attr("data-player1").replace("&amp;", "&")
-        
-        if (playerUrl.isEmpty()) return false
-        
-        // Extractor 호출 (data는 현재 에피소드 URL이며 Referer로 사용됨)
+        // 1순위: data-player1, 2순위: data-player2, 3순위: src 속성 확인
+        var playerUrl = iframe.attr("data-player1").takeIf { it.isNotEmpty() }
+            ?: iframe.attr("data-player2").takeIf { it.isNotEmpty() }
+            ?: iframe.attr("src")
+
+        if (playerUrl.isNullOrEmpty()) {
+            println("DEBUG_MAIN: Player URL not found in iframe")
+            return false
+        }
+
+        playerUrl = playerUrl.replace("&amp;", "&")
+        println("DEBUG_MAIN: Final Player URL: $playerUrl")
+
+        // Extractor 실행 (Referer는 에피소드 페이지 주소)
         BunnyPoorCdn().getUrl(fixUrl(playerUrl), data, subtitleCallback, callback)
-        
         return true
     }
 }
