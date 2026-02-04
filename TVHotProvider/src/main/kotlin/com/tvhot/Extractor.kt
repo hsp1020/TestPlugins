@@ -12,8 +12,8 @@ class BunnyPoorCdn : ExtractorApi() {
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
 
-    // 실제 윈도우 크롬 브라우저와 100% 일치하는 UA 및 핑거프린트
-    private val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+    // 안드로이드 실기기 로그와 일치하는 브라우저 정보 (IP 밴 방지 핵심)
+    private val USER_AGENT = "Mozilla/5.0 (Linux; Android 13; SM-S911B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36"
     
     private val browserHeaders = mapOf(
         "User-Agent" to USER_AGENT,
@@ -24,8 +24,8 @@ class BunnyPoorCdn : ExtractorApi() {
         "Sec-Fetch-Mode" to "cors",
         "Sec-Fetch-Site" to "cross-site",
         "Sec-Ch-Ua" to "\"Not_A Brand\";v=\"8\", \"Chromium\";v=\"121\", \"Google Chrome\";v=\"121\"",
-        "Sec-Ch-Ua-Mobile" to "?0",
-        "Sec-Ch-Ua-Platform" to "\"Windows\""
+        "Sec-Ch-Ua-Mobile" to "?1",
+        "Sec-Ch-Ua-Platform" to "\"Android\""
     )
 
     override suspend fun getUrl(
@@ -34,18 +34,19 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
+        // 공백 및 줄바꿈 완전 제거 (로그 에러 0x0d 해결)
         val cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = referer?.replace(Regex("[\\r\\n\\s]"), "")?.trim()
 
         val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
         val domain = "https://every$serverNum.poorcdn.com"
         
-        // 1. 플레이어 로드 시 브라우저 헤더 전송
-        val playerRes = app.get(cleanUrl, referer = cleanReferer, headers = mapOf("User-Agent" to USER_AGENT))
+        // 1. 플레이어 페이지 접속 및 쿠키 생성
+        val playerRes = app.get(cleanUrl, referer = cleanReferer, headers = browserHeaders)
         val responseText = playerRes.text
         val cookieMap = playerRes.cookies
 
-        // [로그 기반 수정] ID 정규식에 z 및 기타 문자 허용하도록 [a-z0-9]로 확장
+        // [로그 기반 수정] ID가 잘리지 않도록 정규식에 a-z 전체 허용
         val idRegex = Regex("""(?i)(?:/v/f/|src=)([a-z0-9]{32,})""")
         val idMatch = idRegex.find(responseText)?.groupValues?.get(1)
             ?: idRegex.find(cleanUrl)?.groupValues?.get(1)
@@ -55,8 +56,8 @@ class BunnyPoorCdn : ExtractorApi() {
             val directM3u8 = "$domain/v/f/$idMatch/index.m3u8"
 
             try {
-                // 2. 인증 페이지 접속 및 쿠키 누적
-                val tokenRes = app.get(tokenUrl, referer = cleanUrl, headers = mapOf("User-Agent" to USER_AGENT))
+                // 2. c.html 접속하여 보안 세션 쿠키 업데이트 (403 해결책)
+                val tokenRes = app.get(tokenUrl, referer = cleanUrl, headers = browserHeaders)
                 val combinedCookies = cookieMap + tokenRes.cookies
                 
                 val realM3u8 = Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']""").find(tokenRes.text)?.groupValues?.get(1)
@@ -80,8 +81,8 @@ class BunnyPoorCdn : ExtractorApi() {
                 url = cleanM3u8,
                 type = ExtractorLinkType.M3U8
             ) {
+                // [로그 기반 수정] Referer는 절대 변형하지 않고 원본 그대로 사용
                 this.referer = referer
-                // [IP 밴 방지 핵심] 재생기 헤더에 쿠키와 브라우저 특성 헤더를 강제 주입
                 this.headers = browserHeaders.toMutableMap().apply {
                     if (cookieString.isNotEmpty()) put("Cookie", cookieString)
                     put("Referer", referer)
