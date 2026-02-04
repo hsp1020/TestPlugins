@@ -18,38 +18,39 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
+        // 1. 플레이어 페이지 로드
         val playerResponse = app.get(url, referer = referer).text
         
-        // 1. 모든 형태의 .m3u8 주소 추출 (상대경로 포함)
-        val m3u8Regex = Regex("""["']([^"']+\.m3u8[^"']*)["']""")
-        val m3u8Match = m3u8Regex.find(playerResponse)?.groupValues?.get(1)?.replace("\\/", "/")
+        // 서버 번호(s=5 등)를 추출하여 도메인 생성 (every5.poorcdn.com 형태)
+        val serverNum = Regex("""[?&]s=(\d+)""").find(url)?.groupValues?.get(1) ?: "9"
+        val domain = "https://every$serverNum.poorcdn.com"
+
+        // 2. 상대 경로(/v/f/...) 또는 절대 경로(http...) 추출 정규식
+        // 따옴표 안에 있는 /v/f/ 로 시작하는 모든 문자열을 찾음
+        val pathRegex = Regex("""["']((?:https?://[^"']*)?/v/f/[^"']+(?:\.m3u8|\.html\?token=)[^"']*)["']""")
         
-        if (m3u8Match != null) {
-            val finalM3u8 = if (m3u8Match.startsWith("http")) m3u8Match else "https://every9.poorcdn.com" + m3u8Match
-            invokeLink(finalM3u8, callback)
+        val matches = pathRegex.findAll(playerResponse).map { it.groupValues[1].replace("\\/", "/") }.toList()
+
+        // 3. m3u8 우선 탐색
+        val m3u8Path = matches.find { it.contains(".m3u8") }
+        if (m3u8Path != null) {
+            val finalUrl = if (m3u8Path.startsWith("http")) m3u8Path else domain + m3u8Path
+            invokeLink(finalUrl, callback)
             return
         }
 
-        // 2. 모든 형태의 .html?token= 주소 추출 (따옴표 사이의 값을 가져옴)
-        val htmlTokenRegex = Regex("""["']([^"']+\.html\?token=[^"']+)["']""")
-        val htmlMatch = htmlTokenRegex.find(playerResponse)?.groupValues?.get(1)?.replace("\\/", "/")
-
-        if (htmlMatch != null) {
-            // 상대 경로인 경우 기본 도메인(every9.poorcdn.com)을 붙여줌
-            val finalHtmlUrl = if (htmlMatch.startsWith("http")) {
-                htmlMatch
-            } else {
-                "https://every9.poorcdn.com" + if (htmlMatch.startsWith("/")) htmlMatch else "/$htmlMatch"
-            }
-
-            println("DEBUG_EXTRACTOR: Requesting Token URL: $finalHtmlUrl")
+        // 4. Token HTML 탐색 (.html?token=)
+        val tokenPath = matches.find { it.contains("token=") }
+        if (tokenPath != null) {
+            val tokenUrl = if (tokenPath.startsWith("http")) tokenPath else domain + (if (tokenPath.startsWith("/")) "" else "/") + tokenPath
             
-            val finalPageResponse = app.get(finalHtmlUrl, referer = url).text
-            val finalM3u8Match = m3u8Regex.find(finalPageResponse)?.groupValues?.get(1)?.replace("\\/", "/")
+            // 토큰 페이지 접속해서 진짜 m3u8 찾기
+            val tokenPageResponse = app.get(tokenUrl, referer = url).text
+            val finalM3u8Match = pathRegex.find(tokenPageResponse)?.groupValues?.get(1)?.replace("\\/", "/")
             
             finalM3u8Match?.let {
-                val absoluteM3u8 = if (it.startsWith("http")) it else "https://every9.poorcdn.com" + it
-                invokeLink(absoluteM3u8, callback)
+                val finalUrl = if (it.startsWith("http")) it else domain + it
+                invokeLink(finalUrl, callback)
             }
         }
     }
