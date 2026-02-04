@@ -12,21 +12,7 @@ class BunnyPoorCdn : ExtractorApi() {
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
 
-    // 안드로이드 실기기 로그와 일치하는 브라우저 정보 (IP 밴 방지 핵심)
     private val USER_AGENT = "Mozilla/5.0 (Linux; Android 13; SM-S911B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36"
-    
-    private val browserHeaders = mapOf(
-        "User-Agent" to USER_AGENT,
-        "Accept" to "*/*",
-        "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Origin" to "https://player.bunny-frame.online",
-        "Sec-Fetch-Dest" to "empty",
-        "Sec-Fetch-Mode" to "cors",
-        "Sec-Fetch-Site" to "cross-site",
-        "Sec-Ch-Ua" to "\"Not_A Brand\";v=\"8\", \"Chromium\";v=\"121\", \"Google Chrome\";v=\"121\"",
-        "Sec-Ch-Ua-Mobile" to "?1",
-        "Sec-Ch-Ua-Platform" to "\"Android\""
-    )
 
     override suspend fun getUrl(
         url: String,
@@ -34,73 +20,71 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // 공백 및 줄바꿈 완전 제거 (로그 에러 0x0d 해결)
-        val cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
-        val cleanReferer = referer?.replace(Regex("[\\r\\n\\s]"), "")?.trim()
+        val cleanUrl = url.trim()
 
-        // 수정된 serverNum 추출 로직: s= 파라미터 또는 도메인에서 숫자 추출
-        val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1)
-            ?: Regex("""every(\d+)\.poorcdn\.com""").find(cleanUrl)?.groupValues?.get(1)
-            ?: "9"  // 기본값
-        
+        // [핵심 수정 1] 로그 분석 결과: URL의 src 파라미터 ID가 세션과 직결됨
+        // HTML 본문에서 찾는 것보다 URL에서 직접 추출하는 것이 100% 정확함
+        val idMatch = Regex("""src=([a-z0-9]{32,})""").find(cleanUrl)?.groupValues?.get(1)
+            ?: Regex("""/v/f/([a-z0-9]{32,})""").find(cleanUrl)?.groupValues?.get(1)
+
+        if (idMatch == null) return
+
+        val serverNum = Regex("""every(\d+)\.poorcdn\.com""").find(cleanUrl)?.groupValues?.get(1)
+            ?: Regex("""s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
         val domain = "https://every$serverNum.poorcdn.com"
+
+        // [핵심 수정 2] 헤더 최적화 (실제 브라우저와 동일하게)
+        val baseHeaders = mapOf(
+            "User-Agent" to USER_AGENT,
+            "Accept" to "*/*",
+            "Accept-Language" to "ko-KR,ko;q=0.9",
+            "Connection" to "keep-alive"
+        )
+
+        // 1. 플레이어 페이지 접속하여 초기 세션 쿠키 획득
+        val playerRes = app.get(cleanUrl, referer = referer, headers = baseHeaders)
+        val initialCookies = playerRes.cookies
+
+        // 2. c.html 접속 (인증 쿠키 획득 단계)
+        val tokenUrl = "$domain/v/f/$idMatch/c.html"
         
-        // 1. 플레이어 페이지 접속 및 쿠키 생성
-        val playerRes = app.get(cleanUrl, referer = cleanReferer, headers = browserHeaders)
-        val responseText = playerRes.text
-        val cookieMap = playerRes.cookies
-
-        // [로그 기반 수정] ID가 잘리지 않도록 정규식에 a-z 전체 허용
-        val idRegex = Regex("""(?i)(?:/v/f/|src=)([a-z0-9]{32,})""")
-        val idMatch = idRegex.find(responseText)?.groupValues?.get(1)
-            ?: idRegex.find(cleanUrl)?.groupValues?.get(1)
-
-        if (idMatch != null) {
-            val tokenUrl = "$domain/v/f/$idMatch/c.html"
-            val directM3u8 = "$domain/v/f/$idMatch/index.m3u8"
-
-            // 2. c.html 접속하여 보안 세션 쿠키 업데이트 (폴백 제거, 응답 대기시간 증가)
-            var tokenRes = app.get(tokenUrl, referer = cleanUrl, headers = browserHeaders)
-            
-            // c.html 응답 확인 (빈 응답이면 재시도)
-            var retryCount = 0
-            val maxRetries = 5
-            while (tokenRes.text.isNullOrEmpty() && retryCount < maxRetries) {
-                // kotlinx.coroutines 대신 Thread.sleep 사용
-                Thread.sleep(10000L) // 10초 대기
-                tokenRes = app.get(tokenUrl, referer = cleanUrl, headers = browserHeaders)
-                retryCount++
-            }
-            
-            if (tokenRes.text.isNullOrEmpty()) {
-                throw Exception("c.html 응답이 비어있습니다. 서버 문제일 수 있습니다.")
-            }
-            
-            val combinedCookies = cookieMap + tokenRes.cookies
-                
-            val realM3u8 = Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']""").find(tokenRes.text)?.groupValues?.get(1)
-                ?: directM3u8
-            
-            invokeLink(realM3u8, cleanUrl, combinedCookies, callback)
+        // c.html 요청 시에는 반드시 cors 모드 헤더와 이전 쿠키가 필요함
+        val tokenHeaders = baseHeaders.toMutableMap().apply {
+            put("Referer", cleanUrl)
+            put("Sec-Fetch-Dest", "empty")
+            put("Sec-Fetch-Mode", "cors")
+            put("Sec-Fetch-Site", "same-origin")
         }
-    }
 
-    private suspend fun invokeLink(m3u8Url: String, referer: String, cookies: Map<String, String>, callback: (ExtractorLink) -> Unit) {
-        val cleanM3u8 = m3u8Url.replace(Regex("[\\r\\n\\s]"), "").trim()
-        val cookieString = cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
+        var tokenRes = app.get(tokenUrl, referer = cleanUrl, headers = tokenHeaders, cookies = initialCookies)
 
+        // [핵심 수정 3] c.html 응답이 비어있을 경우에만 아주 짧게 대기 (스레드 차단 최소화)
+        if (tokenRes.text.isNullOrEmpty()) {
+            Thread.sleep(1500) // 10초는 너무 길어서 세션 끊김. 1.5초가 적당함.
+            tokenRes = app.get(tokenUrl, referer = cleanUrl, headers = tokenHeaders, cookies = initialCookies)
+        }
+
+        val finalCookies = initialCookies + tokenRes.cookies
+        
+        // c.html 응답에서 m3u8 주소 추출 시도, 없으면 기본값 사용
+        val realM3u8 = Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']""").find(tokenRes.text ?: "")?.groupValues?.get(1)
+            ?: "$domain/v/f/$idMatch/index.m3u8"
+
+        // 3. 최종 링크 생성
+        val cookieString = finalCookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
+        
         callback.invoke(
             newExtractorLink(
                 source = name,
-                name = name,
-                url = cleanM3u8,
+                name = "$name (PoorCDN)",
+                url = realM3u8,
                 type = ExtractorLinkType.M3U8
             ) {
-                // [로그 기반 수정] Referer는 절대 변형하지 않고 원본 그대로 사용
-                this.referer = referer
-                this.headers = browserHeaders.toMutableMap().apply {
-                    if (cookieString.isNotEmpty()) put("Cookie", cookieString)
-                    put("Referer", referer)
+                this.referer = cleanUrl
+                this.headers = baseHeaders.toMutableMap().apply {
+                    put("Cookie", cookieString)
+                    put("Referer", cleanUrl)
+                    put("Origin", "https://player.bunny-frame.online")
                 }
                 this.quality = Qualities.Unknown.value
             }
