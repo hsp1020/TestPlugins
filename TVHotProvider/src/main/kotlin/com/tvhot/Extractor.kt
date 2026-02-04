@@ -18,50 +18,49 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // 1. 플레이어 페이지 요청 (Referer 필수)
-        val response = app.get(url, referer = referer).text
+        // 1. 플레이어 페이지 요청 (Referer: 에피소드 페이지 주소)
+        val playerResponse = app.get(url, referer = referer).text
 
-        // 2. m3u8 직접 찾기 (도메인 제약 제거)
-        // 역슬래시 이스케이프(\/) 처리된 URL까지 고려한 정규식
+        // m3u8 주소 매칭용 정규식 (이스케이프된 \/ 포함 대응)
         val m3u8Regex = Regex("""https?[:\\]+[/\\/]+[^"' ]+?\.m3u8[^"' ]*""")
-        val m3u8Match = m3u8Regex.find(response)?.value?.replace("\\/", "/")
-
+        
+        // 2. m3u8 주소가 소스에 바로 있는지 확인
+        val m3u8Match = m3u8Regex.find(playerResponse)?.value?.replace("\\/", "/")
         if (m3u8Match != null) {
-            callback.invoke(
-                newExtractorLink(
-                    source = name,
-                    name = name,
-                    url = m3u8Match,
-                    type = ExtractorLinkType.M3U8
-                ) {
-                    this.referer = "https://player.bunny-frame.online/"
-                    this.quality = Qualities.Unknown.value
-                }
-            )
+            invokeLink(m3u8Match, callback)
             return
         }
 
-        // 3. .html?token=... 형태 찾기 (도메인 제약 제거)
-        val htmlRegex = Regex("""https?[:\\]+[/\\/]+[^"' ]+?\.html\?token=[^"' ]*""")
-        val htmlUrl = htmlRegex.find(response)?.value?.replace("\\/", "/")
+        // 3. 사용자가 확인한 .html?token=... 형태의 주소 추출
+        // 도메인을 특정하지 않고 확장자와 파라미터로 검색
+        val htmlRegex = Regex("""https?[:\\]+[/\\/]+[^"' ]+?\.html\?token=[^"' ]+""")
+        val htmlMatch = htmlRegex.find(playerResponse)?.value?.replace("\\/", "/")
 
-        if (htmlUrl != null) {
-            val finalResponse = app.get(htmlUrl, referer = url).text
-            val finalM3u8 = m3u8Regex.find(finalResponse)?.value?.replace("\\/", "/")
+        if (htmlMatch != null) {
+            // .html?token= 주소로 2차 요청 (Referer: 1차 플레이어 주소)
+            val finalPageResponse = app.get(htmlMatch, referer = url).text
             
-            finalM3u8?.let { link ->
-                callback.invoke(
-                    newExtractorLink(
-                        source = name,
-                        name = name,
-                        url = link,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        this.referer = "https://player.bunny-frame.online/"
-                        this.quality = Qualities.Unknown.value
-                    }
-                )
+            // 최종 페이지 본문에서 진짜 m3u8 주소 추출
+            val finalM3u8 = m3u8Regex.find(finalPageResponse)?.value?.replace("\\/", "/")
+            
+            finalM3u8?.let { realLink ->
+                invokeLink(realLink, callback)
             }
         }
+    }
+
+    private fun invokeLink(m3u8Url: String, callback: (ExtractorLink) -> Unit) {
+        callback.invoke(
+            newExtractorLink(
+                source = name,
+                name = name,
+                url = m3u8Url,
+                type = ExtractorLinkType.M3U8
+            ) {
+                // 이 계열 서버는 플레이어 도메인을 Referer로 주지 않으면 403 에러 발생 가능성 높음
+                this.referer = "https://player.bunny-frame.online/"
+                this.quality = Qualities.Unknown.value
+            }
+        )
     }
 }
