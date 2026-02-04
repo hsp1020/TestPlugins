@@ -105,7 +105,6 @@ class TVHot : MainAPI() {
         
         if (playerUrlMatch == null) return false
 
-        // 중요: 추출된 플레이어 URL에서 줄바꿈 및 공백 완전 제거
         val finalPlayerUrl = fixUrl(playerUrlMatch.replace("&amp;", "&")).replace(Regex("[\\r\\n\\s]"), "").trim()
 
         BunnyPoorCdn().getUrl(finalPlayerUrl, data, subtitleCallback, callback)
