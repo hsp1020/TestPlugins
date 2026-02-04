@@ -59,16 +59,15 @@ class BunnyPoorCdn : ExtractorApi() {
             val tokenUrl = "$domain/v/f/$idMatch/c.html"
             val directM3u8 = "$domain/v/f/$idMatch/index.m3u8"
 
-            // 2. c.html 접속하여 보안 세션 쿠키 업데이트 (폴백 제거, 타임아웃 증가)
-            // CloudStream3의 app.get은 내부적으로 30초 타임아웃을 사용하므로,
-            // 여기서는 재시도를 통해 응답 대기시간을 효과적으로 증가시킵니다.
+            // 2. c.html 접속하여 보안 세션 쿠키 업데이트 (폴백 제거, 응답 대기시간 증가)
             var tokenRes = app.get(tokenUrl, referer = cleanUrl, headers = browserHeaders)
             
             // c.html 응답 확인 (빈 응답이면 재시도)
             var retryCount = 0
             val maxRetries = 2
             while (tokenRes.text.isNullOrEmpty() && retryCount < maxRetries) {
-                kotlinx.coroutines.delay(2000L) // 2초 대기
+                // kotlinx.coroutines 대신 Thread.sleep 사용
+                Thread.sleep(2000L) // 2초 대기
                 tokenRes = app.get(tokenUrl, referer = cleanUrl, headers = browserHeaders)
                 retryCount++
             }
