@@ -38,7 +38,11 @@ class BunnyPoorCdn : ExtractorApi() {
         val cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = referer?.replace(Regex("[\\r\\n\\s]"), "")?.trim()
 
-        val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
+        // 수정된 serverNum 추출 로직: s= 파라미터 또는 도메인에서 숫자 추출
+        val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1)
+            ?: Regex("""every(\d+)\.poorcdn\.com""").find(cleanUrl)?.groupValues?.get(1)
+            ?: "9"  // 기본값
+        
         val domain = "https://every$serverNum.poorcdn.com"
         
         // 1. 플레이어 페이지 접속 및 쿠키 생성
