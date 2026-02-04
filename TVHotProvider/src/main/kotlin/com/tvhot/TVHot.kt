@@ -107,15 +107,17 @@ class TVHot : MainAPI() {
         val doc = app.get(data).document
         val iframe = doc.selectFirst("iframe#view_iframe") ?: return false
         
+        // data-player1부터 순서대로 확인
         var playerUrl = iframe.attr("data-player1").takeIf { it.isNotEmpty() }
             ?: iframe.attr("data-player2").takeIf { it.isNotEmpty() }
             ?: iframe.attr("src")
 
         if (playerUrl.isNullOrEmpty()) return false
+        
+        // HTML Entity 변환
+        val finalPlayerUrl = fixUrl(playerUrl.replace("&amp;", "&"))
 
-        playerUrl = playerUrl.replace("&amp;", "&")
-
-        BunnyPoorCdn().getUrl(fixUrl(playerUrl), data, subtitleCallback, callback)
+        BunnyPoorCdn().getUrl(finalPlayerUrl, data, subtitleCallback, callback)
         return true
     }
 }
