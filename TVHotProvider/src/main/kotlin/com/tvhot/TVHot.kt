@@ -104,18 +104,20 @@ class TVHot : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val doc = app.get(data).document
-        val iframe = doc.selectFirst("iframe#view_iframe") ?: return false
+        val response = app.get(data).text
         
-        // data-player1부터 src까지 순차적으로 확인
-        val playerUrl = iframe.attr("data-player1").takeIf { it.isNotEmpty() }
-            ?: iframe.attr("data-player2").takeIf { it.isNotEmpty() }
-            ?: iframe.attr("src")
+        // 전면 수정: iframe 속성만 보지 말고, 페이지 전체 소스에서 BunnyFrame URL을 직접 긁어옴
+        // 특히 암호화되지 않은 p=//v/f/... 패턴을 우선적으로 찾음
+        val playerRegex = Regex("""https://player\.bunny-frame\.online/[^"']+""")
+        val playerUrlMatch = playerRegex.find(response)?.value
+        
+        if (playerUrlMatch == null) {
+            println("DEBUG_MAIN: No Player URL found in entire page source")
+            return false
+        }
 
-        if (playerUrl.isNullOrEmpty()) return false
-        
-        // &amp; 변환 및 fixUrl 처리
-        val finalPlayerUrl = fixUrl(playerUrl.replace("&amp;", "&"))
+        val finalPlayerUrl = fixUrl(playerUrlMatch.replace("&amp;", "&"))
+        println("DEBUG_MAIN: Found Player URL: $finalPlayerUrl")
 
         BunnyPoorCdn().getUrl(finalPlayerUrl, data, subtitleCallback, callback)
         return true
