@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.*
+import kotlin.random.Random
 
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "BunnyPoorCdn"
@@ -13,7 +14,7 @@ class BunnyPoorCdn : ExtractorApi() {
     override val requiresReferer = true
 
     override suspend fun getUrl(
-        url: String, // 이것이 전체 플레이어 주소 (토큰 포함)
+        url: String,
         referer: String?,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
@@ -22,50 +23,65 @@ class BunnyPoorCdn : ExtractorApi() {
         val serverNum = Regex("""[?&]s=(\d+)""").find(url)?.groupValues?.get(1) ?: "9"
         val domain = "https://every$serverNum.poorcdn.com"
         
-        // 2. 플레이어 페이지 로드
-        // 여기서 referer는 TVHot 사이트 주소가 됨
-        val response = app.get(url, referer = referer).text
+        // 2. 랜덤 IP 생성 (IP 차단 우회 시도)
+        // 한국 대역대 혹은 랜덤 대역 IP를 생성하여 헤더에 넣음
+        val randomIp = "${Random.nextInt(1, 255)}.${Random.nextInt(0, 255)}.${Random.nextInt(0, 255)}.${Random.nextInt(0, 255)}"
         
-        // 3. 경로 탐색 (ID 추출)
+        // IP 스푸핑을 위한 헤더 맵 생성
+        val spoofHeaders = mapOf(
+            "X-Forwarded-For" to randomIp,
+            "X-Real-IP" to randomIp,
+            "Client-IP" to randomIp,
+            "Referer" to (referer ?: mainUrl) // 기본 페이지 로드 시에는 referer 유지
+        )
+
+        // 3. 플레이어 페이지 로드 (스푸핑 헤더 적용)
+        val response = app.get(url, headers = spoofHeaders).text
+        
+        // 4. 경로 탐색
         val pathRegex = Regex("""(?i)(?:/v/f/|src=)([a-f0-9]{32,})""")
         val idMatch = pathRegex.find(response)?.groupValues?.get(1)
             ?: pathRegex.find(url)?.groupValues?.get(1)
 
+        // m3u8 요청용 Referer (전체 URL)
+        val m3u8Referer = url 
+
+        // m3u8 요청 및 재생 시 사용할 최종 헤더 (IP 스푸핑 + Referer)
+        val finalHeaders = spoofHeaders.toMutableMap().apply {
+            put("Referer", m3u8Referer)
+        }
+
         if (idMatch != null) {
-            println("DEBUG_EXTRACTOR: Found ID: $idMatch")
+            println("DEBUG_EXTRACTOR: Found ID: $idMatch / Fake IP: $randomIp")
             
             val tokenUrl = "$domain/v/f/$idMatch/c.html"
             val directM3u8 = "$domain/v/f/$idMatch/index.m3u8"
 
-            // 4. 토큰 페이지 접속 시도
+            // 5. 토큰 페이지 접속 시도
             try {
-                // 토큰 페이지 접속시에도 referer는 전체 플레이어 URL을 사용
-                val tokenResponse = app.get(tokenUrl, referer = url).text
+                // 토큰 페이지에도 가짜 IP 헤더 전송
+                val tokenResponse = app.get(tokenUrl, headers = finalHeaders).text
                 val realM3u8Regex = Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']""")
                 val realM3u8 = realM3u8Regex.find(tokenResponse)?.groupValues?.get(1)
                     ?: directM3u8 
                 
-                // [핵심 수정] invokeLink에 url(전체 주소)을 refererUrl로 넘김
-                invokeLink(realM3u8, url, callback)
+                invokeLink(realM3u8, finalHeaders, callback)
             } catch (e: Exception) {
-                invokeLink(directM3u8, url, callback)
+                invokeLink(directM3u8, finalHeaders, callback)
             }
         } else {
-            // ID 못 찾았을 때 fallback
             val fallbackRegex = Regex("""[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
             val fallbackMatch = fallbackRegex.find(response)?.value?.replace("\\/", "/")
             
             fallbackMatch?.let {
                 val finalUrl = if (it.startsWith("http")) it else domain + it
-                invokeLink(finalUrl, url, callback)
+                invokeLink(finalUrl, finalHeaders, callback)
             }
         }
     }
 
-    // [핵심 수정] refererUrl을 인자로 받아서 처리
-    private suspend fun invokeLink(m3u8Url: String, refererUrl: String, callback: (ExtractorLink) -> Unit) {
+    private suspend fun invokeLink(m3u8Url: String, headers: Map<String, String>, callback: (ExtractorLink) -> Unit) {
         println("DEBUG_EXTRACTOR: Final URL: $m3u8Url")
-        println("DEBUG_EXTRACTOR: Using Referer: $refererUrl") // 로그로 확인 가능하게 추가
         
         callback.invoke(
             newExtractorLink(
@@ -74,8 +90,9 @@ class BunnyPoorCdn : ExtractorApi() {
                 url = m3u8Url,
                 type = ExtractorLinkType.M3U8
             ) {
-                // 여기가 문제였음. 고정 주소가 아니라, 파라미터가 포함된 전체 주소를 넣어야 함.
-                this.referer = refererUrl
+                // ExtractorLink에 헤더를 직접 주입 (이게 있어야 플레이어도 가짜 IP 헤더를 씀)
+                // headers는 mapOf("Referer" to ..., "X-Forwarded-For" to ...) 등을 포함함
+                this.headers = headers 
                 this.quality = Qualities.Unknown.value
             }
         )
