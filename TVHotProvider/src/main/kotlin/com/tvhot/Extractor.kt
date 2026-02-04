@@ -21,7 +21,6 @@ class BunnyPoorCdn : ExtractorApi() {
         "Sec-Fetch-Dest" to "empty",
         "Sec-Fetch-Mode" to "cors",
         "Sec-Fetch-Site" to "cross-site",
-        "Connection" to "keep-alive"
     )
 
     override suspend fun getUrl(
@@ -30,57 +29,49 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // URL에서 불필요한 줄바꿈 제거 (로그에 나타난 에러 해결 핵심)
         val cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = referer?.replace(Regex("[\\r\\n\\s]"), "")?.trim()
 
         val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
         val domain = "https://every$serverNum.poorcdn.com"
         
-        val playerResponse = app.get(
-            cleanUrl, 
-            referer = cleanReferer, 
-            headers = standardHeaders
-        )
+        // 1. 플레이어 페이지 접속 및 초기 쿠키 획득
+        val playerResponse = app.get(cleanUrl, referer = cleanReferer, headers = standardHeaders)
         val responseText = playerResponse.text
+        val cookies = playerResponse.cookies.toMutableMap()
         
-        val pathRegex = Regex("""(?i)(?:/v/f/|src=)([a-f0-9]{32,})""")
-        val idMatch = pathRegex.find(responseText)?.groupValues?.get(1)
-            ?: pathRegex.find(cleanUrl)?.groupValues?.get(1)
+        val idMatch = Regex("""(?i)(?:/v/f/|src=)([a-f0-9]{32,})""").find(responseText)?.groupValues?.get(1)
+            ?: Regex("""(?i)(?:/v/f/|src=)([a-f0-9]{32,})""").find(cleanUrl)?.groupValues?.get(1)
 
         if (idMatch != null) {
             val tokenUrl = "$domain/v/f/$idMatch/c.html"
             val directM3u8 = "$domain/v/f/$idMatch/index.m3u8"
 
             try {
-                val tokenResponse = app.get(
-                    tokenUrl, 
-                    referer = cleanUrl, 
-                    headers = standardHeaders
-                ).text
+                // 2. c.html 접속하여 세션 쿠키 업데이트 (404 방지의 핵심)
+                val tokenResponse = app.get(tokenUrl, referer = cleanUrl, headers = standardHeaders)
+                cookies.putAll(tokenResponse.cookies)
                 
-                val realM3u8Regex = Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']""")
-                val realM3u8 = realM3u8Regex.find(tokenResponse)?.groupValues?.get(1)
+                val realM3u8 = Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']""").find(tokenResponse.text)?.groupValues?.get(1)
                     ?: directM3u8
                 
-                invokeLink(realM3u8, cleanUrl, callback)
+                invokeLink(realM3u8, cleanUrl, cookies, callback)
             } catch (e: Exception) {
-                invokeLink(directM3u8, cleanUrl, callback)
+                invokeLink(directM3u8, cleanUrl, cookies, callback)
             }
         } else {
-            val fallbackRegex = Regex("""[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
-            val fallbackMatch = fallbackRegex.find(responseText)?.value?.replace("\\/", "/")
-            
+            val fallbackMatch = Regex("""[^\s"'<>]+?\.m3u8[^\s"'<>]*""").find(responseText)?.value?.replace("\\/", "/")
             fallbackMatch?.let {
                 val finalUrl = if (it.startsWith("http")) it else domain + it
-                invokeLink(finalUrl, cleanUrl, callback)
+                invokeLink(finalUrl, cleanUrl, cookies, callback)
             }
         }
     }
 
-    private suspend fun invokeLink(m3u8Url: String, referer: String, callback: (ExtractorLink) -> Unit) {
+    private suspend fun invokeLink(m3u8Url: String, referer: String, cookies: Map<String, String>, callback: (ExtractorLink) -> Unit) {
         val cleanM3u8 = m3u8Url.replace(Regex("[\\r\\n\\s]"), "").trim()
-        val cleanReferer = referer.replace(Regex("[\\r\\n\\s]"), "").trim()
+        // 쿠키 문자열 생성
+        val cookieString = cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
 
         callback.invoke(
             newExtractorLink(
@@ -89,10 +80,11 @@ class BunnyPoorCdn : ExtractorApi() {
                 url = cleanM3u8,
                 type = ExtractorLinkType.M3U8
             ) {
-                this.referer = cleanReferer
+                this.referer = referer
                 this.headers = standardHeaders.toMutableMap().apply {
                     put("Origin", "https://player.bunny-frame.online")
-                    put("Referer", cleanReferer)
+                    // 수동으로 추출한 쿠키를 헤더에 주입 (404 Not Found 해결책)
+                    if (cookieString.isNotEmpty()) put("Cookie", cookieString)
                 }
                 this.quality = Qualities.Unknown.value
             }
