@@ -51,7 +51,7 @@ class BunnyPoorCdn : ExtractorApi() {
         val cookieMap = playerRes.cookies
 
         // [로그 기반 수정] ID가 잘리지 않도록 정규식에 a-z 전체 허용
-        val idRegex = Regex("""(?i)(?:/v/f/|src=)([a-z0-9]{32,45})""")
+        val idRegex = Regex("""(?i)/v/f/([a-z0-9]{32,45})""")
         val idMatch = idRegex.find(responseText)?.groupValues?.get(1)
             ?: idRegex.find(cleanUrl)?.groupValues?.get(1)
 
