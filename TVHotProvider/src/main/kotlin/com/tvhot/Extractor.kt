@@ -64,10 +64,10 @@ class BunnyPoorCdn : ExtractorApi() {
             
             // c.html 응답 확인 (빈 응답이면 재시도)
             var retryCount = 0
-            val maxRetries = 2
+            val maxRetries = 5
             while (tokenRes.text.isNullOrEmpty() && retryCount < maxRetries) {
                 // kotlinx.coroutines 대신 Thread.sleep 사용
-                Thread.sleep(2000L) // 2초 대기
+                Thread.sleep(10000L) // 10초 대기
                 tokenRes = app.get(tokenUrl, referer = cleanUrl, headers = browserHeaders)
                 retryCount++
             }
