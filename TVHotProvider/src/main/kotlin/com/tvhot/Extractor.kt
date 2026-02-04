@@ -1,100 +1,125 @@
 package com.tvhot
 
+import com.lagradost.cloudstream3.DubStatus
+import com.lagradost.cloudstream3.Episode
+import com.lagradost.cloudstream3.HomePageList
+import com.lagradost.cloudstream3.HomePageResponse
+import com.lagradost.cloudstream3.LoadResponse
+import com.lagradost.cloudstream3.MainAPI
+import com.lagradost.cloudstream3.MainPageRequest
+import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.SubtitleFile
+import com.lagradost.cloudstream3.TvType
+import com.lagradost.cloudstream3.addEpisodes
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.utils.ExtractorApi
+import com.lagradost.cloudstream3.fixUrl
+import com.lagradost.cloudstream3.newAnimeLoadResponse
+import com.lagradost.cloudstream3.newAnimeSearchResponse
+import com.lagradost.cloudstream3.newEpisode
+import com.lagradost.cloudstream3.newHomePageResponse
+import com.lagradost.cloudstream3.newMovieLoadResponse
+import com.lagradost.cloudstream3.newMovieSearchResponse
+import com.lagradost.cloudstream3.newTvSeriesLoadResponse
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.*
-import kotlin.random.Random
+import org.jsoup.nodes.Element
 
-class BunnyPoorCdn : ExtractorApi() {
-    override val name = "BunnyPoorCdn"
-    override val mainUrl = "https://player.bunny-frame.online"
-    override val requiresReferer = true
+class TVHot : MainAPI() {
+    override var mainUrl = "https://tvhot.store"
+    override var name = "TVHot"
+    override val hasMainPage = true
+    override var lang = "ko"
+    override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie, TvType.AsianDrama, TvType.Anime, TvType.AnimeMovie)
 
-    override suspend fun getUrl(
-        url: String,
-        referer: String?,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ) {
-        // 1. 서버 번호 추출
-        val serverNum = Regex("""[?&]s=(\d+)""").find(url)?.groupValues?.get(1) ?: "9"
-        val domain = "https://every$serverNum.poorcdn.com"
+    private fun Element.toSearchResponse(): SearchResponse? {
+        val onClick = this.attr("onclick")
+        val link = Regex("location\\.href='(.*?)'").find(onClick)?.groupValues?.get(1) ?: return null
+        val title = this.selectFirst("div.title")?.text()?.trim() ?: return null
+        val poster = this.selectFirst("div.img img")?.attr("src")
+        val type = determineTypeFromUrl(link)
         
-        // 2. 랜덤 IP 생성 (IP 차단 우회 시도)
-        // 한국 대역대 혹은 랜덤 대역 IP를 생성하여 헤더에 넣음
-        val randomIp = "${Random.nextInt(1, 255)}.${Random.nextInt(0, 255)}.${Random.nextInt(0, 255)}.${Random.nextInt(0, 255)}"
-        
-        // IP 스푸핑을 위한 헤더 맵 생성
-        val spoofHeaders = mapOf(
-            "X-Forwarded-For" to randomIp,
-            "X-Real-IP" to randomIp,
-            "Client-IP" to randomIp,
-            "Referer" to (referer ?: mainUrl) // 기본 페이지 로드 시에는 referer 유지
-        )
-
-        // 3. 플레이어 페이지 로드 (스푸핑 헤더 적용)
-        val response = app.get(url, headers = spoofHeaders).text
-        
-        // 4. 경로 탐색
-        val pathRegex = Regex("""(?i)(?:/v/f/|src=)([a-f0-9]{32,})""")
-        val idMatch = pathRegex.find(response)?.groupValues?.get(1)
-            ?: pathRegex.find(url)?.groupValues?.get(1)
-
-        // m3u8 요청용 Referer (전체 URL)
-        val m3u8Referer = url 
-
-        // m3u8 요청 및 재생 시 사용할 최종 헤더 (IP 스푸핑 + Referer)
-        val finalHeaders = spoofHeaders.toMutableMap().apply {
-            put("Referer", m3u8Referer)
+        return when (type) {
+            TvType.Movie, TvType.AnimeMovie -> newMovieSearchResponse(title, fixUrl(link), type) { this.posterUrl = fixUrl(poster ?: "") }
+            TvType.Anime -> newAnimeSearchResponse(title, fixUrl(link), TvType.Anime) { this.posterUrl = fixUrl(poster ?: "") }
+            else -> newAnimeSearchResponse(title, fixUrl(link), TvType.TvSeries) { this.posterUrl = fixUrl(poster ?: "") }
         }
+    }
 
-        if (idMatch != null) {
-            println("DEBUG_EXTRACTOR: Found ID: $idMatch / Fake IP: $randomIp")
-            
-            val tokenUrl = "$domain/v/f/$idMatch/c.html"
-            val directM3u8 = "$domain/v/f/$idMatch/index.m3u8"
+    private fun determineTypeFromUrl(url: String): TvType {
+        return when {
+            url.contains("/movie") || url.contains("/kor_movie") -> TvType.Movie
+            url.contains("/ani_movie") -> TvType.AnimeMovie
+            url.contains("/animation") -> TvType.Anime
+            else -> TvType.TvSeries
+        }
+    }
 
-            // 5. 토큰 페이지 접속 시도
-            try {
-                // 토큰 페이지에도 가짜 IP 헤더 전송
-                val tokenResponse = app.get(tokenUrl, headers = finalHeaders).text
-                val realM3u8Regex = Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']""")
-                val realM3u8 = realM3u8Regex.find(tokenResponse)?.groupValues?.get(1)
-                    ?: directM3u8 
-                
-                invokeLink(realM3u8, finalHeaders, callback)
-            } catch (e: Exception) {
-                invokeLink(directM3u8, finalHeaders, callback)
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        if (page > 1) return newHomePageResponse(emptyList())
+        val doc = app.get(mainUrl).document
+        val home = mutableListOf<HomePageList>()
+        doc.select("div.mov_type").forEach { section ->
+            val title = section.selectFirst("h2 strong")?.text()?.trim()?.replace("무료 ", "")?.replace(" 다시보기", "") ?: "추천"
+            val listItems = section.select("ul li[onclick]").mapNotNull { it.toSearchResponse() }
+            if (listItems.isNotEmpty()) home.add(HomePageList(title, listItems))
+        }
+        return newHomePageResponse(home, hasNext = false)
+    }
+
+    override suspend fun search(query: String): List<SearchResponse> {
+        val doc = app.get("$mainUrl/search?stx=$query").document
+        return doc.select("ul li[onclick]").mapNotNull { it.toSearchResponse() }
+    }
+
+    override suspend fun load(url: String): LoadResponse {
+        val doc = app.get(url).document
+        var title = doc.selectFirst("div.tmdb-card-top img")?.attr("alt")?.trim() 
+            ?: doc.selectFirst("h2#bo_v_title .bo_v_tit")?.text()?.trim() ?: "Unknown"
+        
+        title = title.replace(Regex("\\s*\\d+\\s*(?:회|화|부)\\s*"), "").trim()
+        
+        val episodes = doc.select("div#other_list ul li").mapNotNull {
+            val aTag = it.selectFirst("a") ?: return@mapNotNull null
+            val epTitle = it.selectFirst(".title")?.text()?.trim() ?: "Episode"
+            newEpisode(fixUrl(aTag.attr("href"))) { this.name = epTitle }
+        }.reversed()
+
+        val type = determineTypeFromUrl(url)
+        val poster = fixUrl(doc.selectFirst(".tmdb-card-top img")?.attr("src") ?: "")
+        val plot = doc.selectFirst(".tmdb-overview")?.text()
+
+        return when (type) {
+            TvType.Movie, TvType.AnimeMovie -> {
+                val movieLink = episodes.firstOrNull()?.data ?: url
+                newMovieLoadResponse(title, url, type, movieLink) { this.posterUrl = poster; this.plot = plot }
             }
-        } else {
-            val fallbackRegex = Regex("""[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
-            val fallbackMatch = fallbackRegex.find(response)?.value?.replace("\\/", "/")
-            
-            fallbackMatch?.let {
-                val finalUrl = if (it.startsWith("http")) it else domain + it
-                invokeLink(finalUrl, finalHeaders, callback)
+            else -> {
+                newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) { this.posterUrl = poster; this.plot = plot }
             }
         }
     }
 
-    private suspend fun invokeLink(m3u8Url: String, headers: Map<String, String>, callback: (ExtractorLink) -> Unit) {
-        println("DEBUG_EXTRACTOR: Final URL: $m3u8Url")
+    override suspend fun loadLinks(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val response = app.get(data).text
         
-        callback.invoke(
-            newExtractorLink(
-                source = name,
-                name = name,
-                url = m3u8Url,
-                type = ExtractorLinkType.M3U8
-            ) {
-                // ExtractorLink에 헤더를 직접 주입 (이게 있어야 플레이어도 가짜 IP 헤더를 씀)
-                // headers는 mapOf("Referer" to ..., "X-Forwarded-For" to ...) 등을 포함함
-                this.headers = headers 
-                this.quality = Qualities.Unknown.value
-            }
-        )
+        // 전면 수정: iframe 속성만 보지 말고, 페이지 전체 소스에서 BunnyFrame URL을 직접 긁어옴
+        // 특히 암호화되지 않은 p=//v/f/... 패턴을 우선적으로 찾음
+        val playerRegex = Regex("""https://player\.bunny-frame\.online/[^"']+""")
+        val playerUrlMatch = playerRegex.find(response)?.value
+        
+        if (playerUrlMatch == null) {
+            println("DEBUG_MAIN: No Player URL found in entire page source")
+            return false
+        }
+
+        val finalPlayerUrl = fixUrl(playerUrlMatch.replace("&amp;", "&"))
+        println("DEBUG_MAIN: Found Player URL: $finalPlayerUrl")
+
+        BunnyPoorCdn().getUrl(finalPlayerUrl, data, subtitleCallback, callback)
+        return true
     }
 }
