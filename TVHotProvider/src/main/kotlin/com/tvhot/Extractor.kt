@@ -12,10 +12,10 @@ class BunnyPoorCdn : ExtractorApi() {
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
 
-    // 실제 최신 크롬 브라우저와 동일한 UA 사용
+    // 실제 윈도우 크롬 브라우저와 100% 일치하는 UA 및 핑거프린트
     private val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
     
-    private val playHeaders = mapOf(
+    private val browserHeaders = mapOf(
         "User-Agent" to USER_AGENT,
         "Accept" to "*/*",
         "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -40,35 +40,31 @@ class BunnyPoorCdn : ExtractorApi() {
         val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
         val domain = "https://every$serverNum.poorcdn.com"
         
-        // 1. 플레이어 페이지 접속하여 쿠키 확보
+        // 1. 플레이어 로드 시 브라우저 헤더 전송
         val playerRes = app.get(cleanUrl, referer = cleanReferer, headers = mapOf("User-Agent" to USER_AGENT))
         val responseText = playerRes.text
         val cookieMap = playerRes.cookies
 
-        val idMatch = Regex("""(?i)(?:/v/f/|src=)([a-f0-9]{32,})""").find(responseText)?.groupValues?.get(1)
-            ?: Regex("""(?i)(?:/v/f/|src=)([a-f0-9]{32,})""").find(cleanUrl)?.groupValues?.get(1)
+        // [로그 기반 수정] ID 정규식에 z 및 기타 문자 허용하도록 [a-z0-9]로 확장
+        val idRegex = Regex("""(?i)(?:/v/f/|src=)([a-z0-9]{32,})""")
+        val idMatch = idRegex.find(responseText)?.groupValues?.get(1)
+            ?: idRegex.find(cleanUrl)?.groupValues?.get(1)
 
         if (idMatch != null) {
             val tokenUrl = "$domain/v/f/$idMatch/c.html"
             val directM3u8 = "$domain/v/f/$idMatch/index.m3u8"
 
             try {
-                // 2. c.html 접속 (여기서 세션 쿠키가 완성됨)
+                // 2. 인증 페이지 접속 및 쿠키 누적
                 val tokenRes = app.get(tokenUrl, referer = cleanUrl, headers = mapOf("User-Agent" to USER_AGENT))
-                val finalCookies = cookieMap + tokenRes.cookies // 쿠키 합치기
+                val combinedCookies = cookieMap + tokenRes.cookies
                 
                 val realM3u8 = Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']""").find(tokenRes.text)?.groupValues?.get(1)
                     ?: directM3u8
                 
-                invokeLink(realM3u8, cleanUrl, finalCookies, callback)
+                invokeLink(realM3u8, cleanUrl, combinedCookies, callback)
             } catch (e: Exception) {
                 invokeLink(directM3u8, cleanUrl, cookieMap, callback)
-            }
-        } else {
-            val fallbackMatch = Regex("""[^\s"'<>]+?\.m3u8[^\s"'<>]*""").find(responseText)?.value?.replace("\\/", "/")
-            fallbackMatch?.let {
-                val finalUrl = if (it.startsWith("http")) it else domain + it
-                invokeLink(finalUrl, cleanUrl, cookieMap, callback)
             }
         }
     }
@@ -85,8 +81,8 @@ class BunnyPoorCdn : ExtractorApi() {
                 type = ExtractorLinkType.M3U8
             ) {
                 this.referer = referer
-                // 모든 요청 헤더를 브라우저와 동일하게 설정하여 IP 차단 우회
-                this.headers = playHeaders.toMutableMap().apply {
+                // [IP 밴 방지 핵심] 재생기 헤더에 쿠키와 브라우저 특성 헤더를 강제 주입
+                this.headers = browserHeaders.toMutableMap().apply {
                     if (cookieString.isNotEmpty()) put("Cookie", cookieString)
                     put("Referer", referer)
                 }
