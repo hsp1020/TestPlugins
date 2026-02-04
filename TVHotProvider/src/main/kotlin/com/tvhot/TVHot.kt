@@ -104,20 +104,19 @@ class TVHot : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // iframe 속성에서 플레이어 URL을 찾아냄
         val doc = app.get(data).document
         val iframe = doc.selectFirst("iframe#view_iframe") ?: return false
         
-        var playerUrl = iframe.attr("data-player1").takeIf { it.isNotEmpty() }
+        // data-player1부터 src까지 순차적으로 확인
+        val playerUrl = iframe.attr("data-player1").takeIf { it.isNotEmpty() }
             ?: iframe.attr("data-player2").takeIf { it.isNotEmpty() }
             ?: iframe.attr("src")
 
         if (playerUrl.isNullOrEmpty()) return false
         
-        // HTML Entity (&amp;) 변환 및 fixUrl 적용
+        // &amp; 변환 및 fixUrl 처리
         val finalPlayerUrl = fixUrl(playerUrl.replace("&amp;", "&"))
 
-        // Extractor 실행 (현재 페이지 data를 Referer로 전달)
         BunnyPoorCdn().getUrl(finalPlayerUrl, data, subtitleCallback, callback)
         return true
     }
