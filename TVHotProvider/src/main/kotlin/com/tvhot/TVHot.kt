@@ -1,25 +1,6 @@
 package com.tvhot
 
-import com.lagradost.cloudstream3.DubStatus
-import com.lagradost.cloudstream3.Episode
-import com.lagradost.cloudstream3.HomePageList
-import com.lagradost.cloudstream3.HomePageResponse
-import com.lagradost.cloudstream3.LoadResponse
-import com.lagradost.cloudstream3.MainAPI
-import com.lagradost.cloudstream3.MainPageRequest
-import com.lagradost.cloudstream3.SearchResponse
-import com.lagradost.cloudstream3.SubtitleFile
-import com.lagradost.cloudstream3.TvType
-import com.lagradost.cloudstream3.addEpisodes
-import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.fixUrl
-import com.lagradost.cloudstream3.newAnimeLoadResponse
-import com.lagradost.cloudstream3.newAnimeSearchResponse
-import com.lagradost.cloudstream3.newEpisode
-import com.lagradost.cloudstream3.newHomePageResponse
-import com.lagradost.cloudstream3.newMovieLoadResponse
-import com.lagradost.cloudstream3.newMovieSearchResponse
-import com.lagradost.cloudstream3.newTvSeriesLoadResponse
+import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import org.jsoup.nodes.Element
 
@@ -29,6 +10,20 @@ class TVHot : MainAPI() {
     override val hasMainPage = true
     override var lang = "ko"
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie, TvType.AsianDrama, TvType.Anime, TvType.AnimeMovie)
+
+    // 전역 User-Agent 및 헤더 설정 (IP 밴 방지의 핵심)
+    private val USER_AGENT = "Mozilla/5.0 (Linux; Android 13; SM-S911B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36"
+    
+    private val commonHeaders = mapOf(
+        "User-Agent" to USER_AGENT,
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Cache-Control" to "max-age=0",
+        "Sec-Ch-Ua" to "\"Not_A Brand\";v=\"8\", \"Chromium\";v=\"121\", \"Google Chrome\";v=\"121\"",
+        "Sec-Ch-Ua-Mobile" to "?1",
+        "Sec-Ch-Ua-Platform" to "\"Android\"",
+        "Upgrade-Insecure-Requests" to "1"
+    )
 
     private fun Element.toSearchResponse(): SearchResponse? {
         val onClick = this.attr("onclick")
@@ -55,7 +50,8 @@ class TVHot : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         if (page > 1) return newHomePageResponse(emptyList())
-        val doc = app.get(mainUrl).document
+        // 모든 요청에 공통 헤더 적용하여 봇 감지 회피
+        val doc = app.get(mainUrl, headers = commonHeaders).document
         val home = mutableListOf<HomePageList>()
         doc.select("div.mov_type").forEach { section ->
             val title = section.selectFirst("h2 strong")?.text()?.trim()?.replace("무료 ", "")?.replace(" 다시보기", "") ?: "추천"
@@ -66,12 +62,12 @@ class TVHot : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val doc = app.get("$mainUrl/search?stx=$query").document
+        val doc = app.get("$mainUrl/search?stx=$query", headers = commonHeaders).document
         return doc.select("ul li[onclick]").mapNotNull { it.toSearchResponse() }
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val doc = app.get(url).document
+        val doc = app.get(url, headers = commonHeaders).document
         var title = doc.selectFirst("div.tmdb-card-top img")?.attr("alt")?.trim() 
             ?: doc.selectFirst("h2#bo_v_title .bo_v_tit")?.text()?.trim() ?: "Unknown"
         
@@ -104,21 +100,18 @@ class TVHot : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val response = app.get(data).text
+        // 영상 페이지 로드 시에도 헤더 유지
+        val response = app.get(data, headers = commonHeaders).text
         
-        // 전면 수정: iframe 속성만 보지 말고, 페이지 전체 소스에서 BunnyFrame URL을 직접 긁어옴
-        // 특히 암호화되지 않은 p=//v/f/... 패턴을 우선적으로 찾음
+        // BunnyFrame URL 추출
         val playerRegex = Regex("""https://player\.bunny-frame\.online/[^"']+""")
         val playerUrlMatch = playerRegex.find(response)?.value
         
-        if (playerUrlMatch == null) {
-            println("DEBUG_MAIN: No Player URL found in entire page source")
-            return false
-        }
+        if (playerUrlMatch == null) return false
 
         val finalPlayerUrl = fixUrl(playerUrlMatch.replace("&amp;", "&"))
-        println("DEBUG_MAIN: Found Player URL: $finalPlayerUrl")
 
+        // Extractor로 넘길 때 현재 페이지(data)를 Referer로 전달하여 추적 피함
         BunnyPoorCdn().getUrl(finalPlayerUrl, data, subtitleCallback, callback)
         return true
     }
