@@ -102,12 +102,8 @@ class TVHot : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val response = app.get(data, headers = commonHeaders).text
-        
         val playerRegex = Regex("""https://player\.bunny-frame\.online/[^"']+""")
-        val playerUrlMatch = playerRegex.find(response)?.value
-        
-        if (playerUrlMatch == null) return false
-
+        val playerUrlMatch = playerRegex.find(response)?.value ?: return false
         val finalPlayerUrl = fixUrl(playerUrlMatch.replace("&amp;", "&")).replace(Regex("[\\r\\n\\s]"), "").trim()
 
         BunnyPoorCdn().getUrl(finalPlayerUrl, data, subtitleCallback, callback)
