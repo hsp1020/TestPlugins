@@ -18,54 +18,51 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // 1. 서버 번호 추출 (s=5 -> every5)
+        // 1. 서버 번호 추출
         val serverNum = Regex("""[?&]s=(\d+)""").find(url)?.groupValues?.get(1) ?: "9"
         val domain = "https://every$serverNum.poorcdn.com"
         
         // 2. 플레이어 페이지 로드
         val response = app.get(url, referer = referer).text
         
-        // 3. 모든 경로 탐색 (난독화 대응 정규식)
-        // /v/f/ 로 시작하는 모든 32자리 이상의 ID를 가진 경로를 찾음
+        // 3. 경로 탐색
         val pathRegex = Regex("""(?i)(?:/v/f/|src=)([a-f0-9]{32,})""")
         val idMatch = pathRegex.find(response)?.groupValues?.get(1)
-            ?: pathRegex.find(url)?.groupValues?.get(1) // URL 자체에서도 시도
+            ?: pathRegex.find(url)?.groupValues?.get(1)
 
         if (idMatch != null) {
             println("DEBUG_EXTRACTOR: Found ID: $idMatch")
             
-            // BunnyCDN/PoorCDN의 표준 경로 생성
-            // 1순위: c.html (인증 페이지)
-            // 2순위: index.m3u8 (직접 주소)
             val tokenUrl = "$domain/v/f/$idMatch/c.html"
             val directM3u8 = "$domain/v/f/$idMatch/index.m3u8"
 
             // 4. 토큰 페이지 접속 시도
             try {
+                // referer를 url(플레이어 전체 주소)로 설정
                 val tokenResponse = app.get(tokenUrl, referer = url).text
-                // 토큰 페이지 내부에서 진짜 재생 주소 추출
                 val realM3u8Regex = Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']""")
                 val realM3u8 = realM3u8Regex.find(tokenResponse)?.groupValues?.get(1)
-                    ?: directM3u8 // 실패시 직접 주소 사용
+                    ?: directM3u8 
                 
-                invokeLink(realM3u8, callback)
+                // url을 referer로 넘김
+                invokeLink(realM3u8, url, callback)
             } catch (e: Exception) {
-                invokeLink(directM3u8, callback)
+                invokeLink(directM3u8, url, callback)
             }
         } else {
-            // 만약 위 방법으로도 못 찾았다면, 66KB 데이터 전체에서 m3u8 패턴을 강제로 긁어옴
             val fallbackRegex = Regex("""[^\s"'<>]+?\.m3u8[^\s"'<>]*""")
             val fallbackMatch = fallbackRegex.find(response)?.value?.replace("\\/", "/")
             
             fallbackMatch?.let {
                 val finalUrl = if (it.startsWith("http")) it else domain + it
-                invokeLink(finalUrl, callback)
+                invokeLink(finalUrl, url, callback)
             }
         }
     }
 
-    private suspend fun invokeLink(m3u8Url: String, callback: (ExtractorLink) -> Unit) {
-        println("DEBUG_EXTRACTOR: Final URL: $m3u8Url")
+    // refererUrl 파라미터 추가
+    private suspend fun invokeLink(m3u8Url: String, refererUrl: String, callback: (ExtractorLink) -> Unit) {
+        println("DEBUG_EXTRACTOR: Final URL: $m3u8Url with Referer: $refererUrl")
         callback.invoke(
             newExtractorLink(
                 source = name,
@@ -73,7 +70,8 @@ class BunnyPoorCdn : ExtractorApi() {
                 url = m3u8Url,
                 type = ExtractorLinkType.M3U8
             ) {
-                this.referer = "https://player.bunny-frame.online/"
+                // 고정 주소가 아닌 파라미터가 포함된 전체 주소를 Referer로 사용
+                this.referer = refererUrl
                 this.quality = Qualities.Unknown.value
             }
         )
