@@ -18,47 +18,44 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // 1. 플레이어 페이지 로드 (에피소드 주소를 Referer로 사용)
-        val playerResponse = app.get(url, referer = referer).text
+        // 1. 플레이어 페이지 로드
+        val response = app.get(url, referer = referer).text
         
-        // 도메인 추출 (현재 요청한 URL의 도메인을 그대로 사용: everyX.poorcdn.com)
-        val domainMatch = Regex("""https?://([^/]+)""").find(url)
-        val currentDomain = if (domainMatch != null) "https://${domainMatch.groupValues[1]}" else "https://every9.poorcdn.com"
+        // 서버 번호(s=7 등) 추출하여 기본 도메인 생성
+        val sNum = Regex("""[?&]s=(\d+)""").find(url)?.groupValues?.get(1) ?: "9"
+        val domain = "https://every$sNum.poorcdn.com"
 
-        // 2. 유동적 경로 추출 (/v/f/, /v/w/, /v/k/ 등 모든 패턴 대응)
-        // index.m3u8 또는 c.html?token= 으로 끝나는 모든 따옴표 안의 경로를 찾음
-        val pathRegex = Regex("""["']((?:https?://[^"']*)?/v/[a-z]/[a-f0-9]{32,}[^"']*(?:\.m3u8|\.html\?token=[^"']+))["']""")
-        
-        val matches = pathRegex.findAll(playerResponse).map { it.groupValues[1].replace("\\/", "/") }.toList()
-        
-        // 3. m3u8 주소 먼저 확인
-        val m3u8Path = matches.find { it.contains(".m3u8") }
+        // 2. 따옴표 내부의 모든 문자열을 추출 (JSON/JS 대응)
+        val allStrings = Regex("""["']([^"']+)["']""").findAll(response).map { it.groupValues[1] }.toList()
+
+        // 3. m3u8 주소 찾기
+        val m3u8Path = allStrings.find { it.contains("index.m3u8") }?.replace("\\/", "/")
         if (m3u8Path != null) {
-            val finalUrl = if (m3u8Path.startsWith("http")) m3u8Path else "$currentDomain${if (m3u8Path.startsWith("/")) "" else "/"}$m3u8Path"
-            println("DEBUG_EXTRACTOR: Found m3u8 -> $finalUrl")
-            invokeLink(finalUrl, url, callback) // 플레이어 주소를 Referer로 전달
+            val finalM3u8 = if (m3u8Path.startsWith("http")) m3u8Path else domain + (if (m3u8Path.startsWith("/")) "" else "/") + m3u8Path
+            invokeLink(finalM3u8, callback)
             return
         }
 
-        // 4. m3u8이 없다면 Token HTML 확인
-        val tokenPath = matches.find { it.contains("token=") }
+        // 4. Token HTML 찾기
+        val tokenPath = allStrings.find { it.contains(".html?token=") }?.replace("\\/", "/")
         if (tokenPath != null) {
-            val tokenUrl = if (tokenPath.startsWith("http")) tokenPath else "$currentDomain${if (tokenPath.startsWith("/")) "" else "/"}$tokenPath"
-            println("DEBUG_EXTRACTOR: Found Token URL -> $tokenUrl")
+            val finalHtmlUrl = if (tokenPath.startsWith("http")) tokenPath else domain + (if (tokenPath.startsWith("/")) "" else "/") + tokenPath
             
-            val tokenResponse = app.get(tokenUrl, referer = url).text
-            val finalM3u8Match = pathRegex.find(tokenResponse)?.groupValues?.get(1)?.replace("\\/", "/")
+            // 토큰 페이지 접속 (Referer 필수)
+            val tokenPageResponse = app.get(finalHtmlUrl, referer = url).text
             
-            finalM3u8Match?.let {
-                val finalUrl = if (it.startsWith("http")) it else "$currentDomain${if (it.startsWith("/")) "" else "/"}$it"
-                invokeLink(finalUrl, url, callback)
+            // 토큰 페이지 안에서 다시 m3u8 찾기
+            val finalM3u8 = Regex("""["']([^"']+\.m3u8[^"']*)["']""").find(tokenPageResponse)
+                ?.groupValues?.get(1)?.replace("\\/", "/")
+
+            finalM3u8?.let {
+                val absoluteM3u8 = if (it.startsWith("http")) it else domain + (if (it.startsWith("/")) "" else "/") + it
+                invokeLink(absoluteM3u8, callback)
             }
-        } else {
-            println("DEBUG_EXTRACTOR: Failed to find any valid path in 66KB response")
         }
     }
 
-    private suspend fun invokeLink(m3u8Url: String, refererUrl: String, callback: (ExtractorLink) -> Unit) {
+    private suspend fun invokeLink(m3u8Url: String, callback: (ExtractorLink) -> Unit) {
         callback.invoke(
             newExtractorLink(
                 source = name,
@@ -66,8 +63,8 @@ class BunnyPoorCdn : ExtractorApi() {
                 url = m3u8Url,
                 type = ExtractorLinkType.M3U8
             ) {
-                // 핵심: m3u8을 재생할 때 Referer가 플레이어 URL(bunny-frame.online)이어야 404/403이 안 남
-                this.referer = refererUrl 
+                // 중요: 403 Forbidden 에러 방지를 위해 Referer를 고정함
+                this.referer = "https://player.bunny-frame.online/"
                 this.quality = Qualities.Unknown.value
             }
         )
