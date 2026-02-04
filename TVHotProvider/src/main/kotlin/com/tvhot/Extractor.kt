@@ -22,72 +22,75 @@ class BunnyPoorCdn : ExtractorApi() {
     ) {
         val cleanUrl = url.trim()
 
-        // [핵심 수정 1] 로그 분석 결과: URL의 src 파라미터 ID가 세션과 직결됨
-        // HTML 본문에서 찾는 것보다 URL에서 직접 추출하는 것이 100% 정확함
-        val idMatch = Regex("""src=([a-z0-9]{32,})""").find(cleanUrl)?.groupValues?.get(1)
-            ?: Regex("""/v/f/([a-z0-9]{32,})""").find(cleanUrl)?.groupValues?.get(1)
-
-        if (idMatch == null) return
-
-        val serverNum = Regex("""every(\d+)\.poorcdn\.com""").find(cleanUrl)?.groupValues?.get(1)
-            ?: Regex("""s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
-        val domain = "https://every$serverNum.poorcdn.com"
-
-        // [핵심 수정 2] 헤더 최적화 (실제 브라우저와 동일하게)
-        val baseHeaders = mapOf(
-            "User-Agent" to USER_AGENT,
-            "Accept" to "*/*",
-            "Accept-Language" to "ko-KR,ko;q=0.9",
-            "Connection" to "keep-alive"
-        )
-
-        // 1. 플레이어 페이지 접속하여 초기 세션 쿠키 획득
-        val playerRes = app.get(cleanUrl, referer = referer, headers = baseHeaders)
+        // 1. 플레이어 페이지 접속 (초기 세션 쿠키 획득)
+        val playerRes = app.get(cleanUrl, referer = referer, headers = mapOf("User-Agent" to USER_AGENT))
+        val html = playerRes.text
         val initialCookies = playerRes.cookies
 
-        // 2. c.html 접속 (인증 쿠키 획득 단계)
-        val tokenUrl = "$domain/v/f/$idMatch/c.html"
-        
-        // c.html 요청 시에는 반드시 cors 모드 헤더와 이전 쿠키가 필요함
-        val tokenHeaders = baseHeaders.toMutableMap().apply {
-            put("Referer", cleanUrl)
-            put("Sec-Fetch-Dest", "empty")
-            put("Sec-Fetch-Mode", "cors")
-            put("Sec-Fetch-Site", "same-origin")
+        // [핵심 수정] upnext 리스트에 있는 ID에 낚이지 않도록 upnext 이전까지만 자름
+        val currentVideoHtml = if (html.contains("upnext")) {
+            html.substringBefore("upnext")
+        } else {
+            html
         }
 
-        var tokenRes = app.get(tokenUrl, referer = cleanUrl, headers = tokenHeaders, cookies = initialCookies)
+        // 현재 재생 중인 영상의 32자리 ID만 정확히 추출
+        val idRegex = Regex("""/v/f/([a-z0-9]{32,})""")
+        val idMatch = idRegex.find(currentVideoHtml)?.groupValues?.get(1)
+            ?: idRegex.find(cleanUrl)?.groupValues?.get(1) // URL에도 있을 수 있으니 fallback
 
-        // [핵심 수정 3] c.html 응답이 비어있을 경우에만 아주 짧게 대기 (스레드 차단 최소화)
-        if (tokenRes.text.isNullOrEmpty()) {
-            Thread.sleep(1500) // 10초는 너무 길어서 세션 끊김. 1.5초가 적당함.
-            tokenRes = app.get(tokenUrl, referer = cleanUrl, headers = tokenHeaders, cookies = initialCookies)
-        }
+        if (idMatch != null) {
+            // 2. 서버 도메인 결정 (로그 상의 every5, every9 등)
+            val serverNum = Regex("""every(\d+)""").find(html)?.groupValues?.get(1)
+                ?: Regex("""s=(\d+)""").find(cleanUrl)?.groupValues?.get(1)
+                ?: "9"
+            val domain = "https://every$serverNum.poorcdn.com"
 
-        val finalCookies = initialCookies + tokenRes.cookies
-        
-        // c.html 응답에서 m3u8 주소 추출 시도, 없으면 기본값 사용
-        val realM3u8 = Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']""").find(tokenRes.text ?: "")?.groupValues?.get(1)
-            ?: "$domain/v/f/$idMatch/index.m3u8"
+            // 3. c.html 호출 (쿠키 인증 단계)
+            val tokenUrl = "$domain/v/f/$idMatch/c.html"
+            
+            // c.html은 빈 응답일 때가 많으므로, 쿠키 연동이 생명입니다.
+            val tokenRes = app.get(
+                tokenUrl,
+                referer = cleanUrl,
+                headers = mapOf(
+                    "User-Agent" to USER_AGENT,
+                    "Accept" to "*/*",
+                    "Sec-Fetch-Mode" to "cors",
+                    "Sec-Fetch-Dest" to "empty"
+                ),
+                cookies = initialCookies // 중요: 이전 단계의 쿠키를 수동으로 전달
+            )
 
-        // 3. 최종 링크 생성
-        val cookieString = finalCookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
-        
-        callback.invoke(
-            newExtractorLink(
-                source = name,
-                name = "$name (PoorCDN)",
-                url = realM3u8,
-                type = ExtractorLinkType.M3U8
-            ) {
-                this.referer = cleanUrl
-                this.headers = baseHeaders.toMutableMap().apply {
-                    put("Cookie", cookieString)
-                    put("Referer", cleanUrl)
-                    put("Origin", "https://player.bunny-frame.online")
-                }
-                this.quality = Qualities.Unknown.value
+            // 만약 응답이 비어있다면 아주 짧게만 대기 후 재시도 (Thread.sleep 1초 미만)
+            var finalTokenRes = tokenRes
+            if (finalTokenRes.text.isNullOrEmpty()) {
+                Thread.sleep(800) 
+                finalTokenRes = app.get(tokenUrl, referer = cleanUrl, headers = mapOf("User-Agent" to USER_AGENT), cookies = initialCookies)
             }
-        )
+
+            // 4. 모든 쿠키 병합 및 링크 전송
+            val combinedCookies = initialCookies + finalTokenRes.cookies
+            val cookieString = combinedCookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
+            val m3u8Url = "$domain/v/f/$idMatch/index.m3u8"
+
+            callback.invoke(
+                newExtractorLink(
+                    source = name,
+                    name = "$name (PoorCDN)",
+                    url = m3u8Url,
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    this.referer = cleanUrl
+                    this.headers = mapOf(
+                        "User-Agent" to USER_AGENT,
+                        "Cookie" to cookieString,
+                        "Referer" to cleanUrl,
+                        "Origin" to "https://player.bunny-frame.online"
+                    ).toMutableMap()
+                    this.quality = Qualities.Unknown.value
+                }
+            )
+        }
     }
 }
