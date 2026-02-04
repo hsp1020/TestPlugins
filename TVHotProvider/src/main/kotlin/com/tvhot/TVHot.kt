@@ -104,24 +104,17 @@ class TVHot : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        println("DEBUG_MAIN: loadLinks for $data")
         val doc = app.get(data).document
         val iframe = doc.selectFirst("iframe#view_iframe") ?: return false
         
-        // 1순위: data-player1, 2순위: data-player2, 3순위: src 속성 확인
         var playerUrl = iframe.attr("data-player1").takeIf { it.isNotEmpty() }
             ?: iframe.attr("data-player2").takeIf { it.isNotEmpty() }
             ?: iframe.attr("src")
 
-        if (playerUrl.isNullOrEmpty()) {
-            println("DEBUG_MAIN: Player URL not found in iframe")
-            return false
-        }
+        if (playerUrl.isNullOrEmpty()) return false
 
         playerUrl = playerUrl.replace("&amp;", "&")
-        println("DEBUG_MAIN: Final Player URL: $playerUrl")
 
-        // Extractor 실행 (Referer는 에피소드 페이지 주소)
         BunnyPoorCdn().getUrl(fixUrl(playerUrl), data, subtitleCallback, callback)
         return true
     }
