@@ -11,7 +11,6 @@ class TVHot : MainAPI() {
     override var lang = "ko"
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie, TvType.AsianDrama, TvType.Anime, TvType.AnimeMovie)
 
-    // 전역 User-Agent 및 헤더 설정 (IP 밴 방지의 핵심)
     private val USER_AGENT = "Mozilla/5.0 (Linux; Android 13; SM-S911B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36"
     
     private val commonHeaders = mapOf(
@@ -50,7 +49,6 @@ class TVHot : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         if (page > 1) return newHomePageResponse(emptyList())
-        // 모든 요청에 공통 헤더 적용하여 봇 감지 회피
         val doc = app.get(mainUrl, headers = commonHeaders).document
         val home = mutableListOf<HomePageList>()
         doc.select("div.mov_type").forEach { section ->
@@ -100,18 +98,16 @@ class TVHot : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // 영상 페이지 로드 시에도 헤더 유지
         val response = app.get(data, headers = commonHeaders).text
         
-        // BunnyFrame URL 추출
         val playerRegex = Regex("""https://player\.bunny-frame\.online/[^"']+""")
         val playerUrlMatch = playerRegex.find(response)?.value
         
         if (playerUrlMatch == null) return false
 
-        val finalPlayerUrl = fixUrl(playerUrlMatch.replace("&amp;", "&"))
+        // 중요: 추출된 플레이어 URL에서 줄바꿈 및 공백 완전 제거
+        val finalPlayerUrl = fixUrl(playerUrlMatch.replace("&amp;", "&")).replace(Regex("[\\r\\n\\s]"), "").trim()
 
-        // Extractor로 넘길 때 현재 페이지(data)를 Referer로 전달하여 추적 피함
         BunnyPoorCdn().getUrl(finalPlayerUrl, data, subtitleCallback, callback)
         return true
     }
