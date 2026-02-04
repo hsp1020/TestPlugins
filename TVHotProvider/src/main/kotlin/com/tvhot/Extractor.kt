@@ -5,7 +5,8 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import kotlinx.coroutines.delay
 
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "BunnyPoorCdn"
@@ -34,23 +35,23 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // 공백 및 줄바꿈 완전 제거 (로그 에러 0x0d 해결)
+        // 공백 및 줄바꿈 완전 제거
         val cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = referer?.replace(Regex("[\\r\\n\\s]"), "")?.trim()
 
-        // 수정된 serverNum 추출 로직: s= 파라미터 또는 도메인에서 숫자 추출
+        // serverNum 추출 로직: s= 파라미터 또는 도메인에서 숫자 추출
         val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1)
             ?: Regex("""every(\d+)\.poorcdn\.com""").find(cleanUrl)?.groupValues?.get(1)
             ?: "9"  // 기본값
         
         val domain = "https://every$serverNum.poorcdn.com"
         
-        // 1. 플레이어 페이지 접속 및 쿠키 생성
+        // 1. 플레이어 페이지 접속 및 초기 쿠키 생성
         val playerRes = app.get(cleanUrl, referer = cleanReferer, headers = browserHeaders)
         val responseText = playerRes.text
         val cookieMap = playerRes.cookies
 
-        // [로그 기반 수정] ID가 잘리지 않도록 정규식에 a-z 전체 허용
+        // ID 추출 (잘리지 않도록 a-z0-9 전체 허용)
         val idRegex = Regex("""(?i)(?:/v/f/|src=)([a-z0-9]{32,})""")
         val idMatch = idRegex.find(responseText)?.groupValues?.get(1)
             ?: idRegex.find(cleanUrl)?.groupValues?.get(1)
@@ -59,17 +60,42 @@ class BunnyPoorCdn : ExtractorApi() {
             val tokenUrl = "$domain/v/f/$idMatch/c.html"
             val directM3u8 = "$domain/v/f/$idMatch/index.m3u8"
 
-            try {
-                // 2. c.html 접속하여 보안 세션 쿠키 업데이트 (403 해결책)
-                val tokenRes = app.get(tokenUrl, referer = cleanUrl, headers = browserHeaders)
-                val combinedCookies = cookieMap + tokenRes.cookies
-                
-                val realM3u8 = Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']""").find(tokenRes.text)?.groupValues?.get(1)
-                    ?: directM3u8
-                
-                invokeLink(realM3u8, cleanUrl, combinedCookies, callback)
-            } catch (e: Exception) {
-                invokeLink(directM3u8, cleanUrl, cookieMap, callback)
+            // 2. c.html 접속 (재시도 로직 적용)
+            // c.html은 필수이므로 실패 시 절대 Fallback(쿠키 없는 요청)으로 넘어가지 않음
+            var attempt = 0
+            val maxRetries = 3
+            var success = false
+
+            while (attempt < maxRetries && !success) {
+                try {
+                    // 타임아웃 15초 설정 (네트워크 지연 대비)
+                    val tokenRes = app.get(
+                        tokenUrl, 
+                        referer = cleanUrl, 
+                        headers = browserHeaders,
+                        timeout = 15L 
+                    )
+
+                    // 성공 시 쿠키 병합
+                    val combinedCookies = cookieMap + tokenRes.cookies
+                    
+                    // c.html 내부에서 실제 m3u8 주소가 리다이렉트 되거나 박혀있는 경우 추출
+                    val realM3u8 = Regex("""["'](https?://[^"']+\.m3u8[^"']*)["']""").find(tokenRes.text)?.groupValues?.get(1)
+                        ?: directM3u8
+                    
+                    // 최종 링크 실행 (쿠키 포함 필수)
+                    invokeLink(realM3u8, cleanUrl, combinedCookies, callback)
+                    success = true // 루프 종료
+
+                } catch (e: Exception) {
+                    attempt++
+                    if (attempt >= maxRetries) {
+                        // 3회 시도 실패 시 예외 던짐 (쿠키 없이 요청하는 로직 삭제함)
+                        // 이렇게 해야 "링크를 찾을 수 없음" 같은 명확한 에러가 나고 403 Forbidden 루프를 방지함
+                        throw e 
+                    }
+                    delay(1000L) // 1초 대기 후 재시도
+                }
             }
         }
     }
@@ -85,7 +111,7 @@ class BunnyPoorCdn : ExtractorApi() {
                 url = cleanM3u8,
                 type = ExtractorLinkType.M3U8
             ) {
-                // [로그 기반 수정] Referer는 절대 변형하지 않고 원본 그대로 사용
+                // Referer는 절대 변형하지 않고 원본 그대로 사용
                 this.referer = referer
                 this.headers = browserHeaders.toMutableMap().apply {
                     if (cookieString.isNotEmpty()) put("Cookie", cookieString)
