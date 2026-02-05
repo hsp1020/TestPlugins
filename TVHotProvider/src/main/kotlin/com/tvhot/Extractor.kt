@@ -36,8 +36,7 @@ class BunnyPoorCdn : ExtractorApi() {
         url: String,
         referer: String?,
         subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit,
-        thumbnailHint: String? = null
+        callback: (ExtractorLink) -> Unit
     ): Boolean {
         val cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
         val headers = browserHeaders.toMutableMap()
@@ -48,14 +47,11 @@ class BunnyPoorCdn : ExtractorApi() {
             val text = response.text
             val finalUrl = response.url
 
-            val pathRegex = Regex("""/v/[a-z]/[a-zA-Z0-9]+""")
+            val pathRegex = Regex("""/v/[ef]/[a-zA-Z0-9]+""")
             val pathMatch = pathRegex.find(text) ?: pathRegex.find(cleanUrl)
             
-            val thumbPathMatch = if (thumbnailHint != null) pathRegex.find(thumbnailHint) else null
-            val finalPathMatch = pathMatch ?: thumbPathMatch
-            
-            if (finalPathMatch == null) return false
-            val path = finalPathMatch.value
+            if (pathMatch == null) return false
+            val path = pathMatch.value
 
             val domainRegex = Regex("""(https?://[^"' \t\n]+)$path""")
             val domainMatch = domainRegex.find(text)
@@ -66,20 +62,9 @@ class BunnyPoorCdn : ExtractorApi() {
                     val uri = java.net.URI(finalUrl)
                     "${uri.scheme}://${uri.host}"
                 }
-                thumbnailHint != null && thumbnailHint.contains(path) -> {
-                    try {
-                        val uri = java.net.URI(thumbnailHint)
-                        "${uri.scheme}://${uri.host}"
-                    } catch (e: Exception) {
-                        null
-                    }
-                } ?: run {
-                    val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
-                    "https://every${serverNum}.poorcdn.com"
-                }
                 else -> {
                     val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
-                    "https://every${serverNum}.poorcdn.com"
+                    "https://every$serverNum.poorcdn.com"
                 }
             }
 
