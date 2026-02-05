@@ -11,9 +11,8 @@ class BunnyPoorCdn : ExtractorApi() {
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
 
-    private val USER_AGENT =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-
+    private val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+    
     private val browserHeaders = mapOf(
         "User-Agent" to USER_AGENT,
         "Accept" to "*/*",
@@ -38,7 +37,7 @@ class BunnyPoorCdn : ExtractorApi() {
         referer: String?,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
-        thumbnailHint: String? = null, // 썸네일 힌트
+        thumbnailHint: String? = null
     ): Boolean {
         val cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
         val headers = browserHeaders.toMutableMap()
@@ -49,46 +48,42 @@ class BunnyPoorCdn : ExtractorApi() {
             val text = response.text
             val finalUrl = response.url
 
-            // 👇 [변경] e,f 뿐만 아니라 a-z 모든 한 글자 경로 허용
             val pathRegex = Regex("""/v/[a-z]/[a-zA-Z0-9]+""")
-            
             val pathMatch = pathRegex.find(text) ?: pathRegex.find(cleanUrl)
-            val thumbPathMatch = if (thumbnailHint != null) pathRegex.find(thumbnailHint) else null
             
-            // 썸네일 힌트가 유효하면 우선 고려 (혹은 pathMatch 실패 시 사용)
+            val thumbPathMatch = if (thumbnailHint != null) pathRegex.find(thumbnailHint) else null
             val finalPathMatch = pathMatch ?: thumbPathMatch
-
+            
             if (finalPathMatch == null) return false
             val path = finalPathMatch.value
 
             val domainRegex = Regex("""(https?://[^"' \t\n]+)$path""")
             val domainMatch = domainRegex.find(text)
-
+            
             val domain = when {
                 domainMatch != null -> domainMatch.groupValues[1]
                 finalUrl.contains(path) -> {
                     val uri = java.net.URI(finalUrl)
                     "${uri.scheme}://${uri.host}"
                 }
-                // 썸네일 힌트 기반 도메인 추정
-                thumbnailHint != null && thumbnailHint.contains(path) ->
-                    (try {
+                thumbnailHint != null && thumbnailHint.contains(path) -> {
+                    try {
                         val uri = java.net.URI(thumbnailHint)
-                        if (uri.scheme != null && uri.host != null) "${uri.scheme}://${uri.host}" else null
+                        "${uri.scheme}://${uri.host}"
                     } catch (e: Exception) {
                         null
-                    }) ?: run {
-                        // fallback
-                        val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
-                        "https://every${serverNum}.poorcdn.com"
                     }
+                } ?: run {
+                    val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
+                    "https://every${serverNum}.poorcdn.com"
+                }
                 else -> {
                     val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
                     "https://every${serverNum}.poorcdn.com"
                 }
             }
 
-            val cleanPath = path.replace(Regex("//v/"), "/v/")
+            val cleanPath = path.replace("//v/", "/v/")
             val tokenUrl = "$domain$cleanPath/c.html"
             val directM3u8 = "$domain$cleanPath/index.m3u8"
 
@@ -99,31 +94,28 @@ class BunnyPoorCdn : ExtractorApi() {
             try {
                 val tokenRes = app.get(tokenUrl, headers = tokenHeaders)
                 val tokenText = tokenRes.text
-
+                
                 val cookieMap = mutableMapOf<String, String>()
                 cookieMap.putAll(tokenRes.cookies)
-                Regex("""document\.cookie\s*=\s*["']([^=]+)=([^; "']+)""")
-                    .findAll(tokenText)
-                    .forEach {
-                        cookieMap[it.groupValues[1]] = it.groupValues[2]
-                    }
+                Regex("""document\.cookie\s*=\s*["']([^=]+)=([^; "']+)""").findAll(tokenText).forEach {
+                    cookieMap[it.groupValues[1]] = it.groupValues[2]
+                }
 
-                val realM3u8Match =
-                    Regex("""["']([^"']+\.m3u8[^"']*)["']""").find(tokenText)
-                        ?: Regex("""location\.href\s*=\s*["']([^"']+)["']""").find(tokenText)
-
+                val realM3u8Match = Regex("""["']([^"']+\.m3u8[^"']*)["']""").find(tokenText)
+                    ?: Regex("""location\.href\s*=\s*["']([^"']+)["']""").find(tokenText)
+                
                 var realM3u8 = realM3u8Match?.groupValues?.get(1) ?: directM3u8
-
+                
                 if (!realM3u8.startsWith("http")) {
-                    realM3u8 = "$domain$cleanPath/$realM3u8"
-                        .replace("$cleanPath/$cleanPath", cleanPath)
+                    realM3u8 = "$domain$cleanPath/$realM3u8".replace("$cleanPath/$cleanPath", cleanPath)
                 }
 
                 loadM3u8(realM3u8, cleanUrl, tokenHeaders, cookieMap, callback)
-                true
+                return true
+
             } catch (e: Exception) {
                 loadM3u8(directM3u8, cleanUrl, tokenHeaders, emptyMap(), callback)
-                true
+                return true
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -132,10 +124,10 @@ class BunnyPoorCdn : ExtractorApi() {
     }
 
     private suspend fun loadM3u8(
-        url: String,
-        referer: String,
-        baseHeaders: Map<String, String>,
-        cookies: Map<String, String>,
+        url: String, 
+        referer: String, 
+        baseHeaders: Map<String, String>, 
+        cookies: Map<String, String>, 
         callback: (ExtractorLink) -> Unit
     ) {
         val headers = baseHeaders.toMutableMap()
