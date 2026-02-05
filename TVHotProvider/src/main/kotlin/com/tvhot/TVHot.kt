@@ -7,13 +7,21 @@ import org.jsoup.nodes.Element
 class TVHot : MainAPI() {
     // TVMon 주소로 변경
     override var mainUrl = "https://tvmon.site"
-    override var name = "TVHot" // 기존 이름 유지
+    override var name = "TVHot" // 기존 앱 이름 유지
     override val hasMainPage = true
     override var lang = "ko"
-    override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie, TvType.AsianDrama, TvType.Anime, TvType.AnimeMovie, TvType.Variety)
+    
+    // TvType.Variety 제거 -> TvSeries로 통합
+    override val supportedTypes = setOf(
+        TvType.TvSeries, 
+        TvType.Movie, 
+        TvType.AsianDrama, 
+        TvType.Anime, 
+        TvType.AnimeMovie
+    )
 
     private val USER_AGENT = "Mozilla/5.0 (Linux; Android 13; SM-S911B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36"
-
+    
     private val commonHeaders = mapOf(
         "User-Agent" to USER_AGENT,
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
@@ -22,25 +30,27 @@ class TVHot : MainAPI() {
         "Upgrade-Insecure-Requests" to "1"
     )
 
-    // TVMon의 메인/검색 결과 아이템을 CloudStream 객체로 변환
     private fun Element.toSearchResponse(): SearchResponse? {
-        // 메인화면 (.item) 및 검색화면 (li .box) 공통 처리
+        // TVMon HTML 구조: <div class="item"><a href="..." class="img">...</a><a class="title">...</a></div>
+        // 또는 검색 결과: <li><div class="box"><a href="..." class="img">...</a>...</div></li>
         
-        // 1. 링크와 포스터 추출 (a 태그 중 class="img" 인 것)
-        val imgTag = this.selectFirst("a.img") ?: return null
-        val link = fixUrl(imgTag.attr("href"))
-        val poster = fixUrl(imgTag.selectFirst("img")?.attr("src") ?: "")
-        
-        // 2. 제목 추출
+        val aTag = this.selectFirst("a.img") ?: return null
+        val link = fixUrl(aTag.attr("href"))
         val title = this.selectFirst("a.title")?.text()?.trim() ?: return null
         
-        // 3. 타입 결정
-        val type = determineTypeFromUrl(link)
+        // 이미지 태그 처리 (Lazy loading 대응)
+        val imgTag = aTag.selectFirst("img")
+        val poster = imgTag?.attr("data-original")?.ifEmpty { null }
+            ?: imgTag?.attr("data-src")?.ifEmpty { null }
+            ?: imgTag?.attr("src")
+            ?: ""
 
+        val type = determineTypeFromUrl(link)
+        
         return when (type) {
-            TvType.Movie, TvType.AnimeMovie -> newMovieSearchResponse(title, link, type) { this.posterUrl = poster }
-            TvType.Anime -> newAnimeSearchResponse(title, link, TvType.Anime) { this.posterUrl = poster }
-            else -> newAnimeSearchResponse(title, link, TvType.TvSeries) { this.posterUrl = poster } // 드라마/예능은 TvSeries로 처리
+            TvType.Movie, TvType.AnimeMovie -> newMovieSearchResponse(title, link, type) { this.posterUrl = fixUrl(poster) }
+            TvType.Anime -> newAnimeSearchResponse(title, link, TvType.Anime) { this.posterUrl = fixUrl(poster) }
+            else -> newTvSeriesSearchResponse(title, link, TvType.TvSeries) { this.posterUrl = fixUrl(poster) }
         }
     }
 
@@ -49,85 +59,74 @@ class TVHot : MainAPI() {
             url.contains("/movie") || url.contains("/kor_movie") -> TvType.Movie
             url.contains("/ani_movie") -> TvType.AnimeMovie
             url.contains("/animation") -> TvType.Anime
-            url.contains("/ent") || url.contains("/old_ent") -> TvType.Variety
+            // 예능(/ent, /old_ent)은 TvSeries로 처리 (Variety 타입 없음)
+            url.contains("/ent") || url.contains("/old_ent") -> TvType.TvSeries
             else -> TvType.TvSeries
         }
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         if (page > 1) return newHomePageResponse(emptyList())
-        
         val doc = app.get(mainUrl, headers = commonHeaders).document
         val home = mutableListOf<HomePageList>()
-
-        // TVMon 메인 페이지의 섹션 파싱 (<section> 태그 사용)
+        
+        // TVMon 메인 페이지 섹션 파싱
         doc.select("section").forEach { section ->
-            // 섹션 제목 추출 (h2 텍스트)
-            val titleText = section.selectFirst("h2")?.text()?.replace("전체보기", "")?.trim() ?: "추천"
-            
-            // OwlCarousel 아이템 추출
+            val title = section.selectFirst("h2")?.text()?.replace("전체보기", "")?.trim() ?: "추천"
+            // OwlCarousel 아이템들 파싱
             val listItems = section.select(".owl-carousel .item").mapNotNull { it.toSearchResponse() }
-            
-            if (listItems.isNotEmpty()) {
-                home.add(HomePageList(titleText, listItems))
-            }
+            if (listItems.isNotEmpty()) home.add(HomePageList(title, listItems))
         }
         return newHomePageResponse(home, hasNext = false)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
+        // 검색 페이지 파싱
         val searchUrl = "$mainUrl/search?stx=$query"
         val doc = app.get(searchUrl, headers = commonHeaders).document
         
-        // 검색 결과는 ul#mov_con_list 아래 li 태그들임
+        // 검색 결과 리스트 ul#mov_con_list li
         return doc.select("ul#mov_con_list li").mapNotNull { it.toSearchResponse() }
     }
 
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url, headers = commonHeaders).document
-
-        // 제목 파싱
+        
+        // 제목 추출
         var title = doc.selectFirst("h1#bo_v_title")?.text()?.trim() 
             ?: doc.selectFirst(".bo_v_tit")?.text()?.trim() 
             ?: "Unknown"
-        
-        // "다시보기" 등 불필요한 접미사 제거
         title = title.replace(" 다시보기", "").trim()
-
-        // 포스터 파싱 (상세 페이지에 포스터가 없을 경우 OpenGraph 태그 사용)
+        
+        // 포스터 추출
         val poster = doc.selectFirst("meta[property='og:image']")?.attr("content")
-            ?: doc.selectFirst(".img-container img")?.attr("data-src") // 에피소드 썸네일 fallback
+            ?: doc.selectFirst(".bo_v_file img")?.attr("src") 
             ?: ""
+            
+        // 줄거리 추출
+        val plot = doc.selectFirst("meta[name='description']")?.attr("content")
 
-        // 줄거리 파싱
-        val plot = doc.selectFirst(".bo_v_con")?.text()?.trim() ?: doc.selectFirst("meta[name='description']")?.attr("content")
-
-        // 에피소드 파싱
-        // TVMon은 #other_list ul li.searchText 구조를 가짐
+        // 에피소드 리스트 추출
+        // 구조: #other_list ul li.searchText a.ep-link
         val episodes = doc.select("#other_list ul li").mapNotNull { li ->
-            val linkTag = li.selectFirst("a.ep-link") ?: return@mapNotNull null
-            val href = fixUrl(linkTag.attr("href"))
+            val aTag = li.selectFirst("a.ep-link") ?: return@mapNotNull null
+            val href = fixUrl(aTag.attr("href"))
+            val epName = li.selectFirst("a.title")?.text()?.trim() ?: "Episode"
             
-            val epTitle = li.selectFirst("a.title")?.text()?.trim() 
-                ?: li.selectFirst(".ep-item-title")?.text()?.trim()
-                ?: "Episode"
-            
-            // 썸네일
-            val thumb = li.selectFirst("img")?.let { 
-                it.attr("data-src").ifEmpty { it.attr("src") } 
-            }
+            // 에피소드 썸네일
+            val thumbImg = aTag.selectFirst("img")
+            val epThumb = thumbImg?.attr("data-src")?.ifEmpty { thumbImg.attr("src") }
 
             newEpisode(href) {
-                this.name = epTitle
-                this.posterUrl = fixUrl(thumb ?: "")
+                this.name = epName
+                this.posterUrl = fixUrl(epThumb ?: "")
             }
-        }.reversed() // 최신화가 위에 있으므로 역순 정렬 (필요 시 조정)
+        }.reversed()
 
         val type = determineTypeFromUrl(url)
 
         return when (type) {
             TvType.Movie, TvType.AnimeMovie -> {
-                // 영화의 경우 에피소드가 따로 없으면 현재 URL 사용
                 val movieLink = episodes.firstOrNull()?.data ?: url
                 newMovieLoadResponse(title, url, type, movieLink) {
                     this.posterUrl = fixUrl(poster)
@@ -149,12 +148,10 @@ class TVHot : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val response = app.get(data, headers = commonHeaders).document
+        val doc = app.get(data, headers = commonHeaders).document
         
-        // Iframe 찾기 (id="view_iframe")
-        val iframe = response.selectFirst("iframe#view_iframe")
-        
-        // data-player1 또는 src 속성에서 URL 추출
+        // iframe#view_iframe 에서 data-player1 또는 src 추출
+        val iframe = doc.selectFirst("iframe#view_iframe")
         val playerUrl = iframe?.attr("data-player1")?.ifEmpty { null }
             ?: iframe?.attr("data-player2")?.ifEmpty { null }
             ?: iframe?.attr("src")
@@ -162,7 +159,6 @@ class TVHot : MainAPI() {
 
         val finalPlayerUrl = fixUrl(playerUrl).replace("&amp;", "&")
 
-        // BunnyPoorCdn 추출기 호출
         BunnyPoorCdn().getUrl(finalPlayerUrl, "$mainUrl/", subtitleCallback, callback)
         return true
     }
