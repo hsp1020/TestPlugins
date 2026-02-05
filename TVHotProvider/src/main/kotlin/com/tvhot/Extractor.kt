@@ -35,7 +35,6 @@ class BunnyPoorCdn : ExtractorApi() {
         println("DEBUG_EXTRACTOR name=$name $tag $msg")
     }
 
-    // ExtractorApi 기본 메서드
     override suspend fun getUrl(
         url: String,
         referer: String?,
@@ -45,7 +44,6 @@ class BunnyPoorCdn : ExtractorApi() {
         extract(url, referer, subtitleCallback, callback)
     }
 
-    // TVHot.kt 호환용
     suspend fun extract(
         url: String,
         referer: String?,
@@ -121,6 +119,13 @@ class BunnyPoorCdn : ExtractorApi() {
                 jsCookieRegex.findAll(tokenRes.text).forEach { match ->
                     cookieMap[match.groupValues[1]] = match.groupValues[2]
                 }
+                
+                // [핵심 수정] 응답이 이미 M3U8 파일 내용인 경우
+                if (tokenRes.text.trim().startsWith("#EXTM3U")) {
+                    pl("req=$reqId step=direct_m3u8_content", "msg=Content is M3U8, using tokenUrl")
+                    invokeLink(tokenUrl, cleanUrl, cookieMap, callback)
+                    return true
+                }
 
                 val realM3u8 = extractM3u8FromToken(tokenRes.text)
                 
@@ -129,7 +134,6 @@ class BunnyPoorCdn : ExtractorApi() {
                     pl("req=$reqId step=success", "m3u8=$finalM3u8")
                     invokeLink(finalM3u8, cleanUrl, cookieMap, callback)
                 } else {
-                    // DUMP 추가
                     pl("req=$reqId step=token_parse_fail", "DUMP=${tokenRes.text.take(1000)}")
                     invokeLink(directM3u8, cleanUrl, cookieMap, callback)
                 }
@@ -153,7 +157,7 @@ class BunnyPoorCdn : ExtractorApi() {
             Regex("""source\s*:\s*["']([^"']+)["']"""),
             Regex("""file\s*:\s*["']([^"']+)["']"""),
             Regex("""src\s*:\s*["']([^"']+)["']"""),
-            Regex("""["'](https?://[^"'\s]{50,})["']""") // Fallback for raw long URLs
+            Regex("""["'](https?://[^"'\s]{50,})["']""")
         )
         for (pattern in patterns) {
             val match = pattern.find(tokenText)
