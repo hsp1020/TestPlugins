@@ -2,16 +2,16 @@ package com.tvhot
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.M3u8Helper
 import org.jsoup.nodes.Element
 
 class TVHot : MainAPI() {
-    // TVMon 주소로 변경
     override var mainUrl = "https://tvmon.site"
-    override var name = "TVHot" // 기존 앱 이름 유지
+    override var name = "TVHot"
     override val hasMainPage = true
     override var lang = "ko"
     
-    // TvType.Variety 제거 -> TvSeries로 통합
+    // Variety 타입이 없으므로 TvSeries로 통합
     override val supportedTypes = setOf(
         TvType.TvSeries, 
         TvType.Movie, 
@@ -31,14 +31,10 @@ class TVHot : MainAPI() {
     )
 
     private fun Element.toSearchResponse(): SearchResponse? {
-        // TVMon HTML 구조: <div class="item"><a href="..." class="img">...</a><a class="title">...</a></div>
-        // 또는 검색 결과: <li><div class="box"><a href="..." class="img">...</a>...</div></li>
-        
         val aTag = this.selectFirst("a.img") ?: return null
         val link = fixUrl(aTag.attr("href"))
         val title = this.selectFirst("a.title")?.text()?.trim() ?: return null
         
-        // 이미지 태그 처리 (Lazy loading 대응)
         val imgTag = aTag.selectFirst("img")
         val poster = imgTag?.attr("data-original")?.ifEmpty { null }
             ?: imgTag?.attr("data-src")?.ifEmpty { null }
@@ -59,7 +55,6 @@ class TVHot : MainAPI() {
             url.contains("/movie") || url.contains("/kor_movie") -> TvType.Movie
             url.contains("/ani_movie") -> TvType.AnimeMovie
             url.contains("/animation") -> TvType.Anime
-            // 예능(/ent, /old_ent)은 TvSeries로 처리 (Variety 타입 없음)
             url.contains("/ent") || url.contains("/old_ent") -> TvType.TvSeries
             else -> TvType.TvSeries
         }
@@ -70,10 +65,8 @@ class TVHot : MainAPI() {
         val doc = app.get(mainUrl, headers = commonHeaders).document
         val home = mutableListOf<HomePageList>()
         
-        // TVMon 메인 페이지 섹션 파싱
         doc.select("section").forEach { section ->
             val title = section.selectFirst("h2")?.text()?.replace("전체보기", "")?.trim() ?: "추천"
-            // OwlCarousel 아이템들 파싱
             val listItems = section.select(".owl-carousel .item").mapNotNull { it.toSearchResponse() }
             if (listItems.isNotEmpty()) home.add(HomePageList(title, listItems))
         }
@@ -81,39 +74,29 @@ class TVHot : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        // 검색 페이지 파싱
         val searchUrl = "$mainUrl/search?stx=$query"
         val doc = app.get(searchUrl, headers = commonHeaders).document
-        
-        // 검색 결과 리스트 ul#mov_con_list li
         return doc.select("ul#mov_con_list li").mapNotNull { it.toSearchResponse() }
     }
 
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url, headers = commonHeaders).document
         
-        // 제목 추출
         var title = doc.selectFirst("h1#bo_v_title")?.text()?.trim() 
             ?: doc.selectFirst(".bo_v_tit")?.text()?.trim() 
             ?: "Unknown"
         title = title.replace(" 다시보기", "").trim()
         
-        // 포스터 추출
         val poster = doc.selectFirst("meta[property='og:image']")?.attr("content")
             ?: doc.selectFirst(".bo_v_file img")?.attr("src") 
             ?: ""
             
-        // 줄거리 추출
         val plot = doc.selectFirst("meta[name='description']")?.attr("content")
 
-        // 에피소드 리스트 추출
-        // 구조: #other_list ul li.searchText a.ep-link
         val episodes = doc.select("#other_list ul li").mapNotNull { li ->
             val aTag = li.selectFirst("a.ep-link") ?: return@mapNotNull null
             val href = fixUrl(aTag.attr("href"))
             val epName = li.selectFirst("a.title")?.text()?.trim() ?: "Episode"
-            
-            // 에피소드 썸네일
             val thumbImg = aTag.selectFirst("img")
             val epThumb = thumbImg?.attr("data-src")?.ifEmpty { thumbImg.attr("src") }
 
@@ -150,16 +133,46 @@ class TVHot : MainAPI() {
     ): Boolean {
         val doc = app.get(data, headers = commonHeaders).document
         
-        // iframe#view_iframe 에서 data-player1 또는 src 추출
+        // 1. Iframe에서 플레이어 주소 추출
         val iframe = doc.selectFirst("iframe#view_iframe")
         val playerUrl = iframe?.attr("data-player1")?.ifEmpty { null }
             ?: iframe?.attr("data-player2")?.ifEmpty { null }
             ?: iframe?.attr("src")
-            ?: return false
+        
+        // 2. 현재 페이지의 썸네일에서 직접 CDN 정보 추출 (백업용)
+        // 예: https://germany-cdn9398.bunny-cdn-player.online//v/f/ID/thumb.png
+        val thumbUrl = doc.selectFirst("#other_list ul li.current img")?.let { 
+            it.attr("data-src").ifEmpty { it.attr("src") }
+        } ?: doc.selectFirst("meta[property='og:image']")?.attr("content")
 
-        val finalPlayerUrl = fixUrl(playerUrl).replace("&amp;", "&")
+        // 3. 우선 Extractor 시도
+        if (playerUrl != null) {
+            val finalPlayerUrl = fixUrl(playerUrl).replace("&amp;", "&")
+            val extracted = BunnyPoorCdn().getUrl(finalPlayerUrl, data, subtitleCallback, callback)
+            if (extracted) return true
+        }
 
-        BunnyPoorCdn().getUrl(finalPlayerUrl, "$mainUrl/", subtitleCallback, callback)
-        return true
+        // 4. Extractor 실패 시 썸네일 정보를 기반으로 직접 주소 생성 시도
+        if (thumbUrl != null && thumbUrl.contains("/v/")) {
+            try {
+                // thumbUrl 예: https://domain.com//v/f/VIDEO_ID/thumb.png
+                // m3u8 주소 변환: https://domain.com/v/f/VIDEO_ID/index.m3u8
+                val m3u8Url = thumbUrl.substringBeforeLast("/") + "/index.m3u8"
+                // 더블 슬래시(//v/) 보정
+                val fixedM3u8Url = m3u8Url.replace("//v/", "/v/")
+                
+                M3u8Helper.generateM3u8(
+                    "TVHot Backup",
+                    fixedM3u8Url,
+                    data,
+                    headers = commonHeaders
+                ).forEach(callback)
+                return true
+            } catch (e: Exception) {
+                return false
+            }
+        }
+
+        return false
     }
 }
