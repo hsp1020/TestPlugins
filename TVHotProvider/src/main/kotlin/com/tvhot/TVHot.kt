@@ -3,7 +3,6 @@ package com.tvhot
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.M3u8Helper
-import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 class TVHot : MainAPI() {
@@ -68,6 +67,7 @@ class TVHot : MainAPI() {
         doc.select("section").forEach { section ->
             var title = section.selectFirst("h2")?.text()?.replace("전체보기", "")?.trim() ?: "추천"
             
+            // 메인화면 타이틀 변경 요청 반영
             if (title.contains("무료 다시보기 순위를 확인")) {
                 title = "다시보기 순위"
             }
@@ -87,9 +87,10 @@ class TVHot : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url, headers = commonHeaders).document
         
+        // 1. 제목 추출 및 원제 처리
         val h3Element = doc.selectFirst("#bo_v_movinfo h3")
-        var title = h3Element?.ownText()?.trim()
-        val oriTitleFull = h3Element?.selectFirst(".ori_title")?.text()?.trim()
+        var title = h3Element?.ownText()?.trim() // <h3> 바로 밑의 텍스트만 가져옴 (span 제외)
+        val oriTitleFull = h3Element?.selectFirst(".ori_title")?.text()?.trim() // 원제 : ...
 
         if (title.isNullOrEmpty()) {
             title = doc.selectFirst("h1#bo_v_title")?.text()?.trim() 
@@ -97,10 +98,13 @@ class TVHot : MainAPI() {
                 ?: "Unknown"
         }
         
+        // 불필요한 접미사 제거
         title = title!!.replace(Regex("\\s*\\d+\\s*[화회부].*"), "").replace(" 다시보기", "").trim()
 
+        // 원제 처리 로직
         if (!oriTitleFull.isNullOrEmpty()) {
             val pureOriTitle = oriTitleFull.replace("원제 :", "").replace("원제:", "").trim()
+            // 한국어가 포함되어 있는지 확인
             val hasKorean = pureOriTitle.contains(Regex("[가-힣]"))
             
             if (!hasKorean && pureOriTitle.isNotEmpty()) {
@@ -108,42 +112,53 @@ class TVHot : MainAPI() {
             }
         }
 
+        // 2. 포스터 추출
         val poster = doc.selectFirst("#bo_v_poster img")?.attr("src")
             ?: doc.selectFirst("meta[property='og:image']")?.attr("content")
             ?: ""
 
+        // 3. 상세 정보 구성 (국가 / 언어 / 개봉년도 / 장르)
         val infoList = doc.select(".bo_v_info dd").map { it.text().trim() }
         
+        // 장르
         val genreList = doc.select(".ctgs dd a").filter { 
             val txt = it.text()
             !txt.contains("트레일러") && !it.hasClass("btn_watch") 
         }.map { it.text().trim() }
 
+        // 구분자 " / " 로 합치기
         val metaString = (infoList + genreList).joinToString(" / ")
 
+        // 4. 줄거리 본문 추출 및 필터링
         var story = doc.selectFirst(".story")?.text()?.trim() 
             ?: doc.selectFirst(".tmdb-overview")?.text()?.trim()
             ?: doc.selectFirst("meta[name='description']")?.attr("content") 
             ?: ""
 
+        // [요청사항] "다시보기"와 "무료"가 모두 포함되면 SEO 텍스트로 간주하여 "-"로 변경
         if (story.contains("다시보기") && story.contains("무료")) {
             story = "-"
         }
         
+        // 내용이 없는 경우에도 "-"로 표시
         if (story.isEmpty()) {
             story = "-"
         }
 
+        // 최종 설명: 메타정보 + 줄바꿈 + 줄거리
         val finalPlot = "$metaString\n\n$story".trim()
 
+        // 5. 에피소드 리스트 추출
         val episodes = doc.select("#other_list ul li").mapNotNull { li ->
             val aTag = li.selectFirst("a.ep-link") ?: return@mapNotNull null
             val href = fixUrl(aTag.attr("href"))
             
+            // 에피소드 제목
             val epName = li.selectFirst(".clamp")?.text()?.trim() 
                 ?: li.selectFirst("a.title")?.text()?.trim() 
                 ?: "Episode"
             
+            // 썸네일
             val thumbImg = li.selectFirst(".img-container img")
             val epThumb = thumbImg?.attr("data-src")?.ifEmpty { null }
                 ?: thumbImg?.attr("src")?.ifEmpty { null }
@@ -182,84 +197,41 @@ class TVHot : MainAPI() {
     ): Boolean {
         val doc = app.get(data, headers = commonHeaders).document
         
-        val thumbnailHints = extractThumbnailHints(doc)
-
+        // 1. Iframe에서 플레이어 주소 추출
         val iframe = doc.selectFirst("iframe#view_iframe")
         val playerUrl = iframe?.attr("data-player1")?.ifEmpty { null }
             ?: iframe?.attr("data-player2")?.ifEmpty { null }
             ?: iframe?.attr("src")
-
-        var isExtracted = false
-
+        
+        // 2. Extractor (BunnyPoorCdn) 호출
         if (playerUrl != null) {
             val finalPlayerUrl = fixUrl(playerUrl).replace("&amp;", "&")
-            
-            if (thumbnailHints.isNotEmpty()) {
-                for (hint in thumbnailHints) {
-                    val result = BunnyPoorCdn().extract(
-                        finalPlayerUrl,
-                        data,
-                        subtitleCallback,
-                        callback,
-                        hint
-                    )
-                    if (result) {
-                        isExtracted = true
-                        break
-                    }
-                }
-            } else {
-                if (BunnyPoorCdn().extract(finalPlayerUrl, data, subtitleCallback, callback, null)) {
-                    isExtracted = true
-                }
-            }
+            val extracted = BunnyPoorCdn().extract(finalPlayerUrl, data, subtitleCallback, callback)
+            if (extracted) return true
         }
 
-        if (isExtracted) return true
-
-        for (hint in thumbnailHints) {
-            try {
-                val pathRegex = Regex("""/v/[a-z]/[a-zA-Z0-9]+""")
-                val pathMatch = pathRegex.find(hint)
-                
-                if (pathMatch != null) {
-                    val m3u8Url = hint.substringBefore(pathMatch.value) + pathMatch.value + "/index.m3u8"
-                    val fixedM3u8Url = m3u8Url.replace(Regex("//v/"), "/v/")
-
-                    try {
-                        M3u8Helper.generateM3u8(
-                            name,
-                            fixedM3u8Url,
-                            mainUrl,
-                            headers = commonHeaders
-                        ).forEach(callback)
-                        return true
-                    } catch (e: Exception) {
-                        continue
-                    }
+        // 3. Extractor 실패 시 백업: 페이지 내 썸네일에서 경로 유추
+        val videoThumbElements = doc.select("img[src*='/v/'], img[data-src*='/v/']")
+        for (el in videoThumbElements) {
+            val src = el.attr("src").ifEmpty { el.attr("data-src") }
+            if (src.contains("/v/f/") || src.contains("/v/e/")) {
+                try {
+                    val m3u8Url = src.substringBeforeLast("/") + "/index.m3u8"
+                    val fixedM3u8Url = m3u8Url.replace("//v/", "/v/")
+                    
+                    M3u8Helper.generateM3u8(
+                        name,
+                        fixedM3u8Url,
+                        mainUrl,
+                        headers = commonHeaders
+                    ).forEach(callback)
+                    return true
+                } catch (e: Exception) {
+                    continue
                 }
-            } catch (e: Exception) {
-                e.printStackTrace()
             }
         }
 
         return false
-    }
-
-    private fun extractThumbnailHints(doc: Document): List<String> {
-        val hints = mutableListOf<String>()
-        val videoThumbElements = doc.select("img[src*='/v/'], img[data-src*='/v/']")
-        val priorityRegex = Regex("""/v/[a-z]/""")
-
-        for (el in videoThumbElements) {
-            val raw = el.attr("src").ifEmpty { el.attr("data-src") }
-            val fixed = fixUrl(raw)
-            
-            if (priorityRegex.containsMatchIn(fixed)) {
-                hints.add(fixed)
-            }
-        }
-        
-        return hints.distinct()
     }
 }
