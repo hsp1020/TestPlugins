@@ -11,7 +11,7 @@ class TVHot : MainAPI() {
     override val hasMainPage = true
     override var lang = "ko"
     
-    // Variety 타입이 없으므로 TvSeries로 통합
+    // Variety 타입 제거 -> TvSeries로 통합
     override val supportedTypes = setOf(
         TvType.TvSeries, 
         TvType.Movie, 
@@ -140,7 +140,6 @@ class TVHot : MainAPI() {
             ?: iframe?.attr("src")
         
         // 2. 현재 페이지의 썸네일에서 직접 CDN 정보 추출 (백업용)
-        // 예: https://germany-cdn9398.bunny-cdn-player.online//v/f/ID/thumb.png
         val thumbUrl = doc.selectFirst("#other_list ul li.current img")?.let { 
             it.attr("data-src").ifEmpty { it.attr("src") }
         } ?: doc.selectFirst("meta[property='og:image']")?.attr("content")
@@ -148,7 +147,8 @@ class TVHot : MainAPI() {
         // 3. 우선 Extractor 시도
         if (playerUrl != null) {
             val finalPlayerUrl = fixUrl(playerUrl).replace("&amp;", "&")
-            val extracted = BunnyPoorCdn().getUrl(finalPlayerUrl, data, subtitleCallback, callback)
+            // 여기서 getUrl 대신 extract 호출
+            val extracted = BunnyPoorCdn().extract(finalPlayerUrl, data, subtitleCallback, callback)
             if (extracted) return true
         }
 
