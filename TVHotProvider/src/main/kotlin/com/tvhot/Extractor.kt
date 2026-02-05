@@ -6,10 +6,9 @@ import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.M3u8Helper
 import com.lagradost.cloudstream3.network.WebViewResolver
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
 import android.webkit.WebView
-import android.webkit.WebViewClient
+import android.webkit.WebSettings
+import kotlinx.coroutines.delay
 
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "BunnyPoorCdn"
@@ -22,9 +21,7 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // WebView를 사용하여 페이지 로딩 및 m3u8 요청 가로채기
         val cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
-        
         println("DEBUG_EXTRACTOR name=$name step=webview_start url=$cleanUrl")
 
         val headers = mapOf(
@@ -32,30 +29,30 @@ class BunnyPoorCdn : ExtractorApi() {
             "Referer" to (referer ?: "https://tvmon.site/")
         )
 
-        // WebViewResolver 사용 (CloudStream 내장 기능)
-        WebViewResolver(
-            Regex("""\.m3u8""") // .m3u8로 끝나는 요청을 잡음
-        ).resolveUsingWebView(
-            request = WebViewResolver.Url(cleanUrl, headers),
-            // WebView 설정
-            extraWebViewOptions = { webView ->
-                webView.settings.domStorageEnabled = true
-                webView.settings.javaScriptEnabled = true
+        val resolver = WebViewResolver(
+            Regex("""\.m3u8""") // .m3u8 요청을 가로챔
+        )
+
+        // WebViewResolver 호출 (CloudStream 버전에 따라 시그니처가 다를 수 있어 가장 안전한 방법 사용)
+        val requestUrl = WebViewResolver.Url(cleanUrl, headers)
+        
+        resolver.resolveUsingWebView(
+            request = requestUrl,
+            requestCallBack = { request ->
+                // 가로챈 요청(m3u8)이 들어오면 여기로 옴
+                val capturedUrl = request.url.toString()
+                println("DEBUG_EXTRACTOR step=webview_found url=$capturedUrl")
+                
+                // 찾은 URL로 M3U8 생성
+                M3u8Helper.generateM3u8(
+                    name,
+                    capturedUrl,
+                    cleanUrl,
+                    headers = request.headers.toMap()
+                ).forEach(callback)
+                
+                true // true를 리턴하면 WebView 종료
             }
-        ) { capturedUrl ->
-            // 찾은 URL (토큰 포함됨)
-            println("DEBUG_EXTRACTOR step=webview_found url=$capturedUrl")
-            
-            // 토큰이 포함된 m3u8 주소를 바로 사용
-            M3u8Helper.generateM3u8(
-                name,
-                capturedUrl.url,
-                cleanUrl,
-                headers = capturedUrl.headers.toMap()
-            ).forEach(callback)
-            
-            // 하나만 찾으면 종료 (true 반환)
-            true 
-        }
+        )
     }
 }
