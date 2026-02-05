@@ -70,15 +70,13 @@ class BunnyPoorCdn : ExtractorApi() {
                 if (iframeMatch != null) {
                     cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&")
                     pl("req=$reqId step=iframe_found", "newUrl=$cleanUrl")
-                } else {
-                    pl("req=$reqId step=iframe_not_found", "msg=Using original url")
                 }
             } catch (e: Exception) {
                 pl("req=$reqId step=refetch_error", "msg=${e.message}")
             }
         }
 
-        // 2. Visit Logic (Path 찾기)
+        // 2. Visit Logic
         var videoPathMatch = Regex("""(/v/[a-z]/)([a-z0-9]{32,50})""").find(cleanUrl)
         
         if (videoPathMatch == null) {
@@ -112,7 +110,15 @@ class BunnyPoorCdn : ExtractorApi() {
             pl("req=$reqId step=path_final", "tokenUrl=$tokenUrl")
 
             try {
-                val tokenRes = app.get(tokenUrl, referer = cleanUrl, headers = browserHeaders)
+                // 1차 시도: Referer = cleanUrl
+                var tokenRes = app.get(tokenUrl, referer = cleanUrl, headers = browserHeaders)
+                
+                // [신규] 403 Forbidden이면 재시도 (Referer 변경)
+                if (tokenRes.code == 403 || tokenRes.text.contains("Forbidden")) {
+                    pl("req=$reqId step=retry_403", "msg=Got 403, retrying with main referer")
+                    tokenRes = app.get(tokenUrl, referer = "https://tvmon.site/", headers = browserHeaders)
+                }
+
                 val cookieMap = tokenRes.cookies.toMutableMap()
                 
                 val jsCookieRegex = Regex("""document\.cookie\s*=\s*["']([^=]+)=([^; "']+)""")
@@ -120,9 +126,9 @@ class BunnyPoorCdn : ExtractorApi() {
                     cookieMap[match.groupValues[1]] = match.groupValues[2]
                 }
                 
-                // [핵심 수정] 응답이 이미 M3U8 파일 내용인 경우
+                // 응답이 이미 M3U8 파일 내용인 경우
                 if (tokenRes.text.trim().startsWith("#EXTM3U")) {
-                    pl("req=$reqId step=direct_m3u8_content", "msg=Content is M3U8, using tokenUrl")
+                    pl("req=$reqId step=direct_m3u8_content", "msg=Content is M3U8")
                     invokeLink(tokenUrl, cleanUrl, cookieMap, callback)
                     return true
                 }
@@ -134,7 +140,8 @@ class BunnyPoorCdn : ExtractorApi() {
                     pl("req=$reqId step=success", "m3u8=$finalM3u8")
                     invokeLink(finalM3u8, cleanUrl, cookieMap, callback)
                 } else {
-                    pl("req=$reqId step=token_parse_fail", "DUMP=${tokenRes.text.take(1000)}")
+                    pl("req=$reqId step=token_parse_fail", "DUMP=${tokenRes.text.take(500)}")
+                    // Fallback to directM3u8
                     invokeLink(directM3u8, cleanUrl, cookieMap, callback)
                 }
                 return true
