@@ -4,7 +4,7 @@ import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.M3u8Helper
 
 class BunnyPoorCdn : ExtractorApi() {
@@ -92,11 +92,10 @@ class BunnyPoorCdn : ExtractorApi() {
 
             try {
                 // 3. c.html 접속 (Referer를 iframe 주소로 고정)
-                // 중요: 쿠키 처리를 위해 response 전체를 받음
                 val tokenRes = app.get(tokenUrl, referer = cleanUrl, headers = browserHeaders)
                 val cookieMap = tokenRes.cookies.toMutableMap()
                 
-                // [핵심] 자바스크립트 쿠키 파싱 (보내주신 코드의 핵심 로직)
+                // [핵심] 자바스크립트 쿠키 파싱
                 val jsCookieRegex = Regex("""document\.cookie\s*=\s*["']([^=]+)=([^; "']+)""")
                 jsCookieRegex.findAll(tokenRes.text).forEach { match ->
                     cookieMap[match.groupValues[1]] = match.groupValues[2]
@@ -112,14 +111,12 @@ class BunnyPoorCdn : ExtractorApi() {
                     // 쿠키와 함께 m3u8 호출
                     invokeLink(finalM3u8, cleanUrl, cookieMap, callback)
                 } else {
-                    // m3u8을 못 찾았으면 fallback (혹시 403이더라도 시도는 해봄)
                     pl("req=$reqId step=token_parse_fail", "msg=Fallback to direct")
                     invokeLink(directM3u8, cleanUrl, cookieMap, callback)
                 }
 
             } catch (e: Exception) {
                 pl("req=$reqId step=error", "msg=${e.message}")
-                // 에러 나도 direct 주소로 시도 (혹시 토큰 없이 될 수도 있으니)
                 invokeLink(directM3u8, cleanUrl, emptyMap(), callback)
             }
         } else {
@@ -146,20 +143,15 @@ class BunnyPoorCdn : ExtractorApi() {
         // 쿠키 문자열 생성
         val cookieString = cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
 
-        callback.invoke(
-            ExtractorLink(
-                source = name,
-                name = name,
-                url = cleanM3u8,
-                referer = referer,
-                quality = Qualities.Unknown.value,
-                isM3u8 = true,
-                headers = browserHeaders.toMutableMap().apply {
-                    if (cookieString.isNotEmpty()) {
-                        put("Cookie", cookieString)
-                    }
+        M3u8Helper.generateM3u8(
+            name,
+            cleanM3u8,
+            referer,
+            headers = browserHeaders.toMutableMap().apply {
+                if (cookieString.isNotEmpty()) {
+                    put("Cookie", cookieString)
                 }
-            )
-        )
+            }
+        ).forEach(callback)
     }
 }
