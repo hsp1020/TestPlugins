@@ -24,9 +24,15 @@ class BunnyPoorCdn : ExtractorApi() {
         "Sec-Fetch-Site" to "cross-site",
     )
 
-    private fun trunc(s: String?, max: Int = 220): String {
+    private fun trunc(s: String?, max: Int = 240): String {
         if (s == null) return "null"
         val clean = s.replace("\n", "\\n").replace("\r", "\\r")
+        return if (clean.length <= max) clean else clean.substring(0, max) + "...(truncated)"
+    }
+
+    private fun head(s: String?, max: Int = 300): String {
+        if (s == null) return "null"
+        val clean = s.replace("\r", "")
         return if (clean.length <= max) clean else clean.substring(0, max) + "...(truncated)"
     }
 
@@ -140,22 +146,23 @@ class BunnyPoorCdn : ExtractorApi() {
             try {
                 println("DEBUG_EXTRACTOR name=$name req=$reqId step=token_request_begin ok=true GET=${trunc(tokenUrl)}")
                 val tokenRes = app.get(tokenUrl, headers = tokenHeaders)
-                println("DEBUG_EXTRACTOR name=$name req=$reqId step=token_request_ok ok=true tokenFinalUrl=${trunc(tokenRes.url)}")
-
                 val tokenText = tokenRes.text
-                println("DEBUG_EXTRACTOR name=$name req=$reqId step=token_text_ok ok=${tokenText.isNotBlank()} tokenTextLen=${tokenText.length}")
+
+                println("DEBUG_EXTRACTOR name=$name req=$reqId step=token_request_ok ok=true tokenFinalUrl=${trunc(tokenRes.url)}")
+                println("DEBUG_EXTRACTOR name=$name req=$reqId step=token_text_len ok=true tokenTextLen=${tokenText.length}")
+                // 핵심: 16바이트 내용이 뭔지 바로 보자 (너무 길면 앞부분만)
+                println("DEBUG_EXTRACTOR name=$name req=$reqId step=token_text_head ok=true head=${trunc(head(tokenText, 300), 340)}")
+                println("DEBUG_EXTRACTOR name=$name req=$reqId step=token_text_flags ok=true hasM3u8=${tokenText.contains(\".m3u8\")} hasLocation=${tokenText.contains(\"location\")} hasCookieJs=${tokenText.contains(\"document.cookie\")}")
 
                 val cookieMap = mutableMapOf<String, String>()
                 cookieMap.putAll(tokenRes.cookies)
                 println("DEBUG_EXTRACTOR name=$name req=$reqId step=token_cookies_initial ok=true cookieCount=${cookieMap.size}")
 
-                val jsCookieRegex = Regex("""document\.cookie\s*=\s*["']([^=]+)=([^; "']+)""")
-                val jsCookieMatches = jsCookieRegex.findAll(tokenText).toList()
-                println("DEBUG_EXTRACTOR name=$name req=$reqId step=token_cookies_js_found ok=${jsCookieMatches.isNotEmpty()} count=${jsCookieMatches.size}")
-
-                jsCookieMatches.forEach {
-                    cookieMap[it.groupValues[1]] = it.groupValues[2]
-                }
+                Regex("""document\.cookie\s*=\s*["']([^=]+)=([^; "']+)""")
+                    .findAll(tokenText)
+                    .forEach {
+                        cookieMap[it.groupValues[1]] = it.groupValues[2]
+                    }
                 println("DEBUG_EXTRACTOR name=$name req=$reqId step=token_cookies_total ok=true cookieCount=${cookieMap.size}")
 
                 val realM3u8Match =
@@ -163,10 +170,10 @@ class BunnyPoorCdn : ExtractorApi() {
                         ?: Regex("""location\.href\s*=\s*["']([^"']+)["']""").find(tokenText)
 
                 val rawM3u8 = realM3u8Match?.groupValues?.getOrNull(1)
-                println("DEBUG_EXTRACTOR name=$name req=$reqId step=real_m3u8_match ok=${realM3u8Match != null} raw=${trunc(rawM3u8)}")
+                println("DEBUG_EXTRACTOR name=$name req=$reqId step=real_m3u8_match ok=${rawM3u8 != null} raw=${trunc(rawM3u8)}")
 
                 var realM3u8 = rawM3u8 ?: directM3u8
-                println("DEBUG_EXTRACTOR name=$name req=$reqId step=real_m3u8_selected ok=true realM3u8=${trunc(realM3u8)} (fallback=${rawM3u8 == null})")
+                println("DEBUG_EXTRACTOR name=$name req=$reqId step=real_m3u8_selected ok=true realM3u8=${trunc(realM3u8)} fallback=${rawM3u8 == null}")
 
                 if (!realM3u8.startsWith("http")) {
                     val before = realM3u8
@@ -204,24 +211,32 @@ class BunnyPoorCdn : ExtractorApi() {
         val headers = baseHeaders.toMutableMap()
         if (cookies.isNotEmpty()) {
             headers["Cookie"] = cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
-            println("DEBUG_EXTRACTOR name=$name req=$reqId step=m3u8_headers_cookie ok=true cookieCount=${cookies.size}")
-        } else {
-            println("DEBUG_EXTRACTOR name=$name req=$reqId step=m3u8_headers_cookie ok=true cookieCount=0")
+        }
+        println("DEBUG_EXTRACTOR name=$name req=$reqId step=m3u8_headers_ready ok=true cookieCount=${cookies.size}")
+
+        // 핵심: 실제로 index.m3u8에서 뭐가 내려오는지 먼저 덤프
+        try {
+            println("DEBUG_EXTRACTOR name=$name req=$reqId step=m3u8_prefetch_begin ok=true url=${trunc(url)}")
+            val pre = app.get(url, headers = headers)
+            val body = pre.text
+            val firstLine = body.lineSequence().firstOrNull() ?: ""
+            println("DEBUG_EXTRACTOR name=$name req=$reqId step=m3u8_prefetch_ok ok=true finalUrl=${trunc(pre.url)} len=${body.length}")
+            println("DEBUG_EXTRACTOR name=$name req=$reqId step=m3u8_prefetch_flags ok=true hasEXTM3U=${body.contains(\"#EXTM3U\")} firstLine=${trunc(firstLine, 260)}")
+            println("DEBUG_EXTRACTOR name=$name req=$reqId step=m3u8_prefetch_head ok=true head=${trunc(head(body, 300), 340)}")
+        } catch (e: Exception) {
+            println("DEBUG_EXTRACTOR name=$name req=$reqId step=m3u8_prefetch_exception ok=false e=${trunc(e.message)}")
         }
 
         println("DEBUG_EXTRACTOR name=$name req=$reqId step=m3u8_generate_begin ok=true url=${trunc(url)} referer=${trunc(referer)}")
-
         val links = M3u8Helper.generateM3u8(
             name,
             url,
             referer,
             headers = headers
         )
-
         println("DEBUG_EXTRACTOR name=$name req=$reqId step=m3u8_generate_ok ok=true linkCount=${links.size}")
 
         links.forEach(callback)
-
         println("DEBUG_EXTRACTOR name=$name req=$reqId step=m3u8_callback_done ok=true emitted=${links.size}")
     }
 }
