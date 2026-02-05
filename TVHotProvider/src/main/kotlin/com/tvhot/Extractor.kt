@@ -51,28 +51,39 @@ class BunnyPoorCdn : ExtractorApi() {
         val headers = browserHeaders.toMutableMap()
         if (referer != null) headers["Referer"] = referer
 
-        return try {
-            // [추가된 로직] URL이 부실하면(p= 없음) Referer에서 iframe src 다시 긁어오기
-            // 부모(TVHot)가 URL을 잘라서 주는 경우 대비
-            if (!cleanUrl.contains("p=") && !cleanUrl.contains("src=") && referer != null) {
-                pl("req=$reqId step=refetch_iframe", "msg=URL seems incomplete, checking referer")
-                try {
-                    val refRes = app.get(referer, headers = mapOf("User-Agent" to USER_AGENT))
-                    val refText = refRes.text
-                    // iframe src 추출 (player.bunny-frame.online 포함)
-                    val iframeMatch = Regex("""src=["'](https://player\.bunny-frame\.online/[^"']+)["']""").find(refText)
-                    if (iframeMatch != null) {
-                        cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&")
-                        pl("req=$reqId step=iframe_found", "newUrl=$cleanUrl")
-                    } else {
-                         pl("req=$reqId step=iframe_not_found_in_referer", "msg=Using original url")
-                    }
-                } catch (e: Exception) {
-                    pl("req=$reqId step=refetch_error", "msg=${e.message}")
+        // -------------------------------------------------------------------------
+        // 1. [신규] 무조건 Referer 페이지를 긁어서 진짜 iframe URL 찾기
+        // -------------------------------------------------------------------------
+        pl("req=$reqId step=refetch_check", "referer=$referer")
+        
+        if (referer != null) {
+            pl("req=$reqId step=refetch_start", "msg=Fetching referer to find iframe src")
+            try {
+                // Referer 페이지(tvmon.site) 가져오기
+                val refRes = app.get(referer, headers = mapOf("User-Agent" to USER_AGENT))
+                val refText = refRes.text
+                pl("req=$reqId step=refetch_done", "len=${refText.length}")
+                
+                // iframe src 찾기 (player.bunny-frame.online 포함된 것)
+                val iframeMatch = Regex("""src=["'](https://player\.bunny-frame\.online/[^"']+)["']""").find(refText)
+                
+                if (iframeMatch != null) {
+                    val newUrl = iframeMatch.groupValues[1].replace("&amp;", "&")
+                    pl("req=$reqId step=iframe_found", "oldUrl=$cleanUrl newUrl=$newUrl")
+                    cleanUrl = newUrl // URL 교체!
+                } else {
+                    pl("req=$reqId step=iframe_not_found", "msg=Regex failed on referer text")
+                    pl("req=$reqId step=referer_dump", "dump=${refText.take(500)}")
                 }
+            } catch (e: Exception) {
+                pl("req=$reqId step=refetch_error", "msg=${e.message}")
             }
+        } else {
+             pl("req=$reqId step=refetch_skip", "msg=No referer")
+        }
 
-            // 1. 임베드 페이지 가져오기
+        return try {
+            // 2. 임베드 페이지 가져오기 (교체된 cleanUrl 사용)
             pl("req=$reqId step=fetch_page_begin", "ok=true GET=$cleanUrl")
             val response = app.get(cleanUrl, headers = headers)
             val text = response.text
@@ -80,7 +91,7 @@ class BunnyPoorCdn : ExtractorApi() {
             pl("req=$reqId step=page_text_ok", "ok=true textLen=${text.length}")
 
             // -------------------------------------------------------------------------
-            // 2. 🎯 토큰 추출 시도 (Ultra Pattern Mode)
+            // 3. 🎯 토큰 추출 시도 (Ultra Pattern Mode)
             // -------------------------------------------------------------------------
             
             val pathRegex = Regex("""/v/[a-z]/[a-zA-Z0-9]+""")
@@ -127,7 +138,7 @@ class BunnyPoorCdn : ExtractorApi() {
                         .replace("&amp;", "&")
                         .replace(Regex("""expires=[\d.e+E]+""")) { matchResult ->
                             val expiresStr = matchResult.value.substringAfter("=")
-                            val expiresInt = if ('e' in expiresStr.lowercase()) { 
+                            val expiresInt = if ('e' in expiresStr.lowercase()) {
                                 expiresStr.toDoubleOrNull()?.toLong() ?: expiresStr
                             } else {
                                 expiresStr
@@ -140,7 +151,7 @@ class BunnyPoorCdn : ExtractorApi() {
             }
 
             // -------------------------------------------------------------------------
-            // 3. 결과 처리
+            // 4. 결과 처리
             // -------------------------------------------------------------------------
             if (finalM3u8Url != null) {
                 pl("req=$reqId step=m3u8_url_built", "ok=true url=$finalM3u8Url")
@@ -153,7 +164,7 @@ class BunnyPoorCdn : ExtractorApi() {
                 ).forEach(callback)
                 return true
             } else {
-                // ❌ 토큰 못 찾음 -> DUMP 출력
+                // ❌ 토큰 못 찾음
                 pl("req=$reqId step=token_not_found", "DUMP=${text.take(1000)}")
                 
                 if (path.isEmpty()) return false
