@@ -5,8 +5,8 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.M3u8Helper
-import com.lagradost.cloudstream3.network.WebViewResolver // 이거 사용
-import com.lagradost.api.Log
+import com.lagradost.cloudstream3.network.WebViewResolver 
+import android.webkit.CookieManager // 쿠키 매니저 추가
 
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "BunnyPoorCdn"
@@ -39,7 +39,7 @@ class BunnyPoorCdn : ExtractorApi() {
         var cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = referer?.replace(Regex("[\\r\\n\\s]"), "")?.trim() ?: "https://tvmon.site/"
 
-        // 1. Refetch Logic
+        // 1. Refetch
         if (!cleanUrl.contains("v/f/") && !cleanUrl.contains("v/e/")) {
             try {
                 val refRes = app.get(cleanReferer)
@@ -52,7 +52,7 @@ class BunnyPoorCdn : ExtractorApi() {
             } catch (e: Exception) {}
         }
 
-        // 2. Visit Logic
+        // 2. Visit (Path Find)
         var path = ""
         var id = ""
         try {
@@ -60,14 +60,12 @@ class BunnyPoorCdn : ExtractorApi() {
             val text = res.text
             val videoPathMatch = Regex("""(/v/[a-z]/)([a-z0-9]{32,50})""").find(text) 
                 ?: Regex("""(/v/[a-z]/)([a-z0-9]{32,50})""").find(cleanUrl)
-            
             if (videoPathMatch != null) {
                 path = videoPathMatch.groupValues[1]
                 id = videoPathMatch.groupValues[2]
             }
         } catch (e: Exception) {}
 
-        // 3. Token & WebView Resolver
         if (path.isNotEmpty()) {
             val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
             val domain = "https://every$serverNum.poorcdn.com"
@@ -75,50 +73,56 @@ class BunnyPoorCdn : ExtractorApi() {
             
             pl("req=$reqId step=webview_start", "tokenUrl=$tokenUrl")
 
-            // [핵심] WebViewResolver 설정 (MegaPlay 방식 참고)
             val resolver = WebViewResolver(
-                interceptUrl = Regex("""(c\.html|index\.m3u8)"""), // c.html이나 m3u8을 가로챔
+                interceptUrl = Regex("""(c\.html|index\.m3u8)"""),
                 additionalUrls = listOf(Regex("""\.m3u8""")),
-                useOkhttp = false, // WebView 엔진 사용
+                useOkhttp = false,
                 timeout = 15_000L
             )
 
             try {
-                // WebView를 통해 요청
                 val response = app.get(
                     url = tokenUrl, 
-                    headers = mapOf("Referer" to cleanUrl), // Referer는 플레이어 URL
+                    headers = mapOf("Referer" to cleanUrl),
                     interceptor = resolver
                 )
                 
                 pl("req=$reqId step=webview_done", "url=${response.url}")
 
-                // 응답 처리
-                // 1) 바로 m3u8 URL인 경우
+                // WebView 쿠키 가져오기 (ExoPlayer용)
+                val cookie = CookieManager.getInstance().getCookie(response.url) ?: ""
+                val headersWithCookie = mapOf(
+                    "Referer" to cleanUrl,
+                    "Cookie" to cookie,
+                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+                )
+
+                // 1. M3U8 URL 직접 포착
                 if (response.url.contains(".m3u8")) {
-                     pl("req=$reqId step=success", "Captured M3U8 URL: ${response.url}")
-                     M3u8Helper.generateM3u8(name, response.url, cleanUrl).forEach(callback)
+                     pl("req=$reqId step=success", "Captured URL")
+                     M3u8Helper.generateM3u8(name, response.url, cleanUrl, headers = headersWithCookie).forEach(callback)
                      return true
                 }
                 
-                // 2) 내용에 m3u8이 있는 경우 (c.html 내용)
-                val text = response.text
-                if (text.contains("#EXTM3U")) {
+                // 2. 내용이 M3U8
+                if (response.text.contains("#EXTM3U")) {
                      pl("req=$reqId step=success", "Content is M3U8")
-                     M3u8Helper.generateM3u8(name, tokenUrl, cleanUrl).forEach(callback)
+                     // c.html 대신 index.m3u8 사용 (확장자 보정)
+                     val directUrl = tokenUrl.replace("c.html", "index.m3u8")
+                     M3u8Helper.generateM3u8(name, directUrl, cleanUrl, headers = headersWithCookie).forEach(callback)
                      return true
                 }
 
-                // 3) 토큰 추출
-                val realM3u8 = extractM3u8FromToken(text)
+                // 3. 내용에서 추출
+                val realM3u8 = extractM3u8FromToken(response.text)
                 if (realM3u8 != null) {
                      val finalM3u8 = if (realM3u8.startsWith("http")) realM3u8 else "$domain$realM3u8"
                      pl("req=$reqId step=success", "Extracted: $finalM3u8")
-                     M3u8Helper.generateM3u8(name, finalM3u8, cleanUrl).forEach(callback)
+                     M3u8Helper.generateM3u8(name, finalM3u8, cleanUrl, headers = headersWithCookie).forEach(callback)
                      return true
                 }
 
-                pl("req=$reqId step=webview_fail", "len=${text.length}")
+                pl("req=$reqId step=webview_fail", "len=${response.text.length}")
 
             } catch (e: Exception) {
                 pl("req=$reqId step=webview_error", "msg=${e.message}")
