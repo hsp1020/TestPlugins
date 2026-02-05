@@ -32,6 +32,7 @@ class TVHot : MainAPI() {
     private fun Element.toSearchResponse(): SearchResponse? {
         val aTag = this.selectFirst("a.img") ?: return null
         val link = fixUrl(aTag.attr("href"))
+        // 메인/검색 화면에서는 a.title 사용
         val title = this.selectFirst("a.title")?.text()?.trim() ?: return null
         
         val imgTag = aTag.selectFirst("img")
@@ -65,12 +66,13 @@ class TVHot : MainAPI() {
         val home = mutableListOf<HomePageList>()
         
         doc.select("section").forEach { section ->
-            // 메인화면에서 "무료 다시보기 순위를 확인하세요"를 "다시보기 순위"로 변경
-            var title = section.selectFirst("h2")?.text()?.trim() ?: "추천"
-            title = title.replace("무료 다시보기 순위를 확인하세요", "다시보기 순위")
-                .replace("전체보기", "")
-                .trim()
+            var title = section.selectFirst("h2")?.text()?.replace("전체보기", "")?.trim() ?: "추천"
             
+            // 요청사항: 메인화면 타이틀 변경
+            if (title.contains("무료 다시보기 순위를 확인")) {
+                title = "다시보기 순위"
+            }
+
             val listItems = section.select(".owl-carousel .item").mapNotNull { it.toSearchResponse() }
             if (listItems.isNotEmpty()) home.add(HomePageList(title, listItems))
         }
@@ -86,65 +88,62 @@ class TVHot : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url, headers = commonHeaders).document
         
-        // 1. 제목: #bo_v_movinfo h3에서 가져오기
-        var title = doc.selectFirst("#bo_v_movinfo h3")?.text()?.trim()
-            ?: "Unknown"
+        // 1. 제목 추출 (요청사항: 상세페이지 제목만 깔끔하게)
+        // h3 태그 바로 아래의 텍스트만 가져옴 (span.ori_title 제외)
+        var title = doc.selectFirst("#bo_v_movinfo h3")?.ownText()?.trim()
         
-        // 2. 포스터: #bo_v_poster img에서 가져오기
-        val poster = doc.selectFirst("#bo_v_poster img")?.attr("src")?.let { fixUrl(it) }
-            ?: doc.selectFirst("meta[property='og:image']")?.attr("content")?.let { fixUrl(it) }
+        // 백업: 만약 위 구조가 아니면 기존 방식 시도
+        if (title.isNullOrEmpty()) {
+            title = doc.selectFirst("h1#bo_v_title")?.text()?.trim() 
+                ?: doc.selectFirst(".bo_v_tit")?.text()?.trim() 
+                ?: "Unknown"
+            // "37화", "다시보기" 등 제거
+            title = title!!.replace(Regex("\\s*\\d+\\s*[화회부].*"), "").replace(" 다시보기", "").trim()
+        }
+
+        // 2. 포스터 추출 (요청사항: 상세페이지 포스터 로드)
+        val poster = doc.selectFirst("#bo_v_poster img")?.attr("src")
+            ?: doc.selectFirst("meta[property='og:image']")?.attr("content")
             ?: ""
 
-        // 3. 설명: #bo_v_movinfo .story에서 가져오기 (트레일러 보기 제외)
-        val plot = doc.selectFirst("#bo_v_movinfo .story")?.text()?.trim()
-            ?: doc.selectFirst("meta[name='description']")?.attr("content")
-
-        // 4. 상세 정보 (국가, 언어, 개봉년도, 장르)
-        val details = mutableListOf<String>()
-        val infoElements = doc.select("#bo_v_movinfo .bo_v_info dd")
-        infoElements.forEach { dd ->
-            details.add(dd.text().trim())
-        }
+        // 3. 줄거리 및 정보 추출 (요청사항: 정보 한줄 + 설명)
+        // 정보: 국가, 언어, 개봉년도
+        val infoText = doc.select(".bo_v_info dd").joinToString(" ") { it.text() }
         
-        // 장르 정보 추가
-        val genres = doc.select("#bo_v_movinfo .ctgs dd").mapNotNull { it.text().trim() }
-            .filter { it != "트레일러 보기" }
+        // 장르 (트레일러 보기 제외)
+        val genreText = doc.select(".ctgs dd a").filter { 
+            !it.text().contains("트레일러") && !it.hasClass("btn_watch") 
+        }.joinToString(", ") { it.text() }
         
-        val fullPlot = buildString {
-            // 기본 정보 추가
-            if (details.isNotEmpty()) {
-                append(details.joinToString("\n"))
-                appendLine()
-            }
-            // 장르 추가
-            if (genres.isNotEmpty()) {
-                appendLine(genres.joinToString(", "))
-            }
-            // 줄거리 추가
-            plot?.let {
-                if (isNotEmpty()) appendLine()
-                append(it)
-            }
-        }.trim()
+        // 줄거리 본문
+        val story = doc.selectFirst(".story")?.text()?.trim() 
+            ?: doc.selectFirst(".tmdb-overview")?.text()?.trim()
+            ?: doc.selectFirst("meta[name='description']")?.attr("content") 
+            ?: ""
 
-        // 5. 에피소드 목록 - thumb.png 썸네일에서 가져오기
+        val finalPlot = "$infoText\n$genreText\n\n$story".trim()
+
+        // 4. 에피소드 리스트 추출 (요청사항: 썸네일 긁어오기)
         val episodes = doc.select("#other_list ul li").mapNotNull { li ->
             val aTag = li.selectFirst("a.ep-link") ?: return@mapNotNull null
             val href = fixUrl(aTag.attr("href"))
             
-            // 에피소드 제목
-            val epName = li.selectFirst("a.title")?.text()?.trim() ?: "Episode"
+            // 에피소드 제목 (clamp div 안의 텍스트)
+            val epName = li.selectFirst(".clamp")?.text()?.trim() 
+                ?: li.selectFirst("a.title")?.text()?.trim() 
+                ?: "Episode"
             
-            // thumb.png 썸네일 가져오기
-            val thumbImg = li.selectFirst(".img-container img.lazy")
-            val epThumb = thumbImg?.attr("data-src")?.ifEmpty { thumbImg.attr("src") }
-                ?: thumbImg?.attr("data-original")
+            // 썸네일 (요청사항: thumb.png 링크)
+            val thumbImg = li.selectFirst(".img-container img")
+            val epThumb = thumbImg?.attr("data-src")?.ifEmpty { null }
+                ?: thumbImg?.attr("src")?.ifEmpty { null }
+                ?: li.selectFirst("img")?.attr("src")
 
             newEpisode(href) {
                 this.name = epName
                 this.posterUrl = fixUrl(epThumb ?: "")
             }
-        }.reversed()
+        }.reversed() // 최신화가 위에 있으므로 역순 정렬 (1화부터 정렬)
 
         val type = determineTypeFromUrl(url)
 
@@ -152,17 +151,14 @@ class TVHot : MainAPI() {
             TvType.Movie, TvType.AnimeMovie -> {
                 val movieLink = episodes.firstOrNull()?.data ?: url
                 newMovieLoadResponse(title, url, type, movieLink) {
-                    this.posterUrl = poster
-                    this.plot = fullPlot
-                    this.year = details.find { it.contains("개봉년도") }?.substringAfter(":")?.trim()?.substringBefore("-")?.toIntOrNull()
+                    this.posterUrl = fixUrl(poster)
+                    this.plot = finalPlot
                 }
             }
             else -> {
                 newTvSeriesLoadResponse(title, url, type, episodes) {
-                    this.posterUrl = poster
-                    this.plot = fullPlot
-                    this.year = details.find { it.contains("개봉년도") }?.substringAfter(":")?.trim()?.substringBefore("-")?.toIntOrNull()
-                    this.tags = genres
+                    this.posterUrl = fixUrl(poster)
+                    this.plot = finalPlot
                 }
             }
         }
@@ -176,35 +172,45 @@ class TVHot : MainAPI() {
     ): Boolean {
         val doc = app.get(data, headers = commonHeaders).document
         
-        // 1. Iframe에서 플레이어 주소 추출
+        // [전략 1] Iframe URL (data-player1) 추출 후 Extractor 실행
+        // TVMon은 data-player1에 실제 플레이어 주소가 있음
         val iframe = doc.selectFirst("iframe#view_iframe")
         val playerUrl = iframe?.attr("data-player1")?.ifEmpty { null }
             ?: iframe?.attr("data-player2")?.ifEmpty { null }
             ?: iframe?.attr("src")
         
-        // 2. Extractor (BunnyPoorCdn) 호출
         if (playerUrl != null) {
             val finalPlayerUrl = fixUrl(playerUrl).replace("&amp;", "&")
+            // Extractor 호출 (성공 시 true 반환)
             val extracted = BunnyPoorCdn().extract(finalPlayerUrl, data, subtitleCallback, callback)
             if (extracted) return true
         }
 
-        // 3. Extractor 실패 시 백업: thumb.png에서 m3u8 경로 추출
-        val videoThumbElements = doc.select("img[src*='thumb.png'], img[data-src*='thumb.png']")
+        // [전략 2] Extractor 실패 시 백업: 페이지 내 썸네일 이미지에서 m3u8 경로 직접 유추
+        // 소스코드: <img src=".../v/f/ID/thumb.png"> -> .../v/f/ID/index.m3u8 변환
+        val videoThumbElements = doc.select("img[src*='/v/'], img[data-src*='/v/']")
         for (el in videoThumbElements) {
             val src = el.attr("src").ifEmpty { el.attr("data-src") }
-            if (src.contains("/v/") && src.contains("thumb.png")) {
-                // thumb.png를 index.m3u8로 변환
-                val m3u8Url = src.replace("/thumb.png", "/index.m3u8")
-                
+            if (src.contains("/v/f/") || src.contains("/v/e/")) {
                 try {
+                    // 예: https://img.domain.com//v/f/VIDEO_ID/thumb.png
+                    // 목표: https://img.domain.com/v/f/VIDEO_ID/index.m3u8
+                    
+                    // 마지막 '/' 이전까지만 자르고 index.m3u8 붙이기
+                    val basePath = src.substringBeforeLast("/")
+                    val m3u8Url = "$basePath/index.m3u8"
+                    
+                    // 더블 슬래시 보정 (//v/ -> /v/)
+                    val fixedM3u8Url = m3u8Url.replace("//v/", "/v/")
+                    
                     M3u8Helper.generateM3u8(
                         name,
-                        m3u8Url,
-                        mainUrl,
+                        fixedM3u8Url,
+                        mainUrl, // referer
                         headers = commonHeaders
                     ).forEach(callback)
-                    return true
+                    
+                    return true // 하나라도 찾으면 성공 처리
                 } catch (e: Exception) {
                     continue
                 }
