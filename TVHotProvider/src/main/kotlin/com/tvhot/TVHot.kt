@@ -101,7 +101,6 @@ class TVHot : MainAPI() {
         if (!oriTitleFull.isNullOrEmpty()) {
             val pureOriTitle = oriTitleFull.replace("원제 :", "").replace("원제:", "").trim()
             val hasKorean = pureOriTitle.contains(Regex("[가-힣]"))
-
             if (!hasKorean && pureOriTitle.isNotEmpty()) {
                 title = "$title (원제 : $pureOriTitle)"
             }
@@ -124,12 +123,8 @@ class TVHot : MainAPI() {
             ?: doc.selectFirst("meta[name='description']")?.attr("content")
             ?: ""
 
-        if (story.contains("다시보기") && story.contains("무료")) {
-            story = "-"
-        }
-        if (story.isEmpty()) {
-            story = "-"
-        }
+        if (story.contains("다시보기") && story.contains("무료")) story = "-"
+        if (story.isEmpty()) story = "-"
 
         val finalPlot = "$metaString\n\n$story".trim()
 
@@ -179,62 +174,46 @@ class TVHot : MainAPI() {
     ): Boolean {
         val doc = app.get(data, headers = commonHeaders).document
 
-        val thumbnailHints = extractThumbnailHints(doc)
+        // 1) 썸네일에서 힌트 추출 (우선순위: /v/[a-z]/ 패턴)
+        val thumbnailHint = extractThumbnailHint(doc)
 
+        // 2) Iframe에서 플레이어 주소 추출
         val iframe = doc.selectFirst("iframe#view_iframe")
         val playerUrl = iframe?.attr("data-player1")?.ifEmpty { null }
             ?: iframe?.attr("data-player2")?.ifEmpty { null }
             ?: iframe?.attr("src")
 
-        var isExtracted = false
-
+        // 3) Extractor 호출 + 썸네일 힌트 전달
         if (playerUrl != null) {
             val finalPlayerUrl = fixUrl(playerUrl).replace("&amp;", "&")
-            
-            if (thumbnailHints.isNotEmpty()) {
-                for (hint in thumbnailHints) {
-                    val result = BunnyPoorCdn().extract(
-                        finalPlayerUrl,
-                        data,
-                        subtitleCallback,
-                        callback,
-                        hint
-                    )
-                    if (result) {
-                        isExtracted = true
-                        break 
-                    }
-                }
-            } else {
-                if (BunnyPoorCdn().extract(finalPlayerUrl, data, subtitleCallback, callback, null)) {
-                    isExtracted = true
-                }
-            }
+            val extracted = BunnyPoorCdn().extract(
+                finalPlayerUrl,
+                data,
+                subtitleCallback,
+                callback,
+                thumbnailHint
+            )
+            if (extracted) return true
         }
 
-        if (isExtracted) return true
-
-        for (hint in thumbnailHints) {
+        // 4) Extractor 실패 시 백업: 썸네일에서 직접 index.m3u8 유추
+        if (thumbnailHint != null) {
             try {
+                // [변경] a-z 허용
                 val pathRegex = Regex("""/v/[a-z]/[a-zA-Z0-9]+""")
-                val pathMatch = pathRegex.find(hint)
+                val pathMatch = pathRegex.find(thumbnailHint)
+
                 if (pathMatch != null) {
-                    val m3u8Url = hint.substringBefore(pathMatch.value) + pathMatch.value + "/index.m3u8"
+                    val m3u8Url = thumbnailHint.substringBefore(pathMatch.value) + pathMatch.value + "/index.m3u8"
                     val fixedM3u8Url = m3u8Url.replace(Regex("//v/"), "/v/")
 
-                    var success = false
-                    try {
-                        M3u8Helper.generateM3u8(
-                            name,
-                            fixedM3u8Url,
-                            mainUrl,
-                            headers = commonHeaders
-                        ).forEach(callback)
-                        success = true
-                    } catch (e: Exception) {
-                    }
-                    
-                    if (success) return true
+                    M3u8Helper.generateM3u8(
+                        name,
+                        fixedM3u8Url,
+                        mainUrl,
+                        headers = commonHeaders
+                    ).forEach(callback)
+                    return true
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -244,19 +223,23 @@ class TVHot : MainAPI() {
         return false
     }
 
-    private fun extractThumbnailHints(doc: Document): List<String> {
-        val hints = mutableListOf<String>()
+    private fun extractThumbnailHint(doc: Document): String? {
+        // /v/ 포함 이미지 수집
         val videoThumbElements = doc.select("img[src*='/v/'], img[data-src*='/v/']")
+
+        // [변경] /v/한글자/ 패턴 우선 매칭
         val priorityRegex = Regex("""/v/[a-z]/""")
 
         for (el in videoThumbElements) {
             val raw = el.attr("src").ifEmpty { el.attr("data-src") }
-            val fixed = fixUrl(raw) ?: continue
+            val fixed = fixUrl(raw)
             
+            // 해당 패턴을 가진 이미지가 발견되면 즉시 반환
             if (priorityRegex.containsMatchIn(fixed)) {
-                hints.add(fixed)
+                return fixed
             }
         }
-        return hints.distinct()
+        
+        return null
     }
 }
