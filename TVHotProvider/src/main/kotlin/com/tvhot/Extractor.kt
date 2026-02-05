@@ -64,16 +64,21 @@ class BunnyPoorCdn : ExtractorApi() {
             pl("req=$reqId step=page_text_ok", "ok=true textLen=${text.length}")
 
             // 2. 🎯 poorcdn.com c.html URL (토큰 포함) 직접 추출
+            // 패턴: https://every5.poorcdn.com/.../c.html?token=...
             val fullUrlPattern = Regex("""(https://every\d+\.poorcdn\.com/v/[a-z]/[a-zA-Z0-9]+/c\.html\?[^"'\s<>]+)""")
             val fullUrlMatch = fullUrlPattern.find(text)
             
             if (fullUrlMatch != null) {
                 // ✅ 완전한 URL (토큰 포함) 발견!
-                val tokenUrl = fullUrlMatch.groupValues[1]
-                    .replace("&amp;", "&") // HTML 엔티티 디코딩
+                val rawTokenUrl = fullUrlMatch.groupValues[1]
+                
+                // HTML 엔티티 디코딩 및 expires 지수표기법 변환
+                val tokenUrl = rawTokenUrl
+                    .replace("&amp;", "&") 
                     .replace(Regex("""expires=[\d.e+E]+""")) { matchResult ->
                         // 과학적 표기법(1.77e+09)을 정수로 변환
                         val expiresStr = matchResult.value.substringAfter("=")
+                        // [수정완료] toLowerCase() -> lowercase() 사용
                         val expiresInt = if ('e' in expiresStr.lowercase()) {
                             expiresStr.toDoubleOrNull()?.toLong() ?: expiresStr
                         } else {
@@ -105,7 +110,7 @@ class BunnyPoorCdn : ExtractorApi() {
                 return true
                 
             } else {
-                // ❌ 토큰이 포함된 전체 URL을 찾지 못함 → 기존 방식으로 fallback
+                // ❌ 토큰이 포함된 전체 URL을 찾지 못함 → 기존 방식으로 fallback (s=4 등에서 실패할 수 있음)
                 pl("req=$reqId step=token_url_not_found", "ok=false")
                 
                 // 기존 경로 추출 로직
@@ -120,6 +125,7 @@ class BunnyPoorCdn : ExtractorApi() {
                 }
                 
                 val path = pathMatch.value
+                // s 파라미터가 없으면 9번 서버로 시도
                 val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
                 val domain = "https://every${serverNum}.poorcdn.com"
                 val directM3u8 = "$domain$path/index.m3u8"
