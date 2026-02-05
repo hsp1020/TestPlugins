@@ -48,39 +48,35 @@ class BunnyPoorCdn : ExtractorApi() {
         pl("req=$reqId step=start", "ok=true url=$url referer=$referer thumbnailHint=$thumbnailHint")
 
         val cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
-        pl("req=$reqId step=clean_url", "ok=true cleanUrl=$cleanUrl")
-
         val headers = browserHeaders.toMutableMap()
         if (referer != null) headers["Referer"] = referer
-        pl("req=$reqId step=headers_ready", "ok=true hasReferer=${referer != null}")
 
         return try {
-            // 1. 임베드 페이지(player.bunny-frame.online) 가져오기
+            // 1. 임베드 페이지 가져오기
             pl("req=$reqId step=fetch_page_begin", "ok=true GET=$cleanUrl")
             val response = app.get(cleanUrl, headers = headers)
             val text = response.text
             val finalUrl = response.url
-            pl("req=$reqId step=fetch_page_ok", "ok=true finalUrl=$finalUrl")
             pl("req=$reqId step=page_text_ok", "ok=true textLen=${text.length}")
 
             // -------------------------------------------------------------------------
-            // 2. 🎯 토큰 추출 시도 (다양한 패턴 적용)
+            // 2. 🎯 토큰 추출 시도 (Ultra Pattern Mode)
             // -------------------------------------------------------------------------
             
-            // 공통 변수 (경로 및 서버번호 추출)
+            // 공통 정보 추출
             val pathRegex = Regex("""/v/[a-z]/[a-zA-Z0-9]+""")
             val pathMatch = pathRegex.find(text) 
                 ?: pathRegex.find(cleanUrl) 
                 ?: if (thumbnailHint != null) pathRegex.find(thumbnailHint) else null
-                
+            
             val path = pathMatch?.value ?: ""
+            // s 파라미터가 없으면 9번 서버 기본값
             val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
             val domain = "https://every${serverNum}.poorcdn.com"
 
-            // 결과 URL (찾으면 여기에 저장)
             var finalM3u8Url: String? = null
 
-            // [패턴 1] 전체 URL 매칭 (c.html?token=...)
+            // [패턴 1] URL 통째로 찾기 (가장 정확)
             val fullUrlPattern = Regex("""(https://every\d+\.poorcdn\.com/v/[a-z]/[a-zA-Z0-9]+/c\.html\?[^"'\s<>]+)""")
             val fullUrlMatch = fullUrlPattern.find(text)
 
@@ -97,29 +93,33 @@ class BunnyPoorCdn : ExtractorApi() {
                         }
                         "expires=$expiresInt"
                     }
-                pl("req=$reqId step=token_url_found_p1", "ok=true url=$tokenUrl")
+                pl("req=$reqId step=token_found_ultra_p1", "url=$tokenUrl")
                 finalM3u8Url = tokenUrl.replace("/c.html", "/index.m3u8")
             }
 
-            // [패턴 2] 쿼리 스트링 매칭 (token=xxx&expires=yyy) - URL 없이 파라미터만 있는 경우
+            // [패턴 2] "token" 키워드 뒤의 긴 문자열 무조건 잡기 (범용성 ↑)
+            if (finalM3u8Url == null) {
+                // token 혹은 _token 뒤에 오는 =, :, 공백 등을 건너뛰고 20자 이상의 문자열 추출
+                val roughTokenMatch = Regex("""(?:token|_token)["']?\s*[:=]\s*["']?([a-zA-Z0-9_\-=]{20,})["']?""").find(text)
+                // expires 혹은 _expires 뒤에 오는 숫자 추출
+                val roughExpiresMatch = Regex("""(?:expires|_expires)["']?\s*[:=]\s*["']?(\d{8,})["']?""").find(text)
+
+                if (roughTokenMatch != null && roughExpiresMatch != null && path.isNotEmpty()) {
+                    val tokenVal = roughTokenMatch.groupValues[1]
+                    val expiresVal = roughExpiresMatch.groupValues[2]
+                    pl("req=$reqId step=token_found_ultra_p2", "token=$tokenVal expires=$expiresVal")
+                    finalM3u8Url = "$domain$path/index.m3u8?token=$tokenVal&expires=$expiresVal"
+                }
+            }
+
+            // [패턴 3] 쿼리 스트링 파싱 (token=...&expires=...)
             if (finalM3u8Url == null) {
                 val queryParamsMatch = Regex("""token=([^&"']+)&expires=(\d+)""").find(text)
                 if (queryParamsMatch != null && path.isNotEmpty()) {
                     val token = queryParamsMatch.groupValues[1]
                     val expires = queryParamsMatch.groupValues[2]
-                    pl("req=$reqId step=token_url_found_p2", "token=$token expires=$expires")
+                    pl("req=$reqId step=token_found_ultra_p3", "token=$token expires=$expires")
                     finalM3u8Url = "$domain$path/index.m3u8?token=$token&expires=$expires"
-                }
-            }
-
-            // [패턴 3] 개별 변수 매칭 (var token = "xxx";)
-            if (finalM3u8Url == null) {
-                val tokenVal = Regex("""["']?token["']?\s*[:=]\s*["']([^"']+)["']""").find(text)?.groupValues?.get(1)
-                val expiresVal = Regex("""["']?expires["']?\s*[:=]\s*["']?(\d+)["']?""").find(text)?.groupValues?.get(1)
-                
-                if (tokenVal != null && expiresVal != null && path.isNotEmpty()) {
-                    pl("req=$reqId step=token_url_found_p3", "token=$tokenVal expires=$expiresVal")
-                    finalM3u8Url = "$domain$path/index.m3u8?token=$tokenVal&expires=$expiresVal"
                 }
             }
 
@@ -127,7 +127,6 @@ class BunnyPoorCdn : ExtractorApi() {
             // 3. 결과 처리
             // -------------------------------------------------------------------------
             if (finalM3u8Url != null) {
-                // ✅ 토큰 찾음 -> 바로 m3u8 생성
                 pl("req=$reqId step=m3u8_url_built", "ok=true url=$finalM3u8Url")
                 
                 val m3u8Headers = browserHeaders.toMutableMap().apply { put("Referer", cleanUrl) }
@@ -140,10 +139,9 @@ class BunnyPoorCdn : ExtractorApi() {
                 
                 pl("req=$reqId step=success", "ok=true method=token")
                 return true
-
             } else {
-                // ❌ 토큰 못 찾음 -> Fallback (기존 방식, 403 가능성 높음)
-                pl("req=$reqId step=token_url_not_found", "ok=false")
+                // [최후의 수단] 페이지 덤프 (500자) - 패턴 못 찾았을 때 분석용
+                pl("req=$reqId step=token_url_not_found", "ok=false DUMP=${text.take(500)}")
                 
                 if (path.isEmpty()) {
                     pl("req=$reqId step=fail", "ok=false reason=no_path")
