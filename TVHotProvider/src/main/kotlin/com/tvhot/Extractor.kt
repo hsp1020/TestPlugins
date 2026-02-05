@@ -13,8 +13,18 @@ class BunnyPoorCdn : ExtractorApi() {
 
     private val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
     
-    // Boolean 반환형으로 변경하여 성공 여부 전달
-    suspend fun getUrl(
+    // ExtractorApi의 기본 메서드 오버라이드 (Unit 반환)
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        extract(url, referer, subtitleCallback, callback)
+    }
+
+    // 실제 로직을 수행하고 성공 여부를 반환하는 함수 (TVHot.kt에서 직접 호출)
+    suspend fun extract(
         url: String,
         referer: String?,
         subtitleCallback: (SubtitleFile) -> Unit,
@@ -45,14 +55,13 @@ class BunnyPoorCdn : ExtractorApi() {
             }
 
             // 2. 비디오 경로(/v/f/ID)를 찾아 도메인과 결합
-            // 예: /v/f/71411cac... 
             val pathMatch = Regex("""/v/[ef]/[a-zA-Z0-9]+""").find(text) ?: Regex("""/v/[ef]/[a-zA-Z0-9]+""").find(cleanUrl)
             
             if (pathMatch != null) {
                 val path = pathMatch.value
                 
                 // 도메인 찾기 시도
-                // 1) 텍스트 내에서 도메인 변수 찾기 (var domain = "...")
+                // 1) 텍스트 내에서 도메인 변수 찾기
                 val domainMatch = Regex("""var\s+\w+\s*=\s*["'](https?://[^"']+)["']""").find(text)
                 
                 // 2) 텍스트 내에서 해당 경로를 포함한 전체 URL 찾기 (예: 썸네일 이미지 등)
