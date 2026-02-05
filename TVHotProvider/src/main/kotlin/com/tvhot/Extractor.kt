@@ -74,7 +74,7 @@ class BunnyPoorCdn : ExtractorApi() {
                     .replace(Regex("""expires=[\d.e+E]+""")) { matchResult ->
                         // 과학적 표기법(1.77e+09)을 정수로 변환
                         val expiresStr = matchResult.value.substringAfter("=")
-                        val expiresInt = if ('e' in expiresStr.toLowerCase()) {
+                        val expiresInt = if ('e' in expiresStr.lowerCase()) {
                             expiresStr.toDoubleOrNull()?.toLong() ?: expiresStr
                         } else {
                             expiresStr
