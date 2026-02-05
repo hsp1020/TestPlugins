@@ -67,7 +67,6 @@ class TVHot : MainAPI() {
         doc.select("section").forEach { section ->
             var title = section.selectFirst("h2")?.text()?.replace("전체보기", "")?.trim() ?: "추천"
             
-            // 메인화면 타이틀 변경 요청 반영
             if (title.contains("무료 다시보기 순위를 확인")) {
                 title = "다시보기 순위"
             }
@@ -87,10 +86,9 @@ class TVHot : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url, headers = commonHeaders).document
         
-        // 1. 제목 추출 및 원제 처리
         val h3Element = doc.selectFirst("#bo_v_movinfo h3")
-        var title = h3Element?.ownText()?.trim() // <h3> 바로 밑의 텍스트만 가져옴 (span 제외)
-        val oriTitleFull = h3Element?.selectFirst(".ori_title")?.text()?.trim() // 원제 : ...
+        var title = h3Element?.ownText()?.trim()
+        val oriTitleFull = h3Element?.selectFirst(".ori_title")?.text()?.trim()
 
         if (title.isNullOrEmpty()) {
             title = doc.selectFirst("h1#bo_v_title")?.text()?.trim() 
@@ -98,69 +96,54 @@ class TVHot : MainAPI() {
                 ?: "Unknown"
         }
         
-        // 불필요한 접미사 제거
         title = title!!.replace(Regex("\\s*\\d+\\s*[화회부].*"), "").replace(" 다시보기", "").trim()
 
-        // 원제 처리 로직
         if (!oriTitleFull.isNullOrEmpty()) {
             val pureOriTitle = oriTitleFull.replace("원제 :", "").replace("원제:", "").trim()
-            // 한국어가 포함되어 있는지 확인
             val hasKorean = pureOriTitle.contains(Regex("[가-힣]"))
-            
             if (!hasKorean && pureOriTitle.isNotEmpty()) {
                 title = "$title (원제 : $pureOriTitle)"
             }
         }
 
-        // 2. 포스터 추출
         val poster = doc.selectFirst("#bo_v_poster img")?.attr("src")
             ?: doc.selectFirst("meta[property='og:image']")?.attr("content")
             ?: ""
 
-        // 3. 상세 정보 구성 (국가 / 언어 / 개봉년도 / 장르)
         val infoList = doc.select(".bo_v_info dd").map { it.text().trim() }
-        
-        // 장르
         val genreList = doc.select(".ctgs dd a").filter { 
             val txt = it.text()
             !txt.contains("트레일러") && !it.hasClass("btn_watch") 
         }.map { it.text().trim() }
 
-        // 구분자 " / " 로 합치기
         val metaString = (infoList + genreList).joinToString(" / ")
 
-        // 4. 줄거리 본문 추출 및 필터링
         var story = doc.selectFirst(".story")?.text()?.trim() 
             ?: doc.selectFirst(".tmdb-overview")?.text()?.trim()
             ?: doc.selectFirst("meta[name='description']")?.attr("content") 
             ?: ""
 
-        // [요청사항] "다시보기"와 "무료"가 모두 포함되면 SEO 텍스트로 간주하여 "-"로 변경
         if (story.contains("다시보기") && story.contains("무료")) {
             story = "-"
         }
-        
-        // 내용이 없는 경우에도 "-"로 표시
         if (story.isEmpty()) {
             story = "-"
         }
 
-        // 최종 설명: 메타정보 + 줄바꿈 + 줄거리
         val finalPlot = "$metaString\n\n$story".trim()
 
-        // 5. 에피소드 리스트 추출
         val episodes = doc.select("#other_list ul li").mapNotNull { li ->
             val aTag = li.selectFirst("a.ep-link") ?: return@mapNotNull null
             val href = fixUrl(aTag.attr("href"))
             
-            // 에피소드 제목
             val epName = li.selectFirst(".clamp")?.text()?.trim() 
                 ?: li.selectFirst("a.title")?.text()?.trim() 
                 ?: "Episode"
             
-            // 썸네일
+            // 304화 문제 해결: data-original 속성 확인 추가
             val thumbImg = li.selectFirst(".img-container img")
-            val epThumb = thumbImg?.attr("data-src")?.ifEmpty { null }
+            val epThumb = thumbImg?.attr("data-original")?.ifEmpty { null }
+                ?: thumbImg?.attr("data-src")?.ifEmpty { null }
                 ?: thumbImg?.attr("src")?.ifEmpty { null }
                 ?: li.selectFirst("img")?.attr("src")
 
@@ -197,35 +180,75 @@ class TVHot : MainAPI() {
     ): Boolean {
         val doc = app.get(data, headers = commonHeaders).document
         
-        // 1. Iframe에서 플레이어 주소 추출
+        // 1. Iframe 정보 추출
         val iframe = doc.selectFirst("iframe#view_iframe")
         val playerUrl = iframe?.attr("data-player1")?.ifEmpty { null }
             ?: iframe?.attr("data-player2")?.ifEmpty { null }
             ?: iframe?.attr("src")
         
-        // 2. Extractor (BunnyPoorCdn) 호출
+        // 서버 번호 파싱 (예: ?s=4 -> 4)
+        var serverNum = "9"
+        if (playerUrl != null) {
+            val sMatch = Regex("""[?&]s=(\d+)""").find(playerUrl)
+            if (sMatch != null) {
+                serverNum = sMatch.groupValues[1]
+            }
+        }
+
+        // 2. Extractor (BunnyPoorCdn) 시도
         if (playerUrl != null) {
             val finalPlayerUrl = fixUrl(playerUrl).replace("&amp;", "&")
             val extracted = BunnyPoorCdn().extract(finalPlayerUrl, data, subtitleCallback, callback)
             if (extracted) return true
         }
 
-        // 3. Extractor 실패 시 백업: 페이지 내 썸네일에서 경로 유추
-        val videoThumbElements = doc.select("img[src*='/v/'], img[data-src*='/v/']")
+        // 3. 백업 전략: 페이지 내 썸네일에서 경로 추출
+        // 304화 문제 해결: data-original 속성 스캔 추가
+        val videoThumbElements = doc.select("img[src*='/v/'], img[data-src*='/v/'], img[data-original*='/v/']")
+        
         for (el in videoThumbElements) {
-            val src = el.attr("src").ifEmpty { el.attr("data-src") }
+            // 속성 우선순위: data-original (304화) > data-src (305화) > src
+            val src = el.attr("data-original").ifEmpty { 
+                el.attr("data-src").ifEmpty { 
+                    el.attr("src") 
+                } 
+            }
+
+            // 경로 패턴 (/v/f/ 또는 /v/e/) 확인
             if (src.contains("/v/f/") || src.contains("/v/e/")) {
                 try {
-                    val m3u8Url = src.substringBeforeLast("/") + "/index.m3u8"
-                    val fixedM3u8Url = m3u8Url.replace("//v/", "/v/")
+                    // src 예시: https://img-requset4...//v/f/ID/thumb.png
+                    // 추출할 경로: /v/f/ID
+                    val pathRegex = Regex("""(/v/[ef]/[a-zA-Z0-9]+)""")
+                    val match = pathRegex.find(src) ?: continue
+                    val path = match.value.replace("//", "/")
                     
+                    // 도메인 생성 전략
+                    // 전략 A: s 파라미터를 기반으로 everyX.poorcdn.com 도메인 생성 (가장 확실)
+                    val targetDomain = "https://every$serverNum.poorcdn.com"
+                    val targetUrl = "$targetDomain$path/index.m3u8"
+
                     M3u8Helper.generateM3u8(
                         name,
-                        fixedM3u8Url,
+                        targetUrl,
                         mainUrl,
                         headers = commonHeaders
                     ).forEach(callback)
-                    return true
+
+                    // 전략 B: 썸네일 도메인이 혹시 작동할 경우를 대비해 추가
+                    val thumbDomainUrl = src.substringBeforeLast("/") + "/index.m3u8"
+                    val fixedThumbUrl = thumbDomainUrl.replace("//v/", "/v/")
+                    
+                    if (!fixedThumbUrl.contains("poorcdn")) {
+                         M3u8Helper.generateM3u8(
+                            "$name Alt",
+                            fixedThumbUrl,
+                            mainUrl,
+                            headers = commonHeaders
+                        ).forEach(callback)
+                    }
+
+                    return true 
                 } catch (e: Exception) {
                     continue
                 }
