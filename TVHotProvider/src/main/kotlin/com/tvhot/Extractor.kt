@@ -47,15 +47,12 @@ class BunnyPoorCdn : ExtractorApi() {
             val text = response.text
             val finalUrl = response.url
 
-            // 비디오 경로 추출 (/v/f/ID)
             val pathRegex = Regex("""/v/[ef]/[a-zA-Z0-9]+""")
             val pathMatch = pathRegex.find(text) ?: pathRegex.find(cleanUrl)
             
             if (pathMatch == null) return false
             val path = pathMatch.value
 
-            // 도메인 추출: 썸네일 이미지 등에서 도메인 찾기
-            // 304화 대응: data-original 까지 포함하여 검색
             val domainRegex = Regex("""(https?://[^"' \t\n]+)$path""")
             val domainMatch = domainRegex.find(text)
             
@@ -66,7 +63,6 @@ class BunnyPoorCdn : ExtractorApi() {
                     "${uri.scheme}://${uri.host}"
                 }
                 else -> {
-                    // 도메인 못 찾으면 s 파라미터로 추정
                     val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
                     "https://every$serverNum.poorcdn.com"
                 }
@@ -81,7 +77,6 @@ class BunnyPoorCdn : ExtractorApi() {
             }
 
             try {
-                // c.html 접속 및 토큰/쿠키 획득 시도
                 val tokenRes = app.get(tokenUrl, headers = tokenHeaders)
                 val tokenText = tokenRes.text
                 
@@ -104,7 +99,6 @@ class BunnyPoorCdn : ExtractorApi() {
                 return true
 
             } catch (e: Exception) {
-                // c.html 실패 시 다이렉트 주소 시도
                 loadM3u8(directM3u8, cleanUrl, tokenHeaders, emptyMap(), callback)
                 return true
             }
