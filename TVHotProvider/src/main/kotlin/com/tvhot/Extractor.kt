@@ -4,6 +4,7 @@ import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.M3u8Helper
 
 class BunnyPoorCdn : ExtractorApi() {
@@ -11,8 +12,7 @@ class BunnyPoorCdn : ExtractorApi() {
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
 
-    private val USER_AGENT =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+    private val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
     private val browserHeaders = mapOf(
         "User-Agent" to USER_AGENT,
@@ -22,6 +22,14 @@ class BunnyPoorCdn : ExtractorApi() {
         "Sec-Fetch-Dest" to "empty",
         "Sec-Fetch-Mode" to "cors",
         "Sec-Fetch-Site" to "cross-site",
+    )
+
+    // Referer 긁어오기용 헤더 (tvmon.site)
+    private val tvMonHeaders = mapOf(
+        "User-Agent" to USER_AGENT,
+        "Referer" to "https://tvmon.site/",
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Upgrade-Insecure-Requests" to "1"
     )
 
     private fun pl(tag: String, msg: String) {
@@ -34,158 +42,124 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        extract(url, referer, subtitleCallback, callback)
-    }
-
-    suspend fun extract(
-        url: String,
-        referer: String?,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit,
-        thumbnailHint: String? = null,
-    ): Boolean {
         val reqId = System.currentTimeMillis().toDouble()
         pl("req=$reqId step=start", "ok=true url=$url referer=$referer")
 
         var cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
-        val headers = browserHeaders.toMutableMap()
-        if (referer != null) headers["Referer"] = referer
+        val cleanReferer = referer?.replace(Regex("[\\r\\n\\s]"), "")?.trim()
 
         // -------------------------------------------------------------------------
-        // 1. [신규] 무조건 Referer 페이지를 긁어서 진짜 iframe URL 찾기
+        // 1. [Refetch Logic] URL이 부실하면 Referer에서 iframe src 다시 긁어오기
         // -------------------------------------------------------------------------
-        pl("req=$reqId step=refetch_check", "referer=$referer")
-        
-        if (referer != null) {
-            pl("req=$reqId step=refetch_start", "msg=Fetching referer to find iframe src")
+        if (!cleanUrl.contains("v/f/") && !cleanUrl.contains("v/e/") && cleanReferer != null) {
+            pl("req=$reqId step=refetch_start", "msg=URL seems incomplete, fetching referer")
             try {
-                // Referer 페이지(tvmon.site) 가져오기
-                val refRes = app.get(referer, headers = mapOf("User-Agent" to USER_AGENT))
+                val refRes = app.get(cleanReferer, headers = tvMonHeaders)
                 val refText = refRes.text
-                pl("req=$reqId step=refetch_done", "len=${refText.length}")
                 
-                // iframe src 찾기 (player.bunny-frame.online 포함된 것)
-                val iframeMatch = Regex("""src=["'](https://player\.bunny-frame\.online/[^"']+)["']""").find(refText)
+                // iframe src 추출 (유연한 정규식)
+                val iframeMatch = Regex("""src=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refText)
+                    ?: Regex("""data-player\d*=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refText)
                 
                 if (iframeMatch != null) {
-                    val newUrl = iframeMatch.groupValues[1].replace("&amp;", "&")
-                    pl("req=$reqId step=iframe_found", "oldUrl=$cleanUrl newUrl=$newUrl")
-                    cleanUrl = newUrl // URL 교체!
+                    cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&")
+                    pl("req=$reqId step=iframe_found", "newUrl=$cleanUrl")
                 } else {
-                    pl("req=$reqId step=iframe_not_found", "msg=Regex failed on referer text")
-                    pl("req=$reqId step=referer_dump", "dump=${refText.take(500)}")
+                    pl("req=$reqId step=iframe_not_found", "msg=Using original url")
                 }
             } catch (e: Exception) {
                 pl("req=$reqId step=refetch_error", "msg=${e.message}")
             }
+        }
+
+        // -------------------------------------------------------------------------
+        // 2. 서버 정보 및 비디오 경로 추출
+        // -------------------------------------------------------------------------
+        val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
+        val domain = "https://every$serverNum.poorcdn.com"
+        
+        // 경로 추출 (/v/f/ID 또는 /v/e/ID)
+        val videoPathMatch = Regex("""(/v/[a-z]/)([a-z0-9]{32,50})""").find(cleanUrl)
+        
+        if (videoPathMatch != null) {
+            val path = videoPathMatch.groupValues[1]
+            val id = videoPathMatch.groupValues[2]
+            
+            val tokenUrl = "$domain$path$id/c.html"
+            val directM3u8 = "$domain$path$id/index.m3u8"
+            
+            pl("req=$reqId step=path_found", "tokenUrl=$tokenUrl")
+
+            try {
+                // 3. c.html 접속 (Referer를 iframe 주소로 고정)
+                // 중요: 쿠키 처리를 위해 response 전체를 받음
+                val tokenRes = app.get(tokenUrl, referer = cleanUrl, headers = browserHeaders)
+                val cookieMap = tokenRes.cookies.toMutableMap()
+                
+                // [핵심] 자바스크립트 쿠키 파싱 (보내주신 코드의 핵심 로직)
+                val jsCookieRegex = Regex("""document\.cookie\s*=\s*["']([^=]+)=([^; "']+)""")
+                jsCookieRegex.findAll(tokenRes.text).forEach { match ->
+                    cookieMap[match.groupValues[1]] = match.groupValues[2]
+                }
+
+                // 4. c.html 내용에서 진짜 m3u8 주소 추출
+                val realM3u8 = extractM3u8FromToken(tokenRes.text)
+                
+                if (realM3u8 != null) {
+                    val finalM3u8 = if (realM3u8.startsWith("http")) realM3u8 else "$domain$realM3u8"
+                    pl("req=$reqId step=success", "m3u8=$finalM3u8")
+                    
+                    // 쿠키와 함께 m3u8 호출
+                    invokeLink(finalM3u8, cleanUrl, cookieMap, callback)
+                } else {
+                    // m3u8을 못 찾았으면 fallback (혹시 403이더라도 시도는 해봄)
+                    pl("req=$reqId step=token_parse_fail", "msg=Fallback to direct")
+                    invokeLink(directM3u8, cleanUrl, cookieMap, callback)
+                }
+
+            } catch (e: Exception) {
+                pl("req=$reqId step=error", "msg=${e.message}")
+                // 에러 나도 direct 주소로 시도 (혹시 토큰 없이 될 수도 있으니)
+                invokeLink(directM3u8, cleanUrl, emptyMap(), callback)
+            }
         } else {
-             pl("req=$reqId step=refetch_skip", "msg=No referer")
+            pl("req=$reqId step=fail", "msg=No video path found in URL")
         }
+    }
 
-        return try {
-            // 2. 임베드 페이지 가져오기 (교체된 cleanUrl 사용)
-            pl("req=$reqId step=fetch_page_begin", "ok=true GET=$cleanUrl")
-            val response = app.get(cleanUrl, headers = headers)
-            val text = response.text
-            val finalUrl = response.url
-            pl("req=$reqId step=page_text_ok", "ok=true textLen=${text.length}")
-
-            // -------------------------------------------------------------------------
-            // 3. 🎯 토큰 추출 시도 (Ultra Pattern Mode)
-            // -------------------------------------------------------------------------
-            
-            val pathRegex = Regex("""/v/[a-z]/[a-zA-Z0-9]+""")
-            val pathMatch = pathRegex.find(text) 
-                ?: pathRegex.find(cleanUrl) 
-                ?: if (thumbnailHint != null) pathRegex.find(thumbnailHint) else null
-            
-            val path = pathMatch?.value ?: ""
-            val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
-            val domain = "https://every${serverNum}.poorcdn.com"
-
-            var finalM3u8Url: String? = null
-
-            // [패턴 1] "token" 키워드 뒤의 긴 문자열 (가장 강력)
-            if (finalM3u8Url == null) {
-                val roughTokenMatch = Regex("""token["']?\s*[:=]\s*["']?([a-zA-Z0-9_\-=]{20,})["']?""").find(text)
-                val roughExpiresMatch = Regex("""expires["']?\s*[:=]\s*["']?(\d{8,})["']?""").find(text)
-
-                if (roughTokenMatch != null && roughExpiresMatch != null && path.isNotEmpty()) {
-                    val tokenVal = roughTokenMatch.groupValues[1]
-                    val expiresVal = roughExpiresMatch.groupValues[2]
-                    pl("req=$reqId step=token_found_p1", "token=$tokenVal expires=$expiresVal")
-                    finalM3u8Url = "$domain$path/index.m3u8?token=$tokenVal&expires=$expiresVal"
-                }
-            }
-
-            // [패턴 2] URL 쿼리 스트링 (token=...&expires=...)
-            if (finalM3u8Url == null) {
-                val queryParamsMatch = Regex("""token=([^&"']+)&expires=(\d+)""").find(text)
-                if (queryParamsMatch != null && path.isNotEmpty()) {
-                    val token = queryParamsMatch.groupValues[1]
-                    val expires = queryParamsMatch.groupValues[2]
-                    pl("req=$reqId step=token_found_p2", "token=$token expires=$expires")
-                    finalM3u8Url = "$domain$path/index.m3u8?token=$token&expires=$expires"
-                }
-            }
-
-            // [패턴 3] 전체 URL 매칭 (c.html?token=...)
-            if (finalM3u8Url == null) {
-                val fullUrlPattern = Regex("""(https://every\d+\.poorcdn\.com/v/[a-z]/[a-zA-Z0-9]+/c\.html\?[^"'\s<>]+)""")
-                val fullUrlMatch = fullUrlPattern.find(text)
-                if (fullUrlMatch != null) {
-                    val rawTokenUrl = fullUrlMatch.groupValues[1]
-                        .replace("&amp;", "&")
-                        .replace(Regex("""expires=[\d.e+E]+""")) { matchResult ->
-                            val expiresStr = matchResult.value.substringAfter("=")
-                            val expiresInt = if ('e' in expiresStr.lowercase()) {
-                                expiresStr.toDoubleOrNull()?.toLong() ?: expiresStr
-                            } else {
-                                expiresStr
-                            }
-                            "expires=$expiresInt"
-                        }
-                    pl("req=$reqId step=token_found_p3", "url=$rawTokenUrl")
-                    finalM3u8Url = rawTokenUrl.replace("/c.html", "/index.m3u8")
-                }
-            }
-
-            // -------------------------------------------------------------------------
-            // 4. 결과 처리
-            // -------------------------------------------------------------------------
-            if (finalM3u8Url != null) {
-                pl("req=$reqId step=m3u8_url_built", "ok=true url=$finalM3u8Url")
-                val m3u8Headers = browserHeaders.toMutableMap().apply { put("Referer", cleanUrl) }
-                M3u8Helper.generateM3u8(
-                    name,
-                    finalM3u8Url,
-                    cleanUrl,
-                    headers = m3u8Headers
-                ).forEach(callback)
-                return true
-            } else {
-                // ❌ 토큰 못 찾음
-                pl("req=$reqId step=token_not_found", "DUMP=${text.take(1000)}")
-                
-                if (path.isEmpty()) return false
-                
-                val directM3u8 = "$domain$path/index.m3u8"
-                pl("req=$reqId step=fallback_m3u8", "ok=true url=$directM3u8")
-                
-                val m3u8Headers = browserHeaders.toMutableMap().apply { put("Referer", cleanUrl) }
-                M3u8Helper.generateM3u8(
-                    name,
-                    directM3u8,
-                    cleanUrl,
-                    headers = m3u8Headers
-                ).forEach(callback)
-                return true
-            }
-
-        } catch (e: Exception) {
-            pl("req=$reqId step=error", "ok=false error=${e.message}")
-            e.printStackTrace()
-            return false
+    private fun extractM3u8FromToken(tokenText: String): String? {
+        val patterns = listOf(
+            Regex("""["']([^"']+\.m3u8\?[^"']+)["']"""), // 토큰 포함 주소
+            Regex("""["']([^"']+\.m3u8)["']"""),         // 일반 주소
+            Regex("""location\.href\s*=\s*["']([^"']+)["']""")
+        )
+        for (pattern in patterns) {
+            val match = pattern.find(tokenText)
+            if (match != null) return match.groupValues[1]
         }
+        return null
+    }
+
+    private suspend fun invokeLink(m3u8Url: String, referer: String, cookies: Map<String, String>, callback: (ExtractorLink) -> Unit) {
+        val cleanM3u8 = m3u8Url.replace(Regex("[\\r\\n\\s]"), "").trim()
+        
+        // 쿠키 문자열 생성
+        val cookieString = cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
+
+        callback.invoke(
+            ExtractorLink(
+                source = name,
+                name = name,
+                url = cleanM3u8,
+                referer = referer,
+                quality = Qualities.Unknown.value,
+                isM3u8 = true,
+                headers = browserHeaders.toMutableMap().apply {
+                    if (cookieString.isNotEmpty()) {
+                        put("Cookie", cookieString)
+                    }
+                }
+            )
+        )
     }
 }
