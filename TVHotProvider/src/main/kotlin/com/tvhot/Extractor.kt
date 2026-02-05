@@ -38,7 +38,7 @@ class BunnyPoorCdn : ExtractorApi() {
         referer: String?,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
-        thumbnailHint: String? = null,
+        thumbnailHint: String? = null, // 썸네일 힌트
     ): Boolean {
         val cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
         val headers = browserHeaders.toMutableMap()
@@ -49,11 +49,13 @@ class BunnyPoorCdn : ExtractorApi() {
             val text = response.text
             val finalUrl = response.url
 
+            // 👇 [변경] e,f 뿐만 아니라 a-z 모든 한 글자 경로 허용
             val pathRegex = Regex("""/v/[a-z]/[a-zA-Z0-9]+""")
-            val pathMatch = pathRegex.find(text) ?: pathRegex.find(cleanUrl)
             
-            // 썸네일 힌트 활용
+            val pathMatch = pathRegex.find(text) ?: pathRegex.find(cleanUrl)
             val thumbPathMatch = if (thumbnailHint != null) pathRegex.find(thumbnailHint) else null
+            
+            // 썸네일 힌트가 유효하면 우선 고려 (혹은 pathMatch 실패 시 사용)
             val finalPathMatch = pathMatch ?: thumbPathMatch
 
             if (finalPathMatch == null) return false
@@ -62,32 +64,24 @@ class BunnyPoorCdn : ExtractorApi() {
             val domainRegex = Regex("""(https?://[^"' \t\n]+)$path""")
             val domainMatch = domainRegex.find(text)
 
-            // 문법 오류 수정된 domain 결정 로직
             val domain = when {
                 domainMatch != null -> domainMatch.groupValues[1]
-                
                 finalUrl.contains(path) -> {
                     val uri = java.net.URI(finalUrl)
                     "${uri.scheme}://${uri.host}"
                 }
-                
-                // 여기가 문제였던 부분입니다. 블록으로 깔끔하게 처리
-                thumbnailHint != null && thumbnailHint.contains(path) -> {
-                    try {
+                // 썸네일 힌트 기반 도메인 추정
+                thumbnailHint != null && thumbnailHint.contains(path) ->
+                    (try {
                         val uri = java.net.URI(thumbnailHint)
-                        if (uri.scheme != null && uri.host != null) {
-                            "${uri.scheme}://${uri.host}"
-                        } else {
-                            // fallback logic
-                            val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
-                            "https://every${serverNum}.poorcdn.com"
-                        }
+                        if (uri.scheme != null && uri.host != null) "${uri.scheme}://${uri.host}" else null
                     } catch (e: Exception) {
+                        null
+                    }) ?: run {
+                        // fallback
                         val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
                         "https://every${serverNum}.poorcdn.com"
                     }
-                }
-                
                 else -> {
                     val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
                     "https://every${serverNum}.poorcdn.com"
