@@ -4,8 +4,8 @@ import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.M3u8Helper
+import com.lagradost.cloudstream3.utils.Qualities
 
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "BunnyPoorCdn"
@@ -35,6 +35,7 @@ class BunnyPoorCdn : ExtractorApi() {
         println("DEBUG_EXTRACTOR name=$name $tag $msg")
     }
 
+    // ExtractorApi 기본 메서드
     override suspend fun getUrl(
         url: String,
         referer: String?,
@@ -44,6 +45,7 @@ class BunnyPoorCdn : ExtractorApi() {
         extract(url, referer, subtitleCallback, callback)
     }
 
+    // TVHot.kt 호환용
     suspend fun extract(
         url: String,
         referer: String?,
@@ -57,7 +59,7 @@ class BunnyPoorCdn : ExtractorApi() {
         var cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = referer?.replace(Regex("[\\r\\n\\s]"), "")?.trim()
 
-        // 1. Refetch Logic (iframe URL 찾기)
+        // 1. Refetch Logic
         if (!cleanUrl.contains("v/f/") && !cleanUrl.contains("v/e/") && cleanReferer != null) {
             pl("req=$reqId step=refetch_start", "msg=URL seems incomplete, fetching referer")
             try {
@@ -78,21 +80,18 @@ class BunnyPoorCdn : ExtractorApi() {
             }
         }
 
-        // 2. 비디오 경로 찾기 (/v/f/ID) - URL에 없으면 페이지 방문
+        // 2. Visit Logic (Path 찾기)
         var videoPathMatch = Regex("""(/v/[a-z]/)([a-z0-9]{32,50})""").find(cleanUrl)
         
-        // URL에서 못 찾았으면, 해당 페이지를 방문해서 소스를 뒤짐
         if (videoPathMatch == null) {
             pl("req=$reqId step=visit_start", "msg=Path not in URL, visiting page")
             try {
-                // Referer는 tvmon.site로 설정하여 iframe 페이지 로드
                 val res = app.get(cleanUrl, headers = browserHeaders.toMutableMap().apply {
                     put("Referer", cleanReferer ?: "https://tvmon.site/")
                 })
                 val text = res.text
                 pl("req=$reqId step=visit_done", "len=${text.length}")
                 
-                // 소스 내에서 경로 찾기
                 videoPathMatch = Regex("""(/v/[a-z]/)([a-z0-9]{32,50})""").find(text)
                 if (videoPathMatch != null) {
                     pl("req=$reqId step=path_found_in_source", "path=${videoPathMatch.value}")
@@ -130,7 +129,8 @@ class BunnyPoorCdn : ExtractorApi() {
                     pl("req=$reqId step=success", "m3u8=$finalM3u8")
                     invokeLink(finalM3u8, cleanUrl, cookieMap, callback)
                 } else {
-                    pl("req=$reqId step=token_parse_fail", "msg=Fallback to direct")
+                    // DUMP 추가
+                    pl("req=$reqId step=token_parse_fail", "DUMP=${tokenRes.text.take(1000)}")
                     invokeLink(directM3u8, cleanUrl, cookieMap, callback)
                 }
                 return true
@@ -140,7 +140,7 @@ class BunnyPoorCdn : ExtractorApi() {
                 return true
             }
         } else {
-            pl("req=$reqId step=fail", "msg=No video path found anywhere")
+            pl("req=$reqId step=fail", "msg=No video path found")
             return false
         }
     }
@@ -149,11 +149,20 @@ class BunnyPoorCdn : ExtractorApi() {
         val patterns = listOf(
             Regex("""["']([^"']+\.m3u8\?[^"']+)["']"""),
             Regex("""["']([^"']+\.m3u8)["']"""),
-            Regex("""location\.href\s*=\s*["']([^"']+)["']""")
+            Regex("""location\.href\s*=\s*["']([^"']+)["']"""),
+            Regex("""source\s*:\s*["']([^"']+)["']"""),
+            Regex("""file\s*:\s*["']([^"']+)["']"""),
+            Regex("""src\s*:\s*["']([^"']+)["']"""),
+            Regex("""["'](https?://[^"'\s]{50,})["']""") // Fallback for raw long URLs
         )
         for (pattern in patterns) {
             val match = pattern.find(tokenText)
-            if (match != null) return match.groupValues[1]
+            if (match != null) {
+                val found = match.groupValues[1]
+                if (found.startsWith("http") && !found.contains("<") && !found.contains(";")) {
+                    return found
+                }
+            }
         }
         return null
     }
