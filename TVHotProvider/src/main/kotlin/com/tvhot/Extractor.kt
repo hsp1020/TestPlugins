@@ -54,6 +54,7 @@ class BunnyPoorCdn : ExtractorApi() {
         val reqId = System.currentTimeMillis().toDouble()
         pl("req=$reqId step=start", "ok=true url=$url referer=$referer")
 
+        // 초기 URL 정제
         var cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = referer?.replace(Regex("[\\r\\n\\s]"), "")?.trim()
 
@@ -68,8 +69,12 @@ class BunnyPoorCdn : ExtractorApi() {
                     ?: Regex("""data-player\d*=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refText)
                 
                 if (iframeMatch != null) {
-                    cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&")
+                    val rawUrl = iframeMatch.groupValues[1]
+                    // [핵심 수정] 여기서 줄바꿈 문자(\r, \n)를 확실하게 제거
+                    cleanUrl = rawUrl.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
                     pl("req=$reqId step=iframe_found", "newUrl=$cleanUrl")
+                } else {
+                    pl("req=$reqId step=iframe_not_found", "msg=Using original url")
                 }
             } catch (e: Exception) {
                 pl("req=$reqId step=refetch_error", "msg=${e.message}")
@@ -110,10 +115,13 @@ class BunnyPoorCdn : ExtractorApi() {
             pl("req=$reqId step=path_final", "tokenUrl=$tokenUrl")
 
             try {
-                // 1차 시도: Referer = cleanUrl
-                var tokenRes = app.get(tokenUrl, referer = cleanUrl, headers = browserHeaders)
+                // Referer도 정제해서 사용
+                val safeReferer = cleanUrl.replace(Regex("[\\r\\n\\s]"), "").trim()
                 
-                // [신규] 403 Forbidden이면 재시도 (Referer 변경)
+                // 1차 시도
+                var tokenRes = app.get(tokenUrl, referer = safeReferer, headers = browserHeaders)
+                
+                // 403 재시도 로직
                 if (tokenRes.code == 403 || tokenRes.text.contains("Forbidden")) {
                     pl("req=$reqId step=retry_403", "msg=Got 403, retrying with main referer")
                     tokenRes = app.get(tokenUrl, referer = "https://tvmon.site/", headers = browserHeaders)
@@ -126,10 +134,9 @@ class BunnyPoorCdn : ExtractorApi() {
                     cookieMap[match.groupValues[1]] = match.groupValues[2]
                 }
                 
-                // 응답이 이미 M3U8 파일 내용인 경우
                 if (tokenRes.text.trim().startsWith("#EXTM3U")) {
                     pl("req=$reqId step=direct_m3u8_content", "msg=Content is M3U8")
-                    invokeLink(tokenUrl, cleanUrl, cookieMap, callback)
+                    invokeLink(tokenUrl, safeReferer, cookieMap, callback)
                     return true
                 }
 
@@ -138,11 +145,10 @@ class BunnyPoorCdn : ExtractorApi() {
                 if (realM3u8 != null) {
                     val finalM3u8 = if (realM3u8.startsWith("http")) realM3u8 else "$domain$realM3u8"
                     pl("req=$reqId step=success", "m3u8=$finalM3u8")
-                    invokeLink(finalM3u8, cleanUrl, cookieMap, callback)
+                    invokeLink(finalM3u8, safeReferer, cookieMap, callback)
                 } else {
                     pl("req=$reqId step=token_parse_fail", "DUMP=${tokenRes.text.take(500)}")
-                    // Fallback to directM3u8
-                    invokeLink(directM3u8, cleanUrl, cookieMap, callback)
+                    invokeLink(directM3u8, safeReferer, cookieMap, callback)
                 }
                 return true
             } catch (e: Exception) {
