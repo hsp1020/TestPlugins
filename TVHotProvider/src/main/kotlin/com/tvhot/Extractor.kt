@@ -38,7 +38,7 @@ class BunnyPoorCdn : ExtractorApi() {
         referer: String?,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
-        thumbnailHint: String? = null, // 썸네일 힌트
+        thumbnailHint: String? = null,
     ): Boolean {
         val cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
         val headers = browserHeaders.toMutableMap()
@@ -49,13 +49,9 @@ class BunnyPoorCdn : ExtractorApi() {
             val text = response.text
             val finalUrl = response.url
 
-            // 👇 [변경] e,f 뿐만 아니라 a-z 모든 한 글자 경로 허용
             val pathRegex = Regex("""/v/[a-z]/[a-zA-Z0-9]+""")
-            
             val pathMatch = pathRegex.find(text) ?: pathRegex.find(cleanUrl)
             val thumbPathMatch = if (thumbnailHint != null) pathRegex.find(thumbnailHint) else null
-            
-            // 썸네일 힌트가 유효하면 우선 고려 (혹은 pathMatch 실패 시 사용)
             val finalPathMatch = pathMatch ?: thumbPathMatch
 
             if (finalPathMatch == null) return false
@@ -70,18 +66,17 @@ class BunnyPoorCdn : ExtractorApi() {
                     val uri = java.net.URI(finalUrl)
                     "${uri.scheme}://${uri.host}"
                 }
-                // 썸네일 힌트 기반 도메인 추정
-                thumbnailHint != null && thumbnailHint.contains(path) ->
-                    (try {
+                thumbnailHint != null && thumbnailHint.contains(path) -> {
+                    try {
                         val uri = java.net.URI(thumbnailHint)
                         if (uri.scheme != null && uri.host != null) "${uri.scheme}://${uri.host}" else null
                     } catch (e: Exception) {
                         null
-                    }) ?: run {
-                        // fallback
-                        val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
-                        "https://every${serverNum}.poorcdn.com"
                     }
+                } ?: run {
+                    val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
+                    "https://every${serverNum}.poorcdn.com"
+                }
                 else -> {
                     val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
                     "https://every${serverNum}.poorcdn.com"
@@ -108,15 +103,13 @@ class BunnyPoorCdn : ExtractorApi() {
                         cookieMap[it.groupValues[1]] = it.groupValues[2]
                     }
 
-                val realM3u8Match =
-                    Regex("""["']([^"']+\.m3u8[^"']*)["']""").find(tokenText)
-                        ?: Regex("""location\.href\s*=\s*["']([^"']+)["']""").find(tokenText)
+                val realM3u8Match = Regex("""["']([^"']+\.m3u8[^"']*)["']""").find(tokenText)
+                    ?: Regex("""location\.href\s*=\s*["']([^"']+)["']""").find(tokenText)
 
                 var realM3u8 = realM3u8Match?.groupValues?.get(1) ?: directM3u8
 
                 if (!realM3u8.startsWith("http")) {
-                    realM3u8 = "$domain$cleanPath/$realM3u8"
-                        .replace("$cleanPath/$cleanPath", cleanPath)
+                    realM3u8 = "$domain$cleanPath/$realM3u8".replace("$cleanPath/$cleanPath", cleanPath)
                 }
 
                 loadM3u8(realM3u8, cleanUrl, tokenHeaders, cookieMap, callback)
