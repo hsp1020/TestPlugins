@@ -36,6 +36,21 @@ class BunnyPoorCdn : ExtractorApi() {
         return if (clean.length <= max) clean else clean.substring(0, max) + "...(truncated)"
     }
 
+    /** println은 무조건 문자열 1개만 찍도록 강제 */
+    private fun pl(
+        reqId: String,
+        step: String,
+        ok: Boolean,
+        msg: String = "",
+        extra: Map<String, Any?> = emptyMap(),
+    ) {
+        val extraStr = if (extra.isEmpty()) "" else {
+            " " + extra.entries.joinToString(" ") { (k, v) -> "$k=${trunc(v?.toString(), 300)}" }
+        }
+        val msgStr = if (msg.isBlank()) "" else " msg=${trunc(msg, 400)}"
+        println("DEBUG_EXTRACTOR name=$name req=$reqId step=$step ok=$ok$msgStr$extraStr")
+    }
+
     override suspend fun getUrl(
         url: String,
         referer: String?,
@@ -53,148 +68,146 @@ class BunnyPoorCdn : ExtractorApi() {
         thumbnailHint: String? = null,
     ): Boolean {
         val reqId = System.currentTimeMillis().toString()
-        println("DEBUG_EXTRACTOR name=$name req=$reqId step=start ok=true url=${trunc(url)} referer=${trunc(referer)} thumbnailHint=${trunc(thumbnailHint)}")
+        pl(reqId, "start", ok = true, extra = mapOf(
+            "url" to url,
+            "referer" to referer,
+            "thumbnailHint" to thumbnailHint
+        ))
 
         val cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
-        println("DEBUG_EXTRACTOR name=$name req=$reqId step=clean_url ok=${cleanUrl.isNotBlank()} cleanUrl=${trunc(cleanUrl)}")
+        pl(reqId, "clean_url", ok = cleanUrl.isNotBlank(), extra = mapOf("cleanUrl" to cleanUrl))
 
         val headers = browserHeaders.toMutableMap()
         if (referer != null) headers["Referer"] = referer
-        println("DEBUG_EXTRACTOR name=$name req=$reqId step=headers_ready ok=true hasReferer=${referer != null}")
+        pl(reqId, "headers_ready", ok = true, extra = mapOf("hasReferer" to (referer != null)))
 
         return try {
-            println("DEBUG_EXTRACTOR name=$name req=$reqId step=fetch_page_begin ok=true GET=${trunc(cleanUrl)}")
+            pl(reqId, "fetch_page_begin", ok = true, extra = mapOf("GET" to cleanUrl))
             val response = app.get(cleanUrl, headers = headers)
-            println("DEBUG_EXTRACTOR name=$name req=$reqId step=fetch_page_ok ok=true finalUrl=${trunc(response.url)}")
+            pl(reqId, "fetch_page_ok", ok = true, extra = mapOf("finalUrl" to response.url))
 
             val text = response.text
             val finalUrl = response.url
-            println("DEBUG_EXTRACTOR name=$name req=$reqId step=page_text_ok ok=${text.isNotBlank()} textLen=${text.length}")
+            pl(reqId, "page_text_ok", ok = text.isNotBlank(), extra = mapOf("textLen" to text.length))
 
             val pathRegex = Regex("""/v/[a-z]/[a-zA-Z0-9]+""")
 
             val pathMatchFromText = pathRegex.find(text)
-            println("DEBUG_EXTRACTOR name=$name req=$reqId step=path_match_text ok=${pathMatchFromText != null} match=${trunc(pathMatchFromText?.value)}")
+            pl(reqId, "path_match_text", ok = (pathMatchFromText != null), extra = mapOf("match" to pathMatchFromText?.value))
 
             val pathMatchFromUrl = pathRegex.find(cleanUrl)
-            println("DEBUG_EXTRACTOR name=$name req=$reqId step=path_match_url ok=${pathMatchFromUrl != null} match=${trunc(pathMatchFromUrl?.value)}")
+            pl(reqId, "path_match_url", ok = (pathMatchFromUrl != null), extra = mapOf("match" to pathMatchFromUrl?.value))
 
             val pathMatch = pathMatchFromText ?: pathMatchFromUrl
 
             val thumbPathMatch = if (thumbnailHint != null) pathRegex.find(thumbnailHint) else null
-            println("DEBUG_EXTRACTOR name=$name req=$reqId step=path_match_thumb ok=${thumbPathMatch != null} match=${trunc(thumbPathMatch?.value)}")
+            pl(reqId, "path_match_thumb", ok = (thumbPathMatch != null), extra = mapOf("match" to thumbPathMatch?.value))
 
             val finalPathMatch = pathMatch ?: thumbPathMatch
-            println("DEBUG_EXTRACTOR name=$name req=$reqId step=path_final_selected ok=${finalPathMatch != null} path=${trunc(finalPathMatch?.value)}")
+            pl(reqId, "path_final_selected", ok = (finalPathMatch != null), extra = mapOf("path" to finalPathMatch?.value))
 
             if (finalPathMatch == null) {
-                println("DEBUG_EXTRACTOR name=$name req=$reqId step=fail_no_path ok=false msg=No /v/x/<id> path found")
+                pl(reqId, "fail_no_path", ok = false, msg = "No /v/x/<id> path found")
                 return false
             }
             val path = finalPathMatch.value
 
             val domainRegex = Regex("""(https?://[^"' \t\n]+)$path""")
             val domainMatch = domainRegex.find(text)
-            println("DEBUG_EXTRACTOR name=$name req=$reqId step=domain_match_text ok=${domainMatch != null} domain=${trunc(domainMatch?.groupValues?.getOrNull(1))}")
+            pl(reqId, "domain_match_text", ok = (domainMatch != null), extra = mapOf("domain" to domainMatch?.groupValues?.getOrNull(1)))
 
             val domain = when {
-                domainMatch != null -> {
-                    println("DEBUG_EXTRACTOR name=$name req=$reqId step=domain_source ok=true src=text_match")
-                    domainMatch.groupValues[1]
-                }
+                domainMatch != null -> domainMatch.groupValues[1]
 
                 finalUrl.contains(path) -> {
-                    println("DEBUG_EXTRACTOR name=$name req=$reqId step=domain_source ok=true src=finalUrl_contains_path finalUrl=${trunc(finalUrl)}")
                     val uri = java.net.URI(finalUrl)
                     "${uri.scheme}://${uri.host}"
                 }
 
                 thumbnailHint != null && thumbnailHint.contains(path) -> {
-                    println("DEBUG_EXTRACTOR name=$name req=$reqId step=domain_source ok=true src=thumbnailHint thumbnailHint=${trunc(thumbnailHint)}")
                     (try {
                         val uri = java.net.URI(thumbnailHint)
                         if (uri.scheme != null && uri.host != null) "${uri.scheme}://${uri.host}" else null
                     } catch (e: Exception) {
-                        println("DEBUG_EXTRACTOR name=$name req=$reqId step=domain_from_thumb_exception ok=false e=${trunc(e.message)}")
+                        pl(reqId, "domain_from_thumb_exception", ok = false, msg = e.message ?: "null")
                         null
                     }) ?: run {
                         val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
-                        val fallback = "https://every${serverNum}.poorcdn.com"
-                        println("DEBUG_EXTRACTOR name=$name req=$reqId step=domain_fallback ok=true serverNum=$serverNum domain=$fallback")
-                        fallback
+                        "https://every${serverNum}.poorcdn.com"
                     }
                 }
 
                 else -> {
                     val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
-                    val fallback = "https://every${serverNum}.poorcdn.com"
-                    println("DEBUG_EXTRACTOR name=$name req=$reqId step=domain_fallback ok=true serverNum=$serverNum domain=$fallback")
-                    fallback
+                    "https://every${serverNum}.poorcdn.com"
                 }
             }
 
-            println("DEBUG_EXTRACTOR name=$name req=$reqId step=domain_final ok=${domain.isNotBlank()} domain=${trunc(domain)} path=${trunc(path)}")
+            pl(reqId, "domain_final", ok = domain.isNotBlank(), extra = mapOf("domain" to domain, "path" to path))
 
             val cleanPath = path.replace(Regex("//v/"), "/v/")
             val tokenUrl = "$domain$cleanPath/c.html"
             val directM3u8 = "$domain$cleanPath/index.m3u8"
-            println("DEBUG_EXTRACTOR name=$name req=$reqId step=urls_built ok=true tokenUrl=${trunc(tokenUrl)} directM3u8=${trunc(directM3u8)}")
+            pl(reqId, "urls_built", ok = true, extra = mapOf("tokenUrl" to tokenUrl, "directM3u8" to directM3u8))
 
             val tokenHeaders = browserHeaders.toMutableMap().apply { put("Referer", cleanUrl) }
-            println("DEBUG_EXTRACTOR name=$name req=$reqId step=token_headers_ready ok=true Referer=${trunc(cleanUrl)}")
+            pl(reqId, "token_headers_ready", ok = true, extra = mapOf("Referer" to cleanUrl))
 
             try {
-                println("DEBUG_EXTRACTOR name=$name req=$reqId step=token_request_begin ok=true GET=${trunc(tokenUrl)}")
+                pl(reqId, "token_request_begin", ok = true, extra = mapOf("GET" to tokenUrl))
                 val tokenRes = app.get(tokenUrl, headers = tokenHeaders)
                 val tokenText = tokenRes.text
 
-                println("DEBUG_EXTRACTOR name=$name req=$reqId step=token_request_ok ok=true tokenFinalUrl=${trunc(tokenRes.url)}")
-                println("DEBUG_EXTRACTOR name=$name req=$reqId step=token_text_len ok=true tokenTextLen=${tokenText.length}")
-                // 핵심: 16바이트 내용이 뭔지 바로 보자 (너무 길면 앞부분만)
-                println("DEBUG_EXTRACTOR name=$name req=$reqId step=token_text_head ok=true head=${trunc(head(tokenText, 300), 340)}")
-                println("DEBUG_EXTRACTOR name=$name req=$reqId step=token_text_flags ok=true hasM3u8=${tokenText.contains(\".m3u8\")} hasLocation=${tokenText.contains(\"location\")} hasCookieJs=${tokenText.contains(\"document.cookie\")}")
+                pl(reqId, "token_request_ok", ok = true, extra = mapOf("tokenFinalUrl" to tokenRes.url))
+                pl(reqId, "token_text_len", ok = true, extra = mapOf("tokenTextLen" to tokenText.length))
+                pl(reqId, "token_text_head", ok = true, extra = mapOf("head" to head(tokenText, 300)))
+
+                val hasM3u8 = tokenText.contains(".m3u8")
+                val hasLocation = tokenText.contains("location")
+                val hasCookieJs = tokenText.contains("document.cookie")
+                pl(reqId, "token_text_flags", ok = true, extra = mapOf(
+                    "hasM3u8" to hasM3u8,
+                    "hasLocation" to hasLocation,
+                    "hasCookieJs" to hasCookieJs
+                ))
 
                 val cookieMap = mutableMapOf<String, String>()
                 cookieMap.putAll(tokenRes.cookies)
-                println("DEBUG_EXTRACTOR name=$name req=$reqId step=token_cookies_initial ok=true cookieCount=${cookieMap.size}")
+                pl(reqId, "token_cookies_initial", ok = true, extra = mapOf("cookieCount" to cookieMap.size))
 
                 Regex("""document\.cookie\s*=\s*["']([^=]+)=([^; "']+)""")
                     .findAll(tokenText)
-                    .forEach {
-                        cookieMap[it.groupValues[1]] = it.groupValues[2]
-                    }
-                println("DEBUG_EXTRACTOR name=$name req=$reqId step=token_cookies_total ok=true cookieCount=${cookieMap.size}")
+                    .forEach { m -> cookieMap[m.groupValues[1]] = m.groupValues[2] }
+                pl(reqId, "token_cookies_total", ok = true, extra = mapOf("cookieCount" to cookieMap.size))
 
                 val realM3u8Match =
                     Regex("""["']([^"']+\.m3u8[^"']*)["']""").find(tokenText)
                         ?: Regex("""location\.href\s*=\s*["']([^"']+)["']""").find(tokenText)
 
                 val rawM3u8 = realM3u8Match?.groupValues?.getOrNull(1)
-                println("DEBUG_EXTRACTOR name=$name req=$reqId step=real_m3u8_match ok=${rawM3u8 != null} raw=${trunc(rawM3u8)}")
+                pl(reqId, "real_m3u8_match", ok = (rawM3u8 != null), extra = mapOf("raw" to rawM3u8))
 
                 var realM3u8 = rawM3u8 ?: directM3u8
-                println("DEBUG_EXTRACTOR name=$name req=$reqId step=real_m3u8_selected ok=true realM3u8=${trunc(realM3u8)} fallback=${rawM3u8 == null}")
+                pl(reqId, "real_m3u8_selected", ok = true, extra = mapOf("realM3u8" to realM3u8, "fallback" to (rawM3u8 == null)))
 
                 if (!realM3u8.startsWith("http")) {
                     val before = realM3u8
-                    realM3u8 = "$domain$cleanPath/$realM3u8"
-                        .replace("$cleanPath/$cleanPath", cleanPath)
-                    println("DEBUG_EXTRACTOR name=$name req=$reqId step=real_m3u8_make_abs ok=true before=${trunc(before)} after=${trunc(realM3u8)}")
+                    realM3u8 = "$domain$cleanPath/$realM3u8".replace("$cleanPath/$cleanPath", cleanPath)
+                    pl(reqId, "real_m3u8_make_abs", ok = true, extra = mapOf("before" to before, "after" to realM3u8))
                 }
 
-                println("DEBUG_EXTRACTOR name=$name req=$reqId step=load_m3u8_begin ok=true url=${trunc(realM3u8)} cookieCount=${cookieMap.size}")
+                pl(reqId, "load_m3u8_begin", ok = true, extra = mapOf("url" to realM3u8, "cookieCount" to cookieMap.size))
                 loadM3u8(realM3u8, cleanUrl, tokenHeaders, cookieMap, callback, reqId)
-                println("DEBUG_EXTRACTOR name=$name req=$reqId step=load_m3u8_done ok=true via=token_flow")
+                pl(reqId, "load_m3u8_done", ok = true, extra = mapOf("via" to "token_flow"))
                 true
             } catch (e: Exception) {
-                println("DEBUG_EXTRACTOR name=$name req=$reqId step=token_flow_exception ok=false e=${trunc(e.message)}")
-                println("DEBUG_EXTRACTOR name=$name req=$reqId step=load_m3u8_begin ok=true url=${trunc(directM3u8)} cookieCount=0 via=direct_fallback")
+                pl(reqId, "token_flow_exception", ok = false, msg = e.message ?: "null", extra = mapOf("fallback" to "directM3u8"))
                 loadM3u8(directM3u8, cleanUrl, tokenHeaders, emptyMap(), callback, reqId)
-                println("DEBUG_EXTRACTOR name=$name req=$reqId step=load_m3u8_done ok=true via=direct_fallback")
+                pl(reqId, "load_m3u8_done", ok = true, extra = mapOf("via" to "direct_fallback"))
                 true
             }
         } catch (e: Exception) {
-            println("DEBUG_EXTRACTOR name=$name req=$reqId step=extract_exception ok=false e=${trunc(e.message)}")
+            pl(reqId, "extract_exception", ok = false, msg = e.message ?: "null")
             e.printStackTrace()
             false
         }
@@ -212,31 +225,34 @@ class BunnyPoorCdn : ExtractorApi() {
         if (cookies.isNotEmpty()) {
             headers["Cookie"] = cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
         }
-        println("DEBUG_EXTRACTOR name=$name req=$reqId step=m3u8_headers_ready ok=true cookieCount=${cookies.size}")
+        pl(reqId, "m3u8_headers_ready", ok = true, extra = mapOf("cookieCount" to cookies.size))
 
-        // 핵심: 실제로 index.m3u8에서 뭐가 내려오는지 먼저 덤프
+        // m3u8 본문 덤프(원인 확정용)
         try {
-            println("DEBUG_EXTRACTOR name=$name req=$reqId step=m3u8_prefetch_begin ok=true url=${trunc(url)}")
+            pl(reqId, "m3u8_prefetch_begin", ok = true, extra = mapOf("url" to url))
             val pre = app.get(url, headers = headers)
             val body = pre.text
             val firstLine = body.lineSequence().firstOrNull() ?: ""
-            println("DEBUG_EXTRACTOR name=$name req=$reqId step=m3u8_prefetch_ok ok=true finalUrl=${trunc(pre.url)} len=${body.length}")
-            println("DEBUG_EXTRACTOR name=$name req=$reqId step=m3u8_prefetch_flags ok=true hasEXTM3U=${body.contains(\"#EXTM3U\")} firstLine=${trunc(firstLine, 260)}")
-            println("DEBUG_EXTRACTOR name=$name req=$reqId step=m3u8_prefetch_head ok=true head=${trunc(head(body, 300), 340)}")
+            pl(reqId, "m3u8_prefetch_ok", ok = true, extra = mapOf("finalUrl" to pre.url, "len" to body.length))
+            pl(reqId, "m3u8_prefetch_flags", ok = true, extra = mapOf(
+                "hasEXTM3U" to body.contains("#EXTM3U"),
+                "firstLine" to firstLine
+            ))
+            pl(reqId, "m3u8_prefetch_head", ok = true, extra = mapOf("head" to head(body, 300)))
         } catch (e: Exception) {
-            println("DEBUG_EXTRACTOR name=$name req=$reqId step=m3u8_prefetch_exception ok=false e=${trunc(e.message)}")
+            pl(reqId, "m3u8_prefetch_exception", ok = false, msg = e.message ?: "null")
         }
 
-        println("DEBUG_EXTRACTOR name=$name req=$reqId step=m3u8_generate_begin ok=true url=${trunc(url)} referer=${trunc(referer)}")
+        pl(reqId, "m3u8_generate_begin", ok = true, extra = mapOf("url" to url, "referer" to referer))
         val links = M3u8Helper.generateM3u8(
             name,
             url,
             referer,
             headers = headers
         )
-        println("DEBUG_EXTRACTOR name=$name req=$reqId step=m3u8_generate_ok ok=true linkCount=${links.size}")
+        pl(reqId, "m3u8_generate_ok", ok = true, extra = mapOf("linkCount" to links.size))
 
         links.forEach(callback)
-        println("DEBUG_EXTRACTOR name=$name req=$reqId step=m3u8_callback_done ok=true emitted=${links.size}")
+        pl(reqId, "m3u8_callback_done", ok = true, extra = mapOf("emitted" to links.size))
     }
 }
