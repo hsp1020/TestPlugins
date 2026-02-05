@@ -67,7 +67,6 @@ class TVHot : MainAPI() {
         doc.select("section").forEach { section ->
             var title = section.selectFirst("h2")?.text()?.replace("전체보기", "")?.trim() ?: "추천"
             
-            // 요청사항: 메인화면 타이틀 변경
             if (title.contains("무료 다시보기 순위를 확인")) {
                 title = "다시보기 순위"
             }
@@ -89,25 +88,19 @@ class TVHot : MainAPI() {
         
         // 1. 제목 추출 및 원제 처리
         val h3Element = doc.selectFirst("#bo_v_movinfo h3")
-        var title = h3Element?.ownText()?.trim() // <h3> 바로 밑의 텍스트만 가져옴 (span 제외)
-        val oriTitleFull = h3Element?.selectFirst(".ori_title")?.text()?.trim() // 원제 : ...
+        var title = h3Element?.ownText()?.trim()
+        val oriTitleFull = h3Element?.selectFirst(".ori_title")?.text()?.trim()
 
         if (title.isNullOrEmpty()) {
-            // 백업 로직
             title = doc.selectFirst("h1#bo_v_title")?.text()?.trim() 
                 ?: doc.selectFirst(".bo_v_tit")?.text()?.trim() 
                 ?: "Unknown"
         }
         
-        // 불필요한 접미사 제거
         title = title!!.replace(Regex("\\s*\\d+\\s*[화회부].*"), "").replace(" 다시보기", "").trim()
 
-        // 원제 처리 로직
         if (!oriTitleFull.isNullOrEmpty()) {
-            // "원제 :" 제거
             val pureOriTitle = oriTitleFull.replace("원제 :", "").replace("원제:", "").trim()
-            
-            // 한국어가 포함되어 있는지 확인 (정규식: 한글 범위)
             val hasKorean = pureOriTitle.contains(Regex("[가-힣]"))
             
             if (!hasKorean && pureOriTitle.isNotEmpty()) {
@@ -122,36 +115,36 @@ class TVHot : MainAPI() {
 
         // 3. 상세 정보 구성 (국가 / 언어 / 개봉년도 / 장르)
         val infoList = doc.select(".bo_v_info dd").map { it.text().trim() }
-        
-        // 장르 (트레일러, 버튼 제외)
         val genreList = doc.select(".ctgs dd a").filter { 
             val txt = it.text()
             !txt.contains("트레일러") && !it.hasClass("btn_watch") 
         }.map { it.text().trim() }
 
-        // 구분자 " / " 로 합치기
         val metaString = (infoList + genreList).joinToString(" / ")
 
         // 줄거리 본문
-        val story = doc.selectFirst(".story")?.text()?.trim() 
+        var story = doc.selectFirst(".story")?.text()?.trim() 
             ?: doc.selectFirst(".tmdb-overview")?.text()?.trim()
             ?: doc.selectFirst("meta[name='description']")?.attr("content") 
             ?: ""
 
-        // 최종 설명: 메타정보 + 줄바꿈 + 줄거리
-        val finalPlot = "$metaString\n\n$story".trim()
+        // [요청사항 반영] "다시보기"와 "무료" 키워드가 모두 있으면 줄거리 내용을 비움 (SEO 텍스트 제거)
+        if (story.contains("다시보기") && story.contains("무료")) {
+            story = ""
+        }
+
+        // 최종 설명: 메타정보 + 줄바꿈 + 줄거리 (줄거리가 없으면 메타정보만 표시)
+        val finalPlot = if (story.isNotEmpty()) "$metaString\n\n$story".trim() else metaString
 
         // 4. 에피소드 리스트 추출
         val episodes = doc.select("#other_list ul li").mapNotNull { li ->
             val aTag = li.selectFirst("a.ep-link") ?: return@mapNotNull null
             val href = fixUrl(aTag.attr("href"))
             
-            // 에피소드 제목
             val epName = li.selectFirst(".clamp")?.text()?.trim() 
                 ?: li.selectFirst("a.title")?.text()?.trim() 
                 ?: "Episode"
             
-            // 썸네일 (div.img-container img -> data-src or src)
             val thumbImg = li.selectFirst(".img-container img")
             val epThumb = thumbImg?.attr("data-src")?.ifEmpty { null }
                 ?: thumbImg?.attr("src")?.ifEmpty { null }
@@ -190,20 +183,17 @@ class TVHot : MainAPI() {
     ): Boolean {
         val doc = app.get(data, headers = commonHeaders).document
         
-        // 1. Iframe에서 플레이어 주소 추출
         val iframe = doc.selectFirst("iframe#view_iframe")
         val playerUrl = iframe?.attr("data-player1")?.ifEmpty { null }
             ?: iframe?.attr("data-player2")?.ifEmpty { null }
             ?: iframe?.attr("src")
         
-        // 2. Extractor (BunnyPoorCdn) 호출
         if (playerUrl != null) {
             val finalPlayerUrl = fixUrl(playerUrl).replace("&amp;", "&")
             val extracted = BunnyPoorCdn().extract(finalPlayerUrl, data, subtitleCallback, callback)
             if (extracted) return true
         }
 
-        // 3. Extractor 실패 시 백업: 페이지 내 썸네일에서 경로 유추
         val videoThumbElements = doc.select("img[src*='/v/'], img[data-src*='/v/']")
         for (el in videoThumbElements) {
             val src = el.attr("src").ifEmpty { el.attr("data-src") }
