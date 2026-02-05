@@ -4,8 +4,8 @@ import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.M3u8Helper
 import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.M3u8Helper
 
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "BunnyPoorCdn"
@@ -35,7 +35,6 @@ class BunnyPoorCdn : ExtractorApi() {
         println("DEBUG_EXTRACTOR name=$name $tag $msg")
     }
 
-    // ExtractorApi 기본 메서드
     override suspend fun getUrl(
         url: String,
         referer: String?,
@@ -45,7 +44,6 @@ class BunnyPoorCdn : ExtractorApi() {
         extract(url, referer, subtitleCallback, callback)
     }
 
-    // TVHot.kt에서 호출하는 메서드 (반환값 Boolean 필수)
     suspend fun extract(
         url: String,
         referer: String?,
@@ -59,7 +57,7 @@ class BunnyPoorCdn : ExtractorApi() {
         var cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = referer?.replace(Regex("[\\r\\n\\s]"), "")?.trim()
 
-        // 1. Refetch Logic
+        // 1. Refetch Logic (iframe URL 찾기)
         if (!cleanUrl.contains("v/f/") && !cleanUrl.contains("v/e/") && cleanReferer != null) {
             pl("req=$reqId step=refetch_start", "msg=URL seems incomplete, fetching referer")
             try {
@@ -80,10 +78,32 @@ class BunnyPoorCdn : ExtractorApi() {
             }
         }
 
+        // 2. 비디오 경로 찾기 (/v/f/ID) - URL에 없으면 페이지 방문
+        var videoPathMatch = Regex("""(/v/[a-z]/)([a-z0-9]{32,50})""").find(cleanUrl)
+        
+        // URL에서 못 찾았으면, 해당 페이지를 방문해서 소스를 뒤짐
+        if (videoPathMatch == null) {
+            pl("req=$reqId step=visit_start", "msg=Path not in URL, visiting page")
+            try {
+                // Referer는 tvmon.site로 설정하여 iframe 페이지 로드
+                val res = app.get(cleanUrl, headers = browserHeaders.toMutableMap().apply {
+                    put("Referer", cleanReferer ?: "https://tvmon.site/")
+                })
+                val text = res.text
+                pl("req=$reqId step=visit_done", "len=${text.length}")
+                
+                // 소스 내에서 경로 찾기
+                videoPathMatch = Regex("""(/v/[a-z]/)([a-z0-9]{32,50})""").find(text)
+                if (videoPathMatch != null) {
+                    pl("req=$reqId step=path_found_in_source", "path=${videoPathMatch.value}")
+                }
+            } catch (e: Exception) {
+                 pl("req=$reqId step=visit_error", "msg=${e.message}")
+            }
+        }
+
         val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
         val domain = "https://every$serverNum.poorcdn.com"
-        
-        val videoPathMatch = Regex("""(/v/[a-z]/)([a-z0-9]{32,50})""").find(cleanUrl)
         
         if (videoPathMatch != null) {
             val path = videoPathMatch.groupValues[1]
@@ -92,7 +112,7 @@ class BunnyPoorCdn : ExtractorApi() {
             val tokenUrl = "$domain$path$id/c.html"
             val directM3u8 = "$domain$path$id/index.m3u8"
             
-            pl("req=$reqId step=path_found", "tokenUrl=$tokenUrl")
+            pl("req=$reqId step=path_final", "tokenUrl=$tokenUrl")
 
             try {
                 val tokenRes = app.get(tokenUrl, referer = cleanUrl, headers = browserHeaders)
@@ -117,10 +137,10 @@ class BunnyPoorCdn : ExtractorApi() {
             } catch (e: Exception) {
                 pl("req=$reqId step=error", "msg=${e.message}")
                 invokeLink(directM3u8, cleanUrl, emptyMap(), callback)
-                return true // 에러나도 시도는 했으므로 true 반환
+                return true
             }
         } else {
-            pl("req=$reqId step=fail", "msg=No video path found in URL")
+            pl("req=$reqId step=fail", "msg=No video path found anywhere")
             return false
         }
     }
