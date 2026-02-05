@@ -14,14 +14,11 @@ class BunnyPoorCdn : ExtractorApi() {
 
     private val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
-    private val browserHeaders = mapOf(
+    // [수정] Origin 제거, 최소한의 헤더만 사용
+    private val baseHeaders = mapOf(
         "User-Agent" to USER_AGENT,
         "Accept" to "*/*",
-        "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Origin" to "https://player.bunny-frame.online",
-        "Sec-Fetch-Dest" to "empty",
-        "Sec-Fetch-Mode" to "cors",
-        "Sec-Fetch-Site" to "cross-site",
+        "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
     )
 
     private val tvMonHeaders = mapOf(
@@ -54,24 +51,26 @@ class BunnyPoorCdn : ExtractorApi() {
         val reqId = System.currentTimeMillis().toDouble()
         pl("req=$reqId step=start", "ok=true url=$url referer=$referer")
 
-        // [중요] 초기 URL 정제 (줄바꿈 제거 필수)
         var cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = referer?.replace(Regex("[\\r\\n\\s]"), "")?.trim()
+        
+        // 쿠키 저장소 (모든 요청에서 공유)
+        val cookieJar = mutableMapOf<String, String>()
 
         // 1. Refetch Logic
         if (!cleanUrl.contains("v/f/") && !cleanUrl.contains("v/e/") && cleanReferer != null) {
             pl("req=$reqId step=refetch_start", "msg=URL seems incomplete, fetching referer")
             try {
                 val refRes = app.get(cleanReferer, headers = tvMonHeaders)
-                val refText = refRes.text
+                // 여기서 얻은 쿠키도 저장
+                cookieJar.putAll(refRes.cookies)
                 
+                val refText = refRes.text
                 val iframeMatch = Regex("""src=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refText)
                     ?: Regex("""data-player\d*=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refText)
                 
                 if (iframeMatch != null) {
-                    val rawUrl = iframeMatch.groupValues[1]
-                    // [핵심] 긁어온 URL에서 줄바꿈 문자 제거
-                    cleanUrl = rawUrl.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
+                    cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
                     pl("req=$reqId step=iframe_found", "newUrl=$cleanUrl")
                 }
             } catch (e: Exception) {
@@ -79,80 +78,84 @@ class BunnyPoorCdn : ExtractorApi() {
             }
         }
 
-        // 2. Visit Logic
-        var videoPathMatch = Regex("""(/v/[a-z]/)([a-z0-9]{32,50})""").find(cleanUrl)
-        
-        if (videoPathMatch == null) {
-            pl("req=$reqId step=visit_start", "msg=Path not in URL, visiting page")
-            try {
-                // Visit 할 때도 Referer는 tvmon.site
-                val res = app.get(cleanUrl, headers = browserHeaders.toMutableMap().apply {
-                    put("Referer", cleanReferer ?: "https://tvmon.site/")
-                })
-                val text = res.text
-                pl("req=$reqId step=visit_done", "len=${text.length}")
-                
-                videoPathMatch = Regex("""(/v/[a-z]/)([a-z0-9]{32,50})""").find(text)
-                if (videoPathMatch != null) {
-                    pl("req=$reqId step=path_found_in_source", "path=${videoPathMatch.value}")
-                }
-            } catch (e: Exception) {
-                 pl("req=$reqId step=visit_error", "msg=${e.message}")
+        // 2. Visit Logic (쿠키 획득 목적 포함)
+        // 무조건 한 번 방문해서 쿠키를 구워야 함 (Cloudflare 등)
+        pl("req=$reqId step=visit_start", "msg=Visiting player page to get cookies")
+        try {
+            val visitHeaders = baseHeaders.toMutableMap().apply {
+                put("Referer", cleanReferer ?: "https://tvmon.site/")
             }
-        }
-
-        val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
-        val domain = "https://every$serverNum.poorcdn.com"
-        
-        if (videoPathMatch != null) {
-            val path = videoPathMatch.groupValues[1]
-            val id = videoPathMatch.groupValues[2]
+            // 쿠키 적용
+            val res = app.get(cleanUrl, headers = visitHeaders, cookies = cookieJar)
+            cookieJar.putAll(res.cookies) // 쿠키 업데이트
             
-            val tokenUrl = "$domain$path$id/c.html"
-            val directM3u8 = "$domain$path$id/index.m3u8"
+            val text = res.text
+            pl("req=$reqId step=visit_done", "len=${text.length}")
             
-            pl("req=$reqId step=path_final", "tokenUrl=$tokenUrl")
+            // 경로 찾기
+            val videoPathMatch = Regex("""(/v/[a-z]/)([a-z0-9]{32,50})""").find(text) 
+                ?: Regex("""(/v/[a-z]/)([a-z0-9]{32,50})""").find(cleanUrl) // URL에도 있을 수 있음
 
-            try {
-                // Referer: 반드시 플레이어 URL이어야 함 (줄바꿈 제거된 cleanUrl)
-                val safeReferer = cleanUrl.replace(Regex("[\\r\\n\\s]"), "").trim()
+            if (videoPathMatch != null) {
+                val path = videoPathMatch.groupValues[1]
+                val id = videoPathMatch.groupValues[2]
                 
-                val tokenRes = app.get(tokenUrl, referer = safeReferer, headers = browserHeaders)
+                val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
+                val domain = "https://every$serverNum.poorcdn.com"
                 
-                val cookieMap = tokenRes.cookies.toMutableMap()
+                val tokenUrl = "$domain$path$id/c.html"
+                val directM3u8 = "$domain$path$id/index.m3u8"
                 
-                val jsCookieRegex = Regex("""document\.cookie\s*=\s*["']([^=]+)=([^; "']+)""")
-                jsCookieRegex.findAll(tokenRes.text).forEach { match ->
-                    cookieMap[match.groupValues[1]] = match.groupValues[2]
-                }
+                pl("req=$reqId step=path_final", "tokenUrl=$tokenUrl")
                 
-                // #EXTM3U 체크
-                if (tokenRes.text.trim().startsWith("#EXTM3U")) {
-                    pl("req=$reqId step=direct_m3u8_content", "msg=Content is M3U8")
-                    invokeLink(tokenUrl, safeReferer, cookieMap, callback)
+                // 3. Token 요청 (쿠키 필수!)
+                try {
+                    val tokenHeaders = baseHeaders.toMutableMap().apply {
+                        put("Referer", cleanUrl) // Referer는 플레이어 주소
+                        put("Origin", "https://player.bunny-frame.online") // 여기선 Origin 필요할 수도
+                    }
+                    
+                    val tokenRes = app.get(tokenUrl, headers = tokenHeaders, cookies = cookieJar)
+                    cookieJar.putAll(tokenRes.cookies)
+                    
+                    // JS 쿠키 파싱
+                    val jsCookieRegex = Regex("""document\.cookie\s*=\s*["']([^=]+)=([^; "']+)""")
+                    jsCookieRegex.findAll(tokenRes.text).forEach { match ->
+                        cookieJar[match.groupValues[1]] = match.groupValues[2]
+                    }
+                    
+                    // #EXTM3U 체크
+                    if (tokenRes.text.trim().startsWith("#EXTM3U")) {
+                        pl("req=$reqId step=direct_m3u8_content", "msg=Content is M3U8")
+                        invokeLink(tokenUrl, cleanUrl, cookieJar, callback)
+                        return true
+                    }
+
+                    val realM3u8 = extractM3u8FromToken(tokenRes.text)
+                    
+                    if (realM3u8 != null) {
+                        val finalM3u8 = if (realM3u8.startsWith("http")) realM3u8 else "$domain$realM3u8"
+                        pl("req=$reqId step=success", "m3u8=$finalM3u8")
+                        invokeLink(finalM3u8, cleanUrl, cookieJar, callback)
+                    } else {
+                        pl("req=$reqId step=token_parse_fail", "DUMP=${tokenRes.text.take(500)}")
+                        invokeLink(directM3u8, cleanUrl, cookieJar, callback)
+                    }
+                    return true
+
+                } catch (e: Exception) {
+                    pl("req=$reqId step=token_error", "msg=${e.message}")
+                    invokeLink(directM3u8, cleanUrl, cookieJar, callback)
                     return true
                 }
-
-                val realM3u8 = extractM3u8FromToken(tokenRes.text)
-                
-                if (realM3u8 != null) {
-                    val finalM3u8 = if (realM3u8.startsWith("http")) realM3u8 else "$domain$realM3u8"
-                    pl("req=$reqId step=success", "m3u8=$finalM3u8")
-                    invokeLink(finalM3u8, safeReferer, cookieMap, callback)
-                } else {
-                    pl("req=$reqId step=token_parse_fail", "DUMP=${tokenRes.text.take(500)}")
-                    // Fallback
-                    invokeLink(directM3u8, safeReferer, cookieMap, callback)
-                }
-                return true
-            } catch (e: Exception) {
-                pl("req=$reqId step=error", "msg=${e.message}")
-                invokeLink(directM3u8, cleanUrl, emptyMap(), callback)
-                return true
+            } else {
+                pl("req=$reqId step=fail", "msg=No video path found")
+                return false
             }
-        } else {
-            pl("req=$reqId step=fail", "msg=No video path found")
-            return false
+
+        } catch (e: Exception) {
+             pl("req=$reqId step=visit_error", "msg=${e.message}")
+             return false
         }
     }
 
@@ -186,7 +189,7 @@ class BunnyPoorCdn : ExtractorApi() {
             name,
             cleanM3u8,
             referer,
-            headers = browserHeaders.toMutableMap().apply {
+            headers = baseHeaders.toMutableMap().apply {
                 if (cookieString.isNotEmpty()) {
                     put("Cookie", cookieString)
                 }
