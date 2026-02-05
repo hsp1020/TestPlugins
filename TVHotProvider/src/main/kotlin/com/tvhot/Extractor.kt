@@ -4,23 +4,15 @@ import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.M3u8Helper
+import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.network.WebViewResolver 
 import android.webkit.CookieManager
-import com.lagradost.cloudstream3.utils.suspendSafeApiCall
-import android.webkit.WebViewClient
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import android.webkit.WebView
+import java.net.URI
 
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "BunnyPoorCdn"
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
-
-    private fun pl(tag: String, msg: String) {
-        println("DEBUG_EXTRACTOR name=$name $tag $msg")
-    }
 
     override suspend fun getUrl(
         url: String,
@@ -28,23 +20,12 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        extract(url, referer, subtitleCallback, callback)
-    }
-
-    suspend fun extract(
-        url: String,
-        referer: String?,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit,
-        thumbnailHint: String? = null,
-    ): Boolean {
         val reqId = System.currentTimeMillis().toDouble()
-        pl("req=$reqId step=start", "url=$url")
-
+        
         var cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = referer?.replace(Regex("[\\r\\n\\s]"), "")?.trim() ?: "https://tvmon.site/"
 
-        // 1. Refetch (iframe src 찾기)
+        // 1. Iframe 주소 따기 (Refetch)
         if (!cleanUrl.contains("v/f/") && !cleanUrl.contains("v/e/")) {
             try {
                 val refRes = app.get(cleanReferer)
@@ -74,86 +55,94 @@ class BunnyPoorCdn : ExtractorApi() {
             val domain = "https://every$serverNum.poorcdn.com"
             val tokenUrl = "$domain$path$id/c.html"
             
-            pl("req=$reqId step=webview_hack_start", "tokenUrl=$tokenUrl")
+            // [성공했던 02:19 설정 복구]
+            val resolver = WebViewResolver(
+                interceptUrl = Regex("""(c\.html|index\.m3u8)"""),
+                additionalUrls = listOf(Regex("""\.m3u8""")),
+                useOkhttp = false
+            )
 
-            // [최후의 수단] suspendSafeApiCall로 WebView 직접 제어
-            // OkHttp 간섭 없이 순수 WebView로 로드 -> 403 회피 확률 높음
-            val capturedUrl = suspendSafeApiCall<String?> {
-                val webView = WebView(it)
-                webView.settings.javaScriptEnabled = true
-                webView.settings.domStorageEnabled = true
-                webView.settings.userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-                
-                var result: String? = null
-                
-                webView.webViewClient = object : WebViewClient() {
-                    override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
-                        val reqUrl = request.url.toString()
-                        
-                        // 1. m3u8 요청 감지
-                        if (reqUrl.contains(".m3u8")) {
-                            pl("req=$reqId step=intercept", "found=$reqUrl")
-                            result = reqUrl
-                            return null // 로드 계속 진행 (쿠키 생성을 위해)
-                        }
-                        
-                        // 2. c.html 요청 감지 (여기서 리다이렉트나 내용 확인)
-                        if (reqUrl.contains("c.html")) {
-                             // 그냥 통과시킴
-                        }
-                        
-                        return super.shouldInterceptRequest(view, request)
-                    }
+            try {
+                // [성공했던 02:19 요청]
+                val response = app.get(
+                    url = tokenUrl, 
+                    headers = mapOf("Referer" to cleanUrl),
+                    interceptor = resolver
+                )
 
-                    override fun onPageFinished(view: WebView?, url: String?) {
-                        super.onPageFinished(view, url)
-                        // 페이지 로드 완료 시 URL 확인
-                        val currentUrl = view?.url ?: ""
-                        if (currentUrl.contains(".m3u8")) {
-                             result = currentUrl
-                        }
-                        
-                        // 만약 아직 못 찾았다면, 강제로 index.m3u8로 추측해서 리턴할 수도 있음
-                        if (result == null && currentUrl.contains("c.html")) {
-                             // c.html 로드 완료 -> 내용은 못 보지만 쿠키는 구워졌을 것임.
-                             // 강제로 주소 변환
-                             result = tokenUrl.replace("c.html", "index.m3u8")
-                        }
-                    }
-                }
-                
-                val headers = mapOf("Referer" to cleanUrl)
-                webView.loadUrl(tokenUrl, headers)
-                
-                // 15초 대기
-                val startTime = System.currentTimeMillis()
-                while (result == null && System.currentTimeMillis() - startTime < 15000) {
-                    Thread.sleep(200)
-                }
-                
-                result
-            }
-
-            if (capturedUrl != null) {
-                pl("req=$reqId step=success", "url=$capturedUrl")
-                
-                // 쿠키 가져오기
-                val cookie = CookieManager.getInstance().getCookie(capturedUrl) 
-                           ?: CookieManager.getInstance().getCookie(tokenUrl) 
-                           ?: ""
-                           
+                // 쿠키 줍기
+                val cookie = CookieManager.getInstance().getCookie(response.url) ?: ""
                 val headers = mapOf(
                     "Referer" to cleanUrl,
                     "Cookie" to cookie,
                     "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
                 )
 
-                M3u8Helper.generateM3u8(name, capturedUrl, cleanUrl, headers = headers).forEach(callback)
-                return true
-            } else {
-                pl("req=$reqId step=fail", "timeout or blocked")
+                // 3. 내용이 M3U8이면 -> M3u8Helper 쓰지 말고 '직접' 파싱
+                if (response.text.contains("#EXTM3U")) {
+                    val m3u8Content = response.text
+                    val baseUrl = response.url.substringBeforeLast("/") // .../v/f/{id}
+                    
+                    // (1) Master Playlist인 경우 (해상도별 분기)
+                    if (m3u8Content.contains("#EXT-X-STREAM-INF")) {
+                        Regex("""#EXT-X-STREAM-INF:.*?RESOLUTION=(\d+x\d+).*?\n(.*?\.m3u8)""").findAll(m3u8Content).forEach { match ->
+                            val res = match.groupValues[1]
+                            val subUrl = match.groupValues[2].trim()
+                            val fullUrl = if (subUrl.startsWith("http")) subUrl else "$baseUrl/$subUrl"
+                            
+                            callback(
+                                ExtractorLink(
+                                    name,
+                                    name,
+                                    fullUrl,
+                                    cleanUrl,
+                                    Qualities.Unknown.value,
+                                    type = 1, // M3U8 type
+                                    headers = headers
+                                )
+                            )
+                        }
+                    } 
+                    // (2) 단일 Stream인 경우
+                    else {
+                        // URL 확장자만 .m3u8로 싹 바꿔서 던져줌 (플레이어 인식용)
+                        val finalUrl = if (response.url.contains(".m3u8")) response.url 
+                                       else tokenUrl.replace("c.html", "index.m3u8")
+                        
+                        callback(
+                            ExtractorLink(
+                                name,
+                                name,
+                                finalUrl,
+                                cleanUrl,
+                                Qualities.Unknown.value,
+                                type = 1,
+                                headers = headers
+                            )
+                        )
+                    }
+                    return
+                }
+                
+                // 만약 URL 자체가 m3u8로 리다이렉트 되었는데 내용은 못 읽은 경우 (드문 케이스)
+                if (response.url.contains(".m3u8")) {
+                     callback(
+                        ExtractorLink(
+                            name,
+                            name,
+                            response.url,
+                            cleanUrl,
+                            Qualities.Unknown.value,
+                            type = 1,
+                            headers = headers
+                        )
+                    )
+                    return
+                }
+
+            } catch (e: Exception) {
+                // Fail silently
             }
         }
-        return false
     }
 }
