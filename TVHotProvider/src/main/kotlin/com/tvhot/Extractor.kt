@@ -6,12 +6,15 @@ import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.M3u8Helper
 import com.lagradost.cloudstream3.network.WebViewResolver 
-import android.webkit.CookieManager // 쿠키 매니저 추가
+import android.webkit.CookieManager
 
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "BunnyPoorCdn"
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
+
+    // 성공했던 윈도우 UA 사용
+    private val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
     private fun pl(tag: String, msg: String) {
         println("DEBUG_EXTRACTOR name=$name $tag $msg")
@@ -47,7 +50,6 @@ class BunnyPoorCdn : ExtractorApi() {
                     ?: Regex("""data-player\d*=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
                 if (iframeMatch != null) {
                     cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
-                    pl("req=$reqId step=iframe_found", "newUrl=$cleanUrl")
                 }
             } catch (e: Exception) {}
         }
@@ -56,6 +58,7 @@ class BunnyPoorCdn : ExtractorApi() {
         var path = ""
         var id = ""
         try {
+            // 여기서는 모바일 UA를 쓰는 게 나을 수도 있지만, 일단 통일
             val res = app.get(cleanUrl, headers = mapOf("Referer" to cleanReferer))
             val text = res.text
             val videoPathMatch = Regex("""(/v/[a-z]/)([a-z0-9]{32,50})""").find(text) 
@@ -73,75 +76,61 @@ class BunnyPoorCdn : ExtractorApi() {
             
             pl("req=$reqId step=webview_start", "tokenUrl=$tokenUrl")
 
+            // [수정] 정규식 단순화 (m3u8만 찾음)
             val resolver = WebViewResolver(
                 interceptUrl = Regex("""(c\.html|index\.m3u8)"""),
                 additionalUrls = listOf(Regex("""\.m3u8""")),
                 useOkhttp = false,
-                timeout = 15_000L
+                timeout = 20_000L // 타임아웃 20초로 증가
             )
 
             try {
+                // [수정] 헤더에 User-Agent 명시
+                val headers = mapOf(
+                    "Referer" to cleanUrl,
+                    "User-Agent" to USER_AGENT
+                )
+
                 val response = app.get(
                     url = tokenUrl, 
-                    headers = mapOf("Referer" to cleanUrl),
+                    headers = headers,
                     interceptor = resolver
                 )
                 
-                pl("req=$reqId step=webview_done", "url=${response.url}")
-
-                // WebView 쿠키 가져오기 (ExoPlayer용)
+                pl("req=$reqId step=webview_done", "code=${response.code} url=${response.url}")
+                
+                // 쿠키 획득
                 val cookie = CookieManager.getInstance().getCookie(response.url) ?: ""
-                val headersWithCookie = mapOf(
+                val m3u8Headers = mapOf(
                     "Referer" to cleanUrl,
                     "Cookie" to cookie,
-                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+                    "User-Agent" to USER_AGENT
                 )
 
-                // 1. M3U8 URL 직접 포착
+                // 1. URL이 m3u8인 경우 (리다이렉트 됨)
                 if (response.url.contains(".m3u8")) {
                      pl("req=$reqId step=success", "Captured URL")
-                     M3u8Helper.generateM3u8(name, response.url, cleanUrl, headers = headersWithCookie).forEach(callback)
+                     M3u8Helper.generateM3u8(name, response.url, cleanUrl, headers = m3u8Headers).forEach(callback)
                      return true
                 }
                 
-                // 2. 내용이 M3U8
-                if (response.text.contains("#EXTM3U")) {
+                // 2. 내용이 M3U8인 경우
+                val text = response.text
+                if (text.contains("#EXTM3U")) {
                      pl("req=$reqId step=success", "Content is M3U8")
-                     // c.html 대신 index.m3u8 사용 (확장자 보정)
-                     val directUrl = tokenUrl.replace("c.html", "index.m3u8")
-                     M3u8Helper.generateM3u8(name, directUrl, cleanUrl, headers = headersWithCookie).forEach(callback)
+                     // [중요] tokenUrl이 아니라 response.url을 기반으로 교체하거나
+                     // 그냥 안전하게 index.m3u8 주소 생성
+                     val directUrl = "$domain$path$id/index.m3u8"
+                     M3u8Helper.generateM3u8(name, directUrl, cleanUrl, headers = m3u8Headers).forEach(callback)
                      return true
                 }
 
-                // 3. 내용에서 추출
-                val realM3u8 = extractM3u8FromToken(response.text)
-                if (realM3u8 != null) {
-                     val finalM3u8 = if (realM3u8.startsWith("http")) realM3u8 else "$domain$realM3u8"
-                     pl("req=$reqId step=success", "Extracted: $finalM3u8")
-                     M3u8Helper.generateM3u8(name, finalM3u8, cleanUrl, headers = headersWithCookie).forEach(callback)
-                     return true
-                }
-
-                pl("req=$reqId step=webview_fail", "len=${response.text.length}")
+                pl("req=$reqId step=webview_fail", "len=${text.length} dump=${text.take(100)}")
 
             } catch (e: Exception) {
                 pl("req=$reqId step=webview_error", "msg=${e.message}")
             }
         }
         return false
-    }
-
-    private fun extractM3u8FromToken(tokenText: String): String? {
-        val patterns = listOf(
-            Regex("""["']([^"']+\.m3u8\?[^"']+)["']"""),
-            Regex("""["']([^"']+\.m3u8)["']"""),
-            Regex("""location\.href\s*=\s*["']([^"']+)["']"""),
-            Regex("""src\s*:\s*["']([^"']+)["']""")
-        )
-        for (pattern in patterns) {
-            val match = pattern.find(tokenText)
-            if (match != null) return match.groupValues[1]
-        }
-        return null
     }
 }
