@@ -122,7 +122,7 @@ class TVHot : MainAPI() {
 
                 // 장르 포맷팅: "장르 : 드라마, 코미디" 형식으로 변경
                 val genreFormatted = if (genreList.isNotEmpty()) {
-                        "장르 : ${genreList.joinToString(", ")}"
+                        "장르: ${genreList.joinToString(", ")}"
                 } else {
                         ""
                 }
@@ -150,7 +150,7 @@ class TVHot : MainAPI() {
                 val finalPlot = if (story == "다시보기") {
                         "다시보기"
                 } else {
-                        "$metaString / 스토리 : $story".trim()
+                        "$metaString / 스토리: $story".trim()
                 }
                 
                 val episodes = doc.select("#other_list ul li").mapNotNull { li ->
