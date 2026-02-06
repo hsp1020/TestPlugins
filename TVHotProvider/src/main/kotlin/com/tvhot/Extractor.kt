@@ -8,15 +8,14 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.network.WebViewResolver 
-import okhttp3.Interceptor
-import okhttp3.Response
+import java.net.URI
 
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "BunnyPoorCdn"
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
 
-    // 사용자 로그 기반 (Chrome 144는 아니지만 최신 안정 버전으로 맞춤)
+    // [표준] Windows Chrome 121 버전 (안정성 확보)
     private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
     override suspend fun getUrl(
@@ -35,7 +34,6 @@ class BunnyPoorCdn : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
         thumbnailHint: String? = null,
     ): Boolean {
-        // cleanUrl = iframe 주소 (https://player.bunny-frame.online/...)
         var cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = referer?.replace(Regex("[\\r\\n\\s]"), "")?.trim() ?: "https://tvmon.site/"
 
@@ -51,61 +49,60 @@ class BunnyPoorCdn : ExtractorApi() {
             } catch (e: Exception) {}
         }
 
-        // [핵심 변경]
-        // 우리가 캡처하고 싶은 건 "c.html?token=..." 입니다.
-        // 이걸 얻으려면 WebView는 "iframe 주소(cleanUrl)"를 로딩해야 합니다.
-        
         var capturedUrl: String? = null
 
+        // 2. WebView로 iframe 로딩 -> JS 실행 -> 토큰 URL 낚아채기
         val resolver = WebViewResolver(
-            interceptUrl = Regex("""/c\.html"""), // c.html 요청이 발생하면 낚아채라
+            interceptUrl = Regex("""/c\.html"""), 
             useOkhttp = false,
             timeout = 15000L
         )
         
         try {
-            // [중요] WebView에게 iframe 페이지를 열게 시킴
-            // Referer는 tvmon.site여야 함 (iframe을 부른 곳이니까)
             val requestHeaders = mapOf(
                 "Referer" to "https://tvmon.site/", 
                 "User-Agent" to DESKTOP_UA
             )
 
             val response = app.get(
-                url = cleanUrl, // <-- 여기가 수정됨 (tokenUrl이 아니라 cleanUrl)
+                url = cleanUrl,
                 headers = requestHeaders,
                 interceptor = resolver
             )
             
-            // WebViewResolver가 가로챈 최종 URL 확인
-            // response.url에 token=... 이 포함되어 있어야 성공
+            // 토큰이 포함된 진짜 URL 획득
             if (response.url.contains("/c.html") && response.url.contains("token=")) {
                 capturedUrl = response.url
             }
             
-        } catch (e: Exception) {
-            // 에러가 나더라도 Interceptor가 URL을 캡처했을 수 있음
-            // 하지만 CloudStream 구조상 response 객체를 못 받으면 확인 불가
-            // 로그를 보면 WebViewResolver가 URL을 뱉어내는 방식이므로 response.url에 있을 것임
-        }
+        } catch (e: Exception) {}
 
         if (capturedUrl != null) {
-            // capturedUrl: https://every4.poorcdn.com/.../c.html?token=XXX&expires=YYY
+            // URL: https://every4.poorcdn.com/.../c.html?token=XXX&expires=YYY
             
-            // c.html -> index.m3u8 교체 (뒤에 붙은 ?token=... 파라미터는 그대로 둠!)
+            // c.html -> index.m3u8 (파라미터 유지)
             val m3u8Url = capturedUrl.replace("/c.html", "/index.m3u8")
 
-            // 사용자 로그 기반 헤더 (100% 일치)
+            // [핵심] Fiddler 로그 기반 완벽한 헤더 세트
+            // 쿠키는 제거하고, sec-ch-ua 헤더들을 반드시 포함시킴
             val headers = mapOf(
+                "Host" to URI(m3u8Url).host, // 호스트 헤더 명시 (안전장치)
                 "User-Agent" to DESKTOP_UA,
-                "Referer" to "https://player.bunny-frame.online/",
-                "Origin" to "https://player.bunny-frame.online",
                 "Accept" to "*/*",
-                "Sec-Fetch-Site" to "cross-site",
-                "Sec-Fetch-Mode" to "cors",
-                "Sec-Fetch-Dest" to "empty",
+                "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
                 "Accept-Encoding" to "gzip, deflate, br",
-                "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
+                "Origin" to "https://player.bunny-frame.online",
+                "Referer" to "https://player.bunny-frame.online/",
+                
+                // [누락되었던 핵심 헤더들 - 이게 없으면 520 뜸]
+                "sec-ch-ua" to "\"Not A(Brand\";v=\"99\", \"Google Chrome\";v=\"121\", \"Chromium\";v=\"121\"",
+                "sec-ch-ua-mobile" to "?0",
+                "sec-ch-ua-platform" to "\"Windows\"",
+                
+                "Sec-Fetch-Dest" to "empty",
+                "Sec-Fetch-Mode" to "cors",
+                "Sec-Fetch-Site" to "cross-site",
+                "Connection" to "keep-alive"
             )
             
             callback(
