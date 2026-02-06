@@ -5,7 +5,6 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
-// [필수]
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.network.WebViewResolver 
@@ -15,6 +14,9 @@ class BunnyPoorCdn : ExtractorApi() {
     override val name = "BunnyPoorCdn"
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
+
+    // [중요] 윈도우 UA 상수로 정의 (WebView와 ExoPlayer가 동일하게 사용)
+    private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
     override suspend fun getUrl(
         url: String,
@@ -35,7 +37,7 @@ class BunnyPoorCdn : ExtractorApi() {
         var cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = referer?.replace(Regex("[\\r\\n\\s]"), "")?.trim() ?: "https://tvmon.site/"
 
-        // 1. Refetch & 2. Visit (URL 추출)
+        // 1. Refetch
         if (!cleanUrl.contains("v/f/") && !cleanUrl.contains("v/e/")) {
             try {
                 val refRes = app.get(cleanReferer)
@@ -47,6 +49,7 @@ class BunnyPoorCdn : ExtractorApi() {
             } catch (e: Exception) {}
         }
 
+        // 2. Visit
         var path = ""
         var id = ""
         try {
@@ -64,7 +67,6 @@ class BunnyPoorCdn : ExtractorApi() {
             val domain = "https://every$serverNum.poorcdn.com"
             val tokenUrl = "$domain$path$id/c.html"
 
-            // 타임아웃을 60초로 넉넉하게
             val resolver = WebViewResolver(
                 interceptUrl = Regex("""(c\.html|index\.m3u8)"""),
                 additionalUrls = listOf(Regex("""\.m3u8""")),
@@ -73,20 +75,25 @@ class BunnyPoorCdn : ExtractorApi() {
             )
 
             try {
+                // [중요] WebView 요청 시에도 UA 강제 설정 (User-Agent 헤더 추가)
                 val response = app.get(
                     url = tokenUrl, 
-                    headers = mapOf("Referer" to cleanUrl),
+                    headers = mapOf(
+                        "Referer" to cleanUrl,
+                        "User-Agent" to DESKTOP_UA
+                    ),
                     interceptor = resolver
                 )
 
                 val cookie = CookieManager.getInstance().getCookie(response.url) ?: ""
-                val headers = mapOf(
+                
+                // [중요] ExoPlayer용 헤더에도 UA 강제 설정
+                val playbackHeaders = mapOf(
                     "Referer" to cleanUrl,
                     "Cookie" to cookie,
-                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+                    "User-Agent" to DESKTOP_UA // 여기서 덮어씌움
                 )
 
-                // 성공 케이스 (내용 읽음)
                 if (response.text.contains("#EXTM3U")) {
                     val m3u8Content = response.text
                     val baseUrl = response.url.substringBeforeLast("/")
@@ -99,7 +106,7 @@ class BunnyPoorCdn : ExtractorApi() {
                                 newExtractorLink(name, name, fullUrl, ExtractorLinkType.M3U8) {
                                     this.referer = cleanUrl
                                     this.quality = Qualities.Unknown.value
-                                    this.headers = headers
+                                    this.headers = playbackHeaders // 강제 UA 적용된 헤더
                                 }
                             )
                         }
@@ -109,21 +116,20 @@ class BunnyPoorCdn : ExtractorApi() {
                             newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
                                 this.referer = cleanUrl
                                 this.quality = Qualities.Unknown.value
-                                this.headers = headers
+                                this.headers = playbackHeaders // 강제 UA 적용된 헤더
                             }
                         )
                     }
                     return true
                 }
                 
-                // [필수] 실패 케이스(타임아웃 등)에서도 쿠키만 있으면 강제 진행
                 if (cookie.isNotEmpty()) {
                     val finalUrl = tokenUrl.replace("c.html", "index.m3u8")
                     callback(
                         newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
                             this.referer = cleanUrl
                             this.quality = Qualities.Unknown.value
-                            this.headers = headers
+                            this.headers = playbackHeaders // 강제 UA 적용된 헤더
                         }
                     )
                     return true
