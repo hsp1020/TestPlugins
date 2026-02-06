@@ -3,6 +3,9 @@ package com.tvhot
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.M3u8Helper
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+// newExtractorLink 등 사용을 위한 import
+import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
@@ -96,7 +99,7 @@ class TVHot : MainAPI() {
                 ?: doc.selectFirst(".bo_v_tit")?.text()?.trim()
                 ?: "Unknown"
         }
-        title = title!!.replace(Regex("\\s*\\d+\\s*[화회부].*"), "").replace(" 다시보기", "").trim()
+        title = title!!.replace(Regex("\\\\s*\\\\d+\\\\s*[화회부].*"), "").replace(" 다시보기", "").trim()
 
         if (!oriTitleFull.isNullOrEmpty()) {
             val pureOriTitle = oriTitleFull.replace("원제 :", "").replace("원제:", "").trim()
@@ -126,7 +129,7 @@ class TVHot : MainAPI() {
         if (story.contains("다시보기") && story.contains("무료")) story = "-"
         if (story.isEmpty()) story = "-"
 
-        val finalPlot = "$metaString\n\n$story".trim()
+        val finalPlot = "$metaString\\n\\n$story".trim()
 
         val episodes = doc.select("#other_list ul li").mapNotNull { li ->
             val aTag = li.selectFirst("a.ep-link") ?: return@mapNotNull null
@@ -174,7 +177,7 @@ class TVHot : MainAPI() {
     ): Boolean {
         val doc = app.get(data, headers = commonHeaders).document
 
-        // 1) 썸네일에서 힌트 추출 (우선순위: /v/[a-z]/ 패턴)
+        // 1) 썸네일에서 힌트 추출
         val thumbnailHint = extractThumbnailHint(doc)
 
         // 2) Iframe에서 플레이어 주소 추출
@@ -183,7 +186,7 @@ class TVHot : MainAPI() {
             ?: iframe?.attr("data-player2")?.ifEmpty { null }
             ?: iframe?.attr("src")
 
-        // 3) Extractor 호출 + 썸네일 힌트 전달
+        // 3) Extractor 호출
         if (playerUrl != null) {
             val finalPlayerUrl = fixUrl(playerUrl).replace("&amp;", "&")
             val extracted = BunnyPoorCdn().extract(
@@ -193,13 +196,14 @@ class TVHot : MainAPI() {
                 callback,
                 thumbnailHint
             )
+            // Extractor가 하나라도 찾았으면 true 반환 (백업 로직 실행 안 함)
             if (extracted) return true
         }
 
         // 4) Extractor 실패 시 백업: 썸네일에서 직접 index.m3u8 유추
+        // [중요] 여기서 M3u8Helper 대신 newExtractorLink로 강제 생성
         if (thumbnailHint != null) {
             try {
-                // [변경] a-z 허용
                 val pathRegex = Regex("""/v/[a-z]/[a-zA-Z0-9]+""")
                 val pathMatch = pathRegex.find(thumbnailHint)
 
@@ -207,12 +211,14 @@ class TVHot : MainAPI() {
                     val m3u8Url = thumbnailHint.substringBefore(pathMatch.value) + pathMatch.value + "/index.m3u8"
                     val fixedM3u8Url = m3u8Url.replace(Regex("//v/"), "/v/")
 
-                    M3u8Helper.generateM3u8(
-                        name,
-                        fixedM3u8Url,
-                        mainUrl,
-                        headers = commonHeaders
-                    ).forEach(callback)
+                    // [수정] M3u8Helper 제거 -> 강제 링크 생성
+                    callback(
+                        newExtractorLink(name, name, fixedM3u8Url, ExtractorLinkType.M3U8) {
+                            this.referer = mainUrl
+                            this.quality = Qualities.Unknown.value
+                            this.headers = commonHeaders
+                        }
+                    )
                     return true
                 }
             } catch (e: Exception) {
@@ -224,17 +230,13 @@ class TVHot : MainAPI() {
     }
 
     private fun extractThumbnailHint(doc: Document): String? {
-        // /v/ 포함 이미지 수집
         val videoThumbElements = doc.select("img[src*='/v/'], img[data-src*='/v/']")
-
-        // [변경] /v/한글자/ 패턴 우선 매칭
         val priorityRegex = Regex("""/v/[a-z]/""")
 
         for (el in videoThumbElements) {
             val raw = el.attr("src").ifEmpty { el.attr("data-src") }
             val fixed = fixUrl(raw)
             
-            // 해당 패턴을 가진 이미지가 발견되면 즉시 반환
             if (priorityRegex.containsMatchIn(fixed)) {
                 return fixed
             }
