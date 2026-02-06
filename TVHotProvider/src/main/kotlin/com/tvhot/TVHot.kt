@@ -106,7 +106,7 @@ class TVHot : MainAPI() {
                         val pureOriTitle = oriTitleFull.replace("원제 :", "").replace("원제:", "").trim()
                         val hasKorean = pureOriTitle.contains(Regex("[가-힣]"))
                         if (!hasKorean && pureOriTitle.isNotEmpty()) {
-                                title = "$title"
+                                title = "$title (원제 : $pureOriTitle)"
                         }
                 }
 
