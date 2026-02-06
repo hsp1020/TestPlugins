@@ -15,7 +15,7 @@ class BunnyPoorCdn : ExtractorApi() {
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
 
-    // 윈도우 크롬 UA (Somansa/Every4 통과용)
+    // 소만사/Every4 서버 통과용 윈도우 UA
     private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
     override suspend fun getUrl(
@@ -67,13 +67,13 @@ class BunnyPoorCdn : ExtractorApi() {
             val domain = "https://every$serverNum.poorcdn.com"
             val tokenUrl = "$domain$path$id/c.html"
 
-            // Somansa가 WebView 통신을 방해해서 SSL 에러가 나더라도
-            // 타임아웃까지 버텨서 코드가 'catch' 블록이나 'timeout' 이후로 넘어가게 유도
+            // 소만사 환경에서는 WebView도 SSL 에러가 날 수 있지만
+            // 타임아웃까지 버티면 강제로 링크를 생성해서 내보냄
             val resolver = WebViewResolver(
                 interceptUrl = Regex("""(c\.html|index\.m3u8)"""),
                 additionalUrls = listOf(Regex("""this_will_never_exist_12345""")),
                 useOkhttp = false,
-                timeout = 10000L // 10초면 충분
+                timeout = 10000L
             )
 
             try {
@@ -98,6 +98,7 @@ class BunnyPoorCdn : ExtractorApi() {
                     "Accept" to "*/*"
                 )
 
+                // HTTP 변환 제거 (어차피 서버가 HTTPS로 리다이렉트하면 도루묵)
                 val finalUrl = tokenUrl.replace("c.html", "index.m3u8")
                 
                 callback(
@@ -110,7 +111,7 @@ class BunnyPoorCdn : ExtractorApi() {
                 return true
 
             } catch (e: Exception) {
-                // SSL Handshake failed 에러가 나더라도 무조건 링크 생성
+                // 에러 발생 시에도 링크 생성 (외부 플레이어에게 맡김)
                 val cookie = CookieManager.getInstance().getCookie(tokenUrl) ?: ""
                 val headers = mapOf(
                     "User-Agent" to DESKTOP_UA,
