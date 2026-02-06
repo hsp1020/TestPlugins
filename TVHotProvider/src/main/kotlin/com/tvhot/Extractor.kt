@@ -5,17 +5,17 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
+// [필수] 로그가 알려준 함수 사용을 위해 import (보통 utils에 포함됨)
+import com.lagradost.cloudstream3.utils.loadExtractor 
 import com.lagradost.cloudstream3.network.WebViewResolver 
 import android.webkit.CookieManager
+// [중요] newExtractorLink가 확장 함수나 Top-level일 수 있으므로 utils 전체 import 권장
+import com.lagradost.cloudstream3.utils.*
 
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "BunnyPoorCdn"
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
-
-    private fun pl(tag: String, msg: String) {
-        println("DEBUG_EXTRACTOR name=$name $tag $msg")
-    }
 
     override suspend fun getUrl(
         url: String,
@@ -26,7 +26,6 @@ class BunnyPoorCdn : ExtractorApi() {
         extract(url, referer, subtitleCallback, callback)
     }
 
-    // [복구] TVHot.kt 등 외부에서 호출할 수 있도록 extract 메서드 복원
     suspend fun extract(
         url: String,
         referer: String?,
@@ -34,9 +33,6 @@ class BunnyPoorCdn : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
         thumbnailHint: String? = null,
     ): Boolean {
-        val reqId = System.currentTimeMillis().toDouble()
-        // pl("req=$reqId step=start", "url=$url")
-
         var cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = referer?.replace(Regex("[\\r\\n\\s]"), "")?.trim() ?: "https://tvmon.site/"
 
@@ -69,8 +65,6 @@ class BunnyPoorCdn : ExtractorApi() {
             val serverNum = Regex("""[?&]s=(\d+)""").find(cleanUrl)?.groupValues?.get(1) ?: "9"
             val domain = "https://every$serverNum.poorcdn.com"
             val tokenUrl = "$domain$path$id/c.html"
-            
-            // pl("req=$reqId step=webview_try", "tokenUrl=$tokenUrl")
 
             val resolver = WebViewResolver(
                 interceptUrl = Regex("""(c\.html|index\.m3u8)"""),
@@ -79,14 +73,11 @@ class BunnyPoorCdn : ExtractorApi() {
             )
 
             try {
-                // 02:19 성공 헤더 설정
                 val response = app.get(
                     url = tokenUrl, 
                     headers = mapOf("Referer" to cleanUrl),
                     interceptor = resolver
                 )
-                
-                // pl("req=$reqId step=webview_done", "code=${response.code}")
 
                 val cookie = CookieManager.getInstance().getCookie(response.url) ?: ""
                 val headers = mapOf(
@@ -96,53 +87,50 @@ class BunnyPoorCdn : ExtractorApi() {
                 )
 
                 if (response.text.contains("#EXTM3U")) {
-                     // pl("req=$reqId step=success", "Content is M3U8")
-                     
-                     // [수동 파싱] M3u8Helper 대신 직접 링크 생성 (403 방지)
                      val m3u8Content = response.text
-                     val baseUrl = response.url.substringBeforeLast("/") // .../v/f/{id}
+                     val baseUrl = response.url.substringBeforeLast("/")
                      
                      if (m3u8Content.contains("#EXT-X-STREAM-INF")) {
-                        // Master Playlist 처리
                         Regex("""#EXT-X-STREAM-INF:.*?RESOLUTION=(\d+x\d+).*?\n(.*?\.m3u8)""").findAll(m3u8Content).forEach { match ->
-                            // val res = match.groupValues[1] // 해상도 정보 (필요시 사용)
                             val subUrl = match.groupValues[2].trim()
                             val fullUrl = if (subUrl.startsWith("http")) subUrl else "$baseUrl/$subUrl"
                             
+                            // [수정] ExtractorLink(...) 대신 newExtractorLink(...) 사용
                             callback(
-                                ExtractorLink(
+                                newExtractorLink(
                                     source = name,
                                     name = name,
                                     url = fullUrl,
                                     referer = cleanUrl,
                                     quality = Qualities.Unknown.value,
-                                    isM3u8 = true, // [수정] type=1 대신 isM3u8=true 사용
-                                    headers = headers
-                                )
+                                    isM3u8 = true // 여기서는 boolean 사용 가능
+                                ).apply {
+                                    // headers는 apply 블록에서 넣거나 생성자 지원 시 넣음
+                                    // newExtractorLink가 headers 인자를 지원하지 않을 경우를 대비해 이렇게 설정
+                                    this.headers = headers
+                                }
                             )
                         }
                      } else {
-                        // Single Stream 처리
-                        // c.html -> index.m3u8 주소 변환 (플레이어 호환성)
                         val finalUrl = if (response.url.contains(".m3u8")) response.url 
                                        else tokenUrl.replace("c.html", "index.m3u8")
                         
                         callback(
-                            ExtractorLink(
+                            newExtractorLink(
                                 source = name,
                                 name = name,
                                 url = finalUrl,
                                 referer = cleanUrl,
                                 quality = Qualities.Unknown.value,
-                                isM3u8 = true, // [수정] type=1 대신 isM3u8=true 사용
-                                headers = headers
-                            )
+                                isM3u8 = true
+                            ).apply {
+                                this.headers = headers
+                            }
                         )
                      }
                      return true
                 }
             } catch (e: Exception) {
-                // pl("req=$reqId step=webview_error", "msg=${e.message}")
             }
         }
         return false
