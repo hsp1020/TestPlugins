@@ -4,7 +4,6 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.M3u8Helper
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
-// newExtractorLink 등 사용을 위한 import
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -23,8 +22,10 @@ class TVHot : MainAPI() {
         TvType.AnimeMovie
     )
 
+    // [핵심 변경] 모바일 UA -> 윈도우 UA로 변경 (BunnyPoorCdn과 일치시킴)
+    // 이걸로 통일해야 520 에러(세션 불일치)가 사라집니다.
     private val USER_AGENT =
-        "Mozilla/5.0 (Linux; Android 13; SM-S911B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Mobile Safari/537.36"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
     private val commonHeaders = mapOf(
         "User-Agent" to USER_AGENT,
@@ -196,12 +197,12 @@ class TVHot : MainAPI() {
                 callback,
                 thumbnailHint
             )
-            // Extractor가 하나라도 찾았으면 true 반환 (백업 로직 실행 안 함)
+            // 성공하면 여기서 종료
             if (extracted) return true
         }
 
         // 4) Extractor 실패 시 백업: 썸네일에서 직접 index.m3u8 유추
-        // [중요] 여기서 M3u8Helper 대신 newExtractorLink로 강제 생성
+        // [중요] 여기도 commonHeaders를 쓰는데, 위에서 UA를 윈도우용으로 바꿨으니 OK
         if (thumbnailHint != null) {
             try {
                 val pathRegex = Regex("""/v/[a-z]/[a-zA-Z0-9]+""")
@@ -212,11 +213,12 @@ class TVHot : MainAPI() {
                     val fixedM3u8Url = m3u8Url.replace(Regex("//v/"), "/v/")
 
                     // [수정] M3u8Helper 제거 -> 강제 링크 생성
+                    // 백업 로직에서도 재요청 없이 바로 링크를 줍니다.
                     callback(
                         newExtractorLink(name, name, fixedM3u8Url, ExtractorLinkType.M3U8) {
                             this.referer = mainUrl
                             this.quality = Qualities.Unknown.value
-                            this.headers = commonHeaders
+                            this.headers = commonHeaders // 윈도우 UA 포함됨
                         }
                     )
                     return true
@@ -236,12 +238,10 @@ class TVHot : MainAPI() {
         for (el in videoThumbElements) {
             val raw = el.attr("src").ifEmpty { el.attr("data-src") }
             val fixed = fixUrl(raw)
-            
             if (priorityRegex.containsMatchIn(fixed)) {
                 return fixed
             }
         }
-        
         return null
     }
 }
