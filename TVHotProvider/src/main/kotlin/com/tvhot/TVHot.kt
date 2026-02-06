@@ -2,7 +2,6 @@ package com.tvhot
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.M3u8Helper
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Document
@@ -33,6 +32,39 @@ class TVHot : MainAPI() {
         "Referer" to "$mainUrl/",
         "Upgrade-Insecure-Requests" to "1"
     )
+
+    // [변경됨] FourKHDHub 스타일: 메인 페이지 탭 정의
+    // 여기에 정의된 항목들이 앱 홈 화면의 탭이나 섹션으로 나타납니다.
+    override val mainPage = mainPageOf(
+        "/kor_movie" to "영화",
+        "/drama" to "드라마",
+        "/ent" to "예능",
+        "/sisa" to "시사/다큐",
+        "/movie" to "해외 영화",
+        "/world" to "해외 드라마",
+        "/animation" to "애니메이션",
+        "/ani_movie" to "극장판 애니",
+        "/old_drama" to "추억의 드라마",
+        "/old_ent" to "추억의 예능"
+    )
+
+    // [변경됨] FourKHDHub 스타일: 페이지네이션 적용
+    // page 변수가 스크롤 할 때마다 1, 2, 3... 으로 자동으로 들어옵니다.
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        // request.data에는 위 mainPage에서 정의한 URL 뒷부분(예: /drama)이 들어옵니다.
+        val url = "$mainUrl${request.data}?page=$page"
+        
+        return try {
+            val doc = app.get(url, headers = commonHeaders).document
+            // 리스트 아이템 추출
+            val list = doc.select(".mov_list ul li").mapNotNull { it.toSearchResponse() }
+            
+            // 리스트가 비어있지 않다면 다음 페이지가 있다고 가정 (hasNext = true)
+            newHomePageResponse(request.name, list, hasNext = list.isNotEmpty())
+        } catch (e: Exception) {
+            newHomePageResponse(request.name, emptyList(), hasNext = false)
+        }
+    }
 
     // 리스트 아이템 파싱 로직
     private fun Element.toSearchResponse(): SearchResponse? {
@@ -77,52 +109,6 @@ class TVHot : MainAPI() {
             url.contains("/ent") || url.contains("/old_ent") -> TvType.TvSeries
             else -> TvType.TvSeries
         }
-    }
-
-    // [수정됨] amap 사용 (kotlinx 제거, Cloudstream 내장 비동기 맵 사용)
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        if (page > 1) return newHomePageResponse(emptyList())
-
-        // 수집할 카테고리 목록 정의
-        val categories = listOf(
-            Pair("한국영화", "/kor_movie"),
-            Pair("드라마", "/drama"),
-            Pair("예능", "/ent"),
-            Pair("시사/다큐", "/sisa"),
-            Pair("영화", "/movie"),
-            Pair("해외드라마", "/world"),
-            Pair("애니메이션", "/animation"),
-            Pair("극장판 애니", "/ani_movie"),
-            Pair("추억의 드라마", "/old_drama"),
-            Pair("추억의 예능", "/old_ent")
-        )
-
-        // amap을 사용하여 병렬 처리 (import com.lagradost.cloudstream3.amap 가 필요하지만 보통 MainAPI 상속시 사용가능, 안되면 utils.*에 포함됨)
-        // 만약 amap이 unresolved 뜨면 map(순차처리)으로 바꿔야하지만, 보통 지원함.
-        val home = categories.amap { (categoryName, urlPath) ->
-            val urls = listOf(
-                "$mainUrl$urlPath?page=1",
-                "$mainUrl$urlPath?page=2"
-            )
-
-            // 페이지 1, 2를 병렬 호출
-            val items = urls.amap { url ->
-                try {
-                    val doc = app.get(url, headers = commonHeaders).document
-                    doc.select(".mov_list ul li").mapNotNull { it.toSearchResponse() }
-                } catch (e: Exception) {
-                    emptyList<SearchResponse>()
-                }
-            }.flatten()
-
-            if (items.isNotEmpty()) {
-                HomePageList(categoryName, items)
-            } else {
-                null
-            }
-        }.filterNotNull()
-
-        return newHomePageResponse(home, hasNext = false)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
