@@ -16,7 +16,7 @@ class BunnyPoorCdn : ExtractorApi() {
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
 
-    // Chrome 121 (Fiddler 로그 기반 표준화)
+    // Chrome 121 (표준)
     private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
     override suspend fun getUrl(
@@ -52,11 +52,11 @@ class BunnyPoorCdn : ExtractorApi() {
 
         var capturedUrl: String? = null
 
-        // [핵심 변경] c.html이 아니라, 실제 영상 파일인 .m3u8을 기다림
+        // 2. c.html 요청을 낚아채서 '진짜 도메인'과 '토큰'을 확보
         val resolver = WebViewResolver(
-            interceptUrl = Regex("""\.m3u8"""), 
+            interceptUrl = Regex("""/c\.html"""), 
             useOkhttp = false,
-            timeout = 20000L // JS 실행 및 m3u8 요청 대기 시간 확보 (20초)
+            timeout = 15000L
         )
         
         try {
@@ -65,35 +65,46 @@ class BunnyPoorCdn : ExtractorApi() {
                 "User-Agent" to DESKTOP_UA
             )
 
-            // WebView가 iframe 페이지를 로딩 -> 내부 JS가 돌면서 -> .m3u8 요청 발생
+            // cleanUrl(iframe)을 로딩하면 내부에서 c.html을 호출함
             val response = app.get(
                 url = cleanUrl,
                 headers = requestHeaders,
                 interceptor = resolver
             )
             
-            // 낚아챈 URL이 m3u8인지 확인
-            if (response.url.contains(".m3u8")) {
+            // 낚아챈 URL (리다이렉트가 있었다면 pixelstorm 도메인일 수도 있음)
+            if (response.url.contains("/c.html") && response.url.contains("token=")) {
                 capturedUrl = response.url
             }
             
         } catch (e: Exception) {}
 
         if (capturedUrl != null) {
-            // capturedUrl은 이제 "진짜" 영상 주소입니다. (토큰이 있든 없든 이게 정답)
+            // capturedUrl: https://[every4 or pixelstorm...]/v/f/.../c.html?token=...
             
-            // 쿠키 확보 (안전장치)
+            // 1. 쿠키 확보 (가장 중요)
             val cookieManager = CookieManager.getInstance()
             var cookie = cookieManager.getCookie(capturedUrl)
+            
+            // 쿠키가 없으면 도메인 단위로 빡세게 뒤짐
             if (cookie.isNullOrEmpty()) {
                 try {
                     val uri = URI(capturedUrl)
-                    val domainUrl = "${uri.scheme}://${uri.host}"
-                    cookie = cookieManager.getCookie(domainUrl)
+                    val host = uri.host // every4.poorcdn.com or c4.pixelstormh7q.com
+                    cookie = cookieManager.getCookie("https://$host")
+                    
+                    // 그래도 없으면 상위 도메인 시도 (poorcdn.com)
+                    if (cookie.isNullOrEmpty() && host.count { it == '.' } > 1) {
+                         val rootDomain = host.substring(host.indexOf('.') + 1)
+                         cookie = cookieManager.getCookie("https://$rootDomain") ?: ""
+                    }
                 } catch (e: Exception) {}
             }
 
-            // 헤더 구성 (Fiddler + F12 기반)
+            // 2. c.html -> index.m3u8 변환
+            val m3u8Url = capturedUrl.replace("/c.html", "/index.m3u8")
+
+            // 3. 헤더 구성 (Fiddler 완벽 복제 + 쿠키)
             val headers = mutableMapOf(
                 "User-Agent" to DESKTOP_UA,
                 "Referer" to "https://player.bunny-frame.online/",
@@ -104,7 +115,6 @@ class BunnyPoorCdn : ExtractorApi() {
                 "Sec-Fetch-Dest" to "empty",
                 "Accept-Encoding" to "gzip, deflate, br",
                 "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-                // [필수] 봇 탐지 우회용 Client Hints
                 "sec-ch-ua" to "\"Not A(Brand\";v=\"99\", \"Google Chrome\";v=\"121\", \"Chromium\";v=\"121\"",
                 "sec-ch-ua-mobile" to "?0",
                 "sec-ch-ua-platform" to "\"Windows\""
@@ -115,7 +125,7 @@ class BunnyPoorCdn : ExtractorApi() {
             }
             
             callback(
-                newExtractorLink(name, name, capturedUrl, ExtractorLinkType.M3U8) {
+                newExtractorLink(name, name, m3u8Url, ExtractorLinkType.M3U8) {
                     this.referer = "https://player.bunny-frame.online/"
                     this.quality = Qualities.Unknown.value
                     this.headers = headers
