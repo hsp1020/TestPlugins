@@ -15,6 +15,7 @@ class BunnyPoorCdn : ExtractorApi() {
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
 
+    // 크롬 윈도우 버전 풀 세트
     private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
     override suspend fun getUrl(
@@ -36,7 +37,7 @@ class BunnyPoorCdn : ExtractorApi() {
         var cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = referer?.replace(Regex("[\\r\\n\\s]"), "")?.trim() ?: "https://tvmon.site/"
 
-        // 1. Refetch & 2. Visit (생략 - 동일)
+        // 1. Refetch (동일)
         if (!cleanUrl.contains("v/f/") && !cleanUrl.contains("v/e/")) {
             try {
                 val refRes = app.get(cleanReferer)
@@ -48,6 +49,7 @@ class BunnyPoorCdn : ExtractorApi() {
             } catch (e: Exception) {}
         }
 
+        // 2. Visit (동일)
         var path = ""
         var id = ""
         try {
@@ -65,13 +67,12 @@ class BunnyPoorCdn : ExtractorApi() {
             val domain = "https://every$serverNum.poorcdn.com"
             val tokenUrl = "$domain$path$id/c.html"
 
-            // [꼼수] 절대 발견되지 않을 URL을 추가해서 강제로 타임아웃까지 대기시킴
-            // 이렇게 하면 0.1초 만에 종료되는 걸 막고, 20초 동안 JS가 돌 시간을 줌
+            // 꼼수(대기) 유지: 시간을 충분히 줘서 JS 실행 보장
             val resolver = WebViewResolver(
                 interceptUrl = Regex("""(c\.html|index\.m3u8)"""),
                 additionalUrls = listOf(Regex("""this_will_never_exist_12345""")),
                 useOkhttp = false,
-                timeout = 20000L // 20초 동안 강제 대기
+                timeout = 15000L
             )
 
             try {
@@ -84,21 +85,33 @@ class BunnyPoorCdn : ExtractorApi() {
                     interceptor = resolver
                 )
 
-                // 20초 후 타임아웃으로 여기 도달 (혹은 그 전에 m3u8을 찾으면 이득)
-                
+                // 쿠키 확보
                 var cookie = CookieManager.getInstance().getCookie(response.url)
                 if (cookie.isNullOrEmpty()) {
                     cookie = CookieManager.getInstance().getCookie(tokenUrl) ?: ""
                 }
                 
+                // [핵심] 헤더 보강 (브라우저처럼 보이게)
                 val headers = mapOf(
+                    "User-Agent" to DESKTOP_UA,
                     "Referer" to cleanUrl,
                     "Cookie" to cookie,
-                    "User-Agent" to DESKTOP_UA
+                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                    "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+                    "Accept-Encoding" to "gzip, deflate, br",
+                    "Upgrade-Insecure-Requests" to "1",
+                    "Sec-Ch-Ua" to "\"Not A(Brand\";v=\"99\", \"Google Chrome\";v=\"121\", \"Chromium\";v=\"121\"",
+                    "Sec-Ch-Ua-Mobile" to "?0",
+                    "Sec-Ch-Ua-Platform" to "\"Windows\"",
+                    "Sec-Fetch-Dest" to "document",
+                    "Sec-Fetch-Mode" to "navigate",
+                    "Sec-Fetch-Site" to "none", // or "same-origin"
+                    "Sec-Fetch-User" to "?1"
                 )
 
-                // 타임아웃으로 끝났어도 쿠키만 있으면 강제 진행
                 val finalUrl = tokenUrl.replace("c.html", "index.m3u8")
+                
+                // 쿠키가 있든 없든, 헤더 풀장착해서 시도
                 callback(
                     newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
                         this.referer = cleanUrl
@@ -109,20 +122,23 @@ class BunnyPoorCdn : ExtractorApi() {
                 return true
 
             } catch (e: Exception) {
-                // 타임아웃 에러가 나도 무시하고 진행 (쿠키 줍기 시도)
+                // 에러 나도 시도
                 val cookie = CookieManager.getInstance().getCookie(tokenUrl) ?: ""
-                if (cookie.isNotEmpty()) {
-                     val finalUrl = tokenUrl.replace("c.html", "index.m3u8")
-                     val headers = mapOf("Referer" to cleanUrl, "Cookie" to cookie, "User-Agent" to DESKTOP_UA)
-                     callback(
-                        newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
-                            this.referer = cleanUrl
-                            this.quality = Qualities.Unknown.value
-                            this.headers = headers
-                        }
-                    )
-                    return true
-                }
+                val headers = mapOf(
+                    "User-Agent" to DESKTOP_UA,
+                    "Referer" to cleanUrl,
+                    "Cookie" to cookie,
+                    "Accept" to "*/*" // 최소한의 Accept
+                )
+                val finalUrl = tokenUrl.replace("c.html", "index.m3u8")
+                 callback(
+                    newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
+                        this.referer = cleanUrl
+                        this.quality = Qualities.Unknown.value
+                        this.headers = headers
+                    }
+                )
+                return true
             }
         }
         return false
