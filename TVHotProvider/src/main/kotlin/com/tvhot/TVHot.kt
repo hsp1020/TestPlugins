@@ -85,14 +85,16 @@ class TVHot : MainAPI() {
 
         // 수집할 카테고리 목록 정의
         val categories = listOf(
-            Pair("영화", "/movie"),
             Pair("한국영화", "/kor_movie"),
             Pair("드라마", "/drama"),
-            Pair("예능프로그램", "/ent"),
+            Pair("예능", "/ent"),
             Pair("시사/다큐", "/sisa"),
+            Pair("영화", "/movie"),
             Pair("해외드라마", "/world"),
             Pair("애니메이션", "/animation"),
-            Pair("극장판 애니", "/ani_movie")
+            Pair("극장판 애니", "/ani_movie"),
+            Pair("추억의 드라마", "/old_drama"),
+            Pair("추억의 예능", "/old_ent")
         )
 
         // amap을 사용하여 병렬 처리 (import com.lagradost.cloudstream3.amap 가 필요하지만 보통 MainAPI 상속시 사용가능, 안되면 utils.*에 포함됨)
