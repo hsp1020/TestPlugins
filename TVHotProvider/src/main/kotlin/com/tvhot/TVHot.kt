@@ -133,9 +133,9 @@ class TVHot : MainAPI() {
 
                 // 최종 plot 생성
                 val finalPlot = if (story == "다시보기") {
-                        metaString.trim()
+                        "다시보기"
                 } else {
-                        "$metaString 스토리 : $story".trim()
+                        "$metaString / 스토리 : $story".trim()
                 }
                 
                 val episodes = doc.select("#other_list ul li").mapNotNull { li ->
