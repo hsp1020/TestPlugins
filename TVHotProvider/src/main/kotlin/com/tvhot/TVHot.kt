@@ -150,7 +150,7 @@ class TVHot : MainAPI() {
                 val finalPlot = if (story == "다시보기") {
                         "다시보기"
                 } else {
-                        "$metaString / 스토리: $story".trim()
+                        "$metaString / 줄거리: $story".trim()
                 }
                 
                 val episodes = doc.select("#other_list ul li").mapNotNull { li ->
