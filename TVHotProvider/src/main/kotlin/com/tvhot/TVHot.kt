@@ -127,8 +127,8 @@ class TVHot : MainAPI() {
             ?: doc.selectFirst("meta[name='description']")?.attr("content")
             ?: ""
 
-        if (story.contains("다시보기") && story.contains("무료")) story = "-"
-        if (story.isEmpty()) story = "-"
+        if (story.contains("다시보기") && story.contains("무료")) story = "다시보기"
+        if (story.isEmpty()) story = "다시보기"
 
         val finalPlot = "$metaString / $story".trim()
         val episodes = doc.select("#other_list ul li").mapNotNull { li ->
