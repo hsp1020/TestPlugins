@@ -97,7 +97,7 @@ class TVHot : MainAPI() {
 
                 if (title.isNullOrEmpty()) {
                         title = doc.selectFirst("#bo_v_movinfo h3")?.text()?.trim()
-                                ?: doc.selectFirst(".con_title")?.text()?.trim()
+                                ?: doc.selectFirst("input[name='con_title']")?.attr("value")?.trim()
                                 ?: "Unknown"
                 }
                 title = title!!.replace(Regex("\\\\\\\\s*\\\\\\\\d+\\\\\\\\s*[화회부].*"), "").replace(" 다시보기", "").trim()
