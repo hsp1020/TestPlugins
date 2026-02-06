@@ -126,11 +126,24 @@ class TVHot : MainAPI() {
             ?: doc.selectFirst(".tmdb-overview")?.text()?.trim()
             ?: doc.selectFirst("meta[name='description']")?.attr("content")
             ?: ""
+        val metaString = (infoList + genreList).joinToString(" / ")  
 
+        var story = doc.selectFirst(".story")?.text()?.trim()
+            ?: doc.selectFirst(".tmdb-overview")?.text()?.trim()
+            ?: doc.selectFirst("meta[name='description']")?.attr("content")
+            ?: ""
+
+        // 스토리 정제
         if (story.contains("다시보기") && story.contains("무료")) story = "다시보기"
         if (story.isEmpty()) story = "다시보기"
 
-        val finalPlot = "$metaString / $story".trim()
+        // 최종 plot 생성
+        val finalPlot = if (story == "다시보기") {
+            metaString.trim()
+        } else {
+            "$metaString 스토리 : $story".trim()
+        }
+        
         val episodes = doc.select("#other_list ul li").mapNotNull { li ->
             val aTag = li.selectFirst("a.ep-link") ?: return@mapNotNull null
             val href = fixUrl(aTag.attr("href"))
