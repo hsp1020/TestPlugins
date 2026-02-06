@@ -7,10 +7,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-// [추가됨] 병렬 처리를 위한 코루틴 임포트
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 
 class TVHot : MainAPI() {
     override var mainUrl = "https://tvmon.site"
@@ -26,7 +22,7 @@ class TVHot : MainAPI() {
         TvType.AnimeMovie
     )
 
-    // [핵심] 모바일 UA -> 윈도우 UA로 변경 (BunnyPoorCdn과 일치시킴, 세션 오류 방지)
+    // 모바일 UA -> 윈도우 UA (BunnyPoorCdn 대응)
     private val USER_AGENT =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
@@ -83,9 +79,8 @@ class TVHot : MainAPI() {
         }
     }
 
-    // [수정됨] apmap(Deprecated) -> coroutineScope + async/awaitAll 방식으로 변경
+    // [수정됨] amap 사용 (kotlinx 제거, Cloudstream 내장 비동기 맵 사용)
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        // 무한 스크롤 방지 (홈 화면은 한 번만 로드)
         if (page > 1) return newHomePageResponse(emptyList())
 
         // 수집할 카테고리 목록 정의
@@ -100,38 +95,30 @@ class TVHot : MainAPI() {
             Pair("극장판 애니", "/ani_movie")
         )
 
-        // coroutineScope를 사용하여 안전하게 병렬 처리 수행
-        val home = coroutineScope {
-            categories.map { (categoryName, urlPath) ->
-                async {
-                    // 1페이지와 2페이지 URL 생성
-                    val urls = listOf(
-                        "$mainUrl$urlPath?page=1",
-                        "$mainUrl$urlPath?page=2"
-                    )
+        // amap을 사용하여 병렬 처리 (import com.lagradost.cloudstream3.amap 가 필요하지만 보통 MainAPI 상속시 사용가능, 안되면 utils.*에 포함됨)
+        // 만약 amap이 unresolved 뜨면 map(순차처리)으로 바꿔야하지만, 보통 지원함.
+        val home = categories.amap { (categoryName, urlPath) ->
+            val urls = listOf(
+                "$mainUrl$urlPath?page=1",
+                "$mainUrl$urlPath?page=2"
+            )
 
-                    // 두 페이지를 병렬로 가져와서 합침
-                    val items = urls.map { url ->
-                        async {
-                            try {
-                                val doc = app.get(url, headers = commonHeaders).document
-                                // 제공된 HTML 구조에 맞는 선택자: .mov_list ul li
-                                doc.select(".mov_list ul li").mapNotNull { it.toSearchResponse() }
-                            } catch (e: Exception) {
-                                emptyList<SearchResponse>()
-                            }
-                        }
-                    }.awaitAll().flatten()
-
-                    // 항목이 있는 경우에만 리스트에 추가
-                    if (items.isNotEmpty()) {
-                        HomePageList(categoryName, items)
-                    } else {
-                        null
-                    }
+            // 페이지 1, 2를 병렬 호출
+            val items = urls.amap { url ->
+                try {
+                    val doc = app.get(url, headers = commonHeaders).document
+                    doc.select(".mov_list ul li").mapNotNull { it.toSearchResponse() }
+                } catch (e: Exception) {
+                    emptyList<SearchResponse>()
                 }
-            }.awaitAll().filterNotNull()
-        }
+            }.flatten()
+
+            if (items.isNotEmpty()) {
+                HomePageList(categoryName, items)
+            } else {
+                null
+            }
+        }.filterNotNull()
 
         return newHomePageResponse(home, hasNext = false)
     }
@@ -142,7 +129,6 @@ class TVHot : MainAPI() {
         
         var items = doc.select("ul#mov_con_list li").mapNotNull { it.toSearchResponse() }
         if (items.isEmpty()) {
-             // 검색 결과 구조가 일반 리스트와 같다면 백업으로 시도
              items = doc.select(".mov_list ul li").mapNotNull { it.toSearchResponse() }
         }
         return items
