@@ -8,6 +8,7 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.network.WebViewResolver 
+import android.webkit.CookieManager
 import java.net.URI
 
 class BunnyPoorCdn : ExtractorApi() {
@@ -15,7 +16,7 @@ class BunnyPoorCdn : ExtractorApi() {
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
 
-    // [표준] Windows Chrome 121 버전 (안정성 확보)
+    // Chrome 121 (Fiddler 로그 기반 표준화)
     private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
     override suspend fun getUrl(
@@ -51,11 +52,11 @@ class BunnyPoorCdn : ExtractorApi() {
 
         var capturedUrl: String? = null
 
-        // 2. WebView로 iframe 로딩 -> JS 실행 -> 토큰 URL 낚아채기
+        // [핵심 변경] c.html이 아니라, 실제 영상 파일인 .m3u8을 기다림
         val resolver = WebViewResolver(
-            interceptUrl = Regex("""/c\.html"""), 
+            interceptUrl = Regex("""\.m3u8"""), 
             useOkhttp = false,
-            timeout = 15000L
+            timeout = 20000L // JS 실행 및 m3u8 요청 대기 시간 확보 (20초)
         )
         
         try {
@@ -64,49 +65,57 @@ class BunnyPoorCdn : ExtractorApi() {
                 "User-Agent" to DESKTOP_UA
             )
 
+            // WebView가 iframe 페이지를 로딩 -> 내부 JS가 돌면서 -> .m3u8 요청 발생
             val response = app.get(
                 url = cleanUrl,
                 headers = requestHeaders,
                 interceptor = resolver
             )
             
-            // 토큰이 포함된 진짜 URL 획득
-            if (response.url.contains("/c.html") && response.url.contains("token=")) {
+            // 낚아챈 URL이 m3u8인지 확인
+            if (response.url.contains(".m3u8")) {
                 capturedUrl = response.url
             }
             
         } catch (e: Exception) {}
 
         if (capturedUrl != null) {
-            // URL: https://every4.poorcdn.com/.../c.html?token=XXX&expires=YYY
+            // capturedUrl은 이제 "진짜" 영상 주소입니다. (토큰이 있든 없든 이게 정답)
             
-            // c.html -> index.m3u8 (파라미터 유지)
-            val m3u8Url = capturedUrl.replace("/c.html", "/index.m3u8")
+            // 쿠키 확보 (안전장치)
+            val cookieManager = CookieManager.getInstance()
+            var cookie = cookieManager.getCookie(capturedUrl)
+            if (cookie.isNullOrEmpty()) {
+                try {
+                    val uri = URI(capturedUrl)
+                    val domainUrl = "${uri.scheme}://${uri.host}"
+                    cookie = cookieManager.getCookie(domainUrl)
+                } catch (e: Exception) {}
+            }
 
-            // [핵심] Fiddler 로그 기반 완벽한 헤더 세트
-            // 쿠키는 제거하고, sec-ch-ua 헤더들을 반드시 포함시킴
-            val headers = mapOf(
-                "Host" to URI(m3u8Url).host, // 호스트 헤더 명시 (안전장치)
+            // 헤더 구성 (Fiddler + F12 기반)
+            val headers = mutableMapOf(
                 "User-Agent" to DESKTOP_UA,
-                "Accept" to "*/*",
-                "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-                "Accept-Encoding" to "gzip, deflate, br",
-                "Origin" to "https://player.bunny-frame.online",
                 "Referer" to "https://player.bunny-frame.online/",
-                
-                // [누락되었던 핵심 헤더들 - 이게 없으면 520 뜸]
+                "Origin" to "https://player.bunny-frame.online",
+                "Accept" to "*/*",
+                "Sec-Fetch-Site" to "cross-site",
+                "Sec-Fetch-Mode" to "cors",
+                "Sec-Fetch-Dest" to "empty",
+                "Accept-Encoding" to "gzip, deflate, br",
+                "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+                // [필수] 봇 탐지 우회용 Client Hints
                 "sec-ch-ua" to "\"Not A(Brand\";v=\"99\", \"Google Chrome\";v=\"121\", \"Chromium\";v=\"121\"",
                 "sec-ch-ua-mobile" to "?0",
-                "sec-ch-ua-platform" to "\"Windows\"",
-                
-                "Sec-Fetch-Dest" to "empty",
-                "Sec-Fetch-Mode" to "cors",
-                "Sec-Fetch-Site" to "cross-site",
-                "Connection" to "keep-alive"
+                "sec-ch-ua-platform" to "\"Windows\""
             )
+
+            if (!cookie.isNullOrEmpty()) {
+                headers["Cookie"] = cookie
+            }
             
             callback(
-                newExtractorLink(name, name, m3u8Url, ExtractorLinkType.M3U8) {
+                newExtractorLink(name, name, capturedUrl, ExtractorLinkType.M3U8) {
                     this.referer = "https://player.bunny-frame.online/"
                     this.quality = Qualities.Unknown.value
                     this.headers = headers
