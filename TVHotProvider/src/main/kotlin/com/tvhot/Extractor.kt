@@ -15,7 +15,6 @@ class BunnyPoorCdn : ExtractorApi() {
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
 
-    // 크롬 윈도우 버전 풀 세트
     private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
     override suspend fun getUrl(
@@ -67,7 +66,6 @@ class BunnyPoorCdn : ExtractorApi() {
             val domain = "https://every$serverNum.poorcdn.com"
             val tokenUrl = "$domain$path$id/c.html"
 
-            // 꼼수(대기) 유지: 시간을 충분히 줘서 JS 실행 보장
             val resolver = WebViewResolver(
                 interceptUrl = Regex("""(c\.html|index\.m3u8)"""),
                 additionalUrls = listOf(Regex("""this_will_never_exist_12345""")),
@@ -85,33 +83,22 @@ class BunnyPoorCdn : ExtractorApi() {
                     interceptor = resolver
                 )
 
-                // 쿠키 확보
                 var cookie = CookieManager.getInstance().getCookie(response.url)
                 if (cookie.isNullOrEmpty()) {
                     cookie = CookieManager.getInstance().getCookie(tokenUrl) ?: ""
                 }
                 
-                // [핵심] 헤더 보강 (브라우저처럼 보이게)
                 val headers = mapOf(
                     "User-Agent" to DESKTOP_UA,
                     "Referer" to cleanUrl,
                     "Cookie" to cookie,
-                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-                    "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-                    "Accept-Encoding" to "gzip, deflate, br",
-                    "Upgrade-Insecure-Requests" to "1",
-                    "Sec-Ch-Ua" to "\"Not A(Brand\";v=\"99\", \"Google Chrome\";v=\"121\", \"Chromium\";v=\"121\"",
-                    "Sec-Ch-Ua-Mobile" to "?0",
-                    "Sec-Ch-Ua-Platform" to "\"Windows\"",
-                    "Sec-Fetch-Dest" to "document",
-                    "Sec-Fetch-Mode" to "navigate",
-                    "Sec-Fetch-Site" to "none", // or "same-origin"
-                    "Sec-Fetch-User" to "?1"
+                    "Accept" to "*/*"
                 )
 
-                val finalUrl = tokenUrl.replace("c.html", "index.m3u8")
+                // [핵심 변경] HTTPS -> HTTP 강제 변환 (SSL 우회 시도)
+                // 만약 서버가 HTTP를 지원한다면 소만사 인증서 오류를 피할 수 있음
+                val finalUrl = tokenUrl.replace("c.html", "index.m3u8").replace("https://", "http://")
                 
-                // 쿠키가 있든 없든, 헤더 풀장착해서 시도
                 callback(
                     newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
                         this.referer = cleanUrl
@@ -122,15 +109,15 @@ class BunnyPoorCdn : ExtractorApi() {
                 return true
 
             } catch (e: Exception) {
-                // 에러 나도 시도
                 val cookie = CookieManager.getInstance().getCookie(tokenUrl) ?: ""
                 val headers = mapOf(
                     "User-Agent" to DESKTOP_UA,
                     "Referer" to cleanUrl,
                     "Cookie" to cookie,
-                    "Accept" to "*/*" // 최소한의 Accept
+                    "Accept" to "*/*"
                 )
-                val finalUrl = tokenUrl.replace("c.html", "index.m3u8")
+                // [핵심 변경] 여기도 HTTP 변환 적용
+                val finalUrl = tokenUrl.replace("c.html", "index.m3u8").replace("https://", "http://")
                  callback(
                     newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
                         this.referer = cleanUrl
