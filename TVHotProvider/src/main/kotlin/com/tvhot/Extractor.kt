@@ -15,6 +15,7 @@ class BunnyPoorCdn : ExtractorApi() {
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
 
+    // 윈도우 크롬 UA (Somansa/Every4 통과용)
     private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
     override suspend fun getUrl(
@@ -36,7 +37,7 @@ class BunnyPoorCdn : ExtractorApi() {
         var cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = referer?.replace(Regex("[\\r\\n\\s]"), "")?.trim() ?: "https://tvmon.site/"
 
-        // 1. Refetch (동일)
+        // 1. Refetch
         if (!cleanUrl.contains("v/f/") && !cleanUrl.contains("v/e/")) {
             try {
                 val refRes = app.get(cleanReferer)
@@ -48,7 +49,7 @@ class BunnyPoorCdn : ExtractorApi() {
             } catch (e: Exception) {}
         }
 
-        // 2. Visit (동일)
+        // 2. Visit
         var path = ""
         var id = ""
         try {
@@ -66,11 +67,13 @@ class BunnyPoorCdn : ExtractorApi() {
             val domain = "https://every$serverNum.poorcdn.com"
             val tokenUrl = "$domain$path$id/c.html"
 
+            // Somansa가 WebView 통신을 방해해서 SSL 에러가 나더라도
+            // 타임아웃까지 버텨서 코드가 'catch' 블록이나 'timeout' 이후로 넘어가게 유도
             val resolver = WebViewResolver(
                 interceptUrl = Regex("""(c\.html|index\.m3u8)"""),
                 additionalUrls = listOf(Regex("""this_will_never_exist_12345""")),
                 useOkhttp = false,
-                timeout = 15000L
+                timeout = 10000L // 10초면 충분
             )
 
             try {
@@ -95,9 +98,7 @@ class BunnyPoorCdn : ExtractorApi() {
                     "Accept" to "*/*"
                 )
 
-                // [핵심 변경] HTTPS -> HTTP 강제 변환 (SSL 우회 시도)
-                // 만약 서버가 HTTP를 지원한다면 소만사 인증서 오류를 피할 수 있음
-                val finalUrl = tokenUrl.replace("c.html", "index.m3u8").replace("https://", "http://")
+                val finalUrl = tokenUrl.replace("c.html", "index.m3u8")
                 
                 callback(
                     newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
@@ -109,6 +110,7 @@ class BunnyPoorCdn : ExtractorApi() {
                 return true
 
             } catch (e: Exception) {
+                // SSL Handshake failed 에러가 나더라도 무조건 링크 생성
                 val cookie = CookieManager.getInstance().getCookie(tokenUrl) ?: ""
                 val headers = mapOf(
                     "User-Agent" to DESKTOP_UA,
@@ -116,8 +118,7 @@ class BunnyPoorCdn : ExtractorApi() {
                     "Cookie" to cookie,
                     "Accept" to "*/*"
                 )
-                // [핵심 변경] 여기도 HTTP 변환 적용
-                val finalUrl = tokenUrl.replace("c.html", "index.m3u8").replace("https://", "http://")
+                val finalUrl = tokenUrl.replace("c.html", "index.m3u8")
                  callback(
                     newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
                         this.referer = cleanUrl
