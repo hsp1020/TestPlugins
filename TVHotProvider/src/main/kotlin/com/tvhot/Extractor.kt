@@ -16,7 +16,7 @@ class BunnyPoorCdn : ExtractorApi() {
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
 
-    // 윈도우 UA 유지
+    // 윈도우 UA
     private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
     override suspend fun getUrl(
@@ -76,9 +76,10 @@ class BunnyPoorCdn : ExtractorApi() {
             )
 
             try {
-                // Referer를 tvmon.site로 변경하여 시도 (혹시 이게 문제일까봐)
+                // [수정] WebView 요청 시 Referer를 'cleanUrl'(iframe 주소)로 설정
+                // tvmon.site가 아니라 이게 맞습니다. 그래야 서버가 iframe 내부 요청으로 인식하고 쿠키를 줍니다.
                 val webViewHeaders = mapOf(
-                    "Referer" to "https://tvmon.site/",
+                    "Referer" to cleanUrl, 
                     "User-Agent" to DESKTOP_UA
                 )
 
@@ -88,11 +89,9 @@ class BunnyPoorCdn : ExtractorApi() {
                     interceptor = resolver
                 )
 
-                // [핵심 변경] 쿠키 탐색 로직 강화
+                // 쿠키 수집 (URL 및 도메인)
                 val cookieManager = CookieManager.getInstance()
                 var cookie = cookieManager.getCookie(tokenUrl)
-                
-                // 1차 실패 시 도메인으로 재시도 (every4.poorcdn.com)
                 if (cookie.isNullOrEmpty()) {
                     try {
                         val uri = URI(tokenUrl)
@@ -101,19 +100,18 @@ class BunnyPoorCdn : ExtractorApi() {
                     } catch (e: Exception) {}
                 }
 
-                // 2차 실패 시 Bunny CDN 도메인으로 재시도
-                if (cookie.isNullOrEmpty()) {
-                     cookie = cookieManager.getCookie("https://player.bunny-frame.online")
-                }
-
-                val finalCookie = cookie ?: ""
-                
-                val headers = mapOf(
+                // [중요] 헤더 맵 생성 (쿠키가 있을 때만 추가)
+                val headers = mutableMapOf(
                     "User-Agent" to DESKTOP_UA,
-                    "Referer" to cleanUrl, // 재생할 땐 iframe 주소로 다시 복구
-                    "Cookie" to finalCookie,
-                    "Accept" to "*/*"
+                    "Referer" to cleanUrl,
+                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                    "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
                 )
+
+                if (!cookie.isNullOrEmpty()) {
+                    headers["Cookie"] = cookie
+                }
+                // 쿠키가 없으면 아예 키를 넣지 않습니다. (빈 값 전송 방지)
 
                 val finalUrl = tokenUrl.replace("c.html", "index.m3u8")
                 
@@ -127,24 +125,16 @@ class BunnyPoorCdn : ExtractorApi() {
                 return true
 
             } catch (e: Exception) {
-                // 에러 시에도 쿠키 긁어모으기 시도
-                val cookieManager = CookieManager.getInstance()
-                var cookie = cookieManager.getCookie(tokenUrl)
-                if (cookie.isNullOrEmpty()) {
-                    try {
-                        val uri = URI(tokenUrl)
-                        val domainUrl = "${uri.scheme}://${uri.host}"
-                        cookie = cookieManager.getCookie(domainUrl)
-                    } catch (err: Exception) {}
-                }
-                
-                val finalCookie = cookie ?: ""
-                val headers = mapOf(
+                val cookie = CookieManager.getInstance().getCookie(tokenUrl)
+                val headers = mutableMapOf(
                     "User-Agent" to DESKTOP_UA,
                     "Referer" to cleanUrl,
-                    "Cookie" to finalCookie,
                     "Accept" to "*/*"
                 )
+                if (!cookie.isNullOrEmpty()) {
+                    headers["Cookie"] = cookie
+                }
+
                 val finalUrl = tokenUrl.replace("c.html", "index.m3u8")
                  callback(
                     newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
