@@ -9,7 +9,7 @@ import org.jsoup.nodes.Element
 
 class TVHot : MainAPI() {
     override var mainUrl = "https://tvmon.site"
-    override var name = "TVHot"
+    override var name = "TVMON"
     override val hasMainPage = true
     override var lang = "ko"
 
