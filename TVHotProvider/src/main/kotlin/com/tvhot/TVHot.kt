@@ -7,6 +7,10 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+// [추가됨] 병렬 처리를 위한 코루틴 임포트
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 
 class TVHot : MainAPI() {
     override var mainUrl = "https://tvmon.site"
@@ -79,12 +83,12 @@ class TVHot : MainAPI() {
         }
     }
 
-    // [수정됨] 메인 페이지 구성: 카테고리별로 2페이지까지 긁어옴
+    // [수정됨] apmap(Deprecated) -> coroutineScope + async/awaitAll 방식으로 변경
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         // 무한 스크롤 방지 (홈 화면은 한 번만 로드)
         if (page > 1) return newHomePageResponse(emptyList())
 
-        // 수집할 카테고리 목록 정의 (소스코드 네비게이션 기반)
+        // 수집할 카테고리 목록 정의
         val categories = listOf(
             Pair("영화", "/movie"),
             Pair("한국영화", "/kor_movie"),
@@ -96,32 +100,38 @@ class TVHot : MainAPI() {
             Pair("극장판 애니", "/ani_movie")
         )
 
-        // 병렬 처리(apmap)로 각 카테고리 로드
-        val home = categories.apmap { (categoryName, urlPath) ->
-            // 1페이지와 2페이지 URL 생성
-            val urls = listOf(
-                "$mainUrl$urlPath?page=1",
-                "$mainUrl$urlPath?page=2"
-            )
+        // coroutineScope를 사용하여 안전하게 병렬 처리 수행
+        val home = coroutineScope {
+            categories.map { (categoryName, urlPath) ->
+                async {
+                    // 1페이지와 2페이지 URL 생성
+                    val urls = listOf(
+                        "$mainUrl$urlPath?page=1",
+                        "$mainUrl$urlPath?page=2"
+                    )
 
-            // 두 페이지를 병렬로 가져와서 합침
-            val items = urls.apmap { url ->
-                try {
-                    val doc = app.get(url, headers = commonHeaders).document
-                    // 제공된 HTML 구조에 맞는 선택자: .mov_list ul li
-                    doc.select(".mov_list ul li").mapNotNull { it.toSearchResponse() }
-                } catch (e: Exception) {
-                    emptyList<SearchResponse>()
+                    // 두 페이지를 병렬로 가져와서 합침
+                    val items = urls.map { url ->
+                        async {
+                            try {
+                                val doc = app.get(url, headers = commonHeaders).document
+                                // 제공된 HTML 구조에 맞는 선택자: .mov_list ul li
+                                doc.select(".mov_list ul li").mapNotNull { it.toSearchResponse() }
+                            } catch (e: Exception) {
+                                emptyList<SearchResponse>()
+                            }
+                        }
+                    }.awaitAll().flatten()
+
+                    // 항목이 있는 경우에만 리스트에 추가
+                    if (items.isNotEmpty()) {
+                        HomePageList(categoryName, items)
+                    } else {
+                        null
+                    }
                 }
-            }.flatten()
-
-            // 항목이 있는 경우에만 리스트에 추가
-            if (items.isNotEmpty()) {
-                HomePageList(categoryName, items)
-            } else {
-                null
-            }
-        }.filterNotNull()
+            }.awaitAll().filterNotNull()
+        }
 
         return newHomePageResponse(home, hasNext = false)
     }
@@ -129,7 +139,7 @@ class TVHot : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val searchUrl = "$mainUrl/search?stx=$query"
         val doc = app.get(searchUrl, headers = commonHeaders).document
-        // 검색 결과 페이지의 선택자는 상황에 따라 다를 수 있으나, 기존 코드 유지 혹은 .mov_list로 시도
+        
         var items = doc.select("ul#mov_con_list li").mapNotNull { it.toSearchResponse() }
         if (items.isEmpty()) {
              // 검색 결과 구조가 일반 리스트와 같다면 백업으로 시도
