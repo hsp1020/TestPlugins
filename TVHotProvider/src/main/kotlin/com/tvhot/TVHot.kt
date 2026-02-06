@@ -130,7 +130,7 @@ class TVHot : MainAPI() {
         if (story.contains("다시보기") && story.contains("무료")) story = "-"
         if (story.isEmpty()) story = "-"
 
-        val finalPlot = "$metaString\\n\\n$story".trim()
+        val finalPlot = "$metaString  $story".trim()
 
         val episodes = doc.select("#other_list ul li").mapNotNull { li ->
             val aTag = li.selectFirst("a.ep-link") ?: return@mapNotNull null
