@@ -5,17 +5,11 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
+// [필수]
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.network.WebViewResolver 
 import android.webkit.CookieManager
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import com.lagradost.cloudstream3.MainActivity
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.Dispatchers
 
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "BunnyPoorCdn"
@@ -70,67 +64,72 @@ class BunnyPoorCdn : ExtractorApi() {
             val domain = "https://every$serverNum.poorcdn.com"
             val tokenUrl = "$domain$path$id/c.html"
 
-            // [직접 구현] WebViewResolver 대신 suspendSafeApiCall 사용
-            // 메인 스레드에서 WebView 생성 -> 로딩 대기 -> 쿠키 추출
-            val captured = suspendSafeApiCall<String?> {
-                val webView = WebView(it)
-                webView.settings.javaScriptEnabled = true
-                webView.settings.domStorageEnabled = true
-                // 사용자 에이전트 고정 (성공했던 설정)
-                webView.settings.userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-                
-                var targetUrl: String? = null
-                var pageFinished = false
-                
-                webView.webViewClient = object : WebViewClient() {
-                    override fun onPageFinished(view: WebView?, url: String?) {
-                        super.onPageFinished(view, url)
-                        pageFinished = true
-                        if (url?.contains(".m3u8") == true) {
-                            targetUrl = url
-                        }
-                    }
-                    
-                    override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
-                        val reqUrl = request?.url?.toString()
-                        if (reqUrl?.contains(".m3u8") == true) {
-                            targetUrl = reqUrl
-                        }
-                        return super.shouldInterceptRequest(view, request)
-                    }
-                }
-                
-                webView.loadUrl(tokenUrl, mapOf("Referer" to cleanUrl))
-                
-                // 최대 15초 대기 (0.1초 광속 종료 방지)
-                val startTime = System.currentTimeMillis()
-                while (targetUrl == null && System.currentTimeMillis() - startTime < 15000) {
-                    delay(200)
-                }
-                
-                // 찾았으면 그거 반환, 못 찾았어도 c.html 로딩이 끝났으면 강제 변환 URL 반환
-                targetUrl ?: if (pageFinished) tokenUrl.replace("c.html", "index.m3u8") else null
-            }
+            // 타임아웃을 60초로 넉넉하게
+            val resolver = WebViewResolver(
+                interceptUrl = Regex("""(c\.html|index\.m3u8)"""),
+                additionalUrls = listOf(Regex("""\.m3u8""")),
+                useOkhttp = false,
+                timeout = 60000L
+            )
 
-            if (captured != null) {
-                val cookie = CookieManager.getInstance().getCookie(captured) 
-                           ?: CookieManager.getInstance().getCookie(tokenUrl) 
-                           ?: ""
-                           
+            try {
+                val response = app.get(
+                    url = tokenUrl, 
+                    headers = mapOf("Referer" to cleanUrl),
+                    interceptor = resolver
+                )
+
+                val cookie = CookieManager.getInstance().getCookie(response.url) ?: ""
                 val headers = mapOf(
                     "Referer" to cleanUrl,
                     "Cookie" to cookie,
                     "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
                 )
-                
-                callback(
-                    newExtractorLink(name, name, captured, ExtractorLinkType.M3U8) {
-                        this.referer = cleanUrl
-                        this.quality = Qualities.Unknown.value
-                        this.headers = headers
+
+                // 성공 케이스 (내용 읽음)
+                if (response.text.contains("#EXTM3U")) {
+                    val m3u8Content = response.text
+                    val baseUrl = response.url.substringBeforeLast("/")
+                    
+                    if (m3u8Content.contains("#EXT-X-STREAM-INF")) {
+                         Regex("""#EXT-X-STREAM-INF:.*?RESOLUTION=(\d+x\d+).*?\n(.*?\.m3u8)""").findAll(m3u8Content).forEach { match ->
+                            val subUrl = match.groupValues[2].trim()
+                            val fullUrl = if (subUrl.startsWith("http")) subUrl else "$baseUrl/$subUrl"
+                            callback(
+                                newExtractorLink(name, name, fullUrl, ExtractorLinkType.M3U8) {
+                                    this.referer = cleanUrl
+                                    this.quality = Qualities.Unknown.value
+                                    this.headers = headers
+                                }
+                            )
+                        }
+                    } else {
+                        val finalUrl = tokenUrl.replace("c.html", "index.m3u8")
+                        callback(
+                            newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
+                                this.referer = cleanUrl
+                                this.quality = Qualities.Unknown.value
+                                this.headers = headers
+                            }
+                        )
                     }
-                )
-                return true
+                    return true
+                }
+                
+                // [필수] 실패 케이스(타임아웃 등)에서도 쿠키만 있으면 강제 진행
+                if (cookie.isNotEmpty()) {
+                    val finalUrl = tokenUrl.replace("c.html", "index.m3u8")
+                    callback(
+                        newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
+                            this.referer = cleanUrl
+                            this.quality = Qualities.Unknown.value
+                            this.headers = headers
+                        }
+                    )
+                    return true
+                }
+
+            } catch (e: Exception) {
             }
         }
         return false
