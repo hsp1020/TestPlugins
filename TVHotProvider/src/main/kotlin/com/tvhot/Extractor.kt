@@ -5,8 +5,9 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
-// [필수] newExtractorLink를 쓰기 위한 모든 utils import
-import com.lagradost.cloudstream3.utils.* 
+// [필수] ExtractorLinkType import
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.network.WebViewResolver 
 import android.webkit.CookieManager
 
@@ -93,37 +94,27 @@ class BunnyPoorCdn : ExtractorApi() {
                             val subUrl = match.groupValues[2].trim()
                             val fullUrl = if (subUrl.startsWith("http")) subUrl else "$baseUrl/$subUrl"
                             
-                            // [빌드 해결] 파라미터 이름 생략 + 순서 준수
-                            // source, name, url, referer, quality, isM3u8
-                            val link = newExtractorLink(
-                                name, // source
-                                name, // name
-                                fullUrl, // url
-                                cleanUrl, // referer
-                                Qualities.Unknown.value, // quality
-                                true // isM3u8 (boolean)
+                            // [빌드 해결] 4번째 인자는 Type, 나머지는 블록 내부에서 설정
+                            callback(
+                                newExtractorLink(name, name, fullUrl, ExtractorLinkType.M3U8) {
+                                    this.referer = cleanUrl
+                                    this.quality = Qualities.Unknown.value
+                                    this.headers = headers
+                                }
                             )
-                            // 헤더는 따로 설정
-                            link.headers = headers
-                            
-                            callback(link)
                         }
                      } else {
                         val finalUrl = if (response.url.contains(".m3u8")) response.url 
                                        else tokenUrl.replace("c.html", "index.m3u8")
                         
-                        // [빌드 해결] 파라미터 이름 생략 + 순서 준수
-                        val link = newExtractorLink(
-                            name,
-                            name,
-                            finalUrl,
-                            cleanUrl,
-                            Qualities.Unknown.value,
-                            true // isM3u8
+                        // [빌드 해결] 4번째 인자는 Type, 나머지는 블록 내부에서 설정
+                        callback(
+                            newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
+                                this.referer = cleanUrl
+                                this.quality = Qualities.Unknown.value
+                                this.headers = headers
+                            }
                         )
-                        link.headers = headers
-                        
-                        callback(link)
                      }
                      return true
                 }
