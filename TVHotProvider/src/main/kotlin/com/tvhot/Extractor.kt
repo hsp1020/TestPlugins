@@ -9,13 +9,14 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.network.WebViewResolver 
 import android.webkit.CookieManager
+import java.net.URI
 
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "BunnyPoorCdn"
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
 
-    // 소만사/Every4 서버 통과용 윈도우 UA
+    // 윈도우 UA 유지
     private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
     override suspend fun getUrl(
@@ -67,38 +68,53 @@ class BunnyPoorCdn : ExtractorApi() {
             val domain = "https://every$serverNum.poorcdn.com"
             val tokenUrl = "$domain$path$id/c.html"
 
-            // 소만사 환경에서는 WebView도 SSL 에러가 날 수 있지만
-            // 타임아웃까지 버티면 강제로 링크를 생성해서 내보냄
             val resolver = WebViewResolver(
                 interceptUrl = Regex("""(c\.html|index\.m3u8)"""),
                 additionalUrls = listOf(Regex("""this_will_never_exist_12345""")),
                 useOkhttp = false,
-                timeout = 10000L
+                timeout = 15000L
             )
 
             try {
+                // Referer를 tvmon.site로 변경하여 시도 (혹시 이게 문제일까봐)
+                val webViewHeaders = mapOf(
+                    "Referer" to "https://tvmon.site/",
+                    "User-Agent" to DESKTOP_UA
+                )
+
                 val response = app.get(
                     url = tokenUrl, 
-                    headers = mapOf(
-                        "Referer" to cleanUrl,
-                        "User-Agent" to DESKTOP_UA
-                    ),
+                    headers = webViewHeaders,
                     interceptor = resolver
                 )
 
-                var cookie = CookieManager.getInstance().getCookie(response.url)
+                // [핵심 변경] 쿠키 탐색 로직 강화
+                val cookieManager = CookieManager.getInstance()
+                var cookie = cookieManager.getCookie(tokenUrl)
+                
+                // 1차 실패 시 도메인으로 재시도 (every4.poorcdn.com)
                 if (cookie.isNullOrEmpty()) {
-                    cookie = CookieManager.getInstance().getCookie(tokenUrl) ?: ""
+                    try {
+                        val uri = URI(tokenUrl)
+                        val domainUrl = "${uri.scheme}://${uri.host}"
+                        cookie = cookieManager.getCookie(domainUrl)
+                    } catch (e: Exception) {}
                 }
+
+                // 2차 실패 시 Bunny CDN 도메인으로 재시도
+                if (cookie.isNullOrEmpty()) {
+                     cookie = cookieManager.getCookie("https://player.bunny-frame.online")
+                }
+
+                val finalCookie = cookie ?: ""
                 
                 val headers = mapOf(
                     "User-Agent" to DESKTOP_UA,
-                    "Referer" to cleanUrl,
-                    "Cookie" to cookie,
+                    "Referer" to cleanUrl, // 재생할 땐 iframe 주소로 다시 복구
+                    "Cookie" to finalCookie,
                     "Accept" to "*/*"
                 )
 
-                // HTTP 변환 제거 (어차피 서버가 HTTPS로 리다이렉트하면 도루묵)
                 val finalUrl = tokenUrl.replace("c.html", "index.m3u8")
                 
                 callback(
@@ -111,12 +127,22 @@ class BunnyPoorCdn : ExtractorApi() {
                 return true
 
             } catch (e: Exception) {
-                // 에러 발생 시에도 링크 생성 (외부 플레이어에게 맡김)
-                val cookie = CookieManager.getInstance().getCookie(tokenUrl) ?: ""
+                // 에러 시에도 쿠키 긁어모으기 시도
+                val cookieManager = CookieManager.getInstance()
+                var cookie = cookieManager.getCookie(tokenUrl)
+                if (cookie.isNullOrEmpty()) {
+                    try {
+                        val uri = URI(tokenUrl)
+                        val domainUrl = "${uri.scheme}://${uri.host}"
+                        cookie = cookieManager.getCookie(domainUrl)
+                    } catch (err: Exception) {}
+                }
+                
+                val finalCookie = cookie ?: ""
                 val headers = mapOf(
                     "User-Agent" to DESKTOP_UA,
                     "Referer" to cleanUrl,
-                    "Cookie" to cookie,
+                    "Cookie" to finalCookie,
                     "Accept" to "*/*"
                 )
                 val finalUrl = tokenUrl.replace("c.html", "index.m3u8")
