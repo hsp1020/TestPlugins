@@ -120,7 +120,22 @@ class TVHot : MainAPI() {
                         !txt.contains("트레일러") && !it.hasClass("btn_watch")
                 }.map { it.text().trim() }
 
-                val metaString = (infoList + genreList).joinToString(" / ")
+                // 장르 포맷팅: "장르 : 드라마, 코미디" 형식으로 변경
+                val genreFormatted = if (genreList.isNotEmpty()) {
+                        "장르 : ${genreList.joinToString(", ")}"
+                } else {
+                        ""
+                }
+
+                // 메타 문자열 생성 (정보 + 장르)
+                val metaParts = mutableListOf<String>()
+                if (infoList.isNotEmpty()) {
+                        metaParts.add(infoList.joinToString(" / "))
+                }
+                if (genreFormatted.isNotEmpty()) {
+                        metaParts.add(genreFormatted)
+                }
+                val metaString = metaParts.joinToString(" / ")
 
                 var story = doc.selectFirst(".story")?.text()?.trim()
                         ?: doc.selectFirst(".tmdb-overview")?.text()?.trim()
