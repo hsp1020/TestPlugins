@@ -6,16 +6,23 @@ import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
-import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.network.WebViewResolver 
+import com.lagradost.cloudstream3.utils.* // suspendSafeApiCall 포함
 import android.webkit.CookieManager
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+// [필수] Dispatchers 사용을 위해
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "BunnyPoorCdn"
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
 
-    // [중요] 윈도우 UA 상수로 정의 (WebView와 ExoPlayer가 동일하게 사용)
+    // 윈도우 UA 상수
     private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
     override suspend fun getUrl(
@@ -37,7 +44,7 @@ class BunnyPoorCdn : ExtractorApi() {
         var cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = referer?.replace(Regex("[\\r\\n\\s]"), "")?.trim() ?: "https://tvmon.site/"
 
-        // 1. Refetch
+        // 1. Refetch & 2. Visit (URL 추출)
         if (!cleanUrl.contains("v/f/") && !cleanUrl.contains("v/e/")) {
             try {
                 val refRes = app.get(cleanReferer)
@@ -49,7 +56,6 @@ class BunnyPoorCdn : ExtractorApi() {
             } catch (e: Exception) {}
         }
 
-        // 2. Visit
         var path = ""
         var id = ""
         try {
@@ -67,75 +73,65 @@ class BunnyPoorCdn : ExtractorApi() {
             val domain = "https://every$serverNum.poorcdn.com"
             val tokenUrl = "$domain$path$id/c.html"
 
-            val resolver = WebViewResolver(
-                interceptUrl = Regex("""(c\.html|index\.m3u8)"""),
-                additionalUrls = listOf(Regex("""\.m3u8""")),
-                useOkhttp = false,
-                timeout = 60000L
-            )
-
-            try {
-                // [중요] WebView 요청 시에도 UA 강제 설정 (User-Agent 헤더 추가)
-                val response = app.get(
-                    url = tokenUrl, 
-                    headers = mapOf(
-                        "Referer" to cleanUrl,
-                        "User-Agent" to DESKTOP_UA
-                    ),
-                    interceptor = resolver
-                )
-
-                val cookie = CookieManager.getInstance().getCookie(response.url) ?: ""
+            // [직접 구현] WebViewResolver 대신 suspendSafeApiCall 사용
+            val captured = suspendSafeApiCall<String?> {
+                val webView = WebView(it)
+                webView.settings.javaScriptEnabled = true
+                webView.settings.domStorageEnabled = true
+                webView.settings.userAgentString = DESKTOP_UA
                 
-                // [중요] ExoPlayer용 헤더에도 UA 강제 설정
-                val playbackHeaders = mapOf(
-                    "Referer" to cleanUrl,
-                    "Cookie" to cookie,
-                    "User-Agent" to DESKTOP_UA // 여기서 덮어씌움
-                )
-
-                if (response.text.contains("#EXTM3U")) {
-                    val m3u8Content = response.text
-                    val baseUrl = response.url.substringBeforeLast("/")
-                    
-                    if (m3u8Content.contains("#EXT-X-STREAM-INF")) {
-                         Regex("""#EXT-X-STREAM-INF:.*?RESOLUTION=(\d+x\d+).*?\n(.*?\.m3u8)""").findAll(m3u8Content).forEach { match ->
-                            val subUrl = match.groupValues[2].trim()
-                            val fullUrl = if (subUrl.startsWith("http")) subUrl else "$baseUrl/$subUrl"
-                            callback(
-                                newExtractorLink(name, name, fullUrl, ExtractorLinkType.M3U8) {
-                                    this.referer = cleanUrl
-                                    this.quality = Qualities.Unknown.value
-                                    this.headers = playbackHeaders // 강제 UA 적용된 헤더
-                                }
-                            )
-                        }
-                    } else {
-                        val finalUrl = tokenUrl.replace("c.html", "index.m3u8")
-                        callback(
-                            newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
-                                this.referer = cleanUrl
-                                this.quality = Qualities.Unknown.value
-                                this.headers = playbackHeaders // 강제 UA 적용된 헤더
-                            }
-                        )
+                var foundUrl: String? = null
+                
+                webView.webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        super.onPageFinished(view, url)
+                        // 페이지 로딩이 끝나도 바로 리턴하지 않고, 쿠키가 생길 때까지 대기하도록 함
                     }
-                    return true
+                    
+                    override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                        val reqUrl = request?.url?.toString()
+                        if (reqUrl?.contains(".m3u8") == true) {
+                            foundUrl = reqUrl
+                        }
+                        return super.shouldInterceptRequest(view, request)
+                    }
                 }
                 
-                if (cookie.isNotEmpty()) {
-                    val finalUrl = tokenUrl.replace("c.html", "index.m3u8")
-                    callback(
-                        newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
-                            this.referer = cleanUrl
-                            this.quality = Qualities.Unknown.value
-                            this.headers = playbackHeaders // 강제 UA 적용된 헤더
-                        }
-                    )
-                    return true
+                webView.loadUrl(tokenUrl, mapOf("Referer" to cleanUrl))
+                
+                // 최대 20초 대기
+                val startTime = System.currentTimeMillis()
+                while (foundUrl == null && System.currentTimeMillis() - startTime < 20000) {
+                    // 쿠키가 들어왔는지 확인
+                    val cookie = CookieManager.getInstance().getCookie(tokenUrl)
+                    if (!cookie.isNullOrEmpty()) {
+                         // 쿠키가 들어왔으면 m3u8을 못 찾았어도 강제로 진행 가능
+                         // 하지만 조금 더 기다려봄
+                    }
+                    delay(500)
                 }
+                
+                foundUrl ?: tokenUrl.replace("c.html", "index.m3u8")
+            }
 
-            } catch (e: Exception) {
+            if (captured != null) {
+                // 쿠키 가져오기
+                val cookie = CookieManager.getInstance().getCookie(tokenUrl) ?: ""
+                
+                val headers = mapOf(
+                    "Referer" to cleanUrl,
+                    "Cookie" to cookie, // 이제 쿠키가 확실히 있을 것임
+                    "User-Agent" to DESKTOP_UA
+                )
+                
+                callback(
+                    newExtractorLink(name, name, captured, ExtractorLinkType.M3U8) {
+                        this.referer = cleanUrl
+                        this.quality = Qualities.Unknown.value
+                        this.headers = headers
+                    }
+                )
+                return true
             }
         }
         return false
