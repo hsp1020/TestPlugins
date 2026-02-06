@@ -96,7 +96,8 @@ class TVHot : MainAPI() {
                 val oriTitleFull = h3Element?.selectFirst(".ori_title")?.text()?.trim()
 
                 if (title.isNullOrEmpty()) {
-                        title = doc.selectFirst("bo_v_movinfo h3")?.text()?.trim()
+                        title = doc.selectFirst("#bo_v_movinfo h3")?.text()?.trim()
+                                ?: doc.selectFirst(".con_title")?.text()?.trim()
                                 ?: "Unknown"
                 }
                 title = title!!.replace(Regex("\\\\\\\\s*\\\\\\\\d+\\\\\\\\s*[화회부].*"), "").replace(" 다시보기", "").trim()
