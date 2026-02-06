@@ -5,12 +5,10 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
-// [필수] 로그가 알려준 함수 사용을 위해 import (보통 utils에 포함됨)
-import com.lagradost.cloudstream3.utils.loadExtractor 
+// INFER 상수를 쓰기 위해 import
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.network.WebViewResolver 
 import android.webkit.CookieManager
-// [중요] newExtractorLink가 확장 함수나 Top-level일 수 있으므로 utils 전체 import 권장
-import com.lagradost.cloudstream3.utils.*
 
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "BunnyPoorCdn"
@@ -95,20 +93,19 @@ class BunnyPoorCdn : ExtractorApi() {
                             val subUrl = match.groupValues[2].trim()
                             val fullUrl = if (subUrl.startsWith("http")) subUrl else "$baseUrl/$subUrl"
                             
-                            // [수정] ExtractorLink(...) 대신 newExtractorLink(...) 사용
+                            // [수정] 파라미터 이름 제거하고 순서대로 주입 (에러 방지)
+                            // 순서: source, name, url, referer, quality, type, headers, extractorData
                             callback(
-                                newExtractorLink(
-                                    source = name,
-                                    name = name,
-                                    url = fullUrl,
-                                    referer = cleanUrl,
-                                    quality = Qualities.Unknown.value,
-                                    isM3u8 = true // 여기서는 boolean 사용 가능
-                                ).apply {
-                                    // headers는 apply 블록에서 넣거나 생성자 지원 시 넣음
-                                    // newExtractorLink가 headers 인자를 지원하지 않을 경우를 대비해 이렇게 설정
-                                    this.headers = headers
-                                }
+                                ExtractorLink(
+                                    name, // source
+                                    name, // name
+                                    fullUrl, // url
+                                    cleanUrl, // referer
+                                    Qualities.Unknown.value, // quality
+                                    ExtractorLinkType.M3U8, // type (Safe Enum)
+                                    headers, // headers
+                                    null // extractorData
+                                )
                             )
                         }
                      } else {
@@ -116,16 +113,16 @@ class BunnyPoorCdn : ExtractorApi() {
                                        else tokenUrl.replace("c.html", "index.m3u8")
                         
                         callback(
-                            newExtractorLink(
-                                source = name,
-                                name = name,
-                                url = finalUrl,
-                                referer = cleanUrl,
-                                quality = Qualities.Unknown.value,
-                                isM3u8 = true
-                            ).apply {
-                                this.headers = headers
-                            }
+                            ExtractorLink(
+                                name, // source
+                                name, // name
+                                finalUrl, // url
+                                cleanUrl, // referer
+                                Qualities.Unknown.value, // quality
+                                ExtractorLinkType.M3U8, // type
+                                headers, // headers
+                                null // extractorData
+                            )
                         )
                      }
                      return true
