@@ -96,7 +96,7 @@ class TVHot : MainAPI() {
                 val oriTitleFull = h3Element?.selectFirst(".ori_title")?.text()?.trim()
 
                 if (title.isNullOrEmpty()) {
-                        title = doc.selectFirst("h1#bo_v_title")?.text()?.trim()
+                        title = doc.selectFirst("bo_v_movinfo h3")?.text()?.trim()
                                 ?: doc.selectFirst(".bo_v_tit")?.text()?.trim()
                                 ?: "Unknown"
                 }
