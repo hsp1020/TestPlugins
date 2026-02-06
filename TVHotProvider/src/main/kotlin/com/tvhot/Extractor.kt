@@ -5,9 +5,7 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
-// [필수] ExtractorLinkType import
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
-import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.network.WebViewResolver 
 import android.webkit.CookieManager
 
@@ -35,7 +33,7 @@ class BunnyPoorCdn : ExtractorApi() {
         var cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = referer?.replace(Regex("[\\r\\n\\s]"), "")?.trim() ?: "https://tvmon.site/"
 
-        // 1. Refetch
+        // 1. Refetch & 2. Visit (URL 추출 로직 동일)
         if (!cleanUrl.contains("v/f/") && !cleanUrl.contains("v/e/")) {
             try {
                 val refRes = app.get(cleanReferer)
@@ -47,7 +45,6 @@ class BunnyPoorCdn : ExtractorApi() {
             } catch (e: Exception) {}
         }
 
-        // 2. Visit
         var path = ""
         var id = ""
         try {
@@ -85,39 +82,58 @@ class BunnyPoorCdn : ExtractorApi() {
                     "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
                 )
 
+                // [핵심 변경] 내용 검사고 뭐고 다 필요 없고, URL만 잡히면 무조건 생성
+                // M3u8Helper를 아예 안 씁니다.
+                
+                // 1. 이미 .m3u8로 리다이렉트 된 경우
+                if (response.url.contains(".m3u8")) {
+                    callback(
+                        ExtractorLink(
+                            name, name, response.url, cleanUrl, Qualities.Unknown.value, ExtractorLinkType.M3U8, headers, null
+                        )
+                    )
+                    return true
+                }
+
+                // 2. c.html 내용을 읽은 경우
                 if (response.text.contains("#EXTM3U")) {
-                     val m3u8Content = response.text
-                     val baseUrl = response.url.substringBeforeLast("/")
-                     
-                     if (m3u8Content.contains("#EXT-X-STREAM-INF")) {
-                        Regex("""#EXT-X-STREAM-INF:.*?RESOLUTION=(\d+x\d+).*?\n(.*?\.m3u8)""").findAll(m3u8Content).forEach { match ->
+                    // (1) Master Playlist 분기
+                    if (response.text.contains("#EXT-X-STREAM-INF")) {
+                         val baseUrl = response.url.substringBeforeLast("/")
+                         Regex("""#EXT-X-STREAM-INF:.*?RESOLUTION=(\d+x\d+).*?\n(.*?\.m3u8)""").findAll(response.text).forEach { match ->
                             val subUrl = match.groupValues[2].trim()
                             val fullUrl = if (subUrl.startsWith("http")) subUrl else "$baseUrl/$subUrl"
-                            
-                            // [빌드 해결] 4번째 인자는 Type, 나머지는 블록 내부에서 설정
                             callback(
-                                newExtractorLink(name, name, fullUrl, ExtractorLinkType.M3U8) {
-                                    this.referer = cleanUrl
-                                    this.quality = Qualities.Unknown.value
-                                    this.headers = headers
-                                }
+                                ExtractorLink(
+                                    name, name, fullUrl, cleanUrl, Qualities.Unknown.value, ExtractorLinkType.M3U8, headers, null
+                                )
                             )
                         }
-                     } else {
-                        val finalUrl = if (response.url.contains(".m3u8")) response.url 
-                                       else tokenUrl.replace("c.html", "index.m3u8")
-                        
-                        // [빌드 해결] 4번째 인자는 Type, 나머지는 블록 내부에서 설정
+                    } 
+                    // (2) Single Stream (이게 대부분) -> 강제 URL 변환
+                    else {
+                        val finalUrl = tokenUrl.replace("c.html", "index.m3u8")
                         callback(
-                            newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
-                                this.referer = cleanUrl
-                                this.quality = Qualities.Unknown.value
-                                this.headers = headers
-                            }
+                            ExtractorLink(
+                                name, name, finalUrl, cleanUrl, Qualities.Unknown.value, ExtractorLinkType.M3U8, headers, null
+                            )
                         )
-                     }
-                     return true
+                    }
+                    return true
                 }
+                
+                // 3. [최후의 수단] 아무것도 못 읽었어도(Timeout), 쿠키만 있으면 시도해본다.
+                // 60초 타임아웃 걸려서 실패했더라도, 쿠키는 구워졌을 수 있음.
+                if (cookie.isNotEmpty()) {
+                    val finalUrl = tokenUrl.replace("c.html", "index.m3u8")
+                    callback(
+                        ExtractorLink(
+                            name, name, finalUrl, cleanUrl, Qualities.Unknown.value, ExtractorLinkType.M3U8, headers, null
+                        )
+                    )
+                    return true
+                }
+
             } catch (e: Exception) {
             }
         }
