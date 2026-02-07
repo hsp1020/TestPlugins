@@ -137,7 +137,7 @@ class TVWiki : MainAPI() {
         }
         // 제목 정리 (회차 정보 제거)
         title = title!!.replace(
-            Regex("\\s*\\d+[화회부].*"),
+            Regex("\\\\s*\\\\d+[화회부].*"),
             ""
         ).replace(" 다시보기", "").trim()
 
@@ -254,18 +254,28 @@ class TVWiki : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        println("[TVWiki] loadLinks 시작 - data: $data")
+        
         val doc = app.get(data, headers = commonHeaders).document
+        println("[TVWiki] 페이지 로드 완료")
 
         val thumbnailHint = extractThumbnailHint(doc)
+        println("[TVWiki] 썸네일 힌트 추출: ${thumbnailHint ?: "없음"}")
 
         val iframe = doc.selectFirst("iframe#view_iframe")
+        println("[TVWiki] iframe#view_iframe 찾음: ${iframe != null}")
+        
         // iframe src를 최우선으로 사용 (티비위키는 src에 토큰이 포함되어 있음)
         val playerUrl = iframe?.attr("src")?.ifEmpty { null }
             ?: iframe?.attr("data-player1")?.ifEmpty { null }
             ?: iframe?.attr("data-player2")?.ifEmpty { null }
 
+        println("[TVWiki] playerUrl 추출: $playerUrl")
+
         if (playerUrl != null) {
             val finalPlayerUrl = fixUrl(playerUrl).replace("&amp;", "&")
+            println("[TVWiki] 최종 playerUrl 처리: $finalPlayerUrl")
+            
             val extracted = BunnyPoorCdn().extract(
                 finalPlayerUrl,
                 data,
@@ -273,18 +283,29 @@ class TVWiki : MainAPI() {
                 callback,
                 thumbnailHint
             )
-            if (extracted) return true
+            println("[TVWiki] BunnyPoorCdn.extract 결과: $extracted")
+            
+            if (extracted) {
+                println("[TVWiki] 성공적으로 링크 추출됨")
+                return true
+            }
+        } else {
+            println("[TVWiki] playerUrl을 찾을 수 없음")
         }
 
         if (thumbnailHint != null) {
+            println("[TVWiki] 썸네일 힌트로 링크 생성 시도: $thumbnailHint")
             try {
                 val pathRegex = Regex("""/v/[a-z]/[a-zA-Z0-9]+""")
                 val pathMatch = pathRegex.find(thumbnailHint)
+                println("[TVWiki] pathMatch 결과: ${pathMatch?.value}")
 
                 if (pathMatch != null) {
                     val m3u8Url =
                         thumbnailHint.substringBefore(pathMatch.value) + pathMatch.value + "/index.m3u8"
                     val fixedM3u8Url = m3u8Url.replace(Regex("//v/"), "/v/")
+                    
+                    println("[TVWiki] 생성된 m3u8 URL: $fixedM3u8Url")
 
                     callback(
                         newExtractorLink(name, name, fixedM3u8Url, ExtractorLinkType.M3U8) {
@@ -293,27 +314,38 @@ class TVWiki : MainAPI() {
                             this.headers = commonHeaders
                         }
                     )
+                    println("[TVWiki] callback 호출 완료")
                     return true
                 }
             } catch (e: Exception) {
+                println("[TVWiki] 썸네일 힌트 처리 중 오류: ${e.message}")
                 e.printStackTrace()
             }
         }
 
+        println("[TVWiki] loadLinks 실패 - 링크를 찾을 수 없음")
         return false
     }
 
     private fun extractThumbnailHint(doc: Document): String? {
+        println("[TVWiki] extractThumbnailHint 시작")
         val videoThumbElements = doc.select("img[src*='/v/'], img[data-src*='/v/']")
+        println("[TVWiki] /v/ 패턴을 가진 이미지 요소 수: ${videoThumbElements.size}")
+        
         val priorityRegex = Regex("""/v/[a-z]/""")
 
         for (el in videoThumbElements) {
             val raw = el.attr("src").ifEmpty { el.attr("data-src") }
             val fixed = fixUrl(raw)
+            println("[TVWiki] 검사 중 - raw: $raw, fixed: $fixed")
+            
             if (priorityRegex.containsMatchIn(fixed)) {
+                println("[TVWiki] 적합한 썸네일 힌트 발견: $fixed")
                 return fixed
             }
         }
+        
+        println("[TVWiki] 적합한 썸네일 힌트 없음")
         return null
     }
 }
