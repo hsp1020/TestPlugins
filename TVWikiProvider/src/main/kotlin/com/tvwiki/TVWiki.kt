@@ -6,6 +6,9 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 class TVWiki : MainAPI() {
     override var mainUrl = "https://tvwiki5.net"
@@ -259,39 +262,127 @@ class TVWiki : MainAPI() {
         val doc = app.get(data, headers = commonHeaders).document
         println("[TVWiki] 페이지 로드 완료")
 
-        val thumbnailHint = extractThumbnailHint(doc)
-        println("[TVWiki] 썸네일 힌트 추출: ${thumbnailHint ?: "없음"}")
-
+        // 1. iframe 요소 찾기
         val iframe = doc.selectFirst("iframe#view_iframe")
-        println("[TVWiki] iframe#view_iframe 찾음: ${iframe != null}")
-        
-        // iframe src를 최우선으로 사용 (티비위키는 src에 토큰이 포함되어 있음)
-        val playerUrl = iframe?.attr("src")?.ifEmpty { null }
-            ?: iframe?.attr("data-player1")?.ifEmpty { null }
-            ?: iframe?.attr("data-player2")?.ifEmpty { null }
-
-        println("[TVWiki] playerUrl 추출: $playerUrl")
-
-        if (playerUrl != null) {
-            val finalPlayerUrl = fixUrl(playerUrl).replace("&amp;", "&")
-            println("[TVWiki] 최종 playerUrl 처리: $finalPlayerUrl")
+        if (iframe != null) {
+            println("[TVWiki] iframe#view_iframe 발견!")
+            println("[TVWiki] iframe 전체 HTML: ${iframe.outerHtml().take(500)}...")
             
-            val extracted = BunnyPoorCdn().extract(
-                finalPlayerUrl,
-                data,
-                subtitleCallback,
-                callback,
-                thumbnailHint
-            )
-            println("[TVWiki] BunnyPoorCdn.extract 결과: $extracted")
+            // iframe의 모든 속성 출력 (디버깅용)
+            for (attr in iframe.attributes()) {
+                println("[TVWiki]   ${attr.key} = ${attr.value.take(100)}")
+            }
             
-            if (extracted) {
-                println("[TVWiki] 성공적으로 링크 추출됨")
-                return true
+            // 2. data-session1 또는 data-session2 속성 가져오기
+            val sessionDataString = iframe.attr("data-session1").ifEmpty { 
+                iframe.attr("data-session2") 
+            }
+            
+            println("[TVWiki] sessionDataString 길이: ${sessionDataString.length}")
+            println("[TVWiki] sessionDataString 처음 200자: ${sessionDataString.take(200)}")
+            
+            if (sessionDataString.isNotEmpty()) {
+                try {
+                    // 3. session 데이터를 사용하여 플레이어 URL 얻기
+                    val sessionUrl = "$mainUrl/api/create_session.php"
+                    println("[TVWiki] 세션 생성 API 호출: $sessionUrl")
+                    
+                    val sessionResponse = app.post(
+                        sessionUrl,
+                        headers = mapOf(
+                            "User-Agent" to USER_AGENT,
+                            "Content-Type" to "application/json",
+                            "Referer" to data,
+                            "Origin" to mainUrl,
+                            "Accept" to "application/json, text/plain, */*",
+                            "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
+                        ),
+                        data = sessionDataString,
+                        timeout = 30000
+                    )
+                    
+                    println("[TVWiki] 세션 API 응답 코드: ${sessionResponse.code}")
+                    println("[TVWiki] 세션 API 응답 본문: ${sessionResponse.text.take(500)}")
+                    
+                    // JSON 응답 파싱
+                    val jsonResponse = sessionResponse.parsedSafe<JsonElement>()
+                    if (jsonResponse != null && jsonResponse.jsonObject != null) {
+                        val jsonObj = jsonResponse.jsonObject!!
+                        
+                        val success = jsonObj["success"]?.jsonPrimitive?.content?.toBoolean() ?: false
+                        val playerUrl = jsonObj["player_url"]?.jsonPrimitive?.content
+                        val sig = jsonObj["sig"]?.jsonPrimitive?.content
+                        val t = jsonObj["t"]?.jsonPrimitive?.content
+                        
+                        println("[TVWiki] API 응답 파싱: success=$success, playerUrl=$playerUrl, sig=$sig, t=$t")
+                        
+                        if (success && playerUrl != null) {
+                            val finalPlayerUrl = if (sig != null && t != null) {
+                                "$playerUrl?t=$t&sig=$sig"
+                            } else {
+                                playerUrl
+                            }
+                            
+                            println("[TVWiki] 최종 플레이어 URL 생성: $finalPlayerUrl")
+                            
+                            // 4. BunnyPoorCdn 추출기 호출
+                            val extracted = BunnyPoorCdn().extract(
+                                finalPlayerUrl,
+                                data,
+                                subtitleCallback,
+                                callback,
+                                null
+                            )
+                            println("[TVWiki] BunnyPoorCdn.extract 결과: $extracted")
+                            
+                            if (extracted) {
+                                println("[TVWiki] 성공적으로 링크 추출됨")
+                                return true
+                            }
+                        } else {
+                            println("[TVWiki] API 응답이 실패하거나 player_url이 없음")
+                        }
+                    } else {
+                        println("[TVWiki] JSON 응답 파싱 실패")
+                    }
+                } catch (e: Exception) {
+                    println("[TVWiki] 세션 API 호출 중 오류: ${e.message}")
+                    e.printStackTrace()
+                }
+            } else {
+                println("[TVWiki] data-session1과 data-session2가 모두 비어있음")
+            }
+            
+            // 5. 대체 방법: iframe의 src 속성 사용 (동적으로 설정되기 전의 기본 URL)
+            val playerUrl = iframe.attr("src")
+            println("[TVWiki] iframe src 속성: $playerUrl")
+            
+            if (playerUrl.isNotEmpty()) {
+                val finalPlayerUrl = fixUrl(playerUrl).replace("&amp;", "&")
+                println("[TVWiki] src로부터 플레이어 URL 생성: $finalPlayerUrl")
+                
+                val extracted = BunnyPoorCdn().extract(
+                    finalPlayerUrl,
+                    data,
+                    subtitleCallback,
+                    callback,
+                    null
+                )
+                println("[TVWiki] BunnyPoorCdn.extract 결과: $extracted")
+                
+                if (extracted) {
+                    println("[TVWiki] 성공적으로 링크 추출됨")
+                    return true
+                }
             }
         } else {
-            println("[TVWiki] playerUrl을 찾을 수 없음")
+            println("[TVWiki] iframe#view_iframe을 찾을 수 없음")
         }
+
+        // 6. 썸네일 힌트 방법 (백업)
+        println("[TVWiki] 기본 방법 실패, 썸네일 힌트 시도")
+        val thumbnailHint = extractThumbnailHint(doc)
+        println("[TVWiki] 썸네일 힌트 추출: ${thumbnailHint ?: "없음"}")
 
         if (thumbnailHint != null) {
             println("[TVWiki] 썸네일 힌트로 링크 생성 시도: $thumbnailHint")
@@ -328,24 +419,24 @@ class TVWiki : MainAPI() {
     }
 
     private fun extractThumbnailHint(doc: Document): String? {
-    println("[TVWiki] extractThumbnailHint 시작")
-    val videoThumbElements = doc.select("img[src*='/v/'], img[data-src*='/v/']")
-    println("[TVWiki] /v/ 패턴을 가진 이미지 요소 수: ${videoThumbElements.size}")
-    
-    val priorityRegex = Regex("""/v/[a-z]/""")
-
-    for (el in videoThumbElements) {
-        val raw = el.attr("src").ifEmpty { el.attr("data-src") }
-        val fixed = fixUrl(raw)
-        println("[TVWiki] 검사 중 - raw: $raw, fixed: $fixed")
+        println("[TVWiki] extractThumbnailHint 시작")
+        val videoThumbElements = doc.select("img[src*='/v/'], img[data-src*='/v/']")
+        println("[TVWiki] /v/ 패턴을 가진 이미지 요소 수: ${videoThumbElements.size}")
         
-        if (priorityRegex.containsMatchIn(fixed)) {
-            println("[TVWiki] 적합한 썸네일 힌트 발견: $fixed")
-            return fixed
+        val priorityRegex = Regex("""/v/[a-z]/""")
+
+        for (el in videoThumbElements) {
+            val raw = el.attr("src").ifEmpty { el.attr("data-src") }
+            val fixed = fixUrl(raw)
+            println("[TVWiki] 검사 중 - raw: $raw, fixed: $fixed")
+            
+            if (priorityRegex.containsMatchIn(fixed)) {
+                println("[TVWiki] 적합한 썸네일 힌트 발견: $fixed")
+                return fixed
+            }
         }
+        
+        println("[TVWiki] 적합한 썸네일 힌트 없음")
+        return null
     }
-    
-    println("[TVWiki] 적합한 썸네일 힌트 없음")
-    return null
-}
 }
