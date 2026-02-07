@@ -22,14 +22,24 @@
         "name": "TVHotProvider"
     },
     {
+        "iconUrl": "https://tvwiki5.net/img/logo.png",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "status": 3,
+        "fileSize": 21871,
+        "status": 1,
+        "language": "ko",
         "authors": [
-            
+            "hsp1020"
         ],
-        "version": -1,
+        "tvTypes": [
+            "TvSeries",
+            "Movie",
+            "AsianDrama",
+            "Anime"
+        ],
+        "version": 1,
         "internalName": "TVWikiProvider",
+        "description": "\ud55c\uad6d \ub4dc\ub77c\ub9c8 \ubc0f TV \ud504\ub85c\uadf8\ub7a8 \ub2e4\uc2dc\ubcf4\uae30 \uc81c\uacf5",
         "url": "https://raw.githubusercontent.com/hsp1020/TestPlugins/builds/TVWikiProvider.cs3",
         "name": "TVWikiProvider"
     }
