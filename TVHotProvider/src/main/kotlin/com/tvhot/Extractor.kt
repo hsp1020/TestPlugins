@@ -12,7 +12,7 @@ import android.webkit.CookieManager
 import java.net.URI
 
 class BunnyPoorCdn : ExtractorApi() {
-    override val name = "BunnyPoorCdn"
+    override val name = "TVMON"
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
     
