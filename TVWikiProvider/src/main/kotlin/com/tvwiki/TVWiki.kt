@@ -348,3 +348,4 @@ class TVWiki : MainAPI() {
     println("[TVWiki] 적합한 썸네일 힌트 없음")
     return null
 }
+}
