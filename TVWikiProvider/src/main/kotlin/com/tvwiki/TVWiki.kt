@@ -33,6 +33,7 @@ class TVHot : MainAPI() {
     )
 
     override val mainPage = mainPageOf(
+        "/popular" to "인기순위",
         "/kor_movie" to "한국영화",
         "/movie" to "해외영화",
         "/drama" to "드라마",
