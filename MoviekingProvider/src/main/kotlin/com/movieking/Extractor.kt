@@ -7,9 +7,6 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.network.WebViewResolver 
-import android.webkit.CookieManager
-import java.net.URI
 
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -22,7 +19,6 @@ class BcbcRedExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // iframe 내부의 HTML을 가져옵니다.
         val response = app.get(
             url,
             referer = referer,
@@ -33,23 +29,27 @@ class BcbcRedExtractor : ExtractorApi() {
 
         val doc = response.text
         
-        // M3U8 URL을 정규식으로 찾습니다.
-        // 보통 'file': 'url.m3u8' 또는 source src="url.m3u8" 형태로 존재합니다.
+        // 정규식 수정: raw string(""") 안에서는 이스케이프가 적게 필요합니다.
+        // iframe 소스 내의 .m3u8 링크를 찾습니다.
         val m3u8Regex = Regex("""["']([^"']+\.m3u8[^"']*)["']""")
         val match = m3u8Regex.find(doc)
 
         if (match != null) {
-            val m3u8Url = match.groupValues[1].replace("\\/", "/") // 이스케이프 문자 제거
+            // 이스케이프 된 슬래시(\/)를 일반 슬래시(/)로 변환
+            val m3u8Url = match.groupValues[1].replace("\\/", "/")
             
+            // [수정된 부분] newExtractorLink 사용 방식 변경
             callback(
                 newExtractorLink(
                     source = name,
                     name = name,
                     url = m3u8Url,
-                    referer = url, // 플레이어 주소를 리퍼러로 사용
-                    quality = Qualities.Unknown.value,
                     type = ExtractorLinkType.M3U8
-                )
+                ) {
+                    // referer와 quality는 여기서(람다 블록 내부) 설정합니다.
+                    this.referer = url
+                    this.quality = Qualities.Unknown.value
+                }
             )
         }
     }
