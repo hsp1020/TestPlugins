@@ -194,7 +194,7 @@ class TVWiki : MainAPI() {
         val genreFormatted = if (genreList.isNotEmpty()) "장르: ${genreList.joinToString(", ")}" else ""
 
         val castList = doc.select(".slider_act .item .name").map { it.text().trim() }
-        val castFormatted = if (castList.isNotEmpty()) "출연진: ${castList.joinToString(", ")}" else ""
+        val castFormatted = if (castList.isNotEmpty()) "출연: ${castList.joinToString(", ")}" else ""
 
         val metaParts = mutableListOf<String>()
         if (infoList.isNotEmpty()) metaParts.add(infoList.joinToString(" / "))
