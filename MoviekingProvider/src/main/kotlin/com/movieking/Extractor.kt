@@ -6,6 +6,11 @@ import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.SubtitleFile
+import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.network.WebViewResolver 
+import android.webkit.CookieManager
+import java.net.URI
 
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -38,7 +43,7 @@ class BcbcRedExtractor : ExtractorApi() {
             val m3u8Url = match.groupValues[1].replace("\\/", "/") // 이스케이프 문자 제거
             
             callback(
-                ExtractorLink(
+                newExtractorLink(
                     source = name,
                     name = name,
                     url = m3u8Url,
