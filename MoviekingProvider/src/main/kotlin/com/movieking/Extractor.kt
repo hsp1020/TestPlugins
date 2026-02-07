@@ -8,8 +8,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.*
-import android.webkit.CookieManager
-import kotlinx.coroutines.delay
 
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -24,10 +22,11 @@ class BcbcRedExtractor : ExtractorApi() {
     ) {
         println("[MovieKingPlayer] getUrl 시작: $url")
 
-        // 1. User-Agent 고정 (PC 크롬으로 위장)
+        // 1. User-Agent 및 헤더 설정
+        // PC User-Agent 사용 (모바일 차단 방지)
         val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         
-        // 2. WebViewResolver 실행 (쿠키 생성 목적)
+        // 2. WebViewResolver를 사용하여 요청 (JS 실행 및 쿠키 굽기)
         val response = app.get(
             url,
             referer = referer,
@@ -45,32 +44,24 @@ class BcbcRedExtractor : ExtractorApi() {
             val m3u8Url = match.groupValues[1].replace("\\/", "/").trim()
             println("[MovieKingPlayer] M3U8 발견: $m3u8Url")
             
-            // 4. [핵심 수정] 쿠키 강제 추출 시도 (최대 2.5초 대기)
-            val cookieManager = CookieManager.getInstance()
-            var cookies = ""
+            // 4. [핵심] CookieManager 대신 response.cookies 사용
+            // app.get이 성공했다면 OkHttp 내부 CookieJar에 쿠키가 있습니다.
+            val cookieMap = response.cookies
+            val cookieString = cookieMap.entries.joinToString("; ") { "${it.key}=${it.value}" }
             
-            // WebView가 쿠키를 디스크/메모리에 쓸 때까지 약간의 딜레이가 필요할 수 있음
-            for (i in 1..5) {
-                cookies = cookieManager.getCookie(url) ?: ""
-                if (cookies.isNotEmpty()) {
-                    println("[MovieKingPlayer] 쿠키 획득 성공 ($i/5): $cookies")
-                    break
-                }
-                println("[MovieKingPlayer] 쿠키 없음, 대기 중... ($i/5)")
-                delay(500L) 
-            }
+            println("[MovieKingPlayer] 추출된 쿠키: $cookieString")
 
-            // 5. 헤더 구성
-            val videoHeaders = mutableMapOf(
+            // 5. [핵심] 헤더 강제 설정
+            // 220 Byte 에러(403 Forbidden)를 피하기 위해 Referer를 iframe 주소로 고정합니다.
+            val headers = mutableMapOf(
                 "User-Agent" to userAgent,
-                "Referer" to url, // iframe 주소 자체를 리퍼러로
+                "Referer" to url, // iframe 전체 주소 (매우 중요)
+                "Origin" to "https://player-v1.bcbc.red",
                 "Accept" to "*/*"
             )
             
-            if (cookies.isNotEmpty()) {
-                videoHeaders["Cookie"] = cookies
-            } else {
-                println("[MovieKingPlayer] 경고: 쿠키를 획득하지 못했습니다. 재생 실패 가능성 높음.")
+            if (cookieString.isNotEmpty()) {
+                headers["Cookie"] = cookieString
             }
 
             callback(
@@ -80,13 +71,14 @@ class BcbcRedExtractor : ExtractorApi() {
                     url = m3u8Url,
                     type = ExtractorLinkType.M3U8
                 ) {
-                    this.referer = url
+                    // M3U8 요청 및 내부 KEY 요청 시 이 헤더가 사용됩니다.
+                    this.referer = url 
                     this.quality = Qualities.Unknown.value
-                    this.headers = videoHeaders
+                    this.headers = headers
                 }
             )
         } else {
-             println("[MovieKingPlayer] M3U8 URL 패턴을 찾지 못했습니다.")
+             println("[MovieKingPlayer] 실패: data-m3u8 패턴을 찾지 못했습니다.")
         }
     }
 }
