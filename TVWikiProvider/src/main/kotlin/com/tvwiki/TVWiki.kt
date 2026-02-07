@@ -8,7 +8,7 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
 class TVHot : MainAPI() {
-    override var mainUrl = "tvwiki5.net"
+    override var mainUrl = "https://tvwiki5.net"
     override var name = "TVWiki"
     override val hasMainPage = true
     override var lang = "ko"
@@ -21,7 +21,6 @@ class TVHot : MainAPI() {
         TvType.AnimeMovie
     )
 
-    // 모바일 UA -> 윈도우 UA (BunnyPoorCdn 대응)
     private val USER_AGENT =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
@@ -33,44 +32,42 @@ class TVHot : MainAPI() {
         "Upgrade-Insecure-Requests" to "1"
     )
 
-    // [변경됨] FourKHDHub 스타일: 메인 페이지 탭 정의
-    // 여기에 정의된 항목들이 앱 홈 화면의 탭이나 섹션으로 나타납니다.
     override val mainPage = mainPageOf(
-        "/kor_movie" to "영화",
+        "/kor_movie" to "한국영화",
+        "/movie" to "해외영화",
         "/drama" to "드라마",
         "/ent" to "예능",
         "/sisa" to "시사/다큐",
-        "/movie" to "해외영화",
         "/world" to "해외드라마",
-        "/animation" to "애니메이션",
+        "/ott_ent" to "해외(예능/다큐)",
         "/ani_movie" to "극장판 애니",
-        "/old_drama" to "추억의 드라마",
-        "/old_ent" to "추억의 예능"
+        "/animation" to "일반 애니메이션",
+        "/old_ent" to "추억의 예능",
+        "/old_drama" to "추억의 드라마"
     )
 
-    // [변경됨] FourKHDHub 스타일: 페이지네이션 적용
-    // page 변수가 스크롤 할 때마다 1, 2, 3... 으로 자동으로 들어옵니다.
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        // request.data에는 위 mainPage에서 정의한 URL 뒷부분(예: /drama)이 들어옵니다.
         val url = "$mainUrl${request.data}?page=$page"
         
         return try {
             val doc = app.get(url, headers = commonHeaders).document
-            // 리스트 아이템 추출
-            val list = doc.select(".mov_list ul li").mapNotNull { it.toSearchResponse() }
+            // 메인 페이지 리스트 ID 변경: #list_type
+            val list = doc.select("#list_type ul li").mapNotNull { it.toSearchResponse() }
             
-            // 리스트가 비어있지 않다면 다음 페이지가 있다고 가정 (hasNext = true)
             newHomePageResponse(request.name, list, hasNext = list.isNotEmpty())
         } catch (e: Exception) {
             newHomePageResponse(request.name, emptyList(), hasNext = false)
         }
     }
 
-    // 리스트 아이템 파싱 로직
     private fun Element.toSearchResponse(): SearchResponse? {
         val aTag = this.selectFirst("a.img") ?: return null
         val link = fixUrl(aTag.attr("href"))
-        val title = this.selectFirst("a.title")?.text()?.trim() ?: return null
+        
+        // 메인페이지는 .title2, 검색페이지는 .title 사용
+        val title = this.selectFirst("a.title")?.text()?.trim() 
+            ?: this.selectFirst("a.title2")?.text()?.trim() 
+            ?: return null
 
         val imgTag = aTag.selectFirst("img")
         val poster = imgTag?.attr("data-original")?.ifEmpty { null }
@@ -106,7 +103,7 @@ class TVHot : MainAPI() {
             url.contains("/movie") || url.contains("/kor_movie") -> TvType.Movie
             url.contains("/ani_movie") -> TvType.AnimeMovie
             url.contains("/animation") -> TvType.Anime
-            url.contains("/ent") || url.contains("/old_ent") -> TvType.TvSeries
+            url.contains("/ent") || url.contains("/old_ent") || url.contains("/ott_ent") -> TvType.TvSeries
             else -> TvType.TvSeries
         }
     }
@@ -115,9 +112,11 @@ class TVHot : MainAPI() {
         val searchUrl = "$mainUrl/search?stx=$query"
         val doc = app.get(searchUrl, headers = commonHeaders).document
         
+        // 검색 결과 리스트 ID: mov_con_list
         var items = doc.select("ul#mov_con_list li").mapNotNull { it.toSearchResponse() }
         if (items.isEmpty()) {
-             items = doc.select(".mov_list ul li").mapNotNull { it.toSearchResponse() }
+             // Fallback
+             items = doc.select("#list_type ul li").mapNotNull { it.toSearchResponse() }
         }
         return items
     }
@@ -125,6 +124,7 @@ class TVHot : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url, headers = commonHeaders).document
 
+        // 제목 파싱 (#bo_v_movinfo h3)
         val h3Element = doc.selectFirst("#bo_v_movinfo h3")
         var title = h3Element?.ownText()?.trim()
         val oriTitleFull = h3Element?.selectFirst(".ori_title")?.text()?.trim()
@@ -134,8 +134,9 @@ class TVHot : MainAPI() {
                 ?: doc.selectFirst("input[name='con_title']")?.attr("value")?.trim()
                 ?: "Unknown"
         }
+        // 제목 정리 (회차 정보 제거)
         title = title!!.replace(
-            Regex("\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\s*\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\d+\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\s*[화회부].*"),
+            Regex("\\s*\\d+[화회부].*"),
             ""
         ).replace(" 다시보기", "").trim()
 
@@ -147,12 +148,16 @@ class TVHot : MainAPI() {
             }
         }
 
+        // 포스터
         val poster = doc.selectFirst("#bo_v_poster img")?.attr("src")
             ?: doc.selectFirst("meta[property='og:image']")?.attr("content")
             ?: ""
 
+        // 정보 (국가, 언어, 개봉년도 등)
         val infoList = doc.select(".bo_v_info dd").map { it.text().trim().replace("개봉년도:", "공개일:") }
-        val genreList = doc.select(".ctgs dd a").filter {
+        
+        // 장르 (.tags dd a)
+        val genreList = doc.select(".tags dd a").filter {
             val txt = it.text()
             !txt.contains("트레일러") && !it.hasClass("btn_watch")
         }.map { it.text().trim() }
@@ -172,8 +177,9 @@ class TVHot : MainAPI() {
         }
         val metaString = metaParts.joinToString(" / ")
 
-        var story = doc.selectFirst(".story")?.text()?.trim()
-            ?: doc.selectFirst(".tmdb-overview")?.text()?.trim()
+        // 줄거리 (#bo_v_con)
+        var story = doc.selectFirst("#bo_v_con")?.text()?.trim()
+            ?: doc.selectFirst(".story")?.text()?.trim() // Fallback
             ?: doc.selectFirst("meta[name='description']")?.attr("content")
             ?: ""
 
@@ -186,16 +192,17 @@ class TVHot : MainAPI() {
             "$metaString / 줄거리: $story".trim()
         }
 
+        // 에피소드 리스트 (#other_list ul li)
         val episodes = doc.select("#other_list ul li").mapNotNull { li ->
             val aTag = li.selectFirst("a.ep-link") ?: return@mapNotNull null
             val href = fixUrl(aTag.attr("href"))
 
-            val epName = li.selectFirst(".clamp")?.text()?.trim()
-                ?: li.selectFirst("a.title")?.text()?.trim()
+            val epName = li.selectFirst("a.title")?.text()?.trim()
                 ?: "Episode"
 
-            val thumbImg = li.selectFirst(".img-container img")
+            val thumbImg = li.selectFirst("a.img img")
             val epThumb = thumbImg?.attr("data-src")?.ifEmpty { null }
+                ?: thumbImg?.attr("data-original")?.ifEmpty { null }
                 ?: thumbImg?.attr("src")?.ifEmpty { null }
                 ?: li.selectFirst("img")?.attr("src")
 
@@ -203,7 +210,7 @@ class TVHot : MainAPI() {
                 this.name = epName
                 this.posterUrl = fixUrl(epThumb ?: "")
             }
-        }.reversed()
+        } // 역순 정렬 제거 (HTML상 이미 최신순 혹은 정렬되어 있음)
 
         val type = determineTypeFromUrl(url)
 
@@ -236,9 +243,10 @@ class TVHot : MainAPI() {
         val thumbnailHint = extractThumbnailHint(doc)
 
         val iframe = doc.selectFirst("iframe#view_iframe")
-        val playerUrl = iframe?.attr("data-player1")?.ifEmpty { null }
+        // iframe src를 최우선으로 사용 (티비위키는 src에 토큰이 포함되어 있음)
+        val playerUrl = iframe?.attr("src")?.ifEmpty { null }
+            ?: iframe?.attr("data-player1")?.ifEmpty { null }
             ?: iframe?.attr("data-player2")?.ifEmpty { null }
-            ?: iframe?.attr("src")
 
         if (playerUrl != null) {
             val finalPlayerUrl = fixUrl(playerUrl).replace("&amp;", "&")
