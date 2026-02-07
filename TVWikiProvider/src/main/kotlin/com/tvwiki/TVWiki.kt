@@ -1,5 +1,6 @@
 package com.tvwiki
 
+import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -32,6 +33,14 @@ class TVWiki : MainAPI() {
         "Upgrade-Insecure-Requests" to "1"
     )
 
+    // JSON 파싱용 데이터 클래스
+    data class SessionResponse(
+        val success: Boolean,
+        val player_url: String?,
+        val t: String?,
+        val sig: String?
+    )
+
     override val mainPage = mainPageOf(
         "/popular" to "인기순위",
         "/kor_movie" to "영화",
@@ -49,12 +58,9 @@ class TVWiki : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = "$mainUrl${request.data}?page=$page"
-        
         return try {
             val doc = app.get(url, headers = commonHeaders).document
-            // 메인 페이지 리스트 ID 변경: #list_type
             val list = doc.select("#list_type ul li").mapNotNull { it.toSearchResponse() }
-            
             newHomePageResponse(request.name, list, hasNext = list.isNotEmpty())
         } catch (e: Exception) {
             newHomePageResponse(request.name, emptyList(), hasNext = false)
@@ -64,8 +70,6 @@ class TVWiki : MainAPI() {
     private fun Element.toSearchResponse(): SearchResponse? {
         val aTag = this.selectFirst("a.img") ?: return null
         val link = fixUrl(aTag.attr("href"))
-        
-        // 메인페이지는 .title2, 검색페이지는 .title 사용
         val title = this.selectFirst("a.title")?.text()?.trim() 
             ?: this.selectFirst("a.title2")?.text()?.trim() 
             ?: return null
@@ -79,23 +83,9 @@ class TVWiki : MainAPI() {
         val type = determineTypeFromUrl(link)
 
         return when (type) {
-            TvType.Movie, TvType.AnimeMovie -> newMovieSearchResponse(
-                title,
-                link,
-                type
-            ) { this.posterUrl = fixUrl(poster) }
-
-            TvType.Anime -> newAnimeSearchResponse(
-                title,
-                link,
-                TvType.Anime
-            ) { this.posterUrl = fixUrl(poster) }
-
-            else -> newTvSeriesSearchResponse(
-                title,
-                link,
-                TvType.TvSeries
-            ) { this.posterUrl = fixUrl(poster) }
+            TvType.Movie, TvType.AnimeMovie -> newMovieSearchResponse(title, link, type) { this.posterUrl = fixUrl(poster) }
+            TvType.Anime -> newAnimeSearchResponse(title, link, TvType.Anime) { this.posterUrl = fixUrl(poster) }
+            else -> newTvSeriesSearchResponse(title, link, TvType.TvSeries) { this.posterUrl = fixUrl(poster) }
         }
     }
 
@@ -112,11 +102,8 @@ class TVWiki : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val searchUrl = "$mainUrl/search?stx=$query"
         val doc = app.get(searchUrl, headers = commonHeaders).document
-        
-        // 검색 결과 리스트 ID: mov_con_list
         var items = doc.select("ul#mov_con_list li").mapNotNull { it.toSearchResponse() }
         if (items.isEmpty()) {
-             // Fallback
              items = doc.select("#list_type ul li").mapNotNull { it.toSearchResponse() }
         }
         return items
@@ -124,8 +111,6 @@ class TVWiki : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url, headers = commonHeaders).document
-
-        // 제목 파싱 (#bo_v_movinfo h3)
         val h3Element = doc.selectFirst("#bo_v_movinfo h3")
         var title = h3Element?.ownText()?.trim()
         val oriTitleFull = h3Element?.selectFirst(".ori_title")?.text()?.trim()
@@ -135,11 +120,7 @@ class TVWiki : MainAPI() {
                 ?: doc.selectFirst("input[name='con_title']")?.attr("value")?.trim()
                 ?: "Unknown"
         }
-        // 제목 정리 (회차 정보 제거)
-        title = title!!.replace(
-            Regex("\\s*\\d+[화회부].*"),
-            ""
-        ).replace(" 다시보기", "").trim()
+        title = title!!.replace(Regex("\\s*\\d+[화회부].*"), "").replace(" 다시보기", "").trim()
 
         if (!oriTitleFull.isNullOrEmpty()) {
             val pureOriTitle = oriTitleFull.replace("원제 :", "").replace("원제:", "").trim()
@@ -149,73 +130,41 @@ class TVWiki : MainAPI() {
             }
         }
 
-        // 포스터
         val poster = doc.selectFirst("#bo_v_poster img")?.attr("src")
             ?: doc.selectFirst("meta[property='og:image']")?.attr("content")
             ?: ""
 
-        // 정보 (국가, 언어, 개봉년도 등)
         val infoList = doc.select(".bo_v_info dd").map { it.text().trim().replace("개봉년도:", "공개일:") }
-        
-        // 장르 (.tags dd a)
         val genreList = doc.select(".tags dd a").filter {
-            val txt = it.text()
-            !txt.contains("트레일러") && !it.hasClass("btn_watch")
+            !it.text().contains("트레일러") && !it.hasClass("btn_watch")
         }.map { it.text().trim() }
 
-        val genreFormatted = if (genreList.isNotEmpty()) {
-            "장르: ${genreList.joinToString(", ")}"
-        } else {
-            ""
-        }
-
-        // 출연진 파싱
+        val genreFormatted = if (genreList.isNotEmpty()) "장르: ${genreList.joinToString(", ")}" else ""
         val castList = doc.select(".slider_act .item .name").map { it.text().trim() }
-        val castFormatted = if (castList.isNotEmpty()) {
-            "출연진: ${castList.joinToString(", ")}"
-        } else {
-            ""
-        }
+        val castFormatted = if (castList.isNotEmpty()) "출연진: ${castList.joinToString(", ")}" else ""
 
         val metaParts = mutableListOf<String>()
-        if (infoList.isNotEmpty()) {
-            metaParts.add(infoList.joinToString(" / "))
-        }
-        if (genreFormatted.isNotEmpty()) {
-            metaParts.add(genreFormatted)
-        }
-        if (castFormatted.isNotEmpty()) {
-            metaParts.add(castFormatted)
-        }
+        if (infoList.isNotEmpty()) metaParts.add(infoList.joinToString(" / "))
+        if (genreFormatted.isNotEmpty()) metaParts.add(genreFormatted)
+        if (castFormatted.isNotEmpty()) metaParts.add(castFormatted)
         val metaString = metaParts.joinToString(" / ")
 
-        // 줄거리 (#bo_v_con)
         var story = doc.selectFirst("#bo_v_con")?.text()?.trim()
-            ?: doc.selectFirst(".story")?.text()?.trim() // Fallback
+            ?: doc.selectFirst(".story")?.text()?.trim()
             ?: doc.selectFirst("meta[name='description']")?.attr("content")
             ?: ""
 
         if (story.contains("다시보기") && story.contains("무료")) story = "다시보기"
         if (story.isEmpty()) story = "다시보기"
 
-        val finalPlot = if (story == "다시보기") {
-                "다시보기"
-        } else {
-                if (metaString.isNullOrBlank()) {
-                        "줄거리: $story".trim()
-                } else {
-                        "$metaString / 줄거리: $story".trim()
-                }
+        val finalPlot = if (story == "다시보기") "다시보기" else {
+                if (metaString.isNullOrBlank()) "줄거리: $story".trim() else "$metaString / 줄거리: $story".trim()
         }
         
-        // 에피소드 리스트 (#other_list ul li)
         val episodes = doc.select("#other_list ul li").mapNotNull { li ->
             val aTag = li.selectFirst("a.ep-link") ?: return@mapNotNull null
             val href = fixUrl(aTag.attr("href"))
-
-            val epName = li.selectFirst("a.title")?.text()?.trim()
-                ?: "Episode"
-
+            val epName = li.selectFirst("a.title")?.text()?.trim() ?: "Episode"
             val thumbImg = li.selectFirst("a.img img")
             val epThumb = thumbImg?.attr("data-src")?.ifEmpty { null }
                 ?: thumbImg?.attr("data-original")?.ifEmpty { null }
@@ -226,7 +175,7 @@ class TVWiki : MainAPI() {
                 this.name = epName
                 this.posterUrl = fixUrl(epThumb ?: "")
             }
-        }.reversed() // 에피소드 순서 반전 (1화부터 나오게)
+        }.reversed()
 
         val type = determineTypeFromUrl(url)
 
@@ -238,7 +187,6 @@ class TVWiki : MainAPI() {
                     this.plot = finalPlot
                 }
             }
-
             else -> {
                 newTvSeriesLoadResponse(title, url, type, episodes) {
                     this.posterUrl = fixUrl(poster)
@@ -254,20 +202,60 @@ class TVWiki : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val doc = app.get(data, headers = commonHeaders).document
+        Log.d("TVWIKI_DEBUG", "LoadLinks 진입: $data")
 
+        val doc = app.get(data, headers = commonHeaders).document
         val thumbnailHint = extractThumbnailHint(doc)
 
-        val iframe = doc.selectFirst("iframe#view_iframe")
-        // iframe src를 최우선으로 사용 (티비위키는 src에 토큰이 포함되어 있음)
-        val playerUrl = iframe?.attr("src")?.ifEmpty { null }
-            ?: iframe?.attr("data-player1")?.ifEmpty { null }
-            ?: iframe?.attr("data-player2")?.ifEmpty { null }
+        // 1. iframe 찾기 (모든 iframe 검색)
+        val iframe = doc.select("iframe").firstOrNull { 
+            val s = it.attr("src")
+            s.contains("bunny-frame") || s.contains("/v/") || it.attr("id") == "view_iframe"
+        }
+        
+        var playerUrl = iframe?.attr("src")?.ifEmpty { null }
+        
+        Log.d("TVWIKI_DEBUG", "1차 iframe src: $playerUrl")
 
-        if (playerUrl != null) {
-            val finalPlayerUrl = fixUrl(playerUrl).replace("&amp;", "&")
+        // 2. src가 유효하지 않으면 API 호출 시도 (세션 생성)
+        if (playerUrl.isNullOrEmpty() || !playerUrl.contains("bunny-frame")) {
+            Log.d("TVWIKI_DEBUG", "유효한 src 없음. API 세션 생성 시도.")
+            val sessionJson = iframe?.attr("data-session1")?.ifEmpty { null }
+                ?: iframe?.attr("data-session2")?.ifEmpty { null }
+            
+            if (sessionJson != null) {
+                try {
+                    val apiUrl = "$mainUrl/api/create_session.php"
+                    // JSON String을 바로 전송
+                    val jsonResp = app.post(
+                        apiUrl,
+                        headers = commonHeaders + mapOf(
+                            "Content-Type" to "application/json",
+                            "X-Requested-With" to "XMLHttpRequest"
+                        ),
+                        requestBody = sessionJson 
+                    ).parsedSafe<SessionResponse>()
+
+                    if (jsonResp?.success == true && jsonResp.player_url != null) {
+                        playerUrl = "${jsonResp.player_url}?t=${jsonResp.t}&sig=${jsonResp.sig}"
+                        Log.d("TVWIKI_DEBUG", "API 주소 획득: $playerUrl")
+                    } else {
+                        Log.e("TVWIKI_DEBUG", "API 실패: $jsonResp")
+                    }
+                } catch (e: Exception) {
+                    Log.e("TVWIKI_DEBUG", "API 에러", e)
+                }
+            }
+        }
+
+        // 3. Extractor 호출
+        if (playerUrl != null && playerUrl.contains("bunny-frame")) {
+            val finalUrl = fixUrl(playerUrl).replace("&amp;", "&")
+            Log.d("TVWIKI_DEBUG", "최종 URL로 Extractor 호출: $finalUrl")
+            
+            // [중요] BunnyPoorCdn 호출 시 data(현재 페이지)를 referer로 넘김
             val extracted = BunnyPoorCdn().extract(
-                finalPlayerUrl,
+                finalUrl,
                 data,
                 subtitleCallback,
                 callback,
@@ -276,22 +264,26 @@ class TVWiki : MainAPI() {
             if (extracted) return true
         }
 
+        // 4. 썸네일 힌트 (최후의 수단)
         if (thumbnailHint != null) {
             try {
                 val pathRegex = Regex("""/v/[a-z]/[a-zA-Z0-9]+""")
                 val pathMatch = pathRegex.find(thumbnailHint)
 
                 if (pathMatch != null) {
-                    val m3u8Url =
-                        thumbnailHint.substringBefore(pathMatch.value) + pathMatch.value + "/index.m3u8"
+                    val m3u8Url = thumbnailHint.substringBefore(pathMatch.value) + pathMatch.value + "/index.m3u8"
                     val fixedM3u8Url = m3u8Url.replace(Regex("//v/"), "/v/")
 
                     callback(
-                        newExtractorLink(name, name, fixedM3u8Url, ExtractorLinkType.M3U8) {
-                            this.referer = mainUrl
-                            this.quality = Qualities.Unknown.value
-                            this.headers = commonHeaders
-                        }
+                        ExtractorLink(
+                            source = name,
+                            name = name,
+                            url = fixedM3u8Url,
+                            referer = mainUrl,
+                            quality = Qualities.Unknown.value,
+                            type = ExtractorLinkType.M3U8,
+                            headers = commonHeaders
+                        )
                     )
                     return true
                 }
@@ -306,13 +298,10 @@ class TVWiki : MainAPI() {
     private fun extractThumbnailHint(doc: Document): String? {
         val videoThumbElements = doc.select("img[src*='/v/'], img[data-src*='/v/']")
         val priorityRegex = Regex("""/v/[a-z]/""")
-
         for (el in videoThumbElements) {
             val raw = el.attr("src").ifEmpty { el.attr("data-src") }
             val fixed = fixUrl(raw)
-            if (priorityRegex.containsMatchIn(fixed)) {
-                return fixed
-            }
+            if (priorityRegex.containsMatchIn(fixed)) return fixed
         }
         return null
     }
