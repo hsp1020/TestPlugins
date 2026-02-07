@@ -6,9 +6,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 
 class TVWiki : MainAPI() {
     override var mainUrl = "https://tvwiki5.net"
@@ -287,62 +284,71 @@ class TVWiki : MainAPI() {
                     val sessionUrl = "$mainUrl/api/create_session.php"
                     println("[TVWiki] 세션 생성 API 호출: $sessionUrl")
                     
-                    // CloudStream3 app.post 시그니처에 맞게 수정
+                    // 헤더를 명시적으로 Map<String, String>으로 변환
+                    val postHeaders = mapOf(
+                        "User-Agent" to USER_AGENT,
+                        "Content-Type" to "application/json",
+                        "Referer" to data,
+                        "Origin" to mainUrl,
+                        "Accept" to "application/json, text/plain, */*",
+                        "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
+                    )
+                    
                     val sessionResponse = app.post(
                         url = sessionUrl,
-                        headers = mapOf(
-                            "User-Agent" to USER_AGENT,
-                            "Content-Type" to "application/json",
-                            "Referer" to data,
-                            "Origin" to mainUrl,
-                            "Accept" to "application/json, text/plain, */*",
-                            "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
-                        ),
+                        headers = postHeaders,
                         data = sessionDataString
                     )
                     
                     println("[TVWiki] 세션 API 응답 코드: ${sessionResponse.code}")
                     println("[TVWiki] 세션 API 응답 본문: ${sessionResponse.text.take(500)}")
                     
-                    // JSON 응답 파싱 - CloudStream3의 parseJson 사용
-                    val jsonResponse = app.parseJson<Map<String, Any>>(sessionResponse.text)
+                    // JSON 응답 파싱 - 간단한 정규식으로 파싱
+                    val responseText = sessionResponse.text
                     
-                    if (jsonResponse != null) {
-                        val success = jsonResponse["success"] as? Boolean ?: false
-                        val playerUrl = jsonResponse["player_url"] as? String
-                        val sig = jsonResponse["sig"] as? String
-                        val t = jsonResponse["t"] as? String
-                        
-                        println("[TVWiki] API 응답 파싱: success=$success, playerUrl=$playerUrl, sig=$sig, t=$t")
-                        
-                        if (success && playerUrl != null) {
-                            val finalPlayerUrl = if (sig != null && t != null) {
-                                "$playerUrl?t=$t&sig=$sig"
-                            } else {
-                                playerUrl
-                            }
-                            
-                            println("[TVWiki] 최종 플레이어 URL 생성: $finalPlayerUrl")
-                            
-                            // 4. BunnyPoorCdn 추출기 호출
-                            val extracted = BunnyPoorCdn().extract(
-                                finalPlayerUrl,
-                                data,
-                                subtitleCallback,
-                                callback,
-                                null
-                            )
-                            println("[TVWiki] BunnyPoorCdn.extract 결과: $extracted")
-                            
-                            if (extracted) {
-                                println("[TVWiki] 성공적으로 링크 추출됨")
-                                return true
-                            }
+                    // success 값 추출
+                    val successMatch = Regex("\"success\"\\s*:\\s*(true|false)").find(responseText)
+                    val success = successMatch?.groups?.get(1)?.value == "true"
+                    
+                    // player_url 값 추출
+                    val playerUrlMatch = Regex("\"player_url\"\\s*:\\s*\"([^\"]+)\"").find(responseText)
+                    val playerUrl = playerUrlMatch?.groups?.get(1)?.value
+                    
+                    // sig 값 추출
+                    val sigMatch = Regex("\"sig\"\\s*:\\s*\"([^\"]*)\"").find(responseText)
+                    val sig = sigMatch?.groups?.get(1)?.value
+                    
+                    // t 값 추출
+                    val tMatch = Regex("\"t\"\\s*:\\s*\"([^\"]*)\"").find(responseText)
+                    val t = tMatch?.groups?.get(1)?.value
+                    
+                    println("[TVWiki] API 응답 파싱: success=$success, playerUrl=$playerUrl, sig=$sig, t=$t")
+                    
+                    if (success && playerUrl != null && playerUrl.isNotEmpty()) {
+                        val finalPlayerUrl = if (sig != null && sig.isNotEmpty() && t != null && t.isNotEmpty()) {
+                            "$playerUrl?t=$t&sig=$sig"
                         } else {
-                            println("[TVWiki] API 응답이 실패하거나 player_url이 없음")
+                            playerUrl
+                        }
+                        
+                        println("[TVWiki] 최종 플레이어 URL 생성: $finalPlayerUrl")
+                        
+                        // 4. BunnyPoorCdn 추출기 호출
+                        val extracted = BunnyPoorCdn().extract(
+                            finalPlayerUrl,
+                            data,
+                            subtitleCallback,
+                            callback,
+                            null
+                        )
+                        println("[TVWiki] BunnyPoorCdn.extract 결과: $extracted")
+                        
+                        if (extracted) {
+                            println("[TVWiki] 성공적으로 링크 추출됨")
+                            return true
                         }
                     } else {
-                        println("[TVWiki] JSON 응답 파싱 실패")
+                        println("[TVWiki] API 응답이 실패하거나 player_url이 없음")
                     }
                 } catch (e: Exception) {
                     println("[TVWiki] 세션 API 호출 중 오류: ${e.message}")
