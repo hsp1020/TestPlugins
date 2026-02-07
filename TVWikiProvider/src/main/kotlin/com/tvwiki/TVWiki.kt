@@ -78,12 +78,10 @@ class TVWiki : MainAPI() {
 
         val fixedPoster = fixUrl(poster)
 
-        // [변경 1] URL에 포스터 주소를 인코딩해서 붙임
-        // 나중에 load() 함수에서 이 값을 백업으로 사용합니다.
+        // URL에 포스터 주소를 인코딩해서 붙임 (상세페이지 전달용)
         if (fixedPoster.isNotEmpty()) {
             try {
                 val encodedPoster = URLEncoder.encode(fixedPoster, "UTF-8")
-                // 기존 링크에 파라미터가 있는지 확인 후 연결자 결정
                 val separator = if (link.contains("?")) "&" else "?"
                 link = "$link${separator}cw_poster=$encodedPoster"
             } catch (e: Exception) {
@@ -115,7 +113,6 @@ class TVWiki : MainAPI() {
     }
 
     private fun determineTypeFromUrl(url: String): TvType {
-        // 파라미터가 붙어도 포함 여부 확인에는 문제 없음
         return when {
             url.contains("/movie") || url.contains("/kor_movie") -> TvType.Movie
             url.contains("/ani_movie") -> TvType.AnimeMovie
@@ -137,22 +134,17 @@ class TVWiki : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        // [변경 2] URL에서 백업용 포스터 추출 및 URL 정리
+        // 전달받은 URL에서 포스터 정보 추출 및 복원
         var passedPoster: String? = null
         var realUrl = url
 
         try {
-            // cw_poster 파라미터 찾기
             val regex = Regex("[?&]cw_poster=([^&]+)")
             val match = regex.find(url)
             if (match != null) {
                 val encoded = match.groupValues[1]
                 passedPoster = URLDecoder.decode(encoded, "UTF-8")
-                
-                // 실제 요청할 URL에서는 파라미터 제거 (서버 에러 방지)
                 realUrl = url.replace(match.value, "")
-                // 만약 ?로 시작하는 파라미터를 지워서 URL이 깨졌다면(ex: id=1&... 에서 앞이 날아감) 조정 필요하지만
-                // 여기선 우리가 맨 뒤에 붙였으므로 replace로 충분하거나, 안전하게 split 사용
                 if (realUrl.endsWith("?") || realUrl.endsWith("&")) {
                     realUrl = realUrl.dropLast(1)
                 }
@@ -161,10 +153,8 @@ class TVWiki : MainAPI() {
             e.printStackTrace()
         }
 
-        // 실제 페이지 요청은 깨끗한 URL로 수행
         val doc = app.get(realUrl, headers = commonHeaders).document
 
-        // 제목 파싱
         val h3Element = doc.selectFirst("#bo_v_movinfo h3")
         var title = h3Element?.ownText()?.trim()
         val oriTitleFull = h3Element?.selectFirst(".ori_title")?.text()?.trim()
@@ -184,10 +174,7 @@ class TVWiki : MainAPI() {
             }
         }
 
-        // [변경 3] 포스터 결정 로직 개선
-        // 1순위: 상세페이지 내 #bo_v_poster
-        // 2순위: 메타태그 og:image
-        // 3순위: 목록에서 가져온 passedPoster (진입 전 포스터)
+        // 포스터 우선순위: 상세페이지 > 메타태그 > 목록에서 가져온 포스터
         var poster = doc.selectFirst("#bo_v_poster img")?.attr("src")
             ?: doc.selectFirst("meta[property='og:image']")?.attr("content")
         
@@ -195,12 +182,10 @@ class TVWiki : MainAPI() {
             poster = passedPoster
         }
         
-        poster = poster ?: "" // Null safe
+        poster = poster ?: ""
 
-        // 정보 (국가, 언어, 개봉년도 등)
         val infoList = doc.select(".bo_v_info dd").map { it.text().trim().replace("개봉년도:", "공개일:") }
         
-        // 장르
         val genreList = doc.select(".tags dd a").filter {
             val txt = it.text()
             !txt.contains("트레일러") && !it.hasClass("btn_watch")
@@ -208,7 +193,6 @@ class TVWiki : MainAPI() {
 
         val genreFormatted = if (genreList.isNotEmpty()) "장르: ${genreList.joinToString(", ")}" else ""
 
-        // 출연진
         val castList = doc.select(".slider_act .item .name").map { it.text().trim() }
         val castFormatted = if (castList.isNotEmpty()) "출연진: ${castList.joinToString(", ")}" else ""
 
@@ -218,7 +202,6 @@ class TVWiki : MainAPI() {
         if (castFormatted.isNotEmpty()) metaParts.add(castFormatted)
         val metaString = metaParts.joinToString(" / ")
 
-        // 줄거리
         var story = doc.selectFirst("#bo_v_con")?.text()?.trim()
             ?: doc.selectFirst(".story")?.text()?.trim()
             ?: doc.selectFirst("meta[name='description']")?.attr("content")
@@ -234,7 +217,6 @@ class TVWiki : MainAPI() {
                 else "$metaString / 줄거리: $story".trim()
         }
         
-        // 에피소드 리스트
         val episodes = doc.select("#other_list ul li").mapNotNull { li ->
             val aTag = li.selectFirst("a.ep-link") ?: return@mapNotNull null
             val href = fixUrl(aTag.attr("href"))
@@ -251,7 +233,7 @@ class TVWiki : MainAPI() {
             }
         }.reversed()
 
-        val type = determineTypeFromUrl(realUrl) // 실제 URL 기준 타입 판별
+        val type = determineTypeFromUrl(realUrl)
 
         return when (type) {
             TvType.Movie, TvType.AnimeMovie -> {
@@ -277,14 +259,8 @@ class TVWiki : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // 기존 코드 유지 (URL 파싱 부분은 이미 load()에서 처리되어 data에는 순수 URL만 넘어옴)
-        // 하지만 혹시 loadLinks가 직접 호출될 경우를 대비해 파라미터 제거 로직 추가 가능
-        // 보통은 필요 없음
-        
         println("[TVWiki] loadLinks 시작 - data: $data")
         val doc = app.get(data, headers = commonHeaders).document
-        
-        // ... (이하 기존 loadLinks 로직 동일) ...
         
         val iframe = doc.selectFirst("iframe#view_iframe")
         if (iframe != null) {
@@ -309,8 +285,10 @@ class TVWiki : MainAPI() {
         for (script in scriptTags) {
             val scriptContent = script.html()
             if (scriptContent.contains("player.bunny-frame.online")) {
-                val urlRegex = Regex("https://player\\\\.bunny-frame\\\\.online/[^\\"'\\\\s]+")
+                // [수정] Raw String (""")을 사용하여 정규식 에러 해결
+                val urlRegex = Regex("""https://player\.bunny-frame\.online/[^"'\s]+""")
                 val match = urlRegex.find(scriptContent)
+                
                 if (match != null) {
                     val foundUrl = match.value.replace("&amp;", "&")
                     if(BunnyPoorCdn().extract(foundUrl, data, subtitleCallback, callback, null)) return true
