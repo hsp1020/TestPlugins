@@ -36,7 +36,9 @@ class BunnyPoorCdn : ExtractorApi() {
         thumbnailHint: String? = null,
     ): Boolean {
         var cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
-        val cleanReferer = referer?.replace(Regex("[\\r\\n\\s]"), "")?.trim() ?: "https://tvmon.site/"
+        
+        // [수정 1] 기본 리퍼러를 tvwiki 주소로 변경
+        val cleanReferer = referer?.replace(Regex("[\\r\\n\\s]"), "")?.trim() ?: "https://tvwiki5.net/"
 
         // 1. iframe 주소 따기
         if (!cleanUrl.contains("v/f/") && !cleanUrl.contains("v/e/")) {
@@ -60,8 +62,9 @@ class BunnyPoorCdn : ExtractorApi() {
         )
         
         try {
+            // [수정 2] 웹뷰 요청 헤더의 Referer를 tvwiki로 변경
             val requestHeaders = mapOf(
-                "Referer" to "https://tvmon.site/", 
+                "Referer" to "https://tvwiki5.net/", 
                 "User-Agent" to DESKTOP_UA
             )
 
