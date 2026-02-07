@@ -7,8 +7,8 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.MediaType
+import okhttp3.RequestBody
 
 class TVWiki : MainAPI() {
     override var mainUrl = "https://tvwiki5.net"
@@ -62,8 +62,6 @@ class TVWiki : MainAPI() {
         return try {
             val doc = app.get(url, headers = commonHeaders).document
             val list = doc.select("#list_type ul li").mapNotNull { it.toSearchResponse() }
-            // [수정] newHomePageResponse -> HomePageResponse 생성자 (필요 시)
-            // HomePageResponse는 보통 호환성 문제 적음
             newHomePageResponse(request.name, list, hasNext = list.isNotEmpty())
         } catch (e: Exception) {
             newHomePageResponse(request.name, emptyList(), hasNext = false)
@@ -85,35 +83,14 @@ class TVWiki : MainAPI() {
 
         val type = determineTypeFromUrl(link)
 
-        // [수정] new...SearchResponse -> 생성자 직접 사용
-        return when (type) {
-            TvType.Movie, TvType.AnimeMovie -> MovieSearchResponse(
-                name = title,
-                url = link,
-                apiName = this@TVWiki.name,
-                type = type,
-                posterUrl = fixUrl(poster),
-                year = null
-            )
-            TvType.Anime -> AnimeSearchResponse(
-                name = title,
-                url = link,
-                apiName = this@TVWiki.name,
-                type = TvType.Anime,
-                posterUrl = fixUrl(poster),
-                year = null,
-                dubStatus = null
-            )
-            else -> TvSeriesSearchResponse(
-                name = title,
-                url = link,
-                apiName = this@TVWiki.name,
-                type = TvType.TvSeries,
-                posterUrl = fixUrl(poster),
-                year = null,
-                episodes = null
-            )
+        // 람다 없이 기본 객체 생성 후 값 할당
+        val res = when (type) {
+            TvType.Movie, TvType.AnimeMovie -> newMovieSearchResponse(title, link, type)
+            TvType.Anime -> newAnimeSearchResponse(title, link, TvType.Anime)
+            else -> newTvSeriesSearchResponse(title, link, TvType.TvSeries)
         }
+        res.posterUrl = fixUrl(poster)
+        return res
     }
 
     private fun determineTypeFromUrl(url: String): TvType {
@@ -153,42 +130,29 @@ class TVWiki : MainAPI() {
             val aTag = li.selectFirst("a.ep-link") ?: return@mapNotNull null
             val href = fixUrl(aTag.attr("href"))
             val epName = li.selectFirst("a.title")?.text()?.trim() ?: "Episode"
-            // [수정] newEpisode -> Episode 생성자
-            Episode(
-                data = href,
-                name = epName,
-                posterUrl = null,
-                episode = null,
-                season = null
-            )
+            
+            // newEpisode 팩토리 함수 대신 직접 객체 생성 지양하고 팩토리 사용하되, 람다 제거
+            val ep = newEpisode(href)
+            ep.name = epName
+            ep.posterUrl = null 
+            ep
         }.reversed()
 
         val type = determineTypeFromUrl(url)
 
-        // [수정] new...LoadResponse -> 생성자 직접 사용
         return when (type) {
             TvType.Movie, TvType.AnimeMovie -> {
                 val movieLink = episodes.firstOrNull()?.data ?: url
-                MovieLoadResponse(
-                    name = title,
-                    url = url,
-                    apiName = name,
-                    type = type,
-                    dataUrl = movieLink,
-                    posterUrl = fixUrl(poster),
-                    plot = story
-                )
+                val loadRes = newMovieLoadResponse(title, url, type, movieLink)
+                loadRes.posterUrl = fixUrl(poster)
+                loadRes.plot = story
+                loadRes
             }
             else -> {
-                TvSeriesLoadResponse(
-                    name = title,
-                    url = url,
-                    apiName = name,
-                    type = type,
-                    episodes = episodes,
-                    posterUrl = fixUrl(poster),
-                    plot = story
-                )
+                val loadRes = newTvSeriesLoadResponse(title, url, type, episodes)
+                loadRes.posterUrl = fixUrl(poster)
+                loadRes.plot = story
+                loadRes
             }
         }
     }
@@ -217,9 +181,9 @@ class TVWiki : MainAPI() {
                 try {
                     val apiUrl = "$mainUrl/api/create_session.php"
                     
-                    // [수정] RequestBody 생성
-                    val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
-                    val body = sessionJson.toRequestBody(mediaType)
+                    // [중요 수정] OkHttp RequestBody 생성 (안전한 구형 방식)
+                    val mediaType = MediaType.parse("application/json; charset=utf-8")
+                    val body = RequestBody.create(mediaType, sessionJson)
 
                     val jsonResp = app.post(
                         apiUrl,
@@ -227,7 +191,7 @@ class TVWiki : MainAPI() {
                             "Content-Type" to "application/json",
                             "X-Requested-With" to "XMLHttpRequest"
                         ),
-                        requestBody = body // [수정] 이제 타입 일치함
+                        requestBody = body
                     ).parsedSafe<SessionResponse>()
 
                     if (jsonResp?.success == true && jsonResp.player_url != null) {
