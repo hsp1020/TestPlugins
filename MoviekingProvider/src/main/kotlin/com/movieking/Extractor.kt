@@ -19,8 +19,7 @@ class BcbcRedExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // 1. WebViewResolver로 페이지 로드 (쿠키 생성 및 토큰 발급)
-        // 이때 기기의 WebView User-Agent가 사용되며, 서버는 이를 토큰에 기록합니다.
+        // 1. WebViewResolver로 페이지 로드
         val response = app.get(
             url,
             referer = referer,
@@ -29,52 +28,76 @@ class BcbcRedExtractor : ExtractorApi() {
 
         val doc = response.text
         
-        // 2. data-m3u8 추출
-        val regex = Regex("""data-m3u8=["']([^"']+)["']""")
+        // 2. data-m3u8 추출 (수정된 정규식)
+        // data-m3u8='https://...' 형식 찾기
+        val regex = """data-m3u8\s*=\s*['"]([^'"]+)['"]""".toRegex()
         val match = regex.find(doc)
 
         if (match != null) {
-            val m3u8Url = match.groupValues[1].replace("\\/", "/").trim()
+            var m3u8Url = match.groupValues[1].replace("\\/", "/").trim()
+            println("[MovieKingPlayer] Found m3u8 URL: $m3u8Url")
             
-            // 3. [핵심] 토큰(JWT)에서 서버가 기대하는 User-Agent 추출
-            // URL 구조: https://.../m3u8/HEADER.PAYLOAD.SIGNATURE
+            // 3. 토큰에서 User-Agent 추출
             val tokenUserAgent = try {
-                val parts = m3u8Url.split(".")
+                // JWT 토큰 추출 (마지막 '/' 이후 부분)
+                val tokenPart = m3u8Url.substringAfterLast("/")
+                val parts = tokenPart.split(".")
+                
                 if (parts.size >= 2) {
-                    // URL Safe Base64 디코딩
-                    val payload = String(Base64.decode(parts[1], Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP))
+                    // Base64 URL Safe 디코딩
+                    val payloadBase64 = parts[1]
+                    val payloadJson = String(
+                        Base64.decode(payloadBase64, Base64.URL_SAFE or Base64.NO_PADDING),
+                        Charsets.UTF_8
+                    )
                     
-                    // JSON 파싱 없이 Regex로 "ua":"Chrome(xxx)" 찾기
-                    // 예: "ua":"Chrome(116.0.0.0)"
-                    val uaMatch = Regex(""""ua"\s*:\s*"Chrome\(([^)]+)\)"""").find(payload)
+                    println("[MovieKingPlayer] JWT Payload: $payloadJson")
+                    
+                    // "ua" 필드 추출
+                    val uaRegex = """"ua"\s*:\s*"([^"]+)"""".toRegex()
+                    val uaMatch = uaRegex.find(payloadJson)
+                    
                     if (uaMatch != null) {
-                        val version = uaMatch.groupValues[1]
-                        // 안드로이드 기본 User-Agent 포맷으로 재구성
-                        "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$version Mobile Safari/537.36"
+                        val uaValue = uaMatch.groupValues[1]
+                        println("[MovieKingPlayer] Found UA in token: $uaValue")
+                        
+                        // Chrome(116.0.0.0) -> Chrome/116.0.0.0 형식으로 변환
+                        if (uaValue.startsWith("Chrome(")) {
+                            val version = uaValue.removePrefix("Chrome(").removeSuffix(")")
+                            // Android Mobile User-Agent 형식
+                            "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$version Mobile Safari/537.36"
+                        } else {
+                            // 다른 형식이면 그대로 사용
+                            uaValue
+                        }
                     } else {
-                        // ua 필드가 없으면 기본값 (최신 버전)
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                        println("[MovieKingPlayer] No UA field found in token")
+                        "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"
                     }
                 } else {
-                    null
+                    println("[MovieKingPlayer] Invalid JWT format")
+                    "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                null
-            } ?: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                println("[MovieKingPlayer] Error extracting UA: ${e.message}")
+                "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"
+            }
 
-            println("[MovieKingPlayer] Detected UA from Token: $tokenUserAgent")
+            println("[MovieKingPlayer] Using UA: $tokenUserAgent")
 
             // 4. 쿠키 가져오기
             val cookieMap = response.cookies
             val cookieString = cookieMap.entries.joinToString("; ") { "${it.key}=${it.value}" }
             
-            // 5. 헤더 설정 (추출한 User-Agent 강제 적용)
+            // 5. 헤더 설정
             val headers = mutableMapOf(
-                "User-Agent" to tokenUserAgent, // M3u8Helper가 이 UA를 사용하여 키를 요청함
-                "Referer" to url,               // Iframe 주소
+                "User-Agent" to tokenUserAgent,
+                "Referer" to url,
                 "Origin" to "https://player-v1.bcbc.red",
-                "Accept" to "*/*"
+                "Accept" to "*/*",
+                "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Accept-Encoding" to "gzip, deflate, br"
             )
             
             if (cookieString.isNotEmpty()) {
@@ -90,7 +113,8 @@ class BcbcRedExtractor : ExtractorApi() {
             ).forEach(callback)
 
         } else {
-             System.out.println("[MovieKingPlayer] data-m3u8 not found")
+            println("[MovieKingPlayer] data-m3u8 not found in HTML")
+            println("[MovieKingPlayer] HTML snippet: ${doc.take(1000)}")
         }
     }
 }
