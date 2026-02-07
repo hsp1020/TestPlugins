@@ -20,91 +20,48 @@ class BcbcRedExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
+        // 1. User-Agent 고정
         val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         
-        // 1. WebViewResolver로 실제 페이지 로드
+        // 2. WebViewResolver 실행 (쿠키 생성용)
+        // WebView가 실행되면 자동으로 시스템 CookieManager에 쿠키가 저장됩니다.
         val response = app.get(
             url,
+            referer = referer,
             headers = mapOf("User-Agent" to userAgent),
-            interceptor = WebViewResolver(
-                Regex("""player\.bcbc\.red"""),
-                timeout = 10000L
+            interceptor = WebViewResolver(Regex("""player-v1\.bcbc\.red"""))
+        )
+
+        val doc = response.text
+        
+        // 3. data-m3u8 추출
+        val regex = Regex("""data-m3u8=["']([^"']+)["']""")
+        val match = regex.find(doc)
+
+        if (match != null) {
+            val m3u8Url = match.groupValues[1].replace("\\/", "/").trim()
+            
+            // 4. [핵심] 쿠키 수동 주입 제거 & 헤더 최소화
+            // Cookie 헤더를 직접 넣지 않습니다. Cronet/OkHttp가 자동으로 처리하게 둡니다.
+            // Referer와 User-Agent만 명시합니다.
+            val headers = mapOf(
+                "User-Agent" to userAgent,
+                "Referer" to url, // iframe URL
+                "Accept" to "*/*"
             )
-        )
-        
-        // 2. M3U8 URL 찾기 - 여러 패턴 시도
-        val m3u8Url = findM3u8Url(response.text)
-        
-        if (m3u8Url.isEmpty()) {
-            throw Error("No M3U8 URL found")
+
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = name,
+                    url = m3u8Url,
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    this.referer = url
+                    this.quality = Qualities.Unknown.value
+                    this.headers = headers
+                }
+            )
         }
-        
-        // 3. 올바른 newExtractorLink 사용법
-        callback(
-            newExtractorLink(
-                source = name,
-                name = name,
-                url = m3u8Url,
-                type = ExtractorLinkType.M3U8
-            ) {
-                // 여기서 속성 설정
-                this.referer = referer ?: "https://player-v1.bcbc.red/"
-                this.quality = Qualities.Unknown.value
-                this.headers = mapOf(
-                    "User-Agent" to userAgent,
-                    "Referer" to referer ?: "https://player-v1.bcbc.red/",
-                    "Accept" to "*/*",
-                    "Origin" to "https://player-v1.bcbc.red"
-                )
-            }
-        )
-    }
-    
-    private fun findM3u8Url(html: String): String {
-        // 패턴 1: data-m3u8 속성
-        val dataM3u8Pattern = Regex("""data-m3u8\s*=\s*["']([^"']+)["']""")
-        val dataMatch = dataM3u8Pattern.find(html)
-        if (dataMatch != null) {
-            return processUrl(dataMatch.groupValues[1])
-        }
-        
-        // 패턴 2: script에서 URL 찾기
-        val scriptPattern = Regex("""(https?://[^"'\s]+\.m3u8[^"'\s]*)""")
-        val scriptMatches = scriptPattern.findAll(html)
-        scriptMatches.forEach { match ->
-            return processUrl(match.value)
-        }
-        
-        // 패턴 3: iframe src
-        val iframePattern = Regex("""<iframe[^>]+src\s*=\s*["']([^"']+\.m3u8[^"']*)["']""")
-        val iframeMatch = iframePattern.find(html)
-        if (iframeMatch != null) {
-            return processUrl(iframeMatch.groupValues[1])
-        }
-        
-        return ""
-    }
-    
-    private fun processUrl(url: String): String {
-        var processed = url.trim()
-            .removeSurrounding("\"")
-            .removeSurrounding("'")
-            .replace("\\/", "/")
-        
-        // URL 디코딩
-        try {
-            processed = java.net.URLDecoder.decode(processed, "UTF-8")
-        } catch (e: Exception) {
-            // 무시
-        }
-        
-        // 상대 URL 처리
-        if (processed.startsWith("//")) {
-            processed = "https:$processed"
-        } else if (processed.startsWith("/")) {
-            processed = "https://player.bcbc.red$processed"
-        }
-        
-        return processed
     }
 }
