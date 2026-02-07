@@ -328,24 +328,23 @@ class TVWiki : MainAPI() {
     }
 
     private fun extractThumbnailHint(doc: Document): String? {
-        println("[TVWiki] extractThumbnailHint 시작")
-        val videoThumbElements = doc.select("img[src*='/v/'], img[data-src*='/v/']")
-        println("[TVWiki] /v/ 패턴을 가진 이미지 요소 수: ${videoThumbElements.size}")
-        
-        val priorityRegex = Regex("""/v/[a-z]/""")
+    println("[TVWiki] extractThumbnailHint 시작")
+    val videoThumbElements = doc.select("img[src*='/v/'], img[data-src*='/v/']")
+    println("[TVWiki] /v/ 패턴을 가진 이미지 요소 수: ${videoThumbElements.size}")
+    
+    val priorityRegex = Regex("""/v/[a-z]/""")
 
-        for (el in videoThumbElements) {
-            val raw = el.attr("src").ifEmpty { el.attr("data-src") }
-            val fixed = fixUrl(raw)
-            println("[TVWiki] 검사 중 - raw: $raw, fixed: $fixed")
-            
-            if (priorityRegex.containsMatchIn(fixed)) {
-                println("[TVWiki] 적합한 썸네일 힌트 발견: $fixed")
-                return fixed
-            }
-        }
+    for (el in videoThumbElements) {
+        val raw = el.attr("src").ifEmpty { el.attr("data-src") }
+        val fixed = fixUrl(raw)
+        println("[TVWiki] 검사 중 - raw: $raw, fixed: $fixed")
         
-        println("[TVWiki] 적합한 썸네일 힌트 없음")
-        return null
+        if (priorityRegex.containsMatchIn(fixed)) {
+            println("[TVWiki] 적합한 썸네일 힌트 발견: $fixed")
+            return fixed
+        }
     }
+    
+    println("[TVWiki] 적합한 썸네일 힌트 없음")
+    return null
 }
