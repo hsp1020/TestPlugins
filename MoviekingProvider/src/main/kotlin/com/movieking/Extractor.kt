@@ -1,5 +1,6 @@
 package com.movieking
 
+import android.util.Base64
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -18,8 +19,8 @@ class BcbcRedExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // 1. WebViewResolver를 통해 페이지 로드 (쿠키 생성 및 JS 챌린지 통과)
-        // User-Agent를 강제하지 않고 앱의 기본 동작에 맡겨 토큰과 UA를 일치시킵니다.
+        // 1. WebViewResolver로 페이지 로드 (쿠키 생성 및 토큰 발급)
+        // 이때 기기의 WebView User-Agent가 사용되며, 서버는 이를 토큰에 기록합니다.
         val response = app.get(
             url,
             referer = referer,
@@ -35,16 +36,43 @@ class BcbcRedExtractor : ExtractorApi() {
         if (match != null) {
             val m3u8Url = match.groupValues[1].replace("\\/", "/").trim()
             
-            // 3. 쿠키 및 헤더 설정
-            // response.cookies가 비어있을 경우를 대비해 요청 당시의 쿠키도 고려해야 하지만,
-            // 보통 WebViewResolver 직후에는 response.cookies에 값이 있습니다.
+            // 3. [핵심] 토큰(JWT)에서 서버가 기대하는 User-Agent 추출
+            // URL 구조: https://.../m3u8/HEADER.PAYLOAD.SIGNATURE
+            val tokenUserAgent = try {
+                val parts = m3u8Url.split(".")
+                if (parts.size >= 2) {
+                    // URL Safe Base64 디코딩
+                    val payload = String(Base64.decode(parts[1], Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP))
+                    
+                    // JSON 파싱 없이 Regex로 "ua":"Chrome(xxx)" 찾기
+                    // 예: "ua":"Chrome(116.0.0.0)"
+                    val uaMatch = Regex(""""ua"\s*:\s*"Chrome\(([^)]+)\)"""").find(payload)
+                    if (uaMatch != null) {
+                        val version = uaMatch.groupValues[1]
+                        // 안드로이드 기본 User-Agent 포맷으로 재구성
+                        "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$version Mobile Safari/537.36"
+                    } else {
+                        // ua 필드가 없으면 기본값 (최신 버전)
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                    }
+                } else {
+                    null
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                null
+            } ?: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+
+            println("[MovieKingPlayer] Detected UA from Token: $tokenUserAgent")
+
+            // 4. 쿠키 가져오기
             val cookieMap = response.cookies
             val cookieString = cookieMap.entries.joinToString("; ") { "${it.key}=${it.value}" }
             
-            // 4. 헤더 설정
-            // Referer는 반드시 iframe URL(현재 함수로 들어온 url)이어야 합니다.
+            // 5. 헤더 설정 (추출한 User-Agent 강제 적용)
             val headers = mutableMapOf(
-                "Referer" to url, 
+                "User-Agent" to tokenUserAgent, // M3u8Helper가 이 UA를 사용하여 키를 요청함
+                "Referer" to url,               // Iframe 주소
                 "Origin" to "https://player-v1.bcbc.red",
                 "Accept" to "*/*"
             )
@@ -53,8 +81,7 @@ class BcbcRedExtractor : ExtractorApi() {
                 headers["Cookie"] = cookieString
             }
 
-            // 5. M3u8Helper 사용 (중요)
-            // 직접 ExtractorLink를 만드는 대신 Helper를 쓰면 키(Key) 요청 시 헤더를 자동으로 적용해줍니다.
+            // 6. M3u8Helper 실행
             M3u8Helper.generateM3u8(
                 source = name,
                 streamUrl = m3u8Url,
@@ -63,7 +90,6 @@ class BcbcRedExtractor : ExtractorApi() {
             ).forEach(callback)
 
         } else {
-             // 실패 시 로그 출력
              System.out.println("[MovieKingPlayer] data-m3u8 not found")
         }
     }
