@@ -42,7 +42,7 @@ class BunnyPoorCdn : ExtractorApi() {
         println("[BunnyPoorCdn] thumbnailHint: $thumbnailHint")
         
         // 1. URL 디코딩 및 공백 제거 (HTML 엔티티 &amp; 처리 필수)
-        var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\\\r\\\\n\\\\s]"), "").trim()
+        var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
         println("[BunnyPoorCdn] cleanUrl 처리 후: $cleanUrl")
         
         // [중요] 리퍼러를 tvwiki로 강제 고정
@@ -62,8 +62,8 @@ class BunnyPoorCdn : ExtractorApi() {
                 val refRes = app.get(cleanReferer, headers = mapOf("User-Agent" to DESKTOP_UA))
                 println("[BunnyPoorCdn] 리퍼러 페이지 응답 코드: ${refRes.code}")
                 
-                val iframeMatch = Regex("""src=['"](https://player\\.bunny-frame\\.online/[^"']+)['"]""").find(refRes.text)
-                    ?: Regex("""data-player\\d*=['"](https://player\\.bunny-frame\\.online/[^"']+)['"]""").find(refRes.text)
+                val iframeMatch = Regex("""src=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
+                    ?: Regex("""data-player\d*=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
                 
                 if (iframeMatch != null) {
                     cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&").trim()
@@ -86,7 +86,7 @@ class BunnyPoorCdn : ExtractorApi() {
         // 타임아웃을 30초로 넉넉하게 설정
         println("[BunnyPoorCdn] WebViewResolver 초기화")
         val resolver = WebViewResolver(
-            interceptUrl = Regex("""/c\\.html"""), 
+            interceptUrl = Regex("""/c\.html"""), 
             useOkhttp = false,
             timeout = 30000L
         )
@@ -150,9 +150,9 @@ class BunnyPoorCdn : ExtractorApi() {
                 "Sec-Fetch-Dest" to "empty",
                 "Accept-Encoding" to "gzip, deflate, br",
                 "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-                "sec-ch-ua" to "\\"Chromium\\";v=\\"122\\", \\"Not(A:Brand\\";v=\\"24\\", \\"Google Chrome\\";v=\\"122\\"",
+                "sec-ch-ua" to "\"Chromium\";v=\"122\", \"Not(A:Brand\";v=\"24\", \"Google Chrome\";v=\"122\"",
                 "sec-ch-ua-mobile" to "?0",
-                "sec-ch-ua-platform" to "\\"Windows\\""
+                "sec-ch-ua-platform" to "\"Windows\""
             )
 
             if (!cookie.isNullOrEmpty()) {
