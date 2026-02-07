@@ -1,4 +1,4 @@
-package com.tvhot
+package com.tvwiki
 
 import android.util.Log
 import android.webkit.CookieManager
