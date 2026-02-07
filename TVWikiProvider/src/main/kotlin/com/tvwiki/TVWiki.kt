@@ -287,8 +287,9 @@ class TVWiki : MainAPI() {
                     val sessionUrl = "$mainUrl/api/create_session.php"
                     println("[TVWiki] 세션 생성 API 호출: $sessionUrl")
                     
+                    // CloudStream3 app.post 시그니처에 맞게 수정
                     val sessionResponse = app.post(
-                        sessionUrl,
+                        url = sessionUrl,
                         headers = mapOf(
                             "User-Agent" to USER_AGENT,
                             "Content-Type" to "application/json",
@@ -297,22 +298,20 @@ class TVWiki : MainAPI() {
                             "Accept" to "application/json, text/plain, */*",
                             "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
                         ),
-                        data = sessionDataString,
-                        timeout = 30000
+                        data = sessionDataString
                     )
                     
                     println("[TVWiki] 세션 API 응답 코드: ${sessionResponse.code}")
                     println("[TVWiki] 세션 API 응답 본문: ${sessionResponse.text.take(500)}")
                     
-                    // JSON 응답 파싱
-                    val jsonResponse = sessionResponse.parsedSafe<JsonElement>()
-                    if (jsonResponse != null && jsonResponse.jsonObject != null) {
-                        val jsonObj = jsonResponse.jsonObject!!
-                        
-                        val success = jsonObj["success"]?.jsonPrimitive?.content?.toBoolean() ?: false
-                        val playerUrl = jsonObj["player_url"]?.jsonPrimitive?.content
-                        val sig = jsonObj["sig"]?.jsonPrimitive?.content
-                        val t = jsonObj["t"]?.jsonPrimitive?.content
+                    // JSON 응답 파싱 - CloudStream3의 parseJson 사용
+                    val jsonResponse = app.parseJson<Map<String, Any>>(sessionResponse.text)
+                    
+                    if (jsonResponse != null) {
+                        val success = jsonResponse["success"] as? Boolean ?: false
+                        val playerUrl = jsonResponse["player_url"] as? String
+                        val sig = jsonResponse["sig"] as? String
+                        val t = jsonResponse["t"] as? String
                         
                         println("[TVWiki] API 응답 파싱: success=$success, playerUrl=$playerUrl, sig=$sig, t=$t")
                         
