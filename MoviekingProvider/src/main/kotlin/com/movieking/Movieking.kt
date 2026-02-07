@@ -27,11 +27,11 @@ class MovieKing : MainAPI() {
     private val titleRegex = Regex("""\s*\(\d{4}\)$""")
 
     override val mainPage = mainPageOf(
-        "/video?type=movie" to "무료영화",
-        "/video?type=drama" to "무료드라마",
-        "/video?type=enter" to "무료예능",
-        "/video?type=ani" to "무료애니",
-        "/video?type=docu" to "무료시사/다큐"
+        "/video?type=movie" to "영화",
+        "/video?type=drama" to "드라마",
+        "/video?type=enter" to "예능",
+        "/video?type=ani" to "애니",
+        "/video?type=docu" to "시사/다큐"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
