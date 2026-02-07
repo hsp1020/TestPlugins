@@ -4,7 +4,6 @@ import android.util.Log
 import android.webkit.CookieManager
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -38,56 +37,50 @@ class BunnyPoorCdn : ExtractorApi() {
         thumbnailHint: String? = null,
     ): Boolean {
         Log.e(TAG, "==================================================")
-        Log.e(TAG, "[1] Extract 시작됨")
-        Log.d(TAG, "[1-1] 입력된 URL: $url")
-        Log.d(TAG, "[1-2] 입력된 Referer: $referer")
+        Log.e(TAG, "[Bunny] Extract 시작됨")
+        Log.d(TAG, "[Bunny] 입력된 URL: $url")
+        Log.d(TAG, "[Bunny] 입력된 Referer: $referer")
 
         // 1. URL 정리 (HTML 엔티티 제거)
         var cleanUrl = url.replace("&amp;", "&").trim()
-        Log.d(TAG, "[2] 1차 정리된 URL: $cleanUrl")
+        Log.d(TAG, "[Bunny] 1차 정리된 URL: $cleanUrl")
 
-        // 기본 리퍼러 설정
-        val cleanReferer = "https://tvwiki5.net/"
+        // Referer 설정: 입력값이 없으면 기본값, 있으면 입력값 사용
+        // [중요] 만약 url 자체가 드라마 페이지라면 그것을 리퍼러로 사용
+        val targetPage = if (referer.isNullOrEmpty()) "https://tvwiki5.net/" else referer
+        Log.d(TAG, "[Bunny] 사용할 Target Page (Referer): $targetPage")
 
-        // 2. iframe 주소인지 확인 (재탐색 로직)
-        // /v/ 만 포함되어 있어도 플레이어 주소로 인정
-        val isDirectUrl = cleanUrl.contains("/v/") || cleanUrl.contains("bunny-frame.online")
-        
-        Log.d(TAG, "[3] 직접 플레이어 URL인가?: $isDirectUrl")
+        // 2. iframe 주소인지 확인
+        val isDirectUrl = cleanUrl.contains("bunny-frame.online") || cleanUrl.contains("/v/")
+        Log.d(TAG, "[Bunny] 직접 플레이어 URL인가?: $isDirectUrl")
 
         if (!isDirectUrl) {
-            Log.w(TAG, "[3-1] 직접 URL이 아님. HTML에서 iframe src 탐색 시작")
+            Log.w(TAG, "[Bunny] 직접 URL이 아님. HTML에서 iframe 탐색 시작. 타겟: $targetPage")
             try {
                 // TVWiki 페이지를 긁어옴
-                val refRes = app.get(cleanReferer, headers = mapOf("User-Agent" to DESKTOP_UA))
+                val refRes = app.get(targetPage, headers = mapOf("User-Agent" to DESKTOP_UA))
                 val html = refRes.text
-                Log.d(TAG, "[3-2] 페이지 HTML 로드 성공 (길이: ${html.length})")
+                Log.d(TAG, "[Bunny] 페이지 HTML 로드 성공 (길이: ${html.length})")
                 
                 // 정규식으로 iframe src 추출 (홑따옴표, 쌍따옴표 모두 대응)
-                val iframeMatch = Regex("""src=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(html)
-                    ?: Regex("""data-player\d*=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(html)
+                val iframeMatch = Regex("""src=['"](https://player\\.bunny-frame\\.online/[^"']+)['"]""").find(html)
+                    ?: Regex("""data-player\\d*=['"](https://player\\.bunny-frame\\.online/[^"']+)['"]""").find(html)
                 
                 if (iframeMatch != null) {
                     cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&").trim()
-                    Log.d(TAG, "[3-3] Iframe URL 추출 성공: $cleanUrl")
+                    Log.d(TAG, "[Bunny] Iframe URL 추출 성공: $cleanUrl")
                 } else {
-                    Log.e(TAG, "[3-3] ⚠️ Iframe URL 추출 실패! 정규식 매칭 안됨.")
-                    // 여기서 실패하면 사실상 끝임
+                    Log.e(TAG, "[Bunny] ⚠️ Iframe URL 추출 실패! 정규식 매칭 안됨.")
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "[3-Error] 페이지 로드 중 에러 발생", e)
+                Log.e(TAG, "[Bunny-Error] 페이지 로드 중 에러 발생", e)
             }
-        } else {
-            Log.d(TAG, "[3-1] 이미 플레이어 URL임. 재탐색 생략.")
         }
 
         // 3. WebViewResolver 설정
         var capturedUrl: String? = null
-        
-        // 인터셉트할 패턴: c.html 또는 m3u8
-        val interceptPattern = Regex("""/c\.html""") 
-        
-        Log.d(TAG, "[4] WebViewResolver 준비. 타겟 패턴: $interceptPattern")
+        val interceptPattern = Regex("""/c\\.html""") 
+        Log.d(TAG, "[Bunny] WebViewResolver 준비. 타겟 패턴: $interceptPattern")
 
         val resolver = WebViewResolver(
             interceptUrl = interceptPattern, 
@@ -97,48 +90,41 @@ class BunnyPoorCdn : ExtractorApi() {
 
         try {
             val requestHeaders = mapOf(
-                "Referer" to cleanReferer, 
+                "Referer" to targetPage, 
                 "User-Agent" to DESKTOP_UA,
                 "Upgrade-Insecure-Requests" to "1"
             )
 
-            Log.d(TAG, "[5] WebView 요청 시작. URL: $cleanUrl")
-            Log.d(TAG, "[5-1] WebView 헤더: $requestHeaders")
+            Log.d(TAG, "[Bunny] WebView 요청 시작. URL: $cleanUrl")
 
-            // cleanUrl(iframe) 접속 -> JS 실행 -> c.html 요청 가로채기
             val response = app.get(
                 url = cleanUrl,
                 headers = requestHeaders,
                 interceptor = resolver
             )
             
-            Log.d(TAG, "[6] WebView 응답 수신. 응답 URL: ${response.url}")
+            Log.d(TAG, "[Bunny] WebView 응답 수신. 응답 URL: ${response.url}")
 
             if (response.url.contains("/c.html") && response.url.contains("token=")) {
                 capturedUrl = response.url
-                Log.i(TAG, "[6-1] ✅ 토큰 URL 획득 성공: $capturedUrl")
+                Log.i(TAG, "[Bunny] ✅ 토큰 URL 획득 성공: $capturedUrl")
             } else {
-                Log.e(TAG, "[6-1] ❌ 응답 URL이 c.html 패턴과 다름.")
+                Log.e(TAG, "[Bunny] ❌ 응답 URL이 c.html 패턴과 다름.")
             }
 
         } catch (e: Exception) {
-            Log.e(TAG, "[WebView-Error] WebView 실행 중 에러 발생", e)
+            Log.e(TAG, "[Bunny-Error] WebView 실행 중 에러 발생", e)
         }
 
         if (capturedUrl != null) {
-            Log.d(TAG, "[7] 최종 링크 추출 단계 진입")
-            
             val cookieManager = CookieManager.getInstance()
             val cookie = cookieManager.getCookie(capturedUrl)
-            Log.d(TAG, "[7-1] 획득한 쿠키: $cookie")
-
+            
             val headers = mutableMapOf(
                 "User-Agent" to DESKTOP_UA,
                 "Referer" to "https://player.bunny-frame.online/",
                 "Origin" to "https://player.bunny-frame.online",
-                "Accept" to "*/*",
-                "Accept-Encoding" to "gzip, deflate, br",
-                "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
+                "Accept" to "*/*"
             )
 
             if (!cookie.isNullOrEmpty()) {
@@ -146,20 +132,23 @@ class BunnyPoorCdn : ExtractorApi() {
             }
             
             val finalUrl = "$capturedUrl#.m3u8"
-            Log.i(TAG, "[Final] 콜백으로 전달할 최종 URL: $finalUrl")
+            Log.i(TAG, "[Bunny] 최종 콜백 URL: $finalUrl")
             
             callback(
-                newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
-                    this.referer = "https://player.bunny-frame.online/"
-                    this.quality = Qualities.Unknown.value
-                    this.headers = headers
-                }
+                ExtractorLink(
+                    source = name,
+                    name = name,
+                    url = finalUrl,
+                    referer = "https://player.bunny-frame.online/",
+                    quality = Qualities.Unknown.value,
+                    type = ExtractorLinkType.M3U8,
+                    headers = headers
+                )
             )
             Log.e(TAG, "================ 성공 종료 ================")
             return true
         } else {
-            Log.e(TAG, "[Result] ❌ capturedUrl이 null임. 링크 추출 실패.")
-            Log.e(TAG, "================ 실패 종료 ================")
+            Log.e(TAG, "[Bunny] ❌ capturedUrl이 null임. 실패.")
             return false
         }
     }
