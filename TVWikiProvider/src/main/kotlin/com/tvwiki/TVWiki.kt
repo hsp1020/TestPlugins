@@ -1,4 +1,4 @@
-package com.tvhot
+package com.tvwiki
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
