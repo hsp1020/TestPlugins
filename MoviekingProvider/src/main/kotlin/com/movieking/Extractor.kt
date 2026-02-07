@@ -19,52 +19,52 @@ class BcbcRedExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("[MovieKingPlayer] getUrl 시작 ===============================")
-        println("[MovieKingPlayer] 요청 URL: $url")
+        val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        
+        // 1. iframe 페이지 요청
+        val response = app.get(
+            url,
+            referer = referer,
+            headers = mapOf("User-Agent" to userAgent)
+        )
 
-        try {
-            val response = app.get(
-                url,
-                referer = referer,
-                headers = mapOf(
-                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-                )
+        val doc = response.text
+        
+        // 2. data-m3u8 속성 추출
+        val regex = Regex("""data-m3u8=["']([^"']+)["']""")
+        val match = regex.find(doc)
+
+        if (match != null) {
+            val m3u8Url = match.groupValues[1].replace("\\/", "/").trim()
+            
+            // 3. [중요] 쿠키 추출 (app.get 응답에서 쿠키를 가져와 문자열로 변환)
+            val cookiesMap = response.cookies
+            val cookieString = cookiesMap.entries.joinToString("; ") { "${it.key}=${it.value}" }
+
+            // 4. 헤더 맵 생성 (Video Player와 Key Request에 모두 적용됨)
+            val videoHeaders = mutableMapOf(
+                "User-Agent" to userAgent,
+                "Referer" to "https://player-v1.bcbc.red/", // 플레이어 도메인 리퍼러 강제
+                "Origin" to "https://player-v1.bcbc.red"     // Origin 헤더 추가
             )
-
-            val doc = response.text
-            println("[MovieKingPlayer] HTML 응답 길이: ${doc.length}")
-
-            // [수정 핵심] data-m3u8 속성값을 직접 찾습니다.
-            // 예: data-m3u8="https://..."
-            val regex = Regex("""data-m3u8=["']([^"']+)["']""")
-            val match = regex.find(doc)
-
-            if (match != null) {
-                // 공백 제거 및 이스케이프 문자 처리
-                val m3u8Url = match.groupValues[1].replace("\\/", "/").trim()
-                
-                println("[MovieKingPlayer] URL 추출 성공: $m3u8Url")
-
-                callback(
-                    newExtractorLink(
-                        source = name,
-                        name = name,
-                        url = m3u8Url,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        this.referer = url
-                        this.quality = Qualities.Unknown.value
-                    }
-                )
-            } else {
-                println("[MovieKingPlayer] 실패: data-m3u8 속성을 찾을 수 없습니다.")
-                // 혹시 모르니 HTML 일부를 출력해 확인 (너무 길면 잘림)
-                println("[MovieKingPlayer] HTML 일부: ${doc.take(500)}")
+            
+            if (cookieString.isNotEmpty()) {
+                videoHeaders["Cookie"] = cookieString
             }
 
-        } catch (e: Exception) {
-            println("[MovieKingPlayer] 에러 발생: ${e.message}")
-            e.printStackTrace()
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = name,
+                    url = m3u8Url,
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    this.referer = "https://player-v1.bcbc.red/"
+                    this.quality = Qualities.Unknown.value
+                    // 여기서 헤더를 주입해야 키 요청 시에도 사용됩니다.
+                    this.headers = videoHeaders 
+                }
+            )
         }
     }
 }
