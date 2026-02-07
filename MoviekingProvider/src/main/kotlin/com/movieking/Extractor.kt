@@ -1,6 +1,5 @@
 package com.movieking
 
-import android.webkit.CookieManager // 쿠키 매니저 임포트 필수
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -21,37 +20,48 @@ class BcbcRedExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
+        println("[MovieKingPlayer] getUrl 시작: $url")
+
+        // 1. User-Agent 및 헤더 설정
+        // PC User-Agent 사용 (모바일 차단 방지)
         val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
         
-        // 1. WebViewResolver 실행
+        // 2. WebViewResolver를 사용하여 요청 (JS 실행 및 쿠키 굽기)
         val response = app.get(
             url,
             referer = referer,
             headers = mapOf("User-Agent" to userAgent),
-            interceptor = WebViewResolver(Regex("""player-v1\.bcbc\.red""")) // 정규식 백슬래시 수정
+            interceptor = WebViewResolver(Regex("""player-v1\.bcbc\.red"""))
         )
 
-        // 2. [중요] WebView가 생성한 쿠키를 수동으로 가져옵니다.
-        // ExoPlayer는 기본적으로 CookieManager의 쿠키를 공유받지 못할 수 있으므로 헤더에 직접 넣어야 합니다.
-        val cookies = CookieManager.getInstance().getCookie(url) ?: ""
-
         val doc = response.text
-        val regex = Regex("""data-m3u8=["'](https://[^"']+)["']""")
+        
+        // 3. data-m3u8 추출
+        val regex = Regex("""data-m3u8=["']([^"']+)["']""")
         val match = regex.find(doc)
 
         if (match != null) {
             val m3u8Url = match.groupValues[1].replace("\\/", "/").trim()
+            println("[MovieKingPlayer] M3U8 발견: $m3u8Url")
             
-            // 3. 헤더 맵에 'Cookie' 추가
+            // 4. [핵심] CookieManager 대신 response.cookies 사용
+            // app.get이 성공했다면 OkHttp 내부 CookieJar에 쿠키가 있습니다.
+            val cookieMap = response.cookies
+            val cookieString = cookieMap.entries.joinToString("; ") { "${it.key}=${it.value}" }
+            
+            println("[MovieKingPlayer] 추출된 쿠키: $cookieString")
+
+            // 5. [핵심] 헤더 강제 설정
+            // 220 Byte 에러(403 Forbidden)를 피하기 위해 Referer를 iframe 주소로 고정합니다.
             val headers = mutableMapOf(
                 "User-Agent" to userAgent,
-                "Referer" to url, // 보통 iframe 주소가 Referer로 먹힙니다.
-                "Accept" to "*/*",
-                "Origin" to "https://player-v1.bcbc.red" // Origin 헤더 추가 권장
+                "Referer" to url, // iframe 전체 주소 (매우 중요)
+                "Origin" to "https://player-v1.bcbc.red",
+                "Accept" to "*/*"
             )
             
-            if (cookies.isNotEmpty()) {
-                headers["Cookie"] = cookies
+            if (cookieString.isNotEmpty()) {
+                headers["Cookie"] = cookieString
             }
 
             callback(
@@ -61,11 +71,14 @@ class BcbcRedExtractor : ExtractorApi() {
                     url = m3u8Url,
                     type = ExtractorLinkType.M3U8
                 ) {
-                    this.referer = url
+                    // M3U8 요청 및 내부 KEY 요청 시 이 헤더가 사용됩니다.
+                    this.referer = url 
                     this.quality = Qualities.Unknown.value
-                    this.headers = headers // 여기에 쿠키가 포함된 헤더가 들어갑니다.
+                    this.headers = headers
                 }
             )
+        } else {
+             println("[MovieKingPlayer] 실패: data-m3u8 패턴을 찾지 못했습니다.")
         }
     }
 }
