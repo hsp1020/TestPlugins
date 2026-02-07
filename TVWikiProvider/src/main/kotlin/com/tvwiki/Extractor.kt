@@ -36,13 +36,12 @@ class BunnyPoorCdn : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
         thumbnailHint: String? = null,
     ): Boolean {
-        Log.d(TAG, "[Bunny] Extract 시작: $url")
+        Log.d(TAG, "[Bunny] Extract Start: $url")
         
-        // 1. URL 정리
         var cleanUrl = url.replace("&amp;", "&").trim()
+        // referer가 null이거나 bunny-frame 주소면 메인 사이트 주소로 대체
         val targetPage = if (referer.isNullOrEmpty() || referer.contains("bunny-frame")) "https://tvwiki5.net/" else referer
         
-        // 2. iframe 탐색 (직접 URL이 아닌 경우)
         val isDirectUrl = cleanUrl.contains("bunny-frame.online") || cleanUrl.contains("/v/")
         if (!isDirectUrl) {
             try {
@@ -59,7 +58,6 @@ class BunnyPoorCdn : ExtractorApi() {
             }
         }
 
-        // 3. WebViewResolver 설정
         var capturedUrl: String? = null
         val interceptPattern = Regex("""/c\\.html""") 
         val resolver = WebViewResolver(
@@ -103,7 +101,7 @@ class BunnyPoorCdn : ExtractorApi() {
             
             val finalUrl = "$capturedUrl#.m3u8"
             
-            // [수정] newExtractorLink -> ExtractorLink (하위 호환성)
+            // ExtractorLink 생성자 직접 사용 (안전)
             callback(
                 ExtractorLink(
                     source = name,
