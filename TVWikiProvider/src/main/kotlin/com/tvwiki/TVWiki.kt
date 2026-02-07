@@ -169,12 +169,23 @@ class TVHot : MainAPI() {
             ""
         }
 
+        // 출연진 파싱
+        val castList = doc.select(".slider_act .item .name").map { it.text().trim() }
+        val castFormatted = if (castList.isNotEmpty()) {
+            "출연진: ${castList.joinToString(", ")}"
+        } else {
+            ""
+        }
+
         val metaParts = mutableListOf<String>()
         if (infoList.isNotEmpty()) {
             metaParts.add(infoList.joinToString(" / "))
         }
         if (genreFormatted.isNotEmpty()) {
             metaParts.add(genreFormatted)
+        }
+        if (castFormatted.isNotEmpty()) {
+            metaParts.add(castFormatted)
         }
         val metaString = metaParts.joinToString(" / ")
 
@@ -188,11 +199,15 @@ class TVHot : MainAPI() {
         if (story.isEmpty()) story = "다시보기"
 
         val finalPlot = if (story == "다시보기") {
-            "다시보기"
+                "다시보기"
         } else {
-            "$metaString / 줄거리: $story".trim()
+                if (metaString.isNullOrBlank()) {
+                        "줄거리: $story".trim()
+                } else {
+                        "$metaString / 줄거리: $story".trim()
+                }
         }
-
+        
         // 에피소드 리스트 (#other_list ul li)
         val episodes = doc.select("#other_list ul li").mapNotNull { li ->
             val aTag = li.selectFirst("a.ep-link") ?: return@mapNotNull null
@@ -211,7 +226,7 @@ class TVHot : MainAPI() {
                 this.name = epName
                 this.posterUrl = fixUrl(epThumb ?: "")
             }
-        } // 역순 정렬 제거 (HTML상 이미 최신순 혹은 정렬되어 있음)
+        }.reversed() // 에피소드 순서 반전 (1화부터 나오게)
 
         val type = determineTypeFromUrl(url)
 
