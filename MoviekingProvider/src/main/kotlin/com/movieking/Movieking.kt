@@ -9,7 +9,7 @@ import java.net.URLEncoder
 
 class MovieKing : MainAPI() {
     override var mainUrl = "https://mvking6.org" // 접속 안 되면 최신 도메인으로 변경
-    override var name = "무비킹"
+    override var name = "MovieKing"
     override val hasMainPage = true
     override var lang = "ko"
 
