@@ -151,7 +151,7 @@ class TVHot : MainAPI() {
             ?: doc.selectFirst("meta[property='og:image']")?.attr("content")
             ?: ""
 
-        val infoList = doc.select(".bo_v_info dd").map { it.text().trim() }
+        val infoList = doc.select(".bo_v_info dd").map { it.text().trim().replace("개봉년도:", "공개일:") }
         val genreList = doc.select(".ctgs dd a").filter {
             val txt = it.text()
             !txt.contains("트레일러") && !it.hasClass("btn_watch")
