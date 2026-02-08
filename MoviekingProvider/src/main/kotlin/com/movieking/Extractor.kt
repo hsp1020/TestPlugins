@@ -34,7 +34,7 @@ class BcbcRedExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("=== [MovieKing v53] getUrl Start (JSON Unescape Fix) ===")
+        println("=== [MovieKing v54] getUrl Start (Raw String Key) ===")
         
         try {
             val baseHeaders = mutableMapOf(
@@ -60,7 +60,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
             val m3u8Match = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)
                 ?: run {
-                    println("[MovieKing v53] Error: data-m3u8 not found")
+                    println("[MovieKing v54] Error: data-m3u8 not found")
                     return
                 }
 
@@ -74,7 +74,7 @@ class BcbcRedExtractor : ExtractorApi() {
             val chromeVersion = extractChromeVersion(m3u8Url) ?: "124.0.0.0"
             val standardUA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$chromeVersion Mobile Safari/537.36"
             baseHeaders["User-Agent"] = standardUA
-            println("[MovieKing v53] UA: $standardUA")
+            println("[MovieKing v54] UA: $standardUA")
 
             val playlistResponse = app.get(m3u8Url, headers = baseHeaders)
             var m3u8Content = playlistResponse.text
@@ -87,7 +87,7 @@ class BcbcRedExtractor : ExtractorApi() {
                 val keyUrl = keyMatch.groupValues[1]
                 val keyResponse = app.get(keyUrl, headers = baseHeaders)
                 rawKeyJson = keyResponse.text
-                println("[MovieKing v53] Key JSON Fetched")
+                println("[MovieKing v54] Key JSON Fetched")
             }
 
             if (proxyServer == null || !proxyServer!!.isAlive()) {
@@ -117,7 +117,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
             proxyServer!!.setPlaylist(m3u8Content)
             val localPlaylistUrl = "$proxyBaseUrl/playlist.m3u8"
-            println("[MovieKing v53] Ready: $localPlaylistUrl")
+            println("[MovieKing v54] Ready: $localPlaylistUrl")
 
             callback(
                 newExtractorLink(name, name, localPlaylistUrl, ExtractorLinkType.M3U8) {
@@ -128,7 +128,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
         } catch (e: Exception) {
             e.printStackTrace()
-            println("[MovieKing v53] Error: ${e.message}")
+            println("[MovieKing v54] Error: ${e.message}")
         }
     }
 
@@ -166,7 +166,7 @@ class BcbcRedExtractor : ExtractorApi() {
                             val client = serverSocket!!.accept()
                             handleClient(client)
                         } catch (e: Exception) {
-                            if (isRunning) println("[MovieKing v53] Accept Error: ${e.message}")
+                            if (isRunning) println("[MovieKing v54] Accept Error: ${e.message}")
                         }
                     }
                 }
@@ -239,37 +239,30 @@ class BcbcRedExtractor : ExtractorApi() {
                                         var finalOffset = cachedOffset
                                         
                                         if (bytesRead > 0 && finalKey == null && rawKeyJson != null) {
-                                            val key = generateStringKey(rawKeyJson!!)
+                                            // [변경] Raw String Key (No Replace)
+                                            val key = generateRawStringKey(rawKeyJson!!)
+                                            
                                             if (key != null) {
+                                                // Key Logging
+                                                val keyHex = key.joinToString("") { "%02X".format(it) }
+                                                println("[MovieKing v54] Generated Key: $keyHex")
+                                                
                                                 val dec = buffer.clone()
                                                 for (i in 0 until bytesRead) {
                                                     dec[i] = (buffer[i].toInt() xor key[i % key.size].toInt()).toByte()
                                                 }
                                                 
-                                                // Triple Check (Strict)
+                                                // Triple Check
                                                 for (i in 0 until bytesRead - 376) {
                                                     if (dec[i] == 0x47.toByte() && 
                                                         dec[i + 188] == 0x47.toByte() &&
                                                         dec[i + 376] == 0x47.toByte()) {
-                                                        println("[MovieKing v53] MATCH! Offset $i")
+                                                        println("[MovieKing v54] MATCH! Offset $i")
                                                         finalKey = key
                                                         finalOffset = i
                                                         cachedKey = key
                                                         cachedOffset = i
                                                         break
-                                                    }
-                                                }
-                                                
-                                                // Fallback: Single Check (Loose)
-                                                if (finalKey == null) {
-                                                    for (i in 0 until bytesRead) {
-                                                        if (dec[i] == 0x47.toByte()) {
-                                                            println("[MovieKing v53] Weak Match! Offset $i")
-                                                            finalKey = key
-                                                            finalOffset = i
-                                                            // Don't cache weak match
-                                                            break
-                                                        }
                                                     }
                                                 }
                                             }
@@ -279,18 +272,15 @@ class BcbcRedExtractor : ExtractorApi() {
                                         output.write(header.toByteArray())
                                         
                                         if (finalKey != null) {
-                                            // 1. XOR Decrypt
                                             val decryptedBuffer = buffer.clone()
                                             for (i in 0 until bytesRead) {
                                                 decryptedBuffer[i] = (buffer[i].toInt() xor finalKey!![i % finalKey!!.size].toInt()).toByte()
                                             }
                                             
-                                            // 2. Write from offset
                                             if (bytesRead > finalOffset) {
                                                 output.write(decryptedBuffer, finalOffset, bytesRead - finalOffset)
                                             }
                                             
-                                            // 3. Stream remainder
                                             var globalFileOffset = bytesRead.toLong()
                                             var count: Int
                                             
@@ -303,7 +293,7 @@ class BcbcRedExtractor : ExtractorApi() {
                                                 globalFileOffset += count
                                             }
                                         } else {
-                                            println("[MovieKing v53] Failed. Sending RAW.")
+                                            println("[MovieKing v54] Failed. Sending RAW.")
                                             var count: Int
                                             while (inputStream.read(buffer).also { count = it } != -1) {
                                                 output.write(buffer, 0, count)
@@ -316,7 +306,7 @@ class BcbcRedExtractor : ExtractorApi() {
                                     }
                                 }
                             } catch (e: Exception) {
-                                println("[MovieKing v53] Stream Error: $e")
+                                println("[MovieKing v54] Stream Error: $e")
                             }
                         } else {
                             output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
@@ -324,19 +314,18 @@ class BcbcRedExtractor : ExtractorApi() {
                     }
                     socket.close()
                 } catch (e: Exception) {
-                    println("[MovieKing v53] Socket Error: $e")
+                    println("[MovieKing v54] Socket Error: $e")
                 }
             }
         }
 
-        private fun generateStringKey(jsonText: String): ByteArray? {
+        private fun generateRawStringKey(jsonText: String): ByteArray? {
             try {
                 val decodedJsonStr = try { String(Base64.decode(jsonText, Base64.DEFAULT)) } catch (e: Exception) { jsonText }
                 val encKeyRegex = """"encrypted_key"\s*:\s*"([^"]+)"""".toRegex()
-                var encKeyB64 = encKeyRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return null
+                val encKeyB64 = encKeyRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return null
                 
-                // [핵심] JSON Unescape 복구
-                encKeyB64 = encKeyB64.replace("\\/", "/") 
+                // [변경] No replace! Use Raw String.
                 
                 val ruleRegex = """"rule"\s*:\s*(\{.*?\})""".toRegex()
                 val ruleJson = ruleRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return null
