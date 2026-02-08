@@ -18,8 +18,13 @@ class BcbcRedExtractor : ExtractorApi() {
         private var proxyServer: ProxyWebServer? = null
     }
 
-    override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
-        println("=== [MovieKing v64] getUrl Start (Strict 10-Packet Check) ===")
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        println("=== [MovieKing v65] getUrl Start (Full Brute-Force Restored) ===")
         try {
             val baseHeaders = mutableMapOf("Referer" to "https://player-v1.bcbc.red/", "Origin" to "https://player-v1.bcbc.red")
             val playerHtml = app.get(url, headers = baseHeaders).text
@@ -47,7 +52,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
             proxyServer!!.setPlaylist(m3u8Content)
             callback(newExtractorLink(name, name, "$proxyBaseUrl/playlist.m3u8", ExtractorLinkType.M3U8) { this.referer = "https://player-v1.bcbc.red/" })
-        } catch (e: Exception) { println("[MovieKing v64] Error: $e") }
+        } catch (e: Exception) { println("[MovieKing v65] Error: $e") }
     }
 
     class ProxyWebServer {
@@ -92,22 +97,22 @@ class BcbcRedExtractor : ExtractorApi() {
                             stream.mark(65536); val read = stream.read(buffer); stream.reset()
 
                             if (read > 0 && foundKey == null && rawKeyJson != null) {
-                                val candidates = generateStrictCandidates(rawKeyJson!!)
-                                println("[MovieKing v64] Probing combinations (Strict 10-Packet)...")
+                                // [복구] 모든 조합 (노이즈 + 24가지 순열) 생성
+                                val candidates = generateAllCombinations(rawKeyJson!!)
+                                println("[MovieKing v65] Probing ${candidates.size * 16} total combinations...")
                                 
                                 outer@for ((name, key) in candidates) {
-                                    for (s in 0..15) {
+                                    for (s in 0..15) { // 위상 전수조사
                                         for (i in 0 until (read - 2000).coerceAtLeast(0)) {
                                             if ((buffer[i].toInt() xor key[(i + s) % 16].toInt()).toByte() == 0x47.toByte()) {
-                                                // [강화] 10연속 패킷 검사 (1880바이트 구간)
-                                                var matchCount = 0
-                                                for (p in 1..10) {
+                                                // [검증] 10연속 체크 (가짜 정답 완벽 차단)
+                                                var m = 0; for (p in 1..10) {
                                                     val pos = i + (p * 188)
                                                     if (pos >= read) break
-                                                    if ((buffer[pos].toInt() xor key[(pos + s) % 16].toInt()).toByte() == 0x47.toByte()) matchCount++
+                                                    if ((buffer[pos].toInt() xor key[(pos + s) % 16].toInt()).toByte() == 0x47.toByte()) m++
                                                 }
-                                                if (matchCount >= 9) { // 10개 중 9개 이상 일치 시 정답 확정
-                                                    println("[MovieKing v64] REAL SUCCESS! $name, Offset: $i, Shift: $s")
+                                                if (m >= 9) {
+                                                    println("[MovieKing v65] REAL SUCCESS! $name, Offset: $i, Shift: $s")
                                                     foundKey = key; foundOffset = i; foundShift = s; break@outer
                                                 }
                                             }
@@ -135,19 +140,26 @@ class BcbcRedExtractor : ExtractorApi() {
                     }
                 }
                 output.flush(); socket.close()
-            } catch (e: Exception) { println("[MovieKing v64] Stream Error: $e") }
+            } catch (e: Exception) { println("[MovieKing v65] Stream Error: $e") }
         }
 
-        private fun generateStrictCandidates(json: String): List<Pair<String, ByteArray>> {
+        private fun generateAllCombinations(json: String): List<Pair<String, ByteArray>> {
             val list = mutableListOf<Pair<String, ByteArray>>()
             try {
                 val decoded = if (json.startsWith("{")) json else String(Base64.decode(json, Base64.DEFAULT))
                 val encKeyStr = Regex(""""encrypted_key"\s*:\s*"([^"]+)"""").find(decoded)?.groupValues?.get(1)?.replace("\\/", "/") ?: return list
                 val source = encKeyStr.toByteArray()
-                val perms = listOf(listOf(0,1,2,3), listOf(3,2,1,0), listOf(0,3,2,1), listOf(1,3,0,2)) // 유력 순열만 먼저 테스트
+                
+                // [복구] 24가지 모든 순열 리스트
+                val perms = listOf(
+                    listOf(0,1,2,3), listOf(0,1,3,2), listOf(0,2,1,3), listOf(0,2,3,1), listOf(0,3,1,2), listOf(0,3,2,1),
+                    listOf(1,0,2,3), listOf(1,0,3,2), listOf(1,2,0,3), listOf(1,2,3,0), listOf(1,3,0,2), listOf(1,3,2,0),
+                    listOf(2,0,1,3), listOf(2,0,3,1), listOf(2,1,0,3), listOf(2,1,3,0), listOf(2,3,0,1), listOf(2,3,1,0),
+                    listOf(3,0,1,2), listOf(3,0,2,1), listOf(3,1,0,2), listOf(3,1,2,0), listOf(3,2,0,1), listOf(3,2,1,0)
+                )
 
-                for (gap in 0..4) {
-                    for (startOff in 0..4) {
+                for (gap in 0..5) {
+                    for (startOff in 0..5) {
                         val segments = mutableListOf<ByteArray>()
                         for (i in 0..3) {
                             val pos = startOff + i * (4 + gap)
