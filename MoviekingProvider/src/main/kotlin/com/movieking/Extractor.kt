@@ -32,7 +32,7 @@ class BcbcRedExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("=== [MovieKing v19] getUrl Start (Smart Proxy) ===")
+        println("=== [MovieKing v21] getUrl Start (Forensic Mode) ===")
         
         try {
             // 1. 헤더 준비
@@ -41,7 +41,7 @@ class BcbcRedExtractor : ExtractorApi() {
                 "Origin" to "https://player-v1.bcbc.red"
             )
 
-            // 2. WebView 요청 (토큰 확보)
+            // 2. WebView 요청 (토큰 및 쿠키 획득)
             try {
                 app.get(
                     url,
@@ -52,7 +52,7 @@ class BcbcRedExtractor : ExtractorApi() {
                 app.get(url, headers = baseHeaders)
             }
 
-            // 3. M3U8 다운로드 (성공했던 방식 유지)
+            // 3. M3U8 다운로드
             val m3u8Response = app.get(url, headers = baseHeaders)
             val playerHtml = m3u8Response.text
             
@@ -64,7 +64,7 @@ class BcbcRedExtractor : ExtractorApi() {
             // 4. M3U8 주소 파싱
             val m3u8Match = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)
                 ?: run {
-                    println("[MovieKing v19] Error: data-m3u8 not found")
+                    println("[MovieKing v21] Error: data-m3u8 not found")
                     return
                 }
 
@@ -79,7 +79,7 @@ class BcbcRedExtractor : ExtractorApi() {
             val chromeVersion = extractChromeVersion(m3u8Url) ?: "124.0.0.0"
             val standardUA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$chromeVersion Mobile Safari/537.36"
             baseHeaders["User-Agent"] = standardUA
-            println("[MovieKing v19] UA: $standardUA")
+            println("[MovieKing v21] UA: $standardUA")
 
             // 6. 진짜 M3U8 다운로드
             val playlistResponse = app.get(m3u8Url, headers = baseHeaders)
@@ -94,7 +94,7 @@ class BcbcRedExtractor : ExtractorApi() {
                 val keyUrl = keyMatch.groupValues[1]
                 val keyResponse = app.get(keyUrl, headers = baseHeaders)
                 actualKeyBytes = decryptKeyFromJson(keyResponse.text)
-                if (actualKeyBytes != null) println("[MovieKing v19] Key Decrypted.")
+                if (actualKeyBytes != null) println("[MovieKing v21] Key Decrypted.")
             }
 
             // 8. 프록시 서버 시작
@@ -104,11 +104,10 @@ class BcbcRedExtractor : ExtractorApi() {
                 proxyServer!!.start()
             }
             
-            // 헤더와 키를 프록시에 전달
             val port = proxyServer!!.updateSession(baseHeaders, actualKeyBytes)
             val proxyBaseUrl = "http://127.0.0.1:$port"
 
-            // 9. M3U8 변조 (모두 프록시 태움)
+            // 9. M3U8 변조 (모든 트래픽을 프록시로 유도하여 감식)
             if (keyMatch != null && actualKeyBytes != null) {
                 val localKeyUrl = "$proxyBaseUrl/key.bin"
                 m3u8Content = m3u8Content.replace(keyMatch.groupValues[1], localKeyUrl)
@@ -128,19 +127,19 @@ class BcbcRedExtractor : ExtractorApi() {
             // 10. 재생 요청
             proxyServer!!.setPlaylist(m3u8Content)
             val localPlaylistUrl = "$proxyBaseUrl/playlist.m3u8"
-            println("[MovieKing v19] Ready: $localPlaylistUrl")
+            println("[MovieKing v21] Ready: $localPlaylistUrl")
 
             callback(
                 newExtractorLink(name, name, localPlaylistUrl, ExtractorLinkType.M3U8) {
                     this.referer = "https://player-v1.bcbc.red/"
                     this.quality = Qualities.Unknown.value
-                    // 프록시가 헤더를 관리하므로 여기는 비워둡니다
+                    this.headers = baseHeaders // 프록시가 무시하더라도 혹시 모르니 전달
                 }
             )
 
         } catch (e: Exception) {
             e.printStackTrace()
-            println("[MovieKing v19] Error: ${e.message}")
+            println("[MovieKing v21] Error: ${e.message}")
         }
     }
 
@@ -178,7 +177,7 @@ class BcbcRedExtractor : ExtractorApi() {
         } catch (e: Exception) { null }
     }
     
-    // --- Proxy Web Server (app.get + Domain Check) ---
+    // --- Proxy Web Server (Forensic Mode) ---
     class ProxyWebServer {
         private var serverSocket: ServerSocket? = null
         private var isRunning = false
@@ -201,7 +200,7 @@ class BcbcRedExtractor : ExtractorApi() {
                             val client = serverSocket!!.accept()
                             handleClient(client)
                         } catch (e: Exception) {
-                            if (isRunning) println("[MovieKing v19] Accept Error: ${e.message}")
+                            if (isRunning) println("[MovieKing v21] Accept Error: ${e.message}")
                         }
                     }
                 }
@@ -255,44 +254,65 @@ class BcbcRedExtractor : ExtractorApi() {
                             val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
                             
                             try {
-                                // [핵심] M3U8 다운로드에 성공했던 'app.get'을 그대로 사용 (TLS 지문 통과)
-                                // 코루틴 안에서 실행해야 하므로 runBlocking 사용
+                                // [증거 수집 1] 요청 정보 기록
+                                // println("[MovieKing v21] Requesting TS: $targetUrl")
+                                
                                 val responseBytes = runBlocking {
-                                    // [도메인 체크] 같은 도메인일 때만 전체 헤더 전송, 아니면 UA만 전송
+                                    // 도메인 체크 로직 (이전 성공 요인)
                                     val safeHeaders = if (targetUrl.contains("bcbc.red")) {
                                         currentHeaders
                                     } else {
                                         mapOf("User-Agent" to (currentHeaders["User-Agent"] ?: ""))
                                     }
                                     
+                                    // [증거 수집 2] 헤더 기록
+                                    // println("[MovieKing v21] Headers sent: ${safeHeaders.keys}")
+
                                     val res = app.get(targetUrl, headers = safeHeaders)
+                                    
+                                    // [증거 수집 3] 응답 코드 및 타입 기록
+                                    if (!res.isSuccessful) {
+                                        println("[MovieKing v21] SERVER ERROR: ${res.code}")
+                                    }
+                                    // Content-Type 확인
+                                    // println("[MovieKing v21] Content-Type: ${res.headers["Content-Type"]}")
+                                    
                                     if (res.isSuccessful) res.body.bytes() else null
                                 }
                                 
-                                if (responseBytes != null) {
-                                    // HTML 차단 확인
-                                    val prefix = String(responseBytes.take(50).toByteArray())
-                                    if (prefix.trim().startsWith("<", ignoreCase = true) && 
-                                        (prefix.contains("html", ignoreCase = true) || prefix.contains("doctype", ignoreCase = true))) {
-                                        
-                                        println("[MovieKing v19] Blocked! HTML returned.")
-                                        output.write("HTTP/1.1 403 Forbidden\r\n\r\n".toByteArray())
+                                if (responseBytes != null && responseBytes.isNotEmpty()) {
+                                    // [증거 수집 4] 데이터 내용 정밀 분석 (여기가 핵심)
+                                    val hexSnippet = responseBytes.take(4).joinToString(" ") { "%02X".format(it) }
+                                    val textSnippet = String(responseBytes.take(50).toByteArray())
+                                    
+                                    println("[MovieKing v21] DATA DUMP | Size: ${responseBytes.size} | Hex: [$hexSnippet] | Text: $textSnippet")
+                                    
+                                    if (hexSnippet.startsWith("47")) {
+                                        // 0x47 = MPEG-TS Sync Byte (정상)
+                                        println("[MovieKing v21] VERDICT: Valid TS Stream detected.")
+                                    } else if (textSnippet.trim().startsWith("<")) {
+                                        // HTML 감지
+                                        println("[MovieKing v21] VERDICT: BLOCKED (HTML received).")
                                     } else {
-                                        // 정상 전송
-                                        val header = "HTTP/1.1 200 OK\r\n" +
-                                                "Content-Type: video/mp2t\r\n" +
-                                                "Content-Length: ${responseBytes.size}\r\n" +
-                                                "Connection: close\r\n\r\n"
-                                        output.write(header.toByteArray())
-                                        output.write(responseBytes)
-                                        output.flush()
+                                        // 알 수 없는 데이터
+                                        println("[MovieKing v21] VERDICT: UNKNOWN/CORRUPT data.")
                                     }
+
+                                    // 플레이어에게 전송
+                                    val header = "HTTP/1.1 200 OK\r\n" +
+                                            "Content-Type: video/mp2t\r\n" +
+                                            "Content-Length: ${responseBytes.size}\r\n" +
+                                            "Connection: close\r\n\r\n"
+                                    output.write(header.toByteArray())
+                                    output.write(responseBytes)
+                                    output.flush()
                                 } else {
+                                    println("[MovieKing v21] FAIL: Empty response or Connection Reset")
                                     output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
                                 }
                             } catch (e: Exception) {
-                                println("[MovieKing v19] Stream Error: $e")
-                                e.printStackTrace()
+                                println("[MovieKing v21] EXCEPTION: $e")
+                                // e.printStackTrace() // 필요 시 주석 해제
                             }
                         } else {
                             output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
@@ -300,7 +320,7 @@ class BcbcRedExtractor : ExtractorApi() {
                     }
                     socket.close()
                 } catch (e: Exception) {
-                    println("[MovieKing v19] Socket Error: $e")
+                    println("[MovieKing v21] Socket Error: $e")
                 }
             }
         }
