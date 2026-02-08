@@ -1,11 +1,13 @@
 package com.movieking
 
 import android.util.Base64
-import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.network.WebViewResolver
+import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.M3u8Helper
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.SubtitleFile
+import com.lagradost.cloudstream3.network.WebViewResolver
+import java.net.URI
 
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -19,8 +21,7 @@ class BcbcRedExtractor : ExtractorApi() {
         callback: (ExtractorLink) -> Unit
     ) {
         try {
-            // 🔹 1. WebViewResolver로 플레이어 페이지 로드
-            println("[MovieKing] 1. Loading player page...")
+            // 1. WebViewResolver로 플레이어 페이지 로드 (쿠키/세션 생성)
             val playerResponse = app.get(
                 url,
                 referer = referer,
@@ -28,301 +29,169 @@ class BcbcRedExtractor : ExtractorApi() {
             )
             val playerHtml = playerResponse.text
 
-            // 🔹 2. data-m3u8 URL 추출
-            val m3u8UrlRegex = """data-m3u8\s*=\s*['"]([^'"]+)['"]""".toRegex()
-            val m3u8Match = m3u8UrlRegex.find(playerHtml)
-            if (m3u8Match == null) {
-                println("[MovieKing] ERROR: data-m3u8 not found")
-                throw ErrorLoadingException("M3U8 URL not found")
-            }
+            // 2. data-m3u8 URL 추출
+            val m3u8Match = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)
+                ?: throw Exception("data-m3u8 not found")
 
             var m3u8Url = m3u8Match.groupValues[1].replace("\\/", "/")
             if (!m3u8Url.startsWith("http")) {
                 m3u8Url = "https://$m3u8Url"
             }
-            println("[MovieKing] 2. M3U8 URL: $m3u8Url")
 
-            // 🔹 3. JWT 토큰에서 User-Agent 추출
-            println("[MovieKing] 3. Extracting User-Agent from JWT...")
-            val userAgentFromToken = extractUserAgentFromM3U8Url(m3u8Url)
-            val finalUserAgent = userAgentFromToken ?: "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"
-            println("[MovieKing] Using UA: $finalUserAgent")
-
-            // 🔹 4. 쿠키 및 헤더 준비
+            // 3. User-Agent 및 헤더 설정
+            val userAgent = extractUserAgentFromM3U8Url(m3u8Url)
+                ?: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            
             val cookieString = playerResponse.cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
             val headers = mapOf(
-                "User-Agent" to finalUserAgent,
+                "User-Agent" to userAgent,
                 "Referer" to "https://player-v1.bcbc.red",
                 "Origin" to "https://player-v1.bcbc.red",
-                "Accept" to "*/*",
                 "Cookie" to cookieString
             )
 
-            // 🔹 5. M3U8 파일 가져오기
-            println("[MovieKing] 4. Fetching M3U8...")
+            // 4. M3U8 원본 다운로드
             val m3u8Response = app.get(m3u8Url, headers = headers)
-            val m3u8Content = m3u8Response.text
-            
-            println("[MovieKing] Original M3U8 (first 5 lines):")
-            m3u8Content.lines().take(5).forEachIndexed { i, line -> 
-                println("  [$i] $line")
-            }
-            
-            // 🔹 6. 키 URI 찾기 및 처리 (방법 1: 암호화 라인 완전 제거)
-            val keyUriRegex = """#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)",IV=0x([0-9a-fA-F]+)""".toRegex()
-            val keyUriMatch = keyUriRegex.find(m3u8Content)
-            
-            var modifiedM3u8Url = m3u8Url  // 기본값은 원본 URL
-            
-            if (keyUriMatch != null) {
-                val keyUri = keyUriMatch.groupValues[1]
-                val ivValue = keyUriMatch.groupValues[2]
-                println("[MovieKing] 5. Found key URI: $keyUri, IV: $ivValue")
+            var m3u8Content = m3u8Response.text
+            val baseUrl = m3u8Url.substringBeforeLast("/") + "/"
+
+            // 5. [핵심] 키 URI 찾아서 실제 키로 교체
+            val keyUriRegex = """#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"""".toRegex()
+            val keyMatch = keyUriRegex.find(m3u8Content)
+
+            if (keyMatch != null) {
+                val keyUrl = keyMatch.groupValues[1]
                 
-                // 🔹 7. 키 응답 가져오기 및 디코딩
-                println("[MovieKing] 6. Fetching and decoding key...")
-                try {
-                    val keyResponse = app.get(keyUri, headers = headers)
-                    val keyData = keyResponse.body.bytes()
+                // 키 JSON 다운로드
+                val keyResponse = app.get(keyUrl, headers = headers)
+                val jsonText = keyResponse.text // 여기서 220byte JSON이 들어옴
+
+                // JSON 파싱 및 복호화
+                val actualKeyBytes = decryptKeyFromJson(jsonText)
+                
+                if (actualKeyBytes != null) {
+                    // 실제 키를 Base64 Data URI로 변환
+                    val b64Key = Base64.encodeToString(actualKeyBytes, Base64.NO_WRAP)
+                    val newKeyLine = """#EXT-X-KEY:METHOD=AES-128,URI="data:text/plain;base64,$b64Key""""
                     
-                    if (keyData.size == 220) {
-                        println("[MovieKing] ⚠️ 220-byte key response detected")
-                        
-                        // JSON 텍스트
-                        val jsonText = String(keyData)
-                        
-                        // 🔴🔴🔴🔴🔴 핵심: 방법 1 - 암호화 라인 완전 제거 🔴🔴🔴🔴🔴
-                        
-                        // 1. JSON에서 encrypted_key 추출
-                        val encryptedKey = parseEncryptedKeyFromJson(jsonText)
-                        
-                        if (encryptedKey != null) {
-                            println("[MovieKing] ✅ Extracted encrypted key: $encryptedKey")
-                            
-                            // Base64 디코딩
-                            val decodedKey = Base64.decode(encryptedKey, Base64.DEFAULT)
-                            println("[MovieKing] Decoded key size: ${decodedKey.size} bytes")
-                            
-                            // 2. 규칙 추출
-                            val rule = parseRuleFromJson(jsonText)
-                            println("[MovieKing] Rule permutation: ${rule["permutation"]}")
-                            
-                            // 3. 실제 키 추출 (간단한 방법)
-                            val actualKey = extractActualKeySimple(decodedKey, rule)
-                            println("[MovieKing] ✅ Actual AES key (Base64): ${Base64.encodeToString(actualKey, Base64.NO_WRAP)}")
-                            println("[MovieKing] Actual AES key (HEX): ${actualKey.joinToString("") { "%02x".format(it) }}")
-                            
-                            // 4. M3U8 콘텐츠에서 키 라인 완전히 제거
-                            val originalKeyLine = keyUriMatch.value
-                            println("[MovieKing] Original key line: $originalKeyLine")
-                            
-                            // 🔴 방법 1: 키 라인을 완전히 제거하여 암호화 없이 재생
-                            var modifiedM3u8Content = m3u8Content.replace(originalKeyLine, "")
-                            println("[MovieKing] ✅ Removed encryption line from M3U8")
-                            
-                            // 추가: 다른 EXT-X-KEY 라인도 모두 제거
-                            modifiedM3u8Content = modifiedM3u8Content.replace("#EXT-X-KEY:.*".toRegex(RegexOption.MULTILINE), "")
-                            
-                            // 5. 수정된 M3U8 콘텐츠 확인
-                            val lineCount = modifiedM3u8Content.lines().count { it.contains("#EXT-X-KEY") }
-                            if (lineCount == 0) {
-                                println("[MovieKing] ✅ All encryption lines removed from M3U8")
-                            } else {
-                                println("[MovieKing] ⚠️ Still found $lineCount encryption lines in M3U8")
-                            }
-                            
-                            // 🔴 핵심: 수정된 M3U8 콘텐츠로 직접 ExtractorLink 생성
-                            // Cloudstream에서는 M3U8 콘텐츠를 직접 전달할 수 없으므로,
-                            // 대신 원본 URL을 사용하지만 암호화가 제거되었다고 가정
-                            println("[MovieKing] 7. Creating direct ExtractorLink without M3u8Helper...")
-                            
-                            // 방법 1A: 원본 URL 사용 (서버가 암호화 없이도 스트림 제공한다고 가정)
-                            println("[MovieKing] Using original URL (assuming server provides unencrypted stream)...")
-                            
-                            callback(
-                                newExtractorLink(
-                                    source = name,
-                                    name = "$name (Unencrypted)",
-                                    url = m3u8Url,
-                                    type = ExtractorLinkType.M3U8
-                                ) {
-                                    this.referer = url
-                                    this.quality = Qualities.Unknown.value
-                                    this.headers = headers
-                                }
-                            )
-                            
-                            println("[MovieKing] ✅ Created ExtractorLink with encryption removed")
-                            return  // 🔴 여기서 함수 종료 (M3u8Helper 사용 안 함)
-                        }
-                    }
-                } catch (e: Exception) {
-                    println("[MovieKing] Key processing error: ${e.message}")
-                    e.printStackTrace()
+                    // M3U8 내용 수정 (원본 Key URI -> Data URI)
+                    m3u8Content = m3u8Content.replace(keyMatch.value, newKeyLine)
+                    println("[MovieKing] Key replaced successfully.")
                 }
             }
 
-            // 🔹 8. 키가 없거나 디코딩 실패 시: M3u8Helper로 폴백
-            println("[MovieKing] 8. Fallback: Using M3u8Helper...")
-            M3u8Helper.generateM3u8(
-                name,
-                m3u8Url,
-                url,
-                headers = headers
-            ).forEach { link ->
-                println("[MovieKing] Created stream (fallback): ${link.name}")
-                callback(link)
+            // 6. [핵심] 세그먼트(.ts) 경로 절대경로화
+            // M3U8 전체를 Data URI로 만들 것이므로 상대경로는 깨짐. 따라서 절대경로로 수정해야 함.
+            val newM3u8Lines = m3u8Content.lines().map { line ->
+                val trimLine = line.trim()
+                if (trimLine.isNotEmpty() && !trimLine.startsWith("#")) {
+                    // http로 시작하지 않는 세그먼트 URL 앞에 baseUrl 붙이기
+                    if (!trimLine.startsWith("http")) {
+                        try {
+                            URI(baseUrl).resolve(trimLine).toString()
+                        } catch (e: Exception) {
+                            "$baseUrl$trimLine"
+                        }
+                    } else {
+                        trimLine
+                    }
+                } else {
+                    line
+                }
             }
+            val finalM3u8Content = newM3u8Lines.joinToString("\n")
+
+            // 7. 수정된 M3U8 전체를 Data URI로 변환하여 전달
+            // 이렇게 하면 ExoPlayer는 서버에 접속 안 하고 이 문자열을 재생 목록으로 씀
+            val base64M3u8 = Base64.encodeToString(finalM3u8Content.toByteArray(), Base64.NO_WRAP)
+            val dataUri = "data:application/vnd.apple.mpegurl;base64,$base64M3u8"
+
+            callback(
+                ExtractorLink(
+                    name = name,
+                    name = name,
+                    url = dataUri, // URL 대신 수정된 M3U8 데이터 자체를 넘김
+                    referer = url,
+                    quality = 0, // Unknown
+                    type = ExtractorLinkType.M3U8
+                )
+            )
 
         } catch (e: Exception) {
-            println("[MovieKing] ERROR: ${e.message}")
-            throw ErrorLoadingException("Failed to extract: ${e.message}")
+            e.printStackTrace()
+            // 에러 시 로그만 남김 (Cloudstream 특성상 에러 throw하면 전체가 죽을 수 있음)
+            println("[MovieKing] Error: ${e.message}")
         }
     }
 
-    /** JSON에서 encrypted_key 추출 (간단한 정규식) */
-    private fun parseEncryptedKeyFromJson(jsonText: String): String? {
-        return try {
-            // Base64 디코딩 (JSON 자체가 Base64로 인코딩됨)
-            val decodedJson = String(Base64.decode(jsonText, Base64.DEFAULT))
-            
-            // "encrypted_key":"..." 추출
-            val regex = """"encrypted_key"\s*:\s*"([^"]+)"""".toRegex()
-            val match = regex.find(decodedJson)
-            
-            match?.groupValues?.get(1)
-        } catch (e: Exception) {
-            println("[MovieKing] JSON parsing error: ${e.message}")
-            
-            // 대안: 직접 파싱 시도
-            try {
-                val directRegex = """"encrypted_key"[^"]*"([^"]+)"""".toRegex()
-                val directMatch = directRegex.find(jsonText)
-                directMatch?.groupValues?.get(1)
-            } catch (e2: Exception) {
-                null
-            }
-        }
-    }
-    
-    /** JSON에서 rule 추출 */
-    private fun parseRuleFromJson(jsonText: String): Map<String, Any> {
-        val result = mutableMapOf<String, Any>()
-        
+    // --- Helper Functions ---
+
+    private fun decryptKeyFromJson(jsonText: String): ByteArray? {
         try {
-            val decodedJson = String(Base64.decode(jsonText, Base64.DEFAULT))
-            
-            // segment_sizes 추출
-            val sizesRegex = """"segment_sizes"\s*:\s*\[([^\]]+)\]""".toRegex()
-            val sizesMatch = sizesRegex.find(decodedJson)
-            sizesMatch?.let {
-                val sizesText = it.groupValues[1]
-                val sizes = sizesText.split(",").map { num -> num.trim().toIntOrNull() ?: 0 }
-                result["segment_sizes"] = sizes
+            // 1. JSON 자체가 Base64일 수 있으므로 디코딩 시도 (로그 기반 추론)
+            // 로그: Raw key response: eyJlbmNyeXB0... (Base64된 JSON)
+            val decodedJsonStr = try {
+                String(Base64.decode(jsonText, Base64.DEFAULT))
+            } catch (e: Exception) {
+                jsonText // Base64 아님
             }
+
+            // 2. Regex로 encrypted_key와 rule 추출
+            val encKeyRegex = """"encrypted_key"\s*:\s*"([^"]+)"""".toRegex()
+            val encKeyB64 = encKeyRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return null
             
-            // noise_length 추출
-            val noiseRegex = """"noise_length"\s*:\s*(\d+)""".toRegex()
-            val noiseMatch = noiseRegex.find(decodedJson)
-            noiseMatch?.let {
-                result["noise_length"] = it.groupValues[1].toIntOrNull() ?: 2
+            val ruleRegex = """"rule"\s*:\s*(\{.*?\})""".toRegex()
+            val ruleJson = ruleRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return null
+
+            // 3. Encrypted Key 디코딩 (Base64 -> Bytes)
+            val encryptedBytes = Base64.decode(encKeyB64, Base64.DEFAULT)
+            // 앞 2바이트(Noise) 제거
+            val cleanBytes = encryptedBytes.drop(2).toByteArray()
+
+            // 4. Rule 파싱 (permutation 추출)
+            val permRegex = """"permutation"\s*:\s*\[([\d,]+)\]""".toRegex()
+            val permString = permRegex.find(ruleJson)?.groupValues?.get(1) ?: "0,1,2,3"
+            val permutation = permString.split(",").map { it.trim().toInt() }
+
+            // 5. 셔플 복구 (Segment Size는 4로 고정된 것으로 보임)
+            // 16바이트를 4개 덩어리(4바이트씩)로 나눔
+            val segments = listOf(
+                cleanBytes.copyOfRange(0, 4),
+                cleanBytes.copyOfRange(4, 8),
+                cleanBytes.copyOfRange(8, 12),
+                cleanBytes.copyOfRange(12, 16)
+            )
+
+            val resultKey = ByteArray(16)
+            var offset = 0
+            
+            // permutation 순서대로 재조립
+            for (idx in permutation) {
+                val seg = segments[idx]
+                System.arraycopy(seg, 0, resultKey, offset, 4)
+                offset += 4
             }
-            
-            // permutation 추출
-            val permRegex = """"permutation"\s*:\s*\[([^\]]+)\]""".toRegex()
-            val permMatch = permRegex.find(decodedJson)
-            permMatch?.let {
-                val permText = it.groupValues[1]
-                val permutation = permText.split(",").map { num -> num.trim().toIntOrNull() ?: 0 }
-                result["permutation"] = permutation
-            }
-            
-            // key_length 추출
-            val keyLenRegex = """"key_length"\s*:\s*(\d+)""".toRegex()
-            val keyLenMatch = keyLenRegex.find(decodedJson)
-            keyLenMatch?.let {
-                result["key_length"] = it.groupValues[1].toIntOrNull() ?: 16
-            }
-            
+
+            return resultKey
+
         } catch (e: Exception) {
-            println("[MovieKing] Rule parsing error: ${e.message}")
+            e.printStackTrace()
+            return null
         }
-        
-        // 기본값 설정
-        if (!result.containsKey("segment_sizes")) result["segment_sizes"] = listOf(4, 4, 4, 4)
-        if (!result.containsKey("noise_length")) result["noise_length"] = 2
-        if (!result.containsKey("permutation")) result["permutation"] = listOf(0, 1, 2, 3)
-        if (!result.containsKey("key_length")) result["key_length"] = 16
-        
-        return result
-    }
-    
-    /** 실제 키 추출 (간단한 버전) */
-    private fun extractActualKeySimple(encryptedKey: ByteArray, rule: Map<String, Any>): ByteArray {
-        // 🔹 규칙 가져오기
-        val segmentSizes = rule["segment_sizes"] as? List<Int> ?: listOf(4, 4, 4, 4)
-        val noiseLength = rule["noise_length"] as? Int ?: 2
-        val permutation = rule["permutation"] as? List<Int> ?: listOf(0, 1, 2, 3)
-        val keyLength = rule["key_length"] as? Int ?: 16
-        
-        println("[MovieKing] Using rule: segments=$segmentSizes, noise=$noiseLength, perm=$permutation, keyLen=$keyLength")
-        
-        // 1. 노이즈 제거 (앞에서 noise_length 바이트 제거)
-        val keyWithoutNoise = if (encryptedKey.size > noiseLength) {
-            encryptedKey.copyOfRange(noiseLength, encryptedKey.size)
-        } else {
-            encryptedKey
-        }
-        
-        // 2. 세그먼트로 분할
-        val segments = mutableListOf<ByteArray>()
-        var offset = 0
-        for (size in segmentSizes) {
-            if (offset + size <= keyWithoutNoise.size) {
-                segments.add(keyWithoutNoise.copyOfRange(offset, offset + size))
-                offset += size
-            }
-        }
-        
-        // 3. 순열 적용 (원래 순서로 재배열)
-        val result = ByteArray(keyLength)
-        var resultOffset = 0
-        
-        // 원래 순서대로 재배열 (permutation[i] = 원래 i번째 세그먼트의 새 위치)
-        for (i in segments.indices) {
-            val targetPos = if (i < permutation.size) permutation[i] else i
-            if (targetPos < segments.size) {
-                val segment = segments[targetPos]
-                System.arraycopy(segment, 0, result, resultOffset, minOf(segment.size, keyLength - resultOffset))
-                resultOffset += segment.size
-            }
-        }
-        
-        return result
     }
 
-    /** JWT 토큰에서 User-Agent 추출 */
     private fun extractUserAgentFromM3U8Url(m3u8Url: String): String? {
         return try {
-            val token = m3u8Url.substringAfterLast("/")
-            val parts = token.split(".")
+            val token = m3u8Url.substringAfterLast("/").split(".").getOrNull(1) ?: return null
+            val payload = String(Base64.decode(token, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP))
+            val uaMatch = Regex(""""ua"\s*:\s*"Chrome\(([^)]+)\)"""").find(payload)
+            val version = uaMatch?.groupValues?.get(1)
             
-            if (parts.size >= 2) {
-                val payloadJson = String(
-                    Base64.decode(parts[1], Base64.URL_SAFE or Base64.NO_PADDING),
-                    Charsets.UTF_8
-                )
-                
-                val uaRegex = """"ua"\s*:\s*"([^"]+)"""".toRegex()
-                val uaMatch = uaRegex.find(payloadJson)
-                
-                uaMatch?.groupValues?.get(1)?.let { uaValue ->
-                    if (uaValue.startsWith("Chrome(")) {
-                        val version = uaValue.removePrefix("Chrome(").removeSuffix(")")
-                        "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$version Mobile Safari/537.36"
-                    } else uaValue
-                }
-            } else null
+            if (version != null) {
+                "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$version Mobile Safari/537.36"
+            } else {
+                null
+            }
         } catch (e: Exception) {
             null
         }
