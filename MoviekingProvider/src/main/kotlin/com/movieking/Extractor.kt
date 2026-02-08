@@ -35,7 +35,10 @@ class BcbcRedExtractor : ExtractorApi() {
                 ?: throw Exception("data-m3u8 not found")
 
             var m3u8Url = m3u8Match.groupValues[1].replace("\\/", "/")
-            if (!m3u8Url.startsWith("http")) {
+            // 프로토콜이 없는 경우 처리
+            if (m3u8Url.startsWith("//")) {
+                m3u8Url = "https:$m3u8Url"
+            } else if (!m3u8Url.startsWith("http")) {
                 m3u8Url = "https://$m3u8Url"
             }
 
@@ -45,7 +48,6 @@ class BcbcRedExtractor : ExtractorApi() {
             
             val cookieString = playerResponse.cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
             
-            // 4. 키 정보 추출 (복호화된 키를 헤더에 포함하기 위해)
             val headers = mutableMapOf(
                 "User-Agent" to userAgent,
                 "Referer" to "https://player-v1.bcbc.red",
@@ -53,39 +55,64 @@ class BcbcRedExtractor : ExtractorApi() {
                 "Cookie" to cookieString
             )
 
-            // 5. M3U8 원본 다운로드 (키 정보 확인용)
+            // 4. M3U8 원본 다운로드
             val m3u8Response = app.get(m3u8Url, headers = headers)
-            val m3u8Content = m3u8Response.text
+            var m3u8Content = m3u8Response.text
 
-            // 6. 키 URI 찾기
+            // 5. 키 URI 찾기
             val keyUriRegex = """#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"""".toRegex()
             val keyMatch = keyUriRegex.find(m3u8Content)
 
-            // 7. 키 복호화 및 Base64 인코딩
-            val keyB64 = if (keyMatch != null) {
+            // 6. 키 복호화 및 M3U8 변조 (Data URI 방식)
+            if (keyMatch != null) {
                 val keyUrl = keyMatch.groupValues[1]
                 val keyResponse = app.get(keyUrl, headers = headers)
                 val jsonText = keyResponse.text
-                val actualKeyBytes = decryptKeyFromJson(jsonText)
                 
+                // 실제 키 해독 (16바이트)
+                val actualKeyBytes = decryptKeyFromJson(jsonText)
+
                 if (actualKeyBytes != null) {
-                    Base64.encodeToString(actualKeyBytes, Base64.NO_WRAP)
-                } else {
-                    null
+                    // (1) 해독된 키를 Base64로 변환하여 Data URI 생성
+                    val keyBase64 = Base64.encodeToString(actualKeyBytes, Base64.NO_WRAP)
+                    val keyDataUri = "data:application/octet-stream;base64,$keyBase64"
+
+                    // (2) M3U8 내용 수정: JSON URL을 실제 키 값을 담은 Data URI로 교체
+                    m3u8Content = m3u8Content.replace(
+                        keyMatch.groupValues[1], // 원래 URI
+                        keyDataUri               // 교체할 Data URI
+                    )
+                    
+                    // (3) M3U8 내용 수정: 상대 경로 세그먼트를 절대 경로로 변환 (Data URI 재생 시 필수)
+                    // m3u8Url의 마지막 파일명을 제외한 기본 경로 추출 (예: https://example.com/video/)
+                    val baseUrl = m3u8Url.substringBeforeLast("/") + "/"
+                    
+                    m3u8Content = m3u8Content.lines().joinToString("\n") { line ->
+                        // 주석(#)이 아니고 http로 시작하지 않는 줄(파일명) 앞에 baseUrl 붙이기
+                        if (line.isNotBlank() && !line.startsWith("#") && !line.startsWith("http")) {
+                            "$baseUrl$line"
+                        } else {
+                            line
+                        }
+                    }
+
+                    // (4) 수정된 M3U8 전체를 다시 Data URI로 변환하여 재생
+                    val finalM3u8DataUri = "data:application/vnd.apple.mpegurl;base64," + 
+                        Base64.encodeToString(m3u8Content.toByteArray(), Base64.NO_WRAP)
+
+                    callback(
+                        newExtractorLink(name, name, finalM3u8DataUri, ExtractorLinkType.M3U8) {
+                            this.referer = url
+                            this.quality = 0
+                            // Data URI를 쓰므로 별도 헤더가 필요 없으나 호환성을 위해 유지
+                            this.headers = headers 
+                        }
+                    )
+                    return // 성공적으로 처리했으므로 종료
                 }
-            } else {
-                null
             }
 
-            // 8. 복호화된 키가 있으면 특별 헤더 추가
-            if (keyB64 != null) {
-                // CloudStream ExoPlayer가 인식할 수 있는 특별 헤더 추가
-                // (실제 구현은 CloudStream의 ExoPlayer 커스텀 지원 여부에 달림)
-                headers["X-M3U8-Key-B64"] = keyB64
-            }
-
-            // 9. 원본 M3U8 URL을 사용하되, 추가 헤더와 함께 전달
-            // CloudStream의 ExoPlayer 구현이 이 헤더를 인식하고 키 교체를 해야 함
+            // 7. 키가 없거나 복호화 실패 시 원본 URL 사용 (Fallback)
             callback(
                 newExtractorLink(name, name, m3u8Url, ExtractorLinkType.M3U8) {
                     this.referer = url
