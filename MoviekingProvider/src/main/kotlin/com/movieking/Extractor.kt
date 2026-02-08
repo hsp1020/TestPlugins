@@ -22,8 +22,8 @@ class BcbcRedExtractor : ExtractorApi() {
         callback: (ExtractorLink) -> Unit
     ) {
         try {
-            // 1. 플레이어 페이지 로드 (WebViewResolver 사용)
-            // 타임아웃 방지를 위해 User-Agent를 고정하고, 실패 시에도 진행하도록 try-catch 감쌈
+            // 1. 페이지 로드 (타임아웃 방지 로직 추가)
+            // WebViewResolver가 실패하거나 타임아웃되면 일반 요청으로 시도
             val playerResponse = try {
                 app.get(
                     url,
@@ -31,12 +31,13 @@ class BcbcRedExtractor : ExtractorApi() {
                     interceptor = WebViewResolver(Regex("""player-v1\.bcbc\.red"""))
                 )
             } catch (e: Exception) {
-                // WebView 실패시 일반 요청 시도
+                // WebView 실패 시 로그 찍고 일반 요청 시도
+                println("[MovieKing] WebView timed out, trying normal request...")
                 app.get(url, referer = referer)
             }
             
             val playerHtml = playerResponse.text
-            val cookies = playerResponse.cookies // 쿠키 확보
+            val cookies = playerResponse.cookies
 
             // 2. data-m3u8 URL 추출
             val m3u8Match = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)
@@ -49,12 +50,14 @@ class BcbcRedExtractor : ExtractorApi() {
                 m3u8Url = "https://$m3u8Url"
             }
 
-            // 3. 헤더 설정 (쿠키 포함 필수)
+            // 3. User-Agent 및 헤더 설정
+            // 토큰에 박힌 UA가 있다면 그것을 최우선으로 사용 (서버 검증 통과용)
             val userAgent = extractUserAgentFromM3U8Url(m3u8Url)
                 ?: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
             
             val cookieString = cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
             
+            // 4. 헤더 맵 구성 (Referer는 플레이어 도메인으로 고정)
             val headers = mutableMapOf(
                 "User-Agent" to userAgent,
                 "Referer" to "https://player-v1.bcbc.red/",
@@ -62,38 +65,40 @@ class BcbcRedExtractor : ExtractorApi() {
                 "Cookie" to cookieString
             )
 
-            // 4. M3U8 원본 다운로드
+            // 5. M3U8 원본 다운로드
             val m3u8Response = app.get(m3u8Url, headers = headers)
             var m3u8Content = m3u8Response.text
 
-            // 5. 키 URI 찾기 및 변조
+            // 6. 키 URI 찾기 및 변조 작업
             val keyUriRegex = """#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"""".toRegex()
             val keyMatch = keyUriRegex.find(m3u8Content)
 
             if (keyMatch != null) {
                 val keyUrl = keyMatch.groupValues[1]
-                // 키 다운로드 (JSON 형태)
+                // 키 다운로드 (JSON 형태일 것으로 예상)
                 val keyResponse = app.get(keyUrl, headers = headers)
                 val jsonText = keyResponse.text
                 
-                // 실제 키 해독 (16바이트)
+                // 실제 16바이트 키 해독
                 val actualKeyBytes = decryptKeyFromJson(jsonText)
 
                 if (actualKeyBytes != null) {
                     // (1) 해독된 키를 Base64로 변환하여 Data URI 생성
                     val keyBase64 = Base64.encodeToString(actualKeyBytes, Base64.NO_WRAP)
-                    // 중요: MIME type을 정확히 지정
+                    // 중요: MIME type을 명시
                     val keyDataUri = "data:application/octet-stream;base64,$keyBase64"
 
-                    // (2) M3U8 내용 수정: JSON URL을 Data URI로 교체
+                    // (2) M3U8 내용 수정: 원래 키 URL을 Data URI로 교체
                     m3u8Content = m3u8Content.replace(
                         keyMatch.groupValues[1], 
                         keyDataUri
                     )
                     
-                    // (3) 세그먼트 경로 절대 경로화 (Data URI 재생 시 필수)
+                    // (3) 세그먼트 경로 절대 경로화
+                    // Data URI로 재생 시 상대 경로(.ts)를 못 찾으므로 https://... 로 변환해야 함
                     val baseUrl = m3u8Url.substringBeforeLast("/") + "/"
                     m3u8Content = m3u8Content.lines().joinToString("\n") { line ->
+                        // 주석(#)이 아니고, http나 data로 시작하지 않는 줄(파일명) 앞에 baseUrl 붙이기
                         if (line.isNotBlank() && !line.startsWith("#") && !line.startsWith("http") && !line.startsWith("data:")) {
                             "$baseUrl$line"
                         } else {
@@ -101,12 +106,11 @@ class BcbcRedExtractor : ExtractorApi() {
                         }
                     }
 
-                    // (4) 수정된 M3U8을 Data URI로 변환 (base64 인코딩)
-                    // 중요: ExtractorLinkType.M3U8을 사용하더라도 data URI는 인식이 잘 안될 수 있으므로
-                    // 명시적으로 type을 넘겨주는 것이 좋습니다.
+                    // (4) 수정된 M3U8을 통째로 Data URI로 변환
                     val finalM3u8DataUri = "data:application/vnd.apple.mpegurl;base64," + 
                         Base64.encodeToString(m3u8Content.toByteArray(), Base64.NO_WRAP)
 
+                    // (5) 재생 요청
                     callback(
                         newExtractorLink(name, name, finalM3u8DataUri, referer, 0, ExtractorLinkType.M3U8) {
                             this.headers = headers
@@ -116,7 +120,7 @@ class BcbcRedExtractor : ExtractorApi() {
                 }
             }
 
-            // 실패 시 Fallback
+            // 키가 없거나 실패 시 원본 URL 사용 (Fallback)
             callback(
                 newExtractorLink(name, name, m3u8Url, referer, 0, ExtractorLinkType.M3U8) {
                     this.headers = headers
@@ -133,26 +137,31 @@ class BcbcRedExtractor : ExtractorApi() {
 
     private fun decryptKeyFromJson(jsonText: String): ByteArray? {
         try {
+            // JSON 자체가 Base64일 수 있으므로 디코딩 시도
             val decodedJsonStr = try {
                 String(Base64.decode(jsonText, Base64.DEFAULT))
             } catch (e: Exception) {
-                jsonText 
+                jsonText // Base64 아님
             }
 
+            // Regex로 encrypted_key와 rule 추출
             val encKeyRegex = """"encrypted_key"\s*:\s*"([^"]+)"""".toRegex()
             val encKeyB64 = encKeyRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return null
             
             val ruleRegex = """"rule"\s*:\s*(\{.*?\})""".toRegex()
             val ruleJson = ruleRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return null
 
+            // Encrypted Key 디코딩 (Base64 -> Bytes)
             val encryptedBytes = Base64.decode(encKeyB64, Base64.DEFAULT)
-            // Noise (앞 2바이트) 제거
+            // 앞 2바이트(Noise) 제거
             val cleanBytes = encryptedBytes.drop(2).toByteArray()
 
+            // Rule 파싱 (permutation 추출)
             val permRegex = """"permutation"\s*:\s*\[([\d,]+)\]""".toRegex()
             val permString = permRegex.find(ruleJson)?.groupValues?.get(1) ?: "0,1,2,3"
             val permutation = permString.split(",").map { it.trim().toInt() }
 
+            // 셔플 복구 (16바이트)
             val segments = listOf(
                 cleanBytes.copyOfRange(0, 4),
                 cleanBytes.copyOfRange(4, 8),
@@ -181,11 +190,19 @@ class BcbcRedExtractor : ExtractorApi() {
         return try {
             val token = m3u8Url.substringAfterLast("/").split(".").getOrNull(1) ?: return null
             val payload = String(Base64.decode(token, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP))
-            val uaMatch = Regex(""""ua"\s*:\s*"Chrome\(([^)]+)\)"""").find(payload)
-            val version = uaMatch?.groupValues?.get(1)
+            // 토큰 내의 ua 필드 추출
+            val uaMatch = Regex(""""ua"\s*:\s*"([^"]+)"""").find(payload)
+            val uaValue = uaMatch?.groupValues?.get(1)
             
-            if (version != null) {
-                "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$version Mobile Safari/537.36"
+            // 토큰에 박힌 UA가 있다면 그 포맷을 존중해서 사용
+            // 예: Chrome(122.0.0.0) 이면 그대로 리턴하거나, 필요시 표준 포맷으로 변환
+            if (uaValue != null) {
+                if (uaValue.startsWith("Chrome(")) {
+                    val version = uaValue.substringAfter("Chrome(").substringBefore(")")
+                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$version Safari/537.36"
+                } else {
+                    uaValue
+                }
             } else {
                 null
             }
