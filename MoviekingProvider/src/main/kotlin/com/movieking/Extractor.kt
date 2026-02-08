@@ -2,14 +2,13 @@ package com.movieking
 
 import android.util.Base64
 import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.network.WebViewResolver
-import com.lagradost.cloudstream3.utils.*
 import java.net.URI
-
 
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -117,7 +116,6 @@ class BcbcRedExtractor : ExtractorApi() {
                 }
             )
 
-
         } catch (e: Exception) {
             e.printStackTrace()
             // 에러 시 로그만 남김 (Cloudstream 특성상 에러 throw하면 전체가 죽을 수 있음)
@@ -198,4 +196,3 @@ class BcbcRedExtractor : ExtractorApi() {
         }
     }
 }
-
