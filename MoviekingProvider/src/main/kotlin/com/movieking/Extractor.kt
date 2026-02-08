@@ -34,7 +34,7 @@ class BcbcRedExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("=== [MovieKing v52] getUrl Start (String Key + Triple Check) ===")
+        println("=== [MovieKing v53] getUrl Start (JSON Unescape Fix) ===")
         
         try {
             val baseHeaders = mutableMapOf(
@@ -60,7 +60,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
             val m3u8Match = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)
                 ?: run {
-                    println("[MovieKing v52] Error: data-m3u8 not found")
+                    println("[MovieKing v53] Error: data-m3u8 not found")
                     return
                 }
 
@@ -74,7 +74,7 @@ class BcbcRedExtractor : ExtractorApi() {
             val chromeVersion = extractChromeVersion(m3u8Url) ?: "124.0.0.0"
             val standardUA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$chromeVersion Mobile Safari/537.36"
             baseHeaders["User-Agent"] = standardUA
-            println("[MovieKing v52] UA: $standardUA")
+            println("[MovieKing v53] UA: $standardUA")
 
             val playlistResponse = app.get(m3u8Url, headers = baseHeaders)
             var m3u8Content = playlistResponse.text
@@ -87,7 +87,7 @@ class BcbcRedExtractor : ExtractorApi() {
                 val keyUrl = keyMatch.groupValues[1]
                 val keyResponse = app.get(keyUrl, headers = baseHeaders)
                 rawKeyJson = keyResponse.text
-                println("[MovieKing v52] Key JSON Fetched")
+                println("[MovieKing v53] Key JSON Fetched")
             }
 
             if (proxyServer == null || !proxyServer!!.isAlive()) {
@@ -117,7 +117,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
             proxyServer!!.setPlaylist(m3u8Content)
             val localPlaylistUrl = "$proxyBaseUrl/playlist.m3u8"
-            println("[MovieKing v52] Ready: $localPlaylistUrl")
+            println("[MovieKing v53] Ready: $localPlaylistUrl")
 
             callback(
                 newExtractorLink(name, name, localPlaylistUrl, ExtractorLinkType.M3U8) {
@@ -128,7 +128,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
         } catch (e: Exception) {
             e.printStackTrace()
-            println("[MovieKing v52] Error: ${e.message}")
+            println("[MovieKing v53] Error: ${e.message}")
         }
     }
 
@@ -166,7 +166,7 @@ class BcbcRedExtractor : ExtractorApi() {
                             val client = serverSocket!!.accept()
                             handleClient(client)
                         } catch (e: Exception) {
-                            if (isRunning) println("[MovieKing v52] Accept Error: ${e.message}")
+                            if (isRunning) println("[MovieKing v53] Accept Error: ${e.message}")
                         }
                     }
                 }
@@ -212,7 +212,6 @@ class BcbcRedExtractor : ExtractorApi() {
                             output.flush()
                         }
                         else if (path.contains("/key.bin") && rawKeyJson != null) {
-                            // Key is handled internally, send dummy
                             val dummy = ByteArray(16)
                             val header = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 16\r\nConnection: close\r\n\r\n"
                             output.write(header.toByteArray())
@@ -240,29 +239,37 @@ class BcbcRedExtractor : ExtractorApi() {
                                         var finalOffset = cachedOffset
                                         
                                         if (bytesRead > 0 && finalKey == null && rawKeyJson != null) {
-                                            // [팩트 기반] String Rule 키 생성 (v50 WINNER)
                                             val key = generateStringKey(rawKeyJson!!)
-                                            
                                             if (key != null) {
                                                 val dec = buffer.clone()
-                                                // XOR Decrypt
                                                 for (i in 0 until bytesRead) {
                                                     dec[i] = (buffer[i].toInt() xor key[i % key.size].toInt()).toByte()
                                                 }
                                                 
-                                                // [검증 강화] Triple Check (i, i+188, i+376)
-                                                // 188바이트(패킷) 단위로 3번 연속 0x47이 나오는지 확인
+                                                // Triple Check (Strict)
                                                 for (i in 0 until bytesRead - 376) {
                                                     if (dec[i] == 0x47.toByte() && 
                                                         dec[i + 188] == 0x47.toByte() &&
                                                         dec[i + 376] == 0x47.toByte()) {
-                                                        
-                                                        println("[MovieKing v52] TRIPLE MATCH at offset $i (Key: String_Rule)")
+                                                        println("[MovieKing v53] MATCH! Offset $i")
                                                         finalKey = key
                                                         finalOffset = i
                                                         cachedKey = key
                                                         cachedOffset = i
                                                         break
+                                                    }
+                                                }
+                                                
+                                                // Fallback: Single Check (Loose)
+                                                if (finalKey == null) {
+                                                    for (i in 0 until bytesRead) {
+                                                        if (dec[i] == 0x47.toByte()) {
+                                                            println("[MovieKing v53] Weak Match! Offset $i")
+                                                            finalKey = key
+                                                            finalOffset = i
+                                                            // Don't cache weak match
+                                                            break
+                                                        }
                                                     }
                                                 }
                                             }
@@ -272,23 +279,18 @@ class BcbcRedExtractor : ExtractorApi() {
                                         output.write(header.toByteArray())
                                         
                                         if (finalKey != null) {
-                                            // [중요] inputStream.skip() 호출 금지! 
-                                            // 이미 읽은 버퍼에서 잘라내서 전송
-                                            
-                                            // 1. 복호화
+                                            // 1. XOR Decrypt
                                             val decryptedBuffer = buffer.clone()
                                             for (i in 0 until bytesRead) {
-                                                // Key Index: 0부터 시작 (전체 XOR 가정)
                                                 decryptedBuffer[i] = (buffer[i].toInt() xor finalKey!![i % finalKey!!.size].toInt()).toByte()
                                             }
                                             
-                                            // 2. 오프셋부터 전송
+                                            // 2. Write from offset
                                             if (bytesRead > finalOffset) {
                                                 output.write(decryptedBuffer, finalOffset, bytesRead - finalOffset)
                                             }
                                             
-                                            // 3. 나머지 스트리밍
-                                            // 이미 읽은 양(bytesRead) 만큼 키 인덱스 증가
+                                            // 3. Stream remainder
                                             var globalFileOffset = bytesRead.toLong()
                                             var count: Int
                                             
@@ -301,7 +303,7 @@ class BcbcRedExtractor : ExtractorApi() {
                                                 globalFileOffset += count
                                             }
                                         } else {
-                                            println("[MovieKing v52] Key/Sync Failed. RAW Fallback.")
+                                            println("[MovieKing v53] Failed. Sending RAW.")
                                             var count: Int
                                             while (inputStream.read(buffer).also { count = it } != -1) {
                                                 output.write(buffer, 0, count)
@@ -314,7 +316,7 @@ class BcbcRedExtractor : ExtractorApi() {
                                     }
                                 }
                             } catch (e: Exception) {
-                                println("[MovieKing v52] Stream Error: $e")
+                                println("[MovieKing v53] Stream Error: $e")
                             }
                         } else {
                             output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
@@ -322,7 +324,7 @@ class BcbcRedExtractor : ExtractorApi() {
                     }
                     socket.close()
                 } catch (e: Exception) {
-                    println("[MovieKing v52] Socket Error: $e")
+                    println("[MovieKing v53] Socket Error: $e")
                 }
             }
         }
@@ -332,7 +334,9 @@ class BcbcRedExtractor : ExtractorApi() {
                 val decodedJsonStr = try { String(Base64.decode(jsonText, Base64.DEFAULT)) } catch (e: Exception) { jsonText }
                 val encKeyRegex = """"encrypted_key"\s*:\s*"([^"]+)"""".toRegex()
                 var encKeyB64 = encKeyRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return null
-                encKeyB64 = encKeyB64.replace("\\/", "/") // Unescape
+                
+                // [핵심] JSON Unescape 복구
+                encKeyB64 = encKeyB64.replace("\\/", "/") 
                 
                 val ruleRegex = """"rule"\s*:\s*(\{.*?\})""".toRegex()
                 val ruleJson = ruleRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return null
@@ -341,9 +345,7 @@ class BcbcRedExtractor : ExtractorApi() {
                 val permString = permRegex.find(ruleJson)?.groupValues?.get(1) ?: "0,1,2,3"
                 val permutation = permString.split(",").map { it.trim().toInt() }
 
-                // String Rule (Raw Bytes from String)
                 val source = encKeyB64.toByteArray()
-                
                 val segments = mutableListOf<ByteArray>()
                 var offset = 0
                 for (i in 0 until 4) {
