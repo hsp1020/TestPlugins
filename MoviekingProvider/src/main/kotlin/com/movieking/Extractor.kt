@@ -13,11 +13,11 @@ import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
 /**
- * v82: Dynamic Path Isolation Mode
+ * v85: Zero-Failure ID Extraction Mode
  * [수정 사항]
- * 1. 고유 ID 기반 경로: /playlist.m3u8 대신 /ID/playlist.m3u8 사용 (영상별 구분 가능)
- * 2. v81의 Strict Sync 로직 및 IV 자동 매칭 엔진 유지
- * 3. 플레이어 캐시 및 로그 가독성 개선
+ * 1. ID 추출 로직 완전 개편: URL 파라미터 및 경로 딥 스캔 (타임스탬프 fallback 제거)
+ * 2. ID 구성 표준화: eid가 있으면 반드시 id_eid 조합으로 생성
+ * 3. v81-84의 검증된 AES 복호화 및 동기식 키 조립 엔진 유지
  */
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -29,14 +29,26 @@ class BcbcRedExtractor : ExtractorApi() {
     }
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
-        // [추가] URL에서 고유 ID 추출하여 경로 구분
-        val videoId = Regex("id=(\\d+)").find(url)?.groupValues?.get(1) ?: System.currentTimeMillis().toString()
-        println("=== [MovieKing v82] getUrl Start (ID: $videoId) ===")
-        
         try {
             val baseHeaders = mutableMapOf("Referer" to "https://player-v1.bcbc.red/", "Origin" to "https://player-v1.bcbc.red")
             val playerHtml = app.get(url, headers = baseHeaders).text
             val m3u8Url = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)?.groupValues?.get(1)?.replace("\\/", "/") ?: return
+            
+            // [개선] ID 추출 소스 확장 (현재 URL 및 M3U8 URL 동시 분석)
+            val id = Regex("""[?&]id=([^&]+)""").find(url)?.groupValues?.get(1) 
+                ?: Regex("""/video/(\d+)""").find(m3u8Url)?.groupValues?.get(1) // 경로에서 추출 시도
+                
+            val eid = Regex("""[?&]eid=([^&]+)""").find(url)?.groupValues?.get(1)
+
+            // 최종 고유 ID 결정
+            val videoId = when {
+                id != null && eid != null -> "${id}_$eid"
+                id != null -> id
+                eid != null -> "e$eid"
+                else -> url.hashCode().toString().replace("-", "n") // 실패 시 고정 해시값 사용
+            }
+            
+            println("=== [MovieKing v85] getUrl Start (Detected ID: $videoId) ===")
             
             val playlistRes = app.get(m3u8Url, headers = baseHeaders).text
             
@@ -46,18 +58,13 @@ class BcbcRedExtractor : ExtractorApi() {
             }
             
             val keyMatch = Regex("""#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"(?:,IV=0x([0-9a-fA-F]+))?""").find(playlistRes)
-            val realKeyUrl = keyMatch?.groupValues?.get(1)
-            val tagIv = keyMatch?.groupValues?.get(2)
-
-            // 키 조립 완료 후 진행 (v81 Strict Sync)
-            val candidates = if (realKeyUrl != null) solveKeyCandidatesSync(baseHeaders, realKeyUrl) else emptyList()
-            proxyServer!!.updateSession(baseHeaders, tagIv, candidates)
+            val candidates = if (keyMatch != null) solveKeyCandidatesSync(baseHeaders, keyMatch.groupValues[1]) else emptyList()
+            proxyServer!!.updateSession(baseHeaders, keyMatch?.groupValues?.get(2), candidates)
             
             val port = proxyServer!!.port
             var m3u8Content = playlistRes.lines().filterNot { it.contains("#EXT-X-KEY") }.joinToString("\n")
             val m3u8Base = m3u8Url.substringBeforeLast("/") + "/"
             
-            // 프록시 경로에 videoId 포함
             m3u8Content = m3u8Content.lines().joinToString("\n") { line ->
                 if (line.isNotBlank() && !line.startsWith("#")) {
                     val segmentUrl = if (line.startsWith("http")) line else "$m3u8Base$line"
@@ -66,12 +73,10 @@ class BcbcRedExtractor : ExtractorApi() {
             }
 
             proxyServer!!.setPlaylist(m3u8Content)
-            
-            // [결과] 이제 고정된 이름이 아닌 고유 ID가 포함된 M3U8 주소 반환
             callback(newExtractorLink(name, name, "http://127.0.0.1:$port/$videoId/playlist.m3u8", ExtractorLinkType.M3U8) { 
                 this.referer = "https://player-v1.bcbc.red/" 
             })
-        } catch (e: Exception) { println("[MovieKing v82] Error: $e") }
+        } catch (e: Exception) { println("[MovieKing v85] Error: $e") }
     }
 
     private suspend fun solveKeyCandidatesSync(h: Map<String, String>, kUrl: String): List<ByteArray> {
@@ -112,7 +117,6 @@ class BcbcRedExtractor : ExtractorApi() {
         @Volatile private var playlistIv: String? = null
         @Volatile private var currentPlaylist: String = ""
         @Volatile private var keyCandidates: List<ByteArray> = emptyList()
-        
         @Volatile private var confirmedKey: ByteArray? = null
         @Volatile private var confirmedIvMode: Int = -1
         @Volatile private var confirmedOffset: Int = 0
@@ -137,7 +141,6 @@ class BcbcRedExtractor : ExtractorApi() {
                 val path = line.split(" ")[1]
                 val output = socket.getOutputStream()
 
-                // path.contains()를 사용하므로 ID가 앞에 붙어도 정상 작동함
                 if (path.contains("/playlist.m3u8")) {
                     output.write("HTTP/1.1 200 OK\r\n\r\n".toByteArray() + currentPlaylist.toByteArray())
                 } else if (path.contains("/proxy")) {
@@ -160,7 +163,7 @@ class BcbcRedExtractor : ExtractorApi() {
                     }
                 }
                 output.flush(); socket.close()
-            } catch (e: Exception) { println("[MovieKing v82] Proxy Error: $e") }
+            } catch (e: Exception) { println("[MovieKing v85] Proxy Error: $e") }
         }
 
         private fun findJackpot(data: ByteArray, seq: Long) {
@@ -170,7 +173,7 @@ class BcbcRedExtractor : ExtractorApi() {
                         val decrypted = decryptAes(data.take(8192).toByteArray(), key, getIv(mode, seq))
                         for (off in 0..2048) {
                             if (decrypted[off] == 0x47.toByte() && decrypted[off + 188] == 0x47.toByte()) {
-                                println("[MovieKing v82] JACKPOT! Mode: $mode, Offset: $off")
+                                println("[MovieKing v85] JACKPOT! Mode: $mode, Offset: $off")
                                 confirmedKey = key; confirmedIvMode = mode; confirmedOffset = off
                                 return
                             }
