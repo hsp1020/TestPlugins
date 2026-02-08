@@ -115,6 +115,7 @@ class BcbcRedExtractor : ExtractorApi() {
                     this.quality = 0 // Unknown
                     this.headers = headers
                 }
+            )
 
 
         } catch (e: Exception) {
