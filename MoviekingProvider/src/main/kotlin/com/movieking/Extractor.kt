@@ -13,11 +13,11 @@ import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
 /**
- * v76: Proxy-Side AES Decryption Mode
+ * v77: Robust Proxy Decryption (IV Auto-Detection)
  * [수정 내역]
- * 1. v75의 키 조립 로직(Binary Reconstruction) 확정 유지
- * 2. ExoPlayer 대신 프록시가 직접 AES 복호화 수행 (IV 함정 우회)
- * 3. 3001 에러 원천 봉쇄 (플레이어는 평문 TS만 수신)
+ * 1. IV 자동 탐지 로직 추가 (Tag IV vs Zero IV)
+ * 2. 키 조립 인덱스 예외 방지 (Safe Substring)
+ * 3. NoPadding 우선 적용으로 패딩 에러 해결
  */
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -29,7 +29,7 @@ class BcbcRedExtractor : ExtractorApi() {
     }
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
-        println("=== [MovieKing v76] getUrl Start (Proxy AES Mode) ===")
+        println("=== [MovieKing v77] getUrl Start (Robust Proxy Mode) ===")
         try {
             val baseHeaders = mutableMapOf("Referer" to "https://player-v1.bcbc.red/", "Origin" to "https://player-v1.bcbc.red")
             val playerHtml = app.get(url, headers = baseHeaders).text
@@ -43,7 +43,6 @@ class BcbcRedExtractor : ExtractorApi() {
                 proxyServer!!.start()
             }
             
-            // 키 URL 및 IV 추출
             val keyMatch = Regex("""#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"(?:,IV=0x([0-9a-fA-F]+))?""").find(playlistRes)
             val realKeyUrl = keyMatch?.groupValues?.get(1)
             val tagIv = keyMatch?.groupValues?.get(2)
@@ -51,7 +50,6 @@ class BcbcRedExtractor : ExtractorApi() {
             val port = proxyServer!!.updateSession(baseHeaders, realKeyUrl, tagIv)
             val proxyBaseUrl = "http://127.0.0.1:$port"
             
-            // [핵심] AES 태그를 제거하여 플레이어가 중복 복호화(3001 에러)를 하지 않도록 차단
             var m3u8Content = playlistRes.lines().filterNot { it.contains("#EXT-X-KEY") }.joinToString("\n")
 
             val m3u8Base = m3u8Url.substringBeforeLast("/") + "/"
@@ -66,7 +64,7 @@ class BcbcRedExtractor : ExtractorApi() {
             callback(newExtractorLink(name, name, "$proxyBaseUrl/playlist.m3u8", ExtractorLinkType.M3U8) { 
                 this.referer = "https://player-v1.bcbc.red/"
             })
-        } catch (e: Exception) { println("[MovieKing v76] Error: $e") }
+        } catch (e: Exception) { println("[MovieKing v77] Error: $e") }
     }
 
     class ProxyWebServer {
@@ -109,11 +107,11 @@ class BcbcRedExtractor : ExtractorApi() {
                             if (solvedKey == null) solvedKey = fetchAndSolveKey()
                             
                             output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
-                            
                             val rawData = res.body.bytes()
+                            
                             if (solvedKey != null) {
-                                // 프록시가 직접 AES 복호화 수행
-                                val decrypted = decryptAes128(rawData, solvedKey!!, playlistIv)
+                                // [업그레이드] IV 자동 탐지 복호화
+                                val decrypted = decryptAes128Robust(rawData, solvedKey!!, playlistIv)
                                 output.write(decrypted)
                             } else {
                                 output.write(rawData)
@@ -122,7 +120,7 @@ class BcbcRedExtractor : ExtractorApi() {
                     }
                 }
                 output.flush(); socket.close()
-            } catch (e: Exception) { println("[MovieKing v76] Proxy Error: $e") }
+            } catch (e: Exception) { println("[MovieKing v77] Proxy Error: $e") }
         }
 
         private suspend fun fetchAndSolveKey(): ByteArray? {
@@ -136,46 +134,50 @@ class BcbcRedExtractor : ExtractorApi() {
                 
                 val rawBytes = Base64.decode(encKeyStr, Base64.DEFAULT)
                 val segments = mutableListOf<ByteArray>()
+                
+                // [안정화] 바이트 배열 길이 체크하며 추출
                 for (i in 0 until 4) {
                     val start = i * 6
-                    if (start + 4 <= rawBytes.size) segments.add(rawBytes.copyOfRange(start, start + 4))
+                    if (start + 4 <= rawBytes.size) {
+                        segments.add(rawBytes.copyOfRange(start, start + 4))
+                    } else if (rawBytes.size >= 16) {
+                        // 백업 로직: 데이터가 부족하면 그냥 4바이트씩 자름
+                        val fallbackStart = i * 4
+                        segments.add(rawBytes.copyOfRange(fallbackStart, fallbackStart + 4))
+                    }
                 }
                 
+                if (segments.size < 4) return null
                 val finalKey = ByteArray(16)
                 for (i in 0 until 4) System.arraycopy(segments[perm[i]], 0, finalKey, i * 4, 4)
-                println("[MovieKing v76] Reconstructed AES Key: ${finalKey.joinToString(""){"%02X".format(it)}}")
+                println("[MovieKing v77] Solved Key: ${finalKey.joinToString(""){"%02X".format(it)}}")
                 finalKey
             } catch (e: Exception) { null }
         }
 
-        private fun decryptAes128(data: ByteArray, key: ByteArray, ivHex: String?): ByteArray {
-            return try {
-                // 1. IV 설정 (태그 IV 또는 Zero IV)
-                val ivBytes = if (ivHex != null && ivHex.length >= 32) {
-                    ivHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-                } else ByteArray(16)
-
-                val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-                cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(ivBytes))
-                
-                val decrypted = cipher.doFinal(data)
-                
-                // 디버그: 복호화 성공 여부 확인
-                if (decrypted.isNotEmpty() && decrypted[0] == 0x47.toByte()) {
-                    println("[MovieKing v76] Manual Decryption SUCCESS (0x47 Found)")
-                }
-                decrypted
-            } catch (e: Exception) { 
-                // PKCS5Padding 실패 시 NoPadding으로 재시도 (HLS의 특성)
+        private fun decryptAes128Robust(data: ByteArray, key: ByteArray, ivHex: String?): ByteArray {
+            // 1. 태그 IV 시도
+            if (ivHex != null && ivHex.length >= 32) {
                 try {
-                    val cipher = Cipher.getInstance("AES/CBC/NoPadding")
-                    val ivBytes = if (ivHex != null && ivHex.length >= 32) {
-                        ivHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-                    } else ByteArray(16)
-                    cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(ivBytes))
-                    cipher.doFinal(data)
-                } catch (e2: Exception) { data }
+                    val iv = ivHex.substring(0, 32).chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+                    val result = runDecrypt(data, key, iv)
+                    if (result[0] == 0x47.toByte()) return result
+                } catch (e: Exception) {}
             }
+
+            // 2. Zero IV 시도 (백업)
+            try {
+                val result = runDecrypt(data, key, ByteArray(16))
+                if (result[0] == 0x47.toByte()) return result
+            } catch (e: Exception) {}
+
+            return data // 모두 실패 시 원본 반환
+        }
+
+        private fun runDecrypt(data: ByteArray, key: ByteArray, iv: ByteArray): ByteArray {
+            val cipher = Cipher.getInstance("AES/CBC/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+            return cipher.doFinal(data)
         }
     }
 }
