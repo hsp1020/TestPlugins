@@ -82,17 +82,74 @@ class BcbcRedExtractor : ExtractorApi() {
                     println("[MovieKing] Key response code: ${keyResponse.code}")
                     println("[MovieKing] Key response size: ${keyData.size} bytes")
                     
+                    // 🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴
+                    // 🔴 여기가 핵심: 220바이트 응답 전체를 출력하는 부분 🔴
+                    // 🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴
                     if (keyData.size == 220) {
-                        println("[MovieKing] WARNING: 220-byte error detected!")
-                        val errorText = String(keyData).take(100)
-                        println("[MovieKing] Error content: $errorText")
+                        println("════════════════════════════════════════════════════════")
+                        println("[MovieKing] ⚠️  WARNING: Key response is 220 bytes")
+                        println("════════════════════════════════════════════════════════")
+                        
+                        // 1. 전체 220바이트를 Base64로 출력
+                        val fullBase64 = Base64.encodeToString(keyData, Base64.NO_WRAP)
+                        println("[MovieKing] 🔑 FULL 220-BYTE RESPONSE (Base64):")
+                        println(fullBase64)
+                        println("Base64 길이: ${fullBase64.length} 문자")
+                        println()
+                        
+                        // 2. 전체 220바이트를 문자열로 변환해서 출력
+                        val fullText = String(keyData)
+                        println("[MovieKing] 📄 FULL 220-BYTE RESPONSE (Text):")
+                        println(fullText)
+                        println("텍스트 길이: ${fullText.length} 문자")
+                        println()
+                        
+                        // 3. HEX 형식으로도 출력 (디버깅용)
+                        println("[MovieKing] 🔢 FIRST 50 BYTES (HEX):")
+                        println(keyData.take(50).joinToString(" ") { "%02x".format(it) })
+                        println()
+                        
+                        // 4. 각 바이트의 ASCII 값 출력
+                        println("[MovieKing] 🔤 FIRST 50 BYTES (ASCII):")
+                        for (i in 0 until minOf(50, keyData.size)) {
+                            val byte = keyData[i]
+                            if (byte >= 32 && byte <= 126) {
+                                print(String(byteArrayOf(byte)))
+                            } else {
+                                print(".")
+                            }
+                        }
+                        println()
+                        println("════════════════════════════════════════════════════════")
+                        
+                        // 5. 대체 처리: M3u8Helper 대신 직접 링크 생성
+                        println("[MovieKing] Trying alternative approach without M3u8Helper...")
+                        
+                        // M3u8Helper 대신 직접 ExtractorLink 생성
+                        // 참고: newExtractorLink는 ExtractorApi의 메서드입니다
+                        val extractorLink = newExtractorLink(
+                            source = name,
+                            name = name,
+                            url = m3u8Url,
+                            type = ExtractorLinkType.M3U8
+                        ) {
+                            this.referer = url
+                            this.quality = Qualities.Unknown.value
+                            this.headers = headers
+                        }
+                        
+                        callback(extractorLink)
+                        println("[MovieKing] ✅ Created direct M3U8 link (without M3u8Helper)")
+                        return  // 여기서 종료
                     }
+                    // 🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴🔴
+                    
                 } catch (e: Exception) {
                     println("[MovieKing] Key request error: ${e.message}")
                 }
             }
 
-            // 🔹 7. M3u8Helper로 최종 스트림 생성
+            // 🔹 7. 키가 220바이트가 아니거나 없는 경우: M3u8Helper로 최종 스트림 생성
             println("[MovieKing] 7. Generating streams with M3u8Helper...")
             M3u8Helper.generateM3u8(
                 name,
