@@ -18,13 +18,8 @@ class BcbcRedExtractor : ExtractorApi() {
         private var proxyServer: ProxyWebServer? = null
     }
 
-    override suspend fun getUrl(
-        url: String,
-        referer: String?,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ) {
-        println("=== [MovieKing v65] getUrl Start (Full Brute-Force Restored) ===")
+    override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
+        println("=== [MovieKing v66] getUrl Start (Dual-Source Brute Force) ===")
         try {
             val baseHeaders = mutableMapOf("Referer" to "https://player-v1.bcbc.red/", "Origin" to "https://player-v1.bcbc.red")
             val playerHtml = app.get(url, headers = baseHeaders).text
@@ -33,7 +28,11 @@ class BcbcRedExtractor : ExtractorApi() {
             val playlistRes = app.get(m3u8Url, headers = baseHeaders).text
             val keyMatch = Regex("""#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"""").find(playlistRes)
             var rawKeyJson: String? = null
-            if (keyMatch != null) rawKeyJson = app.get(keyMatch.groupValues[1], headers = baseHeaders).text
+            if (keyMatch != null) {
+                rawKeyJson = app.get(keyMatch.groupValues[1], headers = baseHeaders).text
+                // [요구사항] JSON 데이터 로그 출력
+                println("[MovieKing v66] RAW JSON: $rawKeyJson")
+            }
 
             if (proxyServer == null || !proxyServer!!.isAlive()) {
                 proxyServer?.stop()
@@ -52,7 +51,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
             proxyServer!!.setPlaylist(m3u8Content)
             callback(newExtractorLink(name, name, "$proxyBaseUrl/playlist.m3u8", ExtractorLinkType.M3U8) { this.referer = "https://player-v1.bcbc.red/" })
-        } catch (e: Exception) { println("[MovieKing v65] Error: $e") }
+        } catch (e: Exception) { println("[MovieKing v66] Error: $e") }
     }
 
     class ProxyWebServer {
@@ -62,6 +61,7 @@ class BcbcRedExtractor : ExtractorApi() {
         @Volatile private var currentHeaders: Map<String, String> = emptyMap()
         @Volatile private var rawKeyJson: String? = null
         @Volatile private var currentPlaylist: String = ""
+        
         @Volatile private var foundKey: ByteArray? = null
         @Volatile private var foundOffset: Int = -1
         @Volatile private var foundShift: Int = 0 
@@ -97,22 +97,22 @@ class BcbcRedExtractor : ExtractorApi() {
                             stream.mark(65536); val read = stream.read(buffer); stream.reset()
 
                             if (read > 0 && foundKey == null && rawKeyJson != null) {
-                                // [복구] 모든 조합 (노이즈 + 24가지 순열) 생성
-                                val candidates = generateAllCombinations(rawKeyJson!!)
-                                println("[MovieKing v65] Probing ${candidates.size * 16} total combinations...")
+                                // [업그레이드] String + Base64 듀얼 소스 스캔
+                                val candidates = generateDualSourceCandidates(rawKeyJson!!)
+                                println("[MovieKing v66] Probing ${candidates.size * 16} dual-source combinations...")
                                 
                                 outer@for ((name, key) in candidates) {
                                     for (s in 0..15) { // 위상 전수조사
                                         for (i in 0 until (read - 2000).coerceAtLeast(0)) {
                                             if ((buffer[i].toInt() xor key[(i + s) % 16].toInt()).toByte() == 0x47.toByte()) {
-                                                // [검증] 10연속 체크 (가짜 정답 완벽 차단)
+                                                // [검증] 10연속 체크
                                                 var m = 0; for (p in 1..10) {
                                                     val pos = i + (p * 188)
                                                     if (pos >= read) break
                                                     if ((buffer[pos].toInt() xor key[(pos + s) % 16].toInt()).toByte() == 0x47.toByte()) m++
                                                 }
                                                 if (m >= 9) {
-                                                    println("[MovieKing v65] REAL SUCCESS! $name, Offset: $i, Shift: $s")
+                                                    println("[MovieKing v66] REAL SUCCESS! $name, Offset: $i, Shift: $s")
                                                     foundKey = key; foundOffset = i; foundShift = s; break@outer
                                                 }
                                             }
@@ -140,40 +140,44 @@ class BcbcRedExtractor : ExtractorApi() {
                     }
                 }
                 output.flush(); socket.close()
-            } catch (e: Exception) { println("[MovieKing v65] Stream Error: $e") }
+            } catch (e: Exception) { println("[MovieKing v66] Stream Error: $e") }
         }
 
-        private fun generateAllCombinations(json: String): List<Pair<String, ByteArray>> {
+        private fun generateDualSourceCandidates(json: String): List<Pair<String, ByteArray>> {
             val list = mutableListOf<Pair<String, ByteArray>>()
             try {
                 val decoded = if (json.startsWith("{")) json else String(Base64.decode(json, Base64.DEFAULT))
                 val encKeyStr = Regex(""""encrypted_key"\s*:\s*"([^"]+)"""").find(decoded)?.groupValues?.get(1)?.replace("\\/", "/") ?: return list
-                val source = encKeyStr.toByteArray()
                 
-                // [복구] 24가지 모든 순열 리스트
-                val perms = listOf(
-                    listOf(0,1,2,3), listOf(0,1,3,2), listOf(0,2,1,3), listOf(0,2,3,1), listOf(0,3,1,2), listOf(0,3,2,1),
-                    listOf(1,0,2,3), listOf(1,0,3,2), listOf(1,2,0,3), listOf(1,2,3,0), listOf(1,3,0,2), listOf(1,3,2,0),
-                    listOf(2,0,1,3), listOf(2,0,3,1), listOf(2,1,0,3), listOf(2,1,3,0), listOf(2,3,0,1), listOf(2,3,1,0),
-                    listOf(3,0,1,2), listOf(3,0,2,1), listOf(3,1,0,2), listOf(3,1,2,0), listOf(3,2,0,1), listOf(3,2,1,0)
-                )
+                // 소스 1: 순수 문자열
+                val strBytes = encKeyStr.toByteArray()
+                // 소스 2: Base64 디코딩 바이트
+                val b64Bytes = try { Base64.decode(encKeyStr, Base64.DEFAULT) } catch(e: Exception) { null }
+                
+                val perms = listOf(listOf(0,1,2,3), listOf(0,1,3,2), listOf(0,2,1,3), listOf(0,2,3,1), listOf(0,3,1,2), listOf(0,3,2,1), listOf(1,0,2,3), listOf(1,0,3,2), listOf(1,2,0,3), listOf(1,2,3,0), listOf(1,3,0,2), listOf(1,3,2,0), listOf(2,0,1,3), listOf(2,0,3,1), listOf(2,1,0,3), listOf(2,1,3,0), listOf(2,3,0,1), listOf(2,3,1,0), listOf(3,0,1,2), listOf(3,0,2,1), listOf(3,1,0,2), listOf(3,1,2,0), listOf(3,2,0,1), listOf(3,2,1,0))
 
-                for (gap in 0..5) {
-                    for (startOff in 0..5) {
-                        val segments = mutableListOf<ByteArray>()
-                        for (i in 0..3) {
-                            val pos = startOff + i * (4 + gap)
-                            if (pos + 4 <= source.size) segments.add(source.copyOfRange(pos, pos + 4))
-                        }
-                        if (segments.size == 4) {
-                            for (p in perms) {
-                                val key = ByteArray(16)
-                                for (j in 0..3) System.arraycopy(segments[p[j]], 0, key, j * 4, 4)
-                                list.add("G$gap-O$startOff-P${p.joinToString("")}" to key)
+                fun addCombos(src: ByteArray, label: String) {
+                    for (gap in 0..7) { // 범위 확장
+                        for (startOff in 0..7) {
+                            val segments = mutableListOf<ByteArray>()
+                            for (i in 0..3) {
+                                val pos = startOff + i * (4 + gap)
+                                if (pos + 4 <= src.size) segments.add(src.copyOfRange(pos, pos + 4))
+                            }
+                            if (segments.size == 4) {
+                                for (p in perms) {
+                                    val key = ByteArray(16)
+                                    for (j in 0..3) System.arraycopy(segments[p[j]], 0, key, j * 4, 4)
+                                    list.add("$label-G$gap-O$startOff-P${p.joinToString("")}" to key)
+                                }
                             }
                         }
                     }
                 }
+
+                addCombos(strBytes, "Str")
+                if (b64Bytes != null) addCombos(b64Bytes, "B64")
+
             } catch (e: Exception) {}
             return list
         }
