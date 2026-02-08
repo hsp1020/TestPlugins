@@ -1,211 +1,213 @@
 package com.movieking
 
-import com.lagradost.cloudstream3.*
+import android.util.Base64
+import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.loadExtractor
-import org.jsoup.nodes.Element
-import java.net.URLDecoder
-import java.net.URLEncoder
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.SubtitleFile
+import com.lagradost.cloudstream3.network.WebViewResolver
+import java.net.URI
 
-class MovieKing : MainAPI() {
-    override var mainUrl = "https://mvking6.org" // 접속 안 되면 최신 도메인으로 변경
-    override var name = "MovieKing"
-    override val hasMainPage = true
-    override var lang = "ko"
+class BcbcRedExtractor : ExtractorApi() {
+    override val name = "MovieKingPlayer"
+    override val mainUrl = "https://player-v1.bcbc.red"
+    override val requiresReferer = true
 
-    override val supportedTypes = setOf(
-        TvType.TvSeries,
-        TvType.Movie,
-        TvType.AsianDrama,
-        TvType.Anime
-    )
-
-    private val commonHeaders = mapOf(
-        "Referer" to "$mainUrl/"
-    )
-
-    // 제목에서 (2024) 같은 연도 제거를 위한 정규식
-    private val titleRegex = Regex("""\s*\(\d{4}\)$""")
-
-    // 2. 카테고리 명칭 변경 ("무료" 제거)
-    override val mainPage = mainPageOf(
-        "/video?type=movie" to "영화",
-        "/video?type=drama" to "드라마",
-        "/video?type=enter" to "예능",
-        "/video?type=ani" to "애니",
-        "/video?type=docu" to "시사/다큐"
-    )
-
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = "$mainUrl${request.data}&page=$page"
-        
-        return try {
-            val doc = app.get(url, headers = commonHeaders).document
-            val list = doc.select(".video-card").mapNotNull { it.toSearchResponse() }
-            
-            newHomePageResponse(request.name, list, hasNext = list.isNotEmpty())
-        } catch (e: Exception) {
-            newHomePageResponse(request.name, emptyList(), hasNext = false)
-        }
-    }
-
-    private fun Element.toSearchResponse(): SearchResponse? {
-        val linkTag = this.selectFirst(".video-card-image a") ?: return null
-        val titleTag = this.selectFirst(".video-title a") ?: return null
-        
-        val href = fixUrl(linkTag.attr("href"))
-        
-        // 목록 제목에서 연도 제거
-        val rawTitle = titleTag.text().trim()
-        val title = rawTitle.replace(titleRegex, "").trim()
-
-        val imgTag = this.selectFirst("img")
-        val rawPoster = imgTag?.attr("src") ?: imgTag?.attr("data-src")
-        val fixedPoster = fixUrl(rawPoster ?: "")
-
-        // 1. 포스터 URL 전달 꼼수 (URL 인코딩 후 파라미터로 추가)
-        var finalHref = href
-        if (fixedPoster.isNotEmpty()) {
-            try {
-                val encodedPoster = URLEncoder.encode(fixedPoster, "UTF-8")
-                // 기존 url에 파라미터가 이미 있으므로 &로 연결
-                finalHref = "$href&poster_url=$encodedPoster"
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-
-        val type = if (href.contains("movie")) TvType.Movie else TvType.TvSeries
-
-        return if (type == TvType.Movie) {
-            newMovieSearchResponse(title, finalHref, TvType.Movie) {
-                this.posterUrl = fixedPoster
-            }
-        } else {
-            newTvSeriesSearchResponse(title, finalHref, TvType.TvSeries) {
-                this.posterUrl = fixedPoster
-            }
-        }
-    }
-
-    override suspend fun search(query: String): List<SearchResponse> {
-        val searchUrl = "$mainUrl/video/search?keyword=$query"
-        val doc = app.get(searchUrl, headers = commonHeaders).document
-        
-        return doc.select(".video-card").mapNotNull { it.toSearchResponse() }
-    }
-
-    override suspend fun load(url: String): LoadResponse {
-        // 1. URL에서 poster_url 파라미터 추출 및 제거
-        var passedPoster: String? = null
-        var realUrl = url
-
-        try {
-            // poster_url=... 패턴 찾기
-            val match = Regex("""[&?]poster_url=([^&]+)""").find(url)
-            if (match != null) {
-                val encodedPoster = match.groupValues[1]
-                passedPoster = URLDecoder.decode(encodedPoster, "UTF-8")
-                // 실제 통신용 URL에서 해당 파라미터 제거
-                realUrl = url.replace(match.value, "")
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-
-        val doc = app.get(realUrl, headers = commonHeaders).document
-
-        // 상세 페이지 정보 파싱
-        val infoContent = doc.selectFirst(".single-video-info-content")
-        
-        // 제목 파싱 및 연도 제거
-        val rawTitle = infoContent?.selectFirst("h3")?.text()?.trim() ?: "Unknown"
-        val title = rawTitle.replace(titleRegex, "").trim()
-        
-        // 포스터 우선순위: 전달받은 포스터 > 상세페이지 이미지 > 메타태그
-        var poster = passedPoster
-        if (poster.isNullOrEmpty()) {
-            poster = doc.selectFirst(".single-video-left img")?.attr("src")
-                ?: doc.selectFirst("meta[property='og:image']")?.attr("content")
-        }
-
-        // 상세 정보 텍스트 추출 함수
-        fun getInfoText(keyword: String): String? {
-            return infoContent?.select("p:contains($keyword)")?.text()
-                ?.replace(keyword, "")?.replace(":", "")?.trim()
-        }
-
-        val quality = getInfoText("화질")
-        val genre = getInfoText("장르")
-        val country = getInfoText("나라")
-        val releaseDate = getInfoText("개봉")
-        val director = getInfoText("감독")
-        val cast = getInfoText("출연")
-
-        // 소개(줄거리) 추출
-        val intro = infoContent?.selectFirst("h6:contains(소개)")?.nextElementSibling()?.text()?.trim()
-
-        // 메타데이터 텍스트 조합
-        val plotText = buildString {
-            if (!quality.isNullOrBlank()) append("화질: $quality / ")
-            if (!genre.isNullOrBlank()) append("장르: $genre / ")
-            if (!country.isNullOrBlank()) append("국가: $country / ")
-            if (!releaseDate.isNullOrBlank()) append("공개일: $releaseDate / ")
-            // 3. 감독 라벨 변경
-            if (!director.isNullOrBlank()) append("감독(방송사): $director / ")
-            if (!cast.isNullOrBlank()) append("출연: $cast / ")
-            if (!intro.isNullOrBlank()) append("줄거리: $intro")
-        }
-
-        // 연도 정보
-        val year = releaseDate?.replace(Regex("[^0-9-]"), "")?.take(4)?.toIntOrNull()
-
-        // 에피소드 파싱
-        val episodeList = doc.select(".video-slider-right-list .eps_a").map { element ->
-            val href = fixUrl(element.attr("href"))
-            val name = element.text().trim()
-            newEpisode(href) {
-                this.name = name
-            }
-        }.reversed()
-
-        val isMovie = episodeList.isEmpty() || (episodeList.size == 1 && realUrl.contains("type=movie"))
-
-        return if (isMovie) {
-            newMovieLoadResponse(title, realUrl, TvType.Movie, realUrl) {
-                this.posterUrl = fixUrl(poster ?: "")
-                this.plot = plotText
-                this.year = year
-            }
-        } else {
-            newTvSeriesLoadResponse(title, realUrl, TvType.TvSeries, episodeList) {
-                this.posterUrl = fixUrl(poster ?: "")
-                this.plot = plotText
-                this.year = year
-            }
-        }
-    }
-
-    override suspend fun loadLinks(
-        data: String,
-        isCasting: Boolean,
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        // data에는 poster_url이 포함되지 않은 순수 URL이 들어올 수도 있고 포함될 수도 있음 (load에서 에피소드 링크 생성 시점에 따라 다름)
-        // 안전하게 처리하려면 여기서도 poster_url 제거 로직이 필요할 수 있으나, 
-        // 보통 loadLinks는 iframe src를 찾기 위해 HTML을 긁는 용도이므로 파라미터가 있어도 무방함.
-        
-        val doc = app.get(data, headers = commonHeaders).document
-        
-        val iframe = doc.selectFirst("iframe#view_iframe")
-        val src = iframe?.attr("src")
+    ) {
+        try {
+            // 1. 페이지 로드 (타임아웃 방지 로직 추가)
+            // WebViewResolver가 실패하거나 타임아웃되면 일반 요청으로 시도
+            val playerResponse = try {
+                app.get(
+                    url,
+                    referer = referer,
+                    interceptor = WebViewResolver(Regex("""player-v1\.bcbc\.red"""))
+                )
+            } catch (e: Exception) {
+                // WebView 실패 시 로그 찍고 일반 요청 시도
+                println("[MovieKing] WebView timed out, trying normal request...")
+                app.get(url, referer = referer)
+            }
+            
+            val playerHtml = playerResponse.text
+            val cookies = playerResponse.cookies
 
-        if (src != null) {
-            val fixedSrc = fixUrl(src)
-            loadExtractor(fixedSrc, data, subtitleCallback, callback)
-            return true
+            // 2. data-m3u8 URL 추출
+            val m3u8Match = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)
+                ?: throw Exception("data-m3u8 not found")
+
+            var m3u8Url = m3u8Match.groupValues[1].replace("\\/", "/")
+            if (m3u8Url.startsWith("//")) {
+                m3u8Url = "https:$m3u8Url"
+            } else if (!m3u8Url.startsWith("http")) {
+                m3u8Url = "https://$m3u8Url"
+            }
+
+            // 3. User-Agent 및 헤더 설정
+            // 토큰에 박힌 UA가 있다면 그것을 최우선으로 사용 (서버 검증 통과용)
+            val userAgent = extractUserAgentFromM3U8Url(m3u8Url)
+                ?: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            
+            val cookieString = cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
+            
+            // 4. 헤더 맵 구성 (Referer는 플레이어 도메인으로 고정)
+            val headers = mutableMapOf(
+                "User-Agent" to userAgent,
+                "Referer" to "https://player-v1.bcbc.red/",
+                "Origin" to "https://player-v1.bcbc.red",
+                "Cookie" to cookieString
+            )
+
+            // 5. M3U8 원본 다운로드
+            val m3u8Response = app.get(m3u8Url, headers = headers)
+            var m3u8Content = m3u8Response.text
+
+            // 6. 키 URI 찾기 및 변조 작업
+            val keyUriRegex = """#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"""".toRegex()
+            val keyMatch = keyUriRegex.find(m3u8Content)
+
+            if (keyMatch != null) {
+                val keyUrl = keyMatch.groupValues[1]
+                // 키 다운로드 (JSON 형태일 것으로 예상)
+                val keyResponse = app.get(keyUrl, headers = headers)
+                val jsonText = keyResponse.text
+                
+                // 실제 16바이트 키 해독
+                val actualKeyBytes = decryptKeyFromJson(jsonText)
+
+                if (actualKeyBytes != null) {
+                    // (1) 해독된 키를 Base64로 변환하여 Data URI 생성
+                    val keyBase64 = Base64.encodeToString(actualKeyBytes, Base64.NO_WRAP)
+                    // 중요: MIME type을 명시
+                    val keyDataUri = "data:application/octet-stream;base64,$keyBase64"
+
+                    // (2) M3U8 내용 수정: 원래 키 URL을 Data URI로 교체
+                    m3u8Content = m3u8Content.replace(
+                        keyMatch.groupValues[1], 
+                        keyDataUri
+                    )
+                    
+                    // (3) 세그먼트 경로 절대 경로화
+                    // Data URI로 재생 시 상대 경로(.ts)를 못 찾으므로 https://... 로 변환해야 함
+                    val baseUrl = m3u8Url.substringBeforeLast("/") + "/"
+                    m3u8Content = m3u8Content.lines().joinToString("\n") { line ->
+                        // 주석(#)이 아니고, http나 data로 시작하지 않는 줄(파일명) 앞에 baseUrl 붙이기
+                        if (line.isNotBlank() && !line.startsWith("#") && !line.startsWith("http") && !line.startsWith("data:")) {
+                            "$baseUrl$line"
+                        } else {
+                            line
+                        }
+                    }
+
+                    // (4) 수정된 M3U8을 통째로 Data URI로 변환
+                    val finalM3u8DataUri = "data:application/vnd.apple.mpegurl;base64," + 
+                        Base64.encodeToString(m3u8Content.toByteArray(), Base64.NO_WRAP)
+
+                    // (5) 재생 요청
+                    callback(
+                        newExtractorLink(name, name, finalM3u8DataUri, referer, 0, ExtractorLinkType.M3U8) {
+                            this.headers = headers
+                        }
+                    )
+                    return 
+                }
+            }
+
+            // 키가 없거나 실패 시 원본 URL 사용 (Fallback)
+            callback(
+                newExtractorLink(name, name, m3u8Url, referer, 0, ExtractorLinkType.M3U8) {
+                    this.headers = headers
+                }
+            )
+
+        } catch (e: Exception) {
+            e.printStackTrace()
+            println("[MovieKing] Error: ${e.message}")
         }
-        return false
+    }
+
+    // --- Helper Functions ---
+
+    private fun decryptKeyFromJson(jsonText: String): ByteArray? {
+        try {
+            // JSON 자체가 Base64일 수 있으므로 디코딩 시도
+            val decodedJsonStr = try {
+                String(Base64.decode(jsonText, Base64.DEFAULT))
+            } catch (e: Exception) {
+                jsonText // Base64 아님
+            }
+
+            // Regex로 encrypted_key와 rule 추출
+            val encKeyRegex = """"encrypted_key"\s*:\s*"([^"]+)"""".toRegex()
+            val encKeyB64 = encKeyRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return null
+            
+            val ruleRegex = """"rule"\s*:\s*(\{.*?\})""".toRegex()
+            val ruleJson = ruleRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return null
+
+            // Encrypted Key 디코딩 (Base64 -> Bytes)
+            val encryptedBytes = Base64.decode(encKeyB64, Base64.DEFAULT)
+            // 앞 2바이트(Noise) 제거
+            val cleanBytes = encryptedBytes.drop(2).toByteArray()
+
+            // Rule 파싱 (permutation 추출)
+            val permRegex = """"permutation"\s*:\s*\[([\d,]+)\]""".toRegex()
+            val permString = permRegex.find(ruleJson)?.groupValues?.get(1) ?: "0,1,2,3"
+            val permutation = permString.split(",").map { it.trim().toInt() }
+
+            // 셔플 복구 (16바이트)
+            val segments = listOf(
+                cleanBytes.copyOfRange(0, 4),
+                cleanBytes.copyOfRange(4, 8),
+                cleanBytes.copyOfRange(8, 12),
+                cleanBytes.copyOfRange(12, 16)
+            )
+
+            val resultKey = ByteArray(16)
+            var offset = 0
+            
+            for (idx in permutation) {
+                val seg = segments[idx]
+                System.arraycopy(seg, 0, resultKey, offset, 4)
+                offset += 4
+            }
+
+            return resultKey
+
+        } catch (e: Exception) {
+            e.printStackTrace()
+            return null
+        }
+    }
+
+    private fun extractUserAgentFromM3U8Url(m3u8Url: String): String? {
+        return try {
+            val token = m3u8Url.substringAfterLast("/").split(".").getOrNull(1) ?: return null
+            val payload = String(Base64.decode(token, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP))
+            // 토큰 내의 ua 필드 추출
+            val uaMatch = Regex(""""ua"\s*:\s*"([^"]+)"""").find(payload)
+            val uaValue = uaMatch?.groupValues?.get(1)
+            
+            // 토큰에 박힌 UA가 있다면 그 포맷을 존중해서 사용
+            // 예: Chrome(122.0.0.0) 이면 그대로 리턴하거나, 필요시 표준 포맷으로 변환
+            if (uaValue != null) {
+                if (uaValue.startsWith("Chrome(")) {
+                    val version = uaValue.substringAfter("Chrome(").substringBefore(")")
+                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$version Safari/537.36"
+                } else {
+                    uaValue
+                }
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            null
+        }
     }
 }
