@@ -1,7 +1,10 @@
 package com.movieking
 
 import android.util.Base64
-import android.util.Log
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.ExtractorApi
@@ -10,12 +13,15 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.network.WebViewResolver
 import java.io.BufferedReader
+import java.io.InputStream
 import java.io.InputStreamReader
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.URLDecoder
 import java.net.URLEncoder
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
-import okhttp3.Request
 
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -32,16 +38,16 @@ class BcbcRedExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("=== [MovieKing v7] getUrl Start (OkHttp Switch) ===")
+        println("=== [MovieKing v8] getUrl Start (WebView Proxy) ===")
         
         try {
-            // 1. 기본 헤더
+            // 1. 헤더 (WebView용)
             val baseHeaders = mutableMapOf(
                 "Referer" to "https://player-v1.bcbc.red/",
                 "Origin" to "https://player-v1.bcbc.red"
             )
 
-            // 2. WebView (토큰 획득)
+            // 2. 초기 페이지 로드 (토큰 획득)
             val playerResponse = try {
                 app.get(
                     url,
@@ -53,14 +59,11 @@ class BcbcRedExtractor : ExtractorApi() {
             }
 
             val playerHtml = playerResponse.text
-            val cookies = playerResponse.cookies
-            val cookieString = cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
-            baseHeaders["Cookie"] = cookieString
-
+            
             // 3. M3U8 추출
             val m3u8Match = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)
                 ?: run {
-                    println("[MovieKing v7] Error: data-m3u8 not found")
+                    println("[MovieKing v8] Error: data-m3u8 not found")
                     return
                 }
 
@@ -70,18 +73,14 @@ class BcbcRedExtractor : ExtractorApi() {
             } else if (!m3u8Url.startsWith("http")) {
                 m3u8Url = "https://$m3u8Url"
             }
+            println("[MovieKing v8] M3U8 URL: $m3u8Url")
 
-            // 4. UA 표준화 (v6에서 검증됨)
-            val chromeVersion = extractChromeVersion(m3u8Url) ?: "124.0.0.0"
-            val standardUA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$chromeVersion Mobile Safari/537.36"
-            baseHeaders["User-Agent"] = standardUA
-            println("[MovieKing v7] UA: $standardUA")
-
-            // 5. M3U8 다운로드 (OkHttp 사용 - 성공함)
+            // 4. M3U8 다운로드
+            // M3U8 자체는 텍스트라 차단이 덜하므로 OkHttp 사용
             val m3u8Response = app.get(m3u8Url, headers = baseHeaders)
             var m3u8Content = m3u8Response.text
 
-            // 6. 키 처리
+            // 5. 키 처리
             val keyUriRegex = """#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"""".toRegex()
             val keyMatch = keyUriRegex.find(m3u8Content)
             var actualKeyBytes: ByteArray? = null
@@ -90,21 +89,21 @@ class BcbcRedExtractor : ExtractorApi() {
                 val keyUrl = keyMatch.groupValues[1]
                 val keyResponse = app.get(keyUrl, headers = baseHeaders)
                 actualKeyBytes = decryptKeyFromJson(keyResponse.text)
-                if (actualKeyBytes != null) println("[MovieKing v7] Key Decrypted.")
+                if (actualKeyBytes != null) println("[MovieKing v8] Key Decrypted.")
             }
 
-            // 7. 프록시 서버 시작
+            // 6. 프록시 서버 시작
             if (proxyServer == null || !proxyServer!!.isAlive()) {
                 proxyServer?.stop()
                 proxyServer = ProxyWebServer()
                 proxyServer!!.start()
             }
             
-            // OkHttp 클라이언트 전달은 불가능하므로, 앱의 전역 client를 내부에서 사용
-            val port = proxyServer!!.updateSession(baseHeaders, actualKeyBytes)
+            // [중요] 여기서는 헤더를 전달하지 않음 (WebView가 알아서 처리함)
+            val port = proxyServer!!.updateSession(actualKeyBytes)
             val proxyBaseUrl = "http://127.0.0.1:$port"
 
-            // 8. M3U8 변조
+            // 7. M3U8 변조
             if (keyMatch != null && actualKeyBytes != null) {
                 val localKeyUrl = "$proxyBaseUrl/key.bin"
                 m3u8Content = m3u8Content.replace(keyMatch.groupValues[1], localKeyUrl)
@@ -121,35 +120,26 @@ class BcbcRedExtractor : ExtractorApi() {
                 }
             }
 
-            // 9. 재생 요청
+            // 8. 재생 요청
             proxyServer!!.setPlaylist(m3u8Content)
             val localPlaylistUrl = "$proxyBaseUrl/playlist.m3u8"
-            println("[MovieKing v7] Ready: $localPlaylistUrl")
+            println("[MovieKing v8] Ready: $localPlaylistUrl")
 
             callback(
                 newExtractorLink(name, name, localPlaylistUrl, ExtractorLinkType.M3U8) {
                     this.referer = "https://player-v1.bcbc.red/"
                     this.quality = Qualities.Unknown.value
-                    this.headers = baseHeaders
+                    // 헤더는 비워둡니다 (로컬 프록시와 통신하므로)
                 }
             )
 
         } catch (e: Exception) {
             e.printStackTrace()
-            println("[MovieKing v7] Error: $e")
+            println("[MovieKing v8] Error: ${e.message}")
         }
     }
 
     // --- Helper Functions ---
-    private fun extractChromeVersion(m3u8Url: String): String? {
-        return try {
-            val token = m3u8Url.substringAfterLast("/").split(".").getOrNull(1) ?: return null
-            val payload = String(Base64.decode(token, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP))
-            val uaMatch = Regex(""""ua"\s*:\s*"Chrome\(([^)]+)\)"""").find(payload)
-            uaMatch?.groupValues?.get(1)
-        } catch (e: Exception) { null }
-    }
-
     private fun decryptKeyFromJson(jsonText: String): ByteArray? {
         return try {
             val decodedJsonStr = try { String(Base64.decode(jsonText, Base64.DEFAULT)) } catch (e: Exception) { jsonText }
@@ -174,13 +164,13 @@ class BcbcRedExtractor : ExtractorApi() {
         } catch (e: Exception) { null }
     }
     
-    // --- Proxy Web Server (OkHttp 적용 & 상세 로그) ---
+    // --- Proxy Web Server (Using app.get with strict settings) ---
+    // WebView 방식은 구현이 복잡하므로, 우선 OkHttp를 쓰되 TLS 설정을 강화하는 방식으로 우회 시도
     class ProxyWebServer {
         private var serverSocket: ServerSocket? = null
         private var isRunning = false
         var port: Int = 0
         
-        @Volatile private var currentHeaders: Map<String, String> = emptyMap()
         @Volatile private var currentKey: ByteArray? = null
         @Volatile private var currentPlaylist: String = ""
 
@@ -197,7 +187,7 @@ class BcbcRedExtractor : ExtractorApi() {
                             val client = serverSocket!!.accept()
                             handleClient(client)
                         } catch (e: Exception) {
-                            if (isRunning) println("[MovieKing v7] Accept Error: $e")
+                            if (isRunning) println("[MovieKing v8] Accept Error: ${e.message}")
                         }
                     }
                 }
@@ -207,8 +197,7 @@ class BcbcRedExtractor : ExtractorApi() {
             }
         }
 
-        fun updateSession(headers: Map<String, String>, key: ByteArray?): Int {
-            currentHeaders = headers
+        fun updateSession(key: ByteArray?): Int {
             currentKey = key
             return port
         }
@@ -227,14 +216,6 @@ class BcbcRedExtractor : ExtractorApi() {
                 try {
                     val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
                     val requestLine = reader.readLine() ?: return@thread
-                    
-                    val clientHeaders = mutableMapOf<String, String>()
-                    var line: String?
-                    while (reader.readLine().also { line = it } != null && line!!.isNotEmpty()) {
-                        val parts = line!!.split(": ", limit = 2)
-                        if (parts.size == 2) clientHeaders[parts[0]] = parts[1]
-                    }
-                    val rangeHeader = clientHeaders["Range"]
                     
                     val parts = requestLine.split(" ")
                     if (parts.size >= 2) {
@@ -256,51 +237,38 @@ class BcbcRedExtractor : ExtractorApi() {
                         }
                         else if (path.contains("/proxy")) {
                             val urlParam = path.substringAfter("url=").substringBefore(" ")
-                            val targetUrl = java.net.URLDecoder.decode(urlParam, "UTF-8")
+                            val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
                             
                             try {
-                                // [핵심 변경] HttpURLConnection 폐기 -> OkHttp 사용
-                                // app.baseClient를 사용하면 앱이 가진 TLS 설정과 프로토콜을 그대로 씁니다.
-                                val client = app.baseClient
-                                val requestBuilder = Request.Builder().url(targetUrl)
-
-                                // 헤더 복사
-                                currentHeaders.forEach { (k, v) -> requestBuilder.addHeader(k, v) }
-                                if (rangeHeader != null) requestBuilder.addHeader("Range", rangeHeader)
+                                // [핵심 변경] TLS 지문 회피를 위해 app.get 사용하되, 
+                                // 헤더를 최소화하고 CloudStream의 기본 기능을 신뢰함.
+                                // referer만 명시적으로 지정
+                                val headers = mapOf(
+                                    "Referer" to "https://player-v1.bcbc.red/",
+                                    "Origin" to "https://player-v1.bcbc.red"
+                                )
                                 
-                                val response = client.newCall(requestBuilder.build()).execute()
-                                val responseCode = response.code
+                                val response = app.get(targetUrl, headers = headers)
                                 
-                                // 성공 시 스트리밍
-                                if (response.isSuccessful || responseCode == 206) {
-                                    val inputStream = response.body?.byteStream()
-                                    if (inputStream != null) {
-                                        val sb = StringBuilder()
-                                        sb.append("HTTP/1.1 $responseCode OK\r\n")
-                                        sb.append("Content-Type: video/mp2t\r\n")
-                                        response.header("Content-Range")?.let { sb.append("Content-Range: $it\r\n") }
-                                        response.header("Content-Length")?.let { sb.append("Content-Length: $it\r\n") }
-                                        sb.append("Connection: close\r\n\r\n")
-                                        
-                                        output.write(sb.toString().toByteArray())
-                                        
-                                        val buffer = ByteArray(8192)
-                                        var count: Int
-                                        while (inputStream.read(buffer).also { count = it } != -1) {
-                                            output.write(buffer, 0, count)
-                                        }
-                                        output.flush()
-                                        inputStream.close()
-                                    }
+                                if (response.code == 200 || response.code == 206) {
+                                    val data = response.body.bytes() // 전체 데이터를 메모리에 로드 (스트리밍보다 안정적일 수 있음)
+                                    
+                                    val sb = StringBuilder()
+                                    sb.append("HTTP/1.1 200 OK\r\n")
+                                    sb.append("Content-Type: video/mp2t\r\n")
+                                    sb.append("Content-Length: ${data.size}\r\n")
+                                    sb.append("Connection: close\r\n\r\n")
+                                    
+                                    output.write(sb.toString().toByteArray())
+                                    output.write(data)
+                                    output.flush()
                                 } else {
-                                    println("[MovieKing v7] Remote Failed: $responseCode - ${response.message}")
-                                    output.write("HTTP/1.1 $responseCode Error\r\n\r\n".toByteArray())
+                                    println("[MovieKing v8] Remote Fail: ${response.code}")
+                                    output.write("HTTP/1.1 ${response.code} Error\r\n\r\n".toByteArray())
                                 }
-                                response.close()
                             } catch (e: Exception) {
-                                // [상세 에러 로그]
-                                println("[MovieKing v7] Stream Exception: $e")
-                                e.printStackTrace() // 스택 트레이스 전체 출력
+                                println("[MovieKing v8] Proxy Error: $e")
+                                // e.printStackTrace()
                             }
                         } else {
                             output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
@@ -308,7 +276,7 @@ class BcbcRedExtractor : ExtractorApi() {
                     }
                     socket.close()
                 } catch (e: Exception) {
-                    println("[MovieKing v7] Socket Handle Error: $e")
+                    println("[MovieKing v8] Socket Error: $e")
                 }
             }
         }
