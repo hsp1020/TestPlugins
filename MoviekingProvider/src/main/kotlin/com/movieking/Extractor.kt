@@ -32,19 +32,20 @@ class BcbcRedExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("=== [MovieKing v5] getUrl Start (Sec-Fetch Fix) ===")
+        println("=== [MovieKing v6] getUrl Start (Fix UA Format) ===")
         
         try {
-            // 1. 기본 헤더
+            // 1. 초기 헤더
             val baseHeaders = mutableMapOf(
                 "Referer" to "https://player-v1.bcbc.red/",
                 "Origin" to "https://player-v1.bcbc.red",
-                // [v5 추가] 보안 헤더 (필수)
                 "Sec-Fetch-Dest" to "empty",
                 "Sec-Fetch-Mode" to "cors",
                 "Sec-Fetch-Site" to "same-origin",
                 "Pragma" to "no-cache",
-                "Cache-Control" to "no-cache"
+                "Cache-Control" to "no-cache",
+                "Accept" to "*/*",
+                "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
             )
 
             // 2. WebView 요청
@@ -66,7 +67,7 @@ class BcbcRedExtractor : ExtractorApi() {
             // 3. M3U8 추출
             val m3u8Match = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)
                 ?: run {
-                    println("[MovieKing v5] Error: data-m3u8 not found")
+                    println("[MovieKing v6] Error: data-m3u8 not found")
                     return
                 }
 
@@ -77,11 +78,13 @@ class BcbcRedExtractor : ExtractorApi() {
                 m3u8Url = "https://$m3u8Url"
             }
 
-            // 4. UA 추출
-            val extractedUA = extractUserAgentFromToken(m3u8Url)
-            val targetUA = extractedUA ?: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            baseHeaders["User-Agent"] = targetUA
-            println("[MovieKing v5] Target UA: $targetUA")
+            // 4. [핵심] 버전만 추출하여 표준 UA 생성
+            val chromeVersion = extractChromeVersion(m3u8Url) ?: "124.0.0.0"
+            // 안드로이드 표준 UA 포맷으로 조립
+            val standardUA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$chromeVersion Mobile Safari/537.36"
+            
+            baseHeaders["User-Agent"] = standardUA
+            println("[MovieKing v6] Standard UA Generated: $standardUA")
 
             // 5. M3U8 다운로드
             val m3u8Response = app.get(m3u8Url, headers = baseHeaders)
@@ -98,7 +101,7 @@ class BcbcRedExtractor : ExtractorApi() {
                 actualKeyBytes = decryptKeyFromJson(keyResponse.text)
                 if (actualKeyBytes != null) {
                     val keyHex = actualKeyBytes.joinToString("") { "%02x".format(it) }
-                    println("[MovieKing v5] Key Decrypted: $keyHex")
+                    println("[MovieKing v6] Key Decrypted: $keyHex")
                 }
             }
 
@@ -109,7 +112,6 @@ class BcbcRedExtractor : ExtractorApi() {
                 proxyServer!!.start()
             }
             
-            // [중요] 업데이트 시 보안 헤더가 포함된 baseHeaders 전달
             val port = proxyServer!!.updateSession(baseHeaders, actualKeyBytes)
             val proxyBaseUrl = "http://127.0.0.1:$port"
 
@@ -133,7 +135,7 @@ class BcbcRedExtractor : ExtractorApi() {
             // 9. 데이터 등록
             proxyServer!!.setPlaylist(m3u8Content)
             val localPlaylistUrl = "$proxyBaseUrl/playlist.m3u8"
-            println("[MovieKing v5] Ready: $localPlaylistUrl")
+            println("[MovieKing v6] Ready: $localPlaylistUrl")
 
             callback(
                 newExtractorLink(name, name, localPlaylistUrl, ExtractorLinkType.M3U8) {
@@ -145,16 +147,19 @@ class BcbcRedExtractor : ExtractorApi() {
 
         } catch (e: Exception) {
             e.printStackTrace()
-            println("[MovieKing v5] Error: ${e.message}")
+            println("[MovieKing v6] Error: ${e.message}")
         }
     }
 
     // --- Helper Functions ---
-    private fun extractUserAgentFromToken(m3u8Url: String): String? {
+    
+    // [수정됨] 토큰에서 Chrome 버전 숫자만 추출
+    private fun extractChromeVersion(m3u8Url: String): String? {
         return try {
             val token = m3u8Url.substringAfterLast("/").split(".").getOrNull(1) ?: return null
             val payload = String(Base64.decode(token, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP))
-            val uaMatch = Regex(""""ua"\s*:\s*"([^"]+)"""").find(payload)
+            // "ua":"Chrome(116.0.0.0)" 에서 116.0.0.0 만 추출
+            val uaMatch = Regex(""""ua"\s*:\s*"Chrome\(([^)]+)\)"""").find(payload)
             uaMatch?.groupValues?.get(1)
         } catch (e: Exception) { null }
     }
@@ -183,7 +188,7 @@ class BcbcRedExtractor : ExtractorApi() {
         } catch (e: Exception) { null }
     }
     
-    // --- Proxy Web Server (Sec-Fetch Enabled) ---
+    // --- Proxy Web Server ---
     class ProxyWebServer {
         private var serverSocket: ServerSocket? = null
         private var isRunning = false
@@ -206,7 +211,7 @@ class BcbcRedExtractor : ExtractorApi() {
                             val client = serverSocket!!.accept()
                             handleClient(client)
                         } catch (e: Exception) {
-                            if (isRunning) println("[MovieKing v5] Accept Error: ${e.message}")
+                            if (isRunning) println("[MovieKing v6] Accept Error: ${e.message}")
                         }
                     }
                 }
@@ -237,7 +242,6 @@ class BcbcRedExtractor : ExtractorApi() {
                     val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
                     val requestLine = reader.readLine() ?: return@thread
                     
-                    // Client Headers Reading
                     val clientHeaders = mutableMapOf<String, String>()
                     var line: String?
                     while (reader.readLine().also { line = it } != null && line!!.isNotEmpty()) {
@@ -274,22 +278,17 @@ class BcbcRedExtractor : ExtractorApi() {
                                 connection.connectTimeout = 15000
                                 connection.readTimeout = 15000
                                 
-                                // [핵심] 보안 헤더 + Range 헤더 포함하여 전송
                                 currentHeaders.forEach { (k, v) -> connection.setRequestProperty(k, v) }
                                 if (rangeHeader != null) connection.setRequestProperty("Range", rangeHeader)
 
                                 connection.connect()
 
                                 val responseCode = connection.responseCode
-                                val contentType = connection.contentType
-                                // println("[MovieKing v5] Upstream: $responseCode ($contentType)")
-
                                 if (responseCode == 200 || responseCode == 206) {
                                     val inputStream = connection.inputStream
-                                    
                                     val sb = StringBuilder()
                                     sb.append("HTTP/1.1 $responseCode OK\r\n")
-                                    sb.append("Content-Type: video/mp2t\r\n") // 강제 TS 타입 지정 (HTML 파싱 방지)
+                                    sb.append("Content-Type: video/mp2t\r\n")
                                     connection.getHeaderField("Content-Range")?.let { sb.append("Content-Range: $it\r\n") }
                                     connection.getHeaderField("Content-Length")?.let { sb.append("Content-Length: $it\r\n") }
                                     sb.append("Connection: close\r\n\r\n")
@@ -305,10 +304,11 @@ class BcbcRedExtractor : ExtractorApi() {
                                     inputStream.close()
                                 } else {
                                     output.write("HTTP/1.1 $responseCode Error\r\n\r\n".toByteArray())
+                                    println("[MovieKing v6] Remote Error: $responseCode")
                                 }
                                 connection.disconnect()
                             } catch (e: Exception) {
-                                println("[MovieKing v5] Stream Error: ${e.message}")
+                                println("[MovieKing v6] Stream Error: ${e.message}")
                             }
                         } else {
                             output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
