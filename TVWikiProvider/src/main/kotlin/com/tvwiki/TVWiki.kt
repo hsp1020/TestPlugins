@@ -164,7 +164,7 @@ class TVWiki : MainAPI() {
                 ?: doc.selectFirst("input[name='con_title']")?.attr("value")?.trim()
                 ?: "Unknown"
         }
-        title = title!!.replace(Regex("\\\\\\\\s*\\\\\\\\d+[화회부].*"), "").replace(" 다시보기", "").trim()
+        title = title!!.replace(Regex("\\\\s*\\\\d+[화회부].*"), "").replace(" 다시보기", "").trim()
 
         if (!oriTitleFull.isNullOrEmpty()) {
             val pureOriTitle = oriTitleFull.replace("원제 :", "").replace("원제:", "").trim()
@@ -194,7 +194,13 @@ class TVWiki : MainAPI() {
         val genreFormatted = if (genreList.isNotEmpty()) "장르: ${genreList.joinToString(", ")}" else ""
 
         val castList = doc.select(".slider_act .item .name").map { it.text().trim() }
-        val castFormatted = if (castList.isNotEmpty()) "출연: ${castList.joinToString(", ")}" else ""
+        
+        // [수정] 운영진이 포함된 경우 출연진 정보를 표시하지 않음 (빈 문자열 처리)
+        val castFormatted = if (castList.isNotEmpty() && castList.none { it.contains("운영진") }) {
+            "출연: ${castList.joinToString(", ")}"
+        } else {
+            ""
+        }
 
         val metaParts = mutableListOf<String>()
         if (infoList.isNotEmpty()) metaParts.add(infoList.joinToString(" / "))
@@ -285,7 +291,6 @@ class TVWiki : MainAPI() {
         for (script in scriptTags) {
             val scriptContent = script.html()
             if (scriptContent.contains("player.bunny-frame.online")) {
-                // [수정] Raw String (""")을 사용하여 정규식 에러 해결
                 val urlRegex = Regex("""https://player\.bunny-frame\.online/[^"'\s]+""")
                 val match = urlRegex.find(scriptContent)
                 
