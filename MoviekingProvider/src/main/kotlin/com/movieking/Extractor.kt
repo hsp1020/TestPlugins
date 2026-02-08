@@ -106,15 +106,13 @@ class BcbcRedExtractor : ExtractorApi() {
             val base64M3u8 = Base64.encodeToString(finalM3u8Content.toByteArray(), Base64.NO_WRAP)
             val dataUri = "data:application/vnd.apple.mpegurl;base64,$base64M3u8"
 
+            // 8. newExtractorLink 사용 (예시 코드 참고)
             callback(
-                ExtractorLink(
-                    name = name,
-                    name = name,
-                    url = dataUri, // URL 대신 수정된 M3U8 데이터 자체를 넘김
-                    referer = url,
-                    quality = 0, // Unknown
-                    type = ExtractorLinkType.M3U8
-                )
+                newExtractorLink(name, name, dataUri, ExtractorLinkType.M3U8) {
+                    this.referer = url
+                    this.quality = 0 // Unknown
+                    this.headers = headers
+                }
             )
 
         } catch (e: Exception) {
