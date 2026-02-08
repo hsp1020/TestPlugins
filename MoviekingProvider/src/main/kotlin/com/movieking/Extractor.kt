@@ -11,6 +11,7 @@ import com.lagradost.cloudstream3.network.WebViewResolver
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.InputStream
+import java.io.BufferedInputStream
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URLDecoder
@@ -33,7 +34,7 @@ class BcbcRedExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("=== [MovieKing v27] getUrl Start (Pattern Scan) ===")
+        println("=== [MovieKing v28] getUrl Start (Mega Scan) ===")
         
         try {
             val baseHeaders = mutableMapOf(
@@ -59,7 +60,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
             val m3u8Match = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)
                 ?: run {
-                    println("[MovieKing v27] Error: data-m3u8 not found")
+                    println("[MovieKing v28] Error: data-m3u8 not found")
                     return
                 }
 
@@ -73,12 +74,11 @@ class BcbcRedExtractor : ExtractorApi() {
             val chromeVersion = extractChromeVersion(m3u8Url) ?: "124.0.0.0"
             val standardUA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$chromeVersion Mobile Safari/537.36"
             baseHeaders["User-Agent"] = standardUA
-            println("[MovieKing v27] UA: $standardUA")
+            println("[MovieKing v28] UA: $standardUA")
 
             val playlistResponse = app.get(m3u8Url, headers = baseHeaders)
             var m3u8Content = playlistResponse.text
 
-            // 키 처리
             val keyUriRegex = """#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"""".toRegex()
             val keyMatch = keyUriRegex.find(m3u8Content)
             var actualKeyBytes: ByteArray? = null
@@ -87,7 +87,7 @@ class BcbcRedExtractor : ExtractorApi() {
                 val keyUrl = keyMatch.groupValues[1]
                 val keyResponse = app.get(keyUrl, headers = baseHeaders)
                 actualKeyBytes = decryptKeyFromJson(keyResponse.text)
-                if (actualKeyBytes != null) println("[MovieKing v27] Key Decrypted.")
+                if (actualKeyBytes != null) println("[MovieKing v28] Key Decrypted.")
             }
 
             if (proxyServer == null || !proxyServer!!.isAlive()) {
@@ -117,7 +117,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
             proxyServer!!.setPlaylist(m3u8Content)
             val localPlaylistUrl = "$proxyBaseUrl/playlist.m3u8"
-            println("[MovieKing v27] Ready: $localPlaylistUrl")
+            println("[MovieKing v28] Ready: $localPlaylistUrl")
 
             callback(
                 newExtractorLink(name, name, localPlaylistUrl, ExtractorLinkType.M3U8) {
@@ -128,7 +128,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
         } catch (e: Exception) {
             e.printStackTrace()
-            println("[MovieKing v27] Error: ${e.message}")
+            println("[MovieKing v28] Error: ${e.message}")
         }
     }
 
@@ -165,7 +165,7 @@ class BcbcRedExtractor : ExtractorApi() {
         } catch (e: Exception) { null }
     }
     
-    // --- Proxy Web Server (Valid MPEG-TS Scanner) ---
+    // --- Proxy Web Server (Deep Scan for MPEG-TS) ---
     class ProxyWebServer {
         private var serverSocket: ServerSocket? = null
         private var isRunning = false
@@ -188,7 +188,7 @@ class BcbcRedExtractor : ExtractorApi() {
                             val client = serverSocket!!.accept()
                             handleClient(client)
                         } catch (e: Exception) {
-                            if (isRunning) println("[MovieKing v27] Accept Error: ${e.message}")
+                            if (isRunning) println("[MovieKing v28] Accept Error: ${e.message}")
                         }
                     }
                 }
@@ -250,63 +250,83 @@ class BcbcRedExtractor : ExtractorApi() {
                                     if (res.isSuccessful) {
                                         val inputStream: InputStream = res.body.byteStream()
                                         
-                                        // [핵심] 정밀 패턴 매칭 (Pattern Matching)
-                                        // 무작정 0x47만 찾는 게 아니라, 그 뒤 188바이트, 376바이트 뒤에도 0x47이 있는지 확인
-                                        val scanBufferSize = 8192 // 8KB 스캔
-                                        val scanBuffer = ByteArray(scanBufferSize)
-                                        var bytesInScanBuffer = 0
-                                        
-                                        // 버퍼 채우기
-                                        while (bytesInScanBuffer < scanBufferSize) {
-                                            val read = inputStream.read(scanBuffer, bytesInScanBuffer, scanBufferSize - bytesInScanBuffer)
-                                            if (read == -1) break
-                                            bytesInScanBuffer += read
-                                        }
-                                        
+                                        // [핵심] Deep Scan (최대 2MB)
+                                        val scanLimit = 2 * 1024 * 1024 
+                                        var bytesScanned = 0
+                                        var scanBuffer = ByteArray(0)
+                                        val tempBuffer = ByteArray(8192)
                                         var foundIndex = -1
-                                        if (bytesInScanBuffer > 188 * 3) { // 최소 3패킷 이상 있어야 검증 가능
-                                            for (i in 0 until bytesInScanBuffer - (188 * 2)) {
-                                                // 첫 번째 Sync Byte 후보
-                                                if (scanBuffer[i] == 0x47.toByte()) {
-                                                    // 두 번째, 세 번째 Sync Byte 확인 (188바이트 간격)
-                                                    if (scanBuffer[i + 188] == 0x47.toByte() && scanBuffer[i + 376] == 0x47.toByte()) {
-                                                        foundIndex = i
-                                                        break
+                                        
+                                        // 패턴 찾을 때까지 계속 읽고 버퍼에 쌓음 (나중에 찾으면 써야 하니까)
+                                        // 메모리 효율을 위해 찾은 데이터는 바로 output에 쓰지 않고, 일단 킵해두는 방식은 메모리 터짐.
+                                        // 따라서 '찾을 때까지 버리는' 방식(Skip)이 아닌, '찾을 때까지 읽는' 방식 사용해야 함.
+                                        
+                                        // 수정 전략: 1바이트씩 읽으면 너무 느림. 덩어리로 읽으면서 패턴 검사.
+                                        // 버퍼링된 스트림 사용
+                                        val bufferedInput = BufferedInputStream(inputStream, 32768) // 32KB 버퍼
+                                        bufferedInput.mark(scanLimit) // 되감기 마크
+                                        
+                                        var foundSync = false
+                                        
+                                        while (bytesScanned < scanLimit) {
+                                            // 마킹된 스트림에서 1바이트씩 읽으며 체크 (BufferedInputStream 덕분에 빠름)
+                                            val b = bufferedInput.read()
+                                            if (b == -1) break
+                                            
+                                            if (b == 0x47) {
+                                                // 후보 발견! 뒤에 188, 376 위치 체크는 스트림 포지션 이동 없이 해야 함
+                                                // 하지만 BufferedInputStream은 random access가 안됨.
+                                                // 따라서 가장 확실한 방법: 마크해두고 읽어서 확인하고 아니면 reset 후 1바이트 이동
+                                                
+                                                bufferedInput.mark(400) // 패턴 검사용 마크
+                                                val patternBuf = ByteArray(377)
+                                                // 첫 바이트는 이미 0x47임. 그 뒤 376바이트 읽어옴
+                                                val readLen = bufferedInput.read(patternBuf)
+                                                bufferedInput.reset() // 검사 후 제자리로
+                                                
+                                                if (readLen >= 376) {
+                                                    // 0번 인덱스는 이미 0x47인 상태에서 다음 read했으므로,
+                                                    // patternBuf[187]이 원래 스트림의 188번째 바이트임 (0-indexed read)
+                                                    // 정확히는: 현재 위치(0x47 다음)부터 187바이트 뒤 -> 188번째 바이트
+                                                    if (patternBuf[187] == 0x47.toByte() && patternBuf[375] == 0x47.toByte()) {
+                                                        foundSync = true
+                                                        break // bytesScanned 위치가 Sync Byte 위치임
                                                     }
                                                 }
                                             }
+                                            bytesScanned++
                                         }
                                         
-                                        if (foundIndex != -1) {
-                                            println("[MovieKing v27] Valid MPEG-TS found at index $foundIndex (Pattern Matched).")
+                                        // 찾았으면 해당 위치로 이동하여 전송 시작
+                                        bufferedInput.reset() // 처음(0)으로 돌아감
+                                        if (foundSync) {
+                                            println("[MovieKing v28] Found Valid MPEG-TS at offset $bytesScanned. Skipping garbage.")
+                                            bufferedInput.skip(bytesScanned.toLong()) // 쓰레기 스킵
                                             
-                                            // 헤더 전송
                                             val header = "HTTP/1.1 200 OK\r\n" +
                                                     "Content-Type: video/mp2t\r\n" +
                                                     "Connection: close\r\n\r\n"
                                             output.write(header.toByteArray())
                                             
-                                            // 스캔 버퍼의 유효 데이터 전송
-                                            output.write(scanBuffer, foundIndex, bytesInScanBuffer - foundIndex)
-                                            
-                                            // 나머지 데이터 스트리밍
-                                            val buffer = ByteArray(8192)
+                                            // 나머지 전송
                                             var count: Int
-                                            while (inputStream.read(buffer).also { count = it } != -1) {
-                                                output.write(buffer, 0, count)
+                                            while (bufferedInput.read(tempBuffer).also { count = it } != -1) {
+                                                output.write(tempBuffer, 0, count)
                                             }
                                             output.flush()
                                         } else {
-                                            println("[MovieKing v27] ERROR: No valid MPEG-TS pattern found in first $bytesInScanBuffer bytes.")
+                                            println("[MovieKing v28] ERROR: No MPEG-TS pattern found in $bytesScanned bytes.")
                                             output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
                                         }
+                                        
+                                        bufferedInput.close()
                                         inputStream.close()
                                     } else {
                                         output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
                                     }
                                 }
                             } catch (e: Exception) {
-                                println("[MovieKing v27] Stream Error: $e")
+                                println("[MovieKing v28] Stream Error: $e")
                             }
                         } else {
                             output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
@@ -314,7 +334,7 @@ class BcbcRedExtractor : ExtractorApi() {
                     }
                     socket.close()
                 } catch (e: Exception) {
-                    println("[MovieKing v27] Socket Error: $e")
+                    println("[MovieKing v28] Socket Error: $e")
                 }
             }
         }
