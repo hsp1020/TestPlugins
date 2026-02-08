@@ -44,72 +44,50 @@ class BcbcRedExtractor : ExtractorApi() {
                 ?: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
             
             val cookieString = playerResponse.cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
-            val headers = mapOf(
+            
+            // 4. 키 정보 추출 (복호화된 키를 헤더에 포함하기 위해)
+            val headers = mutableMapOf(
                 "User-Agent" to userAgent,
                 "Referer" to "https://player-v1.bcbc.red",
                 "Origin" to "https://player-v1.bcbc.red",
                 "Cookie" to cookieString
             )
 
-            // 4. M3U8 원본 다운로드
+            // 5. M3U8 원본 다운로드 (키 정보 확인용)
             val m3u8Response = app.get(m3u8Url, headers = headers)
-            var m3u8Content = m3u8Response.text
-            val baseUrl = m3u8Url.substringBeforeLast("/") + "/"
+            val m3u8Content = m3u8Response.text
 
-            // 5. [핵심] 키 URI 찾아서 실제 키로 교체
+            // 6. 키 URI 찾기
             val keyUriRegex = """#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"""".toRegex()
             val keyMatch = keyUriRegex.find(m3u8Content)
 
-            if (keyMatch != null) {
+            // 7. 키 복호화 및 Base64 인코딩
+            val keyB64 = if (keyMatch != null) {
                 val keyUrl = keyMatch.groupValues[1]
-                
-                // 키 JSON 다운로드
                 val keyResponse = app.get(keyUrl, headers = headers)
-                val jsonText = keyResponse.text // 여기서 220byte JSON이 들어옴
-
-                // JSON 파싱 및 복호화
+                val jsonText = keyResponse.text
                 val actualKeyBytes = decryptKeyFromJson(jsonText)
                 
                 if (actualKeyBytes != null) {
-                    // 실제 키를 Base64 Data URI로 변환
-                    val b64Key = Base64.encodeToString(actualKeyBytes, Base64.NO_WRAP)
-                    val newKeyLine = """#EXT-X-KEY:METHOD=AES-128,URI="data:text/plain;base64,$b64Key""""
-                    
-                    // M3U8 내용 수정 (원본 Key URI -> Data URI)
-                    m3u8Content = m3u8Content.replace(keyMatch.value, newKeyLine)
-                    println("[MovieKing] Key replaced successfully.")
-                }
-            }
-
-            // 6. [핵심] 세그먼트(.ts) 경로 절대경로화
-            // M3U8 전체를 Data URI로 만들 것이므로 상대경로는 깨짐. 따라서 절대경로로 수정해야 함.
-            val newM3u8Lines = m3u8Content.lines().map { line ->
-                val trimLine = line.trim()
-                if (trimLine.isNotEmpty() && !trimLine.startsWith("#")) {
-                    // http로 시작하지 않는 세그먼트 URL 앞에 baseUrl 붙이기
-                    if (!trimLine.startsWith("http")) {
-                        try {
-                            URI(baseUrl).resolve(trimLine).toString()
-                        } catch (e: Exception) {
-                            "$baseUrl$trimLine"
-                        }
-                    } else {
-                        trimLine
-                    }
+                    Base64.encodeToString(actualKeyBytes, Base64.NO_WRAP)
                 } else {
-                    line
+                    null
                 }
+            } else {
+                null
             }
-            val finalM3u8Content = newM3u8Lines.joinToString("\n")
 
-            // 7. 수정된 M3U8 전체를 Data URI로 변환하여 전달
-            // 이렇게 하면 ExoPlayer는 서버에 접속 안 하고 이 문자열을 재생 목록으로 씀
-            val base64M3u8 = Base64.encodeToString(finalM3u8Content.toByteArray(), Base64.NO_WRAP)
-            val dataUri = "data:application/vnd.apple.mpegurl;base64,$base64M3u8"
+            // 8. 복호화된 키가 있으면 특별 헤더 추가
+            if (keyB64 != null) {
+                // CloudStream ExoPlayer가 인식할 수 있는 특별 헤더 추가
+                // (실제 구현은 CloudStream의 ExoPlayer 커스텀 지원 여부에 달림)
+                headers["X-M3U8-Key-B64"] = keyB64
+            }
 
-            // 8. newExtractorLink 사용 (예시 코드 참고)
+            // 9. 원본 M3U8 URL을 사용하되, 추가 헤더와 함께 전달
+            // CloudStream의 ExoPlayer 구현이 이 헤더를 인식하고 키 교체를 해야 함
             callback(
-                newExtractorLink(name, name, dataUri, ExtractorLinkType.M3U8) {
+                newExtractorLink(name, name, m3u8Url, ExtractorLinkType.M3U8) {
                     this.referer = url
                     this.quality = 0 // Unknown
                     this.headers = headers
@@ -118,7 +96,6 @@ class BcbcRedExtractor : ExtractorApi() {
 
         } catch (e: Exception) {
             e.printStackTrace()
-            // 에러 시 로그만 남김 (Cloudstream 특성상 에러 throw하면 전체가 죽을 수 있음)
             println("[MovieKing] Error: ${e.message}")
         }
     }
@@ -127,8 +104,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
     private fun decryptKeyFromJson(jsonText: String): ByteArray? {
         try {
-            // 1. JSON 자체가 Base64일 수 있으므로 디코딩 시도 (로그 기반 추론)
-            // 로그: Raw key response: eyJlbmNyeXB0... (Base64된 JSON)
+            // 1. JSON 자체가 Base64일 수 있으므로 디코딩 시도
             val decodedJsonStr = try {
                 String(Base64.decode(jsonText, Base64.DEFAULT))
             } catch (e: Exception) {
