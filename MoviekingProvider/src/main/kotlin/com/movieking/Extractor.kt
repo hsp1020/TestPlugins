@@ -3,23 +3,10 @@ package com.movieking
 import android.util.Base64
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.utils.ExtractorApi
-import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.ExtractorLinkType
-import com.lagradost.cloudstream3.SubtitleFile
-import com.lagradost.cloudstream3.network.WebViewResolver
-import java.io.BufferedReader
-import java.io.InputStreamReader
-import java.io.InputStream
-import java.io.BufferedInputStream
-import java.net.ServerSocket
-import java.net.Socket
-import java.net.URLDecoder
-import java.net.URLEncoder
+import java.io.*
+import java.net.*
 import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
-import javax.crypto.Cipher
-import javax.crypto.spec.SecretKeySpec
 
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -30,365 +17,139 @@ class BcbcRedExtractor : ExtractorApi() {
         private var proxyServer: ProxyWebServer? = null
     }
 
-    override suspend fun getUrl(
-        url: String,
-        referer: String?,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ) {
-        println("=== [MovieKing v56] getUrl Start (Extreme Logging) ===")
-        
+    override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
+        println("=== [MovieKing v58] getUrl Start (Full Brute-Force) ===")
         try {
-            val baseHeaders = mutableMapOf(
-                "Referer" to "https://player-v1.bcbc.red/",
-                "Origin" to "https://player-v1.bcbc.red"
-            )
-
-            try {
-                app.get(
-                    url,
-                    headers = baseHeaders,
-                    interceptor = WebViewResolver(Regex("""player-v1\.bcbc\.red"""))
-                )
-            } catch (e: Exception) {
-                app.get(url, headers = baseHeaders)
-            }
-
-            val m3u8Response = app.get(url, headers = baseHeaders)
-            val playerHtml = m3u8Response.text
-            val cookies = m3u8Response.cookies
-            val cookieString = cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
-            baseHeaders["Cookie"] = cookieString
-
-            val m3u8Match = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)
-                ?: run {
-                    println("[MovieKing v56] Error: data-m3u8 not found")
-                    return
-                }
-
-            var m3u8Url = m3u8Match.groupValues[1].replace("\\/", "/")
-            if (m3u8Url.startsWith("//")) {
-                m3u8Url = "https:$m3u8Url"
-            } else if (!m3u8Url.startsWith("http")) {
-                m3u8Url = "https://$m3u8Url"
-            }
-
-            val chromeVersion = extractChromeVersion(m3u8Url) ?: "124.0.0.0"
-            val standardUA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$chromeVersion Mobile Safari/537.36"
-            baseHeaders["User-Agent"] = standardUA
-            println("[MovieKing v56] UA: $standardUA")
-
-            val playlistResponse = app.get(m3u8Url, headers = baseHeaders)
-            var m3u8Content = playlistResponse.text
-
-            val keyUriRegex = """#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"""".toRegex()
-            val keyMatch = keyUriRegex.find(m3u8Content)
+            val baseHeaders = mutableMapOf("Referer" to "https://player-v1.bcbc.red/", "Origin" to "https://player-v1.bcbc.red")
+            val playerHtml = app.get(url, headers = baseHeaders).text
+            val m3u8Url = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)?.groupValues?.get(1)?.replace("\\/", "/") ?: return
+            
+            val keyMatch = Regex("""#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"""").find(app.get(m3u8Url, headers = baseHeaders).text)
             var rawKeyJson: String? = null
-
-            if (keyMatch != null) {
-                val keyUrl = keyMatch.groupValues[1]
-                val keyResponse = app.get(keyUrl, headers = baseHeaders)
-                rawKeyJson = keyResponse.text
-                
-                // [핵심] 원본 JSON 로그 출력
-                println("[MovieKing v56] RAW JSON: $rawKeyJson")
-            }
+            if (keyMatch != null) rawKeyJson = app.get(keyMatch.groupValues[1], headers = baseHeaders).text
 
             if (proxyServer == null || !proxyServer!!.isAlive()) {
-                proxyServer?.stop()
-                proxyServer = ProxyWebServer()
-                proxyServer!!.start()
+                proxyServer = ProxyWebServer().apply { start() }
             }
             
             val port = proxyServer!!.updateSession(baseHeaders, rawKeyJson)
             val proxyBaseUrl = "http://127.0.0.1:$port"
+            var m3u8Content = app.get(m3u8Url, headers = baseHeaders).text
 
-            if (keyMatch != null) {
-                val localKeyUrl = "$proxyBaseUrl/key.bin"
-                m3u8Content = m3u8Content.replace(keyMatch.groupValues[1], localKeyUrl)
-            }
-
+            if (keyMatch != null) m3u8Content = m3u8Content.replace(keyMatch.groupValues[1], "$proxyBaseUrl/key.bin")
             val m3u8Base = m3u8Url.substringBeforeLast("/") + "/"
             m3u8Content = m3u8Content.lines().joinToString("\n") { line ->
-                if (line.isNotBlank() && !line.startsWith("#")) {
-                    val segmentUrl = if (line.startsWith("http")) line else "$m3u8Base$line"
-                    val encodedUrl = URLEncoder.encode(segmentUrl, "UTF-8")
-                    "$proxyBaseUrl/proxy?url=$encodedUrl"
-                } else {
-                    line
-                }
+                if (line.isNotBlank() && !line.startsWith("#")) "$proxyBaseUrl/proxy?url=${URLEncoder.encode(if (line.startsWith("http")) line else "$m3u8Base$line", "UTF-8")}" else line
             }
 
             proxyServer!!.setPlaylist(m3u8Content)
-            val localPlaylistUrl = "$proxyBaseUrl/playlist.m3u8"
-            println("[MovieKing v56] Ready: $localPlaylistUrl")
-
-            callback(
-                newExtractorLink(name, name, localPlaylistUrl, ExtractorLinkType.M3U8) {
-                    this.referer = "https://player-v1.bcbc.red/"
-                    this.quality = Qualities.Unknown.value
-                }
-            )
-
-        } catch (e: Exception) {
-            e.printStackTrace()
-            println("[MovieKing v56] Error: ${e.message}")
-        }
+            callback(newExtractorLink(name, name, "$proxyBaseUrl/playlist.m3u8", ExtractorLinkType.M3U8) { this.referer = "https://player-v1.bcbc.red/" })
+        } catch (e: Exception) { println("[MovieKing v58] Error: $e") }
     }
 
-    private fun extractChromeVersion(m3u8Url: String): String? {
-        return try {
-            val token = m3u8Url.substringAfterLast("/").split(".").getOrNull(1) ?: return null
-            val payload = String(Base64.decode(token, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP))
-            val uaMatch = Regex(""""ua"\s*:\s*"Chrome\(([^)]+)\)"""").find(payload)
-            uaMatch?.groupValues?.get(1)
-        } catch (e: Exception) { null }
-    }
-    
     class ProxyWebServer {
         private var serverSocket: ServerSocket? = null
         private var isRunning = false
         var port: Int = 0
-        
         @Volatile private var currentHeaders: Map<String, String> = emptyMap()
         @Volatile private var rawKeyJson: String? = null
         @Volatile private var currentPlaylist: String = ""
-        
-        @Volatile private var cachedKey: ByteArray? = null
-        @Volatile private var cachedOffset: Int = -1
+        @Volatile private var foundKey: ByteArray? = null
+        @Volatile private var foundOffset: Int = -1
 
-        fun isAlive(): Boolean = isRunning && serverSocket != null && !serverSocket!!.isClosed
-
+        fun isAlive() = isRunning && serverSocket != null && !serverSocket!!.isClosed
         fun start() {
+            serverSocket = ServerSocket(0).also { port = it.localPort }
+            isRunning = true
+            thread(isDaemon = true) { while (isAlive()) { try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {} } }
+        }
+        fun updateSession(h: Map<String, String>, j: String?) = port.also { currentHeaders = h; rawKeyJson = j; foundKey = null; foundOffset = -1 }
+        fun setPlaylist(p: String) { currentPlaylist = p }
+
+        private fun handleClient(socket: Socket) = thread {
             try {
-                serverSocket = ServerSocket(0)
-                port = serverSocket?.localPort ?: 0
-                isRunning = true
-                thread(start = true, isDaemon = true) {
-                    while (isAlive()) {
-                        try {
-                            val client = serverSocket!!.accept()
-                            handleClient(client)
-                        } catch (e: Exception) {
-                            if (isRunning) println("[MovieKing v56] Accept Error: ${e.message}")
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-                isRunning = false
-            }
-        }
+                val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
+                val line = reader.readLine() ?: return@thread
+                val path = line.split(" ")[1]
+                val output = socket.getOutputStream()
 
-        fun updateSession(headers: Map<String, String>, json: String?): Int {
-            currentHeaders = headers
-            rawKeyJson = json
-            cachedKey = null
-            cachedOffset = -1
-            return port
-        }
+                if (path.contains("/playlist.m3u8")) {
+                    output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\n\r\n".toByteArray() + currentPlaylist.toByteArray())
+                } else if (path.contains("/key.bin")) {
+                    output.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n".toByteArray() + ByteArray(16))
+                } else if (path.contains("/proxy")) {
+                    val url = URLDecoder.decode(path.substringAfter("url=").substringBefore(" "), "UTF-8")
+                    runBlocking {
+                        val res = app.get(url, headers = currentHeaders)
+                        if (res.isSuccessful) {
+                            val stream = BufferedInputStream(res.body.byteStream())
+                            val buffer = ByteArray(65536) // 64KB Probe
+                            stream.mark(65536)
+                            val read = stream.read(buffer)
+                            stream.reset()
 
-        fun setPlaylist(m3u8: String) {
-            currentPlaylist = m3u8
-        }
-
-        fun stop() {
-            isRunning = false
-            try { serverSocket?.close() } catch (e: Exception) { }
-        }
-
-        private fun handleClient(socket: Socket) {
-            thread(start = true) {
-                try {
-                    val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
-                    val requestLine = reader.readLine() ?: return@thread
-                    
-                    val parts = requestLine.split(" ")
-                    if (parts.size >= 2) {
-                        val path = parts[1]
-                        val output = socket.getOutputStream()
-                        
-                        if (path.contains("/playlist.m3u8")) {
-                            val data = currentPlaylist.toByteArray()
-                            val header = "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: ${data.size}\r\nConnection: close\r\n\r\n"
-                            output.write(header.toByteArray())
-                            output.write(data)
-                            output.flush()
-                        }
-                        else if (path.contains("/key.bin")) {
-                            val dummy = ByteArray(16)
-                            val header = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 16\r\nConnection: close\r\n\r\n"
-                            output.write(header.toByteArray())
-                            output.write(dummy)
-                            output.flush()
-                        }
-                        else if (path.contains("/proxy")) {
-                            val urlParam = path.substringAfter("url=").substringBefore(" ")
-                            val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
-                            
-                            try {
-                                runBlocking {
-                                    val res = app.get(targetUrl, headers = currentHeaders)
-                                    
-                                    if (res.isSuccessful) {
-                                        val inputStream = BufferedInputStream(res.body.byteStream())
-                                        
-                                        // 32KB Buffer
-                                        val buffer = ByteArray(32768)
-                                        inputStream.mark(32768)
-                                        val bytesRead = inputStream.read(buffer)
-                                        inputStream.reset()
-                                        
-                                        var finalKey: ByteArray? = cachedKey
-                                        var finalOffset = cachedOffset
-                                        
-                                        if (bytesRead > 0 && finalKey == null && rawKeyJson != null) {
-                                            // [진단] 키 파싱 상세 로그
-                                            val candidates = generateAllKeysWithLog(rawKeyJson!!)
-                                            
-                                            for ((name, key) in candidates) {
-                                                val dec = buffer.clone()
-                                                for (i in 0 until bytesRead) {
-                                                    dec[i] = (buffer[i].toInt() xor key[i % key.size].toInt()).toByte()
-                                                }
-                                                
-                                                // Triple Check
-                                                for (i in 0 until bytesRead - 376) {
-                                                    if (dec[i] == 0x47.toByte() && 
-                                                        dec[i + 188] == 0x47.toByte() &&
-                                                        dec[i + 376] == 0x47.toByte()) {
-                                                        println("[MovieKing v56] MATCH! $name at $i")
-                                                        finalKey = key
-                                                        finalOffset = i
-                                                        cachedKey = key
-                                                        cachedOffset = i
-                                                        break
-                                                    }
-                                                }
-                                                if (finalKey != null) break
-                                            }
+                            if (read > 0 && foundKey == null && rawKeyJson != null) {
+                                val candidates = generateAllCombinations(rawKeyJson!!)
+                                println("[MovieKing v58] Probing ${candidates.size} combinations...")
+                                
+                                outer@for ((name, key) in candidates) {
+                                    val dec = buffer.clone()
+                                    for (i in 0 until read) dec[i] = (buffer[i].toInt() xor key[i % 16].toInt()).toByte()
+                                    for (i in 0 until read - 376) {
+                                        if (dec[i] == 0x47.toByte() && dec[i+188] == 0x47.toByte() && dec[i+376] == 0x47.toByte()) {
+                                            println("[MovieKing v58] SUCCESS: $name at offset $i")
+                                            foundKey = key; foundOffset = i; break@outer
                                         }
-
-                                        val header = "HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nConnection: close\r\n\r\n"
-                                        output.write(header.toByteArray())
-                                        
-                                        if (finalKey != null) {
-                                            val decryptedBuffer = buffer.clone()
-                                            for (i in 0 until bytesRead) {
-                                                decryptedBuffer[i] = (buffer[i].toInt() xor finalKey!![i % finalKey!!.size].toInt()).toByte()
-                                            }
-                                            
-                                            if (bytesRead > finalOffset) {
-                                                output.write(decryptedBuffer, finalOffset, bytesRead - finalOffset)
-                                            }
-                                            
-                                            var globalFileOffset = bytesRead.toLong()
-                                            var count: Int
-                                            
-                                            while (inputStream.read(buffer).also { count = it } != -1) {
-                                                for (i in 0 until count) {
-                                                    val keyIdx = ((globalFileOffset + i) % finalKey!!.size).toInt()
-                                                    buffer[i] = (buffer[i].toInt() xor finalKey!![keyIdx].toInt()).toByte()
-                                                }
-                                                output.write(buffer, 0, count)
-                                                globalFileOffset += count
-                                            }
-                                        } else {
-                                            println("[MovieKing v56] All candidates failed. RAW Fallback.")
-                                            var count: Int
-                                            while (inputStream.read(buffer).also { count = it } != -1) {
-                                                output.write(buffer, 0, count)
-                                            }
-                                        }
-                                        output.flush()
-                                        inputStream.close()
-                                    } else {
-                                        output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
                                     }
                                 }
-                            } catch (e: Exception) {
-                                println("[MovieKing v56] Stream Error: $e")
                             }
-                        } else {
-                            output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
+
+                            output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
+                            if (foundKey != null) {
+                                val k = foundKey!!; val off = foundOffset
+                                var total = 0L
+                                // Initial buffer
+                                for (i in 0 until read) buffer[i] = (buffer[i].toInt() xor k[i % 16].toInt()).toByte()
+                                if (read > off) output.write(buffer, off, read - off)
+                                total = read.toLong()
+                                // Remaining
+                                var count: Int
+                                val streamBuffer = ByteArray(8192)
+                                while (stream.read(streamBuffer).also { count = it } != -1) {
+                                    for (i in 0 until count) streamBuffer[i] = (streamBuffer[i].toInt() xor k[((total + i) % 16).toInt()].toInt()).toByte()
+                                    output.write(streamBuffer, 0, count)
+                                    total += count
+                                }
+                            } else {
+                                output.write(buffer, 0, read)
+                                var count: Int; while (stream.read(buffer).also { count = it } != -1) output.write(buffer, 0, count)
+                            }
                         }
                     }
-                    socket.close()
-                } catch (e: Exception) {
-                    println("[MovieKing v56] Socket Error: $e")
                 }
-            }
+                socket.close()
+            } catch (e: Exception) { println("[MovieKing v58] Stream Error: $e") }
         }
 
-        private fun generateAllKeysWithLog(jsonText: String): List<Pair<String, ByteArray>> {
+        private fun generateAllCombinations(json: String): List<Pair<String, ByteArray>> {
             val list = mutableListOf<Pair<String, ByteArray>>()
             try {
-                // 1. JSON Decode
-                val decodedJsonStr = try { String(Base64.decode(jsonText, Base64.DEFAULT)) } catch (e: Exception) { jsonText }
-                println("[MovieKing v56] Decoded JSON: $decodedJsonStr")
+                val decoded = if (json.startsWith("{")) json else String(Base64.decode(json, Base64.DEFAULT))
+                val encKey = Regex(""""encrypted_key"\s*:\s*"([^"]+)"""").find(decoded)?.groupValues?.get(1)?.replace("\\/", "/") ?: return list
+                val perms = listOf(listOf(0,1,2,3), listOf(0,1,3,2), listOf(0,2,1,3), listOf(0,2,3,1), listOf(0,3,1,2), listOf(0,3,2,1), listOf(1,0,2,3), listOf(1,0,3,2), listOf(1,2,0,3), listOf(1,2,3,0), listOf(1,3,0,2), listOf(1,3,2,0), listOf(2,0,1,3), listOf(2,0,3,1), listOf(2,1,0,3), listOf(2,1,3,0), listOf(2,3,0,1), listOf(2,3,1,0), listOf(3,0,1,2), listOf(3,0,2,1), listOf(3,1,0,2), listOf(3,1,2,0), listOf(3,2,0,1), listOf(3,2,1,0))
                 
-                val encKeyRegex = """"encrypted_key"\s*:\s*"([^"]+)"""".toRegex()
-                var encKeyB64 = encKeyRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return list
-                println("[MovieKing v56] Extracted EncKey: $encKeyB64")
-                
-                val ruleRegex = """"rule"\s*:\s*(\{.*?\})""".toRegex()
-                val ruleJson = ruleRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return list
-                println("[MovieKing v56] Rule JSON: $ruleJson")
-                
-                val permRegex = """"permutation"\s*:\s*\[([\d,]+)\]""".toRegex()
-                val permString = permRegex.find(ruleJson)?.groupValues?.get(1) ?: "0,1,2,3"
-                val permutation = permString.split(",").map { it.trim().toInt() }
-                println("[MovieKing v56] Permutation: $permutation")
+                // Case 1: Noise Behind ([Data 4][Noise 2])
+                val segsB = mutableListOf<ByteArray>()
+                for(i in 0 until 4) segsB.add(encKey.substring(i*6, i*6+4).toByteArray())
+                for(p in perms) list.add("Behind-${p.joinToString("")}" to assemble(segsB, p))
 
-                val segSizesRegex = """"segment_sizes"\s*:\s*\[([\d,]+)\]""".toRegex()
-                val segSizesStr = segSizesRegex.find(ruleJson)?.groupValues?.get(1) ?: "4,4,4,4"
-                val segmentSizes = segSizesStr.split(",").map { it.trim().toInt() }
-                println("[MovieKing v56] Segment Sizes: $segmentSizes")
-
-                // Candidate 1: Raw String (No Replace)
-                val k1 = assembleWithLog(encKeyB64.toByteArray(), permutation, segmentSizes, "RawString")
-                list.add("RawString" to k1)
-                
-                // Candidate 2: Replaced String
-                val k2 = assembleWithLog(encKeyB64.replace("\\/", "/").toByteArray(), permutation, segmentSizes, "ReplacedString")
-                list.add("ReplacedString" to k2)
-                
-                // Candidate 3: Base64
-                try {
-                    val b64 = Base64.decode(encKeyB64.replace("\\/", "/"), Base64.DEFAULT)
-                    val k3 = assembleWithLog(b64, permutation, segmentSizes, "Base64")
-                    list.add("Base64" to k3)
-                } catch(e:Exception){}
-
-            } catch (e: Exception) {
-                println("[MovieKing v56] Key Gen Error: $e")
-            }
+                // Case 2: Noise Front ([Noise 2][Data 4])
+                val segsF = mutableListOf<ByteArray>()
+                for(i in 0 until 4) segsF.add(encKey.substring(i*6+2, i*6+6).toByteArray())
+                for(p in perms) list.add("Front-${p.joinToString("")}" to assemble(segsF, p))
+            } catch (e: Exception) {}
             return list
         }
-        
-        private fun assembleWithLog(src: ByteArray, perm: List<Int>, sizes: List<Int>, label: String): ByteArray {
-            val segs = mutableListOf<ByteArray>()
-            var off = 0
-            val noise = 2
-            
-            for(size in sizes) {
-                if(off + size > src.size) break
-                segs.add(src.copyOfRange(off, off + size))
-                off += size + noise
-            }
-            
-            val res = ByteArray(16)
-            var roff = 0
-            for(idx in perm) {
-                if (idx < segs.size) {
-                    val s = segs[idx]
-                    System.arraycopy(s, 0, res, roff, s.size)
-                    roff += s.size
-                }
-            }
-            val hex = res.joinToString("") { "%02X".format(it) }
-            println("[MovieKing v56] $label Key: $hex")
-            return res
-        }
+        private fun assemble(s: List<ByteArray>, p: List<Int>) = ByteArray(16).apply { var o = 0; for(i in p) { System.arraycopy(s[i], 0, this, o, 4); o+=4 } }
     }
 }
