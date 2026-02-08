@@ -10,6 +10,7 @@ import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.*
 import java.net.URI
 
+
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
     override val mainUrl = "https://player-v1.bcbc.red"
@@ -114,7 +115,7 @@ class BcbcRedExtractor : ExtractorApi() {
                     this.quality = 0 // Unknown
                     this.headers = headers
                 }
-            )
+
 
         } catch (e: Exception) {
             e.printStackTrace()
@@ -196,3 +197,4 @@ class BcbcRedExtractor : ExtractorApi() {
         }
     }
 }
+
