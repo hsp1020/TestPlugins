@@ -34,7 +34,7 @@ class BcbcRedExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("=== [MovieKing v33] getUrl Start (Deep Audit) ===")
+        println("=== [MovieKing v34] getUrl Start (Build Fix) ===")
         
         try {
             val baseHeaders = mutableMapOf(
@@ -60,7 +60,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
             val m3u8Match = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)
                 ?: run {
-                    println("[MovieKing v33] Error: data-m3u8 not found")
+                    println("[MovieKing v34] Error: data-m3u8 not found")
                     return
                 }
 
@@ -74,7 +74,7 @@ class BcbcRedExtractor : ExtractorApi() {
             val chromeVersion = extractChromeVersion(m3u8Url) ?: "124.0.0.0"
             val standardUA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$chromeVersion Mobile Safari/537.36"
             baseHeaders["User-Agent"] = standardUA
-            println("[MovieKing v33] UA: $standardUA")
+            println("[MovieKing v34] UA: $standardUA")
 
             val playlistResponse = app.get(m3u8Url, headers = baseHeaders)
             var m3u8Content = playlistResponse.text
@@ -119,7 +119,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
             proxyServer!!.setPlaylist(m3u8Content)
             val localPlaylistUrl = "$proxyBaseUrl/playlist.m3u8"
-            println("[MovieKing v33] Ready: $localPlaylistUrl")
+            println("[MovieKing v34] Ready: $localPlaylistUrl")
 
             callback(
                 newExtractorLink(name, name, localPlaylistUrl, ExtractorLinkType.M3U8) {
@@ -130,7 +130,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
         } catch (e: Exception) {
             e.printStackTrace()
-            println("[MovieKing v33] Error: ${e.message}")
+            println("[MovieKing v34] Error: ${e.message}")
         }
     }
 
@@ -156,7 +156,7 @@ class BcbcRedExtractor : ExtractorApi() {
             
             // [감사 1] 암호화된 바이트 원본 출력 (Hex)
             val encHex = encryptedBytes.joinToString("") { "%02X".format(it) }
-            println("[MovieKing v33] Encrypted Bytes (24): $encHex")
+            println("[MovieKing v34] Encrypted Bytes (24): $encHex")
 
             // v32 로직 (4+2)
             val segSizesRegex = """"segment_sizes"\s*:\s*\[([\d,]+)\]""".toRegex()
@@ -189,7 +189,7 @@ class BcbcRedExtractor : ExtractorApi() {
             
             // [감사 2] 결과 키 출력 (Hex)
             val keyHex = finalKey.joinToString("") { "%02X".format(it) }
-            println("[MovieKing v33] Generated Key (16): $keyHex")
+            println("[MovieKing v34] Generated Key (16): $keyHex")
             
             return finalKey
         } catch (e: Exception) { null }
@@ -217,7 +217,7 @@ class BcbcRedExtractor : ExtractorApi() {
                             val client = serverSocket!!.accept()
                             handleClient(client)
                         } catch (e: Exception) {
-                            if (isRunning) println("[MovieKing v33] Accept Error: ${e.message}")
+                            if (isRunning) println("[MovieKing v34] Accept Error: ${e.message}")
                         }
                     }
                 }
@@ -281,19 +281,21 @@ class BcbcRedExtractor : ExtractorApi() {
                                         
                                         // [감사 3] 영상 데이터 첫 32바이트 확인 (XOR 키 찾기용)
                                         val buffer = ByteArray(8192)
-                                        val bytesRead = inputStream.read(buffer)
+                                        // [수정] val -> var 로 변경하여 재할당 가능하게 함
+                                        var bytesRead = inputStream.read(buffer)
                                         
                                         if (bytesRead > 0) {
                                             val firstBytes = buffer.take(32).joinToString(" ") { "%02X".format(it) }
-                                            println("[MovieKing v33] Video Head (32): $firstBytes")
+                                            println("[MovieKing v34] Video Head (32): $firstBytes")
                                             
-                                            // 무가공 전송 (일단)
+                                            // 무가공 전송
                                             val header = "HTTP/1.1 200 OK\r\n" +
                                                     "Content-Type: video/mp2t\r\n" +
                                                     "Connection: close\r\n\r\n"
                                             output.write(header.toByteArray())
                                             output.write(buffer, 0, bytesRead)
                                             
+                                            // [수정] bytesRead 재할당 정상 동작
                                             while (inputStream.read(buffer).also { bytesRead = it } != -1) {
                                                 output.write(buffer, 0, bytesRead)
                                             }
@@ -307,7 +309,7 @@ class BcbcRedExtractor : ExtractorApi() {
                                     }
                                 }
                             } catch (e: Exception) {
-                                println("[MovieKing v33] Stream Error: $e")
+                                println("[MovieKing v34] Stream Error: $e")
                             }
                         } else {
                             output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
@@ -315,7 +317,7 @@ class BcbcRedExtractor : ExtractorApi() {
                     }
                     socket.close()
                 } catch (e: Exception) {
-                    println("[MovieKing v33] Socket Error: $e")
+                    println("[MovieKing v34] Socket Error: $e")
                 }
             }
         }
