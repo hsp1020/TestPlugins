@@ -19,7 +19,7 @@ class BcbcRedExtractor : ExtractorApi() {
     }
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
-        println("=== [MovieKing v63] getUrl Start (Omni-Channel Brute Force) ===")
+        println("=== [MovieKing v64] getUrl Start (Strict 10-Packet Check) ===")
         try {
             val baseHeaders = mutableMapOf("Referer" to "https://player-v1.bcbc.red/", "Origin" to "https://player-v1.bcbc.red")
             val playerHtml = app.get(url, headers = baseHeaders).text
@@ -47,7 +47,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
             proxyServer!!.setPlaylist(m3u8Content)
             callback(newExtractorLink(name, name, "$proxyBaseUrl/playlist.m3u8", ExtractorLinkType.M3U8) { this.referer = "https://player-v1.bcbc.red/" })
-        } catch (e: Exception) { println("[MovieKing v63] Error: $e") }
+        } catch (e: Exception) { println("[MovieKing v64] Error: $e") }
     }
 
     class ProxyWebServer {
@@ -57,7 +57,6 @@ class BcbcRedExtractor : ExtractorApi() {
         @Volatile private var currentHeaders: Map<String, String> = emptyMap()
         @Volatile private var rawKeyJson: String? = null
         @Volatile private var currentPlaylist: String = ""
-        
         @Volatile private var foundKey: ByteArray? = null
         @Volatile private var foundOffset: Int = -1
         @Volatile private var foundShift: Int = 0 
@@ -93,21 +92,23 @@ class BcbcRedExtractor : ExtractorApi() {
                             stream.mark(65536); val read = stream.read(buffer); stream.reset()
 
                             if (read > 0 && foundKey == null && rawKeyJson != null) {
-                                val candidates = generateAllOmniCandidates(rawKeyJson!!)
-                                println("[MovieKing v63] Probing ${candidates.size * 16} omni-combinations...")
+                                val candidates = generateStrictCandidates(rawKeyJson!!)
+                                println("[MovieKing v64] Probing combinations (Strict 10-Packet)...")
                                 
                                 outer@for ((name, key) in candidates) {
                                     for (s in 0..15) {
-                                        // 64KB 버퍼 전체 스캔으로 확대
-                                        for (i in 0 until (read - 600).coerceAtLeast(0)) {
+                                        for (i in 0 until (read - 2000).coerceAtLeast(0)) {
                                             if ((buffer[i].toInt() xor key[(i + s) % 16].toInt()).toByte() == 0x47.toByte()) {
-                                                var m = 0; for (p in 1..3) {
+                                                // [강화] 10연속 패킷 검사 (1880바이트 구간)
+                                                var matchCount = 0
+                                                for (p in 1..10) {
                                                     val pos = i + (p * 188)
-                                                    if (pos + 1 > read) break
-                                                    if ((buffer[pos].toInt() xor key[(pos + s) % 16].toInt()).toByte() == 0x47.toByte()) m++
+                                                    if (pos >= read) break
+                                                    if ((buffer[pos].toInt() xor key[(pos + s) % 16].toInt()).toByte() == 0x47.toByte()) matchCount++
                                                 }
-                                                if (m >= 2) {
-                                                    println("[MovieKing v63] SUCCESS! $name, Offset: $i, Shift: $s"); foundKey = key; foundOffset = i; foundShift = s; break@outer
+                                                if (matchCount >= 9) { // 10개 중 9개 이상 일치 시 정답 확정
+                                                    println("[MovieKing v64] REAL SUCCESS! $name, Offset: $i, Shift: $s")
+                                                    foundKey = key; foundOffset = i; foundShift = s; break@outer
                                                 }
                                             }
                                         }
@@ -134,32 +135,29 @@ class BcbcRedExtractor : ExtractorApi() {
                     }
                 }
                 output.flush(); socket.close()
-            } catch (e: Exception) { println("[MovieKing v63] Stream Error: $e") }
+            } catch (e: Exception) { println("[MovieKing v64] Stream Error: $e") }
         }
 
-        private fun generateAllOmniCandidates(json: String): List<Pair<String, ByteArray>> {
+        private fun generateStrictCandidates(json: String): List<Pair<String, ByteArray>> {
             val list = mutableListOf<Pair<String, ByteArray>>()
             try {
                 val decoded = if (json.startsWith("{")) json else String(Base64.decode(json, Base64.DEFAULT))
                 val encKeyStr = Regex(""""encrypted_key"\s*:\s*"([^"]+)"""").find(decoded)?.groupValues?.get(1)?.replace("\\/", "/") ?: return list
-                val sources = listOf("Str" to encKeyStr.toByteArray(), "B64" to try { Base64.decode(encKeyStr, Base64.DEFAULT) } catch(e:Exception) { null })
-                val perms = listOf(listOf(0,1,2,3), listOf(0,1,3,2), listOf(0,2,1,3), listOf(0,2,3,1), listOf(0,3,1,2), listOf(0,3,2,1), listOf(1,0,2,3), listOf(1,0,3,2), listOf(1,2,0,3), listOf(1,2,3,0), listOf(1,3,0,2), listOf(1,3,2,0), listOf(2,0,1,3), listOf(2,0,3,1), listOf(2,1,0,3), listOf(2,1,3,0), listOf(2,3,0,1), listOf(2,3,1,0), listOf(3,0,1,2), listOf(3,0,2,1), listOf(3,1,0,2), listOf(3,1,2,0), listOf(3,2,0,1), listOf(3,2,1,0))
+                val source = encKeyStr.toByteArray()
+                val perms = listOf(listOf(0,1,2,3), listOf(3,2,1,0), listOf(0,3,2,1), listOf(1,3,0,2)) // 유력 순열만 먼저 테스트
 
-                for ((sLabel, source) in sources) {
-                    if (source == null) continue
-                    for (gap in 0..5) { // 노이즈 간격 전수 조사
-                        for (startOff in 0..5) { // 시작 오프셋 전수 조사
-                            val segments = mutableListOf<ByteArray>()
-                            for (i in 0..3) {
-                                val pos = startOff + i * (4 + gap)
-                                if (pos + 4 <= source.size) segments.add(source.copyOfRange(pos, pos + 4))
-                            }
-                            if (segments.size == 4) {
-                                for (p in perms) {
-                                    val key = ByteArray(16)
-                                    for (j in 0..3) System.arraycopy(segments[p[j]], 0, key, j * 4, 4)
-                                    list.add("$sLabel-G$gap-O$startOff-P${p.joinToString("")}" to key)
-                                }
+                for (gap in 0..4) {
+                    for (startOff in 0..4) {
+                        val segments = mutableListOf<ByteArray>()
+                        for (i in 0..3) {
+                            val pos = startOff + i * (4 + gap)
+                            if (pos + 4 <= source.size) segments.add(source.copyOfRange(pos, pos + 4))
+                        }
+                        if (segments.size == 4) {
+                            for (p in perms) {
+                                val key = ByteArray(16)
+                                for (j in 0..3) System.arraycopy(segments[p[j]], 0, key, j * 4, 4)
+                                list.add("G$gap-O$startOff-P${p.joinToString("")}" to key)
                             }
                         }
                     }
