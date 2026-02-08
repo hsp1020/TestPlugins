@@ -18,6 +18,8 @@ import java.net.URLDecoder
 import java.net.URLEncoder
 import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
+import javax.crypto.Cipher
+import javax.crypto.spec.SecretKeySpec
 
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -34,7 +36,7 @@ class BcbcRedExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("=== [MovieKing v54] getUrl Start (Raw String Key) ===")
+        println("=== [MovieKing v56] getUrl Start (Extreme Logging) ===")
         
         try {
             val baseHeaders = mutableMapOf(
@@ -60,7 +62,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
             val m3u8Match = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)
                 ?: run {
-                    println("[MovieKing v54] Error: data-m3u8 not found")
+                    println("[MovieKing v56] Error: data-m3u8 not found")
                     return
                 }
 
@@ -74,7 +76,7 @@ class BcbcRedExtractor : ExtractorApi() {
             val chromeVersion = extractChromeVersion(m3u8Url) ?: "124.0.0.0"
             val standardUA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$chromeVersion Mobile Safari/537.36"
             baseHeaders["User-Agent"] = standardUA
-            println("[MovieKing v54] UA: $standardUA")
+            println("[MovieKing v56] UA: $standardUA")
 
             val playlistResponse = app.get(m3u8Url, headers = baseHeaders)
             var m3u8Content = playlistResponse.text
@@ -87,7 +89,9 @@ class BcbcRedExtractor : ExtractorApi() {
                 val keyUrl = keyMatch.groupValues[1]
                 val keyResponse = app.get(keyUrl, headers = baseHeaders)
                 rawKeyJson = keyResponse.text
-                println("[MovieKing v54] Key JSON Fetched")
+                
+                // [핵심] 원본 JSON 로그 출력
+                println("[MovieKing v56] RAW JSON: $rawKeyJson")
             }
 
             if (proxyServer == null || !proxyServer!!.isAlive()) {
@@ -117,7 +121,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
             proxyServer!!.setPlaylist(m3u8Content)
             val localPlaylistUrl = "$proxyBaseUrl/playlist.m3u8"
-            println("[MovieKing v54] Ready: $localPlaylistUrl")
+            println("[MovieKing v56] Ready: $localPlaylistUrl")
 
             callback(
                 newExtractorLink(name, name, localPlaylistUrl, ExtractorLinkType.M3U8) {
@@ -128,7 +132,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
         } catch (e: Exception) {
             e.printStackTrace()
-            println("[MovieKing v54] Error: ${e.message}")
+            println("[MovieKing v56] Error: ${e.message}")
         }
     }
 
@@ -166,7 +170,7 @@ class BcbcRedExtractor : ExtractorApi() {
                             val client = serverSocket!!.accept()
                             handleClient(client)
                         } catch (e: Exception) {
-                            if (isRunning) println("[MovieKing v54] Accept Error: ${e.message}")
+                            if (isRunning) println("[MovieKing v56] Accept Error: ${e.message}")
                         }
                     }
                 }
@@ -211,7 +215,7 @@ class BcbcRedExtractor : ExtractorApi() {
                             output.write(data)
                             output.flush()
                         }
-                        else if (path.contains("/key.bin") && rawKeyJson != null) {
+                        else if (path.contains("/key.bin")) {
                             val dummy = ByteArray(16)
                             val header = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 16\r\nConnection: close\r\n\r\n"
                             output.write(header.toByteArray())
@@ -239,14 +243,10 @@ class BcbcRedExtractor : ExtractorApi() {
                                         var finalOffset = cachedOffset
                                         
                                         if (bytesRead > 0 && finalKey == null && rawKeyJson != null) {
-                                            // [변경] Raw String Key (No Replace)
-                                            val key = generateRawStringKey(rawKeyJson!!)
+                                            // [진단] 키 파싱 상세 로그
+                                            val candidates = generateAllKeysWithLog(rawKeyJson!!)
                                             
-                                            if (key != null) {
-                                                // Key Logging
-                                                val keyHex = key.joinToString("") { "%02X".format(it) }
-                                                println("[MovieKing v54] Generated Key: $keyHex")
-                                                
+                                            for ((name, key) in candidates) {
                                                 val dec = buffer.clone()
                                                 for (i in 0 until bytesRead) {
                                                     dec[i] = (buffer[i].toInt() xor key[i % key.size].toInt()).toByte()
@@ -257,7 +257,7 @@ class BcbcRedExtractor : ExtractorApi() {
                                                     if (dec[i] == 0x47.toByte() && 
                                                         dec[i + 188] == 0x47.toByte() &&
                                                         dec[i + 376] == 0x47.toByte()) {
-                                                        println("[MovieKing v54] MATCH! Offset $i")
+                                                        println("[MovieKing v56] MATCH! $name at $i")
                                                         finalKey = key
                                                         finalOffset = i
                                                         cachedKey = key
@@ -265,6 +265,7 @@ class BcbcRedExtractor : ExtractorApi() {
                                                         break
                                                     }
                                                 }
+                                                if (finalKey != null) break
                                             }
                                         }
 
@@ -293,7 +294,7 @@ class BcbcRedExtractor : ExtractorApi() {
                                                 globalFileOffset += count
                                             }
                                         } else {
-                                            println("[MovieKing v54] Failed. Sending RAW.")
+                                            println("[MovieKing v56] All candidates failed. RAW Fallback.")
                                             var count: Int
                                             while (inputStream.read(buffer).also { count = it } != -1) {
                                                 output.write(buffer, 0, count)
@@ -306,7 +307,7 @@ class BcbcRedExtractor : ExtractorApi() {
                                     }
                                 }
                             } catch (e: Exception) {
-                                println("[MovieKing v54] Stream Error: $e")
+                                println("[MovieKing v56] Stream Error: $e")
                             }
                         } else {
                             output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
@@ -314,47 +315,80 @@ class BcbcRedExtractor : ExtractorApi() {
                     }
                     socket.close()
                 } catch (e: Exception) {
-                    println("[MovieKing v54] Socket Error: $e")
+                    println("[MovieKing v56] Socket Error: $e")
                 }
             }
         }
 
-        private fun generateRawStringKey(jsonText: String): ByteArray? {
+        private fun generateAllKeysWithLog(jsonText: String): List<Pair<String, ByteArray>> {
+            val list = mutableListOf<Pair<String, ByteArray>>()
             try {
+                // 1. JSON Decode
                 val decodedJsonStr = try { String(Base64.decode(jsonText, Base64.DEFAULT)) } catch (e: Exception) { jsonText }
-                val encKeyRegex = """"encrypted_key"\s*:\s*"([^"]+)"""".toRegex()
-                val encKeyB64 = encKeyRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return null
+                println("[MovieKing v56] Decoded JSON: $decodedJsonStr")
                 
-                // [변경] No replace! Use Raw String.
+                val encKeyRegex = """"encrypted_key"\s*:\s*"([^"]+)"""".toRegex()
+                var encKeyB64 = encKeyRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return list
+                println("[MovieKing v56] Extracted EncKey: $encKeyB64")
                 
                 val ruleRegex = """"rule"\s*:\s*(\{.*?\})""".toRegex()
-                val ruleJson = ruleRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return null
+                val ruleJson = ruleRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return list
+                println("[MovieKing v56] Rule JSON: $ruleJson")
                 
                 val permRegex = """"permutation"\s*:\s*\[([\d,]+)\]""".toRegex()
                 val permString = permRegex.find(ruleJson)?.groupValues?.get(1) ?: "0,1,2,3"
                 val permutation = permString.split(",").map { it.trim().toInt() }
+                println("[MovieKing v56] Permutation: $permutation")
 
-                val source = encKeyB64.toByteArray()
-                val segments = mutableListOf<ByteArray>()
-                var offset = 0
-                for (i in 0 until 4) {
-                    if (offset + 4 > source.size) break
-                    segments.add(source.copyOfRange(offset, offset + 4))
-                    offset += 4 + 2
-                }
+                val segSizesRegex = """"segment_sizes"\s*:\s*\[([\d,]+)\]""".toRegex()
+                val segSizesStr = segSizesRegex.find(ruleJson)?.groupValues?.get(1) ?: "4,4,4,4"
+                val segmentSizes = segSizesStr.split(",").map { it.trim().toInt() }
+                println("[MovieKing v56] Segment Sizes: $segmentSizes")
+
+                // Candidate 1: Raw String (No Replace)
+                val k1 = assembleWithLog(encKeyB64.toByteArray(), permutation, segmentSizes, "RawString")
+                list.add("RawString" to k1)
                 
-                if (segments.size < 4) return null
+                // Candidate 2: Replaced String
+                val k2 = assembleWithLog(encKeyB64.replace("\\/", "/").toByteArray(), permutation, segmentSizes, "ReplacedString")
+                list.add("ReplacedString" to k2)
+                
+                // Candidate 3: Base64
+                try {
+                    val b64 = Base64.decode(encKeyB64.replace("\\/", "/"), Base64.DEFAULT)
+                    val k3 = assembleWithLog(b64, permutation, segmentSizes, "Base64")
+                    list.add("Base64" to k3)
+                } catch(e:Exception){}
 
-                val finalKey = ByteArray(16)
-                var finalOffset = 0
-                for (idx in permutation) {
-                    if (idx < segments.size) {
-                        System.arraycopy(segments[idx], 0, finalKey, finalOffset, 4)
-                        finalOffset += 4
-                    }
+            } catch (e: Exception) {
+                println("[MovieKing v56] Key Gen Error: $e")
+            }
+            return list
+        }
+        
+        private fun assembleWithLog(src: ByteArray, perm: List<Int>, sizes: List<Int>, label: String): ByteArray {
+            val segs = mutableListOf<ByteArray>()
+            var off = 0
+            val noise = 2
+            
+            for(size in sizes) {
+                if(off + size > src.size) break
+                segs.add(src.copyOfRange(off, off + size))
+                off += size + noise
+            }
+            
+            val res = ByteArray(16)
+            var roff = 0
+            for(idx in perm) {
+                if (idx < segs.size) {
+                    val s = segs[idx]
+                    System.arraycopy(s, 0, res, roff, s.size)
+                    roff += s.size
                 }
-                return finalKey
-            } catch (e: Exception) { return null }
+            }
+            val hex = res.joinToString("") { "%02X".format(it) }
+            println("[MovieKing v56] $label Key: $hex")
+            return res
         }
     }
 }
