@@ -8,6 +8,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.network.WebViewResolver
+import java.io.File
 import java.net.URI
 
 class BcbcRedExtractor : ExtractorApi() {
@@ -22,7 +23,7 @@ class BcbcRedExtractor : ExtractorApi() {
         callback: (ExtractorLink) -> Unit
     ) {
         try {
-            // 1. WebViewResolver로 플레이어 페이지 로드 (쿠키/세션 생성)
+            // 1. WebViewResolver로 플레이어 페이지 로드
             val playerResponse = app.get(
                 url,
                 referer = referer,
@@ -35,7 +36,6 @@ class BcbcRedExtractor : ExtractorApi() {
                 ?: throw Exception("data-m3u8 not found")
 
             var m3u8Url = m3u8Match.groupValues[1].replace("\\/", "/")
-            // 프로토콜이 없는 경우 처리
             if (m3u8Url.startsWith("//")) {
                 m3u8Url = "https:$m3u8Url"
             } else if (!m3u8Url.startsWith("http")) {
@@ -63,7 +63,7 @@ class BcbcRedExtractor : ExtractorApi() {
             val keyUriRegex = """#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"""".toRegex()
             val keyMatch = keyUriRegex.find(m3u8Content)
 
-            // 6. 키 복호화 및 M3U8 변조 (Data URI 방식)
+            // 6. 키 복호화 및 로컬 M3U8 생성 (File URI 방식)
             if (keyMatch != null) {
                 val keyUrl = keyMatch.groupValues[1]
                 val keyResponse = app.get(keyUrl, headers = headers)
@@ -73,7 +73,7 @@ class BcbcRedExtractor : ExtractorApi() {
                 val actualKeyBytes = decryptKeyFromJson(jsonText)
 
                 if (actualKeyBytes != null) {
-                    // (1) 해독된 키를 Base64로 변환하여 Data URI 생성
+                    // (1) 해독된 키를 Base64로 변환하여 Data URI 생성 (키는 Data URI 사용 가능)
                     val keyBase64 = Base64.encodeToString(actualKeyBytes, Base64.NO_WRAP)
                     val keyDataUri = "data:application/octet-stream;base64,$keyBase64"
 
@@ -83,8 +83,8 @@ class BcbcRedExtractor : ExtractorApi() {
                         keyDataUri               // 교체할 Data URI
                     )
                     
-                    // (3) M3U8 내용 수정: 상대 경로 세그먼트를 절대 경로로 변환 (Data URI 재생 시 필수)
-                    // m3u8Url의 마지막 파일명을 제외한 기본 경로 추출 (예: https://example.com/video/)
+                    // (3) M3U8 내용 수정: 상대 경로 세그먼트를 절대 경로(https://...)로 변환
+                    // 로컬 파일 재생 시 상대 경로는 file://로 인식되므로 반드시 HTTP 절대 경로로 바꿔야 함
                     val baseUrl = m3u8Url.substringBeforeLast("/") + "/"
                     
                     m3u8Content = m3u8Content.lines().joinToString("\n") { line ->
@@ -96,27 +96,34 @@ class BcbcRedExtractor : ExtractorApi() {
                         }
                     }
 
-                    // (4) 수정된 M3U8 전체를 다시 Data URI로 변환하여 재생
-                    val finalM3u8DataUri = "data:application/vnd.apple.mpegurl;base64," + 
-                        Base64.encodeToString(m3u8Content.toByteArray(), Base64.NO_WRAP)
+                    // (4) 수정된 M3U8을 임시 파일로 저장하여 file:// URI 생성
+                    try {
+                        val tempFile = File.createTempFile("movieking_playlist", ".m3u8")
+                        tempFile.writeText(m3u8Content)
+                        val fileUrl = "file://${tempFile.absolutePath}"
 
-                    callback(
-                        newExtractorLink(name, name, finalM3u8DataUri, ExtractorLinkType.M3U8) {
-                            this.referer = url
-                            this.quality = 0
-                            // Data URI를 쓰므로 별도 헤더가 필요 없으나 호환성을 위해 유지
-                            this.headers = headers 
-                        }
-                    )
-                    return // 성공적으로 처리했으므로 종료
+                        callback(
+                            newExtractorLink(name, name, fileUrl, ExtractorLinkType.M3U8) {
+                                this.referer = url
+                                this.quality = 0
+                                // 로컬 파일 재생이지만 세그먼트는 원격이므로 헤더 유지
+                                this.headers = headers 
+                            }
+                        )
+                        return // 성공적으로 처리했으므로 종료
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        // 파일 생성 실패 시 로그 출력 후 Fallback 시도
+                        println("[MovieKing] Temp file creation failed: ${e.message}")
+                    }
                 }
             }
 
-            // 7. 키가 없거나 복호화 실패 시 원본 URL 사용 (Fallback)
+            // 7. 키가 없거나 복호화/파일생성 실패 시 원본 URL 사용 (Fallback)
             callback(
                 newExtractorLink(name, name, m3u8Url, ExtractorLinkType.M3U8) {
                     this.referer = url
-                    this.quality = 0 // Unknown
+                    this.quality = 0 
                     this.headers = headers
                 }
             )
@@ -156,7 +163,6 @@ class BcbcRedExtractor : ExtractorApi() {
             val permutation = permString.split(",").map { it.trim().toInt() }
 
             // 5. 셔플 복구 (Segment Size는 4로 고정된 것으로 보임)
-            // 16바이트를 4개 덩어리(4바이트씩)로 나눔
             val segments = listOf(
                 cleanBytes.copyOfRange(0, 4),
                 cleanBytes.copyOfRange(4, 8),
