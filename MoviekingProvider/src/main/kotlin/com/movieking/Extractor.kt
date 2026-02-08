@@ -34,7 +34,7 @@ class BcbcRedExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("=== [MovieKing v42] getUrl Start (XOR Scanner) ===")
+        println("=== [MovieKing v44] getUrl Start (JSON Fix + XOR Scan) ===")
         
         try {
             val baseHeaders = mutableMapOf(
@@ -60,7 +60,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
             val m3u8Match = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)
                 ?: run {
-                    println("[MovieKing v42] Error: data-m3u8 not found")
+                    println("[MovieKing v44] Error: data-m3u8 not found")
                     return
                 }
 
@@ -74,20 +74,28 @@ class BcbcRedExtractor : ExtractorApi() {
             val chromeVersion = extractChromeVersion(m3u8Url) ?: "124.0.0.0"
             val standardUA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$chromeVersion Mobile Safari/537.36"
             baseHeaders["User-Agent"] = standardUA
-            println("[MovieKing v42] UA: $standardUA")
+            println("[MovieKing v44] UA: $standardUA")
 
             val playlistResponse = app.get(m3u8Url, headers = baseHeaders)
             var m3u8Content = playlistResponse.text
 
             val keyUriRegex = """#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"""".toRegex()
             val keyMatch = keyUriRegex.find(m3u8Content)
-            var rawKeyJson: String? = null
+            var actualKeyBytes: ByteArray? = null
 
             if (keyMatch != null) {
                 val keyUrl = keyMatch.groupValues[1]
                 val keyResponse = app.get(keyUrl, headers = baseHeaders)
-                rawKeyJson = keyResponse.text
-                println("[MovieKing v42] Key JSON Captured.")
+                
+                // [수정] JSON Unescape 처리 추가
+                actualKeyBytes = decryptKeyRobust(keyResponse.text)
+                
+                if (actualKeyBytes != null) {
+                    val keyHex = actualKeyBytes.joinToString("") { "%02X".format(it) }
+                    println("[MovieKing v44] Key: $keyHex")
+                } else {
+                    println("[MovieKing v44] FATAL: Key generation failed.")
+                }
             }
 
             if (proxyServer == null || !proxyServer!!.isAlive()) {
@@ -96,10 +104,10 @@ class BcbcRedExtractor : ExtractorApi() {
                 proxyServer!!.start()
             }
             
-            val port = proxyServer!!.updateSession(baseHeaders, rawKeyJson)
+            val port = proxyServer!!.updateSession(baseHeaders, actualKeyBytes)
             val proxyBaseUrl = "http://127.0.0.1:$port"
 
-            if (keyMatch != null) {
+            if (keyMatch != null && actualKeyBytes != null) {
                 val localKeyUrl = "$proxyBaseUrl/key.bin"
                 m3u8Content = m3u8Content.replace(keyMatch.groupValues[1], localKeyUrl)
             }
@@ -117,7 +125,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
             proxyServer!!.setPlaylist(m3u8Content)
             val localPlaylistUrl = "$proxyBaseUrl/playlist.m3u8"
-            println("[MovieKing v42] Ready: $localPlaylistUrl")
+            println("[MovieKing v44] Ready: $localPlaylistUrl")
 
             callback(
                 newExtractorLink(name, name, localPlaylistUrl, ExtractorLinkType.M3U8) {
@@ -128,7 +136,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
         } catch (e: Exception) {
             e.printStackTrace()
-            println("[MovieKing v42] Error: ${e.message}")
+            println("[MovieKing v44] Error: ${e.message}")
         }
     }
 
@@ -140,20 +148,73 @@ class BcbcRedExtractor : ExtractorApi() {
             uaMatch?.groupValues?.get(1)
         } catch (e: Exception) { null }
     }
+
+    // [v44] JSON Unescape + Base64 Robust + V32 Logic
+    private fun decryptKeyRobust(jsonText: String): ByteArray? {
+        return try {
+            val decodedJsonStr = try { 
+                String(Base64.decode(jsonText, Base64.DEFAULT)) 
+            } catch (e: Exception) { jsonText }
+            
+            val encKeyRegex = """"encrypted_key"\s*:\s*"([^"]+)"""".toRegex()
+            var encKeyB64 = encKeyRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return null
+            
+            // [핵심 수정] JSON 이스케이프 문자(\/) 제거
+            encKeyB64 = encKeyB64.replace("\\/", "/")
+            
+            val ruleRegex = """"rule"\s*:\s*(\{.*?\})""".toRegex()
+            val ruleJson = ruleRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return null
+
+            val encryptedBytes = try {
+                Base64.decode(encKeyB64, Base64.DEFAULT)
+            } catch (e: Exception) {
+                // Fallback for non-standard padding/wrap
+                Base64.decode(encKeyB64, Base64.NO_WRAP)
+            }
+            
+            val segSizesRegex = """"segment_sizes"\s*:\s*\[([\d,]+)\]""".toRegex()
+            val segSizesStr = segSizesRegex.find(ruleJson)?.groupValues?.get(1) ?: "4,4,4,4"
+            val segmentSizes = segSizesStr.split(",").map { it.trim().toInt() }
+            
+            val permRegex = """"permutation"\s*:\s*\[([\d,]+)\]""".toRegex()
+            val permString = permRegex.find(ruleJson)?.groupValues?.get(1) ?: "0,1,2,3"
+            val permutation = permString.split(",").map { it.trim().toInt() }
+
+            val cleanSegments = mutableListOf<ByteArray>()
+            var currentOffset = 0
+            val noiseLen = 2
+            
+            for (size in segmentSizes) {
+                if (currentOffset + size > encryptedBytes.size) break
+                val segment = encryptedBytes.copyOfRange(currentOffset, currentOffset + size)
+                cleanSegments.add(segment)
+                currentOffset += size + noiseLen
+            }
+
+            val finalKey = ByteArray(16)
+            var finalOffset = 0
+            for (idx in permutation) {
+                if (idx < cleanSegments.size) {
+                    val seg = cleanSegments[idx]
+                    System.arraycopy(seg, 0, finalKey, finalOffset, seg.size)
+                    finalOffset += seg.size
+                }
+            }
+            return finalKey
+        } catch (e: Exception) { 
+            println("[MovieKing v44] Key Fail: $e")
+            null 
+        }
+    }
     
-    // --- Proxy Web Server (XOR Scanner) ---
     class ProxyWebServer {
         private var serverSocket: ServerSocket? = null
         private var isRunning = false
         var port: Int = 0
         
         @Volatile private var currentHeaders: Map<String, String> = emptyMap()
-        @Volatile private var rawKeyJson: String? = null
+        @Volatile private var currentKey: ByteArray? = null
         @Volatile private var currentPlaylist: String = ""
-        
-        // 캐싱
-        @Volatile private var cachedKey: ByteArray? = null
-        @Volatile private var cachedOffset: Int = -1
 
         fun isAlive(): Boolean = isRunning && serverSocket != null && !serverSocket!!.isClosed
 
@@ -168,7 +229,7 @@ class BcbcRedExtractor : ExtractorApi() {
                             val client = serverSocket!!.accept()
                             handleClient(client)
                         } catch (e: Exception) {
-                            if (isRunning) println("[MovieKing v42] Accept Error: ${e.message}")
+                            if (isRunning) println("[MovieKing v44] Accept Error: ${e.message}")
                         }
                     }
                 }
@@ -178,11 +239,9 @@ class BcbcRedExtractor : ExtractorApi() {
             }
         }
 
-        fun updateSession(headers: Map<String, String>, json: String?): Int {
+        fun updateSession(headers: Map<String, String>, key: ByteArray?): Int {
             currentHeaders = headers
-            rawKeyJson = json
-            cachedKey = null
-            cachedOffset = -1
+            currentKey = key
             return port
         }
 
@@ -213,7 +272,7 @@ class BcbcRedExtractor : ExtractorApi() {
                             output.write(data)
                             output.flush()
                         }
-                        else if (path.contains("/key.bin")) {
+                        else if (path.contains("/key.bin") && currentKey != null) {
                             val dummy = ByteArray(16)
                             val header = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 16\r\nConnection: close\r\n\r\n"
                             output.write(header.toByteArray())
@@ -230,79 +289,54 @@ class BcbcRedExtractor : ExtractorApi() {
                                     
                                     if (res.isSuccessful) {
                                         val inputStream = BufferedInputStream(res.body.byteStream())
-                                        
-                                        // 8KB 버퍼링 (헤더 탐색용)
                                         val buffer = ByteArray(8192)
-                                        inputStream.mark(8192)
-                                        val bytesRead = inputStream.read(buffer)
-                                        inputStream.reset()
+                                        var bytesRead = inputStream.read(buffer)
                                         
-                                        var foundKey: ByteArray? = null
-                                        var foundOffset = -1
-                                        
-                                        if (bytesRead > 0 && rawKeyJson != null) {
-                                            // 키 후보 생성
-                                            val keys = generateCandidateKeys(rawKeyJson!!)
+                                        if (bytesRead > 0 && currentKey != null) {
+                                            // 1. XOR Decrypt first chunk
+                                            val decryptedBuffer = buffer.clone()
+                                            for (i in 0 until bytesRead) {
+                                                decryptedBuffer[i] = (buffer[i].toInt() xor currentKey!![i % currentKey!!.size].toInt()).toByte()
+                                            }
                                             
-                                            // [핵심] 키별로 XOR 해보면서 0x47 찾기
-                                            scanLoop@ for (key in keys) {
-                                                // 영상 앞부분 2KB 정도만 스캔
-                                                val limit = minOf(bytesRead, 2048)
-                                                for (i in 0 until limit) {
-                                                    // XOR 복호화 시도
-                                                    val decryptedByte = (buffer[i].toInt() xor key[i % key.size].toInt()).toByte()
-                                                    
-                                                    // Sync Byte 발견?
-                                                    if (decryptedByte == 0x47.toByte()) {
-                                                        // 추가 검증 (188바이트 뒤도 0x47인지)
-                                                        if (i + 188 < bytesRead) {
-                                                            val nextByte = (buffer[i + 188].toInt() xor key[(i + 188) % key.size].toInt()).toByte()
-                                                            if (nextByte == 0x47.toByte()) {
-                                                                println("[MovieKing v42] Match! Offset: $i, Key(Hex): ${key.joinToString(""){"%02X".format(it)}}")
-                                                                foundKey = key
-                                                                foundOffset = i
-                                                                break@scanLoop
-                                                            }
-                                                        } else {
-                                                            // 데이터가 짧으면 그냥 첫 발견을 믿음
-                                                            println("[MovieKing v42] Match (Short)! Offset: $i")
-                                                            foundKey = key
-                                                            foundOffset = i
-                                                            break@scanLoop
-                                                        }
+                                            // 2. Scan for 0x47
+                                            var foundOffset = -1
+                                            for (i in 0 until bytesRead) {
+                                                if (decryptedBuffer[i] == 0x47.toByte()) {
+                                                    // Simple validation: check if enough data or next packet is OK
+                                                    foundOffset = i
+                                                    break
+                                                }
+                                            }
+                                            
+                                            if (foundOffset != -1) {
+                                                println("[MovieKing v44] XOR Sync found at $foundOffset")
+                                                val header = "HTTP/1.1 200 OK\r\n" +
+                                                        "Content-Type: video/mp2t\r\n" +
+                                                        "Connection: close\r\n\r\n"
+                                                output.write(header.toByteArray())
+                                                
+                                                // Send valid data from found offset
+                                                output.write(decryptedBuffer, foundOffset, bytesRead - foundOffset)
+                                                
+                                                // 3. Stream remaining data
+                                                // Important: Rolling XOR index must continue from total bytes read
+                                                var totalRead = bytesRead
+                                                
+                                                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                                                    for (i in 0 until bytesRead) {
+                                                        val keyIdx = (totalRead + i) % currentKey!!.size
+                                                        buffer[i] = (buffer[i].toInt() xor currentKey!![keyIdx].toInt()).toByte()
                                                     }
+                                                    output.write(buffer, 0, bytesRead)
+                                                    totalRead += bytesRead
                                                 }
+                                                output.flush()
+                                            } else {
+                                                println("[MovieKing v44] Scan Failed. No Sync Byte.")
+                                                output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
                                             }
-                                        }
-
-                                        if (foundKey != null && foundOffset != -1) {
-                                            val header = "HTTP/1.1 200 OK\r\n" +
-                                                    "Content-Type: video/mp2t\r\n" +
-                                                    "Connection: close\r\n\r\n"
-                                            output.write(header.toByteArray())
-                                            
-                                            // 쓰레기 건너뛰기
-                                            inputStream.skip(foundOffset.toLong())
-                                            
-                                            // 스트리밍 + XOR 복호화
-                                            // 주의: 건너뛰었으므로 XOR 키 인덱스는 0부터 시작하는 게 아니라 foundOffset부터 시작해야 함?
-                                            // 아니면 서버가 쓰레기 포함 전체를 XOR 했나?
-                                            // -> 보통 전체 파일 XOR임. 따라서 Key Index는 (TotalRead + foundOffset) % KeyLen
-                                            
-                                            var count: Int
-                                            var totalRead = foundOffset // 파일의 절대 위치
-                                            
-                                            while (inputStream.read(buffer).also { count = it } != -1) {
-                                                for (i in 0 until count) {
-                                                    val keyIdx = (totalRead + i) % foundKey!!.size
-                                                    buffer[i] = (buffer[i].toInt() xor foundKey!![keyIdx].toInt()).toByte()
-                                                }
-                                                output.write(buffer, 0, count)
-                                                totalRead += count
-                                            }
-                                            output.flush()
                                         } else {
-                                            println("[MovieKing v42] Scan Failed. No Sync Byte found.")
                                             output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
                                         }
                                         inputStream.close()
@@ -311,7 +345,7 @@ class BcbcRedExtractor : ExtractorApi() {
                                     }
                                 }
                             } catch (e: Exception) {
-                                println("[MovieKing v42] Stream Error: $e")
+                                println("[MovieKing v44] Stream Error: $e")
                             }
                         } else {
                             output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
@@ -319,56 +353,9 @@ class BcbcRedExtractor : ExtractorApi() {
                     }
                     socket.close()
                 } catch (e: Exception) {
-                    println("[MovieKing v42] Socket Error: $e")
+                    println("[MovieKing v44] Socket Error: $e")
                 }
             }
-        }
-
-        private fun generateCandidateKeys(jsonText: String): List<ByteArray> {
-            val list = mutableListOf<ByteArray>()
-            try {
-                val decodedJsonStr = try { String(Base64.decode(jsonText, Base64.DEFAULT)) } catch (e: Exception) { jsonText }
-                
-                val encKeyRegex = """"encrypted_key"\s*:\s*"([^"]+)"""".toRegex()
-                val encKeyStr = encKeyRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return list
-                val ruleRegex = """"rule"\s*:\s*(\{.*?\})""".toRegex()
-                val ruleJson = ruleRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return list
-                
-                val permRegex = """"permutation"\s*:\s*\[([\d,]+)\]""".toRegex()
-                val permString = permRegex.find(ruleJson)?.groupValues?.get(1) ?: "0,1,2,3"
-                val permutation = permString.split(",").map { it.trim().toInt() }
-
-                // Candidate A: String Slice (Most likely)
-                list.add(assembleKeyBytes(encKeyStr.toByteArray(), permutation))
-                
-                // Candidate B: Base64 Decode Slice
-                try {
-                    val decodedBytes = Base64.decode(encKeyStr, Base64.DEFAULT)
-                    list.add(assembleKeyBytes(decodedBytes, permutation))
-                } catch (e: Exception) {}
-
-            } catch (e: Exception) {}
-            return list
-        }
-
-        private fun assembleKeyBytes(source: ByteArray, perm: List<Int>): ByteArray {
-            val segments = mutableListOf<ByteArray>()
-            var offset = 0
-            for (i in 0 until 4) {
-                if (offset + 4 > source.size) break
-                segments.add(source.copyOfRange(offset, offset + 4))
-                offset += 4 + 2 // 4 Data + 2 Noise
-            }
-            
-            val finalKey = ByteArray(16)
-            var finalOffset = 0
-            for (idx in perm) {
-                if (idx < segments.size) {
-                    System.arraycopy(segments[idx], 0, finalKey, finalOffset, 4)
-                    finalOffset += 4
-                }
-            }
-            return finalKey
         }
     }
 }
