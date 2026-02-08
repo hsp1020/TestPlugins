@@ -196,7 +196,7 @@ class TVWiki : MainAPI() {
         val castList = doc.select(".slider_act .item .name").map { it.text().trim() }
         
         // [수정] 운영진이 포함된 경우 출연진 정보를 표시하지 않음 (빈 문자열 처리)
-        val castFormatted = if (castList.isNotEmpty() && castList.none { it.contains("운영진") }) {
+        val castFormatted = if (castList.isNotEmpty() && castList.none { it.contains("운영팀") }) {
             "출연: ${castList.joinToString(", ")}"
         } else {
             ""
