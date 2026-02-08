@@ -32,13 +32,19 @@ class BcbcRedExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("=== [MovieKing v4] getUrl Start (Debug Mode) ===")
+        println("=== [MovieKing v5] getUrl Start (Sec-Fetch Fix) ===")
         
         try {
-            // 1. 헤더 설정
+            // 1. 기본 헤더
             val baseHeaders = mutableMapOf(
                 "Referer" to "https://player-v1.bcbc.red/",
-                "Origin" to "https://player-v1.bcbc.red"
+                "Origin" to "https://player-v1.bcbc.red",
+                // [v5 추가] 보안 헤더 (필수)
+                "Sec-Fetch-Dest" to "empty",
+                "Sec-Fetch-Mode" to "cors",
+                "Sec-Fetch-Site" to "same-origin",
+                "Pragma" to "no-cache",
+                "Cache-Control" to "no-cache"
             )
 
             // 2. WebView 요청
@@ -60,7 +66,7 @@ class BcbcRedExtractor : ExtractorApi() {
             // 3. M3U8 추출
             val m3u8Match = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)
                 ?: run {
-                    println("[MovieKing v4] Error: data-m3u8 not found")
+                    println("[MovieKing v5] Error: data-m3u8 not found")
                     return
                 }
 
@@ -70,19 +76,18 @@ class BcbcRedExtractor : ExtractorApi() {
             } else if (!m3u8Url.startsWith("http")) {
                 m3u8Url = "https://$m3u8Url"
             }
-            println("[MovieKing v4] M3U8 URL found: $m3u8Url")
 
             // 4. UA 추출
             val extractedUA = extractUserAgentFromToken(m3u8Url)
-            val targetUA = extractedUA ?: "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+            val targetUA = extractedUA ?: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
             baseHeaders["User-Agent"] = targetUA
-            println("[MovieKing v4] Using UA: $targetUA")
+            println("[MovieKing v5] Target UA: $targetUA")
 
             // 5. M3U8 다운로드
             val m3u8Response = app.get(m3u8Url, headers = baseHeaders)
             var m3u8Content = m3u8Response.text
 
-            // 6. 키 처리 (상세 로그 추가)
+            // 6. 키 처리
             val keyUriRegex = """#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"""".toRegex()
             val keyMatch = keyUriRegex.find(m3u8Content)
             var actualKeyBytes: ByteArray? = null
@@ -90,16 +95,10 @@ class BcbcRedExtractor : ExtractorApi() {
             if (keyMatch != null) {
                 val keyUrl = keyMatch.groupValues[1]
                 val keyResponse = app.get(keyUrl, headers = baseHeaders)
-                println("[MovieKing v4] Key Response Length: ${keyResponse.text.length}")
-                
                 actualKeyBytes = decryptKeyFromJson(keyResponse.text)
-                
                 if (actualKeyBytes != null) {
-                    // 키 검증용 Hex 출력
                     val keyHex = actualKeyBytes.joinToString("") { "%02x".format(it) }
-                    println("[MovieKing v4] Decrypted Key (Hex): $keyHex")
-                } else {
-                    println("[MovieKing v4] Key Decryption FAILED")
+                    println("[MovieKing v5] Key Decrypted: $keyHex")
                 }
             }
 
@@ -110,6 +109,7 @@ class BcbcRedExtractor : ExtractorApi() {
                 proxyServer!!.start()
             }
             
+            // [중요] 업데이트 시 보안 헤더가 포함된 baseHeaders 전달
             val port = proxyServer!!.updateSession(baseHeaders, actualKeyBytes)
             val proxyBaseUrl = "http://127.0.0.1:$port"
 
@@ -133,7 +133,7 @@ class BcbcRedExtractor : ExtractorApi() {
             // 9. 데이터 등록
             proxyServer!!.setPlaylist(m3u8Content)
             val localPlaylistUrl = "$proxyBaseUrl/playlist.m3u8"
-            println("[MovieKing v4] Local Playlist Ready: $localPlaylistUrl")
+            println("[MovieKing v5] Ready: $localPlaylistUrl")
 
             callback(
                 newExtractorLink(name, name, localPlaylistUrl, ExtractorLinkType.M3U8) {
@@ -145,7 +145,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
         } catch (e: Exception) {
             e.printStackTrace()
-            println("[MovieKing v4] Error: ${e.message}")
+            println("[MovieKing v5] Error: ${e.message}")
         }
     }
 
@@ -162,10 +162,6 @@ class BcbcRedExtractor : ExtractorApi() {
     private fun decryptKeyFromJson(jsonText: String): ByteArray? {
         return try {
             val decodedJsonStr = try { String(Base64.decode(jsonText, Base64.DEFAULT)) } catch (e: Exception) { jsonText }
-            
-            // 디버그용: JSON 구조 확인
-            // println("[MovieKing v4] Raw Key JSON: $decodedJsonStr")
-
             val encKeyRegex = """"encrypted_key"\s*:\s*"([^"]+)"""".toRegex()
             val encKeyB64 = encKeyRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return null
             val ruleRegex = """"rule"\s*:\s*(\{.*?\})""".toRegex()
@@ -184,13 +180,10 @@ class BcbcRedExtractor : ExtractorApi() {
                 offset += 4
             }
             resultKey
-        } catch (e: Exception) { 
-            println("[MovieKing v4] Key Decrypt Error: ${e.message}")
-            null 
-        }
+        } catch (e: Exception) { null }
     }
     
-    // --- Proxy Web Server (Debug Enhanced) ---
+    // --- Proxy Web Server (Sec-Fetch Enabled) ---
     class ProxyWebServer {
         private var serverSocket: ServerSocket? = null
         private var isRunning = false
@@ -213,7 +206,7 @@ class BcbcRedExtractor : ExtractorApi() {
                             val client = serverSocket!!.accept()
                             handleClient(client)
                         } catch (e: Exception) {
-                            if (isRunning) println("[MovieKing v4] Accept Error: ${e.message}")
+                            if (isRunning) println("[MovieKing v5] Accept Error: ${e.message}")
                         }
                     }
                 }
@@ -244,14 +237,12 @@ class BcbcRedExtractor : ExtractorApi() {
                     val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
                     val requestLine = reader.readLine() ?: return@thread
                     
-                    // 클라이언트 헤더 읽기 (Range 헤더 확인용)
+                    // Client Headers Reading
                     val clientHeaders = mutableMapOf<String, String>()
                     var line: String?
                     while (reader.readLine().also { line = it } != null && line!!.isNotEmpty()) {
                         val parts = line!!.split(": ", limit = 2)
-                        if (parts.size == 2) {
-                            clientHeaders[parts[0]] = parts[1]
-                        }
+                        if (parts.size == 2) clientHeaders[parts[0]] = parts[1]
                     }
                     val rangeHeader = clientHeaders["Range"]
                     
@@ -277,16 +268,13 @@ class BcbcRedExtractor : ExtractorApi() {
                             val urlParam = path.substringAfter("url=").substringBefore(" ")
                             val targetUrl = java.net.URLDecoder.decode(urlParam, "UTF-8")
                             
-                            println("[MovieKing v4] Proxy Requesting: $targetUrl")
-                            if (rangeHeader != null) println("[MovieKing v4] Client Range: $rangeHeader")
-                            
                             try {
                                 val connection = URL(targetUrl).openConnection() as HttpURLConnection
                                 connection.requestMethod = "GET"
                                 connection.connectTimeout = 15000
                                 connection.readTimeout = 15000
                                 
-                                // 헤더 포워딩
+                                // [핵심] 보안 헤더 + Range 헤더 포함하여 전송
                                 currentHeaders.forEach { (k, v) -> connection.setRequestProperty(k, v) }
                                 if (rangeHeader != null) connection.setRequestProperty("Range", rangeHeader)
 
@@ -294,49 +282,33 @@ class BcbcRedExtractor : ExtractorApi() {
 
                                 val responseCode = connection.responseCode
                                 val contentType = connection.contentType
-                                
-                                // [분석 핵심] 서버 응답 로그
-                                println("[MovieKing v4] Upstream Response: $responseCode ($contentType)")
+                                // println("[MovieKing v5] Upstream: $responseCode ($contentType)")
 
                                 if (responseCode == 200 || responseCode == 206) {
                                     val inputStream = connection.inputStream
                                     
-                                    // [분석 핵심] 데이터 앞부분 찍어보기 (HTML인지 확인)
+                                    val sb = StringBuilder()
+                                    sb.append("HTTP/1.1 $responseCode OK\r\n")
+                                    sb.append("Content-Type: video/mp2t\r\n") // 강제 TS 타입 지정 (HTML 파싱 방지)
+                                    connection.getHeaderField("Content-Range")?.let { sb.append("Content-Range: $it\r\n") }
+                                    connection.getHeaderField("Content-Length")?.let { sb.append("Content-Length: $it\r\n") }
+                                    sb.append("Connection: close\r\n\r\n")
+                                    
+                                    output.write(sb.toString().toByteArray())
+                                    
                                     val buffer = ByteArray(8192)
-                                    val bytesRead = inputStream.read(buffer)
-                                    
-                                    if (bytesRead != -1) {
-                                        // 처음 50바이트를 텍스트로 변환해 로그 출력
-                                        val preview = String(buffer, 0, minOf(bytesRead, 100))
-                                        println("[MovieKing v4] Data Preview: $preview")
-                                        
-                                        // 응답 시작
-                                        val header = "HTTP/1.1 $responseCode OK\r\nContent-Type: video/mp2t\r\nConnection: close\r\n\r\n"
-                                        output.write(header.toByteArray())
-                                        
-                                        // 읽은 첫 버퍼 전송
-                                        output.write(buffer, 0, bytesRead)
-                                        
-                                        // 나머지 전송
-                                        var count: Int
-                                        while (inputStream.read(buffer).also { count = it } != -1) {
-                                            output.write(buffer, 0, count)
-                                        }
-                                    } else {
-                                        // 빈 응답
-                                        println("[MovieKing v4] Empty Response from upstream")
-                                        output.write("HTTP/1.1 204 No Content\r\n\r\n".toByteArray())
+                                    var count: Int
+                                    while (inputStream.read(buffer).also { count = it } != -1) {
+                                        output.write(buffer, 0, count)
                                     }
-                                    
                                     output.flush()
                                     inputStream.close()
                                 } else {
                                     output.write("HTTP/1.1 $responseCode Error\r\n\r\n".toByteArray())
-                                    println("[MovieKing v4] Remote Error: $responseCode")
                                 }
                                 connection.disconnect()
                             } catch (e: Exception) {
-                                println("[MovieKing v4] Stream Error: ${e.message}")
+                                println("[MovieKing v5] Stream Error: ${e.message}")
                             }
                         } else {
                             output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
