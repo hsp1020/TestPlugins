@@ -6,6 +6,24 @@ import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.M3u8Helper
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.json.Json
+
+@Serializable
+data class KeyResponse(
+    val encrypted_key: String,
+    val rule: KeyRule
+)
+
+@Serializable
+data class KeyRule(
+    val segment_sizes: List<Int>,
+    val noise_length: Int,
+    val permutation: List<Int>,
+    val segments_count: Int,
+    val key_length: Int
+)
 
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -58,15 +76,12 @@ class BcbcRedExtractor : ExtractorApi() {
                 "Cookie" to cookieString
             )
 
-            // 🔹 5. M3U8 파일 직접 요청 (디버깅)
-            println("[MovieKing] 4. Testing M3U8 request...")
-            val testResponse = app.get(m3u8Url, headers = headers)
-            println("[MovieKing] M3U8 response code: ${testResponse.code}")
-
-            val m3u8Content = testResponse.text
-            println("[MovieKing] M3U8 content sample:\n${m3u8Content.lines().take(5).joinToString("\n")}")
-
-            // 🔹 6. 키 URI 확인
+            // 🔹 5. M3U8 파일 가져오기
+            println("[MovieKing] 4. Fetching M3U8...")
+            val m3u8Response = app.get(m3u8Url, headers = headers)
+            var m3u8Content = m3u8Response.text
+            
+            // 🔹 6. 키 URI 찾기
             val keyUriRegex = """#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"""".toRegex()
             val keyUriMatch = keyUriRegex.find(m3u8Content)
             
@@ -74,26 +89,55 @@ class BcbcRedExtractor : ExtractorApi() {
                 val keyUri = keyUriMatch.groupValues[1]
                 println("[MovieKing] 5. Found key URI: $keyUri")
                 
-                // 키 직접 요청 테스트
-                println("[MovieKing] 6. Testing key request...")
+                // 🔹 7. 키 응답 가져오기 및 디코딩
+                println("[MovieKing] 6. Fetching and decoding key...")
                 try {
                     val keyResponse = app.get(keyUri, headers = headers)
                     val keyData = keyResponse.body.bytes()
-                    println("[MovieKing] Key response code: ${keyResponse.code}")
-                    println("[MovieKing] Key response size: ${keyData.size} bytes")
                     
                     if (keyData.size == 220) {
-                        println("[MovieKing] WARNING: 220-byte error detected!")
-                        val errorText = String(keyData).take(220)
-                        println("[MovieKing] Error content: $errorText")
+                        println("[MovieKing] ⚠️ 220-byte key response detected")
+                        
+                        // JSON 파싱
+                        val jsonText = String(keyData)
+                        println("[MovieKing] Key JSON: $jsonText")
+                        
+                        val json = Json { ignoreUnknownKeys = true }
+                        val keyResponseObj = json.decodeFromString<KeyResponse>(jsonText)
+                        
+                        // 🔴🔴🔴🔴🔴 핵심: 키 추출 및 변환 🔴🔴🔴🔴🔴
+                        val encryptedKeyBase64 = keyResponseObj.encrypted_key
+                        println("[MovieKing] Encrypted key (Base64): $encryptedKeyBase64")
+                        
+                        // Base64 디코딩
+                        val encryptedKey = Base64.decode(encryptedKeyBase64, Base64.DEFAULT)
+                        println("[MovieKing] Encrypted key bytes: ${encryptedKey.size}")
+                        
+                        // 🔹 실제 AES 키 추출 (규칙에 따른 변환)
+                        val actualKey = extractActualKey(encryptedKey, keyResponseObj.rule)
+                        println("[MovieKing] Actual AES key (hex): ${actualKey.joinToString("") { "%02x".format(it) }}")
+                        println("[MovieKing] Actual AES key (Base64): ${Base64.encodeToString(actualKey, Base64.NO_WRAP)}")
+                        
+                        // 🔹 M3U8 콘텐츠 수정: 키 URI를 실제 키로 대체
+                        val keyLine = "#EXT-X-KEY:METHOD=AES-128,URI=\"$keyUri\""
+                        val newKeyLine = "#EXT-X-KEY:METHOD=AES-128,URI=\"data:text/plain;base64,${Base64.encodeToString(actualKey, Base64.NO_WRAP)}\""
+                        
+                        m3u8Content = m3u8Content.replace(keyLine, newKeyLine)
+                        println("[MovieKing] Replaced key URI with actual key")
+                        
+                        // 🔹 수정된 M3U8을 임시 URL로 제공 (Cloudstream 방식)
+                        // 참고: 실제 구현에서는 메모리나 임시 파일에 저장해야 함
                     }
                 } catch (e: Exception) {
-                    println("[MovieKing] Key request error: ${e.message}")
+                    println("[MovieKing] Key processing error: ${e.message}")
                 }
             }
 
-            // 🔹 7. M3u8Helper로 최종 스트림 생성
-            println("[MovieKing] 7. Generating streams with M3u8Helper...")
+            // 🔹 8. 수정된 M3U8으로 스트림 생성
+            println("[MovieKing] 7. Generating streams...")
+            
+            // M3U8 콘텐츠가 수정되었으면 새 M3U8 URL 필요
+            // 임시로 원본 URL 사용 (테스트용)
             M3u8Helper.generateM3u8(
                 name,
                 m3u8Url,
@@ -110,6 +154,43 @@ class BcbcRedExtractor : ExtractorApi() {
         }
     }
 
+    /** 실제 AES 키 추출 (규칙에 따른 변환) */
+    private fun extractActualKey(encryptedKey: ByteArray, rule: KeyRule): ByteArray {
+        // 🔹 간단한 변환: 노이즈 제거 및 순열 적용
+        // 실제 구현은 서버의 정확한 알고리즘에 따라 달라짐
+        
+        val segmentSizes = rule.segment_sizes
+        val permutation = rule.permutation
+        val noiseLength = rule.noise_length
+        
+        // 1. 노이즈 제거 (앞에서 noise_length 바이트 제거)
+        val keyWithoutNoise = encryptedKey.drop(noiseLength).toByteArray()
+        
+        // 2. 세그먼트로 분할
+        val segments = mutableListOf<ByteArray>()
+        var offset = 0
+        for (size in segmentSizes) {
+            segments.add(keyWithoutNoise.copyOfRange(offset, offset + size))
+            offset += size
+        }
+        
+        // 3. 순열 적용 (원래 순서로 재배열)
+        val reorderedSegments = Array(segments.size) { ByteArray(0) }
+        for ((i, pos) in permutation.withIndex()) {
+            reorderedSegments[pos] = segments[i]
+        }
+        
+        // 4. 병합
+        val result = ByteArray(rule.key_length)
+        var resultOffset = 0
+        for (segment in reorderedSegments) {
+            System.arraycopy(segment, 0, result, resultOffset, segment.size)
+            resultOffset += segment.size
+        }
+        
+        return result
+    }
+
     /** JWT 토큰에서 User-Agent 추출 */
     private fun extractUserAgentFromM3U8Url(m3u8Url: String): String? {
         return try {
@@ -122,22 +203,17 @@ class BcbcRedExtractor : ExtractorApi() {
                     Charsets.UTF_8
                 )
                 
-                println("[MovieKing] JWT payload: $payloadJson")
-                
                 val uaRegex = """"ua"\s*:\s*"([^"]+)"""".toRegex()
                 val uaMatch = uaRegex.find(payloadJson)
                 
                 uaMatch?.groupValues?.get(1)?.let { uaValue ->
                     if (uaValue.startsWith("Chrome(")) {
                         val version = uaValue.removePrefix("Chrome(").removeSuffix(")")
-                        return "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$version Mobile Safari/537.36"
-                    }
-                    return uaValue
+                        "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$version Mobile Safari/537.36"
+                    } else uaValue
                 }
-            }
-            null
+            } else null
         } catch (e: Exception) {
-            println("[MovieKing] UA extraction error: ${e.message}")
             null
         }
     }
