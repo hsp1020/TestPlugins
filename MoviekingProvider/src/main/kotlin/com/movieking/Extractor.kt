@@ -13,11 +13,11 @@ import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
 /**
- * v81: Strict Sync Pre-Solving Engine
+ * v82: Dynamic Path Isolation Mode
  * [수정 사항]
- * 1. Synchronous Prepare: 비동기 제거, 키 조립 완료 후 M3U8 반환 (레이스 컨디션 해결)
- * 2. Guaranteed Keys: 프록시 시작 시점에 이미 정답 후보군 확보 완료
- * 3. Robust IV: Sequence IV 연산 정밀화
+ * 1. 고유 ID 기반 경로: /playlist.m3u8 대신 /ID/playlist.m3u8 사용 (영상별 구분 가능)
+ * 2. v81의 Strict Sync 로직 및 IV 자동 매칭 엔진 유지
+ * 3. 플레이어 캐시 및 로그 가독성 개선
  */
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -29,7 +29,10 @@ class BcbcRedExtractor : ExtractorApi() {
     }
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
-        println("=== [MovieKing v81] getUrl Start (Strict Sync Mode) ===")
+        // [추가] URL에서 고유 ID 추출하여 경로 구분
+        val videoId = Regex("id=(\\d+)").find(url)?.groupValues?.get(1) ?: System.currentTimeMillis().toString()
+        println("=== [MovieKing v82] getUrl Start (ID: $videoId) ===")
+        
         try {
             val baseHeaders = mutableMapOf("Referer" to "https://player-v1.bcbc.red/", "Origin" to "https://player-v1.bcbc.red")
             val playerHtml = app.get(url, headers = baseHeaders).text
@@ -46,23 +49,29 @@ class BcbcRedExtractor : ExtractorApi() {
             val realKeyUrl = keyMatch?.groupValues?.get(1)
             val tagIv = keyMatch?.groupValues?.get(2)
 
-            // [핵심] 비동기 thread 제거. 여기서 키 조립을 '완료'할 때까지 대기함 (약 0.5초)
+            // 키 조립 완료 후 진행 (v81 Strict Sync)
             val candidates = if (realKeyUrl != null) solveKeyCandidatesSync(baseHeaders, realKeyUrl) else emptyList()
             proxyServer!!.updateSession(baseHeaders, tagIv, candidates)
             
             val port = proxyServer!!.port
             var m3u8Content = playlistRes.lines().filterNot { it.contains("#EXT-X-KEY") }.joinToString("\n")
             val m3u8Base = m3u8Url.substringBeforeLast("/") + "/"
+            
+            // 프록시 경로에 videoId 포함
             m3u8Content = m3u8Content.lines().joinToString("\n") { line ->
                 if (line.isNotBlank() && !line.startsWith("#")) {
                     val segmentUrl = if (line.startsWith("http")) line else "$m3u8Base$line"
-                    "http://127.0.0.1:$port/proxy?url=${URLEncoder.encode(segmentUrl, "UTF-8")}"
+                    "http://127.0.0.1:$port/$videoId/proxy?url=${URLEncoder.encode(segmentUrl, "UTF-8")}"
                 } else line
             }
 
             proxyServer!!.setPlaylist(m3u8Content)
-            callback(newExtractorLink(name, name, "http://127.0.0.1:$port/playlist.m3u8", ExtractorLinkType.M3U8) { this.referer = "https://player-v1.bcbc.red/" })
-        } catch (e: Exception) { println("[MovieKing v81] Error: $e") }
+            
+            // [결과] 이제 고정된 이름이 아닌 고유 ID가 포함된 M3U8 주소 반환
+            callback(newExtractorLink(name, name, "http://127.0.0.1:$port/$videoId/playlist.m3u8", ExtractorLinkType.M3U8) { 
+                this.referer = "https://player-v1.bcbc.red/" 
+            })
+        } catch (e: Exception) { println("[MovieKing v82] Error: $e") }
     }
 
     private suspend fun solveKeyCandidatesSync(h: Map<String, String>, kUrl: String): List<ByteArray> {
@@ -128,6 +137,7 @@ class BcbcRedExtractor : ExtractorApi() {
                 val path = line.split(" ")[1]
                 val output = socket.getOutputStream()
 
+                // path.contains()를 사용하므로 ID가 앞에 붙어도 정상 작동함
                 if (path.contains("/playlist.m3u8")) {
                     output.write("HTTP/1.1 200 OK\r\n\r\n".toByteArray() + currentPlaylist.toByteArray())
                 } else if (path.contains("/proxy")) {
@@ -150,7 +160,7 @@ class BcbcRedExtractor : ExtractorApi() {
                     }
                 }
                 output.flush(); socket.close()
-            } catch (e: Exception) { println("[MovieKing v81] Proxy Error: $e") }
+            } catch (e: Exception) { println("[MovieKing v82] Proxy Error: $e") }
         }
 
         private fun findJackpot(data: ByteArray, seq: Long) {
@@ -160,7 +170,7 @@ class BcbcRedExtractor : ExtractorApi() {
                         val decrypted = decryptAes(data.take(8192).toByteArray(), key, getIv(mode, seq))
                         for (off in 0..2048) {
                             if (decrypted[off] == 0x47.toByte() && decrypted[off + 188] == 0x47.toByte()) {
-                                println("[MovieKing v81] JACKPOT! Mode: $mode, Offset: $off")
+                                println("[MovieKing v82] JACKPOT! Mode: $mode, Offset: $off")
                                 confirmedKey = key; confirmedIvMode = mode; confirmedOffset = off
                                 return
                             }
