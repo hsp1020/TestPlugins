@@ -11,7 +11,6 @@ import com.lagradost.cloudstream3.network.WebViewResolver
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.InputStream
-import java.io.BufferedInputStream
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URLDecoder
@@ -34,7 +33,7 @@ class BcbcRedExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("=== [MovieKing v25] getUrl Start (Garbage Trim Fix) ===")
+        println("=== [MovieKing v26] getUrl Start (Safe Skip) ===")
         
         try {
             val baseHeaders = mutableMapOf(
@@ -42,7 +41,7 @@ class BcbcRedExtractor : ExtractorApi() {
                 "Origin" to "https://player-v1.bcbc.red"
             )
 
-            // WebView 요청 (토큰 확보)
+            // WebView 요청
             try {
                 app.get(
                     url,
@@ -53,15 +52,17 @@ class BcbcRedExtractor : ExtractorApi() {
                 app.get(url, headers = baseHeaders)
             }
 
+            // M3U8 다운로드
             val m3u8Response = app.get(url, headers = baseHeaders)
             val playerHtml = m3u8Response.text
             val cookies = m3u8Response.cookies
             val cookieString = cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
             baseHeaders["Cookie"] = cookieString
 
+            // M3U8 파싱
             val m3u8Match = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)
                 ?: run {
-                    println("[MovieKing v25] Error: data-m3u8 not found")
+                    println("[MovieKing v26] Error: data-m3u8 not found")
                     return
                 }
 
@@ -72,10 +73,11 @@ class BcbcRedExtractor : ExtractorApi() {
                 m3u8Url = "https://$m3u8Url"
             }
 
+            // UA 설정
             val chromeVersion = extractChromeVersion(m3u8Url) ?: "124.0.0.0"
             val standardUA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$chromeVersion Mobile Safari/537.36"
             baseHeaders["User-Agent"] = standardUA
-            println("[MovieKing v25] UA: $standardUA")
+            println("[MovieKing v26] UA: $standardUA")
 
             val playlistResponse = app.get(m3u8Url, headers = baseHeaders)
             var m3u8Content = playlistResponse.text
@@ -89,7 +91,7 @@ class BcbcRedExtractor : ExtractorApi() {
                 val keyUrl = keyMatch.groupValues[1]
                 val keyResponse = app.get(keyUrl, headers = baseHeaders)
                 actualKeyBytes = decryptKeyFromJson(keyResponse.text)
-                if (actualKeyBytes != null) println("[MovieKing v25] Key Decrypted.")
+                if (actualKeyBytes != null) println("[MovieKing v26] Key Decrypted.")
             }
 
             // 프록시 시작
@@ -102,7 +104,7 @@ class BcbcRedExtractor : ExtractorApi() {
             val port = proxyServer!!.updateSession(baseHeaders, actualKeyBytes)
             val proxyBaseUrl = "http://127.0.0.1:$port"
 
-            // M3U8 변조 (영상 데이터도 프록시 사용)
+            // M3U8 변조
             if (keyMatch != null && actualKeyBytes != null) {
                 val localKeyUrl = "$proxyBaseUrl/key.bin"
                 m3u8Content = m3u8Content.replace(keyMatch.groupValues[1], localKeyUrl)
@@ -121,7 +123,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
             proxyServer!!.setPlaylist(m3u8Content)
             val localPlaylistUrl = "$proxyBaseUrl/playlist.m3u8"
-            println("[MovieKing v25] Ready: $localPlaylistUrl")
+            println("[MovieKing v26] Ready: $localPlaylistUrl")
 
             callback(
                 newExtractorLink(name, name, localPlaylistUrl, ExtractorLinkType.M3U8) {
@@ -132,7 +134,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
         } catch (e: Exception) {
             e.printStackTrace()
-            println("[MovieKing v25] Error: ${e.message}")
+            println("[MovieKing v26] Error: ${e.message}")
         }
     }
 
@@ -170,7 +172,7 @@ class BcbcRedExtractor : ExtractorApi() {
         } catch (e: Exception) { null }
     }
     
-    // --- Proxy Web Server (Robust Header Trimmer) ---
+    // --- Proxy Web Server (No Mark/Reset, Just Read) ---
     class ProxyWebServer {
         private var serverSocket: ServerSocket? = null
         private var isRunning = false
@@ -193,7 +195,7 @@ class BcbcRedExtractor : ExtractorApi() {
                             val client = serverSocket!!.accept()
                             handleClient(client)
                         } catch (e: Exception) {
-                            if (isRunning) println("[MovieKing v25] Accept Error: ${e.message}")
+                            if (isRunning) println("[MovieKing v26] Accept Error: ${e.message}")
                         }
                     }
                 }
@@ -253,55 +255,57 @@ class BcbcRedExtractor : ExtractorApi() {
                                     val res = app.get(targetUrl, headers = safeHeaders)
                                     
                                     if (res.isSuccessful) {
-                                        // BufferedInputStream으로 감싸서 한 바이트씩 체크하지 않고 덩어리로 처리
-                                        val inputStream = BufferedInputStream(res.body.byteStream())
+                                        val inputStream: InputStream = res.body.byteStream()
                                         
-                                        // [핵심] 0x47 (Sync Byte) 찾을 때까지 버리기
-                                        // 최대 4KB까지만 검색 (무한루프 방지)
-                                        inputStream.mark(4096)
-                                        val tempBuffer = ByteArray(4096)
-                                        val bytesRead = inputStream.read(tempBuffer)
+                                        // [핵심] mark/reset을 쓰지 않고 직접 바이트를 읽으면서 0x47 찾기
+                                        var garbageCount = 0
+                                        val maxGarbage = 4096 // 최대 4KB까지만 검사
+                                        var foundSync = false
+                                        var firstByte = -1
                                         
-                                        var startIndex = -1
-                                        if (bytesRead > 0) {
-                                            for (i in 0 until bytesRead) {
-                                                if (tempBuffer[i] == 0x47.toByte()) {
-                                                    startIndex = i
-                                                    break
-                                                }
+                                        // 한 바이트씩 읽어서 0x47 찾기 (스트림 소모)
+                                        // 효율성은 떨어지지만 안전함. 어차피 쓰레기는 버릴 거니까.
+                                        while (garbageCount < maxGarbage) {
+                                            firstByte = inputStream.read()
+                                            if (firstByte == -1) break
+                                            
+                                            if (firstByte == 0x47) {
+                                                foundSync = true
+                                                break
                                             }
-                                        }
-
-                                        // 스트림 위치 재조정
-                                        inputStream.reset()
-                                        if (startIndex > 0) {
-                                            println("[MovieKing v25] Skipping $startIndex bytes of garbage.")
-                                            inputStream.skip(startIndex.toLong())
-                                        } else if (startIndex == -1) {
-                                             println("[MovieKing v25] Warning: Sync Byte not found in first 4KB.")
-                                             // 못 찾았으면 그냥 처음부터 보냄 (혹시 모르니)
+                                            garbageCount++
                                         }
                                         
-                                        // 응답 헤더 전송
-                                        val header = "HTTP/1.1 200 OK\r\n" +
-                                                "Content-Type: video/mp2t\r\n" +
-                                                "Connection: close\r\n\r\n"
-                                        output.write(header.toByteArray())
-                                        
-                                        // 데이터 스트리밍 (Chunked Transfer)
-                                        val buffer = ByteArray(8192)
-                                        var count: Int
-                                        while (inputStream.read(buffer).also { count = it } != -1) {
-                                            output.write(buffer, 0, count)
+                                        if (foundSync) {
+                                            println("[MovieKing v26] Skipped $garbageCount bytes. Found Sync Byte!")
+                                            
+                                            // 헤더 전송
+                                            val header = "HTTP/1.1 200 OK\r\n" +
+                                                    "Content-Type: video/mp2t\r\n" +
+                                                    "Connection: close\r\n\r\n"
+                                            output.write(header.toByteArray())
+                                            
+                                            // 찾은 0x47 바이트를 먼저 씀
+                                            output.write(0x47)
+                                            
+                                            // 나머지 데이터 덩어리로 스트리밍
+                                            val buffer = ByteArray(8192)
+                                            var count: Int
+                                            while (inputStream.read(buffer).also { count = it } != -1) {
+                                                output.write(buffer, 0, count)
+                                            }
+                                            output.flush()
+                                        } else {
+                                            println("[MovieKing v26] Error: Sync Byte not found in first $maxGarbage bytes.")
+                                            output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
                                         }
-                                        output.flush()
                                         inputStream.close()
                                     } else {
                                         output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
                                     }
                                 }
                             } catch (e: Exception) {
-                                println("[MovieKing v25] Stream Error: $e")
+                                println("[MovieKing v26] Stream Error: $e")
                             }
                         } else {
                             output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
@@ -309,7 +313,7 @@ class BcbcRedExtractor : ExtractorApi() {
                     }
                     socket.close()
                 } catch (e: Exception) {
-                    println("[MovieKing v25] Socket Error: $e")
+                    println("[MovieKing v26] Socket Error: $e")
                 }
             }
         }
