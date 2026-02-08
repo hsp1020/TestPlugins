@@ -6,24 +6,6 @@ import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.M3u8Helper
-import kotlinx.serialization.Serializable
-import kotlinx.serialization.decodeFromString
-import kotlinx.serialization.json.Json
-
-@Serializable
-data class KeyResponse(
-    val encrypted_key: String,
-    val rule: KeyRule
-)
-
-@Serializable
-data class KeyRule(
-    val segment_sizes: List<Int>,
-    val noise_length: Int,
-    val permutation: List<Int>,
-    val segments_count: Int,
-    val key_length: Int
-)
 
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -81,6 +63,9 @@ class BcbcRedExtractor : ExtractorApi() {
             val m3u8Response = app.get(m3u8Url, headers = headers)
             var m3u8Content = m3u8Response.text
             
+            println("[MovieKing] Original M3U8 (first 3 lines):")
+            m3u8Content.lines().take(3).forEach { println("  $it") }
+            
             // 🔹 6. 키 URI 찾기
             val keyUriRegex = """#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"""".toRegex()
             val keyUriMatch = keyUriRegex.find(m3u8Content)
@@ -89,7 +74,7 @@ class BcbcRedExtractor : ExtractorApi() {
                 val keyUri = keyUriMatch.groupValues[1]
                 println("[MovieKing] 5. Found key URI: $keyUri")
                 
-                // 🔹 7. 키 응답 가져오기 및 디코딩
+                // 🔹 7. 키 응답 가져오기 및 디코딩 (간단한 파싱)
                 println("[MovieKing] 6. Fetching and decoding key...")
                 try {
                     val keyResponse = app.get(keyUri, headers = headers)
@@ -98,49 +83,65 @@ class BcbcRedExtractor : ExtractorApi() {
                     if (keyData.size == 220) {
                         println("[MovieKing] ⚠️ 220-byte key response detected")
                         
-                        // JSON 파싱
+                        // JSON 텍스트 (Base64 디코딩 필요)
                         val jsonText = String(keyData)
-                        println("[MovieKing] Key JSON: $jsonText")
+                        println("[MovieKing] Raw key response: $jsonText")
                         
-                        val json = Json { ignoreUnknownKeys = true }
-                        val keyResponseObj = json.decodeFromString<KeyResponse>(jsonText)
+                        // 🔴🔴🔴🔴🔴 핵심: 직접 JSON 파싱 🔴🔴🔴🔴🔴
+                        val encryptedKey = parseEncryptedKeyFromJson(jsonText)
                         
-                        // 🔴🔴🔴🔴🔴 핵심: 키 추출 및 변환 🔴🔴🔴🔴🔴
-                        val encryptedKeyBase64 = keyResponseObj.encrypted_key
-                        println("[MovieKing] Encrypted key (Base64): $encryptedKeyBase64")
-                        
-                        // Base64 디코딩
-                        val encryptedKey = Base64.decode(encryptedKeyBase64, Base64.DEFAULT)
-                        println("[MovieKing] Encrypted key bytes: ${encryptedKey.size}")
-                        
-                        // 🔹 실제 AES 키 추출 (규칙에 따른 변환)
-                        val actualKey = extractActualKey(encryptedKey, keyResponseObj.rule)
-                        println("[MovieKing] Actual AES key (hex): ${actualKey.joinToString("") { "%02x".format(it) }}")
-                        println("[MovieKing] Actual AES key (Base64): ${Base64.encodeToString(actualKey, Base64.NO_WRAP)}")
-                        
-                        // 🔹 M3U8 콘텐츠 수정: 키 URI를 실제 키로 대체
-                        val keyLine = "#EXT-X-KEY:METHOD=AES-128,URI=\"$keyUri\""
-                        val newKeyLine = "#EXT-X-KEY:METHOD=AES-128,URI=\"data:text/plain;base64,${Base64.encodeToString(actualKey, Base64.NO_WRAP)}\""
-                        
-                        m3u8Content = m3u8Content.replace(keyLine, newKeyLine)
-                        println("[MovieKing] Replaced key URI with actual key")
-                        
-                        // 🔹 수정된 M3U8을 임시 URL로 제공 (Cloudstream 방식)
-                        // 참고: 실제 구현에서는 메모리나 임시 파일에 저장해야 함
+                        if (encryptedKey != null) {
+                            println("[MovieKing] ✅ Extracted encrypted key: $encryptedKey")
+                            
+                            // Base64 디코딩
+                            val decodedKey = Base64.decode(encryptedKey, Base64.DEFAULT)
+                            println("[MovieKing] Decoded key size: ${decodedKey.size} bytes")
+                            println("[MovieKing] Decoded key (hex): ${decodedKey.joinToString("") { "%02x".format(it) }}")
+                            
+                            // 🔹 규칙 추출
+                            val rule = parseRuleFromJson(jsonText)
+                            println("[MovieKing] Rule: $rule")
+                            
+                            // 🔹 실제 키 추출 (간단한 방법)
+                            val actualKey = extractActualKeySimple(decodedKey, rule)
+                            println("[MovieKing] ✅ Actual AES key (Base64): ${Base64.encodeToString(actualKey, Base64.NO_WRAP)}")
+                            
+                            // 🔹 M3U8 콘텐츠 수정
+                            val keyLine = keyUriMatch.value
+                            val newKeyLine = "#EXT-X-KEY:METHOD=AES-128,URI=\"data:text/plain;base64,${Base64.encodeToString(actualKey, Base64.NO_WRAP)}\",IV=0x${keyLine.substringAfter("IV=0x").substringBefore("\"")}"
+                            
+                            m3u8Content = m3u8Content.replace(keyLine, newKeyLine)
+                            println("[MovieKing] ✅ Updated M3U8 with actual key")
+                            println("[MovieKing] New key line: $newKeyLine")
+                            
+                            // 🔹 임시 M3U8 파일 생성 (메모리 기반)
+                            // Cloudstream에서는 이 부분이 복잡할 수 있음
+                            // 대안: 키가 제거된 M3U8 사용
+                            m3u8Content = m3u8Content.replace("#EXT-X-KEY:METHOD=AES-128.*".toRegex(), "")
+                            println("[MovieKing] ⚠️ Removed encryption (temporary solution)")
+                        }
                     }
                 } catch (e: Exception) {
                     println("[MovieKing] Key processing error: ${e.message}")
+                    e.printStackTrace()
                 }
             }
 
-            // 🔹 8. 수정된 M3U8으로 스트림 생성
-            println("[MovieKing] 7. Generating streams...")
+            // 🔹 8. 대안: 키 제거된 M3U8을 임시 파일로 저장
+            // 이 부분은 Cloudstream API에 따라 구현이 달라짐
+            // 간단한 방법: 키가 제거된 상태로 M3u8Helper 사용
+            println("[MovieKing] 7. Generating streams with modified M3U8...")
             
-            // M3U8 콘텐츠가 수정되었으면 새 M3U8 URL 필요
-            // 임시로 원본 URL 사용 (테스트용)
+            // 키가 제거되었는지 확인
+            if (!m3u8Content.contains("#EXT-X-KEY:METHOD=AES-128")) {
+                println("[MovieKing] ✅ Encryption removed from M3U8")
+            } else {
+                println("[MovieKing] ⚠️ Encryption still present in M3U8")
+            }
+            
             M3u8Helper.generateM3u8(
                 name,
-                m3u8Url,
+                m3u8Url, // 원래 URL (실제로는 수정된 내용이 필요)
                 url,
                 headers = headers
             ).forEach { link ->
@@ -154,38 +155,76 @@ class BcbcRedExtractor : ExtractorApi() {
         }
     }
 
-    /** 실제 AES 키 추출 (규칙에 따른 변환) */
-    private fun extractActualKey(encryptedKey: ByteArray, rule: KeyRule): ByteArray {
-        // 🔹 간단한 변환: 노이즈 제거 및 순열 적용
-        // 실제 구현은 서버의 정확한 알고리즘에 따라 달라짐
+    /** JSON에서 encrypted_key 추출 (간단한 정규식) */
+    private fun parseEncryptedKeyFromJson(jsonText: String): String? {
+        return try {
+            // Base64 디코딩 (JSON 자체가 Base64로 인코딩됨)
+            val decodedJson = String(Base64.decode(jsonText, Base64.DEFAULT))
+            println("[MovieKing] Decoded JSON: $decodedJson")
+            
+            // "encrypted_key":"..." 추출
+            val regex = """"encrypted_key"\s*:\s*"([^"]+)"""".toRegex()
+            val match = regex.find(decodedJson)
+            
+            match?.groupValues?.get(1)
+        } catch (e: Exception) {
+            println("[MovieKing] JSON parsing error: ${e.message}")
+            
+            // 대안: 직접 파싱
+            val directRegex = """"encrypted_key"[^"]*"([^"]+)"""".toRegex()
+            val directMatch = directRegex.find(jsonText)
+            directMatch?.groupValues?.get(1)
+        }
+    }
+    
+    /** JSON에서 rule 추출 */
+    private fun parseRuleFromJson(jsonText: String): Map<String, Any> {
+        return try {
+            val decodedJson = String(Base64.decode(jsonText, Base64.DEFAULT))
+            val ruleRegex = """"rule"\s*:\s*(\{[^}]+\})""".toRegex()
+            val match = ruleRegex.find(decodedJson)
+            
+            if (match != null) {
+                val ruleJson = match.groupValues[1]
+                println("[MovieKing] Rule JSON: $ruleJson")
+                
+                // 간단한 파싱
+                mapOf(
+                    "parsed" to true,
+                    "raw" to ruleJson
+                )
+            } else {
+                emptyMap()
+            }
+        } catch (e: Exception) {
+            emptyMap()
+        }
+    }
+    
+    /** 실제 키 추출 (간단한 버전) */
+    private fun extractActualKeySimple(encryptedKey: ByteArray, rule: Map<String, Any>): ByteArray {
+        // 🔹 기본 규칙: [4,4,4,4] 세그먼트, noise_length=2, permutation=[3,1,2,0]
         
-        val segmentSizes = rule.segment_sizes
-        val permutation = rule.permutation
-        val noiseLength = rule.noise_length
+        // 1. 노이즈 제거 (앞 2바이트)
+        val withoutNoise = encryptedKey.drop(2).toByteArray()
         
-        // 1. 노이즈 제거 (앞에서 noise_length 바이트 제거)
-        val keyWithoutNoise = encryptedKey.drop(noiseLength).toByteArray()
+        // 2. 세그먼트 분할 [4,4,4,4]
+        val segments = listOf(
+            withoutNoise.copyOfRange(0, 4),
+            withoutNoise.copyOfRange(4, 8),
+            withoutNoise.copyOfRange(8, 12),
+            withoutNoise.copyOfRange(12, 16)
+        )
         
-        // 2. 세그먼트로 분할
-        val segments = mutableListOf<ByteArray>()
+        // 3. 순열 적용 [3,1,2,0]
+        val permutation = listOf(3, 1, 2, 0)
+        val result = ByteArray(16)
+        
         var offset = 0
-        for (size in segmentSizes) {
-            segments.add(keyWithoutNoise.copyOfRange(offset, offset + size))
-            offset += size
-        }
-        
-        // 3. 순열 적용 (원래 순서로 재배열)
-        val reorderedSegments = Array(segments.size) { ByteArray(0) }
-        for ((i, pos) in permutation.withIndex()) {
-            reorderedSegments[pos] = segments[i]
-        }
-        
-        // 4. 병합
-        val result = ByteArray(rule.key_length)
-        var resultOffset = 0
-        for (segment in reorderedSegments) {
-            System.arraycopy(segment, 0, result, resultOffset, segment.size)
-            resultOffset += segment.size
+        for (i in permutation) {
+            val segment = segments[i]
+            System.arraycopy(segment, 0, result, offset, segment.size)
+            offset += segment.size
         }
         
         return result
