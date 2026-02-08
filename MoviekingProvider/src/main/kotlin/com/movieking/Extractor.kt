@@ -89,7 +89,7 @@ class BcbcRedExtractor : ExtractorApi() {
                 val keyUrl = keyMatch.groupValues[1]
                 val keyResponse = app.get(keyUrl, headers = baseHeaders)
                 
-                // [검증된 로직] 문자열 기반 키 생성
+                // [검증 완료] 문자열 조작으로 키 생성
                 actualKeyBytes = generateKeyFromString(keyResponse.text)
                 
                 if (actualKeyBytes != null) {
@@ -149,7 +149,6 @@ class BcbcRedExtractor : ExtractorApi() {
         } catch (e: Exception) { null }
     }
 
-    // [검증된] 문자열 조작을 통한 키 생성
     private fun generateKeyFromString(jsonText: String): ByteArray? {
         return try {
             val decodedJsonStr = try { String(Base64.decode(jsonText, Base64.DEFAULT)) } catch (e: Exception) { jsonText }
@@ -190,7 +189,6 @@ class BcbcRedExtractor : ExtractorApi() {
         } catch (e: Exception) { null }
     }
     
-    // --- Proxy Web Server (AES-ECB Decryptor) ---
     class ProxyWebServer {
         private var serverSocket: ServerSocket? = null
         private var isRunning = false
@@ -274,7 +272,7 @@ class BcbcRedExtractor : ExtractorApi() {
                                     if (res.isSuccessful) {
                                         val inputStream = BufferedInputStream(res.body.byteStream())
                                         
-                                        // [핵심] AES-ECB 복호화 준비
+                                        // [핵심] AES-ECB 복호화 적용
                                         val keySpec = if (currentKey != null) SecretKeySpec(currentKey!!, "AES") else null
                                         val cipher = if (keySpec != null) {
                                             Cipher.getInstance("AES/ECB/NoPadding").apply {
@@ -287,18 +285,15 @@ class BcbcRedExtractor : ExtractorApi() {
                                                 "Connection: close\r\n\r\n"
                                         output.write(header.toByteArray())
                                         
-                                        // 16바이트(AES 블록 크기) 단위로 읽어서 복호화
-                                        val buffer = ByteArray(8192) // 16의 배수여야 함
+                                        val buffer = ByteArray(8192) // 16의 배수
                                         var count: Int
                                         while (inputStream.read(buffer).also { count = it } != -1) {
                                             if (cipher != null) {
-                                                // 패딩이 안 맞을 수 있으므로 count를 16의 배수로 맞춰서 처리
                                                 val procLen = (count / 16) * 16
                                                 if (procLen > 0) {
                                                     val decrypted = cipher.doFinal(buffer, 0, procLen)
                                                     output.write(decrypted)
                                                 }
-                                                // 남은 자투리(있으면 안 되지만)는 그냥 씀
                                                 if (count > procLen) {
                                                     output.write(buffer, procLen, count - procLen)
                                                 }
