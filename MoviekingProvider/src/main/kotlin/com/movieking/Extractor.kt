@@ -11,12 +11,14 @@ import com.lagradost.cloudstream3.network.WebViewResolver
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.InputStream
+import java.io.BufferedInputStream
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URLDecoder
 import java.net.URLEncoder
 import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
+import org.json.JSONObject // JSON 파싱을 위해 추가
 
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -33,7 +35,7 @@ class BcbcRedExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("=== [MovieKing v31] getUrl Start (Key Logic Audit) ===")
+        println("=== [MovieKing v32] getUrl Start (Correct Key Logic) ===")
         
         try {
             val baseHeaders = mutableMapOf(
@@ -59,7 +61,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
             val m3u8Match = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)
                 ?: run {
-                    println("[MovieKing v31] Error: data-m3u8 not found")
+                    println("[MovieKing v32] Error: data-m3u8 not found")
                     return
                 }
 
@@ -73,12 +75,11 @@ class BcbcRedExtractor : ExtractorApi() {
             val chromeVersion = extractChromeVersion(m3u8Url) ?: "124.0.0.0"
             val standardUA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$chromeVersion Mobile Safari/537.36"
             baseHeaders["User-Agent"] = standardUA
-            println("[MovieKing v31] UA: $standardUA")
+            println("[MovieKing v32] UA: $standardUA")
 
             val playlistResponse = app.get(m3u8Url, headers = baseHeaders)
             var m3u8Content = playlistResponse.text
 
-            // 키 처리 및 검증
             val keyUriRegex = """#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"""".toRegex()
             val keyMatch = keyUriRegex.find(m3u8Content)
             var actualKeyBytes: ByteArray? = null
@@ -87,17 +88,14 @@ class BcbcRedExtractor : ExtractorApi() {
                 val keyUrl = keyMatch.groupValues[1]
                 val keyResponse = app.get(keyUrl, headers = baseHeaders)
                 
-                // [팩트 체크 1] 원본 JSON 출력
-                println("[MovieKing v31] Raw Key JSON: ${keyResponse.text}")
-                
-                // 디코딩 과정 로그 출력하며 실행
-                actualKeyBytes = decryptKeyFromJsonDebug(keyResponse.text)
+                // [핵심] 수정된 키 복호화 로직 적용
+                actualKeyBytes = decryptKeyFromJsonCorrect(keyResponse.text)
                 
                 if (actualKeyBytes != null) {
                     val hexKey = actualKeyBytes.joinToString("") { "%02X".format(it) }
-                    println("[MovieKing v31] Final Key (Hex): $hexKey")
+                    println("[MovieKing v32] Correct Key (Hex): $hexKey")
                 } else {
-                    println("[MovieKing v31] Key Decryption Failed!")
+                    println("[MovieKing v32] Key Decryption Failed!")
                 }
             }
 
@@ -115,7 +113,6 @@ class BcbcRedExtractor : ExtractorApi() {
                 m3u8Content = m3u8Content.replace(keyMatch.groupValues[1], localKeyUrl)
             }
 
-            // v29의 Pass-Through 방식 유지 (키가 맞으면 이게 정답일 확률 높음)
             val m3u8Base = m3u8Url.substringBeforeLast("/") + "/"
             m3u8Content = m3u8Content.lines().joinToString("\n") { line ->
                 if (line.isNotBlank() && !line.startsWith("#")) {
@@ -129,7 +126,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
             proxyServer!!.setPlaylist(m3u8Content)
             val localPlaylistUrl = "$proxyBaseUrl/playlist.m3u8"
-            println("[MovieKing v31] Ready: $localPlaylistUrl")
+            println("[MovieKing v32] Ready: $localPlaylistUrl")
 
             callback(
                 newExtractorLink(name, name, localPlaylistUrl, ExtractorLinkType.M3U8) {
@@ -140,7 +137,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
         } catch (e: Exception) {
             e.printStackTrace()
-            println("[MovieKing v31] Error: ${e.message}")
+            println("[MovieKing v32] Error: ${e.message}")
         }
     }
 
@@ -153,74 +150,68 @@ class BcbcRedExtractor : ExtractorApi() {
         } catch (e: Exception) { null }
     }
 
-    // [수정] 디버깅용 키 해독 함수
-    private fun decryptKeyFromJsonDebug(jsonText: String): ByteArray? {
+    // [v32 핵심] 올바른 키 복호화 로직 (Segment + Noise 처리)
+    private fun decryptKeyFromJsonCorrect(jsonText: String): ByteArray? {
         return try {
             val decodedJsonStr = try { 
                 String(Base64.decode(jsonText, Base64.DEFAULT)) 
-            } catch (e: Exception) { 
-                println("[MovieKing v31] Not Base64 encoded."); jsonText 
-            }
-            // println("[MovieKing v31] Decoded JSON: $decodedJsonStr") // 보안상 생략 가능
+            } catch (e: Exception) { jsonText }
 
+            // JSON 파싱 (정규식 사용)
             val encKeyRegex = """"encrypted_key"\s*:\s*"([^"]+)"""".toRegex()
-            val encKeyB64 = encKeyRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: run {
-                println("[MovieKing v31] Key Audit: encrypted_key not found")
-                return null
-            }
+            val encKeyB64 = encKeyRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return null
             
             val ruleRegex = """"rule"\s*:\s*(\{.*?\})""".toRegex()
-            val ruleJson = ruleRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: run {
-                println("[MovieKing v31] Key Audit: rule not found")
-                return null
-            }
+            val ruleJson = ruleRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return null
 
-            val encryptedBytes = Base64.decode(encKeyB64, Base64.DEFAULT)
-            println("[MovieKing v31] Key Audit: Encrypted Bytes Size = ${encryptedBytes.size}")
+            val encryptedBytes = Base64.decode(encKeyB64, Base64.DEFAULT) // 24 bytes
             
-            // [의심 구간] 18바이트가 아니면 drop(2)는 틀린 것임
-            val cleanBytes = if (encryptedBytes.size == 18) {
-                println("[MovieKing v31] Key Audit: Size is 18, applying drop(2)")
-                encryptedBytes.drop(2).toByteArray()
-            } else {
-                println("[MovieKing v31] Key Audit: Size is ${encryptedBytes.size}, SKIPPING drop(2) (Potential Fix)")
-                encryptedBytes
-            }
-
+            // 룰 파싱
+            val noiseLenRegex = """"noise_length"\s*:\s*(\d+)""".toRegex()
+            val noiseLen = noiseLenRegex.find(ruleJson)?.groupValues?.get(1)?.toInt() ?: 0 // 2
+            
+            val segSizesRegex = """"segment_sizes"\s*:\s*\[([\d,]+)\]""".toRegex()
+            val segSizesStr = segSizesRegex.find(ruleJson)?.groupValues?.get(1) ?: "4,4,4,4"
+            val segmentSizes = segSizesStr.split(",").map { it.trim().toInt() } // [4,4,4,4]
+            
             val permRegex = """"permutation"\s*:\s*\[([\d,]+)\]""".toRegex()
             val permString = permRegex.find(ruleJson)?.groupValues?.get(1) ?: "0,1,2,3"
-            println("[MovieKing v31] Key Audit: Permutation = [$permString]")
+            val permutation = permString.split(",").map { it.trim().toInt() } // [3,1,2,0]
+
+            // [로직 수정] 노이즈 제거 및 세그먼트 추출
+            // 구조: [Seg1(4)][Noise(2)] [Seg2(4)][Noise(2)] ...
+            val cleanSegments = mutableListOf<ByteArray>()
+            var currentOffset = 0
             
-            val permutation = permString.split(",").map { it.trim().toInt() }
-            
-            if (cleanBytes.size != 16) {
-                println("[MovieKing v31] Key Audit: ERROR! Clean bytes size is ${cleanBytes.size}, expected 16.")
-                // 16바이트가 아니면 강제로 16으로 맞추거나 에러 처리
-                if (cleanBytes.size > 16) return cleanBytes.copyOfRange(0, 16)
-                return null 
+            for (size in segmentSizes) {
+                // 세그먼트 추출
+                if (currentOffset + size > encryptedBytes.size) break
+                val segment = encryptedBytes.copyOfRange(currentOffset, currentOffset + size)
+                cleanSegments.add(segment)
+                
+                // 노이즈 건너뛰기
+                currentOffset += size + noiseLen
             }
-            
-            val segments = listOf(
-                cleanBytes.copyOfRange(0, 4), 
-                cleanBytes.copyOfRange(4, 8), 
-                cleanBytes.copyOfRange(8, 12), 
-                cleanBytes.copyOfRange(12, 16)
-            )
-            val resultKey = ByteArray(16)
-            var offset = 0
+
+            // 재조립 (Permutation 적용)
+            val finalKey = ByteArray(16)
+            var finalOffset = 0
             for (idx in permutation) {
-                val seg = segments[idx]
-                System.arraycopy(seg, 0, resultKey, offset, 4)
-                offset += 4
+                if (idx < cleanSegments.size) {
+                    val seg = cleanSegments[idx]
+                    System.arraycopy(seg, 0, finalKey, finalOffset, seg.size)
+                    finalOffset += seg.size
+                }
             }
-            return resultKey
+            
+            return finalKey
         } catch (e: Exception) { 
-            println("[MovieKing v31] Key Audit Exception: $e")
+            println("[MovieKing v32] Key Decrypt Error: $e")
             null 
         }
     }
     
-    // --- Proxy Web Server (Pass-Through Mode) ---
+    // --- Proxy Web Server (Pass-Through) ---
     class ProxyWebServer {
         private var serverSocket: ServerSocket? = null
         private var isRunning = false
@@ -243,7 +234,7 @@ class BcbcRedExtractor : ExtractorApi() {
                             val client = serverSocket!!.accept()
                             handleClient(client)
                         } catch (e: Exception) {
-                            if (isRunning) println("[MovieKing v31] Accept Error: ${e.message}")
+                            if (isRunning) println("[MovieKing v32] Accept Error: ${e.message}")
                         }
                     }
                 }
@@ -303,9 +294,9 @@ class BcbcRedExtractor : ExtractorApi() {
                                     val res = app.get(targetUrl, headers = safeHeaders)
                                     
                                     if (res.isSuccessful) {
-                                        val inputStream: InputStream = res.body.byteStream()
+                                        // v29 방식 유지: 무가공 전송 + Content-Type 교정
+                                        val inputStream = res.body.byteStream()
                                         
-                                        // v29와 동일하게 Pass-Through + Content-Type 강제
                                         val header = "HTTP/1.1 200 OK\r\n" +
                                                 "Content-Type: video/mp2t\r\n" +
                                                 "Connection: close\r\n\r\n"
@@ -323,7 +314,7 @@ class BcbcRedExtractor : ExtractorApi() {
                                     }
                                 }
                             } catch (e: Exception) {
-                                println("[MovieKing v31] Stream Error: $e")
+                                println("[MovieKing v32] Stream Error: $e")
                             }
                         } else {
                             output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
@@ -331,7 +322,7 @@ class BcbcRedExtractor : ExtractorApi() {
                     }
                     socket.close()
                 } catch (e: Exception) {
-                    println("[MovieKing v31] Socket Error: $e")
+                    println("[MovieKing v32] Socket Error: $e")
                 }
             }
         }
