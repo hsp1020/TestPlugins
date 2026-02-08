@@ -23,7 +23,6 @@ class BcbcRedExtractor : ExtractorApi() {
     ) {
         try {
             // 1. 페이지 로드 (타임아웃 방지 로직 추가)
-            // WebViewResolver가 실패하거나 타임아웃되면 일반 요청으로 시도
             val playerResponse = try {
                 app.get(
                     url,
@@ -31,7 +30,6 @@ class BcbcRedExtractor : ExtractorApi() {
                     interceptor = WebViewResolver(Regex("""player-v1\.bcbc\.red"""))
                 )
             } catch (e: Exception) {
-                // WebView 실패 시 로그 찍고 일반 요청 시도
                 println("[MovieKing] WebView timed out, trying normal request...")
                 app.get(url, referer = referer)
             }
@@ -50,14 +48,13 @@ class BcbcRedExtractor : ExtractorApi() {
                 m3u8Url = "https://$m3u8Url"
             }
 
-            // 3. User-Agent 및 헤더 설정
-            // 토큰에 박힌 UA가 있다면 그것을 최우선으로 사용 (서버 검증 통과용)
+            // 3. User-Agent 추출 (토큰에 박힌 값 사용)
             val userAgent = extractUserAgentFromM3U8Url(m3u8Url)
                 ?: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
             
             val cookieString = cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
             
-            // 4. 헤더 맵 구성 (Referer는 플레이어 도메인으로 고정)
+            // 4. 헤더 설정
             val headers = mutableMapOf(
                 "User-Agent" to userAgent,
                 "Referer" to "https://player-v1.bcbc.red/",
@@ -75,17 +72,16 @@ class BcbcRedExtractor : ExtractorApi() {
 
             if (keyMatch != null) {
                 val keyUrl = keyMatch.groupValues[1]
-                // 키 다운로드 (JSON 형태일 것으로 예상)
+                // 키 다운로드
                 val keyResponse = app.get(keyUrl, headers = headers)
                 val jsonText = keyResponse.text
                 
-                // 실제 16바이트 키 해독
+                // 실제 키 해독
                 val actualKeyBytes = decryptKeyFromJson(jsonText)
 
                 if (actualKeyBytes != null) {
                     // (1) 해독된 키를 Base64로 변환하여 Data URI 생성
                     val keyBase64 = Base64.encodeToString(actualKeyBytes, Base64.NO_WRAP)
-                    // 중요: MIME type을 명시
                     val keyDataUri = "data:application/octet-stream;base64,$keyBase64"
 
                     // (2) M3U8 내용 수정: 원래 키 URL을 Data URI로 교체
@@ -95,10 +91,8 @@ class BcbcRedExtractor : ExtractorApi() {
                     )
                     
                     // (3) 세그먼트 경로 절대 경로화
-                    // Data URI로 재생 시 상대 경로(.ts)를 못 찾으므로 https://... 로 변환해야 함
                     val baseUrl = m3u8Url.substringBeforeLast("/") + "/"
                     m3u8Content = m3u8Content.lines().joinToString("\n") { line ->
-                        // 주석(#)이 아니고, http나 data로 시작하지 않는 줄(파일명) 앞에 baseUrl 붙이기
                         if (line.isNotBlank() && !line.startsWith("#") && !line.startsWith("http") && !line.startsWith("data:")) {
                             "$baseUrl$line"
                         } else {
@@ -106,13 +100,15 @@ class BcbcRedExtractor : ExtractorApi() {
                         }
                     }
 
-                    // (4) 수정된 M3U8을 통째로 Data URI로 변환
+                    // (4) 수정된 M3U8을 Data URI로 변환
                     val finalM3u8DataUri = "data:application/vnd.apple.mpegurl;base64," + 
                         Base64.encodeToString(m3u8Content.toByteArray(), Base64.NO_WRAP)
 
-                    // (5) 재생 요청
+                    // (5) 재생 요청 (인자 순서 수정됨)
                     callback(
-                        newExtractorLink(name, name, finalM3u8DataUri, referer, 0, ExtractorLinkType.M3U8) {
+                        newExtractorLink(name, name, finalM3u8DataUri, ExtractorLinkType.M3U8) {
+                            this.referer = referer ?: mainUrl
+                            this.quality = 0
                             this.headers = headers
                         }
                     )
@@ -120,9 +116,11 @@ class BcbcRedExtractor : ExtractorApi() {
                 }
             }
 
-            // 키가 없거나 실패 시 원본 URL 사용 (Fallback)
+            // Fallback (인자 순서 수정됨)
             callback(
-                newExtractorLink(name, name, m3u8Url, referer, 0, ExtractorLinkType.M3U8) {
+                newExtractorLink(name, name, m3u8Url, ExtractorLinkType.M3U8) {
+                    this.referer = referer ?: mainUrl
+                    this.quality = 0
                     this.headers = headers
                 }
             )
@@ -137,31 +135,25 @@ class BcbcRedExtractor : ExtractorApi() {
 
     private fun decryptKeyFromJson(jsonText: String): ByteArray? {
         try {
-            // JSON 자체가 Base64일 수 있으므로 디코딩 시도
             val decodedJsonStr = try {
                 String(Base64.decode(jsonText, Base64.DEFAULT))
             } catch (e: Exception) {
-                jsonText // Base64 아님
+                jsonText 
             }
 
-            // Regex로 encrypted_key와 rule 추출
             val encKeyRegex = """"encrypted_key"\s*:\s*"([^"]+)"""".toRegex()
             val encKeyB64 = encKeyRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return null
             
             val ruleRegex = """"rule"\s*:\s*(\{.*?\})""".toRegex()
             val ruleJson = ruleRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return null
 
-            // Encrypted Key 디코딩 (Base64 -> Bytes)
             val encryptedBytes = Base64.decode(encKeyB64, Base64.DEFAULT)
-            // 앞 2바이트(Noise) 제거
             val cleanBytes = encryptedBytes.drop(2).toByteArray()
 
-            // Rule 파싱 (permutation 추출)
             val permRegex = """"permutation"\s*:\s*\[([\d,]+)\]""".toRegex()
             val permString = permRegex.find(ruleJson)?.groupValues?.get(1) ?: "0,1,2,3"
             val permutation = permString.split(",").map { it.trim().toInt() }
 
-            // 셔플 복구 (16바이트)
             val segments = listOf(
                 cleanBytes.copyOfRange(0, 4),
                 cleanBytes.copyOfRange(4, 8),
@@ -190,12 +182,9 @@ class BcbcRedExtractor : ExtractorApi() {
         return try {
             val token = m3u8Url.substringAfterLast("/").split(".").getOrNull(1) ?: return null
             val payload = String(Base64.decode(token, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP))
-            // 토큰 내의 ua 필드 추출
             val uaMatch = Regex(""""ua"\s*:\s*"([^"]+)"""").find(payload)
             val uaValue = uaMatch?.groupValues?.get(1)
             
-            // 토큰에 박힌 UA가 있다면 그 포맷을 존중해서 사용
-            // 예: Chrome(122.0.0.0) 이면 그대로 리턴하거나, 필요시 표준 포맷으로 변환
             if (uaValue != null) {
                 if (uaValue.startsWith("Chrome(")) {
                     val version = uaValue.substringAfter("Chrome(").substringBefore(")")
