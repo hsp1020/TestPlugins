@@ -19,39 +19,42 @@ class BcbcRedExtractor : ExtractorApi() {
     }
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
-        println("=== [MovieKing v66] getUrl Start (Dual-Source Brute Force) ===")
+        println("=== [MovieKing v69] getUrl Start (Extreme Debug Mode) ===")
         try {
             val baseHeaders = mutableMapOf("Referer" to "https://player-v1.bcbc.red/", "Origin" to "https://player-v1.bcbc.red")
             val playerHtml = app.get(url, headers = baseHeaders).text
             val m3u8Url = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)?.groupValues?.get(1)?.replace("\\/", "/") ?: return
             
             val playlistRes = app.get(m3u8Url, headers = baseHeaders).text
-            val keyMatch = Regex("""#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"""").find(playlistRes)
-            var rawKeyJson: String? = null
-            if (keyMatch != null) {
-                rawKeyJson = app.get(keyMatch.groupValues[1], headers = baseHeaders).text
-                // [요구사항] JSON 데이터 로그 출력
-                println("[MovieKing v66] RAW JSON: $rawKeyJson")
-            }
-
+            
             if (proxyServer == null || !proxyServer!!.isAlive()) {
-                proxyServer?.stop()
                 proxyServer = ProxyWebServer().apply { start() }
             }
             
-            val port = proxyServer!!.updateSession(baseHeaders, rawKeyJson)
+            val port = proxyServer!!.updateSession(baseHeaders)
             val proxyBaseUrl = "http://127.0.0.1:$port"
-            var m3u8Content = playlistRes
-            if (keyMatch != null) m3u8Content = m3u8Content.replace(keyMatch.groupValues[1], "$proxyBaseUrl/key.bin")
+            
+            // [디버그] AES 태그 제거 확인
+            val originalKeyLine = playlistRes.lines().find { it.contains("#EXT-X-KEY") }
+            if (originalKeyLine != null) {
+                println("[MovieKing v69] Detected AES Tag: $originalKeyLine -> REMOVING for stability")
+            }
+            
+            var m3u8Content = playlistRes.lines().filterNot { it.contains("#EXT-X-KEY") }.joinToString("\n")
 
             val m3u8Base = m3u8Url.substringBeforeLast("/") + "/"
             m3u8Content = m3u8Content.lines().joinToString("\n") { line ->
-                if (line.isNotBlank() && !line.startsWith("#")) "$proxyBaseUrl/proxy?url=${URLEncoder.encode(if (line.startsWith("http")) line else "$m3u8Base$line", "UTF-8")}" else line
+                if (line.isNotBlank() && !line.startsWith("#")) {
+                    val segmentUrl = if (line.startsWith("http")) line else "$m3u8Base$line"
+                    "$proxyBaseUrl/proxy?url=${URLEncoder.encode(segmentUrl, "UTF-8")}"
+                } else line
             }
 
             proxyServer!!.setPlaylist(m3u8Content)
-            callback(newExtractorLink(name, name, "$proxyBaseUrl/playlist.m3u8", ExtractorLinkType.M3U8) { this.referer = "https://player-v1.bcbc.red/" })
-        } catch (e: Exception) { println("[MovieKing v66] Error: $e") }
+            callback(newExtractorLink(name, name, "$proxyBaseUrl/playlist.m3u8", ExtractorLinkType.M3U8) { 
+                this.referer = "https://player-v1.bcbc.red/"
+            })
+        } catch (e: Exception) { println("[MovieKing v69] getUrl Error: $e") }
     }
 
     class ProxyWebServer {
@@ -59,12 +62,9 @@ class BcbcRedExtractor : ExtractorApi() {
         private var isRunning = false
         var port: Int = 0
         @Volatile private var currentHeaders: Map<String, String> = emptyMap()
-        @Volatile private var rawKeyJson: String? = null
         @Volatile private var currentPlaylist: String = ""
-        
-        @Volatile private var foundKey: ByteArray? = null
-        @Volatile private var foundOffset: Int = -1
-        @Volatile private var foundShift: Int = 0 
+        @Volatile private var solvedKey: ByteArray? = null
+        @Volatile private var solvedOffset: Int = -1
 
         fun isAlive() = isRunning && serverSocket != null && !serverSocket!!.isClosed
         fun start() {
@@ -73,7 +73,9 @@ class BcbcRedExtractor : ExtractorApi() {
             thread(isDaemon = true) { while (isAlive()) { try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {} } }
         }
         fun stop() { isRunning = false; try { serverSocket?.close() } catch (e: Exception) {} }
-        fun updateSession(h: Map<String, String>, j: String?) = port.also { currentHeaders = h; rawKeyJson = j; foundKey = null; foundOffset = -1 }
+        fun updateSession(h: Map<String, String>) = port.also { 
+            currentHeaders = h; solvedKey = null; solvedOffset = -1 
+        }
         fun setPlaylist(p: String) { currentPlaylist = p }
 
         private fun handleClient(socket: Socket) = thread {
@@ -85,8 +87,6 @@ class BcbcRedExtractor : ExtractorApi() {
 
                 if (path.contains("/playlist.m3u8")) {
                     output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\n\r\n".toByteArray() + currentPlaylist.toByteArray())
-                } else if (path.contains("/key.bin")) {
-                    output.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n".toByteArray() + ByteArray(16))
                 } else if (path.contains("/proxy")) {
                     val url = URLDecoder.decode(path.substringAfter("url=").substringBefore(" "), "UTF-8")
                     runBlocking {
@@ -96,90 +96,81 @@ class BcbcRedExtractor : ExtractorApi() {
                             val buffer = ByteArray(65536) 
                             stream.mark(65536); val read = stream.read(buffer); stream.reset()
 
-                            if (read > 0 && foundKey == null && rawKeyJson != null) {
-                                // [업그레이드] String + Base64 듀얼 소스 스캔
-                                val candidates = generateDualSourceCandidates(rawKeyJson!!)
-                                println("[MovieKing v66] Probing ${candidates.size * 16} dual-source combinations...")
-                                
-                                outer@for ((name, key) in candidates) {
-                                    for (s in 0..15) { // 위상 전수조사
-                                        for (i in 0 until (read - 2000).coerceAtLeast(0)) {
-                                            if ((buffer[i].toInt() xor key[(i + s) % 16].toInt()).toByte() == 0x47.toByte()) {
-                                                // [검증] 10연속 체크
-                                                var m = 0; for (p in 1..10) {
-                                                    val pos = i + (p * 188)
-                                                    if (pos >= read) break
-                                                    if ((buffer[pos].toInt() xor key[(pos + s) % 16].toInt()).toByte() == 0x47.toByte()) m++
-                                                }
-                                                if (m >= 9) {
-                                                    println("[MovieKing v66] REAL SUCCESS! $name, Offset: $i, Shift: $s")
-                                                    foundKey = key; foundOffset = i; foundShift = s; break@outer
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+                            if (read > 0 && solvedKey == null) {
+                                // [디버그] 데이터 샘플링
+                                val headHex = buffer.take(16).joinToString(" ") { "%02X".format(it) }
+                                println("[MovieKing v69] Analyzing Stream Start. Raw Bytes: $headHex")
+                                findKeyAndOffsetWithDebug(buffer, read)
                             }
 
                             output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
-                            if (foundKey != null) {
-                                val k = foundKey!!; val off = foundOffset; val s = foundShift; var total = 0L
-                                val dec = ByteArray(read); for (i in 0 until read) dec[i] = (buffer[i].toInt() xor k[(i + s) % 16].toInt()).toByte()
-                                if (read > off) output.write(dec, off, read - off)
-                                total = read.toLong()
+                            if (solvedKey != null) {
+                                val k = solvedKey!!; val off = solvedOffset
+                                val initialDec = ByteArray(read)
+                                for (i in 0 until read) initialDec[i] = (buffer[i].toInt() xor k[(i % k.size)].toInt()).toByte()
+                                
+                                // [디버그] 복호화 성공 여부 샘플링
+                                val decHead = initialDec.drop(off).take(8).joinToString(" ") { "%02X".format(it) }
+                                println("[MovieKing v69] Stream Decrypted Head (should start with 47): $decHead")
+                                
+                                if (read > off) output.write(initialDec, off, read - off)
+                                var total = read.toLong()
                                 val sBuf = ByteArray(16384); var c: Int
                                 while (stream.read(sBuf).also { c = it } != -1) {
-                                    for (i in 0 until c) sBuf[i] = (sBuf[i].toInt() xor k[((total + i + s) % 16).toInt()].toInt()).toByte()
+                                    for (i in 0 until c) sBuf[i] = (sBuf[i].toInt() xor k[((total + i) % k.size).toInt()].toInt()).toByte()
                                     output.write(sBuf, 0, c); total += c
                                 }
                             } else {
+                                println("[MovieKing v69] WARNING: Key Solver Failed. Sending Raw Data.")
                                 output.write(buffer, 0, read)
-                                var c: Int; while (stream.read(buffer).also { count -> c = count } != -1) output.write(buffer, 0, c)
+                                var c: Int; while (stream.read(buffer).also { c = it } != -1) output.write(buffer, 0, c)
                             }
                         }
                     }
                 }
                 output.flush(); socket.close()
-            } catch (e: Exception) { println("[MovieKing v66] Stream Error: $e") }
+            } catch (e: Exception) { println("[MovieKing v69] Proxy Error: $e") }
         }
 
-        private fun generateDualSourceCandidates(json: String): List<Pair<String, ByteArray>> {
-            val list = mutableListOf<Pair<String, ByteArray>>()
-            try {
-                val decoded = if (json.startsWith("{")) json else String(Base64.decode(json, Base64.DEFAULT))
-                val encKeyStr = Regex(""""encrypted_key"\s*:\s*"([^"]+)"""").find(decoded)?.groupValues?.get(1)?.replace("\\/", "/") ?: return list
+        private fun findKeyAndOffsetWithDebug(data: ByteArray, len: Int) {
+            println("[MovieKing v69] Starting XOR-Solver (4-byte pattern scan)...")
+            for (off in 0..2048) { // 탐색 범위 2KB로 확장
+                // TS 헤더 [47 40 00 10]를 타겟으로 키 역산
+                val k0 = data[off].toInt() xor 0x47
+                val k1 = data[off + 1].toInt() xor 0x40 
+                val k2 = data[off + 2].toInt() xor 0x00
+                val k3 = data[off + 3].toInt() xor 0x10
                 
-                // 소스 1: 순수 문자열
-                val strBytes = encKeyStr.toByteArray()
-                // 소스 2: Base64 디코딩 바이트
-                val b64Bytes = try { Base64.decode(encKeyStr, Base64.DEFAULT) } catch(e: Exception) { null }
+                val key = byteArrayOf(k0.toByte(), k1.toByte(), k2.toByte(), k3.toByte())
                 
-                val perms = listOf(listOf(0,1,2,3), listOf(0,1,3,2), listOf(0,2,1,3), listOf(0,2,3,1), listOf(0,3,1,2), listOf(0,3,2,1), listOf(1,0,2,3), listOf(1,0,3,2), listOf(1,2,0,3), listOf(1,2,3,0), listOf(1,3,0,2), listOf(1,3,2,0), listOf(2,0,1,3), listOf(2,0,3,1), listOf(2,1,0,3), listOf(2,1,3,0), listOf(2,3,0,1), listOf(2,3,1,0), listOf(3,0,1,2), listOf(3,0,2,1), listOf(3,1,0,2), listOf(3,1,2,0), listOf(3,2,0,1), listOf(3,2,1,0))
-
-                fun addCombos(src: ByteArray, label: String) {
-                    for (gap in 0..7) { // 범위 확장
-                        for (startOff in 0..7) {
-                            val segments = mutableListOf<ByteArray>()
-                            for (i in 0..3) {
-                                val pos = startOff + i * (4 + gap)
-                                if (pos + 4 <= src.size) segments.add(src.copyOfRange(pos, pos + 4))
-                            }
-                            if (segments.size == 4) {
-                                for (p in perms) {
-                                    val key = ByteArray(16)
-                                    for (j in 0..3) System.arraycopy(segments[p[j]], 0, key, j * 4, 4)
-                                    list.add("$label-G$gap-O$startOff-P${p.joinToString("")}" to key)
-                                }
-                            }
-                        }
-                    }
+                // 188바이트 간격으로 10번 연속 0x47이 나오는지 수학적 검증
+                var matches = 0
+                for (p in 0..9) {
+                    val pos = off + (p * 188)
+                    if (pos >= len) break
+                    // Data[pos] ^ Key[pos % 4] == 0x47 인지 확인
+                    // 여기서는 Key[0]가 항상 Data[off + p*188]과 만나야 함 (188이 4의 배수이므로)
+                    if ((data[pos].toInt() xor k0).toByte() == 0x47.toByte()) matches++
+                }
+                
+                // 디버깅: 5개 이상 맞으면 "거의 정답"으로 간주하고 상세 로그 출력
+                if (matches >= 5) {
+                    println("[MovieKing v69] Candidate found at Offset $off | Matches: $matches/10 | Key: ${key.joinToString("") { "%02X".format(it) }}")
                 }
 
-                addCombos(strBytes, "Str")
-                if (b64Bytes != null) addCombos(b64Bytes, "B64")
-
-            } catch (e: Exception) {}
-            return list
+                if (matches >= 9) {
+                    println("[MovieKing v69] >>> MATH SOLVED! <<<")
+                    println("[MovieKing v69] Valid Offset: $off")
+                    println("[MovieKing v69] XOR Key (4-byte): ${key.joinToString(" "){ "%02X".format(it) }}")
+                    solvedKey = key
+                    solvedOffset = off
+                    return
+                }
+                
+                // 500 단위로 진행 상황 출력
+                if (off % 500 == 0) println("[MovieKing v69] Scanning... current offset: $off")
+            }
+            println("[MovieKing v69] FATAL: Solver could not find any valid TS pattern in first 2KB.")
         }
     }
 }
