@@ -1,10 +1,6 @@
 package com.movieking
 
 import android.util.Base64
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.ExtractorApi
@@ -13,15 +9,15 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.network.WebViewResolver
 import java.io.BufferedReader
-import java.io.ByteArrayInputStream
 import java.io.InputStreamReader
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URLDecoder
 import java.net.URLEncoder
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
+
+// [수정] OkHttp 클래스 명시적 사용을 위해 import 제거 (충돌 방지)
+// import okhttp3.Request (제거함)
 
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -29,8 +25,6 @@ class BcbcRedExtractor : ExtractorApi() {
     override val requiresReferer = true
 
     companion object {
-        // [중요] WebView 인스턴스를 공유하기 위한 전역 변수
-        private var sharedWebView: WebView? = null
         private var proxyServer: ProxyWebServer? = null
     }
 
@@ -40,7 +34,7 @@ class BcbcRedExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("=== [MovieKing v16] getUrl Start (WebView Hijack) ===")
+        println("=== [MovieKing v17] getUrl Start (Build Fix) ===")
         
         try {
             // 1. 기본 헤더
@@ -49,11 +43,7 @@ class BcbcRedExtractor : ExtractorApi() {
                 "Origin" to "https://player-v1.bcbc.red"
             )
 
-            // 2. WebView 요청 및 인스턴스 확보
-            // CloudStream의 WebViewResolver를 쓰면 WebView에 접근하기 어려우므로,
-            // 우리가 직접 WebView를 띄우지 못하니, app.get의 응답만 취함.
-            // 하지만 '데이터 하이재킹'을 위해서는 WebViewResolver가 만든 쿠키가 필수.
-            
+            // 2. WebView 요청
             val playerResponse = try {
                 app.get(
                     url,
@@ -72,7 +62,7 @@ class BcbcRedExtractor : ExtractorApi() {
             // 3. M3U8 추출
             val m3u8Match = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)
                 ?: run {
-                    println("[MovieKing v16] Error: data-m3u8 not found")
+                    println("[MovieKing v17] Error: data-m3u8 not found")
                     return
                 }
 
@@ -87,13 +77,13 @@ class BcbcRedExtractor : ExtractorApi() {
             val chromeVersion = extractChromeVersion(m3u8Url) ?: "124.0.0.0"
             val standardUA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$chromeVersion Mobile Safari/537.36"
             baseHeaders["User-Agent"] = standardUA
-            println("[MovieKing v16] UA: $standardUA")
+            println("[MovieKing v17] UA: $standardUA")
 
-            // 5. M3U8 다운로드 (일반 요청으로 시도, 실패 시 프록시가 처리하도록 유도할 수도 있음)
+            // 5. M3U8 다운로드
             val m3u8Response = app.get(m3u8Url, headers = baseHeaders)
             var m3u8Content = m3u8Response.text
 
-            // 6. 키 처리 (일반 요청)
+            // 6. 키 처리
             val keyUriRegex = """#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"""".toRegex()
             val keyMatch = keyUriRegex.find(m3u8Content)
             var actualKeyBytes: ByteArray? = null
@@ -108,7 +98,7 @@ class BcbcRedExtractor : ExtractorApi() {
                 )
                 val keyResponse = app.get(keyUrl, headers = keyHeaders)
                 actualKeyBytes = decryptKeyFromJson(keyResponse.text)
-                if (actualKeyBytes != null) println("[MovieKing v16] Key Decrypted.")
+                if (actualKeyBytes != null) println("[MovieKing v17] Key Decrypted.")
             }
 
             // 7. 프록시 서버 시작
@@ -118,7 +108,6 @@ class BcbcRedExtractor : ExtractorApi() {
                 proxyServer!!.start()
             }
             
-            // [핵심] 이번에는 헤더를 아주 강력하게 전달
             val port = proxyServer!!.updateSession(baseHeaders, actualKeyBytes)
             val proxyBaseUrl = "http://127.0.0.1:$port"
 
@@ -142,7 +131,7 @@ class BcbcRedExtractor : ExtractorApi() {
             // 9. 재생 요청
             proxyServer!!.setPlaylist(m3u8Content)
             val localPlaylistUrl = "$proxyBaseUrl/playlist.m3u8"
-            println("[MovieKing v16] Ready: $localPlaylistUrl")
+            println("[MovieKing v17] Ready: $localPlaylistUrl")
 
             callback(
                 newExtractorLink(name, name, localPlaylistUrl, ExtractorLinkType.M3U8) {
@@ -154,7 +143,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
         } catch (e: Exception) {
             e.printStackTrace()
-            println("[MovieKing v16] Error: ${e.message}")
+            println("[MovieKing v17] Error: ${e.message}")
         }
     }
 
@@ -192,17 +181,13 @@ class BcbcRedExtractor : ExtractorApi() {
         } catch (e: Exception) { null }
     }
     
-    // --- Proxy Web Server (Fallback to Clean Client with Range Support) ---
-    // WebView 연동이 불가능한 구조(Activity 접근 불가)이므로,
-    // v15에서 누락된 'Range 헤더 처리'와 '대소문자 처리'를 보강하여 재시도.
-    // 또한 OkHttp의 ConnectionPool을 공유하지 않도록 새 인스턴스 생성.
+    // --- Proxy Web Server ---
     class ProxyWebServer {
         private var serverSocket: ServerSocket? = null
         private var isRunning = false
         var port: Int = 0
         
-        // [수정] 완전히 격리된 OkHttp 클라이언트 생성 (TLS 설정은 시스템 기본값 사용)
-        // CloudStream의 설정을 따르지 않음으로써 충돌 방지
+        // [수정] 빌드 에러 방지를 위해 okhttp3 패키지명 명시
         private val cleanClient = okhttp3.OkHttpClient.Builder()
             .followRedirects(true)
             .followSslRedirects(true)
@@ -226,7 +211,7 @@ class BcbcRedExtractor : ExtractorApi() {
                             val client = serverSocket!!.accept()
                             handleClient(client)
                         } catch (e: Exception) {
-                            if (isRunning) println("[MovieKing v16] Accept Error: ${e.message}")
+                            if (isRunning) println("[MovieKing v17] Accept Error: ${e.message}")
                         }
                     }
                 }
@@ -288,10 +273,9 @@ class BcbcRedExtractor : ExtractorApi() {
                             val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
                             
                             try {
-                                val requestBuilder = Request.Builder().url(targetUrl)
+                                // [수정] 빌드 에러 방지를 위해 okhttp3.Request 명시
+                                val requestBuilder = okhttp3.Request.Builder().url(targetUrl)
 
-                                // [핵심] 헤더 대소문자 문제 해결 및 필수 헤더만 전송
-                                // Cloudflare는 헤더 순서나 대소문자에 민감할 수 있음
                                 currentHeaders.forEach { (k, v) -> 
                                     requestBuilder.header(k, v) 
                                 }
@@ -304,9 +288,8 @@ class BcbcRedExtractor : ExtractorApi() {
                                     val inputStream = response.body?.byteStream()
                                     if (inputStream != null) {
                                         val contentType = response.header("Content-Type", "") ?: ""
-                                        // HTML 차단 감지
                                         if (contentType.contains("text/html")) {
-                                            println("[MovieKing v16] Blocked! HTML returned.")
+                                            println("[MovieKing v17] Blocked! HTML returned.")
                                             output.write("HTTP/1.1 403 Forbidden\r\n\r\n".toByteArray())
                                         } else {
                                             val sb = StringBuilder()
@@ -329,12 +312,12 @@ class BcbcRedExtractor : ExtractorApi() {
                                         }
                                     }
                                 } else {
-                                    println("[MovieKing v16] Remote Failed: ${response.code}")
+                                    println("[MovieKing v17] Remote Failed: ${response.code}")
                                     output.write("HTTP/1.1 ${response.code} Error\r\n\r\n".toByteArray())
                                 }
                                 response.close()
                             } catch (e: Exception) {
-                                println("[MovieKing v16] Stream Error: $e")
+                                println("[MovieKing v17] Stream Error: $e")
                                 e.printStackTrace()
                             }
                         } else {
@@ -343,7 +326,7 @@ class BcbcRedExtractor : ExtractorApi() {
                     }
                     socket.close()
                 } catch (e: Exception) {
-                    println("[MovieKing v16] Socket Error: $e")
+                    println("[MovieKing v17] Socket Error: $e")
                 }
             }
         }
