@@ -18,6 +18,8 @@ import java.net.URLDecoder
 import java.net.URLEncoder
 import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
+import javax.crypto.Cipher
+import javax.crypto.spec.SecretKeySpec
 
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -34,7 +36,7 @@ class BcbcRedExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("=== [MovieKing v34] getUrl Start (Build Fix) ===")
+        println("=== [MovieKing v35] getUrl Start (AES-ECB Decrypt) ===")
         
         try {
             val baseHeaders = mutableMapOf(
@@ -60,7 +62,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
             val m3u8Match = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)
                 ?: run {
-                    println("[MovieKing v34] Error: data-m3u8 not found")
+                    println("[MovieKing v35] Error: data-m3u8 not found")
                     return
                 }
 
@@ -74,12 +76,11 @@ class BcbcRedExtractor : ExtractorApi() {
             val chromeVersion = extractChromeVersion(m3u8Url) ?: "124.0.0.0"
             val standardUA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$chromeVersion Mobile Safari/537.36"
             baseHeaders["User-Agent"] = standardUA
-            println("[MovieKing v34] UA: $standardUA")
+            println("[MovieKing v35] UA: $standardUA")
 
             val playlistResponse = app.get(m3u8Url, headers = baseHeaders)
             var m3u8Content = playlistResponse.text
 
-            // 키 처리
             val keyUriRegex = """#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"""".toRegex()
             val keyMatch = keyUriRegex.find(m3u8Content)
             var actualKeyBytes: ByteArray? = null
@@ -88,8 +89,13 @@ class BcbcRedExtractor : ExtractorApi() {
                 val keyUrl = keyMatch.groupValues[1]
                 val keyResponse = app.get(keyUrl, headers = baseHeaders)
                 
-                // [감사] 원본 데이터 로깅
-                actualKeyBytes = decryptKeyFromJsonAudit(keyResponse.text)
+                // [검증된 로직] 문자열 기반 키 생성
+                actualKeyBytes = generateKeyFromString(keyResponse.text)
+                
+                if (actualKeyBytes != null) {
+                    val keyStr = String(actualKeyBytes)
+                    println("[MovieKing v35] Generated Key (String): $keyStr")
+                }
             }
 
             if (proxyServer == null || !proxyServer!!.isAlive()) {
@@ -119,7 +125,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
             proxyServer!!.setPlaylist(m3u8Content)
             val localPlaylistUrl = "$proxyBaseUrl/playlist.m3u8"
-            println("[MovieKing v34] Ready: $localPlaylistUrl")
+            println("[MovieKing v35] Ready: $localPlaylistUrl")
 
             callback(
                 newExtractorLink(name, name, localPlaylistUrl, ExtractorLinkType.M3U8) {
@@ -130,7 +136,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
         } catch (e: Exception) {
             e.printStackTrace()
-            println("[MovieKing v34] Error: ${e.message}")
+            println("[MovieKing v35] Error: ${e.message}")
         }
     }
 
@@ -143,22 +149,17 @@ class BcbcRedExtractor : ExtractorApi() {
         } catch (e: Exception) { null }
     }
 
-    private fun decryptKeyFromJsonAudit(jsonText: String): ByteArray? {
+    // [검증된] 문자열 조작을 통한 키 생성
+    private fun generateKeyFromString(jsonText: String): ByteArray? {
         return try {
             val decodedJsonStr = try { String(Base64.decode(jsonText, Base64.DEFAULT)) } catch (e: Exception) { jsonText }
             
             val encKeyRegex = """"encrypted_key"\s*:\s*"([^"]+)"""".toRegex()
-            val encKeyB64 = encKeyRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return null
+            val encKeyStr = encKeyRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return null
+            
             val ruleRegex = """"rule"\s*:\s*(\{.*?\})""".toRegex()
             val ruleJson = ruleRegex.find(decodedJsonStr)?.groupValues?.get(1) ?: return null
 
-            val encryptedBytes = Base64.decode(encKeyB64, Base64.DEFAULT)
-            
-            // [감사 1] 암호화된 바이트 원본 출력 (Hex)
-            val encHex = encryptedBytes.joinToString("") { "%02X".format(it) }
-            println("[MovieKing v34] Encrypted Bytes (24): $encHex")
-
-            // v32 로직 (4+2)
             val segSizesRegex = """"segment_sizes"\s*:\s*\[([\d,]+)\]""".toRegex()
             val segSizesStr = segSizesRegex.find(ruleJson)?.groupValues?.get(1) ?: "4,4,4,4"
             val segmentSizes = segSizesStr.split(",").map { it.trim().toInt() }
@@ -167,34 +168,29 @@ class BcbcRedExtractor : ExtractorApi() {
             val permString = permRegex.find(ruleJson)?.groupValues?.get(1) ?: "0,1,2,3"
             val permutation = permString.split(",").map { it.trim().toInt() }
 
-            val cleanSegments = mutableListOf<ByteArray>()
-            var currentOffset = 0
             val noiseLen = 2
+            val cleanSegments = mutableListOf<String>()
+            var currentOffset = 0
             
             for (size in segmentSizes) {
-                if (currentOffset + size > encryptedBytes.size) break
-                cleanSegments.add(encryptedBytes.copyOfRange(currentOffset, currentOffset + size))
+                if (currentOffset + size > encKeyStr.length) break
+                val segment = encKeyStr.substring(currentOffset, currentOffset + size)
+                cleanSegments.add(segment)
                 currentOffset += size + noiseLen
             }
 
-            val finalKey = ByteArray(16)
-            var finalOffset = 0
+            val sb = StringBuilder()
             for (idx in permutation) {
                 if (idx < cleanSegments.size) {
-                    val seg = cleanSegments[idx]
-                    System.arraycopy(seg, 0, finalKey, finalOffset, seg.size)
-                    finalOffset += seg.size
+                    sb.append(cleanSegments[idx])
                 }
             }
             
-            // [감사 2] 결과 키 출력 (Hex)
-            val keyHex = finalKey.joinToString("") { "%02X".format(it) }
-            println("[MovieKing v34] Generated Key (16): $keyHex")
-            
-            return finalKey
+            sb.toString().toByteArray(Charsets.UTF_8)
         } catch (e: Exception) { null }
     }
     
+    // --- Proxy Web Server (AES-ECB Decryptor) ---
     class ProxyWebServer {
         private var serverSocket: ServerSocket? = null
         private var isRunning = false
@@ -217,7 +213,7 @@ class BcbcRedExtractor : ExtractorApi() {
                             val client = serverSocket!!.accept()
                             handleClient(client)
                         } catch (e: Exception) {
-                            if (isRunning) println("[MovieKing v34] Accept Error: ${e.message}")
+                            if (isRunning) println("[MovieKing v35] Accept Error: ${e.message}")
                         }
                     }
                 }
@@ -273,43 +269,51 @@ class BcbcRedExtractor : ExtractorApi() {
                             try {
                                 runBlocking {
                                     val safeHeaders = if (targetUrl.contains("bcbc.red")) currentHeaders else mapOf("User-Agent" to (currentHeaders["User-Agent"] ?: ""))
-                                    
                                     val res = app.get(targetUrl, headers = safeHeaders)
                                     
                                     if (res.isSuccessful) {
-                                        val inputStream: InputStream = res.body.byteStream()
+                                        val inputStream = BufferedInputStream(res.body.byteStream())
                                         
-                                        // [감사 3] 영상 데이터 첫 32바이트 확인 (XOR 키 찾기용)
-                                        val buffer = ByteArray(8192)
-                                        // [수정] val -> var 로 변경하여 재할당 가능하게 함
-                                        var bytesRead = inputStream.read(buffer)
-                                        
-                                        if (bytesRead > 0) {
-                                            val firstBytes = buffer.take(32).joinToString(" ") { "%02X".format(it) }
-                                            println("[MovieKing v34] Video Head (32): $firstBytes")
-                                            
-                                            // 무가공 전송
-                                            val header = "HTTP/1.1 200 OK\r\n" +
-                                                    "Content-Type: video/mp2t\r\n" +
-                                                    "Connection: close\r\n\r\n"
-                                            output.write(header.toByteArray())
-                                            output.write(buffer, 0, bytesRead)
-                                            
-                                            // [수정] bytesRead 재할당 정상 동작
-                                            while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                                                output.write(buffer, 0, bytesRead)
+                                        // [핵심] AES-ECB 복호화 준비
+                                        val keySpec = if (currentKey != null) SecretKeySpec(currentKey!!, "AES") else null
+                                        val cipher = if (keySpec != null) {
+                                            Cipher.getInstance("AES/ECB/NoPadding").apply {
+                                                init(Cipher.DECRYPT_MODE, keySpec)
                                             }
-                                            output.flush()
-                                        } else {
-                                            output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
+                                        } else null
+
+                                        val header = "HTTP/1.1 200 OK\r\n" +
+                                                "Content-Type: video/mp2t\r\n" +
+                                                "Connection: close\r\n\r\n"
+                                        output.write(header.toByteArray())
+                                        
+                                        // 16바이트(AES 블록 크기) 단위로 읽어서 복호화
+                                        val buffer = ByteArray(8192) // 16의 배수여야 함
+                                        var count: Int
+                                        while (inputStream.read(buffer).also { count = it } != -1) {
+                                            if (cipher != null) {
+                                                // 패딩이 안 맞을 수 있으므로 count를 16의 배수로 맞춰서 처리
+                                                val procLen = (count / 16) * 16
+                                                if (procLen > 0) {
+                                                    val decrypted = cipher.doFinal(buffer, 0, procLen)
+                                                    output.write(decrypted)
+                                                }
+                                                // 남은 자투리(있으면 안 되지만)는 그냥 씀
+                                                if (count > procLen) {
+                                                    output.write(buffer, procLen, count - procLen)
+                                                }
+                                            } else {
+                                                output.write(buffer, 0, count)
+                                            }
                                         }
+                                        output.flush()
                                         inputStream.close()
                                     } else {
                                         output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
                                     }
                                 }
                             } catch (e: Exception) {
-                                println("[MovieKing v34] Stream Error: $e")
+                                println("[MovieKing v35] Stream Error: $e")
                             }
                         } else {
                             output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
@@ -317,7 +321,7 @@ class BcbcRedExtractor : ExtractorApi() {
                     }
                     socket.close()
                 } catch (e: Exception) {
-                    println("[MovieKing v34] Socket Error: $e")
+                    println("[MovieKing v35] Socket Error: $e")
                 }
             }
         }
