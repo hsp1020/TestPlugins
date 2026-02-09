@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.SubtitleFile
 import java.io.*
 import java.net.*
+import java.util.concurrent.ConcurrentHashMap
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -13,11 +14,11 @@ import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
 /**
- * v108: v107 Bug Fix (No Extra Logic)
- * [수정 사항]
- * 1. 실수 수정: v107에서 비워뒀던 setPlaylist 함수 정상화 (빈 파일 전송 문제 해결).
- * 2. 군더더기 제거: 유저 지적대로 불필요한 '헤더 강제 삽입' 로직 삭제.
- * 3. 핵심 유지: v106 실패 원인(IV 생성 불가) 해결을 위한 '시퀀스 번호 주입' 로직은 유지.
+ * v109: URL-Sequence Mapping Engine
+ * [해결 전략]
+ * 1. 문제: seq 파라미터 주입 방식은 플레이어의 비순차적 요청 시 IV 불일치 유발.
+ * 2. 해결: TS 파일의 원본 URL을 Key로, 시퀀스 번호를 Value로 하는 매핑 테이블(sequenceMap) 구축.
+ * 3. 동작: 프록시가 요청받은 URL을 보고 매핑 테이블에서 정확한 시퀀스 번호를 찾아 IV 생성.
  */
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -30,7 +31,7 @@ class BcbcRedExtractor : ExtractorApi() {
     }
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
-        println("=== [MovieKing v108] getUrl Start ===")
+        println("=== [MovieKing v109] getUrl Start ===")
         try {
             val videoId = extractVideoIdDeep(url)
             val baseHeaders = mutableMapOf("Referer" to "https://player-v1.bcbc.red/", "Origin" to "https://player-v1.bcbc.red", "User-Agent" to DESKTOP_UA)
@@ -39,9 +40,9 @@ class BcbcRedExtractor : ExtractorApi() {
             val m3u8Url = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)?.groupValues?.get(1)?.replace("\\/", "/") ?: return
             val playlistRes = app.get(m3u8Url, headers = baseHeaders).text
             
-            // [핵심] M3U8에서 시작 시퀀스 번호 파싱
+            // 시퀀스 번호 파싱
             val startSeq = Regex("""#EXT-X-MEDIA-SEQUENCE:(\d+)""").find(playlistRes)?.groupValues?.get(1)?.toLong() ?: 0L
-            println("[MovieKing v108] Playlist Start Sequence: $startSeq")
+            println("[MovieKing v109] Playlist Start Sequence: $startSeq")
 
             if (proxyServer == null || !proxyServer!!.isAlive()) {
                 proxyServer?.stop(); proxyServer = ProxyWebServer().apply { start() }
@@ -49,35 +50,36 @@ class BcbcRedExtractor : ExtractorApi() {
             
             val keyMatch = Regex("""#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"(?:,IV=0x([0-9a-fA-F]+))?""").find(playlistRes)
             val candidates = if (keyMatch != null) solveKeyCandidatesV87(baseHeaders, keyMatch.groupValues[1]) else emptyList()
-            proxyServer!!.updateSession(baseHeaders, keyMatch?.groupValues?.get(2), candidates)
             
-            val port = proxyServer!!.port
-            val proxyRoot = "http://127.0.0.1:$port/$videoId"
-            
-            // 키 라인만 제거하고 재조립 (v106과 동일)
+            // [v109 핵심] URL -> Sequence 매핑 테이블 생성
+            val sequenceMap = ConcurrentHashMap<String, Long>()
             val lines = playlistRes.lines()
+            var currentSeq = startSeq
             val newLines = mutableListOf<String>()
-            var seqCounter = startSeq
-            
+            val proxyRoot = "http://127.0.0.1:${proxyServer!!.port}/$videoId"
+
             for (line in lines) {
-                if (line.startsWith("#EXT-X-KEY")) continue // 프록시가 처리하므로 제거
+                if (line.startsWith("#EXT-X-KEY")) continue // 키 태그 제거
                 
                 if (line.isNotBlank() && !line.startsWith("#")) {
                     val segmentUrl = if (line.startsWith("http")) line else "${m3u8Url.substringBeforeLast("/")}/$line"
-                    // [핵심] 시퀀스 번호(seq) 주입
-                    newLines.add("$proxyRoot/proxy?seq=$seqCounter&url=${URLEncoder.encode(segmentUrl, "UTF-8")}")
-                    seqCounter++
+                    
+                    // URL을 Key로 시퀀스 저장
+                    sequenceMap[segmentUrl] = currentSeq
+                    
+                    // 프록시 URL 생성 (seq 파라미터 제거, url만 전달)
+                    newLines.add("$proxyRoot/proxy?url=${URLEncoder.encode(segmentUrl, "UTF-8")}")
+                    currentSeq++
                 } else {
                     newLines.add(line)
                 }
             }
             
             val m3u8Content = newLines.joinToString("\n")
-            // [수정] 정상적으로 변수 저장
-            proxyServer!!.setPlaylist(m3u8Content)
+            proxyServer!!.updateSession(baseHeaders, keyMatch?.groupValues?.get(2), candidates, m3u8Content, sequenceMap)
             
             callback(newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) { this.referer = "https://player-v1.bcbc.red/" })
-        } catch (e: Exception) { println("[MovieKing v108] FATAL Error: $e") }
+        } catch (e: Exception) { println("[MovieKing v109] FATAL Error: $e") }
     }
 
     private fun extractVideoIdDeep(url: String): String {
@@ -130,8 +132,9 @@ class BcbcRedExtractor : ExtractorApi() {
         var port: Int = 0
         @Volatile private var currentHeaders: Map<String, String> = emptyMap()
         @Volatile private var playlistIv: String? = null
-        @Volatile private var currentPlaylist: String = "" // [정상화] 저장 변수
+        @Volatile private var currentPlaylist: String = ""
         @Volatile private var keyCandidates: List<ByteArray> = emptyList()
+        @Volatile private var seqMap: ConcurrentHashMap<String, Long> = ConcurrentHashMap()
 
         fun isAlive() = isRunning && serverSocket != null && !serverSocket!!.isClosed
         fun start() {
@@ -140,10 +143,10 @@ class BcbcRedExtractor : ExtractorApi() {
             thread(isDaemon = true) { while (isAlive()) { try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {} } }
         }
         fun stop() { isRunning = false; try { serverSocket?.close() } catch (e: Exception) {} }
-        fun updateSession(h: Map<String, String>, iv: String?, k: List<ByteArray>) {
-            currentHeaders = h; playlistIv = iv; keyCandidates = k
+        
+        fun updateSession(h: Map<String, String>, iv: String?, k: List<ByteArray>, p: String, map: ConcurrentHashMap<String, Long>) {
+            currentHeaders = h; playlistIv = iv; keyCandidates = k; currentPlaylist = p; seqMap = map
         }
-        fun setPlaylist(p: String) { currentPlaylist = p } // [정상화] 함수 내용 복구
 
         private fun handleClient(socket: Socket) = thread {
             try {
@@ -153,31 +156,32 @@ class BcbcRedExtractor : ExtractorApi() {
                 val output = socket.getOutputStream()
 
                 if (path.contains("/playlist.m3u8")) {
-                    output.write("HTTP/1.1 200 OK\r\n\r\n".toByteArray() + currentPlaylist.toByteArray(Charsets.UTF_8))
+                    output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\n\r\n".toByteArray())
+                    output.write(currentPlaylist.toByteArray(Charsets.UTF_8))
                 } else if (path.contains("/proxy")) {
-                    val seq = path.substringAfter("seq=").substringBefore("&").toLongOrNull() ?: 0L
                     val targetUrl = URLDecoder.decode(path.substringAfter("url=").substringBefore(" "), "UTF-8")
+                    // [핵심] URL로 매핑된 정확한 시퀀스 번호 조회
+                    val seq = seqMap[targetUrl] ?: 0L
                     
                     runBlocking {
                         val res = app.get(targetUrl, headers = currentHeaders)
                         if (res.isSuccessful) {
                             val rawData = res.body.bytes()
-                            // [로그] 헤더 및 시퀀스 확인
                             val headHex = rawData.take(16).joinToString(" ") { "%02X".format(it) }
-                            println("[MovieKing v108] TS#$seq | Size: ${rawData.size} | Header: $headHex")
+                            println("[MovieKing v109] TS#$seq | Size: ${rawData.size} | Header: $headHex")
 
                             output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
 
                             if (rawData.isNotEmpty() && rawData[0] == 0x47.toByte()) {
-                                println("[MovieKing v108] TS#$seq -> [Action] Plain TS. Passing RAW.")
+                                println("[MovieKing v109] TS#$seq -> [Action] Plain TS. Passing RAW.")
                                 output.write(rawData)
                             } else {
-                                println("[MovieKing v108] TS#$seq -> [Action] Encrypted. Trying Decrypt.")
+                                println("[MovieKing v109] TS#$seq -> [Action] Encrypted. Trying Decrypt.")
                                 val decrypted = tryDecrypt(rawData, seq)
                                 if (decrypted != null) {
                                     output.write(decrypted)
                                 } else {
-                                    println("[MovieKing v108] TS#$seq -> [Fail] Decryption Failed. Sending RAW.")
+                                    println("[MovieKing v109] TS#$seq -> [Fail] All Decryption Modes Failed. Sending RAW.")
                                     output.write(rawData)
                                 }
                             }
@@ -185,7 +189,7 @@ class BcbcRedExtractor : ExtractorApi() {
                     }
                 }
                 output.flush(); socket.close()
-            } catch (e: Exception) { println("[MovieKing v108] Proxy Error: $e") }
+            } catch (e: Exception) { println("[MovieKing v109] Proxy Error: $e") }
         }
 
         private fun tryDecrypt(data: ByteArray, seq: Long): ByteArray? {
@@ -199,7 +203,7 @@ class BcbcRedExtractor : ExtractorApi() {
                         
                         val head = cipher.update(data.take(16).toByteArray())
                         if (head.isNotEmpty() && head[0] == 0x47.toByte()) {
-                            println("[MovieKing v108] TS#$seq -> [Success] KeyIdx:$idx, Mode:$mode")
+                            println("[MovieKing v109] TS#$seq -> [Success] KeyIdx:$idx, Mode:$mode")
                             cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
                             return cipher.doFinal(data)
                         }
