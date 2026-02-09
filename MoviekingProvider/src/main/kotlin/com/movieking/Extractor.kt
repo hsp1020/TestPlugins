@@ -13,47 +13,49 @@ import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
 /**
- * v101: v87-Original Logic & Forensic Logging Mode
- * [유저 지침 반영]
- * 1. 재생 로직: v87 원본 복호화 및 Fallback 로직 100% 유지 (개입 금지)
- * 2. 1MB Deep Scan: 로그 출력용으로만 실행 (재생 성공 여부에 영향 없음)
- * 3. 포렌식 로그: RAW HEADER(64B), Key JSON, Winning Key, Jackpot Offset 전수 출력
- * 4. 원인 추적: Fallback 발생 시 "JACKPOT NOT FOUND. Passing through RAW data" 로그 출력
+ * v87: JWT-Deep ID Extraction Mode
+ * [해결 사유] 
+ * - MovieKing의 최신 URL은 ID를 JWT 토큰 내부에 숨김 (v86 실패 원인 해결)
+ * - URL 내의 모든 Base64 세그먼트를 전수 조사하여 ID/EID 강제 추출
+ * - 타임스탬프 백업 로직 완전 제거
  */
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
     override val mainUrl = "https://player-v1.bcbc.red"
     override val requiresReferer = true
-    private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
     }
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
-        println("=== [MovieKing v101] getUrl Start (v87 Logic Maintained) ===")
+        println("=== [MovieKing v87] getUrl Start ===")
+        
         try {
+            // [핵심] Deep ID Extraction - 토큰 내부까지 뒤지기
             val videoId = extractVideoIdDeep(url)
-            val baseHeaders = mutableMapOf("Referer" to "https://player-v1.bcbc.red/", "Origin" to "https://player-v1.bcbc.red", "User-Agent" to DESKTOP_UA)
-            
+            println("[MovieKing v87] Final Determined VideoID: $videoId")
+
+            val baseHeaders = mutableMapOf("Referer" to "https://player-v1.bcbc.red/", "Origin" to "https://player-v1.bcbc.red")
             val playerHtml = app.get(url, headers = baseHeaders).text
             val m3u8Url = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)?.groupValues?.get(1)?.replace("\\/", "/") ?: return
+            
             val playlistRes = app.get(m3u8Url, headers = baseHeaders).text
             
             if (proxyServer == null || !proxyServer!!.isAlive()) {
-                proxyServer?.stop(); proxyServer = ProxyWebServer().apply { start() }
+                proxyServer?.stop()
+                proxyServer = ProxyWebServer().apply { start() }
             }
             
             val keyMatch = Regex("""#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"(?:,IV=0x([0-9a-fA-F]+))?""").find(playlistRes)
-            // v87 원본 키 조립 로직
-            val candidates = if (keyMatch != null) solveKeyV87(baseHeaders, keyMatch.groupValues[1]) else emptyList()
+            val candidates = if (keyMatch != null) solveKeyCandidatesSync(baseHeaders, keyMatch.groupValues[1]) else emptyList()
             proxyServer!!.updateSession(baseHeaders, keyMatch?.groupValues?.get(2), candidates)
             
             val port = proxyServer!!.port
-            val proxyRoot = "http://127.0.0.1:$port/$videoId"
             var m3u8Content = playlistRes.lines().filterNot { it.contains("#EXT-X-KEY") }.joinToString("\n")
             val m3u8Base = m3u8Url.substringBeforeLast("/") + "/"
             
+            val proxyRoot = "http://127.0.0.1:$port/$videoId"
             m3u8Content = m3u8Content.lines().joinToString("\n") { line ->
                 if (line.isNotBlank() && !line.startsWith("#")) {
                     val segmentUrl = if (line.startsWith("http")) line else "$m3u8Base$line"
@@ -62,55 +64,72 @@ class BcbcRedExtractor : ExtractorApi() {
             }
 
             proxyServer!!.setPlaylist(m3u8Content)
-            callback(newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) { this.referer = "https://player-v1.bcbc.red/" })
-        } catch (e: Exception) { println("[MovieKing v101] FATAL Error: $e") }
+            callback(newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) { 
+                this.referer = "https://player-v1.bcbc.red/" 
+            })
+        } catch (e: Exception) { println("[MovieKing v87] FATAL Error: $e") }
     }
 
+    // [v87 핵심 로직] URL 및 토큰 내부에서 ID를 뽑아내는 전수조사 함수
     private fun extractVideoIdDeep(url: String): String {
+        // 1. 표준 파라미터 먼저 확인
+        val id = Regex("""[?&]id=([^&]+)""").find(url)?.groupValues?.get(1)
+        val eid = Regex("""[?&]eid=([^&]+)""").find(url)?.groupValues?.get(1)
+        if (id != null && eid != null) return "${id}_$eid"
+        if (id != null) return id
+
+        // 2. JWT 토큰(Base64) 내부 스캔
         try {
-            val token = url.split("/v1/").getOrNull(1)?.split(".")?.getOrNull(1)
-            if (token != null) {
-                val decoded = String(Base64.decode(token, Base64.URL_SAFE))
-                return Regex(""""id"\s*:\s*(\d+)""").find(decoded)?.groupValues?.get(1) ?: "ID_ERR"
+            val segments = url.split("/", ".", "?", "&")
+            for (seg in segments) {
+                if (seg.length > 20) { // 토큰으로 의심되는 길이
+                    val decoded = try { String(Base64.decode(seg, Base64.DEFAULT)) } catch (e: Exception) { "" }
+                    if (decoded.contains("\"id\":")) {
+                        val hiddenId = Regex(""""id"\s*:\s*(\d+)""").find(decoded)?.groupValues?.get(1)
+                        if (hiddenId != null) {
+                            println("[MovieKing v87] Found ID inside Token: $hiddenId")
+                            return hiddenId
+                        }
+                    }
+                }
             }
         } catch (e: Exception) {}
-        return "ID_ERR"
+
+        // 3. 최후의 보루: URL에서 가장 긴 숫자 시퀀스 찾기
+        val numbers = Regex("""\d{5,}""").findAll(url).map { it.value }.toList()
+        if (numbers.isNotEmpty()) return numbers.last()
+
+        return "ID_ERROR"
     }
 
-    private suspend fun solveKeyV87(h: Map<String, String>, kUrl: String): List<ByteArray> {
-        val list = mutableListOf<ByteArray>()
-        try {
-            val res = app.get(kUrl, headers = h).text
-            val json = if (res.startsWith("{")) res else String(Base64.decode(res, Base64.DEFAULT))
-            // [포렌식 로그 1] Key JSON 원문 출력
-            println("[MovieKing v101] Key JSON: $json")
+    private suspend fun solveKeyCandidatesSync(h: Map<String, String>, kUrl: String): List<ByteArray> {
+        return try {
+            val jsonStr = app.get(kUrl, headers = h).text
+            val decodedJson = if (jsonStr.startsWith("{")) jsonStr else String(Base64.decode(jsonStr, Base64.DEFAULT))
+            val encKeyStr = Regex(""""encrypted_key"\s*:\s*"([^"]+)"""").find(decodedJson)?.groupValues?.get(1) ?: return emptyList()
+            val ruleJson = Regex(""""rule"\s*:\s*(\{.*?\})""").find(decodedJson)?.groupValues?.get(1) ?: return emptyList()
             
-            val encStr = Regex(""""encrypted_key"\s*:\s*"([^"]+)"""").find(json)?.groupValues?.get(1) ?: return emptyList()
-            val rule = Regex(""""rule"\s*:\s*(\{.*?\})""").find(json)?.groupValues?.get(1) ?: ""
-            val noise = Regex(""""noise_length"\s*:\s*(\d+)""").find(rule)?.groupValues?.get(1)?.toInt() ?: 2
-            val size = Regex(""""segment_sizes"\s*:\s*\[(\d+)""").find(rule)?.groupValues?.get(1)?.toInt() ?: 4
-            val perm = Regex(""""permutation"\s*:\s*\[([\d,]+)\]""").find(rule)?.groupValues?.get(1)?.split(",")?.map { it.trim().toInt() } ?: listOf(0,1,2,3)
+            val noise = Regex(""""noise_length"\s*:\s*(\d+)""").find(ruleJson)?.groupValues?.get(1)?.toInt() ?: 2
+            val size = Regex(""""segment_sizes"\s*:\s*\[(\d+)""").find(ruleJson)?.groupValues?.get(1)?.toInt() ?: 4
+            val perm = Regex(""""permutation"\s*:\s*\[([\d,]+)\]""").find(ruleJson)?.groupValues?.get(1)?.split(",")?.map { it.trim().toInt() } ?: listOf(0,1,2,3)
 
-            val b64 = try { Base64.decode(encStr, Base64.DEFAULT) } catch (e: Exception) { byteArrayOf() }
-            val raw = encStr.toByteArray()
+            val sources = mutableListOf<ByteArray>()
+            try { sources.add(Base64.decode(encKeyStr, Base64.DEFAULT)) } catch (e: Exception) {}
+            sources.add(encKeyStr.toByteArray())
 
-            listOf(b64, raw).forEach { src ->
+            sources.mapNotNull { src ->
                 val segments = mutableListOf<ByteArray>()
-                var offset = 0
                 for (i in 0 until 4) {
-                    if (offset + size <= src.size) {
-                        segments.add(src.copyOfRange(offset, offset + size))
-                        offset += (size + noise)
-                    }
+                    val start = i * (size + noise)
+                    if (start + size <= src.size) segments.add(src.copyOfRange(start, start + size))
                 }
                 if (segments.size == 4) {
                     val k = ByteArray(16)
                     for (j in 0 until 4) System.arraycopy(segments[perm[j]], 0, k, j * 4, 4)
-                    list.add(k)
-                }
+                    k
+                } else null
             }
-        } catch (e: Exception) {}
-        return list.distinctBy { it.contentHashCode() }
+        } catch (e: Exception) { emptyList() }
     }
 
     class ProxyWebServer {
@@ -149,104 +168,61 @@ class BcbcRedExtractor : ExtractorApi() {
                     output.write("HTTP/1.1 200 OK\r\n\r\n".toByteArray() + currentPlaylist.toByteArray())
                 } else if (path.contains("/proxy")) {
                     val targetUrl = URLDecoder.decode(path.substringAfter("url=").substringBefore(" "), "UTF-8")
+                    val seq = Regex("""(\d+)\.ts""").find(targetUrl)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
                     runBlocking {
                         val res = app.get(targetUrl, headers = currentHeaders)
                         if (res.isSuccessful) {
                             val rawData = res.body.bytes()
-                            
-                            // [포렌식 로그 2] RAW HEADER 출력 (64바이트)
-                            val hexHeader = rawData.take(64).joinToString(" ") { "%02X".format(it) }
-                            println("[MovieKing v101] RAW HEADER: $hexHeader")
-
-                            // [분석 전용 로그] 1MB 딥 스캔 (재생 여부 결정에는 개입 안 함)
-                            logDeepScan1MB(rawData)
-
-                            // v87 원본 잭팟 탐색 로직 (개입 금지)
-                            if (confirmedKey == null && confirmedOffset == 0) findJackpotV87(rawData)
+                            if (confirmedKey == null) findJackpot(rawData, seq)
 
                             output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
                             if (confirmedKey != null) {
-                                println("[MovieKing v101] Result: Sending DECRYPTED data")
-                                val result = decryptAes(rawData, confirmedKey!!, getIv(confirmedIvMode))
-                                output.write(result, confirmedOffset, result.size - confirmedOffset)
-                            } else if (confirmedOffset > 0) {
-                                println("[MovieKing v101] Result: Sending PLAIN data (Offset match)")
-                                output.write(rawData, confirmedOffset, rawData.size - confirmedOffset)
+                                val result = decryptAes(rawData, confirmedKey!!, getIv(confirmedIvMode, seq))
+                                if (result.size > confirmedOffset) output.write(result, confirmedOffset, result.size - confirmedOffset)
                             } else {
-                                // [요청 로그] Fallback 경로 확인
-                                println("[MovieKing v101] JACKPOT NOT FOUND. Passing through RAW data")
                                 output.write(rawData)
                             }
                         }
                     }
                 }
                 output.flush(); socket.close()
-            } catch (e: Exception) { println("[MovieKing v101] Proxy Error: $e") }
+            } catch (e: Exception) { println("[MovieKing v87] Proxy Error: $e") }
         }
 
-        // [v101 추가] 1MB 딥 스캔 로그 전용 함수 (재생 변수 건드리지 않음)
-        private fun logDeepScan1MB(data: ByteArray) {
-            val scanLimit = minOf(data.size - 200, 1048576) // 1MB
-            for (off in 0..scanLimit) {
-                if (data[off] == 0x47.toByte() && data[off+188] == 0x47.toByte()) {
-                    println("[MovieKing v101] DEEP SCAN LOG: Raw 0x47 found at Offset: $off")
-                    return
-                }
-            }
-            // 복호화 시뮬레이션 로그
+        private fun findJackpot(data: ByteArray, seq: Long) {
             for (key in keyCandidates) {
-                for (mode in 0..1) {
+                for (mode in 0..2) {
                     try {
-                        val decrypted = decryptAes(data.take(scanLimit + 200).toByteArray(), key, getIv(mode))
-                        for (off in 0..scanLimit) {
-                            if (decrypted[off] == 0x47.toByte() && decrypted[off+188] == 0x47.toByte()) {
-                                println("[MovieKing v101] DEEP SCAN LOG: Decrypted 0x47 could be found at Offset: $off with Mode: $mode")
+                        val decrypted = decryptAes(data.take(8192).toByteArray(), key, getIv(mode, seq))
+                        for (off in 0..2048) {
+                            if (decrypted[off] == 0x47.toByte() && decrypted[off + 188] == 0x47.toByte()) {
+                                confirmedKey = key; confirmedIvMode = mode; confirmedOffset = off
                                 return
                             }
                         }
                     } catch (e: Exception) {}
                 }
             }
-            println("[MovieKing v101] DEEP SCAN LOG: No 0x47 found in 1MB scan.")
         }
 
-        private fun findJackpotV87(data: ByteArray) {
-            val scanLimit = minOf(data.size - 200, 2048) // v87은 2KB만 스캔했음
-            for (off in 0..scanLimit) {
-                if (data[off] == 0x47.toByte() && data[off+188] == 0x47.toByte()) {
-                    confirmedOffset = off; return
-                }
-            }
-            for (key in keyCandidates) {
-                for (mode in 0..1) {
-                    try {
-                        val decrypted = decryptAes(data.take(scanLimit + 200).toByteArray(), key, getIv(mode))
-                        for (off in 0..scanLimit) {
-                            if (decrypted[off] == 0x47.toByte() && decrypted[off+188] == 0x47.toByte()) {
-                                // [포렌식 로그 3, 4] Winning Key & Jackpot Offset 출력
-                                println("[MovieKing v101] JACKPOT! Offset: $off, Mode: $mode")
-                                println("[MovieKing v101] Winning Key (Hex): ${key.joinToString(""){ "%02X".format(it) }}")
-                                confirmedKey = key; confirmedIvMode = mode; confirmedOffset = off; return
-                            }
-                        }
-                    } catch (e: Exception) {}
-                }
-            }
-        }
-
-        private fun getIv(mode: Int): ByteArray {
+        private fun getIv(mode: Int, seq: Long): ByteArray {
             val iv = ByteArray(16)
-            if (mode == 0) {
-                val hex = playlistIv?.removePrefix("0x") ?: ""
-                try { hex.chunked(2).take(16).forEachIndexed { i, s -> iv[i] = s.toInt(16).toByte() } } catch(e:Exception) {}
+            when (mode) {
+                0 -> {
+                    val hex = playlistIv?.removePrefix("0x") ?: ""
+                    try { hex.chunked(2).take(16).forEachIndexed { i, s -> iv[i] = s.toInt(16).toByte() } } catch(e:Exception) {}
+                }
+                1 -> for (i in 0..7) iv[15 - i] = (seq shr (i * 8)).toByte()
             }
             return iv
         }
 
-        private fun decryptAes(d: ByteArray, k: ByteArray, v: ByteArray): ByteArray {
-            val cipher = Cipher.getInstance("AES/CBC/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(k, "AES"), IvParameterSpec(v))
-            return cipher.doFinal(d)
+        private fun decryptAes(data: ByteArray, key: ByteArray, iv: ByteArray): ByteArray {
+            return try {
+                val cipher = Cipher.getInstance("AES/CBC/NoPadding")
+                cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+                cipher.doFinal(data)
+            } catch (e: Exception) { ByteArray(0) }
         }
     }
 }
