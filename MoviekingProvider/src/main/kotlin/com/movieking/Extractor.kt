@@ -7,6 +7,8 @@ import com.lagradost.cloudstream3.SubtitleFile
 import java.io.*
 import java.net.*
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch // 필수
+import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -14,13 +16,14 @@ import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
 /**
- * v132: Immortal Server Engine (Simplest & Most Stable)
+ * v133: Strict Sync Server (Fix 3002/Port 0 Error)
  * [문제 원인]
- * 과도한 헬스 체크와 재시작 로직이 레이스 컨디션을 유발하여, 멀쩡한 서버를 죽이고 M3U8 응답을 방해함 -> 3002 에러.
+ * v132의 Lazy 초기화 및 비동기 startServer로 인해, 포트가 할당되기도 전에 getUrl이 리턴됨.
+ * 플레이어는 'http://127.0.0.1:0/...'으로 접속 시도 -> 실패 -> 3002 에러.
  * [해결책]
- * 1. 서버 불멸화: 클래스 로딩 시점에 서버를 시작하고, 앱 종료 시까지 절대 끄지 않음. (포트 고정 효과)
- * 2. 로직 단순화: getUrl에서는 변수 할당만 수행. (즉시 리턴)
- * 3. 기능 유지: 파일명 매핑, 지연 생성, 캐싱 등 검증된 기능은 그대로 탑재.
+ * 1. 동기식 시작: startServer가 포트 할당 완료 시까지 메인 스레드를 대기시킴 (CountDownLatch).
+ * 2. 포트 보장: getUrl 리턴 시 무조건 유효한 포트(>0)를 반환하도록 보장.
+ * 3. 안정성: 서버 스레드 상태를 더 엄격하게 체크.
  */
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -29,14 +32,12 @@ class BcbcRedExtractor : ExtractorApi() {
     private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
     companion object {
-        // [v132] 앱 시작과 동시에 서버 가동 (Lazy Initialization)
-        private val proxyServer by lazy { 
-            ProxyWebServer().apply { startServer() } 
-        }
+        // [v133] 싱글톤 인스턴스 (Lazy 아님, 즉시 생성)
+        private val proxyServer = ProxyWebServer()
     }
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
-        println("=== [MovieKing v132] getUrl Start ===")
+        println("=== [MovieKing v133] getUrl Start ===")
         try {
             val videoId = extractVideoIdDeep(url)
             val baseHeaders = mutableMapOf("Referer" to "https://player-v1.bcbc.red/", "Origin" to "https://player-v1.bcbc.red", "User-Agent" to DESKTOP_UA)
@@ -50,7 +51,8 @@ class BcbcRedExtractor : ExtractorApi() {
             val keyUrl = keyMatch?.groupValues?.get(1)
             val keyData = if (keyUrl != null) fetchKeyData(baseHeaders, keyUrl) else null
             
-            // [v132] 서버 상태 체크나 재시작 없이 값만 갱신 (0ms 소요)
+            // [v133] 서버 시작 및 포트 할당 대기 (동기화)
+            proxyServer.ensureStarted()
             proxyServer.updateSession(baseHeaders, hexIv, keyData, videoId)
             
             val seqMap = ConcurrentHashMap<String, Long>()
@@ -58,7 +60,10 @@ class BcbcRedExtractor : ExtractorApi() {
             val newLines = mutableListOf<String>()
             var currentSeq = Regex("""#EXT-X-MEDIA-SEQUENCE:(\d+)""").find(playlistRes)?.groupValues?.get(1)?.toLong() ?: 0L
             
+            // [중요] 포트가 0이면 치명적 오류 (재시도 로직 필요할 수 있음)
             val port = proxyServer.port
+            if (port <= 0) throw IOException("Proxy Port Invalid: $port")
+            
             val proxyRoot = "http://127.0.0.1:$port"
 
             for (line in lines) {
@@ -76,7 +81,7 @@ class BcbcRedExtractor : ExtractorApi() {
             
             proxyServer.updateSeqMap(seqMap)
             callback(newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) { this.referer = "https://player-v1.bcbc.red/" })
-        } catch (e: Exception) { println("[MovieKing v132] FATAL Error: $e") }
+        } catch (e: Exception) { println("[MovieKing v133] FATAL Error: $e") }
     }
 
     private fun extractVideoIdDeep(url: String): String {
@@ -101,6 +106,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
     class ProxyWebServer {
         private var serverSocket: ServerSocket? = null
+        @Volatile private var isRunning = false
         var port: Int = 0
         
         @Volatile private var currentHeaders: Map<String, String> = emptyMap()
@@ -112,23 +118,39 @@ class BcbcRedExtractor : ExtractorApi() {
         @Volatile private var confirmedKey: ByteArray? = null
         @Volatile private var confirmedIvType: Int = -1
 
-        fun startServer() {
-            try {
-                serverSocket = ServerSocket(0)
-                port = serverSocket!!.localPort
-                println("[MovieKing v132] Immortal Server Started on Port $port")
-                
-                thread(isDaemon = true) {
-                    while (serverSocket != null && !serverSocket!!.isClosed) { 
+        // [v133] 서버 시작 보장 함수
+        fun ensureStarted() {
+            if (isRunning && serverSocket != null && !serverSocket!!.isClosed && port > 0) return
+            
+            val latch = CountDownLatch(1)
+            thread(isDaemon = true) {
+                try {
+                    serverSocket = ServerSocket(0)
+                    port = serverSocket!!.localPort
+                    isRunning = true
+                    println("[MovieKing v133] Server Started on Port $port")
+                    latch.countDown() // 포트 할당 완료 신호
+                    
+                    while (isRunning && serverSocket != null && !serverSocket!!.isClosed) { 
                         try {
                             val client = serverSocket!!.accept()
                             handleClient(client)
                         } catch (e: Exception) {
-                            println("[MovieKing v132] Accept Error: $e")
+                            if (isRunning) println("[MovieKing v133] Accept Error: $e")
                         } 
                     }
+                } catch (e: Exception) {
+                    println("[MovieKing v133] Server Bind Failed: $e")
+                    latch.countDown() // 실패해도 래치는 풀어줘야 무한대기 안 함
                 }
-            } catch (e: Exception) { println("[MovieKing v132] Server Bind Failed: $e") }
+            }
+            
+            // 최대 3초 대기 (포트 할당 될 때까지)
+            try {
+                if (!latch.await(3, TimeUnit.SECONDS)) {
+                    println("[MovieKing v133] Server Start Timeout!")
+                }
+            } catch (e: Exception) { }
         }
 
         fun updateSession(h: Map<String, String>, iv: String?, kData: ByteArray?, vid: String) {
@@ -136,7 +158,7 @@ class BcbcRedExtractor : ExtractorApi() {
             if (currentVideoId != vid) {
                 currentVideoId = vid; confirmedKey = null; confirmedIvType = -1
                 seqMap.clear()
-                println("[MovieKing v132] New Session: $vid")
+                println("[MovieKing v133] New Session: $vid")
             }
         }
         
@@ -209,7 +231,7 @@ class BcbcRedExtractor : ExtractorApi() {
                         cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
                         val head = cipher.update(data.take(checkSize).toByteArray())
                         if (head.isNotEmpty() && head[0] == 0x47.toByte() && head.size > 188 && head[188] == 0x47.toByte()) {
-                            println("[MovieKing v132] KEY LOCKED!")
+                            println("[MovieKing v133] KEY LOCKED!")
                             confirmedKey = key
                             confirmedIvType = ivIdx
                             cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
@@ -261,8 +283,7 @@ class BcbcRedExtractor : ExtractorApi() {
             if (list.isEmpty()) return listOf(emptyList())
             val result = mutableListOf<List<Int>>()
             for (i in list.indices) {
-                val elem = list[i]
-                val rest = list.take(i) + list.drop(i + 1)
+                val elem = list[i]; val rest = list.take(i) + list.drop(i + 1)
                 for (p in generatePermutations(rest)) result.add(listOf(elem) + p)
             }
             return result
