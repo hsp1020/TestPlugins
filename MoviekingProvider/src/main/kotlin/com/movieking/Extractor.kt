@@ -4,9 +4,12 @@ import android.util.Base64
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.SubtitleFile
-import java.io.*
-import java.net.*
-import java.util.concurrent.ConcurrentHashMap
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.net.ServerSocket
+import java.net.Socket
+import java.net.URLDecoder
+import java.net.URLEncoder
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -14,11 +17,10 @@ import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
 /**
- * v109: URL-Sequence Mapping Engine
- * [해결 전략]
- * 1. 문제: seq 파라미터 주입 방식은 플레이어의 비순차적 요청 시 IV 불일치 유발.
- * 2. 해결: TS 파일의 원본 URL을 Key로, 시퀀스 번호를 Value로 하는 매핑 테이블(sequenceMap) 구축.
- * 3. 동작: 프록시가 요청받은 URL을 보고 매핑 테이블에서 정확한 시퀀스 번호를 찾아 IV 생성.
+ * v109: Build-Safe Integrity Fix
+ * [수정 사항]
+ * 1. 빌드 안정성: 인코딩 및 Import 관련 잠재적 오류 제거.
+ * 2. v108 로직 계승: M3U8 헤더 보장, 시퀀스 주입, 포렌식 로그 유지.
  */
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -40,7 +42,6 @@ class BcbcRedExtractor : ExtractorApi() {
             val m3u8Url = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)?.groupValues?.get(1)?.replace("\\/", "/") ?: return
             val playlistRes = app.get(m3u8Url, headers = baseHeaders).text
             
-            // 시퀀스 번호 파싱
             val startSeq = Regex("""#EXT-X-MEDIA-SEQUENCE:(\d+)""").find(playlistRes)?.groupValues?.get(1)?.toLong() ?: 0L
             println("[MovieKing v109] Playlist Start Sequence: $startSeq")
 
@@ -50,34 +51,36 @@ class BcbcRedExtractor : ExtractorApi() {
             
             val keyMatch = Regex("""#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"(?:,IV=0x([0-9a-fA-F]+))?""").find(playlistRes)
             val candidates = if (keyMatch != null) solveKeyCandidatesV87(baseHeaders, keyMatch.groupValues[1]) else emptyList()
+            proxyServer!!.updateSession(baseHeaders, keyMatch?.groupValues?.get(2), candidates)
             
-            // [v109 핵심] URL -> Sequence 매핑 테이블 생성
-            val sequenceMap = ConcurrentHashMap<String, Long>()
-            val lines = playlistRes.lines()
-            var currentSeq = startSeq
+            val port = proxyServer!!.port
+            val proxyRoot = "http://127.0.0.1:$port/$videoId"
+            
+            val lines = playlistRes.lines().toMutableList()
             val newLines = mutableListOf<String>()
-            val proxyRoot = "http://127.0.0.1:${proxyServer!!.port}/$videoId"
-
+            
+            // 헤더 보장
+            if (lines.isNotEmpty() && !lines[0].startsWith("#EXTM3U")) {
+                newLines.add("#EXTM3U")
+            }
+            
+            var seqCounter = startSeq
             for (line in lines) {
-                if (line.startsWith("#EXT-X-KEY")) continue // 키 태그 제거
+                if (line.startsWith("#EXT-X-KEY")) continue 
                 
                 if (line.isNotBlank() && !line.startsWith("#")) {
                     val segmentUrl = if (line.startsWith("http")) line else "${m3u8Url.substringBeforeLast("/")}/$line"
-                    
-                    // URL을 Key로 시퀀스 저장
-                    sequenceMap[segmentUrl] = currentSeq
-                    
-                    // 프록시 URL 생성 (seq 파라미터 제거, url만 전달)
-                    newLines.add("$proxyRoot/proxy?url=${URLEncoder.encode(segmentUrl, "UTF-8")}")
-                    currentSeq++
+                    newLines.add("$proxyRoot/proxy?seq=$seqCounter&url=${URLEncoder.encode(segmentUrl, "UTF-8")}")
+                    seqCounter++
                 } else {
                     newLines.add(line)
                 }
             }
             
             val m3u8Content = newLines.joinToString("\n")
-            proxyServer!!.updateSession(baseHeaders, keyMatch?.groupValues?.get(2), candidates, m3u8Content, sequenceMap)
-            
+            println("[MovieKing v109] M3U8 Generated (First 100 chars): ${m3u8Content.take(100)}")
+
+            proxyServer!!.setPlaylist(m3u8Content)
             callback(newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) { this.referer = "https://player-v1.bcbc.red/" })
         } catch (e: Exception) { println("[MovieKing v109] FATAL Error: $e") }
     }
@@ -134,7 +137,6 @@ class BcbcRedExtractor : ExtractorApi() {
         @Volatile private var playlistIv: String? = null
         @Volatile private var currentPlaylist: String = ""
         @Volatile private var keyCandidates: List<ByteArray> = emptyList()
-        @Volatile private var seqMap: ConcurrentHashMap<String, Long> = ConcurrentHashMap()
 
         fun isAlive() = isRunning && serverSocket != null && !serverSocket!!.isClosed
         fun start() {
@@ -143,10 +145,10 @@ class BcbcRedExtractor : ExtractorApi() {
             thread(isDaemon = true) { while (isAlive()) { try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {} } }
         }
         fun stop() { isRunning = false; try { serverSocket?.close() } catch (e: Exception) {} }
-        
-        fun updateSession(h: Map<String, String>, iv: String?, k: List<ByteArray>, p: String, map: ConcurrentHashMap<String, Long>) {
-            currentHeaders = h; playlistIv = iv; keyCandidates = k; currentPlaylist = p; seqMap = map
+        fun updateSession(h: Map<String, String>, iv: String?, k: List<ByteArray>) {
+            currentHeaders = h; playlistIv = iv; keyCandidates = k
         }
+        fun setPlaylist(p: String) { currentPlaylist = p }
 
         private fun handleClient(socket: Socket) = thread {
             try {
@@ -157,11 +159,10 @@ class BcbcRedExtractor : ExtractorApi() {
 
                 if (path.contains("/playlist.m3u8")) {
                     output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\n\r\n".toByteArray())
-                    output.write(currentPlaylist.toByteArray(Charsets.UTF_8))
+                    output.write(currentPlaylist.toByteArray(charset("UTF-8")))
                 } else if (path.contains("/proxy")) {
+                    val seq = path.substringAfter("seq=").substringBefore("&").toLongOrNull() ?: 0L
                     val targetUrl = URLDecoder.decode(path.substringAfter("url=").substringBefore(" "), "UTF-8")
-                    // [핵심] URL로 매핑된 정확한 시퀀스 번호 조회
-                    val seq = seqMap[targetUrl] ?: 0L
                     
                     runBlocking {
                         val res = app.get(targetUrl, headers = currentHeaders)
@@ -194,7 +195,6 @@ class BcbcRedExtractor : ExtractorApi() {
 
         private fun tryDecrypt(data: ByteArray, seq: Long): ByteArray? {
             for ((idx, key) in keyCandidates.withIndex()) {
-                // Mode 0: Hex IV, Mode 1: Zero IV, Mode 2: Sequence IV
                 for (mode in 0..2) { 
                     try {
                         val iv = getIv(mode, seq)
@@ -220,7 +220,7 @@ class BcbcRedExtractor : ExtractorApi() {
                     val hex = playlistIv?.removePrefix("0x") ?: ""
                     try { hex.chunked(2).take(16).forEachIndexed { i, s -> iv[i] = s.toInt(16).toByte() } } catch(e:Exception) {}
                 }
-                1 -> {} // Zero IV
+                1 -> {} 
                 2 -> for (i in 0..7) iv[15 - i] = (seq shr (i * 8)).toByte()
             }
             return iv
