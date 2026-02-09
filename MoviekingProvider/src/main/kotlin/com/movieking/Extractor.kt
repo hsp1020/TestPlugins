@@ -14,14 +14,13 @@ import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
 /**
- * v131: Unbreakable Server Engine (Fix 3002/Timeout)
+ * v132: Immortal Server Engine (Simplest & Most Stable)
  * [문제 원인]
- * v130에서 서버 스레드가 비정상 종료(Timeout/Error)되어도 'isAlive' 플래그가 true로 남아있어,
- * 다음 요청 시 죽은 서버에 연결을 시도하다 타임아웃(3002) 발생.
+ * 과도한 헬스 체크와 재시작 로직이 레이스 컨디션을 유발하여, 멀쩡한 서버를 죽이고 M3U8 응답을 방해함 -> 3002 에러.
  * [해결책]
- * 1. 서버 감시 강화: 단순 boolean이 아닌 실제 스레드 생존 여부(Thread.isAlive) 확인.
- * 2. 좀비 부활: accept 루프가 죽으면 즉시 감지하고 재시작.
- * 3. 예외 격리: 클라이언트 핸들링 중 에러가 서버 전체를 죽이지 않도록 try-catch 범위 수정.
+ * 1. 서버 불멸화: 클래스 로딩 시점에 서버를 시작하고, 앱 종료 시까지 절대 끄지 않음. (포트 고정 효과)
+ * 2. 로직 단순화: getUrl에서는 변수 할당만 수행. (즉시 리턴)
+ * 3. 기능 유지: 파일명 매핑, 지연 생성, 캐싱 등 검증된 기능은 그대로 탑재.
  */
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -30,12 +29,14 @@ class BcbcRedExtractor : ExtractorApi() {
     private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
     companion object {
-        // [v131] 싱글톤 유지
-        private val proxyServer = ProxyWebServer()
+        // [v132] 앱 시작과 동시에 서버 가동 (Lazy Initialization)
+        private val proxyServer by lazy { 
+            ProxyWebServer().apply { startServer() } 
+        }
     }
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
-        println("=== [MovieKing v131] getUrl Start ===")
+        println("=== [MovieKing v132] getUrl Start ===")
         try {
             val videoId = extractVideoIdDeep(url)
             val baseHeaders = mutableMapOf("Referer" to "https://player-v1.bcbc.red/", "Origin" to "https://player-v1.bcbc.red", "User-Agent" to DESKTOP_UA)
@@ -49,12 +50,7 @@ class BcbcRedExtractor : ExtractorApi() {
             val keyUrl = keyMatch?.groupValues?.get(1)
             val keyData = if (keyUrl != null) fetchKeyData(baseHeaders, keyUrl) else null
             
-            // [v131] 서버 상태 정밀 점검 (죽었으면 살려내라)
-            if (!proxyServer.isHealthy()) {
-                println("[MovieKing v131] Server is unhealthy. Restarting...")
-                proxyServer.stop()
-                proxyServer.start()
-            }
+            // [v132] 서버 상태 체크나 재시작 없이 값만 갱신 (0ms 소요)
             proxyServer.updateSession(baseHeaders, hexIv, keyData, videoId)
             
             val seqMap = ConcurrentHashMap<String, Long>()
@@ -80,7 +76,7 @@ class BcbcRedExtractor : ExtractorApi() {
             
             proxyServer.updateSeqMap(seqMap)
             callback(newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) { this.referer = "https://player-v1.bcbc.red/" })
-        } catch (e: Exception) { println("[MovieKing v131] FATAL Error: $e") }
+        } catch (e: Exception) { println("[MovieKing v132] FATAL Error: $e") }
     }
 
     private fun extractVideoIdDeep(url: String): String {
@@ -105,8 +101,6 @@ class BcbcRedExtractor : ExtractorApi() {
 
     class ProxyWebServer {
         private var serverSocket: ServerSocket? = null
-        private var serverThread: Thread? = null // [v131] 스레드 참조 보관
-        @Volatile private var isRunning = false
         var port: Int = 0
         
         @Volatile private var currentHeaders: Map<String, String> = emptyMap()
@@ -118,45 +112,31 @@ class BcbcRedExtractor : ExtractorApi() {
         @Volatile private var confirmedKey: ByteArray? = null
         @Volatile private var confirmedIvType: Int = -1
 
-        // [v131] 헬스 체크: 소켓이 열려있고 스레드가 살아있는지 확인
-        fun isHealthy(): Boolean {
-            return isRunning && serverSocket != null && !serverSocket!!.isClosed && serverThread != null && serverThread!!.isAlive
-        }
-
-        fun start() {
-            if (isHealthy()) return
+        fun startServer() {
             try {
                 serverSocket = ServerSocket(0)
                 port = serverSocket!!.localPort
-                isRunning = true
+                println("[MovieKing v132] Immortal Server Started on Port $port")
                 
-                serverThread = thread(isDaemon = true) {
-                    println("[MovieKing v131] Server Thread Started on Port $port")
-                    while (isRunning && serverSocket != null && !serverSocket!!.isClosed) { 
+                thread(isDaemon = true) {
+                    while (serverSocket != null && !serverSocket!!.isClosed) { 
                         try {
                             val client = serverSocket!!.accept()
                             handleClient(client)
                         } catch (e: Exception) {
-                            if (isRunning) println("[MovieKing v131] Accept Error (Retrying): $e")
+                            println("[MovieKing v132] Accept Error: $e")
                         } 
                     }
-                    println("[MovieKing v131] Server Thread Died")
                 }
-            } catch (e: Exception) { println("[MovieKing v131] Server Bind Failed: $e") }
+            } catch (e: Exception) { println("[MovieKing v132] Server Bind Failed: $e") }
         }
 
-        fun stop() {
-            isRunning = false
-            try { serverSocket?.close(); serverSocket = null } catch (e: Exception) {}
-            try { serverThread?.interrupt(); serverThread = null } catch (e: Exception) {}
-        }
-        
         fun updateSession(h: Map<String, String>, iv: String?, kData: ByteArray?, vid: String) {
             currentHeaders = h; playlistIv = iv; keyData = kData
             if (currentVideoId != vid) {
                 currentVideoId = vid; confirmedKey = null; confirmedIvType = -1
                 seqMap.clear()
-                println("[MovieKing v131] New Session: $vid")
+                println("[MovieKing v132] New Session: $vid")
             }
         }
         
@@ -229,7 +209,7 @@ class BcbcRedExtractor : ExtractorApi() {
                         cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
                         val head = cipher.update(data.take(checkSize).toByteArray())
                         if (head.isNotEmpty() && head[0] == 0x47.toByte() && head.size > 188 && head[188] == 0x47.toByte()) {
-                            println("[MovieKing v131] KEY LOCKED!")
+                            println("[MovieKing v132] KEY LOCKED!")
                             confirmedKey = key
                             confirmedIvType = ivIdx
                             cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
