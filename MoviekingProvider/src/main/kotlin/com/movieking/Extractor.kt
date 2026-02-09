@@ -13,11 +13,11 @@ import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
 /**
- * v103: 5-Sync Junk Trimmer & Full Logging Mode
+ * v106: Full-Trace Simple Switching Engine
  * [유저 지침 준수]
- * 1. 로그 보존: v102의 RAW HEADER, Key JSON 등 모든 포렌식 로그 100% 유지.
- * 2. 문제 해결: 5-Sync로 가짜 싱크(False Positive)를 거르고, 진짜 오프셋 앞의 가비지(Junk)를 제거.
- * 3. 동작 확인: TRIMMING 로그를 통해 실제로 가비지가 제거되고 있는지 확인 가능.
+ * 1. 무조건 로그: 데이터 수신, 헤더 검사, 분기 판단, 복호화 결과 등 모든 과정 println 출력.
+ * 2. 단순화 로직: 복잡한 가설 제거. (0x47이면 통과, 아니면 복호화)
+ * 3. 디버깅 최적화: 로그만 보면 왜 재생되었는지/실패했는지 1초 만에 파악 가능하도록 설계.
  */
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -30,9 +30,11 @@ class BcbcRedExtractor : ExtractorApi() {
     }
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
-        println("=== [MovieKing v103] getUrl Start (Trimmer + Full Logs) ===")
+        println("=== [MovieKing v106] getUrl Start ===")
         try {
             val videoId = extractVideoIdDeep(url)
+            println("[MovieKing v106] Target ID: $videoId")
+
             val baseHeaders = mutableMapOf("Referer" to "https://player-v1.bcbc.red/", "Origin" to "https://player-v1.bcbc.red", "User-Agent" to DESKTOP_UA)
             
             val playerHtml = app.get(url, headers = baseHeaders).text
@@ -44,6 +46,7 @@ class BcbcRedExtractor : ExtractorApi() {
             }
             
             val keyMatch = Regex("""#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"(?:,IV=0x([0-9a-fA-F]+))?""").find(playlistRes)
+            // v87 표준 방식 키 생성
             val candidates = if (keyMatch != null) solveKeyCandidatesV87(baseHeaders, keyMatch.groupValues[1]) else emptyList()
             proxyServer!!.updateSession(baseHeaders, keyMatch?.groupValues?.get(2), candidates)
             
@@ -61,7 +64,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
             proxyServer!!.setPlaylist(m3u8Content)
             callback(newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) { this.referer = "https://player-v1.bcbc.red/" })
-        } catch (e: Exception) { println("[MovieKing v103] FATAL Error: $e") }
+        } catch (e: Exception) { println("[MovieKing v106] FATAL Error: $e") }
     }
 
     private fun extractVideoIdDeep(url: String): String {
@@ -80,8 +83,8 @@ class BcbcRedExtractor : ExtractorApi() {
         try {
             val res = app.get(kUrl, headers = h).text
             val json = if (res.startsWith("{")) res else String(Base64.decode(res, Base64.DEFAULT))
-            // [로그 유지] Key JSON 출력
-            println("[MovieKing v103] Key JSON: $json")
+            // [로그] 키 규칙 원문 확인
+            println("[MovieKing v106] Key JSON Rule: $json")
             
             val encStr = Regex(""""encrypted_key"\s*:\s*"([^"]+)"""").find(json)?.groupValues?.get(1) ?: return emptyList()
             val rule = Regex(""""rule"\s*:\s*(\{.*?\})""").find(json)?.groupValues?.get(1) ?: ""
@@ -107,7 +110,8 @@ class BcbcRedExtractor : ExtractorApi() {
                     list.add(k)
                 }
             }
-        } catch (e: Exception) { println("[MovieKing v103] Key Build Error: $e") }
+            println("[MovieKing v106] Generated Key Candidates: ${list.size}")
+        } catch (e: Exception) { println("[MovieKing v106] Key Build Error: $e") }
         return list.distinctBy { it.contentHashCode() }
     }
 
@@ -119,9 +123,6 @@ class BcbcRedExtractor : ExtractorApi() {
         @Volatile private var playlistIv: String? = null
         @Volatile private var currentPlaylist: String = ""
         @Volatile private var keyCandidates: List<ByteArray> = emptyList()
-        @Volatile private var confirmedKey: ByteArray? = null
-        @Volatile private var confirmedIvMode: Int = -1
-        @Volatile private var confirmedOffset: Int = 0
 
         fun isAlive() = isRunning && serverSocket != null && !serverSocket!!.isClosed
         fun start() {
@@ -132,7 +133,6 @@ class BcbcRedExtractor : ExtractorApi() {
         fun stop() { isRunning = false; try { serverSocket?.close() } catch (e: Exception) {} }
         fun updateSession(h: Map<String, String>, iv: String?, k: List<ByteArray>) {
             currentHeaders = h; playlistIv = iv; keyCandidates = k
-            confirmedKey = null; confirmedIvMode = -1; confirmedOffset = 0
         }
         fun setPlaylist(p: String) { currentPlaylist = p }
 
@@ -147,97 +147,73 @@ class BcbcRedExtractor : ExtractorApi() {
                     output.write("HTTP/1.1 200 OK\r\n\r\n".toByteArray() + currentPlaylist.toByteArray())
                 } else if (path.contains("/proxy")) {
                     val targetUrl = URLDecoder.decode(path.substringAfter("url=").substringBefore(" "), "UTF-8")
-                    val seq = Regex("""(\d+)\.ts""").find(targetUrl)?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+                    val seqStr = Regex("""(\d+)\.ts""").find(targetUrl)?.groupValues?.get(1) ?: "?"
+                    
                     runBlocking {
                         val res = app.get(targetUrl, headers = currentHeaders)
                         if (res.isSuccessful) {
                             val rawData = res.body.bytes()
-                            // [로그 유지] RAW HEADER 출력
-                            println("[MovieKing v103] RAW HEADER: ${rawData.take(64).joinToString(" ") { "%02X".format(it) }}")
-
-                            // 1MB 5-Sync 정밀 스캔
-                            if (confirmedKey == null && confirmedOffset == 0) findRealStart(rawData, seq)
+                            // [로그] 수신 데이터 헤더 (암호화 여부 판단 기준)
+                            val headHex = rawData.take(16).joinToString(" ") { "%02X".format(it) }
+                            println("[MovieKing v106] TS#$seqStr | Size: ${rawData.size} | Header: $headHex")
 
                             output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
-                            
-                            if (confirmedOffset > 0) {
-                                // [가비지 제거] 5-Sync로 찾은 진짜 시작점부터 전송
-                                println("[MovieKing v103] TRIMMING: Skipping garbage ($confirmedOffset bytes)")
-                                if (confirmedKey != null) {
-                                    val result = decryptAes(rawData, confirmedKey!!, getIv(confirmedIvMode, seq))
-                                    // 암호화된 경우에도 오프셋 적용
-                                    if (result.size > confirmedOffset) output.write(result, confirmedOffset, result.size - confirmedOffset)
-                                } else {
-                                    // Plain TS 경우
-                                    output.write(rawData, confirmedOffset, rawData.size - confirmedOffset)
-                                }
-                            } else {
-                                // 5-Sync 실패 시 (기존 Fallback 유지 및 로그)
-                                println("[MovieKing v103] JACKPOT NOT FOUND. Passing through RAW data")
+
+                            // [로직] 0x47 체크 -> 분기 처리
+                            if (rawData.isNotEmpty() && rawData[0] == 0x47.toByte()) {
+                                println("[MovieKing v106] TS#$seqStr -> [Action] Plain TS Detected. Sending RAW.")
                                 output.write(rawData)
+                            } else {
+                                println("[MovieKing v106] TS#$seqStr -> [Action] Encrypted/Garbage. Trying Decrypt.")
+                                val decrypted = tryDecrypt(rawData, seqStr)
+                                if (decrypted != null) {
+                                    output.write(decrypted)
+                                } else {
+                                    println("[MovieKing v106] TS#$seqStr -> [Fail] Decryption Failed. Sending RAW (Fallback).")
+                                    output.write(rawData)
+                                }
                             }
+                        } else {
+                            println("[MovieKing v106] Download Failed: ${res.code}")
                         }
                     }
                 }
                 output.flush(); socket.close()
-            } catch (e: Exception) { println("[MovieKing v103] Proxy Error: $e") }
+            } catch (e: Exception) { println("[MovieKing v106] Proxy Error: $e") }
         }
 
-        private fun findRealStart(data: ByteArray, seq: Long) {
-            val scanLimit = minOf(data.size - 1000, 1048576) // 1MB 스캔
-            
-            // 1. Plain TS 정밀 검증 (5개 연속 매칭)
-            for (off in 0..scanLimit) {
-                if (check5Sync(data, off)) {
-                    println("[MovieKing v103] VALID PLAIN TS FOUND at Offset: $off")
-                    confirmedOffset = off; return
-                }
-            }
-
-            // 2. AES 복호화 정밀 검증
-            for (key in keyCandidates) {
-                for (mode in 0..1) {
+        private fun tryDecrypt(data: ByteArray, seqStr: String): ByteArray? {
+            // 모든 키와 단순 IV(Hex, Zero)로만 시도
+            for ((idx, key) in keyCandidates.withIndex()) {
+                for (mode in 0..1) { // 0: Hex IV, 1: Zero IV
                     try {
-                        val decrypted = decryptAes(data.take(scanLimit + 1000).toByteArray(), key, getIv(mode, seq))
-                        for (off in 0..scanLimit) {
-                            if (check5Sync(decrypted, off)) {
-                                // [로그 유지] Winning Key 출력
-                                println("[MovieKing v103] VALID DECRYPTED TS FOUND at Offset: $off, Mode: $mode")
-                                println("[MovieKing v103] Winning Key (Hex): ${key.joinToString(""){ "%02X".format(it) }}")
-                                confirmedKey = key; confirmedIvMode = mode; confirmedOffset = off; return
-                            }
+                        val iv = getIv(mode)
+                        val cipher = Cipher.getInstance("AES/CBC/NoPadding")
+                        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+                        
+                        // 16바이트만 먼저 복호화해서 0x47 확인 (속도 최적화)
+                        val head = cipher.update(data.take(16).toByteArray())
+                        if (head.isNotEmpty() && head[0] == 0x47.toByte()) {
+                            // [로그] 성공한 키 정보 기록
+                            println("[MovieKing v106] TS#$seqStr -> [Success] Decrypted! KeyIdx:$idx, Mode:$mode")
+                            
+                            // 전체 복호화 수행
+                            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+                            return cipher.doFinal(data)
                         }
                     } catch (e: Exception) {}
                 }
             }
+            return null
         }
 
-        // [핵심] 5번 연속 싱크 확인 (False Positive 방지)
-        private fun check5Sync(t: ByteArray, o: Int): Boolean {
-            return try {
-                t[o] == 0x47.toByte() && t[o+188] == 0x47.toByte() && t[o+376] == 0x47.toByte() && 
-                t[o+564] == 0x47.toByte() && t[o+752] == 0x47.toByte()
-            } catch (e: Exception) { false }
-        }
-
-        private fun getIv(mode: Int, seq: Long): ByteArray {
+        private fun getIv(mode: Int): ByteArray {
             val iv = ByteArray(16)
-            when (mode) {
-                0 -> {
-                    val hex = playlistIv?.removePrefix("0x") ?: ""
-                    try { hex.chunked(2).take(16).forEachIndexed { i, s -> iv[i] = s.toInt(16).toByte() } } catch(e:Exception) {}
-                }
-                1 -> for (i in 0..7) iv[15 - i] = (seq shr (i * 8)).toByte()
+            if (mode == 0) {
+                val hex = playlistIv?.removePrefix("0x") ?: ""
+                try { hex.chunked(2).take(16).forEachIndexed { i, s -> iv[i] = s.toInt(16).toByte() } } catch(e:Exception) {}
             }
             return iv
-        }
-
-        private fun decryptAes(data: ByteArray, key: ByteArray, iv: ByteArray): ByteArray {
-            return try {
-                val cipher = Cipher.getInstance("AES/CBC/NoPadding")
-                cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
-                cipher.doFinal(data)
-            } catch (e: Exception) { ByteArray(0) }
         }
     }
 }
