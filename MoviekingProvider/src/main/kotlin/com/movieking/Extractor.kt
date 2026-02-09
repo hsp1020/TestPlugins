@@ -7,8 +7,6 @@ import com.lagradost.cloudstream3.SubtitleFile
 import java.io.*
 import java.net.*
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -16,10 +14,14 @@ import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
 /**
- * v130 Fix: Build Error Resolved
- * [수정 사항]
- * 1. 빌드 에러 해결: generatePermutations 함수의 제네릭 <T> 제거 -> List<Int>로 명시적 타입 지정.
- * 2. 기능 유지: v130의 핵심 기능(파일명 매핑, 영구 서버, 스마트 캐싱, 지연 생성) 완벽 보존.
+ * v131: Unbreakable Server Engine (Fix 3002/Timeout)
+ * [문제 원인]
+ * v130에서 서버 스레드가 비정상 종료(Timeout/Error)되어도 'isAlive' 플래그가 true로 남아있어,
+ * 다음 요청 시 죽은 서버에 연결을 시도하다 타임아웃(3002) 발생.
+ * [해결책]
+ * 1. 서버 감시 강화: 단순 boolean이 아닌 실제 스레드 생존 여부(Thread.isAlive) 확인.
+ * 2. 좀비 부활: accept 루프가 죽으면 즉시 감지하고 재시작.
+ * 3. 예외 격리: 클라이언트 핸들링 중 에러가 서버 전체를 죽이지 않도록 try-catch 범위 수정.
  */
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -28,12 +30,12 @@ class BcbcRedExtractor : ExtractorApi() {
     private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
     companion object {
-        // [v130] 서버는 단 하나! (Singleton)
+        // [v131] 싱글톤 유지
         private val proxyServer = ProxyWebServer()
     }
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
-        println("=== [MovieKing v130 Fix] getUrl Start ===")
+        println("=== [MovieKing v131] getUrl Start ===")
         try {
             val videoId = extractVideoIdDeep(url)
             val baseHeaders = mutableMapOf("Referer" to "https://player-v1.bcbc.red/", "Origin" to "https://player-v1.bcbc.red", "User-Agent" to DESKTOP_UA)
@@ -45,12 +47,12 @@ class BcbcRedExtractor : ExtractorApi() {
             val keyMatch = Regex("""#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"(?:,IV=(0x[0-9a-fA-F]+))?""").find(playlistRes)
             val hexIv = keyMatch?.groupValues?.get(2)
             val keyUrl = keyMatch?.groupValues?.get(1)
-            
-            // 키 데이터 미리 확보 (지연 생성 준비)
             val keyData = if (keyUrl != null) fetchKeyData(baseHeaders, keyUrl) else null
             
-            // [v130] 서버를 끄지 않고 '세션'만 업데이트 (포트 유지)
-            if (!proxyServer.isAlive()) {
+            // [v131] 서버 상태 정밀 점검 (죽었으면 살려내라)
+            if (!proxyServer.isHealthy()) {
+                println("[MovieKing v131] Server is unhealthy. Restarting...")
+                proxyServer.stop()
                 proxyServer.start()
             }
             proxyServer.updateSession(baseHeaders, hexIv, keyData, videoId)
@@ -60,20 +62,15 @@ class BcbcRedExtractor : ExtractorApi() {
             val newLines = mutableListOf<String>()
             var currentSeq = Regex("""#EXT-X-MEDIA-SEQUENCE:(\d+)""").find(playlistRes)?.groupValues?.get(1)?.toLong() ?: 0L
             
-            // 프록시 URL 생성
             val port = proxyServer.port
-            val proxyRoot = "http://127.0.0.1:$port" // VideoID는 경로에서 제외하고 내부 세션으로 관리
+            val proxyRoot = "http://127.0.0.1:$port"
 
             for (line in lines) {
                 if (line.startsWith("#EXT-X-KEY")) continue
                 if (line.isNotBlank() && !line.startsWith("#")) {
                     val segmentUrl = if (line.startsWith("http")) line else "${m3u8Url.substringBeforeLast("/")}/$line"
-                    
-                    // [v130] 파일명 기반 매핑 (Seek 완벽 대응)
                     val fileName = segmentUrl.substringAfterLast("/")
                     seqMap[fileName] = currentSeq
-                    
-                    // 원본 URL은 파라미터로 전달
                     newLines.add("$proxyRoot/proxy?url=${URLEncoder.encode(segmentUrl, "UTF-8")}")
                     currentSeq++
                 } else {
@@ -82,9 +79,8 @@ class BcbcRedExtractor : ExtractorApi() {
             }
             
             proxyServer.updateSeqMap(seqMap)
-            
             callback(newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) { this.referer = "https://player-v1.bcbc.red/" })
-        } catch (e: Exception) { println("[MovieKing v130 Fix] FATAL Error: $e") }
+        } catch (e: Exception) { println("[MovieKing v131] FATAL Error: $e") }
     }
 
     private fun extractVideoIdDeep(url: String): String {
@@ -109,68 +105,70 @@ class BcbcRedExtractor : ExtractorApi() {
 
     class ProxyWebServer {
         private var serverSocket: ServerSocket? = null
+        private var serverThread: Thread? = null // [v131] 스레드 참조 보관
         @Volatile private var isRunning = false
         var port: Int = 0
         
-        // 세션 데이터 (Thread-Safe)
         @Volatile private var currentHeaders: Map<String, String> = emptyMap()
         @Volatile private var playlistIv: String? = null
         @Volatile private var keyData: ByteArray? = null
         @Volatile private var seqMap: ConcurrentHashMap<String, Long> = ConcurrentHashMap()
         
-        // [v130] 스마트 캐싱
         @Volatile private var currentVideoId: String = ""
-        @Volatile private var cachedKey: ByteArray? = null
-        @Volatile private var cachedIvType: Int = -1 // 0:Hex, 1:Seq, 2:Zero
-        
-        private val startLatch = CountDownLatch(1)
+        @Volatile private var confirmedKey: ByteArray? = null
+        @Volatile private var confirmedIvType: Int = -1
 
-        fun isAlive() = isRunning && serverSocket != null && !serverSocket!!.isClosed
+        // [v131] 헬스 체크: 소켓이 열려있고 스레드가 살아있는지 확인
+        fun isHealthy(): Boolean {
+            return isRunning && serverSocket != null && !serverSocket!!.isClosed && serverThread != null && serverThread!!.isAlive
+        }
 
         fun start() {
-            if (isAlive()) return
+            if (isHealthy()) return
             try {
                 serverSocket = ServerSocket(0)
                 port = serverSocket!!.localPort
                 isRunning = true
-                thread(isDaemon = true) {
-                    println("[MovieKing v130] Server Started on Port $port")
-                    startLatch.countDown()
-                    while (isRunning && serverSocket != null && !serverSocket!!.isClosed) {
+                
+                serverThread = thread(isDaemon = true) {
+                    println("[MovieKing v131] Server Thread Started on Port $port")
+                    while (isRunning && serverSocket != null && !serverSocket!!.isClosed) { 
                         try {
                             val client = serverSocket!!.accept()
                             handleClient(client)
-                        } catch (e: Exception) { /* Ignored */ }
+                        } catch (e: Exception) {
+                            if (isRunning) println("[MovieKing v131] Accept Error (Retrying): $e")
+                        } 
                     }
+                    println("[MovieKing v131] Server Thread Died")
                 }
-                if (!startLatch.await(3, TimeUnit.SECONDS)) println("[MovieKing v130] Server Start Timeout")
-            } catch (e: Exception) { println("[MovieKing v130] Server Bind Failed: $e") }
+            } catch (e: Exception) { println("[MovieKing v131] Server Bind Failed: $e") }
         }
 
+        fun stop() {
+            isRunning = false
+            try { serverSocket?.close(); serverSocket = null } catch (e: Exception) {}
+            try { serverThread?.interrupt(); serverThread = null } catch (e: Exception) {}
+        }
+        
         fun updateSession(h: Map<String, String>, iv: String?, kData: ByteArray?, vid: String) {
-            currentHeaders = h
-            playlistIv = iv
-            keyData = kData
-            
-            // 영상이 바뀌면 캐시 초기화
+            currentHeaders = h; playlistIv = iv; keyData = kData
             if (currentVideoId != vid) {
-                currentVideoId = vid
-                cachedKey = null
-                cachedIvType = -1
-                seqMap.clear() // 이전 맵 정리
-                println("[MovieKing v130] New Video Session: $vid")
+                currentVideoId = vid; confirmedKey = null; confirmedIvType = -1
+                seqMap.clear()
+                println("[MovieKing v131] New Session: $vid")
             }
         }
         
         fun updateSeqMap(map: ConcurrentHashMap<String, Long>) {
-            seqMap.putAll(map) // 기존 맵에 추가 (Seek 시 누락 방지)
+            seqMap.putAll(map)
         }
         
-        fun setPlaylist(p: String) {} 
+        fun setPlaylist(p: String) {}
 
         private fun handleClient(socket: Socket) = thread {
             try {
-                socket.soTimeout = 15000 // 타임아웃 15초로 넉넉하게
+                socket.soTimeout = 15000 
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
                 val line = reader.readLine() ?: return@thread
                 val path = line.split(" ")[1]
@@ -181,8 +179,6 @@ class BcbcRedExtractor : ExtractorApi() {
                 } else if (path.contains("/proxy")) {
                     val urlParam = path.substringAfter("url=").substringBefore(" ")
                     val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
-                    
-                    // [v130] 파일명으로 매핑 (Seek 해결)
                     val fileName = targetUrl.substringAfterLast("/")
                     val seq = seqMap[fileName] ?: 0L
                     
@@ -195,24 +191,20 @@ class BcbcRedExtractor : ExtractorApi() {
                             if (rawData.isNotEmpty() && rawData[0] == 0x47.toByte() && rawData.size > 188 && rawData[188] == 0x47.toByte()) {
                                 output.write(rawData)
                             } else {
-                                // [v130] 캐시 우선 사용 (FHD 렉 해결)
-                                if (cachedKey != null) {
-                                    val dec = decryptDirect(rawData, cachedKey!!, cachedIvType, seq)
+                                if (confirmedKey != null) {
+                                    val dec = decryptDirect(rawData, confirmedKey!!, confirmedIvType, seq)
                                     if (dec != null) {
                                         output.write(dec)
                                         return@runBlocking
-                                    } else { cachedKey = null } // 캐시 실패 시 리셋
+                                    } else { confirmedKey = null }
                                 }
-                                
-                                // 캐시 없으면 탐색
-                                val dec = bruteForceSmart(rawData, seq)
+                                val dec = bruteForceLazy(rawData, seq)
                                 if (dec != null) output.write(dec) else output.write(rawData)
                             }
                         }
                     }
                 }
-                output.flush()
-                socket.close()
+                output.flush(); socket.close()
             } catch (e: Exception) { try { socket.close() } catch(e2:Exception){} }
         }
 
@@ -225,70 +217,57 @@ class BcbcRedExtractor : ExtractorApi() {
             } catch (e: Exception) { null }
         }
 
-        private fun bruteForceSmart(data: ByteArray, seq: Long): ByteArray? {
+        private fun bruteForceLazy(data: ByteArray, seq: Long): ByteArray? {
             val ivs = getIvList(seq)
             val checkSize = 188 * 2
             if (data.size < checkSize || keyData == null) return null
 
-            val src = keyData!!
-            // 1. Raw Key Check (Priority 1)
-            if (src.size == 16) {
-                if (checkAndCache(src, ivs, data, checkSize)) return decryptDirect(data, src, cachedIvType, seq)
-            }
-
-            // 2. Combinatorial Check (Priority 2)
-            if (src.size > 16) {
-                val slack = src.size - 16
-                for (key in generateKeysLazy(src, slack)) {
-                    if (checkAndCache(key, ivs, data, checkSize)) {
-                        return decryptDirect(data, key, cachedIvType, seq)
-                    }
+            for (key in generateKeysLazy(keyData!!)) {
+                for ((ivIdx, iv) in ivs.withIndex()) {
+                    try {
+                        val cipher = Cipher.getInstance("AES/CBC/NoPadding")
+                        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+                        val head = cipher.update(data.take(checkSize).toByteArray())
+                        if (head.isNotEmpty() && head[0] == 0x47.toByte() && head.size > 188 && head[188] == 0x47.toByte()) {
+                            println("[MovieKing v131] KEY LOCKED!")
+                            confirmedKey = key
+                            confirmedIvType = ivIdx
+                            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+                            return cipher.doFinal(data)
+                        }
+                    } catch (e: Exception) {}
                 }
             }
             return null
         }
 
-        private fun checkAndCache(key: ByteArray, ivs: List<ByteArray>, data: ByteArray, checkSize: Int): Boolean {
-            for ((ivIdx, iv) in ivs.withIndex()) {
-                try {
-                    val cipher = Cipher.getInstance("AES/CBC/NoPadding")
-                    cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
-                    val head = cipher.update(data.take(checkSize).toByteArray())
-                    if (head.isNotEmpty() && head[0] == 0x47.toByte() && head.size > 188 && head[188] == 0x47.toByte()) {
-                        println("[MovieKing v130] KEY LOCKED!")
-                        cachedKey = key
-                        cachedIvType = ivIdx
-                        return true
+        private fun generateKeysLazy(src: ByteArray): Sequence<ByteArray> = sequence {
+            if (src.size == 16) yield(src)
+            if (src.size > 16) {
+                val slack = src.size - 16
+                val distributions = generateDistributions(slack, 5)
+                val allPerms = generatePermutations(listOf(0, 1, 2, 3))
+                for (gaps in distributions) {
+                    val segs = arrayOfNulls<ByteArray>(4)
+                    var idx = gaps[0]
+                    var valid = true
+                    for (i in 0 until 4) {
+                        if (idx + 4 <= src.size) {
+                            segs[i] = src.copyOfRange(idx, idx + 4)
+                            idx += 4 + gaps[i+1]
+                        } else { valid = false; break }
                     }
-                } catch (e: Exception) {}
-            }
-            return false
-        }
-
-        private fun generateKeysLazy(src: ByteArray, slack: Int): Sequence<ByteArray> = sequence {
-            val distributions = generateDistributions(slack, 5)
-            val allPerms = generatePermutations(listOf(0, 1, 2, 3))
-            for (gaps in distributions) {
-                val segs = arrayOfNulls<ByteArray>(4)
-                var idx = gaps[0]
-                var valid = true
-                for (i in 0 until 4) {
-                    if (idx + 4 <= src.size) {
-                        segs[i] = src.copyOfRange(idx, idx + 4)
-                        idx += 4 + gaps[i+1]
-                    } else { valid = false; break }
-                }
-                if (valid) {
-                    for (perm in allPerms) {
-                        val k = ByteArray(16)
-                        for (j in 0 until 4) System.arraycopy(segs[perm[j]]!!, 0, k, j * 4, 4)
-                        yield(k)
+                    if (valid) {
+                        for (perm in allPerms) {
+                            val k = ByteArray(16)
+                            for (j in 0 until 4) System.arraycopy(segs[perm[j]]!!, 0, k, j * 4, 4)
+                            yield(k)
+                        }
                     }
                 }
             }
         }
 
-        // [Fix] 제네릭 제거 및 Int 타입 명시
         private fun generateDistributions(n: Int, k: Int): List<List<Int>> {
             if (k == 1) return listOf(listOf(n))
             val result = mutableListOf<List<Int>>()
@@ -298,16 +277,13 @@ class BcbcRedExtractor : ExtractorApi() {
             return result
         }
 
-        // [Fix] 제네릭 제거 및 Int 타입 명시
         private fun generatePermutations(list: List<Int>): List<List<Int>> {
             if (list.isEmpty()) return listOf(emptyList())
             val result = mutableListOf<List<Int>>()
             for (i in list.indices) {
                 val elem = list[i]
                 val rest = list.take(i) + list.drop(i + 1)
-                for (p in generatePermutations(rest)) {
-                    result.add(listOf(elem) + p)
-                }
+                for (p in generatePermutations(rest)) result.add(listOf(elem) + p)
             }
             return result
         }
