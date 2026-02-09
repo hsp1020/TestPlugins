@@ -13,16 +13,17 @@ import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
 /**
- * v93: Hex-Logging & Ultimate Brute-Force Mode
+ * v94: Evidence-First Diagnostic Engine
  * [수정 사항]
- * 1. 생 바이트 출력: 모든 .ts 조각의 헤더 64바이트를 Hex로 로그캣에 출력 (분석용)
- * 2. 1MB & 5-Sync: 1MB 범위 내에서 188바이트 간격 싱크 바이트 5개 연속 일치 확인
- * 3. ID 추출: 검증된 JWT Deep Parsing 로직 유지
+ * 1. 생 바이트 로그 (RAW HEADER): 실패한 파일의 첫 64바이트를 Hex로 출력하여 실체 확인 (유저 요청)
+ * 2. 헤더 미러링: 플레이어의 User-Agent를 복제하여 서버 차단 회피
+ * 3. 1MB 5-Sync 전수조사: 188바이트 간격의 싱크 바이트 5개 연속 발견 시에만 정답 인정
  */
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
     override val mainUrl = "https://player-v1.bcbc.red"
     override val requiresReferer = true
+    private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
@@ -30,10 +31,16 @@ class BcbcRedExtractor : ExtractorApi() {
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
         val videoId = extractVideoIdDeep(url)
-        println("=== [MovieKing v93] getUrl Start (ID: $videoId) ===")
+        println("=== [MovieKing v94] getUrl Start (Verified ID: $videoId) ===")
 
         try {
-            val baseHeaders = mutableMapOf("Referer" to "https://player-v1.bcbc.red/", "Origin" to "https://player-v1.bcbc.red")
+            // [개선] 정교한 헤더 구성
+            val baseHeaders = mutableMapOf(
+                "Referer" to "https://player-v1.bcbc.red/",
+                "Origin" to "https://player-v1.bcbc.red",
+                "User-Agent" to DESKTOP_UA
+            )
+            
             val playerHtml = app.get(url, headers = baseHeaders).text
             val m3u8Url = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)?.groupValues?.get(1)?.replace("\\/", "/") ?: return
             
@@ -61,8 +68,11 @@ class BcbcRedExtractor : ExtractorApi() {
             }
 
             proxyServer!!.setPlaylist(m3u8Content)
-            callback(newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) { this.referer = "https://player-v1.bcbc.red/" })
-        } catch (e: Exception) { println("[MovieKing v93] Error: $e") }
+            callback(newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) { 
+                this.referer = "https://player-v1.bcbc.red/"
+                this.headers = baseHeaders
+            })
+        } catch (e: Exception) { println("[MovieKing v94] getUrl Error: $e") }
     }
 
     private fun extractVideoIdDeep(url: String): String {
@@ -79,9 +89,11 @@ class BcbcRedExtractor : ExtractorApi() {
     private suspend fun generateExhaustiveKeys(h: Map<String, String>, kUrl: String): List<ByteArray> {
         val list = mutableListOf<ByteArray>()
         try {
-            val json = app.get(kUrl, headers = h).text
+            val res = app.get(kUrl, headers = h)
+            val json = res.text
             val clean = if (json.startsWith("{")) json else String(Base64.decode(json, Base64.DEFAULT))
             val encStr = Regex(""""encrypted_key"\s*:\s*"([^"]+)"""").find(clean)?.groupValues?.get(1) ?: return emptyList()
+            
             val raw = encStr.toByteArray()
             val b64 = try { Base64.decode(encStr, Base64.DEFAULT) } catch (e: Exception) { byteArrayOf() }
             listOf(raw, b64).forEach { src ->
@@ -89,7 +101,8 @@ class BcbcRedExtractor : ExtractorApi() {
                     for (i in 0..src.size - 16) list.add(src.copyOfRange(i, i + 16))
                 }
             }
-        } catch (e: Exception) {}
+            println("[MovieKing v94] Key candidates generated: ${list.size}")
+        } catch (e: Exception) { println("[MovieKing v94] Key fetch failed: $e") }
         return list.distinctBy { it.contentHashCode() }
     }
 
@@ -135,11 +148,11 @@ class BcbcRedExtractor : ExtractorApi() {
                         if (res.isSuccessful) {
                             val rawData = res.body.bytes()
                             
-                            // [v93 핵심: 분석용 로그]
-                            val hexHeader = rawData.take(64).joinToString(" ") { "%02X".format(it) }
-                            println("[MovieKing v93] RAW HEADER (64B): $hexHeader")
+                            // [v94 핵심: 생 바이트 헤더 출력]
+                            val rawHeader = rawData.take(64).joinToString(" ") { "%02X".format(it) }
+                            println("[MovieKing v94] RAW HEADER (ID: $seq): $rawHeader")
 
-                            if (confirmedKey == null) findJACKPOTBrute(rawData, seq)
+                            if (confirmedKey == null) findJACKPOTBruteDeep(rawData, seq)
 
                             output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
                             if (confirmedKey != null || confirmedOffset > 0) {
@@ -147,32 +160,32 @@ class BcbcRedExtractor : ExtractorApi() {
                                 val result = if (key.isNotEmpty()) decryptAes(rawData, key, getIv(confirmedIvMode, seq)) else rawData
                                 if (result.size > confirmedOffset) output.write(result, confirmedOffset, result.size - confirmedOffset)
                             } else output.write(rawData)
+                        } else {
+                            println("[MovieKing v94] Fetch FAILED for $targetUrl. Code: ${res.code}")
                         }
                     }
                 }
                 output.flush(); socket.close()
-            } catch (e: Exception) { println("[MovieKing v93] Proxy Error: $e") }
+            } catch (e: Exception) { println("[MovieKing v94] Proxy Error: $e") }
         }
 
-        private fun findJACKPOTBrute(data: ByteArray, seq: Long) {
-            val scanLimit = minOf(data.size - 1000, 1048576) // 1MB 스캔
+        private fun findJACKPOTBruteDeep(data: ByteArray, seq: Long) {
+            val scanLimit = minOf(data.size - 1000, 1048576) // 1MB 딥 스캔
             
-            // 1. Plain TS 스캔 (5-Sync 검증)
             for (off in 0..scanLimit) {
                 if (check5Sync(data, off)) {
-                    println("[MovieKing v93] PLAIN TS VERIFIED. Offset: $off")
+                    println("[MovieKing v94] JACKPOT! PLAIN TS. Offset: $off")
                     confirmedOffset = off; return
                 }
             }
 
-            // 2. 모든 키/IV 조합 무차별 대입 (1MB & 5-Sync)
             for (key in keyCandidates) {
                 for (mode in 0..2) {
                     try {
                         val decrypted = decryptAes(data.take(scanLimit + 1000).toByteArray(), key, getIv(mode, seq))
                         for (off in 0..scanLimit) {
                             if (check5Sync(decrypted, off)) {
-                                println("[MovieKing v93] BRUTE JACKPOT! Mode: $mode, Offset: $off")
+                                println("[MovieKing v94] JACKPOT! AES. Mode: $mode, Offset: $off")
                                 confirmedKey = key; confirmedIvMode = mode; confirmedOffset = off
                                 return
                             }
@@ -180,16 +193,14 @@ class BcbcRedExtractor : ExtractorApi() {
                     } catch (e: Exception) {}
                 }
             }
-            println("[MovieKing v93] FAILURE: All combinations failed 1MB 5-Sync check.")
+            println("[MovieKing v94] ALL COMBINATIONS FAILED for 1MB Scan.")
         }
 
         private fun check5Sync(target: ByteArray, off: Int): Boolean {
             return try {
-                target[off] == 0x47.toByte() &&
-                target[off + 188] == 0x47.toByte() &&
-                target[off + 376] == 0x47.toByte() &&
-                target[off + 564] == 0x47.toByte() &&
-                target[off + 752] == 0x47.toByte()
+                target[off] == 0x47.toByte() && target[off+188] == 0x47.toByte() && 
+                target[off+376] == 0x47.toByte() && target[off+564] == 0x47.toByte() && 
+                target[off+752] == 0x47.toByte()
             } catch (e: Exception) { false }
         }
 
