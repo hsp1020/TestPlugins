@@ -159,7 +159,7 @@ class BcbcRedExtractor : ExtractorApi() {
                     output.write(currentPlaylist.toByteArray(charset("UTF-8")))
                 } else if (path.contains("/proxy")) {
                     val targetUrl = URLDecoder.decode(path.substringAfter("url=").substringBefore(" "), "UTF-8")
-                    // 1. 예상 시퀀스 번호 조회
+                    // 1. 예상 시퀀스 번호 조회 (Target)
                     val expectedSeq = seqMap[targetUrl] ?: 0L
                     
                     runBlocking {
@@ -171,6 +171,7 @@ class BcbcRedExtractor : ExtractorApi() {
 
                             output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
 
+                            // [2-Sync 검증] 0번지와 188번지 동시 확인
                             if (rawData.isNotEmpty() && rawData[0] == 0x47.toByte() && rawData.size > 188 && rawData[188] == 0x47.toByte()) {
                                 println("[MovieKing v111] Plain TS Detected (2-Sync). Passing RAW.")
                                 output.write(rawData)
@@ -238,7 +239,7 @@ class BcbcRedExtractor : ExtractorApi() {
                         // 앞 2개 패킷만 복호화
                         val head = cipher.update(data.take(checkSize).toByteArray())
                         
-                        // [엄격 검증] 0번지와 188번지 모두 0x47이어야 함
+                        // [엄격 검증] 0번지와 188번지 모두 0x47이어야 함 (확률 1/65536)
                         if (head.isNotEmpty() && head[0] == 0x47.toByte() && head.size > 188 && head[188] == 0x47.toByte()) {
                             println("[MovieKing v111] JACKPOT! KeyIdx:$keyIdx, IV_Index:$ivIdx")
                             
