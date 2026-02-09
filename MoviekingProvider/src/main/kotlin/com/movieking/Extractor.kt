@@ -16,11 +16,10 @@ import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
 /**
- * v130: Pro Expert Edition
- * [해결된 문제]
- * 1. 구간 이동 실패: URL 전체가 아닌 '파일명'으로 매핑하여 파라미터 변경에 대응.
- * 2. 무한 로딩/2001 에러: 싱글톤 서버 인스턴스를 유지하고 세션만 교체하여 포트 충돌 방지.
- * 3. 렉/깍두기: 정답 키 캐싱(Caching) 도입으로 복호화 부하 99.9% 감소.
+ * v130 Fix: Build Error Resolved
+ * [수정 사항]
+ * 1. 빌드 에러 해결: generatePermutations 함수의 제네릭 <T> 제거 -> List<Int>로 명시적 타입 지정.
+ * 2. 기능 유지: v130의 핵심 기능(파일명 매핑, 영구 서버, 스마트 캐싱, 지연 생성) 완벽 보존.
  */
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -34,7 +33,7 @@ class BcbcRedExtractor : ExtractorApi() {
     }
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
-        println("=== [MovieKing v130] getUrl Start ===")
+        println("=== [MovieKing v130 Fix] getUrl Start ===")
         try {
             val videoId = extractVideoIdDeep(url)
             val baseHeaders = mutableMapOf("Referer" to "https://player-v1.bcbc.red/", "Origin" to "https://player-v1.bcbc.red", "User-Agent" to DESKTOP_UA)
@@ -85,7 +84,7 @@ class BcbcRedExtractor : ExtractorApi() {
             proxyServer.updateSeqMap(seqMap)
             
             callback(newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) { this.referer = "https://player-v1.bcbc.red/" })
-        } catch (e: Exception) { println("[MovieKing v130] FATAL Error: $e") }
+        } catch (e: Exception) { println("[MovieKing v130 Fix] FATAL Error: $e") }
     }
 
     private fun extractVideoIdDeep(url: String): String {
@@ -167,7 +166,7 @@ class BcbcRedExtractor : ExtractorApi() {
             seqMap.putAll(map) // 기존 맵에 추가 (Seek 시 누락 방지)
         }
         
-        fun setPlaylist(p: String) {} // Unused but kept for interface compatibility if needed
+        fun setPlaylist(p: String) {} 
 
         private fun handleClient(socket: Socket) = thread {
             try {
@@ -179,7 +178,6 @@ class BcbcRedExtractor : ExtractorApi() {
 
                 if (path.contains("/playlist.m3u8")) {
                     output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\n\r\n".toByteArray())
-                    // Playlist response is handled by ExtractorLink, this is fallback
                 } else if (path.contains("/proxy")) {
                     val urlParam = path.substringAfter("url=").substringBefore(" ")
                     val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
@@ -290,7 +288,7 @@ class BcbcRedExtractor : ExtractorApi() {
             }
         }
 
-        // Helper functions (Distributions, Permutations, getIvList...) remain same as v126/129
+        // [Fix] 제네릭 제거 및 Int 타입 명시
         private fun generateDistributions(n: Int, k: Int): List<List<Int>> {
             if (k == 1) return listOf(listOf(n))
             val result = mutableListOf<List<Int>>()
@@ -299,15 +297,21 @@ class BcbcRedExtractor : ExtractorApi() {
             }
             return result
         }
-        private fun generatePermutations(list: List<T>): List<List<T>> {
+
+        // [Fix] 제네릭 제거 및 Int 타입 명시
+        private fun generatePermutations(list: List<Int>): List<List<Int>> {
             if (list.isEmpty()) return listOf(emptyList())
-            val result = mutableListOf<List<T>>()
+            val result = mutableListOf<List<Int>>()
             for (i in list.indices) {
-                val elem = list[i]; val rest = list.take(i) + list.drop(i + 1)
-                for (p in generatePermutations(rest)) result.add(listOf(elem) + p)
+                val elem = list[i]
+                val rest = list.take(i) + list.drop(i + 1)
+                for (p in generatePermutations(rest)) {
+                    result.add(listOf(elem) + p)
+                }
             }
             return result
         }
+
         private fun getIvList(seq: Long): List<ByteArray> {
             val ivs = mutableListOf<ByteArray>()
             if (!playlistIv.isNullOrEmpty()) {
@@ -324,6 +328,7 @@ class BcbcRedExtractor : ExtractorApi() {
             ivs.add(ByteArray(16))
             return ivs
         }
+
         private fun getIv(type: Int, seq: Long): ByteArray {
             val list = getIvList(seq)
             return if (type in list.indices) list[type] else ByteArray(16)
