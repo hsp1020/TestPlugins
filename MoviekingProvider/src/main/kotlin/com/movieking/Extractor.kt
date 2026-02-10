@@ -14,11 +14,11 @@ import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
 /**
- * v124-9: Sniper Edition (2304~2327 Target)
+ * v124-2: Smart Cache Only
  * [유저 요청 반영]
- * 1. Base: v124-2 (서버 재시작, URL 전체 매핑, 스마트 캐싱 유지).
- * 2. Fix: 12,000개 리스트 생성 대신, 정답 구간(2304~2327) 24개 키만 생성.
- * - 메모리 프리징(30초 멈춤) 해결.
+ * 1. Base: v124 (서버 재시작 로직 유지)
+ * 2. Filename Mapping Rollback: 파일명 매핑 제거 -> 전체 URL 매핑 방식 복귀.
+ * 3. Smart Caching Added: 정답 키 캐싱(cachedKey) 도입으로 렉/깍두기 해결.
  */
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -31,7 +31,7 @@ class BcbcRedExtractor : ExtractorApi() {
     }
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
-        println("=== [MovieKing v124-9] getUrl Start ===")
+        println("=== [MovieKing v124-2] getUrl Start ===")
         try {
             val videoId = extractVideoIdDeep(url)
             val baseHeaders = mutableMapOf("Referer" to "https://player-v1.bcbc.red/", "Origin" to "https://player-v1.bcbc.red", "User-Agent" to DESKTOP_UA)
@@ -43,8 +43,7 @@ class BcbcRedExtractor : ExtractorApi() {
             val keyMatch = Regex("""#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"(?:,IV=(0x[0-9a-fA-F]+))?""").find(playlistRes)
             val hexIv = keyMatch?.groupValues?.get(2)
             
-            // [Fix] Sniper Mode: 타겟 구간(24개)만 생성
-            val candidates = if (keyMatch != null) solveKeyCandidatesSniper(baseHeaders, keyMatch.groupValues[1]) else emptyList()
+            val candidates = if (keyMatch != null) solveKeyCandidatesCombinatorial(baseHeaders, keyMatch.groupValues[1]) else emptyList()
             
             // [v124 로직 유지] 서버 재시작
             proxyServer?.stop()
@@ -53,7 +52,7 @@ class BcbcRedExtractor : ExtractorApi() {
                 updateSession(baseHeaders, hexIv, candidates)
             }
             
-            // [Rollback 유지] 전체 URL 매핑
+            // [Rollback] 파일명 매핑 제거 -> 전체 URL 매핑 (v123 방식)
             val seqMap = ConcurrentHashMap<String, Long>()
             val lines = playlistRes.lines()
             val newLines = mutableListOf<String>()
@@ -66,7 +65,7 @@ class BcbcRedExtractor : ExtractorApi() {
                 if (line.isNotBlank() && !line.startsWith("#")) {
                     val segmentUrl = if (line.startsWith("http")) line else "${m3u8Url.substringBeforeLast("/")}/$line"
                     
-                    // [Rollback 유지] 전체 URL 사용
+                    // [Rollback] 전체 URL을 Key로 사용
                     seqMap[segmentUrl] = currentSeq
                     
                     newLines.add("$proxyRoot/proxy?url=${URLEncoder.encode(segmentUrl, "UTF-8")}")
@@ -81,7 +80,7 @@ class BcbcRedExtractor : ExtractorApi() {
             proxyServer!!.updateSeqMap(seqMap)
             
             callback(newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) { this.referer = "https://player-v1.bcbc.red/" })
-        } catch (e: Exception) { println("[MovieKing v124-9] FATAL Error: $e") }
+        } catch (e: Exception) { println("[MovieKing v124-2] FATAL Error: $e") }
     }
 
     private fun extractVideoIdDeep(url: String): String {
@@ -95,8 +94,7 @@ class BcbcRedExtractor : ExtractorApi() {
         return "ID_ERR"
     }
 
-    // [Fix] 전수 조사 대신 타겟 범위(2304~2327)만 생성하는 함수
-    private suspend fun solveKeyCandidatesSniper(h: Map<String, String>, kUrl: String): List<ByteArray> {
+    private suspend fun solveKeyCandidatesCombinatorial(h: Map<String, String>, kUrl: String): List<ByteArray> {
         val list = mutableListOf<ByteArray>()
         try {
             val res = app.get(kUrl, headers = h).text
@@ -108,33 +106,41 @@ class BcbcRedExtractor : ExtractorApi() {
 
             listOf(b64).forEach { src ->
                 if (src.size > 16) {
+                    val slack = src.size - 16
+                    val distributions = generateDistributions(slack, 5)
                     val allPerms = generatePermutations(listOf(0, 1, 2, 3))
 
-                    // [핵심] 2300번대가 위치한 '균등 분포' (Gap: 0, 2, 2, 2, 2) 하나만 타겟팅
-                    val targetGaps = listOf(0, 2, 2, 2, 2) 
+                    for (gaps in distributions) {
+                        try {
+                            val segs = mutableListOf<ByteArray>()
+                            var idx = gaps[0]
+                            segs.add(src.copyOfRange(idx, idx + 4)); idx += 4 + gaps[1]
+                            segs.add(src.copyOfRange(idx, idx + 4)); idx += 4 + gaps[2]
+                            segs.add(src.copyOfRange(idx, idx + 4)); idx += 4 + gaps[3]
+                            segs.add(src.copyOfRange(idx, idx + 4))
 
-                    try {
-                        val segs = mutableListOf<ByteArray>()
-                        var idx = targetGaps[0]
-                        
-                        // 범위 체크 후 조각 추출
-                        if (idx + 4 <= src.size) { segs.add(src.copyOfRange(idx, idx + 4)); idx += 4 + targetGaps[1] }
-                        if (idx + 4 <= src.size) { segs.add(src.copyOfRange(idx, idx + 4)); idx += 4 + targetGaps[2] }
-                        if (idx + 4 <= src.size) { segs.add(src.copyOfRange(idx, idx + 4)); idx += 4 + targetGaps[3] }
-                        if (idx + 4 <= src.size) { segs.add(src.copyOfRange(idx, idx + 4)) }
-
-                        if (segs.size == 4) {
                             for (perm in allPerms) {
                                 val k = ByteArray(16)
                                 for (j in 0 until 4) System.arraycopy(segs[perm[j]], 0, k, j * 4, 4)
                                 list.add(k)
                             }
-                        }
-                    } catch (e: Exception) {}
+                        } catch (e: Exception) {}
+                    }
                 }
             }
             return list.distinctBy { it.contentHashCode() }
         } catch (e: Exception) { return emptyList() }
+    }
+
+    private fun generateDistributions(n: Int, k: Int): List<List<Int>> {
+        if (k == 1) return listOf(listOf(n))
+        val result = mutableListOf<List<Int>>()
+        for (i in 0..n) {
+            for (sub in generateDistributions(n - i, k - 1)) {
+                result.add(listOf(i) + sub)
+            }
+        }
+        return result
     }
 
     private fun generatePermutations(list: List<Int>): List<List<Int>> {
@@ -174,7 +180,7 @@ class BcbcRedExtractor : ExtractorApi() {
                         try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {} 
                     } 
                 }
-            } catch (e: Exception) { println("[MovieKing v124-9] Server Start Failed: $e") }
+            } catch (e: Exception) { println("[MovieKing v124-2] Server Start Failed: $e") }
         }
 
         fun stop() {
@@ -205,7 +211,7 @@ class BcbcRedExtractor : ExtractorApi() {
                     val urlParam = path.substringAfter("url=").substringBefore(" ")
                     val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
                     
-                    // [Rollback 유지] 전체 URL로 매핑 조회
+                    // [Rollback] 전체 URL로 매핑 조회 (v124 오리지널 방식)
                     val seq = seqMap[targetUrl] ?: 0L
                     
                     runBlocking {
@@ -223,7 +229,7 @@ class BcbcRedExtractor : ExtractorApi() {
                                     if (dec != null) {
                                         output.write(dec)
                                         return@runBlocking
-                                    } else { confirmedKey = null }
+                                    } else { confirmedKey = null } // 캐시 실패 시 초기화
                                 }
                                 
                                 val dec = bruteForceCombinatorial(rawData, seq)
@@ -260,7 +266,7 @@ class BcbcRedExtractor : ExtractorApi() {
                         val head = cipher.update(data.take(checkSize).toByteArray())
                         
                         if (head.isNotEmpty() && head[0] == 0x47.toByte() && head.size > 188 && head[188] == 0x47.toByte()) {
-                            println("[MovieKing v124-9] JACKPOT! Key#$keyIdx")
+                            println("[MovieKing v124-2] JACKPOT! Key#$keyIdx")
                             // [Add] 캐싱 저장
                             confirmedKey = key
                             confirmedIvType = ivIdx
