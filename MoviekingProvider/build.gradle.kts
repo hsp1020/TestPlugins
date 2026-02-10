@@ -1,17 +1,11 @@
-import com.lagradost.cloudstream3.gradle.CloudstreamExtension
-
-plugins {
-    id("com.android.library")
-    kotlin("android")
-    id("com.lagradost.cloudstream3.gradle")
-}
+version = 1
 
 cloudstream {
-    description = "무비킹 - 최신영화, 드라마, 예능, 애니 다시보기"
-    authors = listOf("User") // 작성자 이름
+    description = "한국 드라마 및 TV 프로그램 다시보기 제공"
+    authors = listOf("hsp1020") // 본인 계정명으로 변경
     language = "ko"
     
-    status = 1 // 1: Ok
+    status = 1 // 0: Down, 1: Ok, 2: Slow, 3: Beta
     tvTypes = listOf(
         "TvSeries",
         "Movie",
@@ -20,11 +14,4 @@ cloudstream {
     )
     
     iconUrl = "https://mvking6.org/resource/favicon.ico"
-}
-
-android {
-    namespace = "com.movieking"
-    defaultConfig {
-        minSdk = 21
-    }
 }
