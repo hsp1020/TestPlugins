@@ -11,7 +11,7 @@ import com.lagradost.cloudstream3.network.WebViewResolver
 import android.webkit.CookieManager
 import java.net.URI
 
-// [v108] Extractor.kt: 쿠키 병합 + Referer(c.html) + UA/Origin 포함 (2000 에러 해결 버전)
+// [v110] Extractor.kt: 2004(403) 에러 해결을 위해 'Origin' 헤더 삭제 (Key 로딩 성공 로직은 유지)
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
     override val mainUrl = "https://player.bunny-frame.online"
@@ -25,7 +25,7 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("[TVWiki v108] [Bunny] getUrl 호출 - url: $url")
+        println("[TVWiki v110] [Bunny] getUrl 호출 - url: $url")
         extract(url, referer, subtitleCallback, callback)
     }
 
@@ -36,7 +36,7 @@ class BunnyPoorCdn : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
         thumbnailHint: String? = null,
     ): Boolean {
-        println("[TVWiki v108] [Bunny] extract 시작: $url")
+        println("[TVWiki v110] [Bunny] extract 시작: $url")
         
         var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = "https://tvwiki5.net/"
@@ -51,7 +51,7 @@ class BunnyPoorCdn : ExtractorApi() {
                 
                 if (iframeMatch != null) {
                     cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&").trim()
-                    println("[TVWiki v108] [성공] 재탐색으로 URL 획득: $cleanUrl")
+                    println("[TVWiki v110] [성공] 재탐색으로 URL 획득: $cleanUrl")
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -71,7 +71,7 @@ class BunnyPoorCdn : ExtractorApi() {
                 "Referer" to cleanReferer, 
                 "User-Agent" to DESKTOP_UA 
             )
-            println("[TVWiki v108] [Bunny] WebView 요청 시작")
+            println("[TVWiki v110] [Bunny] WebView 요청 시작")
             
             val response = app.get(
                 url = cleanUrl,
@@ -81,7 +81,7 @@ class BunnyPoorCdn : ExtractorApi() {
             
             if (response.url.contains("/c.html") && response.url.contains("token=")) {
                 capturedUrl = response.url
-                println("[TVWiki v108] [성공] c.html URL 캡처됨: $capturedUrl")
+                println("[TVWiki v110] [성공] c.html URL 캡처됨: $capturedUrl")
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -90,7 +90,7 @@ class BunnyPoorCdn : ExtractorApi() {
         if (capturedUrl != null) {
             val cookieManager = CookieManager.getInstance()
             
-            // 1. 쿠키 수집 (비디오 도메인 + 플레이어 도메인)
+            // 쿠키 병합 (비디오 + 플레이어) - Key 로딩 필수
             val videoCookie = cookieManager.getCookie(capturedUrl) ?: ""
             val playerCookie = cookieManager.getCookie("https://player.bunny-frame.online") ?: ""
             
@@ -98,21 +98,23 @@ class BunnyPoorCdn : ExtractorApi() {
                 .filter { it.isNotEmpty() }
                 .joinToString("; ") { it.trim().removeSuffix(";") }
 
-            println("[TVWiki v108] [Bunny] 쿠키 병합 완료: ${combinedCookies.isNotEmpty()}")
+            println("[TVWiki v110] [Bunny] 쿠키 병합 완료: ${combinedCookies.isNotEmpty()}")
 
-            // Referer를 'capturedUrl'(c.html)로 설정 (Key 로딩 필수)
+            // [v110 수정] 'Origin' 헤더 삭제.
+            // Referer: Key 로딩을 위해 c.html 주소(capturedUrl) 유지.
+            // UA: 쿠키와 세트이므로 유지.
             val playbackHeaders = mutableMapOf(
                 "User-Agent" to DESKTOP_UA,
                 "Referer" to capturedUrl, 
-                "Origin" to "https://player.bunny-frame.online",
                 "Accept" to "*/*"
+                // Origin 헤더 삭제 (403 원인 제거)
             )
 
             if (combinedCookies.isNotEmpty()) {
                 playbackHeaders["Cookie"] = combinedCookies
             }
             
-            println("[TVWiki v108] [Bunny] 최종 재생 헤더 설정: $playbackHeaders")
+            println("[TVWiki v110] [Bunny] 최종 재생 헤더 설정: $playbackHeaders")
             
             val finalUrl = "$capturedUrl#.m3u8"
             
@@ -126,7 +128,7 @@ class BunnyPoorCdn : ExtractorApi() {
             return true
         } 
         
-        println("[TVWiki v108] [Bunny] 최종 실패")
+        println("[TVWiki v110] [Bunny] 최종 실패")
         return false
     }
 }
