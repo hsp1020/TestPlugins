@@ -11,12 +11,13 @@ import com.lagradost.cloudstream3.network.WebViewResolver
 import android.webkit.CookieManager
 import java.net.URI
 
-// [v115] Extractor.kt: 'app.get()'을 사용한 쿠키 직접 수집 및 Main Referer 적용 (2000 & 2004 동시 해결 시도)
+// [v117] Extractor.kt: 'c.html이 m3u8이다'는 점을 반영하여 직접 로딩 + 쿠키/헤더 완벽 동기화
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
     
+    // WebView와 동일한 UA 사용 (쿠키 정합성)
     private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
     override suspend fun getUrl(
@@ -25,7 +26,7 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("[TVWiki v115] [Bunny] getUrl 호출 - url: $url")
+        println("[TVWiki v117] [Bunny] getUrl 호출 - url: $url")
         extract(url, referer, subtitleCallback, callback)
     }
 
@@ -36,13 +37,13 @@ class BunnyPoorCdn : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
         thumbnailHint: String? = null,
     ): Boolean {
-        println("[TVWiki v115] [Bunny] extract 시작: $url")
+        println("[TVWiki v117] [Bunny] extract 시작: $url")
         
         var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = "https://tvwiki5.net/"
 
-        // 1. iframe 재탐색 로직
         val isDirectUrl = cleanUrl.contains("/v/") || cleanUrl.contains("/e/") || cleanUrl.contains("/f/")
+        
         if (!isDirectUrl) {
             try {
                 val refRes = app.get(cleanReferer, headers = mapOf("User-Agent" to DESKTOP_UA))
@@ -51,77 +52,89 @@ class BunnyPoorCdn : ExtractorApi() {
                 
                 if (iframeMatch != null) {
                     cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&").trim()
-                    println("[TVWiki v115] [성공] 재탐색으로 URL 획득: $cleanUrl")
+                    println("[TVWiki v117] [성공] 재탐색으로 URL 획득: $cleanUrl")
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
             }
         }
 
-        var capturedUrl = cleanUrl
+        var capturedUrl: String? = null
 
-        // 2. [v115 핵심] app.get()으로 요청을 보내 쿠키(Set-Cookie)를 직접 수집
-        // WebViewResolver는 비동기라 쿠키 수집에 실패했으므로, 동기식 요청으로 변경
-        val cookieMap = mutableMapOf<String, String>()
+        // 1. [WebView 실행] 쿠키 생성을 위해 c.html 페이지를 한 번 로딩합니다.
+        // c.html 자체가 m3u8 내용을 담고 있더라도, 브라우저가 먼저 접속해서 쿠키를 받아야 합니다.
+        val resolver = WebViewResolver(
+            interceptUrl = Regex("""/c\.html"""), 
+            useOkhttp = false,
+            timeout = 30000L
+        )
         
         try {
-            println("[TVWiki v115] [Bunny] 쿠키 수집 시도 (app.get): $capturedUrl")
+            val requestHeaders = mapOf(
+                "Referer" to cleanReferer, 
+                "User-Agent" to DESKTOP_UA 
+            )
+            println("[TVWiki v117] [Bunny] WebView 요청 시작 (쿠키 생성용)")
+            
             val response = app.get(
-                url = capturedUrl,
-                headers = mapOf("User-Agent" to DESKTOP_UA, "Referer" to cleanReferer)
+                url = cleanUrl,
+                headers = requestHeaders,
+                interceptor = resolver
             )
             
-            // 응답 쿠키 수집
-            response.cookies.forEach { (k, v) -> cookieMap[k] = v }
-            
-            // 만약 URL이 리다이렉트되었다면, 최종 URL 업데이트
-            if (response.url != capturedUrl) {
-                println("[TVWiki v115] [Bunny] URL 리다이렉트 감지: ${response.url}")
+            if (response.url.contains("/c.html") && response.url.contains("token=")) {
                 capturedUrl = response.url
+                println("[TVWiki v117] [성공] c.html URL 캡처됨: $capturedUrl")
             }
-            println("[TVWiki v115] [Bunny] 수집된 쿠키 개수: ${cookieMap.size}")
-
         } catch (e: Exception) {
-            println("[TVWiki v115] [Bunny] 쿠키 수집 중 에러 (무시하고 진행): ${e.message}")
+            e.printStackTrace()
         }
 
-        // CookieManager에서도 혹시 모를 쿠키 긁어오기
-        val cookieManager = CookieManager.getInstance()
-        val videoCookie = cookieManager.getCookie(capturedUrl) ?: ""
-        val playerCookie = cookieManager.getCookie("https://player.bunny-frame.online") ?: ""
-        
-        // 쿠키 문자열 조립
-        val sb = StringBuilder()
-        cookieMap.forEach { (k, v) -> sb.append("$k=$v; ") }
-        if (videoCookie.isNotEmpty()) sb.append(videoCookie).append("; ")
-        if (playerCookie.isNotEmpty()) sb.append(playerCookie).append("; ")
-        
-        val finalCookie = sb.toString().trim().removeSuffix(";")
-        println("[TVWiki v115] [Bunny] 최종 쿠키: ${if(finalCookie.isNotEmpty()) "있음" else "없음"}")
+        if (capturedUrl != null) {
+            val cookieManager = CookieManager.getInstance()
+            // [중요] 쿠키 동기화
+            cookieManager.flush()
+            
+            // 쿠키 수집
+            val videoCookie = cookieManager.getCookie(capturedUrl) ?: ""
+            val playerCookie = cookieManager.getCookie("https://player.bunny-frame.online") ?: ""
+            
+            val combinedCookies = listOf(videoCookie, playerCookie)
+                .filter { it.isNotEmpty() }
+                .joinToString("; ") { it.trim().removeSuffix(";") }
 
-        // 3. 헤더 설정 (Video: Main Referer, Key: Cookie)
-        val playbackHeaders = mutableMapOf(
-            "User-Agent" to DESKTOP_UA,
-            "Referer" to "https://player.bunny-frame.online/", // Main Referer (403 방지)
-            "Origin" to "https://player.bunny-frame.online",   // Main Origin
-            "Accept" to "*/*"
-        )
+            println("[TVWiki v117] [Bunny] 쿠키 병합 완료: ${combinedCookies.isNotEmpty()}")
 
-        if (finalCookie.isNotEmpty()) {
-            playbackHeaders["Cookie"] = finalCookie
-        }
-        
-        println("[TVWiki v115] [Bunny] 최종 재생 헤더 설정: $playbackHeaders")
-        
-        val finalUrl = "$capturedUrl#.m3u8"
-        
-        callback(
-            newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
-                this.referer = "https://player.bunny-frame.online/"
-                this.quality = Qualities.Unknown.value
-                this.headers = playbackHeaders
+            // 2. [헤더 설정] Video 403(2004) 및 Key 2000 에러 동시 해결 전략
+            // - User-Agent: Desktop (WebView와 일치시켜 쿠키 유효성 보장)
+            // - Referer: Main Domain (Video 서버가 403을 뱉지 않도록 함)
+            // - Origin: 삭제 (403 유발 방지)
+            val playbackHeaders = mutableMapOf(
+                "User-Agent" to DESKTOP_UA,
+                "Referer" to "https://player.bunny-frame.online/", 
+                "Accept" to "*/*"
+            )
+
+            if (combinedCookies.isNotEmpty()) {
+                playbackHeaders["Cookie"] = combinedCookies
             }
-        )
-        return true
+            
+            println("[TVWiki v117] [Bunny] 최종 재생 헤더 설정: $playbackHeaders")
+            
+            // c.html이 m3u8이므로 바로 재생 링크로 사용
+            val finalUrl = "$capturedUrl#.m3u8"
+            
+            callback(
+                newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
+                    this.referer = "https://player.bunny-frame.online/"
+                    this.quality = Qualities.Unknown.value
+                    this.headers = playbackHeaders
+                }
+            )
+            return true
+        } 
+        
+        println("[TVWiki v117] [Bunny] 최종 실패")
+        return false
     }
 }
