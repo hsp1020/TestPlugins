@@ -9,6 +9,7 @@ import org.jsoup.nodes.Element
 import java.net.URLDecoder
 import java.net.URLEncoder
 
+// [v103] TVWiki.kt 수정됨: 86화 링크 없음 문제 해결을 위한 iframe 검색 로직 강화
 class TVWiki : MainAPI() {
     override var mainUrl = "https://tvwiki5.net"
     override var name = "TVWiki"
@@ -78,7 +79,6 @@ class TVWiki : MainAPI() {
 
         val fixedPoster = fixUrl(poster)
 
-        // URL에 포스터 주소를 인코딩해서 붙임 (상세페이지 전달용)
         if (fixedPoster.isNotEmpty()) {
             try {
                 val encodedPoster = URLEncoder.encode(fixedPoster, "UTF-8")
@@ -134,7 +134,6 @@ class TVWiki : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        // 전달받은 URL에서 포스터 정보 추출 및 복원
         var passedPoster: String? = null
         var realUrl = url
 
@@ -174,7 +173,6 @@ class TVWiki : MainAPI() {
             }
         }
 
-        // 포스터 우선순위: 상세페이지 > 메타태그 > 목록에서 가져온 포스터
         var poster = doc.selectFirst("#bo_v_poster img")?.attr("src")
             ?: doc.selectFirst("meta[property='og:image']")?.attr("content")
         
@@ -195,7 +193,6 @@ class TVWiki : MainAPI() {
 
         val castList = doc.select(".slider_act .item .name").map { it.text().trim() }
         
-        // [수정] 운영진이 포함된 경우 출연진 정보를 표시하지 않음 (빈 문자열 처리)
         val castFormatted = if (castList.isNotEmpty() && castList.none { it.contains("운영팀") }) {
             "출연: ${castList.joinToString(", ")}"
         } else {
@@ -268,7 +265,15 @@ class TVWiki : MainAPI() {
         println("[TVWiki] loadLinks 시작 - data: $data")
         val doc = app.get(data, headers = commonHeaders).document
         
-        val iframe = doc.selectFirst("iframe#view_iframe")
+        // [수정] iframe 검색 로직 강화 (86화 등 링크 없음 오류 방지)
+        // 1순위: ID로 검색
+        var iframe = doc.selectFirst("iframe#view_iframe")
+        
+        // 2순위: ID가 없으면 src에 'bunny-frame'이 포함된 iframe 검색
+        if (iframe == null) {
+            iframe = doc.selectFirst("iframe[src*='bunny-frame']")
+        }
+
         if (iframe != null) {
             val playerUrl = iframe.attr("src")
             if (playerUrl.contains("player.bunny-frame.online")) {
