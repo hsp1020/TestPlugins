@@ -7,6 +7,8 @@ import com.lagradost.cloudstream3.SubtitleFile
 import java.io.*
 import java.net.*
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch // [필수] 동기화 도구
+import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -14,11 +16,13 @@ import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
 /**
- * v124-6: ID Logging & Speculative Cache
- * [유저 요청 반영]
- * 1. 로깅 강화: extractVideoIdDeep 함수가 URL, 디코딩된 토큰, 추출된 ID를 모두 출력.
- * -> 구간 이동 시 ID가 왜 바뀌는지/실패하는지 '팩트' 확인 가능.
- * 2. 기능 유지: v124-5의 '투기적 캐싱(Speculative Key)' 유지 (ID 달라져도 기존 키 시도).
+ * v124-7: Sync Start Fix (3001 Error Solved)
+ * [문제 원인 설명]
+ * v124-6에서는 start() 내부가 비동기 스레드로 돌면서, 포트가 할당되기도 전에 getUrl이 리턴됨.
+ * 플레이어는 유효하지 않은 포트(0)로 접속을 시도하여 3001 에러(데이터 없음) 발생.
+ * [수정 사항]
+ * CountDownLatch를 도입하여, '서버 포트 할당'이 완료될 때까지 getUrl 실행을 대기시킴.
+ * -> 무조건 '준비 완료된 서버'의 URL만 반환.
  */
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -29,31 +33,17 @@ class BcbcRedExtractor : ExtractorApi() {
     companion object {
         private var proxyServer: ProxyWebServer? = null
         
-        // 전역 캐시 (ID가 바뀌어도 유지됨)
+        // [v124-7] 투기적 캐시 유지 (구간이동 렉 방지)
         @Volatile private var staticKey: ByteArray? = null
         @Volatile private var staticIvType: Int = -1
-        @Volatile private var lastVideoId: String = ""
     }
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
-        println("=== [MovieKing v124-6] getUrl Start ===")
-        println("[MovieKing v124-6] Raw URL: $url") // 요청 URL 확인
-        
+        println("=== [MovieKing v124-7] getUrl Start ===")
         try {
             val videoId = extractVideoIdDeep(url)
             val baseHeaders = mutableMapOf("Referer" to "https://player-v1.bcbc.red/", "Origin" to "https://player-v1.bcbc.red", "User-Agent" to DESKTOP_UA)
             
-            // 캐시 상태 로깅
-            println("[MovieKing v124-6] ID Check -> Old: '$lastVideoId', New: '$videoId'")
-            if (staticKey != null) {
-                println("[MovieKing v124-6] Cached Key Exists. Will try speculative decryption.")
-            } else {
-                println("[MovieKing v124-6] No Cached Key. Fresh Start.")
-            }
-            
-            // ID 갱신
-            lastVideoId = videoId
-
             val playerHtml = app.get(url, headers = baseHeaders).text
             val m3u8Url = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)?.groupValues?.get(1)?.replace("\\/", "/") ?: return
             val playlistRes = app.get(m3u8Url, headers = baseHeaders).text
@@ -63,9 +53,15 @@ class BcbcRedExtractor : ExtractorApi() {
             
             val candidates = if (keyMatch != null) solveKeyCandidatesCombinatorial(baseHeaders, keyMatch.groupValues[1]) else emptyList()
             
+            // [v124-7] 캐시가 있다면 로그 출력 (동작 확인용)
+            if (staticKey != null) {
+                println("[MovieKing v124-7] Using Speculative Cache for Seek Optimization")
+            }
+
+            // [v124-7] 서버 재시작 (Latch로 시작 완료 보장)
             proxyServer?.stop()
             proxyServer = ProxyWebServer().apply {
-                start()
+                start() // 여기서 포트 할당될 때까지 무조건 기다림!
                 updateSession(baseHeaders, hexIv, candidates)
             }
             
@@ -74,15 +70,19 @@ class BcbcRedExtractor : ExtractorApi() {
             val newLines = mutableListOf<String>()
             var currentSeq = Regex("""#EXT-X-MEDIA-SEQUENCE:(\d+)""").find(playlistRes)?.groupValues?.get(1)?.toLong() ?: 0L
             
-            val proxyRoot = "http://127.0.0.1:${proxyServer!!.port}/$videoId"
+            // [중요] Latch 덕분에 여기서 port는 무조건 유효한 값임
+            val port = proxyServer!!.port
+            val proxyRoot = "http://127.0.0.1:$port/$videoId"
 
             for (line in lines) {
                 if (line.startsWith("#EXT-X-KEY")) continue
                 if (line.isNotBlank() && !line.startsWith("#")) {
                     val segmentUrl = if (line.startsWith("http")) line else "${m3u8Url.substringBeforeLast("/")}/$line"
-                    // 파일명 매핑 (Seek 무한로딩 방지 필수)
+                    
+                    // [v124-7] 파일명 매핑 (Seek 해결)
                     val fileName = segmentUrl.substringAfterLast("/")
                     seqMap[fileName] = currentSeq
+                    
                     newLines.add("$proxyRoot/proxy?url=${URLEncoder.encode(segmentUrl, "UTF-8")}")
                     currentSeq++
                 } else {
@@ -95,34 +95,17 @@ class BcbcRedExtractor : ExtractorApi() {
             proxyServer!!.updateSeqMap(seqMap)
             
             callback(newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) { this.referer = "https://player-v1.bcbc.red/" })
-        } catch (e: Exception) { println("[MovieKing v124-6] FATAL Error: $e") }
+        } catch (e: Exception) { println("[MovieKing v124-7] FATAL Error: $e") }
     }
 
-    // [중요] 로그가 추가된 ID 추출 함수
     private fun extractVideoIdDeep(url: String): String {
         try {
             val token = url.split("/v1/").getOrNull(1)?.split(".")?.getOrNull(1)
             if (token != null) {
-                // 토큰 디코딩 시도
-                val decodedBytes = Base64.decode(token, Base64.URL_SAFE)
-                val decodedString = String(decodedBytes)
-                println("[MovieKing v124-6] Decoded Token JSON: $decodedString")
-                
-                val idMatch = Regex(""""id"\s*:\s*(-?\d+)""").find(decodedString)
-                val extractedId = idMatch?.groupValues?.get(1)
-                
-                if (extractedId != null) {
-                    println("[MovieKing v124-6] Extracted ID SUCCESS: $extractedId")
-                    return extractedId
-                } else {
-                    println("[MovieKing v124-6] Extracted ID FAILED (Regex mismatch)")
-                }
-            } else {
-                println("[MovieKing v124-6] Token not found in URL")
+                val decoded = String(Base64.decode(token, Base64.URL_SAFE))
+                return Regex(""""id"\s*:\s*(\d+)""").find(decoded)?.groupValues?.get(1) ?: "ID_ERR"
             }
-        } catch (e: Exception) {
-            println("[MovieKing v124-6] ID Extraction Exception: $e")
-        }
+        } catch (e: Exception) {}
         return "ID_ERR"
     }
 
@@ -197,18 +180,33 @@ class BcbcRedExtractor : ExtractorApi() {
         @Volatile private var currentPlaylist: String = ""
         @Volatile private var keyCandidates: List<ByteArray> = emptyList()
         @Volatile private var seqMap: ConcurrentHashMap<String, Long> = ConcurrentHashMap()
+        
+        // [v124-7] 동기화 래치 추가
+        private val startLatch = CountDownLatch(1)
 
         fun start() {
             try {
                 serverSocket = ServerSocket(0)
                 port = serverSocket!!.localPort
                 isRunning = true
-                thread(isDaemon = true) { 
+                thread(isDaemon = true) {
+                    println("[MovieKing v124-7] Server Started on Port: $port")
+                    // [핵심] 서버가 진짜 켜지면 래치 해제 (신호 발송)
+                    startLatch.countDown()
+                    
                     while (isRunning && serverSocket != null && !serverSocket!!.isClosed) { 
                         try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {} 
                     } 
                 }
-            } catch (e: Exception) { println("[MovieKing v124-6] Server Start Failed: $e") }
+                
+                // [핵심] 여기서 서버가 켜질 때까지 최대 3초간 기다림 (Blocking)
+                if (!startLatch.await(3, TimeUnit.SECONDS)) {
+                    println("[MovieKing v124-7] Server Start Timed Out!")
+                }
+            } catch (e: Exception) { 
+                println("[MovieKing v124-7] Server Start Failed: $e")
+                startLatch.countDown() // 실패해도 해제는 해야 무한대기 방지
+            }
         }
 
         fun stop() {
@@ -249,12 +247,12 @@ class BcbcRedExtractor : ExtractorApi() {
                             if (rawData.isNotEmpty() && rawData[0] == 0x47.toByte() && rawData.size > 188 && rawData[188] == 0x47.toByte()) {
                                 output.write(rawData)
                             } else {
-                                // [v124-6] 투기적 캐싱: ID가 달라도(또는 ID_ERR여도) 일단 기존 키를 찔러봄
+                                // [v124-7] 투기적 캐시 (Speculative Key) 확인
                                 if (staticKey != null) {
                                     val dec = decryptDirect(rawData, staticKey!!, staticIvType, seq)
                                     if (dec != null) {
                                         output.write(dec)
-                                        return@runBlocking // 성공!
+                                        return@runBlocking
                                     } 
                                 }
                                 
@@ -292,8 +290,8 @@ class BcbcRedExtractor : ExtractorApi() {
                         val head = cipher.update(data.take(checkSize).toByteArray())
                         
                         if (head.isNotEmpty() && head[0] == 0x47.toByte() && head.size > 188 && head[188] == 0x47.toByte()) {
-                            println("[MovieKing v124-6] JACKPOT! Key#$keyIdx")
-                            // 성공 시 전역 캐시 업데이트
+                            println("[MovieKing v124-7] JACKPOT! Key#$keyIdx")
+                            // 정답 키를 전역 변수에 저장 (캐싱)
                             staticKey = key
                             staticIvType = ivIdx
                             
