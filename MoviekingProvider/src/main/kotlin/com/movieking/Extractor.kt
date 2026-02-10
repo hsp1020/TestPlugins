@@ -106,6 +106,8 @@ class BcbcRedExtractor : ExtractorApi() {
 
             listOf(b64).forEach { src ->
                 if (src.size > 16) {
+                    val slack = src.size - 16
+                    val distributions = generateDistributions(slack, 5)
                     val allPerms = generatePermutations(listOf(0, 1, 2, 3))
 
                     for (gaps in distributions) {
