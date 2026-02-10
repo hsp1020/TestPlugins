@@ -3,11 +3,11 @@
         "iconUrl": "https://mvking6.org/resource/favicon.ico",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 27369,
+        "fileSize": 27368,
         "status": 1,
         "language": "ko",
         "authors": [
-            "User"
+            "hsp1020"
         ],
         "tvTypes": [
             "TvSeries",
@@ -15,9 +15,9 @@
             "AsianDrama",
             "Anime"
         ],
-        "version": -1,
+        "version": 1,
         "internalName": "MoviekingProvider",
-        "description": "\ubb34\ube44\ud0b9 - \ucd5c\uc2e0\uc601\ud654, \ub4dc\ub77c\ub9c8, \uc608\ub2a5, \uc560\ub2c8 \ub2e4\uc2dc\ubcf4\uae30",
+        "description": "\ud55c\uad6d \ub4dc\ub77c\ub9c8 \ubc0f TV \ud504\ub85c\uadf8\ub7a8 \ub2e4\uc2dc\ubcf4\uae30 \uc81c\uacf5",
         "url": "https://raw.githubusercontent.com/hsp1020/TestPlugins/builds/MoviekingProvider.cs3",
         "name": "MoviekingProvider"
     },
