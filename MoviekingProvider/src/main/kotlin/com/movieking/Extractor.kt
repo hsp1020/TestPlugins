@@ -14,13 +14,11 @@ import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
 /**
- * v124-5: Speculative Key Strategy
- * [문제 원인]
- * 구간 이동 시 URL 변경으로 인해 'Video ID'가 달라진 것으로 인식되어 캐시가 초기화됨 -> 재연산 -> 버퍼링.
- * [해결책]
- * ID 비교 로직 제거. 가장 최근에 성공한 키(staticKey)를 무조건 1순위 후보로 사용.
- * - 구간 이동 시: 100% 적중 (0초 재생)
- * - 다른 영상 시: 실패 후 전수 조사 (기존 속도 유지)
+ * v124-6: ID Logging & Speculative Cache
+ * [유저 요청 반영]
+ * 1. 로깅 강화: extractVideoIdDeep 함수가 URL, 디코딩된 토큰, 추출된 ID를 모두 출력.
+ * -> 구간 이동 시 ID가 왜 바뀌는지/실패하는지 '팩트' 확인 가능.
+ * 2. 기능 유지: v124-5의 '투기적 캐싱(Speculative Key)' 유지 (ID 달라져도 기존 키 시도).
  */
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -31,17 +29,31 @@ class BcbcRedExtractor : ExtractorApi() {
     companion object {
         private var proxyServer: ProxyWebServer? = null
         
-        // [v124-5] ID와 상관없이 유지되는 전역 캐시
+        // 전역 캐시 (ID가 바뀌어도 유지됨)
         @Volatile private var staticKey: ByteArray? = null
         @Volatile private var staticIvType: Int = -1
+        @Volatile private var lastVideoId: String = ""
     }
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
-        println("=== [MovieKing v124-5] getUrl Start ===")
+        println("=== [MovieKing v124-6] getUrl Start ===")
+        println("[MovieKing v124-6] Raw URL: $url") // 요청 URL 확인
+        
         try {
             val videoId = extractVideoIdDeep(url)
             val baseHeaders = mutableMapOf("Referer" to "https://player-v1.bcbc.red/", "Origin" to "https://player-v1.bcbc.red", "User-Agent" to DESKTOP_UA)
             
+            // 캐시 상태 로깅
+            println("[MovieKing v124-6] ID Check -> Old: '$lastVideoId', New: '$videoId'")
+            if (staticKey != null) {
+                println("[MovieKing v124-6] Cached Key Exists. Will try speculative decryption.")
+            } else {
+                println("[MovieKing v124-6] No Cached Key. Fresh Start.")
+            }
+            
+            // ID 갱신
+            lastVideoId = videoId
+
             val playerHtml = app.get(url, headers = baseHeaders).text
             val m3u8Url = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)?.groupValues?.get(1)?.replace("\\/", "/") ?: return
             val playlistRes = app.get(m3u8Url, headers = baseHeaders).text
@@ -51,19 +63,12 @@ class BcbcRedExtractor : ExtractorApi() {
             
             val candidates = if (keyMatch != null) solveKeyCandidatesCombinatorial(baseHeaders, keyMatch.groupValues[1]) else emptyList()
             
-            // [v124-5] 캐시 초기화 로직 삭제.
-            // 무조건 기존 staticKey를 들고 서버로 진입.
-            if (staticKey != null) {
-                println("[MovieKing v124-5] Speculative Key Available. Trying cached key first.")
-            }
-
             proxyServer?.stop()
             proxyServer = ProxyWebServer().apply {
                 start()
                 updateSession(baseHeaders, hexIv, candidates)
             }
             
-            // [v124 유지] 파일명 매핑 롤백 상태 (전체 URL 사용)
             val seqMap = ConcurrentHashMap<String, Long>()
             val lines = playlistRes.lines()
             val newLines = mutableListOf<String>()
@@ -75,7 +80,9 @@ class BcbcRedExtractor : ExtractorApi() {
                 if (line.startsWith("#EXT-X-KEY")) continue
                 if (line.isNotBlank() && !line.startsWith("#")) {
                     val segmentUrl = if (line.startsWith("http")) line else "${m3u8Url.substringBeforeLast("/")}/$line"
-                    seqMap[segmentUrl] = currentSeq
+                    // 파일명 매핑 (Seek 무한로딩 방지 필수)
+                    val fileName = segmentUrl.substringAfterLast("/")
+                    seqMap[fileName] = currentSeq
                     newLines.add("$proxyRoot/proxy?url=${URLEncoder.encode(segmentUrl, "UTF-8")}")
                     currentSeq++
                 } else {
@@ -88,17 +95,34 @@ class BcbcRedExtractor : ExtractorApi() {
             proxyServer!!.updateSeqMap(seqMap)
             
             callback(newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) { this.referer = "https://player-v1.bcbc.red/" })
-        } catch (e: Exception) { println("[MovieKing v124-5] FATAL Error: $e") }
+        } catch (e: Exception) { println("[MovieKing v124-6] FATAL Error: $e") }
     }
 
+    // [중요] 로그가 추가된 ID 추출 함수
     private fun extractVideoIdDeep(url: String): String {
         try {
             val token = url.split("/v1/").getOrNull(1)?.split(".")?.getOrNull(1)
             if (token != null) {
-                val decoded = String(Base64.decode(token, Base64.URL_SAFE))
-                return Regex(""""id"\s*:\s*(\d+)""").find(decoded)?.groupValues?.get(1) ?: "ID_ERR"
+                // 토큰 디코딩 시도
+                val decodedBytes = Base64.decode(token, Base64.URL_SAFE)
+                val decodedString = String(decodedBytes)
+                println("[MovieKing v124-6] Decoded Token JSON: $decodedString")
+                
+                val idMatch = Regex(""""id"\s*:\s*(-?\d+)""").find(decodedString)
+                val extractedId = idMatch?.groupValues?.get(1)
+                
+                if (extractedId != null) {
+                    println("[MovieKing v124-6] Extracted ID SUCCESS: $extractedId")
+                    return extractedId
+                } else {
+                    println("[MovieKing v124-6] Extracted ID FAILED (Regex mismatch)")
+                }
+            } else {
+                println("[MovieKing v124-6] Token not found in URL")
             }
-        } catch (e: Exception) {}
+        } catch (e: Exception) {
+            println("[MovieKing v124-6] ID Extraction Exception: $e")
+        }
         return "ID_ERR"
     }
 
@@ -184,7 +208,7 @@ class BcbcRedExtractor : ExtractorApi() {
                         try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {} 
                     } 
                 }
-            } catch (e: Exception) { println("[MovieKing v124-5] Server Start Failed: $e") }
+            } catch (e: Exception) { println("[MovieKing v124-6] Server Start Failed: $e") }
         }
 
         fun stop() {
@@ -213,7 +237,8 @@ class BcbcRedExtractor : ExtractorApi() {
                     val urlParam = path.substringAfter("url=").substringBefore(" ")
                     val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
                     
-                    val seq = seqMap[targetUrl] ?: 0L
+                    val fileName = targetUrl.substringAfterLast("/")
+                    val seq = seqMap[fileName] ?: 0L
                     
                     runBlocking {
                         val res = app.get(targetUrl, headers = currentHeaders)
@@ -224,16 +249,13 @@ class BcbcRedExtractor : ExtractorApi() {
                             if (rawData.isNotEmpty() && rawData[0] == 0x47.toByte() && rawData.size > 188 && rawData[188] == 0x47.toByte()) {
                                 output.write(rawData)
                             } else {
-                                // [v124-5] 투기적 캐시 사용 (Speculative)
-                                // 영상 ID가 바뀌었더라도, 일단 이전에 성공한 키(staticKey)로 먼저 시도해본다.
-                                // 구간 이동일 경우 100% 성공함.
+                                // [v124-6] 투기적 캐싱: ID가 달라도(또는 ID_ERR여도) 일단 기존 키를 찔러봄
                                 if (staticKey != null) {
                                     val dec = decryptDirect(rawData, staticKey!!, staticIvType, seq)
                                     if (dec != null) {
                                         output.write(dec)
-                                        return@runBlocking // 성공! 전수 조사 건너뜀
+                                        return@runBlocking // 성공!
                                     } 
-                                    // 실패하면? -> 다른 영상이므로 아래에서 새 키 찾기 시작
                                 }
                                 
                                 val dec = bruteForceCombinatorial(rawData, seq)
@@ -270,8 +292,8 @@ class BcbcRedExtractor : ExtractorApi() {
                         val head = cipher.update(data.take(checkSize).toByteArray())
                         
                         if (head.isNotEmpty() && head[0] == 0x47.toByte() && head.size > 188 && head[188] == 0x47.toByte()) {
-                            println("[MovieKing v124-5] JACKPOT! Key#$keyIdx")
-                            // 정답 찾으면 전역 변수에 저장
+                            println("[MovieKing v124-6] JACKPOT! Key#$keyIdx")
+                            // 성공 시 전역 캐시 업데이트
                             staticKey = key
                             staticIvType = ivIdx
                             
