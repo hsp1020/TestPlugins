@@ -9,7 +9,6 @@ import org.jsoup.nodes.Element
 import java.net.URLDecoder
 import java.net.URLEncoder
 
-// [v103] TVWiki.kt 수정됨: 86화 링크 없음 문제 해결을 위한 iframe 검색 로직 강화
 class TVWiki : MainAPI() {
     override var mainUrl = "https://tvwiki5.net"
     override var name = "TVWiki"
@@ -262,36 +261,65 @@ class TVWiki : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        println("[TVWiki] loadLinks 시작 - data: $data")
+        println("[TVWiki v103] loadLinks 시작 - data: $data")
         val doc = app.get(data, headers = commonHeaders).document
         
-        // [수정] iframe 검색 로직 강화 (86화 등 링크 없음 오류 방지)
         // 1순위: ID로 검색
         var iframe = doc.selectFirst("iframe#view_iframe")
-        
-        // 2순위: ID가 없으면 src에 'bunny-frame'이 포함된 iframe 검색
-        if (iframe == null) {
+        if (iframe != null) {
+            println("[TVWiki v103] [성공] iframe#view_iframe 발견")
+        } else {
+            println("[TVWiki v103] [실패] iframe#view_iframe 찾지 못함 -> 2차 검색 시도")
+            // 2순위: ID가 없으면 src에 'bunny-frame'이 포함된 iframe 검색
             iframe = doc.selectFirst("iframe[src*='bunny-frame']")
+            if (iframe != null) {
+                println("[TVWiki v103] [성공] iframe[src*='bunny-frame'] 발견")
+            } else {
+                println("[TVWiki v103] [실패] 모든 iframe 검색 실패 (bunny-frame 포함된 iframe 없음)")
+            }
         }
 
         if (iframe != null) {
             val playerUrl = iframe.attr("src")
+            println("[TVWiki v103] 발견된 iframe src: $playerUrl")
+            
             if (playerUrl.contains("player.bunny-frame.online")) {
+                 println("[TVWiki v103] BunnyPoorCdn 추출 시도 (src)")
                  val extracted = BunnyPoorCdn().extract(fixUrl(playerUrl).replace("&amp;", "&"), data, subtitleCallback, callback, null)
-                 if(extracted) return true
+                 if(extracted) {
+                     println("[TVWiki v103] [성공] BunnyPoorCdn 추출 완료 (src)")
+                     return true
+                 } else {
+                     println("[TVWiki v103] [실패] BunnyPoorCdn 추출 실패 (src)")
+                 }
             }
+            
              val playerUrl1 = iframe.attr("data-player1")
              if (playerUrl1.contains("player.bunny-frame.online")) {
+                 println("[TVWiki v103] BunnyPoorCdn 추출 시도 (data-player1)")
                  val extracted = BunnyPoorCdn().extract(fixUrl(playerUrl1).replace("&amp;", "&"), data, subtitleCallback, callback, null)
-                 if(extracted) return true
+                 if(extracted) {
+                     println("[TVWiki v103] [성공] BunnyPoorCdn 추출 완료 (data-player1)")
+                     return true
+                 } else {
+                     println("[TVWiki v103] [실패] BunnyPoorCdn 추출 실패 (data-player1)")
+                 }
             }
+            
             val playerUrl2 = iframe.attr("data-player2")
             if (playerUrl2.contains("player.bunny-frame.online")) {
+                 println("[TVWiki v103] BunnyPoorCdn 추출 시도 (data-player2)")
                  val extracted = BunnyPoorCdn().extract(fixUrl(playerUrl2).replace("&amp;", "&"), data, subtitleCallback, callback, null)
-                 if(extracted) return true
+                 if(extracted) {
+                     println("[TVWiki v103] [성공] BunnyPoorCdn 추출 완료 (data-player2)")
+                     return true
+                 } else {
+                     println("[TVWiki v103] [실패] BunnyPoorCdn 추출 실패 (data-player2)")
+                 }
             }
         }
 
+        println("[TVWiki v103] iframe에서 추출 실패 또는 없음 -> script 태그 검색 시작")
         val scriptTags = doc.select("script")
         for (script in scriptTags) {
             val scriptContent = script.html()
@@ -300,20 +328,30 @@ class TVWiki : MainAPI() {
                 val match = urlRegex.find(scriptContent)
                 
                 if (match != null) {
+                    println("[TVWiki v103] [성공] Script 태그에서 URL 발견: ${match.value}")
                     val foundUrl = match.value.replace("&amp;", "&")
-                    if(BunnyPoorCdn().extract(foundUrl, data, subtitleCallback, callback, null)) return true
+                    if(BunnyPoorCdn().extract(foundUrl, data, subtitleCallback, callback, null)) {
+                        println("[TVWiki v103] [성공] Script 기반 추출 완료")
+                        return true
+                    } else {
+                        println("[TVWiki v103] [실패] Script 기반 추출 실패")
+                    }
                 }
             }
         }
 
+        println("[TVWiki v103] Script 검색 실패 -> 썸네일 힌트 검색 시작")
         val thumbnailHint = extractThumbnailHint(doc)
         if (thumbnailHint != null) {
+            println("[TVWiki v103] [성공] 썸네일 힌트 발견: $thumbnailHint")
             try {
                 val pathRegex = Regex("""/v/[a-z]/[a-zA-Z0-9]+""")
                 val pathMatch = pathRegex.find(thumbnailHint)
                 if (pathMatch != null) {
                     val m3u8Url = thumbnailHint.substringBefore(pathMatch.value) + pathMatch.value + "/index.m3u8"
                     val fixedM3u8Url = m3u8Url.replace(Regex("//v/"), "/v/")
+                    println("[TVWiki v103] 썸네일 힌트로 m3u8 생성: $fixedM3u8Url")
+                    
                     callback(
                         newExtractorLink(name, name, fixedM3u8Url, ExtractorLinkType.M3U8) {
                             this.referer = mainUrl
@@ -321,12 +359,18 @@ class TVWiki : MainAPI() {
                             this.headers = commonHeaders
                         }
                     )
+                    println("[TVWiki v103] [성공] 썸네일 힌트 기반 callback 호출 완료")
                     return true
                 }
             } catch (e: Exception) {
+                println("[TVWiki v103] [에러] 썸네일 힌트 처리 중 예외 발생: ${e.message}")
                 e.printStackTrace()
             }
+        } else {
+            println("[TVWiki v103] [실패] 썸네일 힌트 없음")
         }
+        
+        println("[TVWiki v103] [최종 실패] 모든 방법으로 링크 추출 실패")
         return false
     }
 
