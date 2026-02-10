@@ -11,7 +11,7 @@ import com.lagradost.cloudstream3.network.WebViewResolver
 import android.webkit.CookieManager
 import java.net.URI
 
-// [v108] Extractor.kt 수정됨: 2000 에러 해결을 위한 'Referer' 값 수정 (c.html 주소 사용)
+// [v108] Extractor.kt: 쿠키 병합 + Referer(c.html) + UA/Origin 포함 (2000 에러 해결 버전)
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
     override val mainUrl = "https://player.bunny-frame.online"
@@ -100,12 +100,10 @@ class BunnyPoorCdn : ExtractorApi() {
 
             println("[TVWiki v108] [Bunny] 쿠키 병합 완료: ${combinedCookies.isNotEmpty()}")
 
-            // [v108 핵심 수정] Referer를 'capturedUrl'(c.html)로 설정
-            // 이전 버전(v107)의 'https://player.bunny-frame.online/'는 잘못된 Referer였습니다.
-            // Key Server는 요청이 '토큰이 있는 c.html 페이지'에서 왔는지 검사합니다.
+            // Referer를 'capturedUrl'(c.html)로 설정 (Key 로딩 필수)
             val playbackHeaders = mutableMapOf(
                 "User-Agent" to DESKTOP_UA,
-                "Referer" to capturedUrl, // [중요] 토큰이 포함된 페이지 URL을 Referer로 사용
+                "Referer" to capturedUrl, 
                 "Origin" to "https://player.bunny-frame.online",
                 "Accept" to "*/*"
             )
@@ -120,7 +118,7 @@ class BunnyPoorCdn : ExtractorApi() {
             
             callback(
                 newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
-                    this.referer = capturedUrl // [중요] ExtractorLink의 referer도 일치시킴
+                    this.referer = capturedUrl
                     this.quality = Qualities.Unknown.value
                     this.headers = playbackHeaders
                 }
