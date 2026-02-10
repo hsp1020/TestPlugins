@@ -4,6 +4,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.network.WebViewResolver
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLDecoder
@@ -24,7 +25,7 @@ class TVWiki : MainAPI() {
     )
 
     private val USER_AGENT =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
     private val commonHeaders = mapOf(
         "User-Agent" to USER_AGENT,
@@ -261,65 +262,76 @@ class TVWiki : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        println("[TVWiki v103] loadLinks 시작 - data: $data")
-        val doc = app.get(data, headers = commonHeaders).document
+        println("[TVWiki v104] loadLinks 시작 - data: $data")
         
+        // 1. 1차 시도: 빠르고 가벼운 정적 파싱
+        var doc = app.get(data, headers = commonHeaders).document
+        
+        if (findAndExtract(doc, data, subtitleCallback, callback)) {
+             println("[TVWiki v104] 정적 파싱으로 링크 추출 성공")
+             return true
+        }
+
+        // 2. 2차 시도: 86화 등 링크 없음(빈 src, JS 동적 로딩) 해결을 위한 WebView 로딩
+        println("[TVWiki v104] 정적 파싱 실패. WebView로 재시도합니다.")
+        try {
+            val webViewInterceptor = WebViewResolver(
+                Regex("bunny-frame|googleapis"), 
+                timeout = 15000L
+            )
+            // WebView를 통해 페이지를 완전히 로딩한 후 소스 가져오기
+            val response = app.get(data, headers = commonHeaders, interceptor = webViewInterceptor)
+            doc = response.document
+            println("[TVWiki v104] WebView 로딩 완료. 다시 파싱 시도.")
+            
+            if (findAndExtract(doc, data, subtitleCallback, callback)) {
+                println("[TVWiki v104] WebView 로딩 후 링크 추출 성공")
+                return true
+            }
+        } catch (e: Exception) {
+            println("[TVWiki v104] WebView 로딩 중 에러: ${e.message}")
+        }
+        
+        println("[TVWiki v104] [최종 실패] 모든 방법으로 링크 추출 실패")
+        return false
+    }
+
+    private suspend fun findAndExtract(
+        doc: Document,
+        data: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
         // 1순위: ID로 검색
         var iframe = doc.selectFirst("iframe#view_iframe")
-        if (iframe != null) {
-            println("[TVWiki v103] [성공] iframe#view_iframe 발견")
-        } else {
-            println("[TVWiki v103] [실패] iframe#view_iframe 찾지 못함 -> 2차 검색 시도")
-            // 2순위: ID가 없으면 src에 'bunny-frame'이 포함된 iframe 검색
+        
+        // 2순위: ID가 없으면 src에 'bunny-frame'이 포함된 iframe 검색
+        if (iframe == null) {
             iframe = doc.selectFirst("iframe[src*='bunny-frame']")
-            if (iframe != null) {
-                println("[TVWiki v103] [성공] iframe[src*='bunny-frame'] 발견")
-            } else {
-                println("[TVWiki v103] [실패] 모든 iframe 검색 실패 (bunny-frame 포함된 iframe 없음)")
-            }
         }
 
         if (iframe != null) {
-            val playerUrl = iframe.attr("src")
-            println("[TVWiki v103] 발견된 iframe src: $playerUrl")
-            
-            if (playerUrl.contains("player.bunny-frame.online")) {
-                 println("[TVWiki v103] BunnyPoorCdn 추출 시도 (src)")
-                 val extracted = BunnyPoorCdn().extract(fixUrl(playerUrl).replace("&amp;", "&"), data, subtitleCallback, callback, null)
-                 if(extracted) {
-                     println("[TVWiki v103] [성공] BunnyPoorCdn 추출 완료 (src)")
-                     return true
-                 } else {
-                     println("[TVWiki v103] [실패] BunnyPoorCdn 추출 실패 (src)")
-                 }
+            // [수정] src 속성 외에 data-src 등 지연 로딩 속성도 체크 (19:41 로그에서 src가 비어있었으므로 중요)
+            val playerUrl = iframe.attr("src").ifEmpty { 
+                iframe.attr("data-src").ifEmpty { iframe.attr("data-url") } 
             }
             
+            println("[TVWiki v104] 발견된 iframe URL: $playerUrl")
+
+            if (playerUrl.contains("player.bunny-frame.online")) {
+                 if(BunnyPoorCdn().extract(fixUrl(playerUrl).replace("&amp;", "&"), data, subtitleCallback, callback, null)) return true
+            }
              val playerUrl1 = iframe.attr("data-player1")
              if (playerUrl1.contains("player.bunny-frame.online")) {
-                 println("[TVWiki v103] BunnyPoorCdn 추출 시도 (data-player1)")
-                 val extracted = BunnyPoorCdn().extract(fixUrl(playerUrl1).replace("&amp;", "&"), data, subtitleCallback, callback, null)
-                 if(extracted) {
-                     println("[TVWiki v103] [성공] BunnyPoorCdn 추출 완료 (data-player1)")
-                     return true
-                 } else {
-                     println("[TVWiki v103] [실패] BunnyPoorCdn 추출 실패 (data-player1)")
-                 }
+                 if(BunnyPoorCdn().extract(fixUrl(playerUrl1).replace("&amp;", "&"), data, subtitleCallback, callback, null)) return true
             }
-            
             val playerUrl2 = iframe.attr("data-player2")
             if (playerUrl2.contains("player.bunny-frame.online")) {
-                 println("[TVWiki v103] BunnyPoorCdn 추출 시도 (data-player2)")
-                 val extracted = BunnyPoorCdn().extract(fixUrl(playerUrl2).replace("&amp;", "&"), data, subtitleCallback, callback, null)
-                 if(extracted) {
-                     println("[TVWiki v103] [성공] BunnyPoorCdn 추출 완료 (data-player2)")
-                     return true
-                 } else {
-                     println("[TVWiki v103] [실패] BunnyPoorCdn 추출 실패 (data-player2)")
-                 }
+                 if(BunnyPoorCdn().extract(fixUrl(playerUrl2).replace("&amp;", "&"), data, subtitleCallback, callback, null)) return true
             }
         }
 
-        println("[TVWiki v103] iframe에서 추출 실패 또는 없음 -> script 태그 검색 시작")
+        println("[TVWiki v104] iframe에서 추출 실패 또는 없음 -> script 태그 검색 시작")
         val scriptTags = doc.select("script")
         for (script in scriptTags) {
             val scriptContent = script.html()
@@ -328,29 +340,23 @@ class TVWiki : MainAPI() {
                 val match = urlRegex.find(scriptContent)
                 
                 if (match != null) {
-                    println("[TVWiki v103] [성공] Script 태그에서 URL 발견: ${match.value}")
+                    println("[TVWiki v104] [성공] Script 태그에서 URL 발견: ${match.value}")
                     val foundUrl = match.value.replace("&amp;", "&")
-                    if(BunnyPoorCdn().extract(foundUrl, data, subtitleCallback, callback, null)) {
-                        println("[TVWiki v103] [성공] Script 기반 추출 완료")
-                        return true
-                    } else {
-                        println("[TVWiki v103] [실패] Script 기반 추출 실패")
-                    }
+                    if(BunnyPoorCdn().extract(foundUrl, data, subtitleCallback, callback, null)) return true
                 }
             }
         }
 
-        println("[TVWiki v103] Script 검색 실패 -> 썸네일 힌트 검색 시작")
+        println("[TVWiki v104] Script 검색 실패 -> 썸네일 힌트 검색 시작")
         val thumbnailHint = extractThumbnailHint(doc)
         if (thumbnailHint != null) {
-            println("[TVWiki v103] [성공] 썸네일 힌트 발견: $thumbnailHint")
             try {
                 val pathRegex = Regex("""/v/[a-z]/[a-zA-Z0-9]+""")
                 val pathMatch = pathRegex.find(thumbnailHint)
                 if (pathMatch != null) {
                     val m3u8Url = thumbnailHint.substringBefore(pathMatch.value) + pathMatch.value + "/index.m3u8"
                     val fixedM3u8Url = m3u8Url.replace(Regex("//v/"), "/v/")
-                    println("[TVWiki v103] 썸네일 힌트로 m3u8 생성: $fixedM3u8Url")
+                    println("[TVWiki v104] 썸네일 힌트로 m3u8 생성: $fixedM3u8Url")
                     
                     callback(
                         newExtractorLink(name, name, fixedM3u8Url, ExtractorLinkType.M3U8) {
@@ -359,18 +365,12 @@ class TVWiki : MainAPI() {
                             this.headers = commonHeaders
                         }
                     )
-                    println("[TVWiki v103] [성공] 썸네일 힌트 기반 callback 호출 완료")
                     return true
                 }
             } catch (e: Exception) {
-                println("[TVWiki v103] [에러] 썸네일 힌트 처리 중 예외 발생: ${e.message}")
                 e.printStackTrace()
             }
-        } else {
-            println("[TVWiki v103] [실패] 썸네일 힌트 없음")
         }
-        
-        println("[TVWiki v103] [최종 실패] 모든 방법으로 링크 추출 실패")
         return false
     }
 
