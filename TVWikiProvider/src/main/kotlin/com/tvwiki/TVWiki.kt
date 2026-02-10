@@ -13,6 +13,7 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 
+// [v110] TVWiki.kt: 로그 태그 업데이트 (로직은 v106 API 호출 방식 유지)
 class TVWiki : MainAPI() {
     override var mainUrl = "https://tvwiki5.net"
     override var name = "TVWiki"
@@ -272,23 +273,23 @@ class TVWiki : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        println("[TVWiki v106] loadLinks 시작 - data: $data")
+        println("[TVWiki v110] loadLinks 시작 - data: $data")
         
         val doc = app.get(data, headers = commonHeaders).document
         
         if (findAndExtract(doc, data, subtitleCallback, callback)) {
-             println("[TVWiki v106] 정적 파싱으로 링크 추출 성공")
+             println("[TVWiki v110] 정적 파싱으로 링크 추출 성공")
              return true
         }
 
         // 2차 시도: API 직접 호출
-        println("[TVWiki v106] 정적 파싱 실패. API 직접 호출 시도")
+        println("[TVWiki v110] 정적 파싱 실패. API 직접 호출 시도")
         if (extractFromApi(doc, data, subtitleCallback, callback)) {
-            println("[TVWiki v106] API 호출로 링크 추출 성공")
+            println("[TVWiki v110] API 호출로 링크 추출 성공")
             return true
         }
         
-        println("[TVWiki v106] [최종 실패] 모든 방법으로 링크 추출 실패")
+        println("[TVWiki v110] [최종 실패] 모든 방법으로 링크 추출 실패")
         return false
     }
 
@@ -306,11 +307,11 @@ class TVWiki : MainAPI() {
             }
 
             if (sessionData.isNullOrEmpty()) {
-                println("[TVWiki v106] data-session 속성 없음")
+                println("[TVWiki v110] data-session 속성 없음")
                 return false
             }
 
-            println("[TVWiki v106] 세션 데이터 발견: $sessionData")
+            println("[TVWiki v110] 세션 데이터 발견: $sessionData")
             
             val apiUrl = "$mainUrl/api/create_session.php"
             val headers = commonHeaders.toMutableMap()
@@ -324,17 +325,17 @@ class TVWiki : MainAPI() {
 
             if (json != null && json.success && !json.playerUrl.isNullOrEmpty()) {
                 val fullUrl = "${json.playerUrl}?t=${json.t}&sig=${json.sig}"
-                println("[TVWiki v106] API 응답으로 URL 생성: $fullUrl")
+                println("[TVWiki v110] API 응답으로 URL 생성: $fullUrl")
                 
                 if (fullUrl.contains("player.bunny-frame.online")) {
                     return BunnyPoorCdn().extract(fullUrl, referer, subtitleCallback, callback, null)
                 }
             } else {
-                println("[TVWiki v106] API 응답 실패 또는 URL 없음")
+                println("[TVWiki v110] API 응답 실패 또는 URL 없음")
             }
 
         } catch (e: Exception) {
-            println("[TVWiki v106] API 호출 중 에러: ${e.message}")
+            println("[TVWiki v110] API 호출 중 에러: ${e.message}")
             e.printStackTrace()
         }
         return false
@@ -357,7 +358,7 @@ class TVWiki : MainAPI() {
             }
             
             if (playerUrl.isNotEmpty()) {
-                println("[TVWiki v106] 발견된 iframe URL: $playerUrl")
+                println("[TVWiki v110] 발견된 iframe URL: $playerUrl")
                 if (playerUrl.contains("player.bunny-frame.online")) {
                      if(BunnyPoorCdn().extract(fixUrl(playerUrl).replace("&amp;", "&"), data, subtitleCallback, callback, null)) return true
                 }
@@ -372,7 +373,7 @@ class TVWiki : MainAPI() {
                 val match = urlRegex.find(scriptContent)
                 
                 if (match != null) {
-                    println("[TVWiki v106] [성공] Script 태그에서 URL 발견: ${match.value}")
+                    println("[TVWiki v110] [성공] Script 태그에서 URL 발견: ${match.value}")
                     val foundUrl = match.value.replace("&amp;", "&")
                     if(BunnyPoorCdn().extract(foundUrl, data, subtitleCallback, callback, null)) return true
                 }
