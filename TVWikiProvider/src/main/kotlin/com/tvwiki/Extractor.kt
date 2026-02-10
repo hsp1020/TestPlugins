@@ -11,13 +11,12 @@ import com.lagradost.cloudstream3.network.WebViewResolver
 import android.webkit.CookieManager
 import java.net.URI
 
-// [v107] Extractor.kt 수정됨: 2000 에러 해결을 위해 '키 서버 도메인 쿠키' 추가 수집 및 UA 복구
+// [v108] Extractor.kt 수정됨: 2000 에러 해결을 위한 'Referer' 값 수정 (c.html 주소 사용)
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
     
-    // 세션 유지용 Desktop UA
     private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
     override suspend fun getUrl(
@@ -26,7 +25,7 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("[TVWiki v107] [Bunny] getUrl 호출 - url: $url, referer: $referer")
+        println("[TVWiki v108] [Bunny] getUrl 호출 - url: $url")
         extract(url, referer, subtitleCallback, callback)
     }
 
@@ -37,8 +36,7 @@ class BunnyPoorCdn : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
         thumbnailHint: String? = null,
     ): Boolean {
-        println("[TVWiki v107] [Bunny] extract 시작")
-        println("[TVWiki v107] [Bunny] 입력 URL: $url")
+        println("[TVWiki v108] [Bunny] extract 시작: $url")
         
         var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = "https://tvwiki5.net/"
@@ -47,14 +45,13 @@ class BunnyPoorCdn : ExtractorApi() {
         
         if (!isDirectUrl) {
             try {
-                // iframe src 찾기
                 val refRes = app.get(cleanReferer, headers = mapOf("User-Agent" to DESKTOP_UA))
                 val iframeMatch = Regex("""src=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
                     ?: Regex("""data-player\d*=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
                 
                 if (iframeMatch != null) {
                     cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&").trim()
-                    println("[TVWiki v107] [성공] 재탐색으로 URL 획득: $cleanUrl")
+                    println("[TVWiki v108] [성공] 재탐색으로 URL 획득: $cleanUrl")
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -74,9 +71,8 @@ class BunnyPoorCdn : ExtractorApi() {
                 "Referer" to cleanReferer, 
                 "User-Agent" to DESKTOP_UA 
             )
-            println("[TVWiki v107] [Bunny] WebView 요청 시작")
+            println("[TVWiki v108] [Bunny] WebView 요청 시작")
             
-            // WebView 실행 (이 과정에서 비디오 도메인과 플레이어 도메인의 쿠키가 생성됨)
             val response = app.get(
                 url = cleanUrl,
                 headers = requestHeaders,
@@ -85,7 +81,7 @@ class BunnyPoorCdn : ExtractorApi() {
             
             if (response.url.contains("/c.html") && response.url.contains("token=")) {
                 capturedUrl = response.url
-                println("[TVWiki v107] [성공] c.html URL 캡처됨: $capturedUrl")
+                println("[TVWiki v108] [성공] c.html URL 캡처됨: $capturedUrl")
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -94,25 +90,22 @@ class BunnyPoorCdn : ExtractorApi() {
         if (capturedUrl != null) {
             val cookieManager = CookieManager.getInstance()
             
-            // [v107 핵심 수정] 두 도메인의 쿠키를 모두 가져와서 합침
-            // 1. 영상 파일이 있는 CDN 도메인 (예: every9.poorcdn.com)
+            // 1. 쿠키 수집 (비디오 도메인 + 플레이어 도메인)
             val videoCookie = cookieManager.getCookie(capturedUrl) ?: ""
-            
-            // 2. 키(Key) 파일이 있는 메인 플레이어 도메인 (https://player.bunny-frame.online)
-            // * 중요: 이 쿠키가 없으면 키 요청 시 2000 에러(1600 bytes) 발생함
             val playerCookie = cookieManager.getCookie("https://player.bunny-frame.online") ?: ""
             
-            // 쿠키 병합 (중복 방지)
             val combinedCookies = listOf(videoCookie, playerCookie)
                 .filter { it.isNotEmpty() }
                 .joinToString("; ") { it.trim().removeSuffix(";") }
 
-            println("[TVWiki v107] [Bunny] 수집된 쿠키 - Video: $videoCookie, Player: $playerCookie")
+            println("[TVWiki v108] [Bunny] 쿠키 병합 완료: ${combinedCookies.isNotEmpty()}")
 
-            // User-Agent 복구 (올바른 쿠키와 함께 보냄)
+            // [v108 핵심 수정] Referer를 'capturedUrl'(c.html)로 설정
+            // 이전 버전(v107)의 'https://player.bunny-frame.online/'는 잘못된 Referer였습니다.
+            // Key Server는 요청이 '토큰이 있는 c.html 페이지'에서 왔는지 검사합니다.
             val playbackHeaders = mutableMapOf(
                 "User-Agent" to DESKTOP_UA,
-                "Referer" to "https://player.bunny-frame.online/",
+                "Referer" to capturedUrl, // [중요] 토큰이 포함된 페이지 URL을 Referer로 사용
                 "Origin" to "https://player.bunny-frame.online",
                 "Accept" to "*/*"
             )
@@ -121,13 +114,13 @@ class BunnyPoorCdn : ExtractorApi() {
                 playbackHeaders["Cookie"] = combinedCookies
             }
             
-            println("[TVWiki v107] [Bunny] 최종 재생 헤더 설정: $playbackHeaders")
+            println("[TVWiki v108] [Bunny] 최종 재생 헤더 설정: $playbackHeaders")
             
             val finalUrl = "$capturedUrl#.m3u8"
             
             callback(
                 newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
-                    this.referer = "https://player.bunny-frame.online/"
+                    this.referer = capturedUrl // [중요] ExtractorLink의 referer도 일치시킴
                     this.quality = Qualities.Unknown.value
                     this.headers = playbackHeaders
                 }
@@ -135,7 +128,7 @@ class BunnyPoorCdn : ExtractorApi() {
             return true
         } 
         
-        println("[TVWiki v107] [Bunny] 최종 실패")
+        println("[TVWiki v108] [Bunny] 최종 실패")
         return false
     }
 }
