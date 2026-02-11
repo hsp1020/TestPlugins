@@ -12,7 +12,7 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 
-// [v131] TVWiki.kt: 프록시 서버 적용을 위한 준비
+// [v146] TVWiki.kt: Extractor v146와 User-Agent 완벽 동기화 (403 해결 필수)
 class TVWiki : MainAPI() {
     override var mainUrl = "https://tvwiki5.net"
     override var name = "TVWiki"
@@ -27,6 +27,7 @@ class TVWiki : MainAPI() {
         TvType.AnimeMovie
     )
 
+    // [중요] Extractor.kt의 DESKTOP_UA와 100% 일치해야 함 (서버가 기기 변경 감지 시 차단함)
     private val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
     private val commonHeaders = mapOf(
@@ -133,7 +134,7 @@ class TVWiki : MainAPI() {
         if (title.isNullOrEmpty()) {
             title = doc.selectFirst("#bo_v_movinfo h3")?.text()?.trim() ?: doc.selectFirst("input[name='con_title']")?.attr("value")?.trim() ?: "Unknown"
         }
-        title = title!!.replace(Regex("\\\\s*\\\\d+[화회부].*"), "").replace(" 다시보기", "").trim()
+        title = title!!.replace(Regex("\\s*\\d+[화회부].*"), "").replace(" 다시보기", "").trim()
         if (!oriTitleFull.isNullOrEmpty()) {
             val pureOriTitle = oriTitleFull.replace("원제 :", "").replace("원제:", "").trim()
             if (!pureOriTitle.contains(Regex("[가-힣]")) && pureOriTitle.isNotEmpty()) title = "$title (원제 : $pureOriTitle)"
@@ -196,10 +197,15 @@ class TVWiki : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        println("[TVWiki v131] loadLinks 시작 - data: $data")
+        println("[TVWiki v146] loadLinks 시작 - data: $data")
         val doc = app.get(data, headers = commonHeaders).document
-        if (findAndExtract(doc, data, subtitleCallback, callback)) return true
+        
+        // 1. API 호출 방식 시도 (토큰 발급)
         if (extractFromApi(doc, data, subtitleCallback, callback)) return true
+        
+        // 2. 정적 파싱 방식 시도
+        if (findAndExtract(doc, data, subtitleCallback, callback)) return true
+        
         return false
     }
 
@@ -220,12 +226,14 @@ class TVWiki : MainAPI() {
             headers["X-Requested-With"] = "XMLHttpRequest"
             val requestBody = sessionData.toRequestBody("application/json".toMediaTypeOrNull())
             
+            // [중요] Desktop UA로 세션 생성 요청
             val response = app.post(apiUrl, headers = headers, requestBody = requestBody)
             val json = response.parsedSafe<SessionResponse>()
 
             if (json != null && json.success && !json.playerUrl.isNullOrEmpty()) {
                 val fullUrl = "${json.playerUrl}?t=${json.t}&sig=${json.sig}"
                 if (fullUrl.contains("player.bunny-frame.online")) {
+                    // Extractor로 넘길 때도 Referer는 현재 페이지 URL(data) 유지
                     return BunnyPoorCdn().extract(fullUrl, referer, subtitleCallback, callback, null)
                 }
             }
