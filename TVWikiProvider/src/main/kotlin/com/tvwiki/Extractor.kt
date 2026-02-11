@@ -19,13 +19,12 @@ import java.io.OutputStream
 import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
-// [v160] Extractor.kt: Referer를 'tvwiki5.net'으로 통일 (WebView 성공 케이스 복제)
+// [v159] Extractor.kt: Token Injection 유지 + Segment 요청 시 Referer/Origin 제거 (Cross-Domain 404 방지)
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
     
-    // TVWiki.kt와 동일한 UA
     private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
     companion object {
@@ -48,10 +47,10 @@ class BunnyPoorCdn : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
         thumbnailHint: String? = null,
     ): Boolean {
-        println("[BunnyPoorCdn] extract 시작 (v160 - Referer: tvwiki5.net)")
+        println("[BunnyPoorCdn] extract 시작 (v159 - No Referer Strategy)")
         
         var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
-        val cleanReferer = "https://tvwiki5.net/" // [핵심] 성공했던 리퍼러
+        val cleanReferer = "https://tvwiki5.net/"
         val videoId = "video_${System.currentTimeMillis()}"
 
         // 1. iframe 재탐색
@@ -70,7 +69,7 @@ class BunnyPoorCdn : ExtractorApi() {
 
         var targetUrl: String? = null
 
-        // 2. c.html 요청 납치 (WebView)
+        // 2. c.html 요청 납치
         val resolver = WebViewResolver(
             interceptUrl = Regex("""/c\.html"""), 
             useOkhttp = false,
@@ -78,61 +77,50 @@ class BunnyPoorCdn : ExtractorApi() {
         )
         
         try {
-            // [성공 팩트] 이 헤더 조합으로 c.html을 가져오는 데 성공했음
-            val requestHeaders = mapOf(
-                "Referer" to cleanReferer, 
-                "User-Agent" to DESKTOP_UA
-            )
-            
-            val response = app.get(
-                url = cleanUrl,
-                headers = requestHeaders,
-                interceptor = resolver
-            )
+            val requestHeaders = mapOf("Referer" to cleanReferer, "User-Agent" to DESKTOP_UA)
+            val response = app.get(url = cleanUrl, headers = requestHeaders, interceptor = resolver)
             
             if (response.url.contains("/c.html") && response.url.contains("token=")) {
                 targetUrl = response.url
-                println("[BunnyPoorCdn] c.html 확보 성공: $targetUrl")
+                println("[BunnyPoorCdn] c.html 확보: $targetUrl")
             }
         } catch (e: Exception) { e.printStackTrace() }
 
         if (targetUrl == null) return false
 
-        // 3. M3U8 다운로드
+        // 3. M3U8 다운로드 및 토큰 추출
         try {
-            // 프록시에서도 성공했던 헤더(cleanReferer)를 그대로 사용
-            val m3u8Headers = mapOf(
-                "User-Agent" to DESKTOP_UA,
-                "Referer" to cleanReferer, 
-                "Accept" to "*/*"
-            )
+            // M3U8 요청은 Referer가 필요함 (기존 유지)
+            val m3u8Headers = mapOf("User-Agent" to DESKTOP_UA, "Referer" to cleanUrl, "Accept" to "*/*")
             val m3u8Response = app.get(targetUrl, headers = m3u8Headers)
             val m3u8Content = m3u8Response.text
             
             if (!m3u8Content.contains("#EXTM3U")) return false
 
             val m3u8Uri = URI(targetUrl)
-            val tokenQuery = m3u8Uri.rawQuery
+            val tokenQuery = m3u8Uri.rawQuery // token=...&expires=...
 
             // 4. 프록시 서버 설정
-            // [v160 핵심] Referer를 'https://tvwiki5.net/'으로 통일
-            val commonHeaders = mapOf(
+            // [v159 핵심] Segment/Key 요청 시에는 Referer/Origin을 보내지 않음
+            // 이미 URL에 토큰이 포함되므로 헤더는 최소화 (User-Agent만 유지)
+            
+            val segmentHeaders = mapOf(
                 "User-Agent" to DESKTOP_UA,
-                "Referer" to cleanReferer, // [중요] bunny-frame이 아니라 tvwiki를 리퍼러로 사용
-                "Origin" to "https://tvwiki5.net", 
-                "Accept" to "*/*"
+                "Accept" to "*/*",
+                "Connection" to "keep-alive"
+                // Referer, Origin 제거
             )
 
             proxyServer?.stop()
             proxyServer = ProxyWebServer().apply {
                 start()
-                updateSession(videoH = commonHeaders, keyH = commonHeaders)
+                updateSession(videoH = segmentHeaders, keyH = segmentHeaders)
             }
 
             val proxyPort = proxyServer!!.port
             val proxyRoot = "http://127.0.0.1:$proxyPort/$videoId"
             
-            // 5. M3U8 변조 (토큰 전파 유지)
+            // 5. M3U8 변조 (토큰 전파)
             val newLines = mutableListOf<String>()
             val lines = m3u8Content.lines()
             val baseUrl = targetUrl.substringBefore("?").substringBeforeLast("/") + "/"
@@ -171,11 +159,11 @@ class BunnyPoorCdn : ExtractorApi() {
             val modifiedM3u8 = newLines.joinToString("\n")
             proxyServer!!.setPlaylist(modifiedM3u8)
 
-            println("[BunnyPoorCdn] 프록시 준비 완료 (Referer: $cleanReferer)")
+            println("[BunnyPoorCdn] 프록시 준비 완료 (Referer 제거됨)")
 
             callback(
                 newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) {
-                    this.referer = cleanReferer // Link 객체도 tvwiki 리퍼러 사용
+                    this.referer = cleanUrl // 플레이어 초기 로딩용 (실제 요청은 프록시가 헤더 제어)
                     this.quality = Qualities.Unknown.value
                 }
             )
@@ -189,6 +177,7 @@ class BunnyPoorCdn : ExtractorApi() {
         private var serverSocket: ServerSocket? = null
         private var isRunning = false
         var port: Int = 0
+        
         @Volatile private var videoHeaders: Map<String, String> = emptyMap()
         @Volatile private var keyHeaders: Map<String, String> = emptyMap()
         @Volatile private var currentPlaylist: String = ""
@@ -239,6 +228,7 @@ class BunnyPoorCdn : ExtractorApi() {
                 } else if (path.contains("/video")) {
                     handleProxyRequest(path, videoHeaders, output, "video/mp2t")
                 }
+
                 output.flush()
                 socket.close()
             } catch (e: Exception) {
@@ -254,6 +244,7 @@ class BunnyPoorCdn : ExtractorApi() {
 
                 runBlocking {
                     val response = app.get(targetUrl, headers = headers)
+                    
                     if (response.isSuccessful) {
                         val bytes = response.body.bytes()
                         val header = "HTTP/1.1 200 OK\r\nContent-Type: $contentType\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n"
@@ -264,7 +255,9 @@ class BunnyPoorCdn : ExtractorApi() {
                         output.write(err.toByteArray())
                     }
                 }
-            } catch (e: Exception) { }
+            } catch (e: Exception) {
+                // Ignore
+            }
         }
     }
 }
