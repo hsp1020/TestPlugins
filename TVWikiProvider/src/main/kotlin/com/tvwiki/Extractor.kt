@@ -19,7 +19,7 @@ import java.net.Socket
 import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
-// [v166] Extractor.kt: v158 복원(권한 통과) + 경로 정밀 보정 (404 해결) + 상세 로그
+// [v167] Extractor.kt: InvalidKeyException(1607 bytes) 해결 - Key 전용 헤더 보강
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
     override val mainUrl = "https://player.bunny-frame.online"
@@ -47,78 +47,69 @@ class BunnyPoorCdn : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
         thumbnailHint: String? = null,
     ): Boolean {
-        println("[BunnyPoorCdn] extract 시작 (v166 - Final Attempt)")
+        println("[BunnyPoorCdn] extract 시작 (v167 - Key Header Fix)")
         
         var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = "https://tvwiki5.net/"
         val videoId = "video_${System.currentTimeMillis()}"
 
-        // 1. iframe 재탐색
+        // 1. iframe 재탐색 (생략 가능하나 안정성을 위해 유지)
         val isDirectUrl = cleanUrl.contains("/v/") || cleanUrl.contains("/e/") || cleanUrl.contains("/f/")
         if (!isDirectUrl) {
             try {
                 val refRes = app.get(cleanReferer, headers = mapOf("User-Agent" to DESKTOP_UA))
                 val iframeMatch = Regex("""src=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
-                    ?: Regex("""data-player\d*=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
-                if (iframeMatch != null) {
-                    cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&").trim()
-                }
-            } catch (e: Exception) { e.printStackTrace() }
+                if (iframeMatch != null) cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&").trim()
+            } catch (e: Exception) { }
         }
 
         var targetUrl: String? = null
 
-        // 2. c.html 요청 납치
-        val resolver = WebViewResolver(
-            interceptUrl = Regex("""/c\.html"""), 
-            useOkhttp = false,
-            timeout = 30000L
-        )
-        
+        // 2. WebViewResolver
+        val resolver = WebViewResolver(interceptUrl = Regex("""/c\.html"""), useOkhttp = false, timeout = 30000L)
         try {
-            val requestHeaders = mapOf("Referer" to cleanReferer, "User-Agent" to DESKTOP_UA)
-            val response = app.get(url = cleanUrl, headers = requestHeaders, interceptor = resolver)
-            
-            if (response.url.contains("/c.html") && response.url.contains("token=")) {
-                targetUrl = response.url
-                println("[BunnyPoorCdn] c.html 확보: $targetUrl")
-            }
-        } catch (e: Exception) { e.printStackTrace() }
+            val response = app.get(url = cleanUrl, headers = mapOf("Referer" to cleanReferer, "User-Agent" to DESKTOP_UA), interceptor = resolver)
+            if (response.url.contains("/c.html")) targetUrl = response.url
+        } catch (e: Exception) { }
 
         if (targetUrl == null) return false
 
-        // 3. M3U8 다운로드 및 토큰/URI 파싱
+        // 3. M3U8 다운로드
         try {
-            val m3u8Headers = mapOf("User-Agent" to DESKTOP_UA, "Referer" to cleanUrl, "Accept" to "*/*")
-            val m3u8Response = app.get(targetUrl, headers = m3u8Headers)
+            val m3u8Response = app.get(targetUrl, headers = mapOf("User-Agent" to DESKTOP_UA, "Referer" to cleanUrl))
             val m3u8Content = m3u8Response.text
-            
             if (!m3u8Content.contains("#EXTM3U")) return false
 
-            // URI 객체 생성 (경로 계산의 핵심)
             val m3u8Uri = URI(targetUrl)
-            val tokenQuery = m3u8Uri.rawQuery // "token=...&expires=..."
+            val tokenQuery = m3u8Uri.rawQuery
 
             // 4. 프록시 서버 설정
-            // [핵심] Referer는 'player.bunny-frame.online' (403을 피하는 유일한 길)
-            val proxyHeaders = mapOf(
+            // [v167] Video와 Key의 헤더를 차별화
+            val videoHeaders = mapOf(
                 "User-Agent" to DESKTOP_UA,
                 "Referer" to "https://player.bunny-frame.online/", 
                 "Origin" to "https://player.bunny-frame.online",
-                "Accept" to "*/*",
-                "Connection" to "keep-alive"
+                "Accept" to "*/*"
+            )
+
+            // [v167 핵심] Key 요청 시 서버가 텍스트/HTML을 주지 않도록 Accept를 명시적으로 설정
+            val keyHeaders = mapOf(
+                "User-Agent" to DESKTOP_UA,
+                "Referer" to "https://player.bunny-frame.online/",
+                "Origin" to "https://player.bunny-frame.online",
+                "Accept" to "application/octet-stream, */*" 
             )
 
             proxyServer?.stop()
             proxyServer = ProxyWebServer().apply {
                 start()
-                updateSession(videoH = proxyHeaders, keyH = proxyHeaders)
+                updateSession(videoH = videoHeaders, keyH = keyHeaders)
             }
 
             val proxyPort = proxyServer!!.port
             val proxyRoot = "http://127.0.0.1:$proxyPort/$videoId"
             
-            // 5. M3U8 변조 (토큰 전파 + URI Resolve)
+            // 5. M3U8 변조
             val newLines = mutableListOf<String>()
             val lines = m3u8Content.lines()
 
@@ -127,54 +118,30 @@ class BunnyPoorCdn : ExtractorApi() {
                     val uriMatch = Regex("""URI="([^"]+)"""").find(line)
                     if (uriMatch != null) {
                         val originalKeyPath = uriMatch.groupValues[1]
-                        
-                        // [v166] URI.resolve로 절대 경로 변환 (실수 방지)
                         var absoluteKeyUrl = m3u8Uri.resolve(originalKeyPath).toString()
-                        
-                        // 토큰 주입 (이미 있으면 패스)
                         if (!absoluteKeyUrl.contains("token=") && !tokenQuery.isNullOrEmpty()) {
                             absoluteKeyUrl += if (absoluteKeyUrl.contains("?")) "&$tokenQuery" else "?$tokenQuery"
                         }
-                        
                         val encodedKeyUrl = URLEncoder.encode(absoluteKeyUrl, "UTF-8")
-                        val newLine = line.replace(originalKeyPath, "$proxyRoot/key?url=$encodedKeyUrl")
-                        newLines.add(newLine)
-                    } else {
-                        newLines.add(line)
-                    }
+                        newLines.add(line.replace(originalKeyPath, "$proxyRoot/key?url=$encodedKeyUrl"))
+                    } else { newLines.add(line) }
                 } else if (line.isNotBlank() && !line.startsWith("#")) {
-                    // [v166] TS 파일 경로 변환
                     var absoluteSegUrl = m3u8Uri.resolve(line).toString()
-                    
-                    // 토큰 주입
                     if (!absoluteSegUrl.contains("token=") && !tokenQuery.isNullOrEmpty()) {
                         absoluteSegUrl += if (absoluteSegUrl.contains("?")) "&$tokenQuery" else "?$tokenQuery"
                     }
-
-                    // [진단 로그] 변환된 TS URL 확인 (첫 줄만)
-                    if (newLines.size < 10) println("[BunnyPoorCdn] TS Target: $absoluteSegUrl")
-
-                    val encodedSegUrl = URLEncoder.encode(absoluteSegUrl, "UTF-8")
-                    newLines.add("$proxyRoot/video?url=$encodedSegUrl")
-                } else {
-                    newLines.add(line)
-                }
+                    newLines.add("$proxyRoot/video?url=${URLEncoder.encode(absoluteSegUrl, "UTF-8")}")
+                } else { newLines.add(line) }
             }
 
-            val modifiedM3u8 = newLines.joinToString("\n")
-            proxyServer!!.setPlaylist(modifiedM3u8)
+            proxyServer!!.setPlaylist(newLines.joinToString("\n"))
 
-            println("[BunnyPoorCdn] 프록시 준비 완료 (Referer: Player + Token + ResolvedPath)")
-
-            callback(
-                newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) {
-                    this.referer = cleanUrl 
-                    this.quality = Qualities.Unknown.value
-                }
-            )
+            callback(newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) {
+                this.referer = cleanUrl 
+                this.quality = Qualities.Unknown.value
+            })
             return true
-
-        } catch (e: Exception) { e.printStackTrace() }
+        } catch (e: Exception) { }
         return false
     }
 
@@ -182,7 +149,6 @@ class BunnyPoorCdn : ExtractorApi() {
         private var serverSocket: ServerSocket? = null
         private var isRunning = false
         var port: Int = 0
-        
         @Volatile private var videoHeaders: Map<String, String> = emptyMap()
         @Volatile private var keyHeaders: Map<String, String> = emptyMap()
         @Volatile private var currentPlaylist: String = ""
@@ -193,7 +159,7 @@ class BunnyPoorCdn : ExtractorApi() {
                 port = serverSocket!!.localPort
                 isRunning = true
                 thread(isDaemon = true) {
-                    while (isRunning && serverSocket != null && !serverSocket!!.isClosed) {
+                    while (isRunning && serverSocket != null) {
                         try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {}
                     }
                 }
@@ -214,58 +180,44 @@ class BunnyPoorCdn : ExtractorApi() {
 
         private fun handleClient(socket: Socket) = thread {
             try {
-                socket.soTimeout = 5000
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
                 val line = reader.readLine() ?: return@thread
-                val parts = line.split(" ")
-                if (parts.size < 2) return@thread
-                val path = parts[1]
-                
+                val path = line.split(" ")[1]
                 val output = socket.getOutputStream()
 
                 if (path.contains("/playlist.m3u8")) {
-                    val responseBytes = currentPlaylist.toByteArray(Charsets.UTF_8)
-                    val header = "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: ${responseBytes.size}\r\nConnection: close\r\n\r\n"
-                    output.write(header.toByteArray())
-                    output.write(responseBytes)
+                    val bytes = currentPlaylist.toByteArray()
+                    output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: ${bytes.size}\r\n\r\n".toByteArray())
+                    output.write(bytes)
                 } else if (path.contains("/key")) {
                     handleProxyRequest(path, keyHeaders, output, "application/octet-stream")
                 } else if (path.contains("/video")) {
                     handleProxyRequest(path, videoHeaders, output, "video/mp2t")
                 }
-
-                output.flush()
-                socket.close()
-            } catch (e: Exception) {
-                try { socket.close() } catch(e2:Exception){}
-            }
+                output.flush(); socket.close()
+            } catch (e: Exception) { try { socket.close() } catch(e2:Exception){} }
         }
 
         private fun handleProxyRequest(path: String, headers: Map<String, String>, output: OutputStream, contentType: String) {
             try {
                 val urlParam = path.substringAfter("url=").substringBefore(" ")
-                if (urlParam.isEmpty()) return
                 val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
-
                 runBlocking {
-                    // [중요] 실제 요청 시도
                     val response = app.get(targetUrl, headers = headers)
-                    
                     if (response.isSuccessful) {
                         val bytes = response.body.bytes()
-                        val header = "HTTP/1.1 200 OK\r\nContent-Type: $contentType\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n"
-                        output.write(header.toByteArray())
-                        output.write(bytes)
+                        // [v167 중요] 만약 응답 데이터가 16바이트가 아니라면 강제로 에러 처리하여 재시도 유도
+                        if (path.contains("/key") && bytes.size != 16) {
+                            output.write("HTTP/1.1 500 KeySizeMismatch\r\n\r\n".toByteArray())
+                        } else {
+                            output.write("HTTP/1.1 200 OK\r\nContent-Type: $contentType\r\nContent-Length: ${bytes.size}\r\n\r\n".toByteArray())
+                            output.write(bytes)
+                        }
                     } else {
-                        // [진단 로그] 실패 원인 출력 (404/403)
-                        println("[BunnyPoorCdn Proxy] FAILED: ${response.code} for $targetUrl")
-                        val err = "HTTP/1.1 ${response.code} Error\r\n\r\n"
-                        output.write(err.toByteArray())
+                        output.write("HTTP/1.1 ${response.code} Error\r\n\r\n".toByteArray())
                     }
                 }
-            } catch (e: Exception) {
-                // Ignore
-            }
+            } catch (e: Exception) { }
         }
     }
 }
