@@ -19,7 +19,7 @@ import java.net.Socket
 import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
-// [v163] Extractor.kt: Origin 헤더 제거 + TVWiki Referer (CORS 403 회피 시도)
+// [v164] Extractor.kt: v158 전략 복귀 (Player Referer) + 경로 계산 정밀화 (404 해결)
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
     override val mainUrl = "https://player.bunny-frame.online"
@@ -47,7 +47,7 @@ class BunnyPoorCdn : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
         thumbnailHint: String? = null,
     ): Boolean {
-        println("[BunnyPoorCdn] extract 시작 (v163 - Origin Removed)")
+        println("[BunnyPoorCdn] extract 시작 (v164 - Player Referer)")
         
         var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = "https://tvwiki5.net/"
@@ -81,7 +81,7 @@ class BunnyPoorCdn : ExtractorApi() {
             
             if (response.url.contains("/c.html") && response.url.contains("token=")) {
                 targetUrl = response.url
-                println("[BunnyPoorCdn] c.html 확보 성공: $targetUrl")
+                println("[BunnyPoorCdn] c.html 확보: $targetUrl")
             }
         } catch (e: Exception) { e.printStackTrace() }
 
@@ -96,16 +96,16 @@ class BunnyPoorCdn : ExtractorApi() {
             if (!m3u8Content.contains("#EXTM3U")) return false
 
             val m3u8Uri = URI(targetUrl)
-            val tokenQuery = m3u8Uri.rawQuery
+            val tokenQuery = m3u8Uri.rawQuery // token=...
 
             // 4. 프록시 서버 설정
-            // [v163 핵심] Origin 헤더 삭제 (CORS 문제 방지), Referer는 Main Site
+            // [v164 핵심] Referer를 'https://player.bunny-frame.online/'으로 설정 (403 뚫은 이력 있음)
             val proxyHeaders = mapOf(
                 "User-Agent" to DESKTOP_UA,
-                "Referer" to "https://tvwiki5.net/",
+                "Referer" to "https://player.bunny-frame.online/", 
+                "Origin" to "https://player.bunny-frame.online",
                 "Accept" to "*/*",
                 "Connection" to "keep-alive"
-                // Origin 헤더는 포함하지 않음
             )
 
             proxyServer?.stop()
@@ -117,9 +117,12 @@ class BunnyPoorCdn : ExtractorApi() {
             val proxyPort = proxyServer!!.port
             val proxyRoot = "http://127.0.0.1:$proxyPort/$videoId"
             
-            // 5. M3U8 변조
+            // 5. M3U8 변조 (토큰 전파 + 경로 보정)
             val newLines = mutableListOf<String>()
             val lines = m3u8Content.lines()
+            
+            // Base URL: 쿼리 제거 -> 마지막 슬래시까지
+            // 예: https://host/v/e/ID/c.html?token=... -> https://host/v/e/ID/
             val baseUrl = targetUrl.substringBefore("?").substringBeforeLast("/") + "/"
 
             for (line in lines) {
@@ -127,8 +130,10 @@ class BunnyPoorCdn : ExtractorApi() {
                     val uriMatch = Regex("""URI="([^"]+)"""").find(line)
                     if (uriMatch != null) {
                         val originalKeyPath = uriMatch.groupValues[1]
+                        // 절대 경로 변환
                         var absoluteKeyUrl = if (originalKeyPath.startsWith("http")) originalKeyPath else baseUrl + originalKeyPath
                         
+                        // 토큰 주입
                         if (!absoluteKeyUrl.contains("token=") && !tokenQuery.isNullOrEmpty()) {
                             absoluteKeyUrl += if (absoluteKeyUrl.contains("?")) "&$tokenQuery" else "?$tokenQuery"
                         }
@@ -140,8 +145,10 @@ class BunnyPoorCdn : ExtractorApi() {
                         newLines.add(line)
                     }
                 } else if (line.isNotBlank() && !line.startsWith("#")) {
+                    // TS 파일 처리
                     var absoluteSegUrl = if (line.startsWith("http")) line else baseUrl + line
                     
+                    // 토큰 주입
                     if (!absoluteSegUrl.contains("token=") && !tokenQuery.isNullOrEmpty()) {
                         absoluteSegUrl += if (absoluteSegUrl.contains("?")) "&$tokenQuery" else "?$tokenQuery"
                     }
@@ -156,7 +163,7 @@ class BunnyPoorCdn : ExtractorApi() {
             val modifiedM3u8 = newLines.joinToString("\n")
             proxyServer!!.setPlaylist(modifiedM3u8)
 
-            println("[BunnyPoorCdn] 프록시 준비 완료 (Origin 제거)")
+            println("[BunnyPoorCdn] 프록시 준비 완료 (Referer: Player + Token)")
 
             callback(
                 newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) {
