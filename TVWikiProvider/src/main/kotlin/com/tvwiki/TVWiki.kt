@@ -12,7 +12,7 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 
-// [v128] TVWiki.kt: 프록시 기반 Extractor 연결
+// [v131] TVWiki.kt: 프록시 서버 적용을 위한 준비
 class TVWiki : MainAPI() {
     override var mainUrl = "https://tvwiki5.net"
     override var name = "TVWiki"
@@ -196,7 +196,7 @@ class TVWiki : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        println("[TVWiki v128] loadLinks 시작 - data: $data")
+        println("[TVWiki v131] loadLinks 시작 - data: $data")
         val doc = app.get(data, headers = commonHeaders).document
         if (findAndExtract(doc, data, subtitleCallback, callback)) return true
         if (extractFromApi(doc, data, subtitleCallback, callback)) return true
