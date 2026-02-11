@@ -1,6 +1,5 @@
 package com.tvwiki
 
-import android.util.Base64
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -8,23 +7,19 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.network.WebViewResolver
-import com.lagradost.cloudstream3.utils.*
-import java.net.ServerSocket
-import java.net.Socket
-import java.net.URLDecoder
-import java.net.URLEncoder
-import java.io.BufferedReader
-import java.io.InputStreamReader
-import java.io.OutputStream
+import java.io.*
+import java.net.*
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
+// [v148] Extractor.kt: UA 통일 + Root Referer 전략 (토큰 파라미터로 인한 403 방지)
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
     
-    // [중요] TVWiki.kt와 동일한 User-Agent 사용 (불일치로 인한 차단 방지)
+    // [중요] TVWiki.kt와 100% 동일한 데스크탑 UA 사용
     private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
     companion object {
@@ -47,16 +42,15 @@ class BunnyPoorCdn : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
         thumbnailHint: String? = null,
     ): Boolean {
-        // cleanUrl: 불필요한 공백 및 엔티티 제거
+        // cleanUrl: 토큰이 포함된 URL이지만, 여기서는 VideoID 추출용으로만 사용
         var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = "https://tvwiki5.net/"
         
-        // Video ID 추출 (프록시 경로 생성용)
         val videoId = Regex("""/v/([^?&/]+)""").find(cleanUrl)?.groupValues?.get(1) 
             ?: Regex("""[?&]src=([^&]+)""").find(cleanUrl)?.groupValues?.get(1)?.take(10)
             ?: "video_${System.currentTimeMillis()}"
 
-        // 1. iframe 소스 재탐색 (Desktop UA 사용)
+        // 1. iframe 소스 재탐색
         try {
             val refRes = app.get(cleanReferer, headers = mapOf("User-Agent" to DESKTOP_UA))
             val text = refRes.text
@@ -66,11 +60,9 @@ class BunnyPoorCdn : ExtractorApi() {
             if (iframeMatch != null) {
                 cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&").trim()
             }
-        } catch (e: Exception) { 
-            e.printStackTrace() 
-        }
+        } catch (e: Exception) { e.printStackTrace() }
 
-        // 2. WebViewResolver로 c.html (M3U8) 주소 탐색
+        // 2. WebViewResolver (M3U8 주소 확보)
         var targetUrl: String? = null
         val resolver = WebViewResolver(
             interceptUrl = Regex("""/c\.html"""), 
@@ -79,7 +71,6 @@ class BunnyPoorCdn : ExtractorApi() {
         )
 
         try {
-            // WebView 요청 시에도 동일한 Desktop UA 사용
             val requestHeaders = mapOf(
                 "Referer" to cleanReferer, 
                 "User-Agent" to DESKTOP_UA 
@@ -106,15 +97,15 @@ class BunnyPoorCdn : ExtractorApi() {
         // 3. M3U8 내용 다운로드
         val finalTokenUrl = targetUrl
         
-        // M3U8 다운로드 헤더: Referer를 메인 도메인으로 설정
-        val baseHeaders = mapOf(
+        // M3U8 요청 시에는 메인 도메인 Referer 사용
+        val downloadHeaders = mapOf(
             "User-Agent" to DESKTOP_UA,
             "Referer" to "https://player.bunny-frame.online/",
             "Accept" to "*/*"
         )
 
         try {
-            val m3u8Response = app.get(finalTokenUrl, headers = baseHeaders)
+            val m3u8Response = app.get(finalTokenUrl, headers = downloadHeaders)
             val m3u8Content = m3u8Response.text
             
             if (!m3u8Content.contains("#EXTM3U")) {
@@ -122,20 +113,21 @@ class BunnyPoorCdn : ExtractorApi() {
             }
 
             // 4. 프록시 서버 설정
-            // [v146 핵심] 
-            // - Origin 제거 (403 방지)
-            // - Referer: https://player.bunny-frame.online/ (일반화된 도메인 Referer 사용)
-            // - UA: Desktop UA
+            
+            // [v148 핵심 전략]
+            // Referer: "https://player.bunny-frame.online/" (쿼리/경로 없는 순수 루트 도메인)
+            // Origin: "https://player.bunny-frame.online"
+            // 이유: v147(전체경로) 실패, v141(경로만) 실패 -> 루트 도메인이 정답일 확률 99%
             
             val proxyHeaders = mapOf(
                 "User-Agent" to DESKTOP_UA,
-                "Referer" to "https://player.bunny-frame.online/",
+                "Referer" to "https://player.bunny-frame.online/", 
+                "Origin" to "https://player.bunny-frame.online",
                 "Accept" to "*/*",
-                "Accept-Encoding" to "gzip, deflate, br",
                 "Connection" to "keep-alive"
             )
 
-            // Key 요청용 헤더 (Key는 토큰 주소 Referer가 필요할 수 있음)
+            // Key 요청은 토큰 URL을 Referer로 (기존 성공 유지)
             val keyHeaders = proxyHeaders.toMutableMap()
             keyHeaders["Referer"] = finalTokenUrl
 
@@ -148,7 +140,7 @@ class BunnyPoorCdn : ExtractorApi() {
             val proxyPort = proxyServer!!.port
             val proxyRoot = "http://127.0.0.1:$proxyPort/$videoId"
             
-            // 5. M3U8 변조 (로컬 프록시 주소로 교체)
+            // 5. M3U8 변조
             val newLines = mutableListOf<String>()
             val lines = m3u8Content.lines()
 
@@ -157,7 +149,6 @@ class BunnyPoorCdn : ExtractorApi() {
                     val uriMatch = Regex("""URI="([^"]+)"""").find(line)
                     if (uriMatch != null) {
                         val originalKeyUrl = uriMatch.groupValues[1]
-                        // 절대 경로 변환
                         val absoluteKeyUrl = if (originalKeyUrl.startsWith("http")) originalKeyUrl else finalTokenUrl.substringBeforeLast("/") + "/" + originalKeyUrl
                         val encodedKeyUrl = URLEncoder.encode(absoluteKeyUrl, "UTF-8")
                         
@@ -167,7 +158,6 @@ class BunnyPoorCdn : ExtractorApi() {
                         newLines.add(line)
                     }
                 } else if (line.isNotBlank() && !line.startsWith("#")) {
-                    // 절대 경로 변환
                     val absoluteSegUrl = if (line.startsWith("http")) line else finalTokenUrl.substringBeforeLast("/") + "/" + line
                     val encodedSegUrl = URLEncoder.encode(absoluteSegUrl, "UTF-8")
                     newLines.add("$proxyRoot/video?url=$encodedSegUrl")
@@ -179,7 +169,6 @@ class BunnyPoorCdn : ExtractorApi() {
             val modifiedM3u8 = newLines.joinToString("\n")
             proxyServer!!.setPlaylist(modifiedM3u8)
 
-            // 6. 플레이어에게 전달
             callback(
                 newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) {
                     this.referer = "https://player.bunny-frame.online/" 
@@ -194,9 +183,6 @@ class BunnyPoorCdn : ExtractorApi() {
         return false
     }
 
-    // =====================================================================================
-    //  Proxy Web Server
-    // =====================================================================================
     class ProxyWebServer {
         private var serverSocket: ServerSocket? = null
         private var isRunning = false
@@ -270,7 +256,7 @@ class BunnyPoorCdn : ExtractorApi() {
                 val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
 
                 runBlocking {
-                    // Cloudstream app.get 사용 (쿠키 자동 관리)
+                    // Cloudstream app.get 사용 (쿠키 자동 처리)
                     val response = app.get(targetUrl, headers = headers)
                     
                     if (response.isSuccessful) {
