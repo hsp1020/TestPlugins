@@ -19,7 +19,7 @@ import java.io.OutputStream
 import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
-// [v154] Extractor.kt: 프록시 재도입 (Key/Video 헤더 분리 적용) + 쿠키 완전 삭제
+// [v155] Extractor.kt: 프록시 + Key/Video 모두 cleanUrl Referer 사용 (토큰 포함)
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
     override val mainUrl = "https://player.bunny-frame.online"
@@ -49,8 +49,9 @@ class BunnyPoorCdn : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
         thumbnailHint: String? = null,
     ): Boolean {
-        println("[BunnyPoorCdn] extract 시작 (v154)")
+        println("[BunnyPoorCdn] extract 시작 (v155)")
         
+        // cleanUrl: 토큰이 포함된 전체 플레이어 주소 (이걸 Referer로 써야 함)
         var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = "https://tvwiki5.net/"
         val videoId = "video_${System.currentTimeMillis()}"
@@ -103,7 +104,7 @@ class BunnyPoorCdn : ExtractorApi() {
 
         // 3. M3U8 다운로드 (검증용)
         try {
-            // M3U8 요청 시에는 cleanUrl(플레이어 주소)을 리퍼러로
+            // M3U8 요청 시 Referer: cleanUrl
             val m3u8Headers = mapOf(
                 "User-Agent" to DESKTOP_UA,
                 "Referer" to cleanUrl, 
@@ -119,20 +120,12 @@ class BunnyPoorCdn : ExtractorApi() {
             }
 
             // 4. 프록시 서버 설정
-            // [핵심] Key와 Video의 Referer 전략을 분리
+            // [v155 핵심] Key와 Video 모두 'cleanUrl'(토큰 포함)을 Referer로 사용
+            // 이유: v154(Key Referer=M3U8주소) 실패 -> Key도 Player주소를 원함
             
-            // Key용 헤더: M3U8 파일 자체(targetUrl)를 리퍼러로 씀 (같은 경로에 있으므로)
-            val keyHeaders = mapOf(
+            val commonHeaders = mapOf(
                 "User-Agent" to DESKTOP_UA,
-                "Referer" to targetUrl, 
-                "Origin" to "https://player.bunny-frame.online",
-                "Accept" to "*/*"
-            )
-
-            // Video용 헤더: 플레이어 페이지(cleanUrl)를 리퍼러로 씀
-            val videoHeaders = mapOf(
-                "User-Agent" to DESKTOP_UA,
-                "Referer" to cleanUrl,
+                "Referer" to cleanUrl, // [중요] Video, Key 모두 이 Referer 사용
                 "Origin" to "https://player.bunny-frame.online",
                 "Accept" to "*/*"
             )
@@ -140,7 +133,8 @@ class BunnyPoorCdn : ExtractorApi() {
             proxyServer?.stop()
             proxyServer = ProxyWebServer().apply {
                 start()
-                updateSession(videoH = videoHeaders, keyH = keyHeaders)
+                // Key, Video 구분 없이 동일한 헤더 사용
+                updateSession(videoH = commonHeaders, keyH = commonHeaders)
             }
 
             val proxyPort = proxyServer!!.port
@@ -149,7 +143,6 @@ class BunnyPoorCdn : ExtractorApi() {
             // 5. M3U8 변조 (프록시 태우기)
             val newLines = mutableListOf<String>()
             val lines = m3u8Content.lines()
-            // 절대 경로 계산용 base url
             val baseUrl = targetUrl.substringBeforeLast("/") + "/"
 
             for (line in lines) {
@@ -181,7 +174,7 @@ class BunnyPoorCdn : ExtractorApi() {
 
             callback(
                 newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) {
-                    this.referer = "https://player.bunny-frame.online/"
+                    this.referer = cleanUrl // 플레이어 Referer도 cleanUrl로 통일
                     this.quality = Qualities.Unknown.value
                 }
             )
@@ -247,10 +240,8 @@ class BunnyPoorCdn : ExtractorApi() {
                     output.write(header.toByteArray())
                     output.write(responseBytes)
                 } else if (path.contains("/key")) {
-                    // 키 요청 처리
                     handleProxyRequest(path, keyHeaders, output, "application/octet-stream")
                 } else if (path.contains("/video")) {
-                    // 비디오 요청 처리
                     handleProxyRequest(path, videoHeaders, output, "video/mp2t")
                 }
 
@@ -268,7 +259,6 @@ class BunnyPoorCdn : ExtractorApi() {
                 val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
 
                 runBlocking {
-                    // Cloudstream app.get을 사용하여 요청 (쿠키 없이 헤더만 사용)
                     val response = app.get(targetUrl, headers = headers)
                     
                     if (response.isSuccessful) {
