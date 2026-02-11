@@ -19,7 +19,7 @@ import java.net.Socket
 import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
-// [v164] Extractor.kt: v158 전략 복귀 (Player Referer) + 경로 계산 정밀화 (404 해결)
+// [v166] Extractor.kt: v158 복원(권한 통과) + 경로 정밀 보정 (404 해결) + 상세 로그
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
     override val mainUrl = "https://player.bunny-frame.online"
@@ -47,7 +47,7 @@ class BunnyPoorCdn : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
         thumbnailHint: String? = null,
     ): Boolean {
-        println("[BunnyPoorCdn] extract 시작 (v164 - Player Referer)")
+        println("[BunnyPoorCdn] extract 시작 (v166 - Final Attempt)")
         
         var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = "https://tvwiki5.net/"
@@ -87,7 +87,7 @@ class BunnyPoorCdn : ExtractorApi() {
 
         if (targetUrl == null) return false
 
-        // 3. M3U8 다운로드 및 토큰 추출
+        // 3. M3U8 다운로드 및 토큰/URI 파싱
         try {
             val m3u8Headers = mapOf("User-Agent" to DESKTOP_UA, "Referer" to cleanUrl, "Accept" to "*/*")
             val m3u8Response = app.get(targetUrl, headers = m3u8Headers)
@@ -95,11 +95,12 @@ class BunnyPoorCdn : ExtractorApi() {
             
             if (!m3u8Content.contains("#EXTM3U")) return false
 
+            // URI 객체 생성 (경로 계산의 핵심)
             val m3u8Uri = URI(targetUrl)
-            val tokenQuery = m3u8Uri.rawQuery // token=...
+            val tokenQuery = m3u8Uri.rawQuery // "token=...&expires=..."
 
             // 4. 프록시 서버 설정
-            // [v164 핵심] Referer를 'https://player.bunny-frame.online/'으로 설정 (403 뚫은 이력 있음)
+            // [핵심] Referer는 'player.bunny-frame.online' (403을 피하는 유일한 길)
             val proxyHeaders = mapOf(
                 "User-Agent" to DESKTOP_UA,
                 "Referer" to "https://player.bunny-frame.online/", 
@@ -117,23 +118,20 @@ class BunnyPoorCdn : ExtractorApi() {
             val proxyPort = proxyServer!!.port
             val proxyRoot = "http://127.0.0.1:$proxyPort/$videoId"
             
-            // 5. M3U8 변조 (토큰 전파 + 경로 보정)
+            // 5. M3U8 변조 (토큰 전파 + URI Resolve)
             val newLines = mutableListOf<String>()
             val lines = m3u8Content.lines()
-            
-            // Base URL: 쿼리 제거 -> 마지막 슬래시까지
-            // 예: https://host/v/e/ID/c.html?token=... -> https://host/v/e/ID/
-            val baseUrl = targetUrl.substringBefore("?").substringBeforeLast("/") + "/"
 
             for (line in lines) {
                 if (line.startsWith("#EXT-X-KEY")) {
                     val uriMatch = Regex("""URI="([^"]+)"""").find(line)
                     if (uriMatch != null) {
                         val originalKeyPath = uriMatch.groupValues[1]
-                        // 절대 경로 변환
-                        var absoluteKeyUrl = if (originalKeyPath.startsWith("http")) originalKeyPath else baseUrl + originalKeyPath
                         
-                        // 토큰 주입
+                        // [v166] URI.resolve로 절대 경로 변환 (실수 방지)
+                        var absoluteKeyUrl = m3u8Uri.resolve(originalKeyPath).toString()
+                        
+                        // 토큰 주입 (이미 있으면 패스)
                         if (!absoluteKeyUrl.contains("token=") && !tokenQuery.isNullOrEmpty()) {
                             absoluteKeyUrl += if (absoluteKeyUrl.contains("?")) "&$tokenQuery" else "?$tokenQuery"
                         }
@@ -145,13 +143,16 @@ class BunnyPoorCdn : ExtractorApi() {
                         newLines.add(line)
                     }
                 } else if (line.isNotBlank() && !line.startsWith("#")) {
-                    // TS 파일 처리
-                    var absoluteSegUrl = if (line.startsWith("http")) line else baseUrl + line
+                    // [v166] TS 파일 경로 변환
+                    var absoluteSegUrl = m3u8Uri.resolve(line).toString()
                     
                     // 토큰 주입
                     if (!absoluteSegUrl.contains("token=") && !tokenQuery.isNullOrEmpty()) {
                         absoluteSegUrl += if (absoluteSegUrl.contains("?")) "&$tokenQuery" else "?$tokenQuery"
                     }
+
+                    // [진단 로그] 변환된 TS URL 확인 (첫 줄만)
+                    if (newLines.size < 10) println("[BunnyPoorCdn] TS Target: $absoluteSegUrl")
 
                     val encodedSegUrl = URLEncoder.encode(absoluteSegUrl, "UTF-8")
                     newLines.add("$proxyRoot/video?url=$encodedSegUrl")
@@ -163,7 +164,7 @@ class BunnyPoorCdn : ExtractorApi() {
             val modifiedM3u8 = newLines.joinToString("\n")
             proxyServer!!.setPlaylist(modifiedM3u8)
 
-            println("[BunnyPoorCdn] 프록시 준비 완료 (Referer: Player + Token)")
+            println("[BunnyPoorCdn] 프록시 준비 완료 (Referer: Player + Token + ResolvedPath)")
 
             callback(
                 newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) {
@@ -247,6 +248,7 @@ class BunnyPoorCdn : ExtractorApi() {
                 val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
 
                 runBlocking {
+                    // [중요] 실제 요청 시도
                     val response = app.get(targetUrl, headers = headers)
                     
                     if (response.isSuccessful) {
@@ -255,6 +257,8 @@ class BunnyPoorCdn : ExtractorApi() {
                         output.write(header.toByteArray())
                         output.write(bytes)
                     } else {
+                        // [진단 로그] 실패 원인 출력 (404/403)
+                        println("[BunnyPoorCdn Proxy] FAILED: ${response.code} for $targetUrl")
                         val err = "HTTP/1.1 ${response.code} Error\r\n\r\n"
                         output.write(err.toByteArray())
                     }
