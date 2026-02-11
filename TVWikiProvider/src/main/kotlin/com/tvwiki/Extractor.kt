@@ -19,13 +19,12 @@ import java.net.Socket
 import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
-// [v161] Extractor.kt: "TVWiki Referer" + "Token Propagation" 최초 동시 적용
+// [v162] Extractor.kt: Self-Referer 전략 (CDN 도메인을 리퍼러로 사용)
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
     
-    // TVWiki.kt와 동일한 UA
     private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
     companion object {
@@ -48,10 +47,9 @@ class BunnyPoorCdn : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
         thumbnailHint: String? = null,
     ): Boolean {
-        println("[BunnyPoorCdn] extract 시작 (v161)")
+        println("[BunnyPoorCdn] extract 시작 (v162 - Self Referer)")
         
         var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
-        // [핵심 1] 리퍼러는 무조건 메인 사이트
         val cleanReferer = "https://tvwiki5.net/"
         val videoId = "video_${System.currentTimeMillis()}"
 
@@ -62,6 +60,7 @@ class BunnyPoorCdn : ExtractorApi() {
                 val refRes = app.get(cleanReferer, headers = mapOf("User-Agent" to DESKTOP_UA))
                 val iframeMatch = Regex("""src=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
                     ?: Regex("""data-player\d*=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
+                
                 if (iframeMatch != null) {
                     cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&").trim()
                 }
@@ -89,7 +88,7 @@ class BunnyPoorCdn : ExtractorApi() {
 
         if (targetUrl == null) return false
 
-        // 3. M3U8 다운로드 및 토큰 추출
+        // 3. M3U8 다운로드 및 도메인 추출
         try {
             val m3u8Headers = mapOf("User-Agent" to DESKTOP_UA, "Referer" to cleanUrl, "Accept" to "*/*")
             val m3u8Response = app.get(targetUrl, headers = m3u8Headers)
@@ -97,16 +96,18 @@ class BunnyPoorCdn : ExtractorApi() {
             
             if (!m3u8Content.contains("#EXTM3U")) return false
 
-            // [핵심 2] 토큰 추출
             val m3u8Uri = URI(targetUrl)
             val tokenQuery = m3u8Uri.rawQuery
+            // [v162 핵심] CDN 도메인을 추출하여 Self-Referer로 사용
+            // 예: https://every9.poorcdn.com/v/e/... -> https://every9.poorcdn.com/
+            val selfDomain = "${m3u8Uri.scheme}://${m3u8Uri.host}/" 
+            println("[BunnyPoorCdn] Self-Referer 설정: $selfDomain")
 
             // 4. 프록시 서버 설정
-            // [핵심 3] 프록시가 사용할 헤더: Referer = tvwiki5.net
             val proxyHeaders = mapOf(
                 "User-Agent" to DESKTOP_UA,
-                "Referer" to "https://tvwiki5.net/",
-                "Origin" to "https://tvwiki5.net",
+                "Referer" to selfDomain, // [중요] 자기 자신 도메인을 리퍼러로 사용
+                "Origin" to selfDomain.dropLast(1), // https://every9.poorcdn.com
                 "Accept" to "*/*",
                 "Connection" to "keep-alive"
             )
@@ -120,7 +121,7 @@ class BunnyPoorCdn : ExtractorApi() {
             val proxyPort = proxyServer!!.port
             val proxyRoot = "http://127.0.0.1:$proxyPort/$videoId"
             
-            // 5. M3U8 변조 (토큰 전파)
+            // 5. M3U8 변조 (토큰 전파 유지)
             val newLines = mutableListOf<String>()
             val lines = m3u8Content.lines()
             val baseUrl = targetUrl.substringBefore("?").substringBeforeLast("/") + "/"
@@ -159,7 +160,7 @@ class BunnyPoorCdn : ExtractorApi() {
             val modifiedM3u8 = newLines.joinToString("\n")
             proxyServer!!.setPlaylist(modifiedM3u8)
 
-            println("[BunnyPoorCdn] 프록시 준비 완료 (Referer: tvwiki5.net + Token)")
+            println("[BunnyPoorCdn] 프록시 준비 완료 (Referer: Self Domain)")
 
             callback(
                 newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) {
