@@ -94,6 +94,11 @@ class BcbcRedExtractor : ExtractorApi() {
         return "ID_ERR"
     }
 
+    /**
+     * solveKeyCandidatesCombinatorial
+     * Version: 1.3.0
+     * Modification: 전체 코드 들여쓰기 1단계 추가 및 고정 Gap 로직 유지
+     */
     private suspend fun solveKeyCandidatesCombinatorial(h: Map<String, String>, kUrl: String): List<ByteArray> {
         val list = mutableListOf<ByteArray>()
         try {
@@ -102,34 +107,50 @@ class BcbcRedExtractor : ExtractorApi() {
             val encStr = Regex(""""encrypted_key"\s*:\s*"([^"]+)"""").find(json)?.groupValues?.get(1) ?: return emptyList()
             val b64 = try { Base64.decode(encStr, Base64.DEFAULT) } catch (e: Exception) { byteArrayOf() }
 
-            if (b64.size == 16) list.add(b64)
+            // 1. 표준 16바이트 키 처리
+            if (b64.size == 16) {
+                list.add(b64)
+            }
 
-            listOf(b64).forEach { src ->
-                if (src.size > 16) {
-                    val slack = src.size - 16
-                    val distributions = generateDistributions(slack, 5)
-                    val allPerms = generatePermutations(listOf(0, 1, 2, 3))
+            // 2. 특정 데이터 패턴(24바이트 등) 타겟팅 로직 (targetGaps: 0, 2, 2, 2, 2)
+            if (b64.size >= 22) { 
+                val src = b64
+                val targetGaps = listOf(0, 2, 2, 2, 2)
+                val allPerms = generatePermutations(listOf(0, 1, 2, 3))
 
-                    for (gaps in distributions) {
-                        try {
-                            val segs = mutableListOf<ByteArray>()
-                            var idx = gaps[0]
-                            segs.add(src.copyOfRange(idx, idx + 4)); idx += 4 + gaps[1]
-                            segs.add(src.copyOfRange(idx, idx + 4)); idx += 4 + gaps[2]
-                            segs.add(src.copyOfRange(idx, idx + 4)); idx += 4 + gaps[3]
-                            segs.add(src.copyOfRange(idx, idx + 4))
+                try {
+                    val segs = mutableListOf<ByteArray>()
+                    var idx = targetGaps[0]
+                    
+                    // 지정된 Gap 규칙에 따라 4개 세그먼트 추출
+                    segs.add(src.copyOfRange(idx, idx + 4))
+                    idx += 4 + targetGaps[1]
+                    
+                    segs.add(src.copyOfRange(idx, idx + 4))
+                    idx += 4 + targetGaps[2]
+                    
+                    segs.add(src.copyOfRange(idx, idx + 4))
+                    idx += 4 + targetGaps[3]
+                    
+                    segs.add(src.copyOfRange(idx, idx + 4))
 
-                            for (perm in allPerms) {
-                                val k = ByteArray(16)
-                                for (j in 0 until 4) System.arraycopy(segs[perm[j]], 0, k, j * 4, 4)
-                                list.add(k)
-                            }
-                        } catch (e: Exception) {}
+                    // 4개 세그먼트를 24가지 순열 조합으로 재구성
+                    for (perm in allPerms) {
+                        val k = ByteArray(16)
+                        for (j in 0 until 4) {
+                            System.arraycopy(segs[perm[j]], 0, k, j * 4, 4)
+                        }
+                        list.add(k)
                     }
+                } catch (e: Exception) {
+                    // 범위 초과 시 무시
                 }
             }
+            
             return list.distinctBy { it.contentHashCode() }
-        } catch (e: Exception) { return emptyList() }
+        } catch (e: Exception) {
+            return emptyList()
+        }
     }
 
     private fun generateDistributions(n: Int, k: Int): List<List<Int>> {
