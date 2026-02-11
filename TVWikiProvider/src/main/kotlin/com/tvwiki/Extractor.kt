@@ -19,7 +19,7 @@ import java.net.Socket
 import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
-// [v172] Extractor.kt: WebView 엔진을 이용한 진짜 16바이트 키 획득 및 검증 로그 추가
+// [v174] Extractor.kt: 'no3.png' 차단 해결 - 올바른 Episode Page Referer 사용
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
     override val mainUrl = "https://player.bunny-frame.online"
@@ -31,37 +31,67 @@ class BunnyPoorCdn : ExtractorApi() {
         private var proxyServer: ProxyWebServer? = null
     }
 
-    override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
         extract(url, referer, subtitleCallback, callback)
     }
 
-    suspend fun extract(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit, thumbnailHint: String? = null): Boolean {
-        println("[BunnyPoorCdn] v172 시작 - WebView 키 획득 모드")
+    suspend fun extract(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit,
+        thumbnailHint: String? = null,
+    ): Boolean {
+        println("[BunnyPoorCdn] v174 시작 - Referer 정밀 타격 모드")
         
-        val fullPlayerUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
-        val strippedReferer = fullPlayerUrl.substringBefore("?")
+        var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
+        
+        // [핵심] WebView 로딩 시, 메인 페이지가 아닌 '실제 드라마 페이지'를 리퍼러로 사용
+        // referer 파라미터가 null이면 메인 페이지를 쓰되, 보통은 null이 아님.
+        val episodePageReferer = referer ?: "https://tvwiki5.net/"
+        println("[BunnyPoorCdn] WebView Referer 설정: $episodePageReferer")
+
         val videoId = "video_${System.currentTimeMillis()}"
 
-        // 1. M3U8 주소(c.html) 확보
-        val m3u8Resolver = WebViewResolver(interceptUrl = Regex("""/c\.html"""), useOkhttp = false)
+        // 1. WebView를 통해 M3U8 주소(c.html) 확보
+        // no3.png로 리다이렉트 되는 것을 막기 위해 올바른 리퍼러 사용
+        val m3u8Resolver = WebViewResolver(interceptUrl = Regex("""/c\.html"""), useOkhttp = false, timeout = 30000L)
         var targetM3u8Url: String? = null
         try {
-            val response = app.get(url = fullPlayerUrl, headers = mapOf("Referer" to "https://tvwiki5.net/", "User-Agent" to DESKTOP_UA), interceptor = m3u8Resolver)
-            if (response.url.contains("/c.html")) targetM3u8Url = response.url
-        } catch (e: Exception) { }
+            val response = app.get(
+                url = cleanUrl, 
+                headers = mapOf("Referer" to episodePageReferer, "User-Agent" to DESKTOP_UA), 
+                interceptor = m3u8Resolver
+            )
+            if (response.url.contains("/c.html")) {
+                targetM3u8Url = response.url
+                println("[BunnyPoorCdn] M3U8 주소 확보 성공: $targetM3u8Url")
+            } else if (response.url.contains("no3.png")) {
+                println("[BunnyPoorCdn] 실패: 여전히 차단 이미지(no3.png)로 리다이렉트됨.")
+                return false
+            }
+        } catch (e: Exception) { 
+            e.printStackTrace()
+        }
 
         if (targetM3u8Url == null) return false
 
         try {
             // 2. M3U8 내용 읽기
-            val m3u8Response = app.get(targetM3u8Url, headers = mapOf("User-Agent" to DESKTOP_UA, "Referer" to fullPlayerUrl))
+            val m3u8Response = app.get(targetM3u8Url, headers = mapOf("User-Agent" to DESKTOP_UA, "Referer" to cleanUrl))
             val m3u8Content = m3u8Response.text
             if (!m3u8Content.contains("#EXTM3U")) return false
 
             val m3u8Uri = URI(targetM3u8Url)
             val tokenQuery = m3u8Uri.rawQuery
 
-            // 3. [v172 핵심] WebView를 사용하여 암호화 키 직접 획득
+            // 3. 진짜 키 획득 (WebView 재사용)
+            // 키 요청 시에는 '플레이어 주소(cleanUrl)'가 리퍼러여야 함 (v170 검증 내용)
             val keyUriMatch = Regex("""URI="([^"]+)"""").find(m3u8Content)
             var finalKeyData: ByteArray? = null
             
@@ -72,28 +102,20 @@ class BunnyPoorCdn : ExtractorApi() {
                     absKeyUrl += if (absKeyUrl.contains("?")) "&$tokenQuery" else "?$tokenQuery"
                 }
 
-                println("[BunnyPoorCdn] WebView로 키 요청 시작: $absKeyUrl")
+                println("[BunnyPoorCdn] 키 주소: $absKeyUrl")
                 
-                // WebView가 직접 wrap_key.php를 실행하게 함 (모든 보안 검사 통과)
+                // 키 요청은 WebView를 통해 '브라우저인 척' 수행
                 val keyResolver = WebViewResolver(interceptUrl = Regex("""wrap_key\.php"""), useOkhttp = false)
-                val keyRes = app.get(absKeyUrl, headers = mapOf("Referer" to strippedReferer, "User-Agent" to DESKTOP_UA), interceptor = keyResolver)
+                val keyRes = app.get(absKeyUrl, headers = mapOf("Referer" to cleanUrl, "User-Agent" to DESKTOP_UA), interceptor = keyResolver)
                 
                 finalKeyData = keyRes.body.bytes()
-                
-                // [검증 로그]
-                println("[BunnyPoorCdn] 획득한 데이터 크기: ${finalKeyData?.size ?: 0} bytes")
-                if (finalKeyData?.size == 16) {
-                    println("[BunnyPoorCdn] 팩트 확인: 16바이트 키 정상 획득 성공!")
-                } else {
-                    println("[BunnyPoorCdn] 경고: 여전히 ${finalKeyData?.size} bytes 데이터가 옴. 차단됨.")
-                    return false
-                }
+                println("[BunnyPoorCdn] 키 데이터 크기: ${finalKeyData?.size} bytes")
             }
 
-            // 4. 프록시 서버 설정 (이미 키를 가졌으므로 중계만 담당)
+            // 4. 프록시 서버 설정
             val videoHeaders = mapOf(
                 "User-Agent" to DESKTOP_UA,
-                "Referer" to strippedReferer,
+                "Referer" to cleanUrl,
                 "Accept" to "*/*",
                 "Sec-Fetch-Dest" to "empty",
                 "Sec-Fetch-Mode" to "cors",
@@ -110,13 +132,12 @@ class BunnyPoorCdn : ExtractorApi() {
             val proxyPort = proxyServer!!.port
             val proxyRoot = "http://127.0.0.1:$proxyPort/$videoId"
             
-            // 5. M3U8 변조 (이미 확보한 키로 URI 교체)
+            // 5. M3U8 변조
             val newLines = mutableListOf<String>()
             val lines = m3u8Content.lines()
 
             for (line in lines) {
                 if (line.startsWith("#EXT-X-KEY")) {
-                    // 키 경로는 프록시의 고정된 /key 주소로 변경
                     newLines.add(line.replace(Regex("""URI="[^"]+""""), "URI=\"$proxyRoot/key\""))
                 } else if (line.isNotBlank() && !line.startsWith("#")) {
                     var absUrl = m3u8Uri.resolve(line).toString()
@@ -130,7 +151,7 @@ class BunnyPoorCdn : ExtractorApi() {
             proxyServer!!.setPlaylist(newLines.joinToString("\n"))
 
             callback(newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) {
-                this.referer = fullPlayerUrl 
+                this.referer = cleanUrl 
                 this.quality = Qualities.Unknown.value
             })
             return true
@@ -174,8 +195,8 @@ class BunnyPoorCdn : ExtractorApi() {
         private fun handleClient(socket: Socket) = thread {
             try {
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
-                val firstLine = reader.readLine() ?: return@thread
-                val path = firstLine.split(" ")[1]
+                val line = reader.readLine() ?: return@thread
+                val path = line.split(" ")[1]
                 val output = socket.getOutputStream()
 
                 if (path.contains("/playlist.m3u8")) {
@@ -183,12 +204,11 @@ class BunnyPoorCdn : ExtractorApi() {
                     output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: ${bytes.size}\r\n\r\n".toByteArray())
                     output.write(bytes)
                 } else if (path.contains("/key")) {
-                    // [핵심] 이미 WebView로 받아둔 진짜 키를 즉시 반환
-                    if (cachedKey != null) {
+                    if (cachedKey != null && cachedKey!!.size == 16) {
                         output.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 16\r\n\r\n".toByteArray())
                         output.write(cachedKey)
                     } else {
-                        output.write("HTTP/1.1 403 NoKeyFound\r\n\r\n".toByteArray())
+                        output.write("HTTP/1.1 403 KeyError\r\n\r\n".toByteArray())
                     }
                 } else if (path.contains("/video")) {
                     val urlParam = path.substringAfter("url=").substringBefore(" ")
