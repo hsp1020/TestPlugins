@@ -13,7 +13,8 @@ import java.net.*
 import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
-// [v130] Extractor.kt: HTML 페이지 내에서 진짜 M3U8(c.html) 주소 추출 로직 추가
+// [v131] Extractor.kt: MovieKing 방식의 프록시 서버 적용
+// Video 요청(Main Referer)과 Key 요청(Token Referer)을 분리하여 2000/2004 에러 해결
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
     override val mainUrl = "https://player.bunny-frame.online"
@@ -31,7 +32,7 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("[TVWiki v130] getUrl 호출 - url: $url")
+        println("[TVWiki v131] getUrl 호출 - url: $url")
         extract(url, referer, subtitleCallback, callback)
     }
 
@@ -42,7 +43,7 @@ class BunnyPoorCdn : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
         thumbnailHint: String? = null,
     ): Boolean {
-        println("[TVWiki v130] extract 시작: $url")
+        println("[TVWiki v131] extract 시작: $url")
         
         var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = "https://tvwiki5.net/"
@@ -57,12 +58,12 @@ class BunnyPoorCdn : ExtractorApi() {
                 
                 if (iframeMatch != null) {
                     cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&").trim()
-                    println("[TVWiki v130] 재탐색 URL: $cleanUrl")
+                    println("[TVWiki v131] 재탐색 URL: $cleanUrl")
                 }
             } catch (e: Exception) { e.printStackTrace() }
         }
 
-        // 2. [v130 핵심] HTML 페이지인지 M3U8인지 확인하고, HTML이면 진짜 주소 추출
+        // 2. HTML 페이지에서 M3U8 주소 찾기 (중요)
         var targetUrl = cleanUrl
         val videoHeaders = mapOf(
             "User-Agent" to DESKTOP_UA,
@@ -71,18 +72,17 @@ class BunnyPoorCdn : ExtractorApi() {
         )
 
         try {
-            println("[TVWiki v130] 페이지 정보 요청: $targetUrl")
+            println("[TVWiki v131] 페이지 정보 요청: $targetUrl")
             var response = app.get(targetUrl, headers = videoHeaders, allowRedirects = true)
             var content = response.text
             
-            // 응답이 M3U8 헤더로 시작하지 않으면 HTML로 간주하고 내부 링크 탐색
+            // HTML일 경우 내부 M3U8 주소 탐색
             if (!content.trim().startsWith("#EXTM3U")) {
-                println("[TVWiki v130] 응답이 HTML임. 내부 M3U8 주소 탐색 시작.")
+                println("[TVWiki v131] HTML 응답 감지. M3U8 주소 탐색.")
                 
-                // 다양한 패턴으로 c.html 또는 .m3u8 링크 검색
                 val m3u8Regexes = listOf(
-                    Regex("""["'](https?://[^"']+/c\.html[^"']*)["']"""), // c.html 패턴 (가장 유력)
-                    Regex("""file:\s*["']([^"']+\.m3u8[^"']*)["']"""),    // 일반적인 플레이어 패턴
+                    Regex("""["'](https?://[^"']+/c\.html[^"']*)["']"""),
+                    Regex("""file:\s*["']([^"']+\.m3u8[^"']*)["']"""),
                     Regex("""source:\s*["']([^"']+\.m3u8[^"']*)["']""")
                 )
 
@@ -90,43 +90,37 @@ class BunnyPoorCdn : ExtractorApi() {
                 for (regex in m3u8Regexes) {
                     val match = regex.find(content)
                     if (match != null) {
-                        foundUrl = match.groupValues[1].replace("\\/", "/") // 이스케이프 해제
+                        foundUrl = match.groupValues[1].replace("\\/", "/")
                         break
                     }
                 }
 
                 if (foundUrl != null) {
-                    println("[TVWiki v130] 진짜 M3U8 주소 발견: $foundUrl")
+                    println("[TVWiki v131] M3U8 주소 발견: $foundUrl")
                     targetUrl = foundUrl
-                    // 진짜 주소로 다시 요청
                     response = app.get(targetUrl, headers = videoHeaders, allowRedirects = true)
                     content = response.text
+                } else if (response.url.contains("c.html") || response.url.contains(".m3u8")) {
+                    targetUrl = response.url
+                    println("[TVWiki v131] 리다이렉트 주소 사용: $targetUrl")
                 } else {
-                    println("[TVWiki v130] [오류] HTML 내에서 M3U8 주소를 찾지 못함.")
-                    // 리다이렉트된 주소 자체가 c.html일 수도 있으니 마지막으로 확인
-                    if (response.url.contains("c.html") || response.url.contains(".m3u8")) {
-                        targetUrl = response.url
-                        println("[TVWiki v130] 리다이렉트 주소 사용: $targetUrl")
-                    } else {
-                        return false // 실패
-                    }
+                    println("[TVWiki v131] [오류] M3U8 주소 탐색 실패")
+                    return false
                 }
             }
 
-            // 최종 검증: 이제는 진짜 M3U8이어야 함
             if (!content.contains("#EXTM3U")) {
-                println("[TVWiki v130] [치명적] 최종 데이터도 M3U8이 아님.")
+                println("[TVWiki v131] [치명적] 최종 데이터 M3U8 아님.")
                 return false
             }
 
             val finalTokenUrl = targetUrl
-            println("[TVWiki v130] M3U8 다운로드 완료. Token URL: $finalTokenUrl")
+            println("[TVWiki v131] M3U8 확보 성공. Token URL: $finalTokenUrl")
 
-            // 3. 프록시 서버 설정
+            // 3. 프록시 서버 시작 및 세션 설정
             proxyServer?.stop()
             proxyServer = ProxyWebServer().apply {
                 start()
-                // 세션 업데이트 (헤더 분기용)
                 updateSession(
                     videoH = videoHeaders, 
                     keyH = mapOf(
@@ -153,7 +147,7 @@ class BunnyPoorCdn : ExtractorApi() {
                         val absoluteKeyUrl = if (originalKeyUrl.startsWith("http")) originalKeyUrl else baseUrl + originalKeyUrl
                         val encodedKeyUrl = URLEncoder.encode(absoluteKeyUrl, "UTF-8")
                         
-                        // 프록시 /key 엔드포인트로 연결
+                        // /key 엔드포인트로 연결
                         val newLine = line.replace(originalKeyUrl, "$proxyRoot/key?url=$encodedKeyUrl")
                         newLines.add(newLine)
                     } else {
@@ -163,7 +157,7 @@ class BunnyPoorCdn : ExtractorApi() {
                     val absoluteSegUrl = if (line.startsWith("http")) line else baseUrl + line
                     val encodedSegUrl = URLEncoder.encode(absoluteSegUrl, "UTF-8")
                     
-                    // 프록시 /video 엔드포인트로 연결
+                    // /video 엔드포인트로 연결
                     newLines.add("$proxyRoot/video?url=$encodedSegUrl")
                 } else {
                     newLines.add(line)
@@ -173,7 +167,7 @@ class BunnyPoorCdn : ExtractorApi() {
             val modifiedM3u8 = newLines.joinToString("\n")
             proxyServer!!.setPlaylist(modifiedM3u8)
 
-            println("[TVWiki v130] 프록시 준비 완료. Port: $proxyPort")
+            println("[TVWiki v131] 프록시 준비 완료. Port: $proxyPort")
 
             // 5. 플레이어에게 프록시 주소 전달
             callback(
@@ -185,7 +179,7 @@ class BunnyPoorCdn : ExtractorApi() {
             return true
 
         } catch (e: Exception) {
-            println("[TVWiki v130] 처리 중 에러: ${e.message}")
+            println("[TVWiki v131] 에러: ${e.message}")
             e.printStackTrace()
         }
         return false
@@ -242,14 +236,16 @@ class BunnyPoorCdn : ExtractorApi() {
                 if (path.contains("/playlist.m3u8")) {
                     val responseBytes = currentPlaylist.toByteArray(Charsets.UTF_8)
                     val header = "HTTP/1.1 200 OK\r\n" +
-                            "Content-Type: application/vnd.apple.mpegurl\r\n" +
+                            "Content-Type: application/vnd.apple.mpegurl; charset=utf-8\r\n" +
                             "Content-Length: ${responseBytes.size}\r\n" +
                             "Connection: close\r\n\r\n"
                     output.write(header.toByteArray())
                     output.write(responseBytes)
                 } else if (path.contains("/key")) {
+                    // Key 요청 시 Token Referer 사용
                     handleProxyRequest(path, keyHeaders, output, "application/octet-stream")
                 } else if (path.contains("/video")) {
+                    // Video 요청 시 Main Referer 사용
                     handleProxyRequest(path, videoHeaders, output, "video/mp2t")
                 }
 
