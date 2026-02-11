@@ -19,7 +19,7 @@ import java.net.Socket
 import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
-// [v170] Extractor.kt: 16바이트 키 획득 패킷 시뮬레이션 성공 결과 반영
+// [v171] Extractor.kt: Referer 정제 + Sec-Fetch 보안 헤더 추가 (403/1607바이트 해결)
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
     override val mainUrl = "https://player.bunny-frame.online"
@@ -36,43 +36,49 @@ class BunnyPoorCdn : ExtractorApi() {
     }
 
     suspend fun extract(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit, thumbnailHint: String? = null): Boolean {
-        println("[BunnyPoorCdn] v170 시작 - 16바이트 키 획득 로직 가동")
+        println("[BunnyPoorCdn] v171 시작 - 브라우저 정석 패킷 재현")
         
-        var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
+        val fullPlayerUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
+        // [v171 핵심 1] Referer에서 쿼리 스트링 제거 (브라우저 표준 동작)
+        val strippedReferer = fullPlayerUrl.substringBefore("?") 
         val cleanReferer = "https://tvwiki5.net/"
         val videoId = "video_${System.currentTimeMillis()}"
 
         val resolver = WebViewResolver(interceptUrl = Regex("""/c\.html"""), useOkhttp = false, timeout = 30000L)
         var targetUrl: String? = null
         try {
-            val response = app.get(url = cleanUrl, headers = mapOf("Referer" to cleanReferer, "User-Agent" to DESKTOP_UA), interceptor = resolver)
+            val response = app.get(url = fullPlayerUrl, headers = mapOf("Referer" to cleanReferer, "User-Agent" to DESKTOP_UA), interceptor = resolver)
             if (response.url.contains("/c.html")) targetUrl = response.url
         } catch (e: Exception) { }
 
         if (targetUrl == null) return false
 
         try {
-            val m3u8Response = app.get(targetUrl, headers = mapOf("User-Agent" to DESKTOP_UA, "Referer" to cleanUrl))
+            val m3u8Response = app.get(targetUrl, headers = mapOf("User-Agent" to DESKTOP_UA, "Referer" to strippedReferer))
             val m3u8Content = m3u8Response.text
             if (!m3u8Content.contains("#EXTM3U")) return false
 
             val m3u8Uri = URI(targetUrl)
             val tokenQuery = m3u8Uri.rawQuery
 
-            // [중요] 성공 패킷 헤더 구성: Origin 제거, Referer는 플레이어 전체 주소(cleanUrl)
-            val successHeaders = mapOf(
+            // [v171 핵심 2] 브라우저 보안 헤더 세트
+            val browserHeaders = mapOf(
                 "User-Agent" to DESKTOP_UA,
-                "Referer" to cleanUrl, // 16바이트 키를 얻기 위한 핵심 조건
+                "Referer" to strippedReferer,
                 "Accept" to "*/*",
-                "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8",
+                "Sec-Fetch-Dest" to "empty",
+                "Sec-Fetch-Mode" to "cors",
+                "Sec-Fetch-Site" to "cross-site",
                 "Connection" to "keep-alive"
             )
+
+            val keyHeaders = browserHeaders.toMutableMap()
+            keyHeaders["Accept"] = "application/octet-stream, */*"
 
             proxyServer?.stop()
             proxyServer = ProxyWebServer().apply {
                 start()
-                // Video와 Key 모두 검증된 동일 헤더 사용
-                updateSession(successHeaders)
+                updateSession(videoH = browserHeaders, keyH = keyHeaders)
             }
 
             val proxyPort = proxyServer!!.port
@@ -104,7 +110,7 @@ class BunnyPoorCdn : ExtractorApi() {
             proxyServer!!.setPlaylist(newLines.joinToString("\n"))
 
             callback(newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) {
-                this.referer = cleanUrl 
+                this.referer = fullPlayerUrl 
                 this.quality = Qualities.Unknown.value
             })
             return true
@@ -116,7 +122,8 @@ class BunnyPoorCdn : ExtractorApi() {
         private var serverSocket: ServerSocket? = null
         private var isRunning = false
         var port: Int = 0
-        @Volatile private var proxyHeaders: Map<String, String> = emptyMap()
+        @Volatile private var videoHeaders: Map<String, String> = emptyMap()
+        @Volatile private var keyHeaders: Map<String, String> = emptyMap()
         @Volatile private var currentPlaylist: String = ""
 
         fun start() {
@@ -137,8 +144,9 @@ class BunnyPoorCdn : ExtractorApi() {
             try { serverSocket?.close(); serverSocket = null } catch (e: Exception) {}
         }
 
-        fun updateSession(headers: Map<String, String>) {
-            proxyHeaders = headers
+        fun updateSession(videoH: Map<String, String>, keyH: Map<String, String>) {
+            videoHeaders = videoH
+            keyHeaders = keyH
         }
 
         fun setPlaylist(p: String) { currentPlaylist = p }
@@ -155,9 +163,9 @@ class BunnyPoorCdn : ExtractorApi() {
                     output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: ${bytes.size}\r\n\r\n".toByteArray())
                     output.write(bytes)
                 } else if (path.contains("/key")) {
-                    handleProxyRequest(path, proxyHeaders, output, "application/octet-stream", true)
+                    handleProxyRequest(path, keyHeaders, output, "application/octet-stream", true)
                 } else if (path.contains("/video")) {
-                    handleProxyRequest(path, proxyHeaders, output, "video/mp2t", false)
+                    handleProxyRequest(path, videoHeaders, output, "video/mp2t", false)
                 }
                 output.flush(); socket.close()
             } catch (e: Exception) { try { socket.close() } catch(e2:Exception){} }
@@ -171,7 +179,6 @@ class BunnyPoorCdn : ExtractorApi() {
                     val response = app.get(targetUrl, headers = headers)
                     if (response.isSuccessful) {
                         val bytes = response.body.bytes()
-                        // [최종 검증] 키 사이즈가 16바이트가 아니면 차단하여 에러 페이지 전송 방지
                         if (isKey && bytes.size != 16) {
                             output.write("HTTP/1.1 403 KeyMismatch\r\n\r\n".toByteArray())
                         } else {
