@@ -15,7 +15,7 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
-// [v140] Extractor.kt: 403 해결을 위한 최종 헤더 조합 (Referer: PlayerUrl, Origin: PlayerDomain)
+// [v141] Extractor.kt: URL 형식(/v/ vs /?s=)에 따라 Video Referer 전략 차별화
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
     override val mainUrl = "https://player.bunny-frame.online"
@@ -33,7 +33,7 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("[TVWiki v140] getUrl 호출 - url: $url")
+        println("[TVWiki v141] getUrl 호출 - url: $url")
         extract(url, referer, subtitleCallback, callback)
     }
 
@@ -44,9 +44,8 @@ class BunnyPoorCdn : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
         thumbnailHint: String? = null,
     ): Boolean {
-        println("[TVWiki v140] extract 시작: $url")
+        println("[TVWiki v141] extract 시작: $url")
         
-        // cleanUrl은 토큰과 sig가 포함된 전체 플레이어 주소
         var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = "https://tvwiki5.net/"
 
@@ -62,13 +61,13 @@ class BunnyPoorCdn : ExtractorApi() {
                 
                 if (iframeMatch != null) {
                     cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&").trim()
-                    println("[TVWiki v140] 재탐색 URL: $cleanUrl")
+                    println("[TVWiki v141] 재탐색 URL: $cleanUrl")
                 }
             } catch (e: Exception) { e.printStackTrace() }
         }
 
         // 2. WebViewResolver로 c.html 주소 탐색
-        println("[TVWiki v140] WebViewResolver 시작: $cleanUrl")
+        println("[TVWiki v141] WebViewResolver 시작: $cleanUrl")
         
         var targetUrl: String? = null
         val resolver = WebViewResolver(
@@ -91,14 +90,14 @@ class BunnyPoorCdn : ExtractorApi() {
             
             if (response.url.contains("/c.html") && response.url.contains("token=")) {
                 targetUrl = response.url
-                println("[TVWiki v140] [성공] WebView로 M3U8 주소 발견: $targetUrl")
+                println("[TVWiki v141] [성공] WebView로 M3U8 주소 발견: $targetUrl")
             } else {
-                println("[TVWiki v140] [실패] WebView가 c.html을 찾지 못함.")
+                println("[TVWiki v141] [실패] WebView가 c.html을 찾지 못함.")
                 return false
             }
 
         } catch (e: Exception) {
-            println("[TVWiki v140] WebView 실행 중 에러: ${e.message}")
+            println("[TVWiki v141] WebView 실행 중 에러: ${e.message}")
             e.printStackTrace()
             return false
         }
@@ -106,8 +105,9 @@ class BunnyPoorCdn : ExtractorApi() {
         if (targetUrl == null) return false
 
         // 3. M3U8 내용 다운로드
-        // [중요] M3U8 다운로드 시에는 'cleanUrl' (플레이어 주소)을 Referer로 사용
         val finalTokenUrl = targetUrl
+        
+        // [v141] M3U8 다운로드용 헤더: 성공 케이스와 동일하게 cleanUrl 사용
         val downloadHeaders = mapOf(
             "User-Agent" to DESKTOP_UA,
             "Referer" to cleanUrl, 
@@ -120,27 +120,34 @@ class BunnyPoorCdn : ExtractorApi() {
             val m3u8Content = m3u8Response.text
             
             if (!m3u8Content.contains("#EXTM3U")) {
-                println("[TVWiki v140] [치명적] 다운로드된 데이터가 M3U8 형식이 아님.")
+                println("[TVWiki v141] [치명적] 다운로드된 데이터가 M3U8 형식이 아님.")
                 return false
             }
 
             // 4. 프록시 서버 설정
             
-            // [v140 핵심]
-            // Video Referer: 'cleanUrl' (플레이어 주소 전체)
-            // Video Origin: 'https://player.bunny-frame.online'
-            // Key Referer: 'finalTokenUrl' (c.html 주소)
+            // [v141 핵심] Video Referer 전략 분기
+            // - /?s=... (성공 케이스): 전체 URL 그대로 사용 (쿼리 포함)
+            // - /v/...  (실패 케이스): 쿼리(?t=..., &sig=...)를 제거한 순수 경로만 사용
+            val videoReferer = if (cleanUrl.contains("/v/")) {
+                cleanUrl.substringBefore("?")
+            } else {
+                cleanUrl
+            }
             
+            println("[TVWiki v141] Video Header Referer 결정: $videoReferer")
+
             val videoHeaders = mapOf(
                 "User-Agent" to DESKTOP_UA,
-                "Referer" to cleanUrl, // 플레이어 주소를 리퍼러로 (브라우저 동작 일치)
-                "Origin" to "https://player.bunny-frame.online",   
+                "Referer" to videoReferer, 
+                "Origin" to "https://player.bunny-frame.online",
                 "Accept" to "*/*"
             )
 
+            // Key Header는 항상 Token URL (c.html)
             val keyHeaders = mapOf(
                 "User-Agent" to DESKTOP_UA,
-                "Referer" to finalTokenUrl, // 키 요청은 토큰 주소 리퍼러 유지
+                "Referer" to finalTokenUrl, 
                 "Origin" to "https://player.bunny-frame.online",
                 "Accept" to "*/*"
             )
@@ -184,7 +191,7 @@ class BunnyPoorCdn : ExtractorApi() {
             val modifiedM3u8 = newLines.joinToString("\n")
             proxyServer!!.setPlaylist(modifiedM3u8)
 
-            println("[TVWiki v140] 프록시 준비 완료. Port: $proxyPort")
+            println("[TVWiki v141] 프록시 준비 완료. Port: $proxyPort")
 
             callback(
                 newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) {
@@ -195,7 +202,7 @@ class BunnyPoorCdn : ExtractorApi() {
             return true
 
         } catch (e: Exception) {
-            println("[TVWiki v140] 에러: ${e.message}")
+            println("[TVWiki v141] 에러: ${e.message}")
             e.printStackTrace()
         }
         return false
