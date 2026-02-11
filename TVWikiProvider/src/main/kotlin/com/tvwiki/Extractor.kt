@@ -10,11 +10,10 @@ import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.SubtitleFile
 import java.io.*
 import java.net.*
-import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
-// [v129] Extractor.kt: M3U8 유효성 검사 추가 및 프록시 응답 안정성 강화
+// [v130] Extractor.kt: HTML 페이지 내에서 진짜 M3U8(c.html) 주소 추출 로직 추가
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
     override val mainUrl = "https://player.bunny-frame.online"
@@ -32,7 +31,7 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("[TVWiki v129] getUrl 호출 - url: $url")
+        println("[TVWiki v130] getUrl 호출 - url: $url")
         extract(url, referer, subtitleCallback, callback)
     }
 
@@ -43,11 +42,12 @@ class BunnyPoorCdn : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
         thumbnailHint: String? = null,
     ): Boolean {
-        println("[TVWiki v129] extract 시작: $url")
+        println("[TVWiki v130] extract 시작: $url")
         
         var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = "https://tvwiki5.net/"
 
+        // 1. iframe 소스 재탐색
         val isDirectUrl = cleanUrl.contains("/v/") || cleanUrl.contains("/e/") || cleanUrl.contains("/f/")
         if (!isDirectUrl) {
             try {
@@ -57,11 +57,12 @@ class BunnyPoorCdn : ExtractorApi() {
                 
                 if (iframeMatch != null) {
                     cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&").trim()
-                    println("[TVWiki v129] 재탐색 URL: $cleanUrl")
+                    println("[TVWiki v130] 재탐색 URL: $cleanUrl")
                 }
             } catch (e: Exception) { e.printStackTrace() }
         }
 
+        // 2. [v130 핵심] HTML 페이지인지 M3U8인지 확인하고, HTML이면 진짜 주소 추출
         var targetUrl = cleanUrl
         val videoHeaders = mapOf(
             "User-Agent" to DESKTOP_UA,
@@ -70,29 +71,67 @@ class BunnyPoorCdn : ExtractorApi() {
         )
 
         try {
-            println("[TVWiki v129] M3U8 요청: $targetUrl")
-            val m3u8Response = app.get(targetUrl, headers = videoHeaders, allowRedirects = true)
-            val finalTokenUrl = m3u8Response.url 
-            val m3u8Content = m3u8Response.text
+            println("[TVWiki v130] 페이지 정보 요청: $targetUrl")
+            var response = app.get(targetUrl, headers = videoHeaders, allowRedirects = true)
+            var content = response.text
             
-            // [v129] M3U8 유효성 1차 검사
-            if (!m3u8Content.startsWith("#EXTM3U") && !m3u8Content.contains("#EXT-X-STREAM-INF")) {
-                println("[TVWiki v129] [오류] 다운로드된 내용이 M3U8이 아님 (길이: ${m3u8Content.length})")
-                // 내용이 HTML 에러 페이지인지 확인
-                if (m3u8Content.length < 500) println("[TVWiki v129] 내용: $m3u8Content")
+            // 응답이 M3U8 헤더로 시작하지 않으면 HTML로 간주하고 내부 링크 탐색
+            if (!content.trim().startsWith("#EXTM3U")) {
+                println("[TVWiki v130] 응답이 HTML임. 내부 M3U8 주소 탐색 시작.")
+                
+                // 다양한 패턴으로 c.html 또는 .m3u8 링크 검색
+                val m3u8Regexes = listOf(
+                    Regex("""["'](https?://[^"']+/c\.html[^"']*)["']"""), // c.html 패턴 (가장 유력)
+                    Regex("""file:\s*["']([^"']+\.m3u8[^"']*)["']"""),    // 일반적인 플레이어 패턴
+                    Regex("""source:\s*["']([^"']+\.m3u8[^"']*)["']""")
+                )
+
+                var foundUrl: String? = null
+                for (regex in m3u8Regexes) {
+                    val match = regex.find(content)
+                    if (match != null) {
+                        foundUrl = match.groupValues[1].replace("\\/", "/") // 이스케이프 해제
+                        break
+                    }
+                }
+
+                if (foundUrl != null) {
+                    println("[TVWiki v130] 진짜 M3U8 주소 발견: $foundUrl")
+                    targetUrl = foundUrl
+                    // 진짜 주소로 다시 요청
+                    response = app.get(targetUrl, headers = videoHeaders, allowRedirects = true)
+                    content = response.text
+                } else {
+                    println("[TVWiki v130] [오류] HTML 내에서 M3U8 주소를 찾지 못함.")
+                    // 리다이렉트된 주소 자체가 c.html일 수도 있으니 마지막으로 확인
+                    if (response.url.contains("c.html") || response.url.contains(".m3u8")) {
+                        targetUrl = response.url
+                        println("[TVWiki v130] 리다이렉트 주소 사용: $targetUrl")
+                    } else {
+                        return false // 실패
+                    }
+                }
+            }
+
+            // 최종 검증: 이제는 진짜 M3U8이어야 함
+            if (!content.contains("#EXTM3U")) {
+                println("[TVWiki v130] [치명적] 최종 데이터도 M3U8이 아님.")
                 return false
             }
-            
-            println("[TVWiki v129] M3U8 다운로드 성공. Token URL: $finalTokenUrl")
 
+            val finalTokenUrl = targetUrl
+            println("[TVWiki v130] M3U8 다운로드 완료. Token URL: $finalTokenUrl")
+
+            // 3. 프록시 서버 설정
             proxyServer?.stop()
             proxyServer = ProxyWebServer().apply {
                 start()
+                // 세션 업데이트 (헤더 분기용)
                 updateSession(
                     videoH = videoHeaders, 
                     keyH = mapOf(
                         "User-Agent" to DESKTOP_UA,
-                        "Referer" to finalTokenUrl, 
+                        "Referer" to finalTokenUrl, // Key 요청용 Token Referer
                         "Accept" to "*/*"
                     )
                 )
@@ -102,8 +141,9 @@ class BunnyPoorCdn : ExtractorApi() {
             val proxyRoot = "http://127.0.0.1:$proxyPort"
             val baseUrl = finalTokenUrl.substringBeforeLast("/") + "/"
 
+            // 4. M3U8 변조 (프록시 주소로 교체)
             val newLines = mutableListOf<String>()
-            val lines = m3u8Content.lines()
+            val lines = content.lines()
 
             for (line in lines) {
                 if (line.startsWith("#EXT-X-KEY")) {
@@ -112,6 +152,8 @@ class BunnyPoorCdn : ExtractorApi() {
                         val originalKeyUrl = uriMatch.groupValues[1]
                         val absoluteKeyUrl = if (originalKeyUrl.startsWith("http")) originalKeyUrl else baseUrl + originalKeyUrl
                         val encodedKeyUrl = URLEncoder.encode(absoluteKeyUrl, "UTF-8")
+                        
+                        // 프록시 /key 엔드포인트로 연결
                         val newLine = line.replace(originalKeyUrl, "$proxyRoot/key?url=$encodedKeyUrl")
                         newLines.add(newLine)
                     } else {
@@ -120,6 +162,8 @@ class BunnyPoorCdn : ExtractorApi() {
                 } else if (line.isNotBlank() && !line.startsWith("#")) {
                     val absoluteSegUrl = if (line.startsWith("http")) line else baseUrl + line
                     val encodedSegUrl = URLEncoder.encode(absoluteSegUrl, "UTF-8")
+                    
+                    // 프록시 /video 엔드포인트로 연결
                     newLines.add("$proxyRoot/video?url=$encodedSegUrl")
                 } else {
                     newLines.add(line)
@@ -127,18 +171,11 @@ class BunnyPoorCdn : ExtractorApi() {
             }
 
             val modifiedM3u8 = newLines.joinToString("\n")
-            
-            // [v129] 변조된 M3U8 유효성 검사
-            if (!modifiedM3u8.contains("#EXTM3U")) {
-                 println("[TVWiki v129] [치명적] 변조된 M3U8 헤더 누락!")
-                 // 강제로 헤더 추가
-                 proxyServer!!.setPlaylist("#EXTM3U\n$modifiedM3u8")
-            } else {
-                 proxyServer!!.setPlaylist(modifiedM3u8)
-            }
+            proxyServer!!.setPlaylist(modifiedM3u8)
 
-            println("[TVWiki v129] 프록시 준비 완료. Port: $proxyPort")
+            println("[TVWiki v130] 프록시 준비 완료. Port: $proxyPort")
 
+            // 5. 플레이어에게 프록시 주소 전달
             callback(
                 newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) {
                     this.referer = "https://player.bunny-frame.online/" 
@@ -148,12 +185,15 @@ class BunnyPoorCdn : ExtractorApi() {
             return true
 
         } catch (e: Exception) {
-            println("[TVWiki v129] 처리 중 에러: ${e.message}")
+            println("[TVWiki v130] 처리 중 에러: ${e.message}")
             e.printStackTrace()
         }
         return false
     }
 
+    // =====================================================================================
+    //  Proxy Web Server
+    // =====================================================================================
     class ProxyWebServer {
         private var serverSocket: ServerSocket? = null
         private var isRunning = false
@@ -186,11 +226,7 @@ class BunnyPoorCdn : ExtractorApi() {
             keyHeaders = keyH
         }
 
-        fun setPlaylist(p: String) { 
-            currentPlaylist = p 
-            // [v129] 플레이리스트 설정 로그
-            println("[TVWiki Proxy] Playlist 설정됨. 길이: ${p.length}")
-        }
+        fun setPlaylist(p: String) { currentPlaylist = p }
 
         private fun handleClient(socket: Socket) = thread {
             try {
@@ -204,25 +240,16 @@ class BunnyPoorCdn : ExtractorApi() {
                 val output = socket.getOutputStream()
 
                 if (path.contains("/playlist.m3u8")) {
-                    println("[TVWiki Proxy] M3U8 요청 수신")
-                    
-                    // [v129] 인코딩 명시 및 비어있을 경우 방어
-                    val playlistToSend = if (currentPlaylist.isEmpty()) "#EXTM3U\n" else currentPlaylist
-                    val responseBytes = playlistToSend.toByteArray(Charsets.UTF_8)
-                    
+                    val responseBytes = currentPlaylist.toByteArray(Charsets.UTF_8)
                     val header = "HTTP/1.1 200 OK\r\n" +
                             "Content-Type: application/vnd.apple.mpegurl\r\n" +
                             "Content-Length: ${responseBytes.size}\r\n" +
                             "Connection: close\r\n\r\n"
                     output.write(header.toByteArray())
                     output.write(responseBytes)
-                    println("[TVWiki Proxy] M3U8 응답 전송 완료 (${responseBytes.size} bytes)")
-                    
                 } else if (path.contains("/key")) {
-                    println("[TVWiki Proxy] Key 요청: $path")
                     handleProxyRequest(path, keyHeaders, output, "application/octet-stream")
                 } else if (path.contains("/video")) {
-                    // Video 요청은 로그 생략 (너무 많음)
                     handleProxyRequest(path, videoHeaders, output, "video/mp2t")
                 }
 
@@ -251,13 +278,12 @@ class BunnyPoorCdn : ExtractorApi() {
                         output.write(header.toByteArray())
                         output.write(bytes)
                     } else {
-                        println("[TVWiki Proxy] 외부 요청 실패: ${response.code} for $targetUrl")
                         val err = "HTTP/1.1 ${response.code} Error\r\n\r\n"
                         output.write(err.toByteArray())
                     }
                 }
             } catch (e: Exception) {
-                println("[TVWiki Proxy] 중계 중 에러: ${e.message}")
+                // Ignore
             }
         }
     }
