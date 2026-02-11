@@ -9,13 +9,14 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.network.WebViewResolver
+import android.webkit.CookieManager
 import java.io.*
 import java.net.*
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
-// [v133] Extractor.kt: 프록시 URL에 Video ID 추가 + Video 요청 헤더에 Origin 추가 (403 해결)
+// [v134] Extractor.kt: 쿠키 수집 로직 복구 (로그 확인 필수) & Origin 제거
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
     override val mainUrl = "https://player.bunny-frame.online"
@@ -33,7 +34,7 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("[TVWiki v133] getUrl 호출 - url: $url")
+        println("[TVWiki v134] getUrl 호출 - url: $url")
         extract(url, referer, subtitleCallback, callback)
     }
 
@@ -44,16 +45,14 @@ class BunnyPoorCdn : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
         thumbnailHint: String? = null,
     ): Boolean {
-        println("[TVWiki v133] extract 시작: $url")
+        println("[TVWiki v134] extract 시작: $url")
         
         var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = "https://tvwiki5.net/"
 
-        // 1. Video ID 추출 (URL 구조: .../v/VIDEO_ID?...)
         val videoId = Regex("""/v/([^?&/]+)""").find(cleanUrl)?.groupValues?.get(1) ?: "video_${System.currentTimeMillis()}"
-        println("[TVWiki v133] Video ID 추출: $videoId")
 
-        // 2. iframe 소스 재탐색
+        // 1. iframe 소스 재탐색
         val isDirectUrl = cleanUrl.contains("/v/") || cleanUrl.contains("/e/") || cleanUrl.contains("/f/")
         if (!isDirectUrl) {
             try {
@@ -63,13 +62,13 @@ class BunnyPoorCdn : ExtractorApi() {
                 
                 if (iframeMatch != null) {
                     cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&").trim()
-                    println("[TVWiki v133] 재탐색 URL: $cleanUrl")
+                    println("[TVWiki v134] 재탐색 URL: $cleanUrl")
                 }
             } catch (e: Exception) { e.printStackTrace() }
         }
 
-        // 3. WebViewResolver로 c.html 주소 탐색 (v132 성공 로직 유지)
-        println("[TVWiki v133] WebViewResolver 시작: $cleanUrl")
+        // 2. WebViewResolver로 c.html 주소 탐색 & 쿠키 생성 유도
+        println("[TVWiki v134] WebViewResolver 시작: $cleanUrl")
         
         var targetUrl: String? = null
         val resolver = WebViewResolver(
@@ -92,67 +91,93 @@ class BunnyPoorCdn : ExtractorApi() {
             
             if (response.url.contains("/c.html") && response.url.contains("token=")) {
                 targetUrl = response.url
-                println("[TVWiki v133] [성공] WebView로 M3U8 주소 발견: $targetUrl")
+                println("[TVWiki v134] [성공] WebView로 M3U8 주소 발견: $targetUrl")
             } else {
-                println("[TVWiki v133] [실패] WebView가 c.html을 찾지 못함.")
+                println("[TVWiki v134] [실패] WebView가 c.html을 찾지 못함.")
                 return false
             }
 
         } catch (e: Exception) {
-            println("[TVWiki v133] WebView 실행 중 에러: ${e.message}")
+            println("[TVWiki v134] WebView 실행 중 에러: ${e.message}")
             e.printStackTrace()
             return false
         }
 
         if (targetUrl == null) return false
 
-        // 4. M3U8 내용 다운로드
+        // [v134 핵심] 쿠키 수집 및 병합 (여기서 로그가 반드시 찍혀야 함)
+        val cookieManager = CookieManager.getInstance()
+        cookieManager.flush()
+        
+        val videoCookie = cookieManager.getCookie(targetUrl) ?: ""
+        val mainCookie = cookieManager.getCookie("https://player.bunny-frame.online") ?: ""
+        
+        // 중복 제거 및 병합
+        val combinedCookies = listOf(videoCookie, mainCookie)
+            .flatMap { it.split(";") }
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+            .joinToString("; ")
+            
+        println("[TVWiki v134] 수집된 쿠키: $combinedCookies")
+
+        // 3. M3U8 내용 다운로드
         val finalTokenUrl = targetUrl
         
-        // [v133 중요] Video 헤더에 Origin 추가 (403 방지)
-        val videoHeaders = mapOf(
+        // M3U8 다운로드용 헤더 (쿠키 포함)
+        val downloadHeaders = mutableMapOf(
             "User-Agent" to DESKTOP_UA,
             "Referer" to "https://player.bunny-frame.online/",
-            "Origin" to "https://player.bunny-frame.online", // 403 Forbidden 해결의 핵심
             "Accept" to "*/*"
         )
+        if (combinedCookies.isNotEmpty()) {
+            downloadHeaders["Cookie"] = combinedCookies
+        }
 
         try {
-            println("[TVWiki v133] M3U8 내용 다운로드 요청")
-            val m3u8Response = app.get(finalTokenUrl, headers = videoHeaders)
-            
-            if (!m3u8Response.isSuccessful) {
-                println("[TVWiki v133] M3U8 다운로드 실패: ${m3u8Response.code}")
-                return false
-            }
-
+            println("[TVWiki v134] M3U8 내용 다운로드 요청")
+            val m3u8Response = app.get(finalTokenUrl, headers = downloadHeaders)
             val m3u8Content = m3u8Response.text
             
             if (!m3u8Content.contains("#EXTM3U")) {
-                println("[TVWiki v133] [치명적] 다운로드된 데이터가 M3U8 형식이 아님.")
+                println("[TVWiki v134] [치명적] 다운로드된 데이터가 M3U8 형식이 아님.")
                 return false
             }
 
-            // 5. 프록시 서버 설정
+            // 4. 프록시 서버 설정
+            // [v134] Video/Key 헤더 모두에 쿠키 추가. Origin 제거.
+            val commonProxyHeaders = mutableMapOf(
+                "User-Agent" to DESKTOP_UA,
+                "Accept" to "*/*"
+            )
+            if (combinedCookies.isNotEmpty()) {
+                commonProxyHeaders["Cookie"] = combinedCookies
+            }
+
+            // Key용 헤더 (Token Referer)
+            val keyHeaders = commonProxyHeaders.toMutableMap()
+            keyHeaders["Referer"] = finalTokenUrl
+
+            // Video용 헤더 (Main Referer)
+            val videoHeaders = commonProxyHeaders.toMutableMap()
+            videoHeaders["Referer"] = "https://player.bunny-frame.online/"
+            // videoHeaders["Origin"] = "https://player.bunny-frame.online" // 403 원인일 수 있어 제거
+
             proxyServer?.stop()
             proxyServer = ProxyWebServer().apply {
                 start()
                 updateSession(
                     videoH = videoHeaders, 
-                    keyH = mapOf(
-                        "User-Agent" to DESKTOP_UA,
-                        "Referer" to finalTokenUrl, // Key 요청 시 Token Referer 사용
-                        "Accept" to "*/*"
-                    )
+                    keyH = keyHeaders
                 )
             }
 
             val proxyPort = proxyServer!!.port
-            // [v133] URL에 Video ID 포함 (http://127.0.0.1:PORT/VIDEO_ID/...)
             val proxyRoot = "http://127.0.0.1:$proxyPort/$videoId"
             val baseUrl = finalTokenUrl.substringBeforeLast("/") + "/"
 
-            // 6. M3U8 변조
+            // 5. M3U8 변조
             val newLines = mutableListOf<String>()
             val lines = m3u8Content.lines()
 
@@ -163,7 +188,6 @@ class BunnyPoorCdn : ExtractorApi() {
                         val originalKeyUrl = uriMatch.groupValues[1]
                         val absoluteKeyUrl = if (originalKeyUrl.startsWith("http")) originalKeyUrl else baseUrl + originalKeyUrl
                         val encodedKeyUrl = URLEncoder.encode(absoluteKeyUrl, "UTF-8")
-                        
                         val newLine = line.replace(originalKeyUrl, "$proxyRoot/key?url=$encodedKeyUrl")
                         newLines.add(newLine)
                     } else {
@@ -172,7 +196,6 @@ class BunnyPoorCdn : ExtractorApi() {
                 } else if (line.isNotBlank() && !line.startsWith("#")) {
                     val absoluteSegUrl = if (line.startsWith("http")) line else baseUrl + line
                     val encodedSegUrl = URLEncoder.encode(absoluteSegUrl, "UTF-8")
-                    
                     newLines.add("$proxyRoot/video?url=$encodedSegUrl")
                 } else {
                     newLines.add(line)
@@ -182,9 +205,9 @@ class BunnyPoorCdn : ExtractorApi() {
             val modifiedM3u8 = newLines.joinToString("\n")
             proxyServer!!.setPlaylist(modifiedM3u8)
 
-            println("[TVWiki v133] 프록시 준비 완료. Port: $proxyPort, ID: $videoId")
+            println("[TVWiki v134] 프록시 준비 완료. Port: $proxyPort")
 
-            // 7. 플레이어에게 전달
+            // 6. 플레이어에게 전달
             callback(
                 newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) {
                     this.referer = "https://player.bunny-frame.online/" 
@@ -194,15 +217,12 @@ class BunnyPoorCdn : ExtractorApi() {
             return true
 
         } catch (e: Exception) {
-            println("[TVWiki v133] 처리 중 에러: ${e.message}")
+            println("[TVWiki v134] 처리 중 에러: ${e.message}")
             e.printStackTrace()
         }
         return false
     }
 
-    // =====================================================================================
-    //  Proxy Web Server
-    // =====================================================================================
     class ProxyWebServer {
         private var serverSocket: ServerSocket? = null
         private var isRunning = false
@@ -248,7 +268,6 @@ class BunnyPoorCdn : ExtractorApi() {
                 
                 val output = socket.getOutputStream()
 
-                // [v133] 경로 매칭 로직은 contains를 사용하므로 ID가 포함되어도 동작함
                 if (path.contains("/playlist.m3u8")) {
                     val responseBytes = currentPlaylist.toByteArray(Charsets.UTF_8)
                     val header = "HTTP/1.1 200 OK\r\n" +
