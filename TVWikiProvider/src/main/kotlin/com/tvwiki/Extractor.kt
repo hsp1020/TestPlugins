@@ -18,9 +18,9 @@ import kotlinx.coroutines.runBlocking
 
 /**
  * BunnyPoorCdn Extractor
- * Version: 2026-02-12-Refined-Token-Logic
- * - Fix: Prevents token duplication (Error 500) by checking if target URL already has a token.
- * - Logic: Only appends parent token if child URL is missing one.
+ * Version: 2026-02-12-Final-KeyFix-Logged
+ * - Same logic as Final-KeyFix.
+ * - Added version prefix to all logs for easier debugging.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki Player"
@@ -28,6 +28,7 @@ class BunnyPoorCdn : ExtractorApi() {
     override val requiresReferer = true
     
     private val MOBILE_UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+    private val TAG = "[BunnyPoorCdn-2026-02-12-Final-KeyFix]"
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
@@ -77,11 +78,11 @@ class BunnyPoorCdn : ExtractorApi() {
                 capturedUrl = response.url
             }
         } catch (e: Exception) {
-            println("[BunnyPoorCdn] WebView failed: ${e.message}")
+            println("$TAG WebView failed: ${e.message}")
         }
 
         if (capturedUrl != null) {
-            println("[BunnyPoorCdn] Captured: $capturedUrl")
+            println("$TAG Captured: $capturedUrl")
             
             val headers = mutableMapOf(
                 "User-Agent" to MOBILE_UA,
@@ -93,7 +94,7 @@ class BunnyPoorCdn : ExtractorApi() {
             val finalUrl = if (capturedUrl.contains("#")) capturedUrl.substringBefore("#") else capturedUrl
 
             if (proxyServer == null) {
-                proxyServer = ProxyWebServer()
+                proxyServer = ProxyWebServer(TAG)
                 proxyServer?.start()
             }
             proxyServer?.updateHeaders(headers)
@@ -113,7 +114,7 @@ class BunnyPoorCdn : ExtractorApi() {
         return false
     }
 
-    class ProxyWebServer {
+    class ProxyWebServer(private val tag: String) {
         private var serverSocket: ServerSocket? = null
         private var isRunning = false
         var port: Int = 0
@@ -125,7 +126,7 @@ class BunnyPoorCdn : ExtractorApi() {
                 serverSocket = ServerSocket(0)
                 port = serverSocket!!.localPort
                 isRunning = true
-                println("[Proxy] Started on port $port")
+                println("$tag [Proxy] Started on port $port")
                 
                 thread(isDaemon = true) { 
                     while (isRunning && serverSocket != null && !serverSocket!!.isClosed) { 
@@ -136,7 +137,7 @@ class BunnyPoorCdn : ExtractorApi() {
                     } 
                 }
             } catch (e: Exception) { 
-                println("[Proxy] Start Failed: $e") 
+                println("$tag [Proxy] Start Failed: $e") 
             }
         }
 
@@ -193,7 +194,7 @@ class BunnyPoorCdn : ExtractorApi() {
                                 output.write(response.body.bytes())
                             }
                         } else {
-                            println("[Proxy] Error ${response.code} requesting: $requestUrl")
+                            println("$tag [Proxy] Error ${response.code} requesting: $requestUrl")
                             output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
                         }
                     } else {
@@ -282,17 +283,19 @@ class BunnyPoorCdn : ExtractorApi() {
                 }
             }
 
-            // [Fix] 토큰 중복 방지 로직
             if (!baseQuery.isNullOrEmpty()) {
-                // 이미 URL에 토큰이 있다면 부모 토큰을 붙이지 않음 (서버 500 에러 방지)
-                if (resolved.contains("token=") || resolved.contains("sig=")) {
+                val hasToken = resolved.contains("token=") || 
+                               resolved.contains("token%3D") || 
+                               resolved.contains("sig=") || 
+                               resolved.contains("&amp;token=")
+                               
+                if (hasToken) {
+                    println("$tag Token detected in child, skipping append. URL: $resolved")
                     return resolved
                 }
 
                 val separator = if (resolved.contains("?")) "&" else "?"
-                if (!resolved.contains(baseQuery)) {
-                     resolved = "$resolved$separator$baseQuery"
-                }
+                resolved = "$resolved$separator$baseQuery"
             }
             return resolved
         }
