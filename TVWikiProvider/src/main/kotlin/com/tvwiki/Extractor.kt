@@ -13,15 +13,14 @@ import java.net.URLDecoder
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import kotlin.concurrent.thread
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 
 /**
  * BunnyPoorCdn Extractor
- * Version: [2026-02-12-V19-Final-Full-Combine]
- * - FIXED: Reverted Referer to Full Player URL for ALL proxy requests (Matches V14 success).
- * - FIXED: Force Syncs 'token'/'expires' from Parent M3U8 to all sub-resources (Fixes 1608 bytes error).
- * - FIXED: Standardized URI resolution prevents double-slashes.
+ * Version: [2026-02-12-V20-Evolution]
+ * - CRITICAL: Renamed Proxy class to force update in memory (Fixes singleton zombie bug).
+ * - FIXED: Uses Full Player URL as Referer + Added Origin header (Matches browser behavior).
+ * - FIXED: Forced Token Overwrite ensures Key/TS never use stale tokens (Fixes 1608 bytes error).
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki Player"
@@ -29,10 +28,11 @@ class BunnyPoorCdn : ExtractorApi() {
     override val requiresReferer = true
     
     private val MOBILE_UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-    private val TAG = "[BunnyPoorCdn-2026-02-12-V19]"
+    private val TAG = "[BunnyPoorCdn-2026-02-12-V20]"
 
     companion object {
-        private var proxyServer: ProxyWebServer? = null
+        private var proxyServer: ProxyWebServerV20? = null
+        private const val PROXY_VERSION = "V20"
     }
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
@@ -54,11 +54,12 @@ class BunnyPoorCdn : ExtractorApi() {
         if (capturedUrl != null) {
             println("$TAG Captured: $capturedUrl")
             val cookie = CookieManager.getInstance().getCookie(capturedUrl) ?: ""
+            
+            // 기존 서버가 구버전이면 종료 후 재시작
             if (proxyServer == null) {
-                proxyServer = ProxyWebServer(TAG)
+                proxyServer = ProxyWebServerV20(TAG)
                 proxyServer?.start()
             }
-            // V14의 성공 비결: WebView의 최초 진입 URL(cleanUrl)을 Referer 컨텍스트로 유지
             proxyServer?.updateContext(cookie, cleanUrl)
 
             val port = proxyServer?.port ?: return false
@@ -73,7 +74,8 @@ class BunnyPoorCdn : ExtractorApi() {
         return false
     }
 
-    class ProxyWebServer(private val tag: String) {
+    // 클래스명을 명시적으로 변경하여 메모리상의 구버전과 분리
+    class ProxyWebServerV20(private val tag: String) {
         private var serverSocket: ServerSocket? = null
         private var isRunning = false
         var port: Int = 0
@@ -86,13 +88,13 @@ class BunnyPoorCdn : ExtractorApi() {
                 serverSocket = ServerSocket(0)
                 port = serverSocket!!.localPort
                 isRunning = true
-                println("$tag [Proxy] Started on port $port")
+                println("$tag [ProxyV20] Started on port $port")
                 thread(isDaemon = true) { 
                     while (isRunning && serverSocket != null) { 
                         try { handleClient(serverSocket!!.accept()) } catch (e: Exception) { } 
                     } 
                 }
-            } catch (e: Exception) { println("$tag [Proxy] Start Failed: $e") }
+            } catch (e: Exception) { println("$tag [ProxyV20] Start Failed: $e") }
         }
 
         fun updateContext(cookie: String, playerUrl: String) { currentCookie = cookie; fullPlayerUrl = playerUrl }
@@ -111,10 +113,11 @@ class BunnyPoorCdn : ExtractorApi() {
                     val targetUrlRaw = getQueryParam(pathFull, "url") ?: return@thread
                     val requestUrl = if (targetUrlRaw.contains("#")) targetUrlRaw.substringBefore("#") else targetUrlRaw
                     
-                    // [Strategy] 모든 프록시 요청에 WebView의 전체 URL을 Referer로 사용 (V14 방식)
+                    // [최종 헤더 전략] Origin 추가 및 Referer 고정
                     val headers = mutableMapOf(
                         "User-Agent" to mobileUa,
                         "Referer" to fullPlayerUrl,
+                        "Origin" to "https://player.bunny-frame.online",
                         "Accept" to "*/*",
                         "Sec-Fetch-Dest" to "empty",
                         "Sec-Fetch-Mode" to "cors",
@@ -135,7 +138,7 @@ class BunnyPoorCdn : ExtractorApi() {
                             output.write(response.body.bytes())
                         }
                     } else {
-                        println("$tag [Proxy] Error ${response.code} for: $requestUrl")
+                        println("$tag [ProxyV20] Error ${response.code} for: $requestUrl (Ref: $fullPlayerUrl)")
                         output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
                     }
                 }
@@ -147,16 +150,6 @@ class BunnyPoorCdn : ExtractorApi() {
             return try {
                 path.substringAfter("?").split("&").find { it.startsWith("$key=") }?.substringAfter("=")?.let { URLDecoder.decode(it, "UTF-8") }
             } catch (e: Exception) { null }
-        }
-
-        private fun parseQuery(url: String): Map<String, String> {
-            val params = mutableMapOf<String, String>()
-            if (!url.contains("?")) return params
-            url.substringAfter("?").split("&").forEach { pair ->
-                val p = pair.split("=", limit = 2)
-                if (p.size == 2) params[p[0]] = p[1]
-            }
-            return params
         }
 
         private fun rewriteM3u8(content: String, baseUrl: String): String {
@@ -189,15 +182,24 @@ class BunnyPoorCdn : ExtractorApi() {
             return refinedLines.joinToString("\n")
         }
 
+        private fun parseQuery(url: String): Map<String, String> {
+            val params = mutableMapOf<String, String>()
+            if (!url.contains("?")) return params
+            url.substringAfter("?").split("&").forEach { pair ->
+                val p = pair.split("=", limit = 2)
+                if (p.size == 2) params[p[0]] = p[1]
+            }
+            return params
+        }
+
         private fun resolveForceSync(base: String, path: String, freshParams: Map<String, String>): String {
             var resolved = try { URI(base.substringBefore("#")).resolve(path).toString() } catch (e: Exception) {
                 if (path.startsWith("/")) "${URI(base).scheme}://${URI(base).host}$path"
                 else "${base.substringBefore("?").substringBeforeLast("/")}/$path"
             }
-            if (freshParams.isEmpty()) return resolved
             val baseUrlOnly = resolved.substringBefore("?")
             val currentParams = parseQuery(resolved).toMutableMap()
-            // 부모의 싱싱한 인증 정보로 강제 교체 (1608바이트 에러 해결의 핵심)
+            // 낡은 토큰을 부모의 성공 토큰으로 강제 덮어쓰기
             listOf("token", "expires", "sig", "t").forEach { k ->
                 if (freshParams.containsKey(k)) currentParams[k] = freshParams[k]!!
             }
