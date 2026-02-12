@@ -18,11 +18,10 @@ import kotlinx.coroutines.runBlocking
 
 /**
  * BunnyPoorCdn Extractor
- * Version: 2026-02-12-Smart-Referer-V7
- * - Fix: Dynamic Referer Strategy.
- * - Playlist: Uses player domain.
- * - Key/TS: Uses the playlist URL itself as Referer (mimics browser behavior).
- * - Logic: Retains Token Override to ensure fresh tokens on keys.
+ * Version: 2026-02-12-Final-Header-Fix
+ * - Fix: Enforces 'https://player.bunny-frame.online/' as Referer for ALL requests (Playlist, Key, Segments).
+ * - Diagnosis: Previous logs showed Playlist success with this Referer, but Key failure with CDN Referer.
+ * - Logic: Unified header strategy + Token Override.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki Player"
@@ -31,7 +30,7 @@ class BunnyPoorCdn : ExtractorApi() {
     
     private val MOBILE_UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
     private val PLAYER_REFERER = "https://player.bunny-frame.online/"
-    private val TAG = "[BunnyPoorCdn-SmartRef]"
+    private val TAG = "[BunnyPoorCdn-HeaderFix]"
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
@@ -106,8 +105,8 @@ class BunnyPoorCdn : ExtractorApi() {
                 proxyServer?.start()
             }
             
-            // Pass the captured URL (M3U8) as the context for the proxy
-            proxyServer?.updateContext(cookie, finalUrl)
+            // Pass context to proxy
+            proxyServer?.updateContext(cookie)
 
             val port = proxyServer?.port ?: return false
             val encodedUrl = URLEncoder.encode(finalUrl, "UTF-8")
@@ -129,9 +128,7 @@ class BunnyPoorCdn : ExtractorApi() {
         private var isRunning = false
         var port: Int = 0
         
-        // Context variables updated per request
         @Volatile private var currentCookie: String = ""
-        @Volatile private var currentPlaylistUrl: String = ""
         
         private val mobileUa = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
         private val playerReferer = "https://player.bunny-frame.online/"
@@ -156,9 +153,8 @@ class BunnyPoorCdn : ExtractorApi() {
             }
         }
 
-        fun updateContext(cookie: String, playlistUrl: String) {
+        fun updateContext(cookie: String) {
             currentCookie = cookie
-            currentPlaylistUrl = playlistUrl
         }
 
         private fun handleClient(socket: Socket) = thread {
@@ -187,15 +183,11 @@ class BunnyPoorCdn : ExtractorApi() {
                     if (targetUrl != null) {
                         val requestUrl = if (targetUrl.contains("#")) targetUrl.substringBefore("#") else targetUrl
                         
-                        // [Smart Referer Logic]
-                        // If fetching Playlist -> Referer = Player Domain
-                        // If fetching Key/Proxy -> Referer = The Playlist URL itself
-                        val isPlaylistRequest = pathFull.startsWith("/playlist")
-                        val referer = if (isPlaylistRequest) playerReferer else currentPlaylistUrl
-                        
+                        // [Fix] Always use Player Domain as Referer
+                        // Logs confirmed this works for Playlist, so we apply it to Key/TS too.
                         val headers = mutableMapOf(
                             "User-Agent" to mobileUa,
-                            "Referer" to referer,
+                            "Referer" to playerReferer,
                             "Accept" to "*/*"
                         )
                         if (currentCookie.isNotEmpty()) {
@@ -207,10 +199,10 @@ class BunnyPoorCdn : ExtractorApi() {
                         }
 
                         if (response.isSuccessful) {
-                            if (isPlaylistRequest) {
+                            if (pathFull.startsWith("/playlist")) {
                                 val content = response.text
-                                // Pass currentPlaylistUrl to parse fresh tokens from it
-                                val newContent = rewriteM3u8(content, currentPlaylistUrl)
+                                // Token Override Logic
+                                val newContent = rewriteM3u8(content, requestUrl)
                                 
                                 val header = "HTTP/1.1 200 OK\r\n" +
                                            "Content-Type: application/vnd.apple.mpegurl\r\n" +
@@ -218,6 +210,7 @@ class BunnyPoorCdn : ExtractorApi() {
                                 output.write(header.toByteArray())
                                 output.write(newContent.toByteArray())
                             } else {
+                                // Key or TS
                                 val contentType = response.headers["Content-Type"] ?: "application/octet-stream"
                                 val header = "HTTP/1.1 200 OK\r\n" +
                                            "Content-Type: $contentType\r\n" +
@@ -226,7 +219,7 @@ class BunnyPoorCdn : ExtractorApi() {
                                 output.write(response.body.bytes())
                             }
                         } else {
-                            println("$tag [Proxy] Error ${response.code} requesting: $requestUrl (Ref: $referer)")
+                            println("$tag [Proxy] Error ${response.code} requesting: $requestUrl")
                             output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
                         }
                     } else {
@@ -282,7 +275,6 @@ class BunnyPoorCdn : ExtractorApi() {
             val proxyBase = "http://127.0.0.1:$port/proxy?url="
             val playlistProxyBase = "http://127.0.0.1:$port/playlist?url="
 
-            // Extract tokens from the passed Playlist URL (currentPlaylistUrl)
             val baseParams = parseQueryString(baseUrl)
             
             if (baseParams.isNotEmpty()) {
@@ -357,7 +349,6 @@ class BunnyPoorCdn : ExtractorApi() {
                 }
             }
 
-            // Force Overwrite tokens
             freshParams.forEach { (key, value) ->
                 currentParams[key] = value
             }
