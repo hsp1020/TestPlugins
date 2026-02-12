@@ -18,10 +18,11 @@ import kotlinx.coroutines.runBlocking
 
 /**
  * BunnyPoorCdn Extractor
- * Version: 2026-02-12-Token-Override-V2
- * - Fix: Parses and merges query parameters to OVERRIDE stale tokens in child URLs.
- * - Fix: Re-enabled cookie passing (safely) as a fallback for Cloudflare.
- * - Solves: InvalidKeyException due to expired tokens in static key URLs.
+ * Version: 2026-02-12-Header-Strategy-V6
+ * - Change: Modified Referer to 'https://tvwiki5.net/' to bypass potential CDN hotlink protection.
+ * - Change: Removed 'Origin' header to prevent strict CORS blocks on key fetch.
+ * - Fix: Re-added short cookie retry loop to ensure session capture.
+ * - Logic: Continues to use Token Override (M3U8 token -> Key token).
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki Player"
@@ -29,7 +30,7 @@ class BunnyPoorCdn : ExtractorApi() {
     override val requiresReferer = true
     
     private val MOBILE_UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-    private val TAG = "[BunnyPoorCdn-TokenOverride-V2]"
+    private val TAG = "[BunnyPoorCdn-V6]"
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
@@ -85,17 +86,23 @@ class BunnyPoorCdn : ExtractorApi() {
         if (capturedUrl != null) {
             println("$TAG Captured: $capturedUrl")
             
-            // 쿠키 획득 시도 (있으면 쓰고 없으면 말고)
+            // Cookie Retry Strategy
+            var cookie = ""
             val cookieManager = CookieManager.getInstance()
-            val cookie = cookieManager.getCookie(capturedUrl) ?: ""
+            for (i in 0..5) {
+                cookie = cookieManager.getCookie(capturedUrl) ?: ""
+                if (cookie.isNotEmpty()) break
+                delay(200)
+            }
             if (cookie.isNotEmpty()) {
                 println("$TAG Cookie Found: $cookie")
             }
 
+            // Headers optimized for Key/Segment fetching
+            // Using main site referer often bypasses CDN "iframe only" checks
             val headers = mutableMapOf(
                 "User-Agent" to MOBILE_UA,
-                "Referer" to "https://player.bunny-frame.online/",
-                "Origin" to "https://player.bunny-frame.online",
+                "Referer" to "https://tvwiki5.net/", 
                 "Accept" to "*/*"
             )
             if (cookie.isNotEmpty()) {
@@ -116,7 +123,7 @@ class BunnyPoorCdn : ExtractorApi() {
 
             callback(
                 newExtractorLink(name, name, proxyUrl, ExtractorLinkType.M3U8) {
-                    this.referer = "https://player.bunny-frame.online/"
+                    this.referer = "https://tvwiki5.net/"
                     this.quality = Qualities.Unknown.value
                 }
             )
@@ -239,7 +246,6 @@ class BunnyPoorCdn : ExtractorApi() {
             return null
         }
 
-        // --- QUERY PARSING HELPERS ---
         private fun parseQuery(query: String?): MutableMap<String, String> {
             val params = mutableMapOf<String, String>()
             if (query.isNullOrEmpty()) return params
@@ -262,7 +268,6 @@ class BunnyPoorCdn : ExtractorApi() {
             val proxyBase = "http://127.0.0.1:$port/proxy?url="
             val playlistProxyBase = "http://127.0.0.1:$port/playlist?url="
 
-            // 1. Parse Fresh Token from Parent URL
             val baseUri = try { URI(baseUrl) } catch(e:Exception) { null }
             val baseParams = parseQuery(baseUri?.rawQuery)
             
@@ -279,7 +284,6 @@ class BunnyPoorCdn : ExtractorApi() {
                     val match = regex.find(trLine)
                     if (match != null) {
                         val keyUrl = match.groupValues[1]
-                        // [Fix] Smart Resolve with Param Merge
                         val absUrl = resolveUrl(baseUrl, keyUrl, baseParams)
                         val encoded = URLEncoder.encode(absUrl, "UTF-8")
                         refinedLines.add(trLine.replace(keyUrl, "$proxyBase$encoded"))
@@ -303,7 +307,6 @@ class BunnyPoorCdn : ExtractorApi() {
         }
 
         private fun resolveUrl(base: String, url: String, baseParams: Map<String, String>): String {
-            // 1. Get Absolute URL
             var resolved = if (url.startsWith("http")) {
                 url
             } else if (url.startsWith("//")) {
@@ -318,19 +321,16 @@ class BunnyPoorCdn : ExtractorApi() {
 
             if (baseParams.isEmpty()) return resolved
 
-            // 2. Parse Existing Query
             val parts = resolved.split("?", limit = 2)
             val baseUrlPart = parts[0]
             val existingQuery = if (parts.size > 1) parts[1] else ""
             
             val currentParams = parseQuery(existingQuery)
 
-            // 3. OVERWRITE with Fresh Params (Token/Sig/Expires)
             baseParams.forEach { (key, value) ->
                 currentParams[key] = value
             }
 
-            // 4. Rebuild URL
             val newQuery = buildQuery(currentParams)
             return if (newQuery.isNotEmpty()) "$baseUrlPart?$newQuery" else baseUrlPart
         }
