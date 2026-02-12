@@ -18,10 +18,10 @@ import kotlinx.coroutines.runBlocking
 
 /**
  * BunnyPoorCdn Extractor
- * Version: [2026-02-12-V15-Param-Merge]
- * - FIXED: V14's bug where tokens weren't added if child URL already had other params (e.g., ?c=hash).
- * - NEW: Implements smart parameter merging. If 'token' is missing in child URL, it takes it from parent.
- * - SECURITY: Keeps full Referer and Sec-Fetch headers to satisfy CDN checks.
+ * Version: [2026-02-12-V17-Force-Sync]
+ * - NEW: Combined 'URI.resolve()' (fixed 404s) with 'Forced Token Overwrite' (fixed 403s/1608 bytes).
+ * - WHY: V15 logs proved that existing tokens in sub-resources are stale and MUST be replaced.
+ * - SECURITY: Implements high-fidelity browser headers and Full URL Referer synchronization.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki Player"
@@ -29,7 +29,7 @@ class BunnyPoorCdn : ExtractorApi() {
     override val requiresReferer = true
     
     private val MOBILE_UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-    private val TAG = "[BunnyPoorCdn-2026-02-12-V15]"
+    private val TAG = "[BunnyPoorCdn-2026-02-12-V17]"
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
@@ -58,12 +58,14 @@ class BunnyPoorCdn : ExtractorApi() {
                 proxyServer = ProxyWebServer(TAG)
                 proxyServer?.start()
             }
-            // Sync with Full WebView URL as Referer
+            // 세션 유지를 위해 WebView 진입 전체 URL을 Referer 컨텍스트로 저장
             proxyServer?.updateContext(cookie, cleanUrl)
 
             val port = proxyServer?.port ?: return false
             val encodedUrl = URLEncoder.encode(capturedUrl, "UTF-8")
-            callback(newExtractorLink(name, name, "http://127.0.0.1:$port/playlist?url=$encodedUrl#.m3u8") {
+            
+            // HLS 인식을 위해 M3U8 타입 명시
+            callback(newExtractorLink(name, name, "http://127.0.0.1:$port/playlist?url=$encodedUrl#.m3u8", ExtractorLinkType.M3U8) {
                 this.referer = cleanUrl
                 this.quality = Qualities.Unknown.value
             })
@@ -109,13 +111,23 @@ class BunnyPoorCdn : ExtractorApi() {
                 if (pathFull.startsWith("/playlist") || pathFull.startsWith("/proxy")) {
                     val targetUrlRaw = getQueryParam(pathFull, "url") ?: return@thread
                     val requestUrl = if (targetUrlRaw.contains("#")) targetUrlRaw.substringBefore("#") else targetUrlRaw
+                    
+                    // [헤더 전략] c.html은 메인 Referer, 나머지는 플레이어 전체 Referer
+                    val finalReferer = if (requestUrl.contains("c.html")) "https://tvwiki5.net/" else fullPlayerUrl
+                    
                     val headers = mutableMapOf(
-                        "User-Agent" to mobileUa, "Referer" to fullPlayerUrl, "Accept" to "*/*",
-                        "Sec-Fetch-Dest" to "empty", "Sec-Fetch-Mode" to "cors", "Sec-Fetch-Site" to "cross-site"
+                        "User-Agent" to mobileUa,
+                        "Referer" to finalReferer,
+                        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                        "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8",
+                        "Sec-Fetch-Dest" to "empty",
+                        "Sec-Fetch-Mode" to "cors",
+                        "Sec-Fetch-Site" to "cross-site"
                     )
                     if (currentCookie.isNotEmpty()) headers["Cookie"] = currentCookie
 
                     val response = runBlocking { app.get(requestUrl, headers = headers) }
+
                     if (response.isSuccessful) {
                         if (pathFull.startsWith("/playlist")) {
                             val newContent = rewriteM3u8(response.text, requestUrl)
@@ -127,7 +139,7 @@ class BunnyPoorCdn : ExtractorApi() {
                             output.write(response.body.bytes())
                         }
                     } else {
-                        println("$tag [Proxy] Error ${response.code} requesting: $requestUrl")
+                        println("$tag [Proxy] Error ${response.code} for: $requestUrl (Ref: $finalReferer)")
                         output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
                     }
                 }
@@ -165,11 +177,12 @@ class BunnyPoorCdn : ExtractorApi() {
                     val uriMatch = Regex("""URI="([^"]+)"""").find(trLine)
                     if (uriMatch != null) {
                         val keyUrl = uriMatch.groupValues[1]
-                        val absUrl = resolveMergeParams(baseUrl, keyUrl, baseParams)
+                        // [Fix] 표준 결합 후 낡은 토큰 강제 교체
+                        val absUrl = resolveForceOverride(baseUrl, keyUrl, baseParams)
                         refinedLines.add(trLine.replace(keyUrl, "$proxyBase${URLEncoder.encode(absUrl, "UTF-8")}"))
                     } else { refinedLines.add(trLine) }
                 } else if (!trLine.startsWith("#")) {
-                    val absUrl = resolveMergeParams(baseUrl, trLine, baseParams)
+                    val absUrl = resolveForceOverride(baseUrl, trLine, baseParams)
                     val encoded = URLEncoder.encode(absUrl, "UTF-8")
                     if (absUrl.contains(".m3u8") || absUrl.contains("c.html")) {
                         refinedLines.add("$playlistProxyBase$encoded")
@@ -179,29 +192,30 @@ class BunnyPoorCdn : ExtractorApi() {
             return refinedLines.joinToString("\n")
         }
 
-        private fun resolveMergeParams(base: String, path: String, freshParams: Map<String, String>): String {
-            // 1. Standard Path Resolve
+        private fun resolveForceOverride(base: String, path: String, freshParams: Map<String, String>): String {
+            // 1. 표준 결합 (V11에서 검증됨, //v/key7 방지)
             var resolved = try { URI(base.substringBefore("#")).resolve(path).toString() } catch (e: Exception) {
                 if (path.startsWith("/")) "${URI(base).scheme}://${URI(base).host}$path"
                 else "${base.substringBefore("?").substringBeforeLast("/")}/$path"
             }
 
-            // 2. Smart Merge: Add auth params ONLY if missing in child
-            val resParams = parseQuery(resolved).toMutableMap()
+            // 2. 강제 갱신 (V15 로그에서 증명된 낡은 토큰 문제 해결)
+            val parts = resolved.split("?", limit = 2)
+            val baseUrlOnly = parts[0]
+            val currentParams = parseQuery(resolved).toMutableMap()
+            
             var changed = false
-            listOf("token", "expires", "sig", "t").forEach { key ->
-                if (freshParams.containsKey(key) && !resParams.containsKey(key)) {
-                    resParams[key] = freshParams[key]!!
+            listOf("token", "expires", "sig", "t").forEach { k ->
+                if (freshParams.containsKey(k)) {
+                    currentParams[k] = freshParams[k]!! // 무조건 덮어씀
                     changed = true
                 }
             }
 
-            if (changed) {
-                val baseUrlPart = resolved.substringBefore("?")
-                val newQuery = resParams.entries.joinToString("&") { "${it.key}=${it.value}" }
-                return "$baseUrlPart?$newQuery"
-            }
-            return resolved
+            return if (changed) {
+                val newQuery = currentParams.entries.joinToString("&") { "${it.key}=${it.value}" }
+                "$baseUrlOnly?$newQuery"
+            } else resolved
         }
     }
 }
