@@ -18,10 +18,10 @@ import kotlinx.coroutines.runBlocking
 
 /**
  * BunnyPoorCdn Extractor
- * Version: [2026-02-12-V13-ZeroTouch-Resolve]
- * - CRITICAL: Stopped overriding tokens. Each resource (M3U8/Key) has its own unique token.
- * - FIX: Uses pure URI.resolve() to fix 404 double-slashes without tampering with query strings.
- * - LOG: Prefixed with version for precise tracking.
+ * Version: [2026-02-12-V14-Final-Full-Sync]
+ * - CRITICAL: Uses FULL Player URL (including tokens/sigs) as Referer for all requests.
+ * - SMART: Inherits tokens only when missing (Zero-touch for keys with tokens).
+ * - BYPASS: Adds browser-standard headers to avoid JS-challenge pages (1611 bytes error).
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki Player"
@@ -29,8 +29,7 @@ class BunnyPoorCdn : ExtractorApi() {
     override val requiresReferer = true
     
     private val MOBILE_UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-    private val PLAYER_REFERER = "https://player.bunny-frame.online/"
-    private val TAG = "[BunnyPoorCdn-2026-02-12-V13]"
+    private val TAG = "[BunnyPoorCdn-2026-02-12-V14-Final]"
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
@@ -83,7 +82,8 @@ class BunnyPoorCdn : ExtractorApi() {
                 proxyServer = ProxyWebServer(TAG)
                 proxyServer?.start()
             }
-            proxyServer?.updateContext(cookie)
+            // [중요] 최초 진입 URL(cleanUrl)을 Referer로 고정하여 세션 유지
+            proxyServer?.updateContext(cookie, cleanUrl)
 
             val port = proxyServer?.port ?: return false
             val encodedUrl = URLEncoder.encode(capturedUrl, "UTF-8")
@@ -91,7 +91,7 @@ class BunnyPoorCdn : ExtractorApi() {
 
             callback(
                 newExtractorLink(name, name, proxyUrl, ExtractorLinkType.M3U8) {
-                    this.referer = PLAYER_REFERER
+                    this.referer = cleanUrl
                     this.quality = Qualities.Unknown.value
                 }
             )
@@ -105,9 +105,9 @@ class BunnyPoorCdn : ExtractorApi() {
         private var isRunning = false
         var port: Int = 0
         @Volatile private var currentCookie: String = ""
+        @Volatile private var fullPlayerUrl: String = ""
         
         private val mobileUa = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-        private val playerReferer = "https://player.bunny-frame.online/"
 
         fun start() {
             try {
@@ -123,7 +123,10 @@ class BunnyPoorCdn : ExtractorApi() {
             } catch (e: Exception) { println("$tag [Proxy] Start Failed: $e") }
         }
 
-        fun updateContext(cookie: String) { currentCookie = cookie }
+        fun updateContext(cookie: String, playerUrl: String) { 
+            currentCookie = cookie 
+            fullPlayerUrl = playerUrl
+        }
 
         private fun handleClient(socket: Socket) = thread {
             try {
@@ -140,13 +143,16 @@ class BunnyPoorCdn : ExtractorApi() {
                     val targetUrlRaw = getQueryParam(pathFull, "url") ?: return@thread
                     val requestUrl = if (targetUrlRaw.contains("#")) targetUrlRaw.substringBefore("#") else targetUrlRaw
                     
+                    // [최종 헤더 전략] 브라우저 환경 완벽 복사
                     val headers = mutableMapOf(
                         "User-Agent" to mobileUa,
-                        "Referer" to playerReferer,
-                        "Accept" to "*/*",
+                        "Referer" to fullPlayerUrl, // 단순 도메인이 아닌 토큰이 포함된 전체 주소
+                        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                        "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8",
                         "Sec-Fetch-Dest" to "empty",
                         "Sec-Fetch-Mode" to "cors",
-                        "Sec-Fetch-Site" to "cross-site"
+                        "Sec-Fetch-Site" to "cross-site",
+                        "Upgrade-Insecure-Requests" to "1"
                     )
                     if (currentCookie.isNotEmpty()) headers["Cookie"] = currentCookie
 
@@ -155,7 +161,6 @@ class BunnyPoorCdn : ExtractorApi() {
                     if (response.isSuccessful) {
                         if (pathFull.startsWith("/playlist")) {
                             val content = response.text
-                            // [핵심] 리라이팅 시 토큰 변조 로직 제거
                             val newContent = rewriteM3u8(content, requestUrl)
                             output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nConnection: close\r\n\r\n".toByteArray())
                             output.write(newContent.toByteArray())
@@ -194,12 +199,12 @@ class BunnyPoorCdn : ExtractorApi() {
                     val uriMatch = Regex("""URI="([^"]+)"""").find(trLine)
                     if (uriMatch != null) {
                         val keyUrl = uriMatch.groupValues[1]
-                        // [중요] 절대 경로 변환만 하고 토큰은 건드리지 않음
-                        val absUrl = resolveUrlStandard(baseUrl, keyUrl)
+                        // [Fix] 표준 결합 + 스마트 토큰 승계
+                        val absUrl = resolveUrlSmart(baseUrl, keyUrl)
                         refinedLines.add(trLine.replace(keyUrl, "$proxyBase${URLEncoder.encode(absUrl, "UTF-8")}"))
                     } else { refinedLines.add(trLine) }
                 } else if (!trLine.startsWith("#")) {
-                    val absUrl = resolveUrlStandard(baseUrl, trLine)
+                    val absUrl = resolveUrlSmart(baseUrl, trLine)
                     val encoded = URLEncoder.encode(absUrl, "UTF-8")
                     if (absUrl.contains(".m3u8") || absUrl.contains("c.html")) {
                         refinedLines.add("$playlistProxyBase$encoded")
@@ -211,17 +216,24 @@ class BunnyPoorCdn : ExtractorApi() {
             return refinedLines.joinToString("\n")
         }
 
-        private fun resolveUrlStandard(base: String, path: String): String {
+        private fun resolveUrlSmart(base: String, path: String): String {
             if (path.startsWith("http")) return path
             if (path.startsWith("//")) return "https:$path"
-            return try {
-                // URI.resolve는 쿼리 파라미터를 유지하면서 경로만 결합하는 표준 방식임
+            
+            var resolved = try {
                 val baseUri = URI(base.substringBefore("#"))
                 baseUri.resolve(path).toString()
             } catch (e: Exception) {
                 val baseDir = base.substringBefore("?").substringBeforeLast("/")
                 "$baseDir/$path"
             }
+
+            // [Smart Inherit] 자식 URL에 토큰이 아예 없는 경우에만 부모 토큰을 빌려줍니다.
+            if (!resolved.contains("?") && base.contains("?")) {
+                val baseQuery = base.substringAfter("?")
+                resolved = "$resolved?$baseQuery"
+            }
+            return resolved
         }
     }
 }
