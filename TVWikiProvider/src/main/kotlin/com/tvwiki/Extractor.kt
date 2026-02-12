@@ -17,10 +17,11 @@ import kotlinx.coroutines.runBlocking
 
 /**
  * BunnyPoorCdn Extractor
- * Version: [2026-02-13-V22-Final-SmartHeaders]
- * - CRITICAL: Implements Dynamic Sec-Fetch-Site (same-origin vs cross-site) based on domain matching.
- * - FIXED: Mimics browser's internal Referer chain (Key/TS refer to M3U8 URL).
- * - FIXED: Forced Token Override ensures every sub-request uses the successful 'c.html' token.
+ * Version: [2026-02-13-V22.1-Final-Perfect-Headers]
+ * - NEW: Implements Dynamic Header Engine. It differentiates between 'cross-site' entries (Playlist)
+ * and 'same-origin' internal calls (Key/Segments).
+ * - FIXED: Mimics browser's Referer chain (Key/TS refer to the M3U8 URL on the SAME HOST).
+ * - FIXED: Forced Token Overwrite fixes the 1608 bytes error by replacing stale tokens.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki Player"
@@ -28,7 +29,7 @@ class BunnyPoorCdn : ExtractorApi() {
     override val requiresReferer = true
     
     private val MOBILE_UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-    private val TAG = "[BunnyPoorCdn-2026-02-13-V22]"
+    private val TAG = "[BunnyPoorCdn-2026-02-13-V22.1]"
 
     companion object {
         private var proxyServer: ProxyWebServerV22? = null
@@ -58,7 +59,7 @@ class BunnyPoorCdn : ExtractorApi() {
                 proxyServer = ProxyWebServerV22(TAG)
                 proxyServer?.start()
             }
-            // 캡처된 M3U8 주소를 하위 리소스의 보안 컨텍스트로 저장
+            // M3U8 주소를 하위 리소스의 Referer 및 도메인 비교용으로 저장
             proxyServer?.updateContext(cookie, capturedUrl)
 
             val port = proxyServer?.port ?: return false
@@ -87,13 +88,13 @@ class BunnyPoorCdn : ExtractorApi() {
                 serverSocket = ServerSocket(0)
                 port = serverSocket!!.localPort
                 isRunning = true
-                println("$tag [ProxyV22] Started on port $port")
+                println("$tag [ProxyV22.1] Started on port $port")
                 thread(isDaemon = true) { 
                     while (isRunning && serverSocket != null) { 
                         try { handleClient(serverSocket!!.accept()) } catch (e: Exception) { } 
                     } 
                 }
-            } catch (e: Exception) { println("$tag [ProxyV22] Start Failed: $e") }
+            } catch (e: Exception) { println("$tag [ProxyV22.1] Start Failed: $e") }
         }
 
         fun updateContext(cookie: String, m3u8Url: String) { 
@@ -115,7 +116,7 @@ class BunnyPoorCdn : ExtractorApi() {
                     val targetUrlRaw = getQueryParam(pathFull, "url") ?: return@thread
                     val requestUrl = if (targetUrlRaw.contains("#")) targetUrlRaw.substringBefore("#") else targetUrlRaw
                     
-                    // [핵심 로직: 지능형 헤더 생성]
+                    // [지능형 엔진 핵심 로직]
                     val targetUri = URI(requestUrl)
                     val baseUri = URI(m3u8FullUrl)
                     val isSameOrigin = targetUri.host == baseUri.host
@@ -127,12 +128,12 @@ class BunnyPoorCdn : ExtractorApi() {
                     )
                     
                     if (isSameOrigin && !requestUrl.contains("c.html")) {
-                        // 자식 리소스(Key, TS)는 부모 M3U8 도메인 내부 요청임
+                        // 키(Key) 및 세그먼트(TS) 요청: M3U8과 같은 도메인이므로 same-origin 적용
                         headers["Referer"] = m3u8FullUrl
                         headers["Sec-Fetch-Site"] = "same-origin"
                         headers["Sec-Fetch-Mode"] = "no-cors"
                     } else {
-                        // M3U8 자체 요청은 외부(Player)에서 오는 요청임
+                        // 플레이리스트(c.html) 요청: 플레이어 외부에서 진입하므로 cross-site 적용
                         headers["Referer"] = "https://player.bunny-frame.online/"
                         headers["Origin"] = "https://player.bunny-frame.online"
                         headers["Sec-Fetch-Site"] = "cross-site"
@@ -154,7 +155,7 @@ class BunnyPoorCdn : ExtractorApi() {
                             output.write(response.body.bytes())
                         }
                     } else {
-                        println("$tag [ProxyV22] Error ${response.code} for: $requestUrl (Mode: ${headers["Sec-Fetch-Site"]})")
+                        println("$tag [ProxyV22.1] Error ${response.code} for: $requestUrl (Mode: ${headers["Sec-Fetch-Site"]})")
                         output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
                     }
                 }
@@ -216,7 +217,8 @@ class BunnyPoorCdn : ExtractorApi() {
             if (freshParams.isEmpty()) return resolved
             val baseUrlOnly = resolved.substringBefore("?")
             val currentParams = parseQuery(resolved).toMutableMap()
-            // 낡은 토큰 무조건 갱신 (1608바이트 에러 해결책)
+            
+            // 토큰 강제 주입 (V20에서 효과 확인됨)
             listOf("token", "expires", "sig", "t").forEach { k ->
                 if (freshParams.containsKey(k)) currentParams[k] = freshParams[k]!!
             }
