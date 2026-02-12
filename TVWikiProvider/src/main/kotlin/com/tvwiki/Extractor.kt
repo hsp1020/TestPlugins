@@ -18,9 +18,10 @@ import kotlinx.coroutines.runBlocking
 
 /**
  * BunnyPoorCdn Extractor
- * Version: 2026-02-12-Token-Override
- * - Solution: Parsed tokens from the M3U8 URL override stale tokens in Key/Segment URLs.
- * - Fixes: 500 Error (Duplicate tokens) AND 403 Error (Stale tokens causing InvalidKeyException).
+ * Version: 2026-02-12-Robust-Token-Inheritance
+ * - Fix: Robust query parsing to ensure tokens are extracted from parent URL.
+ * - Fix: Guaranteed token inheritance for child URLs (Key/TS).
+ * - Debug: Enhanced logging for token detection and injection.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki Player"
@@ -28,7 +29,7 @@ class BunnyPoorCdn : ExtractorApi() {
     override val requiresReferer = true
     
     private val MOBILE_UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-    private val TAG = "[BunnyPoorCdn-TokenOverride]"
+    private val TAG = "[BunnyPoorCdn-RobustToken]"
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
@@ -178,7 +179,6 @@ class BunnyPoorCdn : ExtractorApi() {
                         if (response.isSuccessful) {
                             if (pathFull.startsWith("/playlist")) {
                                 val content = response.text
-                                // Token Override Logic applied here
                                 val newContent = rewriteM3u8(content, requestUrl)
                                 
                                 val header = "HTTP/1.1 200 OK\r\n" +
@@ -229,35 +229,24 @@ class BunnyPoorCdn : ExtractorApi() {
             return null
         }
 
-        // Helper to parse query string into MutableMap
-        private fun parseQuery(query: String?): MutableMap<String, String> {
-            val params = mutableMapOf<String, String>()
-            if (query.isNullOrEmpty()) return params
-            query.split("&").forEach { pair ->
-                val parts = pair.split("=", limit = 2)
-                if (parts.size == 2) {
-                    params[parts[0]] = parts[1]
-                }
-            }
-            return params
-        }
-
-        // Helper to build query string from Map
-        private fun buildQuery(params: Map<String, String>): String {
-            return params.entries.joinToString("&") { "${it.key}=${it.value}" }
-        }
-
         private fun rewriteM3u8(content: String, baseUrl: String): String {
             val lines = content.lines()
             val refinedLines = mutableListOf<String>()
             val proxyBase = "http://127.0.0.1:$port/proxy?url="
             val playlistProxyBase = "http://127.0.0.1:$port/playlist?url="
 
-            // Extract fresh params (token, expires) from the Parent URL (c.html)
-            val baseParams = try {
-                val uri = URI(baseUrl)
-                parseQuery(uri.rawQuery)
-            } catch (e: Exception) { mutableMapOf() }
+            // Extract token from Base URL robustly
+            var baseQueryString = ""
+            if (baseUrl.contains("?")) {
+                baseQueryString = baseUrl.substringAfter("?")
+            }
+            
+            // Ensure we actually have a token
+            if (!baseQueryString.contains("token=")) {
+                println("$tag Warning: No token found in base URL: $baseUrl")
+            } else {
+                println("$tag Found base query: $baseQueryString")
+            }
 
             for (line in lines) {
                 val trLine = line.trim()
@@ -268,16 +257,14 @@ class BunnyPoorCdn : ExtractorApi() {
                     val match = regex.find(trLine)
                     if (match != null) {
                         val keyUrl = match.groupValues[1]
-                        // Smart Resolve: Overwrite stale tokens with fresh ones
-                        val absUrl = resolveUrl(baseUrl, keyUrl, baseParams)
+                        val absUrl = resolveUrl(baseUrl, keyUrl, baseQueryString)
                         val encoded = URLEncoder.encode(absUrl, "UTF-8")
                         refinedLines.add(trLine.replace(keyUrl, "$proxyBase$encoded"))
                     } else {
                         refinedLines.add(trLine)
                     }
                 } else if (!trLine.startsWith("#")) {
-                    // Smart Resolve for Segments
-                    val absUrl = resolveUrl(baseUrl, trLine, baseParams)
+                    val absUrl = resolveUrl(baseUrl, trLine, baseQueryString)
                     val encoded = URLEncoder.encode(absUrl, "UTF-8")
                     
                     if (absUrl.contains(".m3u8") || absUrl.contains("c.html")) {
@@ -292,38 +279,47 @@ class BunnyPoorCdn : ExtractorApi() {
             return refinedLines.joinToString("\n")
         }
 
-        private fun resolveUrl(base: String, url: String, baseParams: Map<String, String>): String {
-            // 1. Get Absolute URL first
+        private fun resolveUrl(base: String, url: String, baseQuery: String): String {
+            // 1. Get Absolute URL
             var resolved = if (url.startsWith("http")) {
                 url
             } else if (url.startsWith("//")) {
                 "https:$url"
             } else {
                 try {
-                    URI(base).resolve(url).toString()
+                    // Manual resolve to avoid URI issues
+                    if (url.startsWith("/")) {
+                        val uri = URI(base)
+                        "${uri.scheme}://${uri.host}$url"
+                    } else {
+                        val lastSlash = base.lastIndexOf('/')
+                        if (lastSlash != -1) {
+                            base.substring(0, lastSlash + 1) + url
+                        } else {
+                            "$base/$url"
+                        }
+                    }
                 } catch (e: Exception) {
                     url
                 }
             }
 
-            if (baseParams.isEmpty()) return resolved
+            // 2. Inject Token if missing
+            if (baseQuery.isNotEmpty()) {
+                val hasToken = resolved.contains("token=") || 
+                               resolved.contains("token%3D") || 
+                               resolved.contains("sig=") || 
+                               resolved.contains("&amp;token=")
+                               
+                if (hasToken) {
+                    return resolved
+                }
 
-            // 2. Parse existing query params of the child URL
-            val parts = resolved.split("?", limit = 2)
-            val baseUrlPart = parts[0]
-            val existingQuery = if (parts.size > 1) parts[1] else ""
-            
-            val currentParams = parseQuery(existingQuery)
-
-            // 3. Overwrite/Add params from Parent (Fresh Tokens)
-            // This ensures we replace stale 'token'/'expires' with new ones
-            baseParams.forEach { (key, value) ->
-                currentParams[key] = value
+                val separator = if (resolved.contains("?")) "&" else "?"
+                resolved = "$resolved$separator$baseQuery"
+                // println("$tag Injected token into: $resolved") // Debug log
             }
-
-            // 4. Reconstruct URL
-            val newQuery = buildQuery(currentParams)
-            return if (newQuery.isNotEmpty()) "$baseUrlPart?$newQuery" else baseUrlPart
+            return resolved
         }
     }
 }
