@@ -18,10 +18,9 @@ import kotlinx.coroutines.runBlocking
 
 /**
  * BunnyPoorCdn Extractor
- * Version: 2026-02-12-String-Parsing-Fix
- * - Fix: Replaced java.net.URI with manual string parsing to guarantee token extraction.
- * - Logic: Parses parent URL params and FORCIBLY overwrites 'token'/'expires' in child URLs.
- * - Debug: Logs exactly which tokens are being injected.
+ * Version: 2026-02-12-Referer-Correction
+ * - Fix: Reverted Referer to 'https://player.bunny-frame.online/' to pass CDN security check (Solves 403 on Playlist).
+ * - Logic: Retained manual token parsing and overriding to solve Key expiry issues.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki Player"
@@ -29,7 +28,7 @@ class BunnyPoorCdn : ExtractorApi() {
     override val requiresReferer = true
     
     private val MOBILE_UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-    private val TAG = "[BunnyPoorCdn-StringFix]"
+    private val TAG = "[BunnyPoorCdn-RefererFix]"
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
@@ -97,9 +96,11 @@ class BunnyPoorCdn : ExtractorApi() {
                 println("$TAG Cookie Found: $cookie")
             }
 
+            // [Fix] Referer must match the player domain for PoorCDN
             val headers = mutableMapOf(
                 "User-Agent" to MOBILE_UA,
-                "Referer" to "https://tvwiki5.net/", 
+                "Referer" to "https://player.bunny-frame.online/",
+                "Origin" to "https://player.bunny-frame.online",
                 "Accept" to "*/*"
             )
             if (cookie.isNotEmpty()) {
@@ -120,7 +121,7 @@ class BunnyPoorCdn : ExtractorApi() {
 
             callback(
                 newExtractorLink(name, name, proxyUrl, ExtractorLinkType.M3U8) {
-                    this.referer = "https://tvwiki5.net/"
+                    this.referer = "https://player.bunny-frame.online/"
                     this.quality = Qualities.Unknown.value
                 }
             )
