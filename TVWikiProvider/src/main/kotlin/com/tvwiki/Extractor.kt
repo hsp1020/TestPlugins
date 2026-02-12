@@ -18,11 +18,10 @@ import kotlinx.coroutines.runBlocking
 
 /**
  * BunnyPoorCdn Extractor
- * Version: 2026-02-12-Header-Strategy-V6
- * - Change: Modified Referer to 'https://tvwiki5.net/' to bypass potential CDN hotlink protection.
- * - Change: Removed 'Origin' header to prevent strict CORS blocks on key fetch.
- * - Fix: Re-added short cookie retry loop to ensure session capture.
- * - Logic: Continues to use Token Override (M3U8 token -> Key token).
+ * Version: 2026-02-12-String-Parsing-Fix
+ * - Fix: Replaced java.net.URI with manual string parsing to guarantee token extraction.
+ * - Logic: Parses parent URL params and FORCIBLY overwrites 'token'/'expires' in child URLs.
+ * - Debug: Logs exactly which tokens are being injected.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki Player"
@@ -30,7 +29,7 @@ class BunnyPoorCdn : ExtractorApi() {
     override val requiresReferer = true
     
     private val MOBILE_UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-    private val TAG = "[BunnyPoorCdn-V6]"
+    private val TAG = "[BunnyPoorCdn-StringFix]"
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
@@ -86,7 +85,7 @@ class BunnyPoorCdn : ExtractorApi() {
         if (capturedUrl != null) {
             println("$TAG Captured: $capturedUrl")
             
-            // Cookie Retry Strategy
+            // Cookie Retry
             var cookie = ""
             val cookieManager = CookieManager.getInstance()
             for (i in 0..5) {
@@ -98,8 +97,6 @@ class BunnyPoorCdn : ExtractorApi() {
                 println("$TAG Cookie Found: $cookie")
             }
 
-            // Headers optimized for Key/Segment fetching
-            // Using main site referer often bypasses CDN "iframe only" checks
             val headers = mutableMapOf(
                 "User-Agent" to MOBILE_UA,
                 "Referer" to "https://tvwiki5.net/", 
@@ -196,6 +193,7 @@ class BunnyPoorCdn : ExtractorApi() {
                         if (response.isSuccessful) {
                             if (pathFull.startsWith("/playlist")) {
                                 val content = response.text
+                                // Rewriting M3U8 content with token override
                                 val newContent = rewriteM3u8(content, requestUrl)
                                 
                                 val header = "HTTP/1.1 200 OK\r\n" +
@@ -246,9 +244,15 @@ class BunnyPoorCdn : ExtractorApi() {
             return null
         }
 
-        private fun parseQuery(query: String?): MutableMap<String, String> {
+        // --- MANUAL STRING PARSING HELPERS ---
+        
+        private fun parseQueryString(url: String): Map<String, String> {
             val params = mutableMapOf<String, String>()
-            if (query.isNullOrEmpty()) return params
+            if (!url.contains("?")) return params
+            
+            val query = url.substringAfter("?")
+            if (query.isBlank()) return params
+
             query.split("&").forEach { pair ->
                 val parts = pair.split("=", limit = 2)
                 if (parts.size == 2) {
@@ -258,21 +262,19 @@ class BunnyPoorCdn : ExtractorApi() {
             return params
         }
 
-        private fun buildQuery(params: Map<String, String>): String {
-            return params.entries.joinToString("&") { "${it.key}=${it.value}" }
-        }
-
         private fun rewriteM3u8(content: String, baseUrl: String): String {
             val lines = content.lines()
             val refinedLines = mutableListOf<String>()
             val proxyBase = "http://127.0.0.1:$port/proxy?url="
             val playlistProxyBase = "http://127.0.0.1:$port/playlist?url="
 
-            val baseUri = try { URI(baseUrl) } catch(e:Exception) { null }
-            val baseParams = parseQuery(baseUri?.rawQuery)
+            // 1. Manually extract fresh params from Parent URL
+            val baseParams = parseQueryString(baseUrl)
             
             if (baseParams.isNotEmpty()) {
-                println("$tag Found base params: ${baseParams.keys}")
+                println("$tag Extracted fresh params: ${baseParams.keys}")
+            } else {
+                println("$tag WARNING: No params found in base URL: $baseUrl")
             }
 
             for (line in lines) {
@@ -284,14 +286,15 @@ class BunnyPoorCdn : ExtractorApi() {
                     val match = regex.find(trLine)
                     if (match != null) {
                         val keyUrl = match.groupValues[1]
-                        val absUrl = resolveUrl(baseUrl, keyUrl, baseParams)
+                        // Overwrite logic applied
+                        val absUrl = resolveUrlWithOverride(baseUrl, keyUrl, baseParams)
                         val encoded = URLEncoder.encode(absUrl, "UTF-8")
                         refinedLines.add(trLine.replace(keyUrl, "$proxyBase$encoded"))
                     } else {
                         refinedLines.add(trLine)
                     }
                 } else if (!trLine.startsWith("#")) {
-                    val absUrl = resolveUrl(baseUrl, trLine, baseParams)
+                    val absUrl = resolveUrlWithOverride(baseUrl, trLine, baseParams)
                     val encoded = URLEncoder.encode(absUrl, "UTF-8")
                     
                     if (absUrl.contains(".m3u8") || absUrl.contains("c.html")) {
@@ -306,33 +309,55 @@ class BunnyPoorCdn : ExtractorApi() {
             return refinedLines.joinToString("\n")
         }
 
-        private fun resolveUrl(base: String, url: String, baseParams: Map<String, String>): String {
+        // Robust URL Resolver with Param Overwriting
+        private fun resolveUrlWithOverride(base: String, url: String, freshParams: Map<String, String>): String {
+            // 1. Get absolute URL
             var resolved = if (url.startsWith("http")) {
                 url
             } else if (url.startsWith("//")) {
                 "https:$url"
             } else {
                 try {
-                    URI(base).resolve(url).toString()
+                    // Manual path resolution to avoid URI class
+                    if (url.startsWith("/")) {
+                        val uri = URI(base)
+                        "${uri.scheme}://${uri.host}$url"
+                    } else {
+                        val lastSlash = base.lastIndexOf('/')
+                        if (lastSlash != -1) {
+                            base.substring(0, lastSlash + 1) + url
+                        } else {
+                            "$base/$url"
+                        }
+                    }
                 } catch (e: Exception) {
                     url
                 }
             }
 
-            if (baseParams.isEmpty()) return resolved
+            if (freshParams.isEmpty()) return resolved
 
-            val parts = resolved.split("?", limit = 2)
-            val baseUrlPart = parts[0]
-            val existingQuery = if (parts.size > 1) parts[1] else ""
+            // 2. Parse existing params of the child URL
+            val urlParts = resolved.split("?", limit = 2)
+            val baseUrlPart = urlParts[0]
+            val existingQuery = if (urlParts.size > 1) urlParts[1] else ""
             
-            val currentParams = parseQuery(existingQuery)
+            val currentParams = mutableMapOf<String, String>()
+            if (existingQuery.isNotEmpty()) {
+                existingQuery.split("&").forEach { 
+                    val p = it.split("=", limit = 2)
+                    if (p.size == 2) currentParams[p[0]] = p[1]
+                }
+            }
 
-            baseParams.forEach { (key, value) ->
+            // 3. FORCE OVERWRITE: Replace existing tokens with fresh ones
+            freshParams.forEach { (key, value) ->
                 currentParams[key] = value
             }
 
-            val newQuery = buildQuery(currentParams)
-            return if (newQuery.isNotEmpty()) "$baseUrlPart?$newQuery" else baseUrlPart
+            // 4. Rebuild
+            val newQuery = currentParams.entries.joinToString("&") { "${it.key}=${it.value}" }
+            return "$baseUrlPart?$newQuery"
         }
     }
 }
