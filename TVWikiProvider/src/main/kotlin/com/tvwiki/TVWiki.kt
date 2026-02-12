@@ -15,8 +15,8 @@ import okhttp3.RequestBody.Companion.toRequestBody
 
 /**
  * TVWiki Provider
- * Version: 2026-02-08 (Refined)
- * - API Session Logic Enhanced
+ * Version: [2026-02-12-EmbeddedKey]
+ * - API Session Logic Enhanced (from 02-08)
  * - Extractor Fallback Improved
  */
 class TVWiki : MainAPI() {
@@ -72,7 +72,6 @@ class TVWiki : MainAPI() {
         
         return try {
             val doc = app.get(url, headers = commonHeaders).document
-            // ID 선택자가 변경될 수 있으므로 여러 케이스 대응
             val list = doc.select("#list_type ul li, .mov_list ul li").mapNotNull { it.toSearchResponse() }
             
             newHomePageResponse(request.name, list, hasNext = list.isNotEmpty())
@@ -99,7 +98,6 @@ class TVWiki : MainAPI() {
 
         val fixedPoster = fixUrl(poster)
 
-        // 포스터 URL을 상세 페이지로 넘기기 위한 트릭
         if (fixedPoster.isNotEmpty()) {
             try {
                 val encodedPoster = URLEncoder.encode(fixedPoster, "UTF-8")
@@ -151,7 +149,6 @@ class TVWiki : MainAPI() {
         var passedPoster: String? = null
         var realUrl = url
 
-        // URL 파라미터에서 포스터 추출
         try {
             val regex = Regex("[?&]cw_poster=([^&]+)")
             val match = regex.find(url)
@@ -169,7 +166,6 @@ class TVWiki : MainAPI() {
 
         val doc = app.get(realUrl, headers = commonHeaders).document
 
-        // 제목 추출
         val h3Element = doc.selectFirst("#bo_v_movinfo h3")
         var title = h3Element?.ownText()?.trim()
         val oriTitleFull = h3Element?.selectFirst(".ori_title")?.text()?.trim()
@@ -180,10 +176,8 @@ class TVWiki : MainAPI() {
                 ?: "Unknown Title"
         }
         
-        // 불필요한 텍스트 제거 (예: 1화, 다시보기 등)
         title = title!!.replace(Regex("\\\\s*\\\\d+[화회부].*"), "").replace(" 다시보기", "").trim()
 
-        // 원제 추가
         if (!oriTitleFull.isNullOrEmpty()) {
             val pureOriTitle = oriTitleFull.replace("원제 :", "").replace("원제:", "").trim()
             if (pureOriTitle.isNotEmpty() && !pureOriTitle.contains(Regex("[가-힣]"))) {
@@ -191,7 +185,6 @@ class TVWiki : MainAPI() {
             }
         }
 
-        // 포스터
         var poster = doc.selectFirst("#bo_v_poster img")?.attr("src")
             ?: doc.selectFirst("meta[property='og:image']")?.attr("content")
         
@@ -200,7 +193,6 @@ class TVWiki : MainAPI() {
         }
         poster = fixUrl(poster ?: "")
 
-        // 메타데이터 추출
         val infoList = doc.select(".bo_v_info dd").map { it.text().trim().replace("개봉년도:", "공개일:") }
         val genreList = doc.select(".tags dd a").map { it.text().trim() }.filter { !it.contains("트레일러") }
         val castList = doc.select(".slider_act .item .name").map { it.text().trim() }
@@ -220,7 +212,6 @@ class TVWiki : MainAPI() {
 
         val finalPlot = "$metaString\n\n$story".trim()
 
-        // 에피소드 목록 추출
         val episodes = doc.select("#other_list ul li").mapNotNull { li ->
             val aTag = li.selectFirst("a.ep-link") ?: return@mapNotNull null
             val href = fixUrl(aTag.attr("href"))
@@ -236,13 +227,12 @@ class TVWiki : MainAPI() {
                 this.name = epName
                 this.posterUrl = fixUrl(epThumb ?: "")
             }
-        }.reversed() // 보통 최신화가 위에 있으므로 역순 정렬
+        }.reversed()
 
         val type = determineTypeFromUrl(realUrl)
 
         return when (type) {
             TvType.Movie, TvType.AnimeMovie -> {
-                // 영화는 에피소드가 없거나 1개
                 val movieLink = episodes.firstOrNull()?.data ?: realUrl
                 newMovieLoadResponse(title, realUrl, type, movieLink) {
                     this.posterUrl = poster
@@ -268,27 +258,23 @@ class TVWiki : MainAPI() {
         
         println("[TVWiki] Parsing Links for: $data")
 
-        // 1. data-session을 이용한 API 호출 (가장 빠르고 정확함)
         if (extractFromApi(doc, data, subtitleCallback, callback)) {
             return true
         }
 
-        // 2. 정적 파싱 (iframe src 직접 찾기)
         if (findAndExtract(doc, data, subtitleCallback, callback)) {
             return true
         }
         
-        // 3. WebView Fallback (최후의 수단)
         println("[TVWiki] Attempting WebView Fallback")
         return try {
             val webViewInterceptor = WebViewResolver(
                 Regex("""bunny-frame|googleapis|player\.php"""), 
-                timeout = 20000L // 타임아웃 20초로 증가
+                timeout = 20000L
             )
             val response = app.get(data, headers = commonHeaders, interceptor = webViewInterceptor)
             val webViewDoc = response.document
             
-            // WebView 로딩 후 다시 찾기
             findAndExtract(webViewDoc, data, subtitleCallback, callback)
         } catch (e: Exception) {
             println("[TVWiki] WebView Error: ${e.message}")
@@ -305,7 +291,6 @@ class TVWiki : MainAPI() {
         try {
             val iframe = doc.selectFirst("iframe#view_iframe") ?: return false
             
-            // data-session1, data-session2 등 여러 속성 시도
             val sessionData = iframe.attr("data-session1").ifEmpty { 
                 iframe.attr("data-session2") 
             }.ifEmpty { 
@@ -319,19 +304,15 @@ class TVWiki : MainAPI() {
             headers["Content-Type"] = "application/json"
             headers["X-Requested-With"] = "XMLHttpRequest"
 
-            // JSON String 생성 (수동 생성으로 라이브러리 의존성 문제 최소화)
             val requestBody = sessionData.toRequestBody("application/json".toMediaTypeOrNull())
             
             val response = app.post(apiUrl, headers = headers, requestBody = requestBody)
-            
-            // 응답이 JSON이 아닐 수도 있으므로 Try-Catch
             val json = response.parsedSafe<SessionResponse>()
 
             if (json != null && json.success && !json.playerUrl.isNullOrEmpty()) {
                 val fullUrl = "${json.playerUrl}?t=${json.t}&sig=${json.sig}"
                 println("[TVWiki] API URL Found: $fullUrl")
                 
-                // BunnyPoorCdn 추출기 사용
                 return BunnyPoorCdn().extract(fullUrl, referer, subtitleCallback, callback, null)
             }
         } catch (e: Exception) {
@@ -346,7 +327,6 @@ class TVWiki : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // Iframe Src 찾기
         var iframe = doc.selectFirst("iframe#view_iframe")
         if (iframe == null) {
             iframe = doc.selectFirst("iframe[src*='bunny-frame']")
@@ -360,7 +340,6 @@ class TVWiki : MainAPI() {
             }
         }
 
-        // Script 태그 내 URL 찾기 (obfuscated code 대응)
         val scriptTags = doc.select("script")
         val urlRegex = Regex("""https://(player\.bunny-frame\.online|vid\.\w+)/[^"'\s]+""")
         
