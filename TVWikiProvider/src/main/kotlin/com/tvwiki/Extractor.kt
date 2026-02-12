@@ -17,11 +17,10 @@ import kotlinx.coroutines.runBlocking
 
 /**
  * BunnyPoorCdn Extractor
- * Version: [2026-02-13-V22.1-Final-Perfect-Headers]
- * - NEW: Implements Dynamic Header Engine. It differentiates between 'cross-site' entries (Playlist)
- * and 'same-origin' internal calls (Key/Segments).
- * - FIXED: Mimics browser's Referer chain (Key/TS refer to the M3U8 URL on the SAME HOST).
- * - FIXED: Forced Token Overwrite fixes the 1608 bytes error by replacing stale tokens.
+ * Version: [2026-02-13-V23-Zero-Sync-Headers]
+ * - NEW: Implements "Zero-Touch" Token strategy. Does NOT overwrite sub-resource tokens.
+ * - NEW: Combined with Dynamic Header Engine to fix 403 (1608 bytes) without breaking unique tokens.
+ * - FIXED: Smart Referer Chain - Playlist refers Player, Key/TS refers M3U8 URL.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki Player"
@@ -29,10 +28,10 @@ class BunnyPoorCdn : ExtractorApi() {
     override val requiresReferer = true
     
     private val MOBILE_UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-    private val TAG = "[BunnyPoorCdn-2026-02-13-V22.1]"
+    private val TAG = "[BunnyPoorCdn-2026-02-13-V23]"
 
     companion object {
-        private var proxyServer: ProxyWebServerV22? = null
+        private var proxyServer: ProxyWebServerV23? = null
     }
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
@@ -56,11 +55,11 @@ class BunnyPoorCdn : ExtractorApi() {
             val cookie = CookieManager.getInstance().getCookie(capturedUrl) ?: ""
             
             if (proxyServer == null) {
-                proxyServer = ProxyWebServerV22(TAG)
+                proxyServer = ProxyWebServerV23(TAG)
                 proxyServer?.start()
             }
-            // M3U8 주소를 하위 리소스의 Referer 및 도메인 비교용으로 저장
-            proxyServer?.updateContext(cookie, capturedUrl)
+            // 세션 유지를 위해 두 가지 기준 URL(플레이어 진입점, 캡처된 M3U8)을 프록시에 전달
+            proxyServer?.updateContext(cookie, cleanUrl, capturedUrl)
 
             val port = proxyServer?.port ?: return false
             val encodedUrl = URLEncoder.encode(capturedUrl, "UTF-8")
@@ -74,11 +73,12 @@ class BunnyPoorCdn : ExtractorApi() {
         return false
     }
 
-    class ProxyWebServerV22(private val tag: String) {
+    class ProxyWebServerV23(private val tag: String) {
         private var serverSocket: ServerSocket? = null
         private var isRunning = false
         var port: Int = 0
         @Volatile private var currentCookie: String = ""
+        @Volatile private var fullPlayerUrl: String = ""
         @Volatile private var m3u8FullUrl: String = ""
         
         private val mobileUa = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
@@ -88,18 +88,19 @@ class BunnyPoorCdn : ExtractorApi() {
                 serverSocket = ServerSocket(0)
                 port = serverSocket!!.localPort
                 isRunning = true
-                println("$tag [ProxyV22.1] Started on port $port")
+                println("$tag [ProxyV23] Started on port $port")
                 thread(isDaemon = true) { 
                     while (isRunning && serverSocket != null) { 
                         try { handleClient(serverSocket!!.accept()) } catch (e: Exception) { } 
                     } 
                 }
-            } catch (e: Exception) { println("$tag [ProxyV22.1] Start Failed: $e") }
+            } catch (e: Exception) { println("$tag [ProxyV23] Start Failed: $e") }
         }
 
-        fun updateContext(cookie: String, m3u8Url: String) { 
+        fun updateContext(cookie: String, playerUrl: String, m3u8Url: String) { 
             currentCookie = cookie 
-            m3u8FullUrl = m3u8Url 
+            fullPlayerUrl = playerUrl
+            m3u8FullUrl = m3u8Url
         }
 
         private fun handleClient(socket: Socket) = thread {
@@ -116,30 +117,21 @@ class BunnyPoorCdn : ExtractorApi() {
                     val targetUrlRaw = getQueryParam(pathFull, "url") ?: return@thread
                     val requestUrl = if (targetUrlRaw.contains("#")) targetUrlRaw.substringBefore("#") else targetUrlRaw
                     
-                    // [지능형 엔진 핵심 로직]
-                    val targetUri = URI(requestUrl)
-                    val baseUri = URI(m3u8FullUrl)
-                    val isSameOrigin = targetUri.host == baseUri.host
+                    // [지능형 엔진: 브라우저 참조 체인 복제]
+                    val isPlaylist = requestUrl.contains("c.html")
+                    val referer = if (isPlaylist) fullPlayerUrl else m3u8FullUrl
+                    val siteMode = if (isPlaylist) "cross-site" else "same-origin"
                     
                     val headers = mutableMapOf(
                         "User-Agent" to mobileUa,
+                        "Referer" to referer,
                         "Accept" to "*/*",
-                        "Sec-Fetch-Dest" to "empty"
+                        "Sec-Fetch-Dest" to "empty",
+                        "Sec-Fetch-Mode" to "cors",
+                        "Sec-Fetch-Site" to siteMode
                     )
-                    
-                    if (isSameOrigin && !requestUrl.contains("c.html")) {
-                        // 키(Key) 및 세그먼트(TS) 요청: M3U8과 같은 도메인이므로 same-origin 적용
-                        headers["Referer"] = m3u8FullUrl
-                        headers["Sec-Fetch-Site"] = "same-origin"
-                        headers["Sec-Fetch-Mode"] = "no-cors"
-                    } else {
-                        // 플레이리스트(c.html) 요청: 플레이어 외부에서 진입하므로 cross-site 적용
-                        headers["Referer"] = "https://player.bunny-frame.online/"
-                        headers["Origin"] = "https://player.bunny-frame.online"
-                        headers["Sec-Fetch-Site"] = "cross-site"
-                        headers["Sec-Fetch-Mode"] = "cors"
-                    }
-                    
+                    // 브라우저는 Same-Origin이라도 CORS 요청 시 Origin을 보낼 수 있음
+                    if (!isPlaylist) headers["Origin"] = "https://player.bunny-frame.online"
                     if (currentCookie.isNotEmpty()) headers["Cookie"] = currentCookie
 
                     val response = runBlocking { app.get(requestUrl, headers = headers) }
@@ -155,7 +147,7 @@ class BunnyPoorCdn : ExtractorApi() {
                             output.write(response.body.bytes())
                         }
                     } else {
-                        println("$tag [ProxyV22.1] Error ${response.code} for: $requestUrl (Mode: ${headers["Sec-Fetch-Site"]})")
+                        println("$tag [ProxyV23] Error ${response.code} for: $requestUrl (Mode: $siteMode)")
                         output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
                     }
                 }
@@ -174,7 +166,6 @@ class BunnyPoorCdn : ExtractorApi() {
             val refinedLines = mutableListOf<String>()
             val proxyBase = "http://127.0.0.1:$port/proxy?url="
             val playlistProxyBase = "http://127.0.0.1:$port/playlist?url="
-            val baseParams = parseQuery(baseUrl)
 
             for (line in lines) {
                 val trLine = line.trim()
@@ -183,11 +174,12 @@ class BunnyPoorCdn : ExtractorApi() {
                     val uriMatch = Regex("""URI="([^"]+)"""").find(trLine)
                     if (uriMatch != null) {
                         val keyUrl = uriMatch.groupValues[1]
-                        val absUrl = resolveForceSync(baseUrl, keyUrl, baseParams)
+                        // [Fix] Zero-Touch: 토큰 변조 없이 절대 경로로만 변환
+                        val absUrl = resolveUrlV23(baseUrl, keyUrl)
                         refinedLines.add(trLine.replace(keyUrl, "$proxyBase${URLEncoder.encode(absUrl, "UTF-8")}"))
                     } else { refinedLines.add(trLine) }
                 } else if (!trLine.startsWith("#")) {
-                    val absUrl = resolveForceSync(baseUrl, trLine, baseParams)
+                    val absUrl = resolveUrlV23(baseUrl, trLine)
                     val encoded = URLEncoder.encode(absUrl, "UTF-8")
                     if (absUrl.contains(".m3u8") || absUrl.contains("c.html")) {
                         refinedLines.add("$playlistProxyBase$encoded")
@@ -199,31 +191,17 @@ class BunnyPoorCdn : ExtractorApi() {
             return refinedLines.joinToString("\n")
         }
 
-        private fun parseQuery(url: String): Map<String, String> {
-            val params = mutableMapOf<String, String>()
-            if (!url.contains("?")) return params
-            url.substringAfter("?").split("&").forEach { pair ->
-                val p = pair.split("=", limit = 2)
-                if (p.size == 2) params[p[0]] = p[1]
+        // [Fix] 절대 경로 결합만 수행하고 쿼리는 보존함 (Zero-Touch)
+        private fun resolveUrlV23(base: String, path: String): String {
+            if (path.startsWith("http")) return path
+            if (path.startsWith("//")) return "https:$path"
+            return try {
+                val baseUri = URI(base.substringBefore("#"))
+                baseUri.resolve(path).toString()
+            } catch (e: Exception) {
+                val baseDir = base.substringBefore("?").substringBeforeLast("/")
+                "$baseDir/$path"
             }
-            return params
-        }
-
-        private fun resolveForceSync(base: String, path: String, freshParams: Map<String, String>): String {
-            var resolved = try { URI(base.substringBefore("#")).resolve(path).toString() } catch (e: Exception) {
-                if (path.startsWith("/")) "${URI(base).scheme}://${URI(base).host}$path"
-                else "${base.substringBefore("?").substringBeforeLast("/")}/$path"
-            }
-            if (freshParams.isEmpty()) return resolved
-            val baseUrlOnly = resolved.substringBefore("?")
-            val currentParams = parseQuery(resolved).toMutableMap()
-            
-            // 토큰 강제 주입 (V20에서 효과 확인됨)
-            listOf("token", "expires", "sig", "t").forEach { k ->
-                if (freshParams.containsKey(k)) currentParams[k] = freshParams[k]!!
-            }
-            val newQuery = currentParams.entries.joinToString("&") { "${it.key}=${it.value}" }
-            return "$baseUrlOnly?$newQuery"
         }
     }
 }
