@@ -18,10 +18,10 @@ import kotlinx.coroutines.runBlocking
 
 /**
  * BunnyPoorCdn Extractor
- * Version: [2026-02-12-V17-Force-Sync]
- * - NEW: Combined 'URI.resolve()' (fixed 404s) with 'Forced Token Overwrite' (fixed 403s/1608 bytes).
- * - WHY: V15 logs proved that existing tokens in sub-resources are stale and MUST be replaced.
- * - SECURITY: Implements high-fidelity browser headers and Full URL Referer synchronization.
+ * Version: [2026-02-12-V19-Final-Full-Combine]
+ * - FIXED: Reverted Referer to Full Player URL for ALL proxy requests (Matches V14 success).
+ * - FIXED: Force Syncs 'token'/'expires' from Parent M3U8 to all sub-resources (Fixes 1608 bytes error).
+ * - FIXED: Standardized URI resolution prevents double-slashes.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki Player"
@@ -29,7 +29,7 @@ class BunnyPoorCdn : ExtractorApi() {
     override val requiresReferer = true
     
     private val MOBILE_UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-    private val TAG = "[BunnyPoorCdn-2026-02-12-V17]"
+    private val TAG = "[BunnyPoorCdn-2026-02-12-V19]"
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
@@ -58,13 +58,12 @@ class BunnyPoorCdn : ExtractorApi() {
                 proxyServer = ProxyWebServer(TAG)
                 proxyServer?.start()
             }
-            // 세션 유지를 위해 WebView 진입 전체 URL을 Referer 컨텍스트로 저장
+            // V14의 성공 비결: WebView의 최초 진입 URL(cleanUrl)을 Referer 컨텍스트로 유지
             proxyServer?.updateContext(cookie, cleanUrl)
 
             val port = proxyServer?.port ?: return false
             val encodedUrl = URLEncoder.encode(capturedUrl, "UTF-8")
             
-            // HLS 인식을 위해 M3U8 타입 명시
             callback(newExtractorLink(name, name, "http://127.0.0.1:$port/playlist?url=$encodedUrl#.m3u8", ExtractorLinkType.M3U8) {
                 this.referer = cleanUrl
                 this.quality = Qualities.Unknown.value
@@ -112,14 +111,11 @@ class BunnyPoorCdn : ExtractorApi() {
                     val targetUrlRaw = getQueryParam(pathFull, "url") ?: return@thread
                     val requestUrl = if (targetUrlRaw.contains("#")) targetUrlRaw.substringBefore("#") else targetUrlRaw
                     
-                    // [헤더 전략] c.html은 메인 Referer, 나머지는 플레이어 전체 Referer
-                    val finalReferer = if (requestUrl.contains("c.html")) "https://tvwiki5.net/" else fullPlayerUrl
-                    
+                    // [Strategy] 모든 프록시 요청에 WebView의 전체 URL을 Referer로 사용 (V14 방식)
                     val headers = mutableMapOf(
                         "User-Agent" to mobileUa,
-                        "Referer" to finalReferer,
-                        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                        "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8",
+                        "Referer" to fullPlayerUrl,
+                        "Accept" to "*/*",
                         "Sec-Fetch-Dest" to "empty",
                         "Sec-Fetch-Mode" to "cors",
                         "Sec-Fetch-Site" to "cross-site"
@@ -139,7 +135,7 @@ class BunnyPoorCdn : ExtractorApi() {
                             output.write(response.body.bytes())
                         }
                     } else {
-                        println("$tag [Proxy] Error ${response.code} for: $requestUrl (Ref: $finalReferer)")
+                        println("$tag [Proxy] Error ${response.code} for: $requestUrl")
                         output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
                     }
                 }
@@ -177,42 +173,35 @@ class BunnyPoorCdn : ExtractorApi() {
                     val uriMatch = Regex("""URI="([^"]+)"""").find(trLine)
                     if (uriMatch != null) {
                         val keyUrl = uriMatch.groupValues[1]
-                        // [Fix] 표준 결합 후 낡은 토큰 강제 교체
-                        val absUrl = resolveForceOverride(baseUrl, keyUrl, baseParams)
+                        val absUrl = resolveForceSync(baseUrl, keyUrl, baseParams)
                         refinedLines.add(trLine.replace(keyUrl, "$proxyBase${URLEncoder.encode(absUrl, "UTF-8")}"))
                     } else { refinedLines.add(trLine) }
                 } else if (!trLine.startsWith("#")) {
-                    val absUrl = resolveForceOverride(baseUrl, trLine, baseParams)
+                    val absUrl = resolveForceSync(baseUrl, trLine, baseParams)
                     val encoded = URLEncoder.encode(absUrl, "UTF-8")
                     if (absUrl.contains(".m3u8") || absUrl.contains("c.html")) {
                         refinedLines.add("$playlistProxyBase$encoded")
-                    } else { refinedLines.add("$proxyBase$encoded") }
+                    } else {
+                        refinedLines.add("$proxyBase$encoded")
+                    }
                 } else { refinedLines.add(trLine) }
             }
             return refinedLines.joinToString("\n")
         }
 
-        private fun resolveForceOverride(base: String, path: String, freshParams: Map<String, String>): String {
-            // 1. 표준 결합 (V11에서 검증됨, //v/key7 방지)
+        private fun resolveForceSync(base: String, path: String, freshParams: Map<String, String>): String {
             var resolved = try { URI(base.substringBefore("#")).resolve(path).toString() } catch (e: Exception) {
                 if (path.startsWith("/")) "${URI(base).scheme}://${URI(base).host}$path"
                 else "${base.substringBefore("?").substringBeforeLast("/")}/$path"
             }
-
-            // 2. 강제 갱신 (V15 로그에서 증명된 낡은 토큰 문제 해결)
-            val parts = resolved.split("?", limit = 2)
-            val baseUrlOnly = parts[0]
+            if (freshParams.isEmpty()) return resolved
+            val baseUrlOnly = resolved.substringBefore("?")
             val currentParams = parseQuery(resolved).toMutableMap()
-            
-            var changed = false
+            // 부모의 싱싱한 인증 정보로 강제 교체 (1608바이트 에러 해결의 핵심)
             listOf("token", "expires", "sig", "t").forEach { k ->
-                if (freshParams.containsKey(k)) {
-                    currentParams[k] = freshParams[k]!! // 무조건 덮어씀
-                    changed = true
-                }
+                if (freshParams.containsKey(k)) currentParams[k] = freshParams[k]!!
             }
-
-            return if (changed) {
+            return if (currentParams.isNotEmpty()) {
                 val newQuery = currentParams.entries.joinToString("&") { "${it.key}=${it.value}" }
                 "$baseUrlOnly?$newQuery"
             } else resolved
