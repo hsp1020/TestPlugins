@@ -19,7 +19,7 @@ import java.net.Socket
 import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
-// [v177] Extractor.kt: M3U8(메인 리퍼러) + Key(플레이어 리퍼러) + no3.png 자동 회피
+// [v178] Extractor.kt: 리퍼러 체인 정상화 (플레이어 로딩=Main, 파일 로딩=Player)
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
     override val mainUrl = "https://player.bunny-frame.online"
@@ -36,51 +36,44 @@ class BunnyPoorCdn : ExtractorApi() {
     }
 
     suspend fun extract(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit, thumbnailHint: String? = null): Boolean {
-        println("[BunnyPoorCdn] v177 시작 - 하이브리드 리퍼러 전략")
+        println("[BunnyPoorCdn] v178 시작 - 올바른 리퍼러 체인 적용")
         
         var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
         val videoId = "video_${System.currentTimeMillis()}"
 
-        // 1. M3U8 확보 (지능형 리퍼러 선택)
-        // v163에서 성공했던 'https://tvwiki5.net/'을 1순위로 사용
-        // 만약 no3.png가 뜨면 자동으로 cleanUrl(플레이어 주소)로 재시도
-        val refererCandidates = listOf("https://tvwiki5.net/", cleanUrl)
+        // 1. M3U8 주소 확보 (no3.png 회피를 위해 'tvwiki5.net' 리퍼러 사용)
+        val m3u8Resolver = WebViewResolver(interceptUrl = Regex("""/c\.html"""), useOkhttp = false, timeout = 30000L)
         var targetUrl: String? = null
-        
-        for (ref in refererCandidates) {
-            println("[BunnyPoorCdn] M3U8 시도 (Referer: $ref)")
-            val resolver = WebViewResolver(interceptUrl = Regex("""/c\.html|no3\.png"""), useOkhttp = false, timeout = 30000L)
-            
-            try {
-                val response = app.get(url = cleanUrl, headers = mapOf("Referer" to ref, "User-Agent" to DESKTOP_UA), interceptor = resolver)
-                
-                if (response.url.contains("no3.png")) {
-                    println("[BunnyPoorCdn] 차단 이미지(no3.png) 감지됨. 다음 리퍼러로 재시도.")
-                    continue // 다음 후보로 이동
-                } else if (response.url.contains("/c.html")) {
-                    targetUrl = response.url
-                    println("[BunnyPoorCdn] M3U8 주소 확보 성공: $targetUrl")
-                    break // 성공 시 루프 탈출
-                }
-            } catch (e: Exception) { }
-        }
-
-        if (targetUrl == null) {
-            println("[BunnyPoorCdn] 모든 리퍼러 시도 실패. M3U8 확보 불가.")
-            return false
-        }
-
-        // 2. M3U8 다운로드
         try {
-            val m3u8Response = app.get(targetUrl, headers = mapOf("User-Agent" to DESKTOP_UA, "Referer" to "https://tvwiki5.net/"))
+            val response = app.get(
+                url = cleanUrl, 
+                // [1단계] 플레이어 페이지를 열 때는 메인 사이트가 리퍼러여야 함
+                headers = mapOf("Referer" to "https://tvwiki5.net/", "User-Agent" to DESKTOP_UA), 
+                interceptor = m3u8Resolver
+            )
+            if (response.url.contains("/c.html")) {
+                targetUrl = response.url
+                println("[BunnyPoorCdn] M3U8 주소 확보 성공: $targetUrl")
+            }
+        } catch (e: Exception) { e.printStackTrace() }
+
+        if (targetUrl == null) return false
+
+        // 2. M3U8 다운로드 (여기서부터는 '플레이어 주소'가 리퍼러여야 함)
+        try {
+            // [v178 수정] CDN 요청 시에는 cleanUrl(플레이어 주소)을 리퍼러로 사용 (v177의 실수 수정)
+            val m3u8Response = app.get(targetUrl, headers = mapOf("User-Agent" to DESKTOP_UA, "Referer" to cleanUrl))
             val m3u8Content = m3u8Response.text
-            if (!m3u8Content.contains("#EXTM3U")) return false
+            
+            if (!m3u8Content.contains("#EXTM3U")) {
+                println("[BunnyPoorCdn] M3U8 내용 다운로드 실패 또는 형식 오류")
+                return false
+            }
 
             val m3u8Uri = URI(targetUrl)
             val tokenQuery = m3u8Uri.rawQuery
 
-            // 3. 진짜 키 획득 (WebView + Player Referer)
-            // [검증] Key 요청 시에는 반드시 '플레이어 주소'가 리퍼러여야 함 (v170 테스트 기반)
+            // 3. 진짜 키 획득 (WebView 사용 + Player Referer)
             val keyUriMatch = Regex("""URI="([^"]+)"""").find(m3u8Content)
             var finalKeyData: ByteArray? = null
             
@@ -91,9 +84,9 @@ class BunnyPoorCdn : ExtractorApi() {
                     absKeyUrl += if (absKeyUrl.contains("?")) "&$tokenQuery" else "?$tokenQuery"
                 }
 
-                println("[BunnyPoorCdn] 키 요청: $absKeyUrl (Referer: $cleanUrl)")
+                println("[BunnyPoorCdn] 키 요청: $absKeyUrl")
                 
-                // 키 요청 전용 WebView (Referer: cleanUrl)
+                // [2단계] 키 파일 요청 시에도 플레이어 주소를 리퍼러로 사용
                 val keyResolver = WebViewResolver(interceptUrl = Regex("""wrap_key\.php"""), useOkhttp = false)
                 val keyRes = app.get(
                     url = absKeyUrl, 
@@ -106,13 +99,13 @@ class BunnyPoorCdn : ExtractorApi() {
             }
 
             // 4. 프록시 서버 설정
-            // 영상 세그먼트는 cleanUrl 리퍼러를 선호할 가능성이 높음
+            // [3단계] 영상 세그먼트 요청 시에도 플레이어 주소를 리퍼러로 사용
             val videoHeaders = mapOf(
                 "User-Agent" to DESKTOP_UA,
                 "Referer" to cleanUrl,
-                "Origin" to "https://player.bunny-frame.online", // 영상 요청엔 Origin이 필요할 수도 있음 (Key와 다름)
                 "Accept" to "*/*",
                 "Connection" to "keep-alive"
+                // Origin은 제거 (v170 성공 요인)
             )
 
             proxyServer?.stop()
