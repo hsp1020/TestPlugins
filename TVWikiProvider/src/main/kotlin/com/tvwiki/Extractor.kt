@@ -5,16 +5,20 @@ import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.network.WebViewResolver 
 import android.webkit.CookieManager
 import java.net.URI
+import kotlinx.coroutines.delay
 
 /**
  * BunnyPoorCdn Extractor
- * Version: [2026-02-12-EmbeddedKey]
- * - Feature: Data URI M3U8 Injection (Solves 403 Forbidden Key Fetch Error)
+ * Version: 2026-02-12-Fix-v2
+ * Fixes:
+ * 1. Waits for CookieManager sync
+ * 2. Recursive Master/Media playlist handling
+ * 3. Strict Absolute URL resolution
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki Player"
@@ -29,7 +33,12 @@ class BunnyPoorCdn : ExtractorApi() {
         return try {
             URI(base).resolve(url).toString()
         } catch (e: Exception) {
-            url
+            if (url.startsWith("/")) {
+                val baseUri = URI(base)
+                "${baseUri.scheme}://${baseUri.host}$url"
+            } else {
+                "$base/$url" // Fallback
+            }
         }
     }
 
@@ -49,25 +58,13 @@ class BunnyPoorCdn : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
         thumbnailHint: String? = null,
     ): Boolean {
-        var cleanUrl = url.replace("&amp;", "&").trim()
+        val cleanUrl = url.replace("&amp;", "&").trim()
         val cleanReferer = referer ?: "https://tvwiki5.net/"
 
-        try {
-            if (cleanUrl.contains(".m3u8")) {
-                callback(
-                    newExtractorLink(name, name, cleanUrl, ExtractorLinkType.M3U8) {
-                        this.referer = cleanReferer
-                        this.quality = Qualities.Unknown.value
-                    }
-                )
-                return true
-            }
-        } catch (e: Exception) {}
-
         var capturedUrl: String? = null
-        // m3u8이 요청될 때까지 대기하여 완벽한 세션 쿠키를 보장함
         val interceptRegex = Regex("""(/c\.html|\.m3u8)""") 
 
+        // 1. WebView로 세션 생성 시도
         val resolver = WebViewResolver(
             interceptUrl = interceptRegex, 
             useOkhttp = false, 
@@ -89,57 +86,38 @@ class BunnyPoorCdn : ExtractorApi() {
             if (interceptRegex.containsMatchIn(response.url)) {
                 capturedUrl = response.url
             }
-
         } catch (e: Exception) {
             println("[BunnyPoorCdn] WebView failed: ${e.message}")
         }
 
         if (capturedUrl != null) {
+            println("[BunnyPoorCdn] Captured URL: $capturedUrl")
+            
+            // [CRITICAL] 쿠키 동기화 대기
+            delay(1000) 
+            
             val cookieManager = CookieManager.getInstance()
-            val cookie = cookieManager.getCookie(capturedUrl)
+            val cookie = cookieManager.getCookie(capturedUrl) ?: ""
+            println("[BunnyPoorCdn] Cookies: $cookie")
 
             val headers = mutableMapOf(
                 "User-Agent" to DESKTOP_UA,
                 "Referer" to "https://player.bunny-frame.online/",
                 "Origin" to "https://player.bunny-frame.online",
-                "Accept" to "*/*",
-                "Sec-Ch-Ua" to "\"Chromium\";v=\"122\", \"Not(A:Brand\";v=\"24\", \"Google Chrome\";v=\"122\"",
-                "Sec-Ch-Ua-Mobile" to "?0",
-                "Sec-Ch-Ua-Platform" to "\"Windows\"",
-                "Sec-Fetch-Site" to "cross-site",
-                "Sec-Fetch-Mode" to "cors"
+                "Accept" to "*/*"
             )
-
-            if (!cookie.isNullOrEmpty()) {
+            if (cookie.isNotEmpty()) {
                 headers["Cookie"] = cookie
             }
             
             val finalUrl = if (capturedUrl.contains("c.html")) "$capturedUrl#.m3u8" else capturedUrl
             
-            // [핵심 해결책] M3U8을 직접 다운로드하여 Key를 삽입하는 과정
-            try {
-                val m3u8Response = app.get(finalUrl, headers = headers)
-                val m3u8Text = m3u8Response.text
-                
-                if (m3u8Text.contains("#EXTM3U")) {
-                    println("[BunnyPoorCdn] Processing Direct M3U8 Injection...")
-                    processAndReturnM3u8(finalUrl, m3u8Text, headers, callback)
-                    
-                    // 만약을 대비해 원본 URL도 Fallback으로 제공
-                    callback(
-                        newExtractorLink("$name (Direct)", "$name (Fallback)", finalUrl, ExtractorLinkType.M3U8) {
-                            this.referer = "https://player.bunny-frame.online/"
-                            this.headers = headers
-                            this.quality = Qualities.Unknown.value
-                        }
-                    )
-                    return true
-                }
-            } catch (e: Exception) {
-                println("[BunnyPoorCdn] Failed to fetch M3U8 directly: ${e.message}")
+            // [Fix] M3U8 직접 다운로드 및 재귀 처리 시도
+            if (downloadAndProcessM3u8(finalUrl, headers, callback)) {
+                return true
             }
-            
-            // 직접 파싱에 실패한 경우 기존 방식 사용
+
+            // 실패 시 원본 링크 전달 (Fallback)
             callback(
                 newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
                     this.referer = "https://player.bunny-frame.online/"
@@ -148,106 +126,111 @@ class BunnyPoorCdn : ExtractorApi() {
                 }
             )
             return true
-        } 
-        
+        }
         return false
     }
 
-    private suspend fun processAndReturnM3u8(
-        baseUrl: String, 
-        m3u8Text: String, 
-        headers: Map<String, String>, 
+    // [New] 재귀적 M3U8 처리 함수
+    private suspend fun downloadAndProcessM3u8(
+        url: String,
+        headers: Map<String, String>,
         callback: (ExtractorLink) -> Unit
-    ) {
-        if (m3u8Text.contains("#EXT-X-STREAM-INF")) {
-            // Master Playlist: 하위 화질별 M3U8 분석
-            val lines = m3u8Text.lines()
-            var i = 0
-            while (i < lines.size) {
-                val line = lines[i]
-                if (line.startsWith("#EXT-X-STREAM-INF")) {
-                    var quality = Qualities.Unknown.value
-                    val resMatch = Regex("""RESOLUTION=(\d+x\d+)""").find(line)
-                    if (resMatch != null) {
-                        val height = resMatch.groupValues[1].split("x")[1].toIntOrNull()
-                        if (height != null) quality = height
-                    }
-                    
-                    val subUrl = lines.getOrNull(i + 1)?.trim()
-                    if (subUrl != null && !subUrl.startsWith("#")) {
-                        val absoluteSubUrl = resolveUrl(baseUrl, subUrl)
-                        try {
-                            val subM3u8Text = app.get(absoluteSubUrl, headers = headers).text
-                            if (subM3u8Text.contains("#EXTM3U")) {
-                                processMediaPlaylist(absoluteSubUrl, subM3u8Text, headers, quality, callback)
-                            }
-                        } catch (e: Exception) {
-                            println("[BunnyPoorCdn] Sub M3U8 fetch failed: ${e.message}")
-                        }
-                        i++ 
+    ): Boolean {
+        try {
+            println("[BunnyPoorCdn] Downloading M3U8: $url")
+            val response = app.get(url, headers = headers)
+            if (!response.isSuccessful) return false
+            
+            val content = response.text
+            
+            // Case A: Master Playlist (다른 M3U8을 포함)
+            if (content.contains("#EXT-X-STREAM-INF")) {
+                println("[BunnyPoorCdn] Master Playlist detected.")
+                val lines = content.lines()
+                var bestUrl: String? = null
+                
+                // 단순히 첫 번째 또는 해상도가 가장 높은 스트림을 찾음
+                for (i in lines.indices) {
+                    if (lines[i].startsWith("#EXT-X-STREAM-INF")) {
+                         // 다음 줄이 URL
+                         val nextLine = lines.getOrNull(i + 1)
+                         if (!nextLine.isNullOrBlank() && !nextLine.startsWith("#")) {
+                             bestUrl = resolveUrl(url, nextLine.trim())
+                             break // 첫 번째 발견된 것 사용 (보통 최고화질)
+                         }
                     }
                 }
-                i++
+
+                if (bestUrl != null) {
+                    // 재귀 호출
+                    return downloadAndProcessM3u8(bestUrl, headers, callback)
+                }
+                return false
             }
-        } else {
-            // Media Playlist
-            processMediaPlaylist(baseUrl, m3u8Text, headers, Qualities.Unknown.value, callback)
+
+            // Case B: Media Playlist (실제 TS 및 Key 포함)
+            if (content.contains("#EXTINF")) {
+                println("[BunnyPoorCdn] Media Playlist detected.")
+                val embeddedM3u8 = embedKeyAndResolveUrls(url, content, headers)
+                
+                val base64Data = Base64.encodeToString(embeddedM3u8.toByteArray(), Base64.NO_WRAP)
+                val dataUri = "data:application/vnd.apple.mpegurl;base64,$base64Data"
+                
+                callback(
+                    newExtractorLink("$name (Embedded)", "$name (Embedded)", dataUri, ExtractorLinkType.M3U8) {
+                        this.referer = "https://player.bunny-frame.online/"
+                        this.headers = headers
+                        this.quality = Qualities.Unknown.value
+                    }
+                )
+                return true
+            }
+
+        } catch (e: Exception) {
+            println("[BunnyPoorCdn] M3U8 Process Error: ${e.message}")
+            e.printStackTrace()
         }
+        return false
     }
 
-    private suspend fun processMediaPlaylist(
-        baseUrl: String,
-        m3u8Text: String,
-        headers: Map<String, String>,
-        quality: Int,
-        callback: (ExtractorLink) -> Unit
-    ) {
-        var newM3u8Text = m3u8Text
-        
-        // 1. 암호화 키 직접 다운로드 및 Data URI 삽입
-        val keyMatch = Regex("""#EXT-X-KEY:METHOD=([^,]+),URI="([^"]+)"""").find(newM3u8Text)
-        if (keyMatch != null) {
-            val method = keyMatch.groupValues[1]
-            val keyUrl = keyMatch.groupValues[2]
-            
-            if (method.contains("AES-128")) {
-                val absoluteKeyUrl = resolveUrl(baseUrl, keyUrl)
-                try {
-                    val keyResponse = app.get(absoluteKeyUrl, headers = headers)
-                    val keyBytes = keyResponse.body.bytes()
+    private suspend fun embedKeyAndResolveUrls(baseUrl: String, content: String, headers: Map<String, String>): String {
+        val newLines = mutableListOf<String>()
+        val lines = content.lines()
+
+        for (line in lines) {
+            if (line.startsWith("#EXT-X-KEY")) {
+                // Key 다운로드 및 교체
+                val uriMatch = Regex("""URI="([^"]+)"""").find(line)
+                if (uriMatch != null) {
+                    val keyUrl = uriMatch.groupValues[1]
+                    val absoluteKeyUrl = resolveUrl(baseUrl, keyUrl)
                     
-                    if (keyBytes.size == 16) {
-                        val base64Key = Base64.encodeToString(keyBytes, Base64.NO_WRAP).trim()
-                        val dataUri = "data:application/octet-stream;base64,$base64Key"
-                        newM3u8Text = newM3u8Text.replace("URI=\"$keyUrl\"", "URI=\"$dataUri\"")
-                        println("[BunnyPoorCdn] AES-128 Key successfully embedded.")
+                    println("[BunnyPoorCdn] Fetching Key: $absoluteKeyUrl")
+                    try {
+                        val keyResponse = app.get(absoluteKeyUrl, headers = headers)
+                        if (keyResponse.isSuccessful) {
+                            val keyBytes = keyResponse.body.bytes()
+                            val b64Key = Base64.encodeToString(keyBytes, Base64.NO_WRAP)
+                            val dataUri = "data:application/octet-stream;base64,$b64Key"
+                            
+                            val newLine = line.replace(keyUrl, dataUri)
+                            newLines.add(newLine)
+                            continue
+                        } else {
+                             println("[BunnyPoorCdn] Key fetch failed code: ${keyResponse.code}")
+                        }
+                    } catch (e: Exception) {
+                        println("[BunnyPoorCdn] Key fetch error: ${e.message}")
                     }
-                } catch (e: Exception) {
-                    println("[BunnyPoorCdn] Failed to fetch Key: ${e.message}")
                 }
-            }
-        }
-        
-        // 2. 비디오 조각(TS) 경로 절대 경로화
-        val newLines = newM3u8Text.lines().map { line ->
-            if (line.isNotBlank() && !line.startsWith("#")) {
-                resolveUrl(baseUrl, line.trim())
+                newLines.add(line) // 실패해도 원본 라인 유지
+            } else if (line.isNotBlank() && !line.startsWith("#")) {
+                // TS 파일 절대 경로 변환
+                newLines.add(resolveUrl(baseUrl, line.trim()))
             } else {
-                line
+                newLines.add(line)
             }
         }
-        newM3u8Text = newLines.joinToString("\n")
-        
-        // 3. 전체 M3U8을 Data URI로 변환하여 전송
-        val base64M3u8 = Base64.encodeToString(newM3u8Text.toByteArray(), Base64.NO_WRAP).trim()
-        val finalDataUri = "data:application/vnd.apple.mpegurl;base64,$base64M3u8"
-        
-        callback(
-            newExtractorLink("$name (Inject)", "$name (Embedded Key)", finalDataUri, ExtractorLinkType.M3U8) {
-                this.referer = "https://player.bunny-frame.online/"
-                this.headers = headers
-                this.quality = quality
-            }
-        )
+        return newLines.joinToString("\n")
     }
 }
