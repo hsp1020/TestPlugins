@@ -17,10 +17,12 @@ import java.io.BufferedReader
 import java.io.InputStreamReader
 import kotlin.concurrent.thread
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
 
 /**
  * BunnyPoorCdn Extractor
- * Version: 2026-02-12-Proxy-Fix
+ * Version: 2026-02-12-Proxy-BuildFixed
+ * - Fixed: Suspend function call error inside thread (added runBlocking)
  * - Solves 2001 Error (403): Injects Headers via Local Proxy
  * - Solves Data URI Crash: Serves content via HTTP (127.0.0.1)
  */
@@ -200,8 +202,11 @@ class BunnyPoorCdn : ExtractorApi() {
                 if (pathFull.startsWith("/playlist")) {
                     val targetUrl = getQueryParam(pathFull, "url")
                     if (targetUrl != null) {
-                        // 실제 M3U8 다운로드
-                        val response = app.get(targetUrl, headers = currentHeaders)
+                        // 실제 M3U8 다운로드 (Blocking for Thread)
+                        val response = runBlocking {
+                            app.get(targetUrl, headers = currentHeaders)
+                        }
+
                         if (response.isSuccessful) {
                             val content = response.text
                             val newContent = rewriteM3u8(content, targetUrl)
@@ -220,8 +225,11 @@ class BunnyPoorCdn : ExtractorApi() {
                 else if (pathFull.startsWith("/proxy")) {
                     val targetUrl = getQueryParam(pathFull, "url")
                     if (targetUrl != null) {
-                        // 실제 리소스 다운로드 (바이너리)
-                        val response = app.get(targetUrl, headers = currentHeaders)
+                        // 실제 리소스 다운로드 (Blocking for Thread)
+                        val response = runBlocking {
+                            app.get(targetUrl, headers = currentHeaders)
+                        }
+
                         if (response.isSuccessful) {
                             val contentType = response.headers["Content-Type"] ?: "application/octet-stream"
                             val header = "HTTP/1.1 200 OK\r\n" +
