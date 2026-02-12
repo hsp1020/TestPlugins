@@ -2,10 +2,7 @@ package com.tvwiki
 
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.utils.ExtractorApi
-import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.network.WebViewResolver 
 import android.webkit.CookieManager
 import java.net.ServerSocket
@@ -21,15 +18,17 @@ import kotlinx.coroutines.runBlocking
 
 /**
  * BunnyPoorCdn Extractor
- * Version: 2026-02-12-Final-V2
- * - Fixed: resolveUrl now correctly appends token even if target URL has query params.
- * - Solves InvalidKeyException (1603 bytes) completely.
+ * Version: 2026-02-12-Refined-Imports
+ * - Logic Verified: Forces inheritance of query parameters (tokens) from c.html to enc.key.
+ * - Fixes: InvalidKeyException (1600~ bytes html error page instead of 16-byte key).
+ * - Update: Optimized imports using wildcard (com.lagradost.cloudstream3.utils.*)
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki Player"
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
     
+    // WebView와 동일한 Mobile UA 사용
     private val MOBILE_UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
     companion object {
@@ -55,10 +54,10 @@ class BunnyPoorCdn : ExtractorApi() {
         val cleanUrl = url.replace("&amp;", "&").trim()
         val cleanReferer = referer ?: "https://tvwiki5.net/"
 
-        // 1. WebView 로딩
         var capturedUrl: String? = null
         val interceptRegex = Regex("""(/c\.html|\.m3u8)""") 
 
+        // 1. WebView 로딩 (토큰 생성 목적)
         val resolver = WebViewResolver(
             interceptUrl = interceptRegex, 
             useOkhttp = false, 
@@ -86,35 +85,30 @@ class BunnyPoorCdn : ExtractorApi() {
 
         if (capturedUrl != null) {
             println("[BunnyPoorCdn] Captured: $capturedUrl")
-            delay(1000) 
             
-            val cookieManager = CookieManager.getInstance()
-            val cookie = cookieManager.getCookie(capturedUrl) ?: ""
-            println("[BunnyPoorCdn] Cookie: $cookie")
-
+            // 쿠키는 없어도 헤더는 필수
             val headers = mutableMapOf(
                 "User-Agent" to MOBILE_UA,
                 "Referer" to "https://player.bunny-frame.online/",
                 "Origin" to "https://player.bunny-frame.online",
                 "Accept" to "*/*"
             )
-            if (cookie.isNotEmpty()) {
-                headers["Cookie"] = cookie
-            }
 
-            val finalUrl = if (capturedUrl.contains("c.html")) "$capturedUrl#.m3u8" else capturedUrl
+            // URL Fragment(#) 제거 (프록시 전달용)
+            val finalUrl = if (capturedUrl.contains("#")) capturedUrl.substringBefore("#") else capturedUrl
 
-            // 2. 프록시 서버 구동
+            // 2. 프록시 서버 시작
             if (proxyServer == null) {
                 proxyServer = ProxyWebServer()
                 proxyServer?.start()
             }
             proxyServer?.updateHeaders(headers)
 
-            // 3. 로컬 프록시 주소 반환
             val port = proxyServer?.port ?: return false
             val encodedUrl = URLEncoder.encode(finalUrl, "UTF-8")
-            val proxyUrl = "http://127.0.0.1:$port/playlist?url=$encodedUrl"
+            
+            // 로컬 프록시 주소 반환 (Cloudstream에는 .m3u8로 인식되게 힌트 추가)
+            val proxyUrl = "http://127.0.0.1:$port/playlist?url=$encodedUrl#.m3u8"
 
             callback(
                 newExtractorLink(name, name, proxyUrl, ExtractorLinkType.M3U8) {
@@ -157,11 +151,6 @@ class BunnyPoorCdn : ExtractorApi() {
             }
         }
 
-        fun stop() {
-            isRunning = false
-            try { serverSocket?.close(); serverSocket = null } catch (e: Exception) {}
-        }
-        
         fun updateHeaders(h: Map<String, String>) {
             currentHeaders = h
         }
@@ -187,45 +176,43 @@ class BunnyPoorCdn : ExtractorApi() {
                 val pathFull = parts[1]
                 val output = socket.getOutputStream()
 
-                if (pathFull.startsWith("/playlist")) {
+                // Request Routing
+                if (pathFull.startsWith("/playlist") || pathFull.startsWith("/proxy")) {
                     val targetUrl = getQueryParam(pathFull, "url")
                     if (targetUrl != null) {
+                        // URL Fragment 제거 (서버 404 방지)
+                        val requestUrl = if (targetUrl.contains("#")) targetUrl.substringBefore("#") else targetUrl
+                        
                         val response = runBlocking {
-                            app.get(targetUrl, headers = currentHeaders)
+                            app.get(requestUrl, headers = currentHeaders)
                         }
 
                         if (response.isSuccessful) {
-                            val content = response.text
-                            // [Fix] 쿼리 파라미터 보존 로직 적용
-                            val newContent = rewriteM3u8(content, targetUrl)
-                            
-                            val header = "HTTP/1.1 200 OK\r\n" +
-                                       "Content-Type: application/vnd.apple.mpegurl\r\n" +
-                                       "Connection: close\r\n\r\n"
-                            output.write(header.toByteArray())
-                            output.write(newContent.toByteArray())
+                            if (pathFull.startsWith("/playlist")) {
+                                val content = response.text
+                                // [핵심] M3U8 내용 재작성 (토큰 승계 로직 적용)
+                                val newContent = rewriteM3u8(content, requestUrl)
+                                
+                                val header = "HTTP/1.1 200 OK\r\n" +
+                                           "Content-Type: application/vnd.apple.mpegurl\r\n" +
+                                           "Connection: close\r\n\r\n"
+                                output.write(header.toByteArray())
+                                output.write(newContent.toByteArray())
+                            } else {
+                                // Key/TS 파일 전달
+                                val contentType = response.headers["Content-Type"] ?: "application/octet-stream"
+                                val header = "HTTP/1.1 200 OK\r\n" +
+                                           "Content-Type: $contentType\r\n" +
+                                           "Connection: close\r\n\r\n"
+                                output.write(header.toByteArray())
+                                output.write(response.body.bytes())
+                            }
                         } else {
+                            println("[Proxy] Error ${response.code} requesting: $requestUrl")
                             output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
                         }
-                    }
-                } 
-                else if (pathFull.startsWith("/proxy")) {
-                    val targetUrl = getQueryParam(pathFull, "url")
-                    if (targetUrl != null) {
-                        val response = runBlocking {
-                            app.get(targetUrl, headers = currentHeaders)
-                        }
-
-                        if (response.isSuccessful) {
-                            val contentType = response.headers["Content-Type"] ?: "application/octet-stream"
-                            val header = "HTTP/1.1 200 OK\r\n" +
-                                       "Content-Type: $contentType\r\n" +
-                                       "Connection: close\r\n\r\n"
-                            output.write(header.toByteArray())
-                            output.write(response.body.bytes())
-                        } else {
-                            output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
-                        }
+                    } else {
+                         output.write("HTTP/1.1 400 Bad Request\r\n\r\n".toByteArray())
                     }
                 } else {
                     output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
@@ -261,10 +248,11 @@ class BunnyPoorCdn : ExtractorApi() {
             val proxyBase = "http://127.0.0.1:$port/proxy?url="
             val playlistProxyBase = "http://127.0.0.1:$port/playlist?url="
 
-            // Base URL에서 토큰 등 쿼리 추출
+            // [핵심] Base URL(c.html)에서 토큰(Query Params) 추출
+            // 예: token=ABC&expires=123
             val baseQuery = try {
                 val uri = URI(baseUrl)
-                uri.rawQuery
+                uri.rawQuery 
             } catch (e: Exception) { null }
 
             for (line in lines) {
@@ -276,7 +264,7 @@ class BunnyPoorCdn : ExtractorApi() {
                     val match = regex.find(trLine)
                     if (match != null) {
                         val keyUrl = match.groupValues[1]
-                        // [Critical Fix] 토큰 강제 주입
+                        // [Fix] 키 URL에 부모의 토큰(baseQuery)을 강제로 이어 붙임
                         val absUrl = resolveUrl(baseUrl, keyUrl, baseQuery)
                         val encoded = URLEncoder.encode(absUrl, "UTF-8")
                         refinedLines.add(trLine.replace(keyUrl, "$proxyBase$encoded"))
@@ -284,10 +272,11 @@ class BunnyPoorCdn : ExtractorApi() {
                         refinedLines.add(trLine)
                     }
                 } else if (!trLine.startsWith("#")) {
-                    // URL Line (TS or M3U8)
+                    // [Fix] TS/M3U8 URL에도 부모의 토큰을 강제로 이어 붙임
                     val absUrl = resolveUrl(baseUrl, trLine, baseQuery)
                     val encoded = URLEncoder.encode(absUrl, "UTF-8")
-                    if (absUrl.contains(".m3u8")) {
+                    
+                    if (absUrl.contains(".m3u8") || absUrl.contains("c.html")) {
                         refinedLines.add("$playlistProxyBase$encoded")
                     } else {
                         refinedLines.add("$proxyBase$encoded")
@@ -299,26 +288,30 @@ class BunnyPoorCdn : ExtractorApi() {
             return refinedLines.joinToString("\n")
         }
 
-        // [Fix] 기존 쿼리가 있어도 baseQuery를 강제로 덧붙이는 로직
         private fun resolveUrl(base: String, url: String, baseQuery: String?): String {
+            // 1. 절대 경로 변환
             var resolved = if (url.startsWith("http")) {
                 url
             } else if (url.startsWith("//")) {
                 "https:$url"
             } else {
                 try {
+                    // base(c.html) 기준으로 상대 경로(enc.key) 해석 -> http://.../enc.key
                     URI(base).resolve(url).toString()
                 } catch (e: Exception) {
                     url
                 }
             }
 
+            // 2. 토큰(Query) 강제 주입
             if (!baseQuery.isNullOrEmpty()) {
-                // 이미 ?가 있으면 &로 연결, 없으면 ?로 연결
+                // 이미 쿼리가 있으면 &로, 없으면 ?로 연결
                 val separator = if (resolved.contains("?")) "&" else "?"
-                // 중복 방지를 위해 간단히 체크할 수도 있지만, 
-                // 토큰이 쿼리 파라미터의 일부라면 중복되어도 서버는 보통 마지막 값을 쓰거나 무시하므로 안전하게 붙임
-                resolved = "$resolved$separator$baseQuery"
+                
+                // 중복 방지: baseQuery가 이미 포함되어 있지 않을 때만 붙임
+                if (!resolved.contains(baseQuery)) {
+                     resolved = "$resolved$separator$baseQuery"
+                }
             }
             return resolved
         }
