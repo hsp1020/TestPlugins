@@ -9,15 +9,32 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.network.WebViewResolver 
 import android.webkit.CookieManager
+import java.net.ServerSocket
+import java.net.Socket
+import java.io.BufferedReader
+import java.io.InputStreamReader
 import java.net.URI
+import java.net.URLDecoder
+import java.net.URLEncoder
+import kotlin.concurrent.thread
+import kotlinx.coroutines.runBlocking
 
+/**
+ * [Version: v2026-02-13-RealFinal]
+ * 1. c.html 자체가 M3U8 파일임을 확인 -> 인터셉트 대상을 /c.html로 복구.
+ * 2. M3U8 내부 Key URI가 절대경로(/v/key7...)인 경우 도메인 기반으로 주소 결합 로직 추가.
+ * 3. 획득한 Cookie/Referer를 Local Proxy를 통해 Key 요청 시 강제 주입하여 403 에러 해결.
+ */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
     
-    // Fiddler로 검증된 최신 Windows Chrome User-Agent
     private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+
+    companion object {
+        private var proxyServer: ProxyWebServer? = null
+    }
 
     override suspend fun getUrl(
         url: String,
@@ -25,7 +42,10 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("[BunnyPoorCdn] getUrl 호출 - url: $url, referer: $referer")
+        // 기존 프록시 정리
+        proxyServer?.stop()
+        proxyServer = null
+        
         extract(url, referer, subtitleCallback, callback)
     }
 
@@ -36,147 +56,239 @@ class BunnyPoorCdn : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
         thumbnailHint: String? = null,
     ): Boolean {
-        println("[BunnyPoorCdn] extract 시작 ===================================")
-        println("[BunnyPoorCdn] 입력 URL: $url")
-        println("[BunnyPoorCdn] 입력 referer: $referer")
-        println("[BunnyPoorCdn] thumbnailHint: $thumbnailHint")
         
-        // 1. URL 디코딩 및 공백 제거 (HTML 엔티티 &amp; 처리 필수)
         var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
-        println("[BunnyPoorCdn] cleanUrl 처리 후: $cleanUrl")
-        
-        // [중요] 리퍼러를 tvwiki로 강제 고정
         val cleanReferer = "https://tvwiki5.net/"
-        println("[BunnyPoorCdn] 고정 referer: $cleanReferer")
 
-        // 2. iframe 주소 따기 (재탐색 로직)
-        // [수정] /v/ 만 있어도 유효한 주소로 인정하여 불필요한 재탐색 스킵
+        // iframe 주소 추출
         val isDirectUrl = cleanUrl.contains("/v/") || cleanUrl.contains("/e/") || cleanUrl.contains("/f/")
-        println("[BunnyPoorCdn] 직접 URL 여부(isDirectUrl): $isDirectUrl")
-        
         if (!isDirectUrl) {
-            println("[BunnyPoorCdn] 직접 URL이 아님 - 재탐색 시작")
             try {
-                // 직접 링크가 아닌 경우에만 페이지를 다시 긁어옴
-                println("[BunnyPoorCdn] 리퍼러 페이지 요청: $cleanReferer")
                 val refRes = app.get(cleanReferer, headers = mapOf("User-Agent" to DESKTOP_UA))
-                println("[BunnyPoorCdn] 리퍼러 페이지 응답 코드: ${refRes.code}")
-                
                 val iframeMatch = Regex("""src=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
                     ?: Regex("""data-player\d*=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
                 
                 if (iframeMatch != null) {
                     cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&").trim()
-                    println("[BunnyPoorCdn] 재탐색 성공 - 새로운 cleanUrl: $cleanUrl")
-                } else {
-                    println("[BunnyPoorCdn] 재탐색 실패 - iframe을 찾을 수 없음")
                 }
             } catch (e: Exception) {
-                // 재탐색 실패 시 로그만 남기고 원래 URL로 시도
-                println("[BunnyPoorCdn] 재탐색 중 오류: ${e.message}")
                 e.printStackTrace()
             }
-        } else {
-            println("[BunnyPoorCdn] 직접 URL이므로 재탐색 생략")
         }
 
-        var capturedUrl: String? = null
-
-        // 3. c.html 요청 납치 (WebViewResolver)
-        // 타임아웃을 30초로 넉넉하게 설정
-        println("[BunnyPoorCdn] WebViewResolver 초기화")
+        // [수정] c.html이 M3U8 파일이므로 이를 타겟으로 인터셉트 (JS 실행 후 최종 요청)
         val resolver = WebViewResolver(
             interceptUrl = Regex("""/c\.html"""), 
             useOkhttp = false,
             timeout = 30000L
         )
         
+        var capturedUrl: String? = null
+        var capturedHeaders: Map<String, String>? = null
+
         try {
-            // [중요] WebView 요청 시 리퍼러와 UA를 정확하게 설정해야 서버가 403을 뱉지 않음
             val requestHeaders = mapOf(
                 "Referer" to cleanReferer, 
                 "User-Agent" to DESKTOP_UA
             )
             
-            println("[BunnyPoorCdn] WebView 요청 시작 - URL: $cleanUrl")
-            println("[BunnyPoorCdn] 요청 헤더: $requestHeaders")
-
-            // cleanUrl(iframe) 접속 -> JS 실행 -> c.html 요청 가로채기
             val response = app.get(
                 url = cleanUrl,
                 headers = requestHeaders,
                 interceptor = resolver
             )
             
-            println("[BunnyPoorCdn] WebView 응답 받음")
-            println("[BunnyPoorCdn] 최종 응답 URL: ${response.url}")
-            println("[BunnyPoorCdn] 응답 코드: ${response.code}")
-
-            // 토큰이 포함된 URL 획득 확인
-            if (response.url.contains("/c.html") && response.url.contains("token=")) {
+            // 인터셉트 성공 시
+            if (response.url.contains("/c.html")) {
                 capturedUrl = response.url
-                println("[BunnyPoorCdn] c.html URL 캡처 성공: $capturedUrl")
-            } else {
-                println("[BunnyPoorCdn] c.html URL 캡처 실패 - URL 패턴 불일치")
-                println("[BunnyPoorCdn] response.text 길이: ${response.text.length}")
-                // 응답 내용의 일부 로깅
-                if (response.text.length > 500) {
-                    println("[BunnyPoorCdn] response.text 첫 500자: ${response.text.substring(0, 500)}")
-                } else {
-                    println("[BunnyPoorCdn] response.text: ${response.text}")
-                }
+                
+                val cookieManager = CookieManager.getInstance()
+                val cookie = cookieManager.getCookie(capturedUrl) ?: ""
+                
+                // 프록시에서 사용할 헤더 캡처
+                capturedHeaders = mutableMapOf(
+                    "User-Agent" to DESKTOP_UA,
+                    "Referer" to "https://player.bunny-frame.online/",
+                    "Origin" to "https://player.bunny-frame.online",
+                    "Cookie" to cookie,
+                    "Accept" to "*/*"
+                )
             }
         } catch (e: Exception) {
-            println("[BunnyPoorCdn] WebViewResolver 실행 중 오류: ${e.message}")
             e.printStackTrace()
         }
 
-        if (capturedUrl != null) {
-            // [핵심] 획득한 c.html URL을 그대로 사용하되 끝에 #.m3u8을 붙여서 플레이어가 HLS로 인식하게 함
-            
-            // 쿠키 동기화
-            val cookieManager = CookieManager.getInstance()
-            val cookie = cookieManager.getCookie(capturedUrl)
-            println("[BunnyPoorCdn] 쿠키 획득: ${cookie?.take(100)}...")
+        if (capturedUrl != null && capturedHeaders != null) {
+            try {
+                // 1. M3U8 다운로드
+                val m3u8Res = app.get(capturedUrl, headers = capturedHeaders!!)
+                val m3u8Content = m3u8Res.text
 
-            // Fiddler 로그 기반 헤더 설정
-            val headers = mutableMapOf(
-                "User-Agent" to DESKTOP_UA,
-                "Referer" to "https://player.bunny-frame.online/",
-                "Origin" to "https://player.bunny-frame.online",
-                "Accept" to "*/*",
-                "Sec-Fetch-Site" to "cross-site",
-                "Sec-Fetch-Mode" to "cors",
-                "Sec-Fetch-Dest" to "empty",
-                "Accept-Encoding" to "gzip, deflate, br",
-                "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-                "sec-ch-ua" to "\"Chromium\";v=\"122\", \"Not(A:Brand\";v=\"24\", \"Google Chrome\";v=\"122\"",
-                "sec-ch-ua-mobile" to "?0",
-                "sec-ch-ua-platform" to "\"Windows\""
-            )
+                // 2. 프록시 서버 시작
+                val proxy = ProxyWebServer()
+                proxy.start()
+                proxy.updateSession(capturedHeaders!!)
+                proxyServer = proxy
 
-            if (!cookie.isNullOrEmpty()) {
-                headers["Cookie"] = cookie
-            }
-            
-            val finalUrl = "$capturedUrl#.m3u8"
-            println("[BunnyPoorCdn] 최종 재생 URL 생성: $finalUrl")
-            println("[BunnyPoorCdn] 헤더 설정: $headers")
-            
-            callback(
-                newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
-                    this.referer = "https://player.bunny-frame.online/"
-                    this.quality = Qualities.Unknown.value
-                    this.headers = headers
+                val proxyPort = proxy.port
+                val proxyRoot = "http://127.0.0.1:$proxyPort"
+
+                // 3. M3U8 재작성 (절대경로 처리 로직 개선)
+                val newLines = mutableListOf<String>()
+                val lines = m3u8Content.lines()
+                
+                // URL 파싱용
+                val uri = URI(capturedUrl)
+                val domain = "${uri.scheme}://${uri.host}" // https://every9.poorcdn.com
+                val parentUrl = capturedUrl.substringBeforeLast("/") // https://every9.poorcdn.com/v/e/...
+
+                fun resolveUrl(path: String): String {
+                    return when {
+                        path.startsWith("http") -> path
+                        path.startsWith("/") -> "$domain$path" // /v/key7... 처리
+                        else -> "$parentUrl/$path"
+                    }
                 }
-            )
-            println("[BunnyPoorCdn] callback 호출 완료 - 성공")
-            println("[BunnyPoorCdn] extract 종료 ===================================")
-            return true
-        } 
+
+                for (line in lines) {
+                    when {
+                        // Key URL 변조
+                        line.startsWith("#EXT-X-KEY") -> {
+                            val keyUriMatch = Regex("""URI="([^"]+)"""").find(line)
+                            if (keyUriMatch != null) {
+                                val originalKeyPath = keyUriMatch.groupValues[1]
+                                val fullKeyUrl = resolveUrl(originalKeyPath)
+                                val encodedKeyUrl = URLEncoder.encode(fullKeyUrl, "UTF-8")
+                                val newLine = line.replace(originalKeyPath, "$proxyRoot/proxy/key?url=$encodedKeyUrl")
+                                newLines.add(newLine)
+                            } else {
+                                newLines.add(line)
+                            }
+                        }
+                        // Segment URL 변조 (필요 시)
+                        // .gif 등 세그먼트가 http로 시작하는 절대주소면 그대로 두거나, 
+                        // 헤더가 필요하다면 프록시로 라우팅. 보통 세그먼트는 토큰이 URL에 있어 헤더 덜 민감함.
+                        // 안전하게 다 프록시 태웁니다.
+                        line.startsWith("http") || (line.isNotBlank() && !line.startsWith("#")) -> {
+                            val fullSegUrl = resolveUrl(line)
+                            val encodedSegUrl = URLEncoder.encode(fullSegUrl, "UTF-8")
+                            newLines.add("$proxyRoot/proxy/seg?url=$encodedSegUrl")
+                        }
+                        else -> newLines.add(line)
+                    }
+                }
+
+                val proxyM3u8 = newLines.joinToString("\n")
+                proxy.setPlaylist(proxyM3u8)
+
+                callback(
+                    newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) {
+                        this.referer = "https://player.bunny-frame.online/"
+                        this.quality = Qualities.Unknown.value
+                    }
+                )
+                return true
+
+            } catch (e: Exception) {
+                // 실패 시 Fallback
+                callback(
+                    newExtractorLink(name, name, capturedUrl, ExtractorLinkType.M3U8) {
+                        this.referer = "https://player.bunny-frame.online/"
+                        this.headers = capturedHeaders
+                    }
+                )
+                return true
+            }
+        }
         
-        println("[BunnyPoorCdn] capturedUrl이 null - 실패")
-        println("[BunnyPoorCdn] extract 종료 ===================================")
         return false
+    }
+
+    class ProxyWebServer {
+        private var serverSocket: ServerSocket? = null
+        private var isRunning = false
+        var port: Int = 0
+        @Volatile private var currentHeaders: Map<String, String> = emptyMap()
+        @Volatile private var currentPlaylist: String = ""
+
+        fun start() {
+            try {
+                serverSocket = ServerSocket(0)
+                port = serverSocket!!.localPort
+                isRunning = true
+                thread(isDaemon = true) { 
+                    while (isRunning && serverSocket != null && !serverSocket!!.isClosed) { 
+                        try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {} 
+                    } 
+                }
+            } catch (e: Exception) {}
+        }
+
+        fun stop() {
+            isRunning = false
+            try { serverSocket?.close(); serverSocket = null } catch (e: Exception) {}
+        }
+        
+        fun updateSession(h: Map<String, String>) {
+            currentHeaders = h
+        }
+        
+        fun setPlaylist(p: String) { currentPlaylist = p }
+
+        private fun handleClient(socket: Socket) {
+            thread {
+                try {
+                    socket.soTimeout = 15000
+                    val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
+                    val line = reader.readLine() ?: return@thread
+                    val parts = line.split(" ")
+                    if (parts.size < 2) return@thread
+                    
+                    val path = parts[1]
+                    val output = socket.getOutputStream()
+
+                    if (path.contains("/playlist.m3u8")) {
+                        val body = currentPlaylist.toByteArray(charset("UTF-8"))
+                        val header = "HTTP/1.1 200 OK\r\n" +
+                                     "Content-Type: application/vnd.apple.mpegurl\r\n" +
+                                     "Content-Length: ${body.size}\r\n" +
+                                     "Connection: close\r\n\r\n"
+                        output.write(header.toByteArray())
+                        output.write(body)
+                    } else if (path.contains("/proxy/")) {
+                        val urlParam = path.substringAfter("url=").substringBefore(" ")
+                        val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
+                        
+                        runBlocking {
+                            try {
+                                // 프록시 핵심: 캡처한 헤더(쿠키 포함)를 싣고 요청
+                                val res = app.get(targetUrl, headers = currentHeaders)
+                                
+                                if (res.isSuccessful) {
+                                    val rawData = res.body.bytes()
+                                    val contentType = if (path.contains("/key")) "application/octet-stream" else "video/mp2t"
+                                    
+                                    val header = "HTTP/1.1 200 OK\r\n" +
+                                                 "Content-Type: $contentType\r\n" +
+                                                 "Content-Length: ${rawData.size}\r\n" +
+                                                 "Connection: close\r\n\r\n"
+                                    output.write(header.toByteArray())
+                                    output.write(rawData)
+                                } else {
+                                    val err = "HTTP/1.1 ${res.code} Error\r\nConnection: close\r\n\r\n"
+                                    output.write(err.toByteArray())
+                                }
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                            }
+                        }
+                    }
+                    output.flush()
+                    socket.close()
+                } catch (e: Exception) { 
+                    try { socket.close() } catch(e2:Exception){} 
+                }
+            }
+        }
     }
 }
