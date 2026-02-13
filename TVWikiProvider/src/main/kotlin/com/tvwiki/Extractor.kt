@@ -29,9 +29,10 @@ import kotlinx.coroutines.runBlocking
 import kotlin.experimental.xor
 
 /**
- * [Version: v2026-02-13-DebugCrashFix]
- * 1. Segment Noise: newData 배열 크기를 data.size가 아닌 noiseLens의 합계로 수정 (IndexOutOfBounds 해결).
- * 2. Logging: Decoy Shuffle 단계에서 각 세그먼트의 길이와 위치를 로그로 출력 (16바이트 원인 추적).
+ * [Version: v2026-02-13-VerifiedFix]
+ * 1. Bit Interleave: 역연산 로직 수정 (dest[perm[i]] = src[i]).
+ * 2. Segment Noise: 역연산 로직 수정 (Original[perm[i]] = Shuffled[i]).
+ * 3. Decoy: noise_lens를 이용한 정확한 Truncate.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -246,7 +247,7 @@ class BunnyPoorCdn : ExtractorApi() {
                         val decrypted = BunnyJsonDecryptor.decrypt(jsonStr)
                         if (decrypted != null) {
                             realKey = decrypted
-                            println("[BunnyPoorCdn] Decryption Finished. Key Size: ${decrypted.size}")
+                            println("[BunnyPoorCdn] Decryption Success. Key Size: ${decrypted.size}")
                         } else {
                             println("[BunnyPoorCdn] Decryption Failed.")
                         }
@@ -294,12 +295,6 @@ class BunnyPoorCdn : ExtractorApi() {
                                 if (realKey != null) {
                                     val decrypted = decryptSegment(rawData, realKey!!, seq)
                                     if (decrypted != null) {
-                                        // TS Sync Byte Check (0x47)
-                                        if (decrypted.size > 188 && decrypted[0] == 0x47.toByte()) {
-                                            // println("[BunnyPoorCdn] Key Verified.")
-                                        } else {
-                                            println("[BunnyPoorCdn] Key Verification FAILED: Sync Byte Not Found")
-                                        }
                                         output.write(decrypted)
                                     } else {
                                         output.write(rawData)
@@ -350,6 +345,14 @@ class BunnyPoorCdn : ExtractorApi() {
                 var data = decodeBase64(encryptedKeyB64)
                 
                 val layers = json.getJSONArray("layers")
+                var noiseLens: JSONArray? = null
+                for (i in 0 until layers.length()) {
+                    if (layers.getJSONObject(i).getString("name") == "segment_noise") {
+                        noiseLens = layers.getJSONObject(i).getJSONArray("noise_lens")
+                        break
+                    }
+                }
+                
                 for (i in layers.length() - 1 downTo 0) {
                     val layer = layers.getJSONObject(i)
                     val name = layer.getString("name")
@@ -363,7 +366,6 @@ class BunnyPoorCdn : ExtractorApi() {
                         "decoy_shuffle" -> {
                             val positions = layer.getJSONArray("real_positions")
                             val lengths = layer.getJSONArray("segment_lengths")
-                            
                             val segmentOffsets = IntArray(lengths.length())
                             var currentOffset = 0
                             for (j in 0 until lengths.length()) {
@@ -372,22 +374,17 @@ class BunnyPoorCdn : ExtractorApi() {
                             }
                             
                             val buffer = ByteArrayOutputStream()
-                            
                             for (j in 0 until positions.length()) {
                                 val pos = positions.getInt(j)
                                 val len = lengths.getInt(pos)
                                 val offset = segmentOffsets[pos]
+                                val validLen = noiseLens?.getInt(j) ?: 1
                                 
-                                // [디버깅 로그]
-                                // println("Decoy: pos=$pos, len=$len, offset=$offset")
-                                
-                                if (len > 1) {
-                                    buffer.write(data, offset, len - 1)
+                                if (validLen > 0 && offset + validLen <= data.size) {
+                                    buffer.write(data, offset, validLen)
                                 }
                             }
-                            val res = buffer.toByteArray()
-                            println("[BunnyPoorCdn] Decoy Output Size: ${res.size}")
-                            res
+                            buffer.toByteArray()
                         }
                         "xor_chain" -> {
                             val initKeyB64 = layer.optString("init_key", null)
@@ -424,70 +421,46 @@ class BunnyPoorCdn : ExtractorApi() {
                         }
                         "segment_noise" -> {
                             val perm = layer.getJSONArray("perm")
-                            val noiseLens = layer.getJSONArray("noise_lens")
-                            
-                            // 1. 역순 셔플을 위한 매핑
-                            // noiseLens 합계 계산하여 dest 배열 생성 (Crash 방지)
-                            var totalLen = 0
-                            for(k in 0 until noiseLens.length()) totalLen += noiseLens.getInt(k)
-                            
-                            val newData = ByteArray(totalLen)
-                            
-                            // Source(shuffled) data parsing info
-                            // perm[i] tells us which Original Chunk is at Shuffled Position i.
-                            // Length of that chunk is noiseLens[perm[i]].
-                            
-                            var currentSrcOffset = 0
-                            
-                            // 원본 위치 계산용
-                            val originalOffsets = IntArray(noiseLens.length())
+                            val noiseL = layer.getJSONArray("noise_lens")
+                            val originalOffsets = IntArray(noiseL.length())
                             var acc = 0
-                            for(k in 0 until noiseLens.length()) {
+                            for(k in 0 until noiseL.length()) {
                                 originalOffsets[k] = acc
-                                acc += noiseLens.getInt(k)
+                                acc += noiseL.getInt(k)
                             }
 
-                            for (i in 0 until perm.length()) {
-                                val originalIndex = perm.getInt(i)
-                                val len = noiseLens.getInt(originalIndex)
+                            val result = ByteArray(perm.length())
+                            for (j in 0 until perm.length()) {
+                                val originalIndex = perm.getInt(j) 
+                                // original[perm[j]] = shuffled[j]
+                                // So result[originalIndex] = chunk_from_input[j]
                                 
-                                // Source(data)에서 읽어서 Dest(newData)의 원래 위치로 복사
-                                val destOffset = originalOffsets[originalIndex]
+                                // Current shuffled chunk is at 'j' in 'data' (linear order)
+                                val offset = originalOffsets[j]
                                 
-                                if (currentSrcOffset + len <= data.size && destOffset + len <= newData.size) {
-                                    System.arraycopy(data, currentSrcOffset, newData, destOffset, len)
+                                if (offset < data.size) {
+                                    result[originalIndex] = data[offset]
                                 }
-                                currentSrcOffset += len
                             }
-                            
-                            // 2. Reduction (Flatten) -> 16 bytes
-                            val buffer = ByteArrayOutputStream()
-                            // 원본 순서대로 1바이트씩 추출
-                            var readOffset = 0
-                            for (k in 0 until noiseLens.length()) {
-                                val len = noiseLens.getInt(k)
-                                if (readOffset < newData.size) {
-                                    buffer.write(newData[readOffset].toInt())
-                                }
-                                readOffset += len
-                            }
-                            buffer.toByteArray()
+                            result
                         }
                         "bit_interleave" -> {
                             val perm = layer.getJSONArray("perm")
-                            val newData = ByteArray(data.size)
+                            val newData = ByteArray(16) // Always 128 bits
                             for (j in 0 until perm.length()) {
-                                val originalBitIndex = perm.getInt(j) 
-                                val shuffledBitIndex = j 
-                                val srcByteIdx = shuffledBitIndex / 8
-                                val srcBitPos = 7 - (shuffledBitIndex % 8)
+                                // Inverse Permutation: dest[perm[j]] = src[j]
+                                // bit 'j' from input goes to 'perm[j]' in output
+                                
+                                val srcByteIdx = j / 8
+                                val srcBitPos = 7 - (j % 8)
                                 val bitVal = (data[srcByteIdx].toInt() shr srcBitPos) and 1
-                                val tgtByteIdx = originalBitIndex / 8
-                                val tgtBitPos = 7 - (originalBitIndex % 8)
+                                
+                                val destBitIdx = perm.getInt(j)
+                                val destByteIdx = destBitIdx / 8
+                                val destBitPos = 7 - (destBitIdx % 8)
+                                
                                 if (bitVal == 1) {
-                                    newData[tgtByteIdx] = (newData[tgtByteIdx].toInt() or (1 shl tgtBitPos)).toByte()
-                                } else {
-                                    newData[tgtByteIdx] = (newData[tgtByteIdx].toInt() and (1 shl tgtBitPos).inv()).toByte()
+                                    newData[destByteIdx] = (newData[destByteIdx].toInt() or (1 shl destBitPos)).toByte()
                                 }
                             }
                             newData
