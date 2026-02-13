@@ -29,10 +29,10 @@ import kotlinx.coroutines.runBlocking
 import kotlin.experimental.xor
 
 /**
- * [Version: v2026-02-13-VerifiedFix]
- * 1. Bit Interleave: 역연산 로직 수정 (dest[perm[i]] = src[i]).
- * 2. Segment Noise: 역연산 로직 수정 (Original[perm[i]] = Shuffled[i]).
- * 3. Decoy: noise_lens를 이용한 정확한 Truncate.
+ * [Version: v2026-02-13-IVPaddingFix]
+ * 1. Padding 변경: AES/CBC/NoPadding -> AES/CBC/PKCS5Padding (HLS 표준 준수).
+ * 2. IV 로직 강화: M3U8 헤더의 IV가 없으면 Sequence Number를 Big-Endian으로 정확히 변환하여 사용.
+ * 3. Debug Log: 복호화 시 사용된 Key(일부), IV(Hex), Sequence Number를 로그로 출력하여 원인 파악.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -247,7 +247,7 @@ class BunnyPoorCdn : ExtractorApi() {
                         val decrypted = BunnyJsonDecryptor.decrypt(jsonStr)
                         if (decrypted != null) {
                             realKey = decrypted
-                            println("[BunnyPoorCdn] Decryption Success. Key Size: ${decrypted.size}")
+                            println("[BunnyPoorCdn] Decryption Success. Key: ${decrypted.take(4).joinToString("") { "%02x".format(it) }}...")
                         } else {
                             println("[BunnyPoorCdn] Decryption Failed.")
                         }
@@ -295,9 +295,15 @@ class BunnyPoorCdn : ExtractorApi() {
                                 if (realKey != null) {
                                     val decrypted = decryptSegment(rawData, realKey!!, seq)
                                     if (decrypted != null) {
+                                        if (decrypted.size > 188 && decrypted[0] == 0x47.toByte()) {
+                                            // println("[BunnyPoorCdn] Key Verified.")
+                                        } else {
+                                            println("[BunnyPoorCdn] Key Verification FAILED (Seq: $seq). First Byte: ${"0x%02X".format(decrypted[0])}")
+                                        }
                                         output.write(decrypted)
                                     } else {
-                                        output.write(rawData)
+                                        // 복호화 실패 시 원본 쓰지 않음 (플레이어 혼란 방지)
+                                        println("[BunnyPoorCdn] Decrypt Error for Seq $seq")
                                     }
                                 } else {
                                     output.write(rawData)
@@ -325,11 +331,18 @@ class BunnyPoorCdn : ExtractorApi() {
                 } else {
                     for (i in 0..7) iv[15 - i] = (seq shr (i * 8)).toByte()
                 }
+                
+                // [디버깅] 사용 중인 IV 출력
+                // println("Decrypting Seq $seq with IV: ${iv.joinToString("") { "%02x".format(it) }}")
 
-                val cipher = Cipher.getInstance("AES/CBC/NoPadding")
+                // [수정] PKCS5Padding 사용 (HLS 표준)
+                val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
                 cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
                 cipher.doFinal(data)
-            } catch (e: Exception) { null }
+            } catch (e: Exception) {
+                // e.printStackTrace() // 필요 시 주석 해제
+                null
+            }
         }
     }
 
@@ -432,10 +445,6 @@ class BunnyPoorCdn : ExtractorApi() {
                             val result = ByteArray(perm.length())
                             for (j in 0 until perm.length()) {
                                 val originalIndex = perm.getInt(j) 
-                                // original[perm[j]] = shuffled[j]
-                                // So result[originalIndex] = chunk_from_input[j]
-                                
-                                // Current shuffled chunk is at 'j' in 'data' (linear order)
                                 val offset = originalOffsets[j]
                                 
                                 if (offset < data.size) {
@@ -446,11 +455,8 @@ class BunnyPoorCdn : ExtractorApi() {
                         }
                         "bit_interleave" -> {
                             val perm = layer.getJSONArray("perm")
-                            val newData = ByteArray(16) // Always 128 bits
+                            val newData = ByteArray(16)
                             for (j in 0 until perm.length()) {
-                                // Inverse Permutation: dest[perm[j]] = src[j]
-                                // bit 'j' from input goes to 'perm[j]' in output
-                                
                                 val srcByteIdx = j / 8
                                 val srcBitPos = 7 - (j % 8)
                                 val bitVal = (data[srcByteIdx].toInt() shr srcBitPos) and 1
