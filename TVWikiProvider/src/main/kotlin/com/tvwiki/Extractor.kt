@@ -29,17 +29,16 @@ import kotlinx.coroutines.runBlocking
 import kotlin.experimental.xor
 
 /**
- * [Version: v2026-02-14-InitKeyStringFix]
- * 수정 내용:
- * 1. XOR Chain: init_key를 Base64 디코딩하지 않고 UTF-8 바이트 그대로 사용하도록 변경.
- * 2. 디버깅 로그 강화: Decrypted Key(Hex) 출력하여 정답 여부 확인.
+ * [Version: v2026-02-14-BitInterleaveFix]
+ * 1. Bit Interleave: 역연산 로직 수정 (perm[i]를 Source Index로 사용하여 원본 위치 i로 복구).
+ * 2. 이를 통해 올바른 16바이트 키 생성 보장.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
     
-    private val VERSION = "v2026-02-14-InitKeyStringFix"
+    private val VERSION = "v2026-02-14-BitInterleaveFix"
     private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
 
     companion object {
@@ -197,12 +196,9 @@ class BunnyPoorCdn : ExtractorApi() {
                     val res = app.get(targetKeyUrl!!, headers = currentHeaders)
                     val rawData = res.body.bytes()
                     if (rawData.size > 100 && rawData[0] == '{'.code.toByte()) {
-                        val decrypted = BunnyJsonDecryptor.decrypt(String(rawData))
-                        if (decrypted != null) {
-                            realKey = decrypted
-                            // [디버깅] 복호화된 키를 Hex로 출력 (정답 확인용)
-                            println("[BunnyPoorCdn] Decrypted Key (Hex): ${decrypted.joinToString("") { "%02x".format(it) }}")
-                        }
+                        println("[BunnyPoorCdn] Decoding with logic version: $version")
+                        realKey = BunnyJsonDecryptor.decrypt(String(rawData))
+                        if (realKey != null) println("[BunnyPoorCdn] Key Decrypted: ${realKey!!.take(4).joinToString(""){"%02x".format(it)}}...")
                     } else if (rawData.size == 16) { realKey = rawData }
                 } catch (e: Exception) { e.printStackTrace() }
             }
@@ -233,10 +229,14 @@ class BunnyPoorCdn : ExtractorApi() {
                             output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
                             if (realKey != null) {
                                 val decrypted = decryptSegment(data, realKey!!, seq)
-                                if (decrypted != null && decrypted[0] == 0x47.toByte()) {
+                                if (decrypted != null) {
+                                    if(decrypted.size > 188 && decrypted[0] == 0x47.toByte()) {
+                                        // Good
+                                    } else {
+                                        println("[BunnyPoorCdn] Sync Byte FAILED for Seq $seq")
+                                    }
                                     output.write(decrypted)
                                 } else {
-                                    println("[BunnyPoorCdn] Sync Byte FAILED for Seq $seq")
                                     output.write(data)
                                 }
                             } else { output.write(data) }
@@ -310,12 +310,9 @@ class BunnyPoorCdn : ExtractorApi() {
                             data = buffer.toByteArray()
                         }
                         "xor_chain" -> {
-                            // [수정] init_key를 Base64가 아닌 문자열 바이트로 처리
                             val initStr = layer.optString("init_key", "")
                             val init = initStr.toByteArray(Charsets.UTF_8)
-                            
                             val newData = data.clone()
-                            // 역방향 XOR 연산 (data[j] ^= data[j-1])
                             for (j in newData.size - 1 downTo 1) newData[j] = newData[j] xor newData[j - 1]
                             if (init.isNotEmpty()) newData[0] = newData[0] xor init[0]
                             data = newData
@@ -339,8 +336,11 @@ class BunnyPoorCdn : ExtractorApi() {
                             for (k in noiseL.indices) { inOffsets[k] = acc; acc += noiseL[k] }
                             val result = ByteArray(perm.length())
                             for (j in 0 until perm.length()) {
-                                if (inOffsets[j] < data.size) {
-                                    result[perm.getInt(j)] = data[inOffsets[j]]
+                                // 셔플된 데이터의 j번째 청크를 가져옴
+                                val offset = inOffsets[j]
+                                // 이 청크는 원래 perm[j] 번째 위치에 있어야 함 (Dest Index)
+                                if (offset < data.size) {
+                                    result[perm.getInt(j)] = data[offset]
                                 }
                             }
                             data = result
@@ -349,10 +349,18 @@ class BunnyPoorCdn : ExtractorApi() {
                             val perm = layer.getJSONArray("perm")
                             val result = ByteArray(16)
                             for (j in 0 until perm.length()) {
-                                val bit = (data[j / 8].toInt() shr (7 - (j % 8))) and 1
-                                if (bit == 1) {
-                                    val d = perm.getInt(j)
-                                    result[d / 8] = (result[d / 8].toInt() or (1 shl (7 - (d % 8)))).toByte()
+                                // 셔플된 데이터의 perm[j] 번째 비트를 가져옴 (Source)
+                                val srcBitIdx = perm.getInt(j)
+                                val srcByteIdx = srcBitIdx / 8
+                                val srcBitPos = 7 - (srcBitIdx % 8)
+                                val bitVal = (data[srcByteIdx].toInt() shr srcBitPos) and 1
+                                
+                                // 이 비트를 원본의 j 번째 위치에 놓음 (Dest)
+                                val destByteIdx = j / 8
+                                val destBitPos = 7 - (j % 8)
+                                
+                                if (bitVal == 1) {
+                                    result[destByteIdx] = (result[destByteIdx].toInt() or (1 shl destBitPos)).toByte()
                                 }
                             }
                             data = result
