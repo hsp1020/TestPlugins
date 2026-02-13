@@ -32,7 +32,7 @@ class TVWiki : MainAPI() {
         TvType.AnimeMovie
     )
 
-    private val USER_AGENT = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+    private val USER_AGENT = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36"
     
     private val commonHeaders = mapOf(
         "User-Agent" to USER_AGENT,
