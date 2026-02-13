@@ -20,10 +20,11 @@ import kotlin.concurrent.thread
 import kotlinx.coroutines.runBlocking
 
 /**
- * [Version: v2026-02-13-RealFinal]
- * 1. c.html 자체가 M3U8 파일임을 확인 -> 인터셉트 대상을 /c.html로 복구.
- * 2. M3U8 내부 Key URI가 절대경로(/v/key7...)인 경우 도메인 기반으로 주소 결합 로직 추가.
- * 3. 획득한 Cookie/Referer를 Local Proxy를 통해 Key 요청 시 강제 주입하여 403 에러 해결.
+ * [Version: v2026-02-13-DebugLog]
+ * 수정 내용:
+ * 1. 1608 바이트 키 에러의 원인을 찾기 위해, 서버가 보낸 에러 메시지(HTML) 내용을 로그캣에 출력하는 기능 추가.
+ * -> 로그캣에서 "[BunnyPoorCdn] Key Error Body:" 검색 요망.
+ * 2. Referer 정책을 'c.html' 주소 자체로 변경 (브라우저 동작과 유사하게 맞춤).
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -42,7 +43,6 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // 기존 프록시 정리
         proxyServer?.stop()
         proxyServer = null
         
@@ -76,7 +76,7 @@ class BunnyPoorCdn : ExtractorApi() {
             }
         }
 
-        // [수정] c.html이 M3U8 파일이므로 이를 타겟으로 인터셉트 (JS 실행 후 최종 요청)
+        // c.html(=M3U8)을 타겟으로 인터셉트
         val resolver = WebViewResolver(
             interceptUrl = Regex("""/c\.html"""), 
             useOkhttp = false,
@@ -98,18 +98,17 @@ class BunnyPoorCdn : ExtractorApi() {
                 interceptor = resolver
             )
             
-            // 인터셉트 성공 시
             if (response.url.contains("/c.html")) {
                 capturedUrl = response.url
                 
                 val cookieManager = CookieManager.getInstance()
                 val cookie = cookieManager.getCookie(capturedUrl) ?: ""
                 
-                // 프록시에서 사용할 헤더 캡처
+                // [수정] Referer를 c.html URL로 설정 (HLS 키 요청 시 일반적인 동작)
                 capturedHeaders = mutableMapOf(
                     "User-Agent" to DESKTOP_UA,
-                    "Referer" to "https://player.bunny-frame.online/",
-                    "Origin" to "https://player.bunny-frame.online",
+                    "Referer" to capturedUrl, 
+                    "Origin" to "https://player.bunny-frame.online", // Origin은 유지
                     "Cookie" to cookie,
                     "Accept" to "*/*"
                 )
@@ -133,26 +132,24 @@ class BunnyPoorCdn : ExtractorApi() {
                 val proxyPort = proxy.port
                 val proxyRoot = "http://127.0.0.1:$proxyPort"
 
-                // 3. M3U8 재작성 (절대경로 처리 로직 개선)
+                // 3. M3U8 재작성
                 val newLines = mutableListOf<String>()
                 val lines = m3u8Content.lines()
                 
-                // URL 파싱용
                 val uri = URI(capturedUrl)
-                val domain = "${uri.scheme}://${uri.host}" // https://every9.poorcdn.com
-                val parentUrl = capturedUrl.substringBeforeLast("/") // https://every9.poorcdn.com/v/e/...
+                val domain = "${uri.scheme}://${uri.host}" 
+                val parentUrl = capturedUrl.substringBeforeLast("/")
 
                 fun resolveUrl(path: String): String {
                     return when {
                         path.startsWith("http") -> path
-                        path.startsWith("/") -> "$domain$path" // /v/key7... 처리
+                        path.startsWith("/") -> "$domain$path"
                         else -> "$parentUrl/$path"
                     }
                 }
 
                 for (line in lines) {
                     when {
-                        // Key URL 변조
                         line.startsWith("#EXT-X-KEY") -> {
                             val keyUriMatch = Regex("""URI="([^"]+)"""").find(line)
                             if (keyUriMatch != null) {
@@ -165,10 +162,6 @@ class BunnyPoorCdn : ExtractorApi() {
                                 newLines.add(line)
                             }
                         }
-                        // Segment URL 변조 (필요 시)
-                        // .gif 등 세그먼트가 http로 시작하는 절대주소면 그대로 두거나, 
-                        // 헤더가 필요하다면 프록시로 라우팅. 보통 세그먼트는 토큰이 URL에 있어 헤더 덜 민감함.
-                        // 안전하게 다 프록시 태웁니다.
                         line.startsWith("http") || (line.isNotBlank() && !line.startsWith("#")) -> {
                             val fullSegUrl = resolveUrl(line)
                             val encodedSegUrl = URLEncoder.encode(fullSegUrl, "UTF-8")
@@ -190,7 +183,6 @@ class BunnyPoorCdn : ExtractorApi() {
                 return true
 
             } catch (e: Exception) {
-                // 실패 시 Fallback
                 callback(
                     newExtractorLink(name, name, capturedUrl, ExtractorLinkType.M3U8) {
                         this.referer = "https://player.bunny-frame.online/"
@@ -261,13 +253,21 @@ class BunnyPoorCdn : ExtractorApi() {
                         
                         runBlocking {
                             try {
-                                // 프록시 핵심: 캡처한 헤더(쿠키 포함)를 싣고 요청
                                 val res = app.get(targetUrl, headers = currentHeaders)
                                 
                                 if (res.isSuccessful) {
                                     val rawData = res.body.bytes()
                                     val contentType = if (path.contains("/key")) "application/octet-stream" else "video/mp2t"
                                     
+                                    // [디버깅] 키 요청인데 16바이트가 아니면 에러 내용을 로그에 출력
+                                    if (path.contains("/key") && rawData.size != 16) {
+                                        val errorBody = String(rawData)
+                                        println("==================================================")
+                                        println("[BunnyPoorCdn] Key Error Body (Size: ${rawData.size} bytes):")
+                                        println(errorBody)
+                                        println("==================================================")
+                                    }
+
                                     val header = "HTTP/1.1 200 OK\r\n" +
                                                  "Content-Type: $contentType\r\n" +
                                                  "Content-Length: ${rawData.size}\r\n" +
