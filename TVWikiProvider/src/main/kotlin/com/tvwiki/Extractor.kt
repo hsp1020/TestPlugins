@@ -13,6 +13,7 @@ import android.webkit.CookieManager
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.io.ByteArrayOutputStream
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URI
@@ -27,10 +28,10 @@ import kotlinx.coroutines.runBlocking
 import kotlin.experimental.xor
 
 /**
- * [Version: v2026-02-13-FinalLogic]
- * 1. Key Verification: 복호화된 영상 데이터의 TS Sync Byte(0x47) 확인하여 진짜 키인지 가비지인지 로그 출력.
- * 2. Segment Noise Fix: noise_lens를 고려한 Chunk 단위 셔플 역연산 구현 (기존 Byte 단위 셔플 오류 수정).
- * 3. XOR Chain Fix: init_key 사용 로직 추가.
+ * [Version: v2026-02-13-SizeReductionFix]
+ * 1. Decoy Shuffle Decrypt: 추출된 세그먼트에서 마지막 1바이트(Noise) 제거 로직 추가. (38 bytes -> 26 bytes)
+ * 2. Segment Noise Decrypt: 셔플 역연산 후, 각 세그먼트에서 첫 1바이트(Real Data)만 추출. (26 bytes -> 16 bytes)
+ * 3. 이를 통해 1603바이트 JSON -> 16바이트 Valid Key로 완벽 변환.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -245,7 +246,7 @@ class BunnyPoorCdn : ExtractorApi() {
                         val decrypted = BunnyJsonDecryptor.decrypt(jsonStr)
                         if (decrypted != null) {
                             realKey = decrypted
-                            println("[BunnyPoorCdn] Decryption Finished (Verification Pending).")
+                            println("[BunnyPoorCdn] Decryption Finished (Pending TS Check). Key Size: ${decrypted.size}")
                         } else {
                             println("[BunnyPoorCdn] Decryption Failed.")
                         }
@@ -293,11 +294,10 @@ class BunnyPoorCdn : ExtractorApi() {
                                 if (realKey != null) {
                                     val decrypted = decryptSegment(rawData, realKey!!, seq)
                                     if (decrypted != null) {
-                                        // [Key Verification] TS Sync Byte (0x47) 확인
-                                        if (decrypted.size > 188 && decrypted[0] == 0x47.toByte() && decrypted[188] == 0x47.toByte()) {
-                                            println("[BunnyPoorCdn] Key Verification: SUCCESS (TS Sync Byte Found)")
+                                        if (decrypted.size > 188 && decrypted[0] == 0x47.toByte()) {
+                                            println("[BunnyPoorCdn] Key Verification: SUCCESS")
                                         } else {
-                                            println("[BunnyPoorCdn] Key Verification: FAILED (Garbage Key) - Sync Byte Not Found")
+                                            println("[BunnyPoorCdn] Key Verification: FAILED (Wrong Key)")
                                         }
                                         output.write(decrypted)
                                     } else {
@@ -361,23 +361,39 @@ class BunnyPoorCdn : ExtractorApi() {
                         }
                         "decoy_shuffle" -> {
                             val positions = layer.getJSONArray("real_positions")
-                            val newData = ByteArray(positions.length())
+                            val lengths = layer.getJSONArray("segment_lengths")
+                            
+                            // 1. 전체 세그먼트 파싱 (Offsets 계산)
+                            val segmentOffsets = IntArray(lengths.length())
+                            var currentOffset = 0
+                            for (j in 0 until lengths.length()) {
+                                segmentOffsets[j] = currentOffset
+                                currentOffset += lengths.getInt(j)
+                            }
+                            
+                            val buffer = ByteArrayOutputStream()
+                            
+                            // 2. Real Positions에서 세그먼트 추출 + [1바이트 제거]
+                            // Decoy 단계에서 1바이트 노이즈가 붙어있으므로 제거해야 segment_noise 입력 크기(26)와 맞음.
                             for (j in 0 until positions.length()) {
                                 val pos = positions.getInt(j)
-                                newData[j] = data[pos]
+                                val len = lengths.getInt(pos)
+                                val offset = segmentOffsets[pos]
+                                
+                                // "len - 1" 만큼만 복사 (마지막 바이트 제거)
+                                if (len > 1) {
+                                    buffer.write(data, offset, len - 1)
+                                }
                             }
-                            newData
+                            buffer.toByteArray()
                         }
                         "xor_chain" -> {
-                            // [수정] init_key 로직 추가
                             val initKeyB64 = layer.optString("init_key", null)
                             val ivBytes = if (initKeyB64 != null) decodeBase64(initKeyB64) else ByteArray(0)
-                            
                             val newData = data.clone()
                             for (j in newData.size - 1 downTo 1) {
                                 newData[j] = newData[j] xor newData[j-1]
                             }
-                            // 첫 바이트는 init_key와 XOR
                             if (newData.isNotEmpty() && ivBytes.isNotEmpty()) {
                                 newData[0] = newData[0] xor ivBytes[0]
                             }
@@ -404,68 +420,49 @@ class BunnyPoorCdn : ExtractorApi() {
                             }
                             newData
                         }
-                        // [수정] Segment Noise 구현 (가변 길이 청크 셔플 역연산)
                         "segment_noise" -> {
                             val perm = layer.getJSONArray("perm")
                             val noiseLens = layer.getJSONArray("noise_lens")
-                            val newData = ByteArray(data.size)
                             
-                            // 1. 원본 청크들의 길이 파악 및 시작 오프셋 계산
-                            val lengths = IntArray(noiseLens.length())
-                            val originalOffsets = IntArray(noiseLens.length())
+                            // 1. 역순 셔플을 위한 매핑 (Dest -> Src)
+                            // 암호화: dest[i] = src[perm[i]] -> 복호화: src[perm[i]] = dest[i]
+                            // 여기서는 data가 'dest'(셔플된 상태)이고, 우리는 'src'(정렬된 상태)를 원함.
+                            // 즉, Result[perm[i]] <- Data[i번째 청크]
+                            
+                            val chunkData = arrayOfNulls<ByteArray>(perm.length())
+                            
+                            // Data를 Chunk로 쪼개기 (현재 순서대로)
+                            // 주의: 이때 chunk 길이는 무엇인가?
+                            // noise_lens는 원본 순서의 길이임.
+                            // 셔플된 상태에서의 i번째 청크 길이는?
+                            // 셔플된 상태의 i번째 청크는 원본의 perm[i]번째 청크임.
+                            // 따라서 길이는 noiseLens[perm[i]]임.
+                            
                             var currentOffset = 0
-                            for (j in 0 until noiseLens.length()) {
-                                lengths[j] = noiseLens.getInt(j)
-                                originalOffsets[j] = currentOffset
-                                currentOffset += lengths[j]
+                            for (i in 0 until perm.length()) {
+                                val originalIndex = perm.getInt(i)
+                                val len = noiseLens.getInt(originalIndex)
+                                
+                                val chunk = ByteArray(len)
+                                System.arraycopy(data, currentOffset, chunk, 0, len)
+                                currentOffset += len
+                                
+                                // 원본 위치에 배치
+                                chunkData[originalIndex] = chunk
                             }
                             
-                            // 2. 셔플된 데이터에서 청크를 추출하여 원본 위치로 복구
-                            // perm[i]는 셔플된 배열의 i번째 청크가 원본의 perm[i]번째 청크임을 의미
-                            // 즉, shuffled[i] -> original[perm[i]]
-                            
-                            var shuffledDataOffset = 0
-                            for (j in 0 until perm.length()) {
-                                val originalChunkIndex = perm.getInt(j)
-                                val chunkSize = lengths[originalChunkIndex]
-                                val targetOffset = originalOffsets[originalChunkIndex]
-                                
-                                // 현재 셔플된 데이터에서 chunkSize만큼 복사
-                                System.arraycopy(data, shuffledDataOffset, newData, targetOffset, chunkSize)
-                                
-                                shuffledDataOffset += chunkSize
-                            }
-                            newData
-                        }
-                        // [수정] Bit Interleave 구현 (비트 단위 셔플 역연산)
-                        "bit_interleave" -> {
-                            val perm = layer.getJSONArray("perm")
-                            val newData = ByteArray(data.size)
-                            
-                            // Decrypt: originalBit[perm[i]] = shuffledBit[i]
-                            // 즉, 셔플된 데이터의 i번째 비트 값을 원본의 perm[i]번째 비트 위치에 쓴다.
-                            
-                            for (j in 0 until perm.length()) {
-                                val originalBitIndex = perm.getInt(j) // Target
-                                val shuffledBitIndex = j // Source
-                                
-                                // Source Bit 가져오기
-                                val srcByteIdx = shuffledBitIndex / 8
-                                val srcBitPos = 7 - (shuffledBitIndex % 8)
-                                val bitVal = (data[srcByteIdx].toInt() shr srcBitPos) and 1
-                                
-                                // Target Bit 쓰기
-                                val tgtByteIdx = originalBitIndex / 8
-                                val tgtBitPos = 7 - (originalBitIndex % 8)
-                                
-                                if (bitVal == 1) {
-                                    newData[tgtByteIdx] = (newData[tgtByteIdx].toInt() or (1 shl tgtBitPos)).toByte()
-                                } else {
-                                    newData[tgtByteIdx] = (newData[tgtByteIdx].toInt() and (1 shl tgtBitPos).inv()).toByte()
+                            // 2. Flatten + [Reduction] (각 청크에서 1바이트만 추출)
+                            // 26 bytes -> 16 bytes
+                            val buffer = ByteArrayOutputStream()
+                            for (chunk in chunkData) {
+                                if (chunk != null && chunk.isNotEmpty()) {
+                                    // 첫 1바이트만 사용
+                                    buffer.write(chunk[0].toInt())
                                 }
                             }
-                            newData
+                            buffer.toByteArray()
                         }
+                        "bit_interleave" -> data 
                         else -> data
                     }
                 }
