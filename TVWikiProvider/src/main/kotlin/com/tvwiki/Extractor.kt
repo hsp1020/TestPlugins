@@ -29,16 +29,17 @@ import kotlinx.coroutines.runBlocking
 import kotlin.experimental.xor
 
 /**
- * [Version: v2026-02-14-PadLenFix]
- * 1. Key Decrypt: 'final_encrypt' 단계에서 'pad_len' 만큼 데이터 끝부분 제거 (필수).
- * 2. Video Decrypt: 'NoPadding' 모드로 변경하여 Padding 오류 방지 및 TS 패킷 확보.
+ * [Version: v2026-02-14-InitKeyStringFix]
+ * 수정 내용:
+ * 1. XOR Chain: init_key를 Base64 디코딩하지 않고 UTF-8 바이트 그대로 사용하도록 변경.
+ * 2. 디버깅 로그 강화: Decrypted Key(Hex) 출력하여 정답 여부 확인.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
     
-    private val VERSION = "v2026-02-14-PadLenFix"
+    private val VERSION = "v2026-02-14-InitKeyStringFix"
     private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
 
     companion object {
@@ -196,8 +197,12 @@ class BunnyPoorCdn : ExtractorApi() {
                     val res = app.get(targetKeyUrl!!, headers = currentHeaders)
                     val rawData = res.body.bytes()
                     if (rawData.size > 100 && rawData[0] == '{'.code.toByte()) {
-                        println("[BunnyPoorCdn] Decoding with logic version: $version")
-                        realKey = BunnyJsonDecryptor.decrypt(String(rawData))
+                        val decrypted = BunnyJsonDecryptor.decrypt(String(rawData))
+                        if (decrypted != null) {
+                            realKey = decrypted
+                            // [디버깅] 복호화된 키를 Hex로 출력 (정답 확인용)
+                            println("[BunnyPoorCdn] Decrypted Key (Hex): ${decrypted.joinToString("") { "%02x".format(it) }}")
+                        }
                     } else if (rawData.size == 16) { realKey = rawData }
                 } catch (e: Exception) { e.printStackTrace() }
             }
@@ -228,14 +233,10 @@ class BunnyPoorCdn : ExtractorApi() {
                             output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
                             if (realKey != null) {
                                 val decrypted = decryptSegment(data, realKey!!, seq)
-                                if (decrypted != null) {
-                                    if(decrypted.size > 188 && decrypted[0] == 0x47.toByte()) {
-                                        // Good
-                                    } else {
-                                        println("[BunnyPoorCdn] Sync Byte FAILED for Seq $seq")
-                                    }
+                                if (decrypted != null && decrypted[0] == 0x47.toByte()) {
                                     output.write(decrypted)
                                 } else {
+                                    println("[BunnyPoorCdn] Sync Byte FAILED for Seq $seq")
                                     output.write(data)
                                 }
                             } else { output.write(data) }
@@ -253,7 +254,7 @@ class BunnyPoorCdn : ExtractorApi() {
                      val hex = playlistIv!!.removePrefix("0x")
                      hex.chunked(2).take(16).forEachIndexed { i, s -> iv[i] = s.toInt(16).toByte() }
                 } else { for (i in 0..7) iv[15 - i] = (seq shr (i * 8)).toByte() }
-                // [수정] PKCS5Padding -> NoPadding으로 변경 (데이터 깨짐/밀림 방지)
+                
                 val cipher = Cipher.getInstance("AES/CBC/NoPadding")
                 cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
                 cipher.doFinal(data)
@@ -286,11 +287,7 @@ class BunnyPoorCdn : ExtractorApi() {
                             val mask = decodeB64(layer.getString("xor_mask"))
                             val padLen = layer.optInt("pad_len", 0)
                             for (j in data.indices) data[j] = data[j] xor mask[j % mask.size]
-                            
-                            // [수정] pad_len 만큼 데이터 끝 제거
-                            if (padLen > 0 && data.size > padLen) {
-                                data = data.copyOfRange(0, data.size - padLen)
-                            }
+                            if (padLen > 0 && data.size > padLen) data = data.copyOfRange(0, data.size - padLen)
                         }
                         "decoy_shuffle" -> {
                             val pos = layer.getJSONArray("real_positions")
@@ -313,8 +310,12 @@ class BunnyPoorCdn : ExtractorApi() {
                             data = buffer.toByteArray()
                         }
                         "xor_chain" -> {
-                            val init = decodeB64(layer.optString("init_key", ""))
+                            // [수정] init_key를 Base64가 아닌 문자열 바이트로 처리
+                            val initStr = layer.optString("init_key", "")
+                            val init = initStr.toByteArray(Charsets.UTF_8)
+                            
                             val newData = data.clone()
+                            // 역방향 XOR 연산 (data[j] ^= data[j-1])
                             for (j in newData.size - 1 downTo 1) newData[j] = newData[j] xor newData[j - 1]
                             if (init.isNotEmpty()) newData[0] = newData[0] xor init[0]
                             data = newData
@@ -338,9 +339,8 @@ class BunnyPoorCdn : ExtractorApi() {
                             for (k in noiseL.indices) { inOffsets[k] = acc; acc += noiseL[k] }
                             val result = ByteArray(perm.length())
                             for (j in 0 until perm.length()) {
-                                val off = inOffsets[j]
-                                if (off < data.size) {
-                                    result[perm.getInt(j)] = data[off]
+                                if (inOffsets[j] < data.size) {
+                                    result[perm.getInt(j)] = data[inOffsets[j]]
                                 }
                             }
                             data = result
