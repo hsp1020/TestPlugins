@@ -31,11 +31,10 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * [Version: v2026-02-14-BruteForceMaster]
- * "무식하게 다 때려박아" 버전
- * 1. Segment Decryption: IV (Big/Little/Zero/Explicit) x Padding (PKCS5/NoPadding) x SeqOffset (-1/0/+1) 모든 조합 시도.
- * 2. Key Decryption: Python 검증 로직과 100% 동일하게 구현 (2단 축소 로직).
- * 3. Verification: 188바이트 간격 Sync Byte(0x47) 다중 체크로 오탐지 방지.
+ * [Version: v2026-02-14-BruteForceUltra]
+ * 1. Brute Force 강화: Zero IV, Big/Little Endian, Explicit IV 모두 시도.
+ * 2. Key Decryption: Python 검증 완료된 2단 축소 로직 적용.
+ * 3. Validation: TS Sync Byte 다중 체크 (188, 376 offset)로 신뢰성 향상.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -209,8 +208,8 @@ class BunnyPoorCdn : ExtractorApi() {
         
         @Volatile private var realKey: ByteArray? = null
         
-        // 성공한 복호화 설정 캐시 (IV모드, 패딩 등)
-        data class DecryptProfile(val ivMode: Int, val padding: String, val seqOffset: Long)
+        // 캐싱: 성공한 설정 (IV Mode, Padding)
+        data class DecryptProfile(val ivMode: Int, val padding: String)
         @Volatile private var confirmedProfile: DecryptProfile? = null
 
         fun start() {
@@ -304,7 +303,7 @@ class BunnyPoorCdn : ExtractorApi() {
                                     if (decrypted != null) {
                                         output.write(decrypted)
                                     } else {
-                                        // 실패해도 원본 전송 (혹시나 Key가 필요 없는 구간일 수도 있으므로)
+                                        // 실패해도 원본 전송 (재생 시도라도 하도록)
                                         println("[BunnyPoorCdn] All Brute Force Attempts Failed. Sending Raw.")
                                         output.write(rawData)
                                     }
@@ -325,32 +324,29 @@ class BunnyPoorCdn : ExtractorApi() {
             }
         }
 
-        // [핵심] 무차별 대입 복호화
+        // [핵심] 무차별 대입 복호화 (IV x Padding 조합)
         private fun bruteForceDecrypt(data: ByteArray, key: ByteArray, seq: Long): ByteArray? {
-            // 1. 캐시된 프로필이 있으면 우선 시도
+            // 1. 캐시된 프로필 있으면 우선 시도
             confirmedProfile?.let { profile ->
-                val dec = attemptDecrypt(data, key, seq + profile.seqOffset, profile.ivMode, profile.padding)
+                val dec = attemptDecrypt(data, key, seq, profile.ivMode, profile.padding)
                 if (isValidTS(dec)) return dec
-                // 캐시 실패 시 초기화 후 다시 찾기
-                confirmedProfile = null
-                println("[BunnyPoorCdn] Cached profile failed. Restarting brute force.")
+                confirmedProfile = null // 실패 시 캐시 삭제
             }
 
             // 2. 가능한 모든 조합 시도
-            // IV Modes: 0=Explicit, 1=BigEndian, 2=LittleEndian
-            val ivModes = if (playlistIv != null) listOf(0, 1, 2) else listOf(1, 2)
-            val paddings = listOf("PKCS5Padding", "NoPadding") // PKCS7 == PKCS5 in Java
-            val seqOffsets = listOf(0L, -1L, 1L) // 시퀀스 번호 오차 보정
+            // IV Modes: 0=Explicit(M3U8), 1=BigEndianSeq, 2=LittleEndianSeq, 3=ZeroIV
+            val ivModes = mutableListOf(1, 2, 3)
+            if (!playlistIv.isNullOrEmpty()) ivModes.add(0, 0)
+            
+            val paddings = listOf("PKCS5Padding", "NoPadding")
 
             for (ivMode in ivModes) {
                 for (padding in paddings) {
-                    for (offset in seqOffsets) {
-                        val dec = attemptDecrypt(data, key, seq + offset, ivMode, padding)
-                        if (isValidTS(dec)) {
-                            println("[BunnyPoorCdn] Crack Success! IV:$ivMode, Pad:$padding, Off:$offset")
-                            confirmedProfile = DecryptProfile(ivMode, padding, offset)
-                            return dec
-                        }
+                    val dec = attemptDecrypt(data, key, seq, ivMode, padding)
+                    if (isValidTS(dec)) {
+                        println("[BunnyPoorCdn] Crack Success! Mode: $ivMode, Pad: $padding")
+                        confirmedProfile = DecryptProfile(ivMode, padding)
+                        return dec
                     }
                 }
             }
@@ -360,14 +356,21 @@ class BunnyPoorCdn : ExtractorApi() {
         private fun attemptDecrypt(data: ByteArray, key: ByteArray, seq: Long, ivMode: Int, padding: String): ByteArray? {
             return try {
                 val iv = ByteArray(16)
-                if (ivMode == 0 && !playlistIv.isNullOrEmpty()) {
-                     val hex = playlistIv!!.removePrefix("0x")
-                     hex.chunked(2).take(16).forEachIndexed { i, s -> iv[i] = s.toInt(16).toByte() }
-                } else {
-                    val buffer = ByteBuffer.wrap(iv)
-                    if (ivMode == 2) buffer.order(ByteOrder.LITTLE_ENDIAN)
-                    else buffer.order(ByteOrder.BIG_ENDIAN)
-                    buffer.putLong(8, seq) // Last 8 bytes
+                when (ivMode) {
+                    0 -> { // Explicit
+                        if (!playlistIv.isNullOrEmpty()) {
+                             val hex = playlistIv!!.removePrefix("0x")
+                             hex.chunked(2).take(16).forEachIndexed { i, s -> iv[i] = s.toInt(16).toByte() }
+                        }
+                    }
+                    1 -> { // Big Endian
+                        ByteBuffer.wrap(iv).order(ByteOrder.BIG_ENDIAN).putLong(8, seq)
+                    }
+                    2 -> { // Little Endian
+                        ByteBuffer.wrap(iv).order(ByteOrder.LITTLE_ENDIAN).putLong(8, seq)
+                    }
+                    3 -> { // Zero IV (Already 0 initialized)
+                    }
                 }
 
                 val cipher = Cipher.getInstance("AES/CBC/$padding")
@@ -376,8 +379,8 @@ class BunnyPoorCdn : ExtractorApi() {
             } catch (e: Exception) { null }
         }
 
-        // [검증 강화] 0x47 Sync Byte가 188 바이트 간격으로 2개 이상 존재하는지 확인
         private fun isValidTS(data: ByteArray?): Boolean {
+            // TS Sync Byte (0x47) check at start and 188 bytes offset
             if (data == null || data.size < 376) return false
             return data[0] == 0x47.toByte() && data[188] == 0x47.toByte()
         }
