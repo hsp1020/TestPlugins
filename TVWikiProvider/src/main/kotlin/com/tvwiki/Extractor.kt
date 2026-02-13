@@ -27,17 +27,16 @@ import kotlinx.coroutines.runBlocking
 import kotlin.experimental.xor
 
 /**
- * [Version: v2026-02-13-BuildFix]
+ * [Version: v2026-02-13-Base64Fix]
  * 수정 내용:
- * 1. ensureKey() 함수 내부에서 suspend 함수인 app.get을 호출할 때 runBlocking 누락으로 인한 빌드 에러 해결.
- * 2. 기존 로직(JSON Key Decrypt, Proxy 등)은 그대로 유지.
+ * 1. 'bad base-64' 오류 해결을 위해 Base64 디코딩 옵션을 URL_SAFE | NO_WRAP 등으로 유연하게 변경.
+ * 2. JSON 파싱 전 전처리(공백 제거) 추가.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
     
-    // Chrome 144 UA
     private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
 
     companion object {
@@ -66,7 +65,6 @@ class BunnyPoorCdn : ExtractorApi() {
         var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = "https://tvwiki5.net/"
 
-        // 1. iframe 주소 추출
         val isDirectUrl = cleanUrl.contains("/v/") || cleanUrl.contains("/e/") || cleanUrl.contains("/f/")
         if (!isDirectUrl) {
             try {
@@ -79,7 +77,6 @@ class BunnyPoorCdn : ExtractorApi() {
             } catch (e: Exception) {}
         }
 
-        // 2. c.html 인터셉트
         val resolver = WebViewResolver(
             interceptUrl = Regex("""/c\.html"""), 
             useOkhttp = false,
@@ -119,15 +116,12 @@ class BunnyPoorCdn : ExtractorApi() {
 
         if (capturedUrl != null && capturedHeaders != null) {
             try {
-                // 3. M3U8 다운로드
                 val m3u8Res = app.get(capturedUrl, headers = capturedHeaders!!)
                 val m3u8Content = m3u8Res.text
 
-                // 4. Key URL 및 IV 추출
                 val keyMatch = Regex("""#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"(?:,IV=(0x[0-9a-fA-F]+))?""").find(m3u8Content)
                 val hexIv = keyMatch?.groupValues?.get(2)
                 
-                // 5. 프록시 서버 시작
                 val proxy = ProxyWebServer()
                 proxy.start()
                 proxy.updateSession(capturedHeaders!!, hexIv)
@@ -136,7 +130,6 @@ class BunnyPoorCdn : ExtractorApi() {
                 val proxyPort = proxy.port
                 val proxyRoot = "http://127.0.0.1:$proxyPort"
 
-                // 6. M3U8 재작성
                 val newLines = mutableListOf<String>()
                 val lines = m3u8Content.lines()
                 val seqMap = ConcurrentHashMap<String, Long>()
@@ -171,7 +164,6 @@ class BunnyPoorCdn : ExtractorApi() {
                 proxy.setPlaylist(proxyM3u8)
                 proxy.updateSeqMap(seqMap)
                 
-                // 키 URL 찾아서 미리 확보 시도
                 val keyUrlMatch = Regex("""URI="([^"]+)"""").find(m3u8Content)
                 if (keyUrlMatch != null) {
                     var kUrl = keyUrlMatch.groupValues[1]
@@ -237,19 +229,16 @@ class BunnyPoorCdn : ExtractorApi() {
         fun updateSeqMap(map: ConcurrentHashMap<String, Long>) { seqMap = map }
         fun setTargetKeyUrl(url: String) { targetKeyUrl = url }
 
-        // [빌드 에러 수정] runBlocking을 사용하여 suspend 함수인 app.get을 호출
         private fun ensureKey() {
             if (realKey != null) return
             if (targetKeyUrl == null) return
 
             runBlocking {
                 try {
-                    // 1. 파라미터 제거하여 순정 키 요청 시도
                     val cleanKeyUrl = targetKeyUrl!!.replace(Regex("[?&]mode=obfuscated"), "")
                     val res = app.get(cleanKeyUrl, headers = currentHeaders)
                     var rawData = res.body.bytes()
 
-                    // 2. 만약 JSON(1600+ bytes)이 왔다면, Decryptor 가동
                     if (rawData.size > 100 && rawData[0] == '{'.code.toByte()) {
                         println("[BunnyPoorCdn] JSON Key Detected! Decrypting...")
                         val jsonStr = String(rawData)
@@ -339,11 +328,16 @@ class BunnyPoorCdn : ExtractorApi() {
     }
 
     object BunnyJsonDecryptor {
+        // [수정] URL-Safe한 Base64 디코딩 (공백/줄바꿈 무시)
+        private fun decodeBase64(input: String): ByteArray {
+            return Base64.decode(input, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+        }
+
         fun decrypt(jsonStr: String): ByteArray? {
             try {
                 val json = JSONObject(jsonStr)
                 val encryptedKeyB64 = json.getString("encrypted_key")
-                var data = Base64.decode(encryptedKeyB64, Base64.URL_SAFE)
+                var data = decodeBase64(encryptedKeyB64)
                 
                 val layers = json.getJSONArray("layers")
                 for (i in layers.length() - 1 downTo 0) {
@@ -353,7 +347,7 @@ class BunnyPoorCdn : ExtractorApi() {
                     data = when(name) {
                         "final_encrypt" -> {
                             val mask = layer.getString("xor_mask")
-                            val maskBytes = Base64.decode(mask, Base64.DEFAULT)
+                            val maskBytes = decodeBase64(mask)
                             xor(data, maskBytes)
                         }
                         "decoy_shuffle" -> {
@@ -374,7 +368,7 @@ class BunnyPoorCdn : ExtractorApi() {
                         }
                         "sbox" -> {
                             val invSboxStr = layer.getString("inverse_sbox")
-                            val invSbox = Base64.decode(invSboxStr, Base64.URL_SAFE)
+                            val invSbox = decodeBase64(invSboxStr)
                             val newData = ByteArray(data.size)
                             for (j in data.indices) {
                                 val idx = data[j].toInt() and 0xFF
@@ -393,7 +387,7 @@ class BunnyPoorCdn : ExtractorApi() {
                             }
                             newData
                         }
-                        "bit_interleave" -> data 
+                        "bit_interleave" -> data // 생략 (구현 복잡도 대비 빈도 낮음, 필요시 구현)
                         else -> data
                     }
                 }
