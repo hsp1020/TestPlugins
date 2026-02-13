@@ -29,19 +29,16 @@ import kotlinx.coroutines.runBlocking
 import kotlin.experimental.xor
 
 /**
- * [Version: v2026-02-14-Final-UniversalFix]
- * 수정 사항:
- * 1. .gif 확장자로 위장된 TS 세그먼트의 Content-Type 강제 지정.
- * 2. 영상별로 변하는 noise_lens와 decoy 길이에 완벽 대응하는 가변 복호화 로직.
- * 3. 128비트 단위 Bit Interleave 역연산 정밀 구현.
- * 4. 모든 단계의 데이터 크기 불일치(ArrayIndexOutOfBounds) 원천 차단.
+ * [Version: v2026-02-14-PadLenFix]
+ * 1. Key Decrypt: 'final_encrypt' 단계에서 'pad_len' 만큼 데이터 끝부분 제거 (필수).
+ * 2. Video Decrypt: 'NoPadding' 모드로 변경하여 Padding 오류 방지 및 TS 패킷 확보.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
     
-    private val VERSION = "v2026-02-14-Final-UniversalFix"
+    private val VERSION = "v2026-02-14-PadLenFix"
     private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
 
     companion object {
@@ -150,7 +147,6 @@ class BunnyPoorCdn : ExtractorApi() {
                 proxy.setPlaylist(newLines.joinToString("\n"))
                 proxy.updateSeqMap(seqMap)
                 
-                // Key URL 추출 및 프록시 전달
                 val keyUrlMatch = Regex("""URI="([^"]+)"""").find(m3u8Content)
                 if (keyUrlMatch != null) {
                     val kUrl = keyUrlMatch.groupValues[1]
@@ -224,16 +220,22 @@ class BunnyPoorCdn : ExtractorApi() {
                     val seq = seqMap[targetUrl] ?: 0L
                     ensureKey()
                     runBlocking {
-                        val res = app.get(targetUrl, headers = currentHeaders)
+                        val segHeaders = currentHeaders.toMutableMap()
+                        segHeaders["Accept"] = "*/*"
+                        val res = app.get(targetUrl, headers = segHeaders)
                         if (res.isSuccessful) {
                             val data = res.body.bytes()
                             output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
                             if (realKey != null) {
                                 val decrypted = decryptSegment(data, realKey!!, seq)
-                                if (decrypted != null && decrypted[0] == 0x47.toByte()) {
+                                if (decrypted != null) {
+                                    if(decrypted.size > 188 && decrypted[0] == 0x47.toByte()) {
+                                        // Good
+                                    } else {
+                                        println("[BunnyPoorCdn] Sync Byte FAILED for Seq $seq")
+                                    }
                                     output.write(decrypted)
                                 } else {
-                                    println("[BunnyPoorCdn] Sync Byte FAILED for Seq $seq")
                                     output.write(data)
                                 }
                             } else { output.write(data) }
@@ -251,7 +253,8 @@ class BunnyPoorCdn : ExtractorApi() {
                      val hex = playlistIv!!.removePrefix("0x")
                      hex.chunked(2).take(16).forEachIndexed { i, s -> iv[i] = s.toInt(16).toByte() }
                 } else { for (i in 0..7) iv[15 - i] = (seq shr (i * 8)).toByte() }
-                val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+                // [수정] PKCS5Padding -> NoPadding으로 변경 (데이터 깨짐/밀림 방지)
+                val cipher = Cipher.getInstance("AES/CBC/NoPadding")
                 cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
                 cipher.doFinal(data)
             } catch (e: Exception) { null }
@@ -281,7 +284,13 @@ class BunnyPoorCdn : ExtractorApi() {
                     when(layer.getString("name")) {
                         "final_encrypt" -> {
                             val mask = decodeB64(layer.getString("xor_mask"))
+                            val padLen = layer.optInt("pad_len", 0)
                             for (j in data.indices) data[j] = data[j] xor mask[j % mask.size]
+                            
+                            // [수정] pad_len 만큼 데이터 끝 제거
+                            if (padLen > 0 && data.size > padLen) {
+                                data = data.copyOfRange(0, data.size - padLen)
+                            }
                         }
                         "decoy_shuffle" -> {
                             val pos = layer.getJSONArray("real_positions")
@@ -293,8 +302,11 @@ class BunnyPoorCdn : ExtractorApi() {
                             val collectedLens = IntArray(pos.length())
                             for (j in 0 until pos.length()) {
                                 val p = pos.getInt(j)
-                                val targetLen = noiseLensArray?.getInt(j) ?: lens.getInt(p)
-                                buffer.write(data, offsets[p], targetLen)
+                                val l = lens.getInt(p)
+                                val targetLen = noiseLensArray?.getInt(j) ?: l
+                                if (offsets[p] + targetLen <= data.size) {
+                                    buffer.write(data, offsets[p], targetLen)
+                                }
                                 collectedLens[j] = targetLen
                             }
                             noiseL = collectedLens
@@ -326,7 +338,10 @@ class BunnyPoorCdn : ExtractorApi() {
                             for (k in noiseL.indices) { inOffsets[k] = acc; acc += noiseL[k] }
                             val result = ByteArray(perm.length())
                             for (j in 0 until perm.length()) {
-                                result[perm.getInt(j)] = data[inOffsets[j]]
+                                val off = inOffsets[j]
+                                if (off < data.size) {
+                                    result[perm.getInt(j)] = data[off]
+                                }
                             }
                             data = result
                         }
