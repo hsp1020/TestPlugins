@@ -9,6 +9,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.network.WebViewResolver 
 import android.webkit.CookieManager
+import android.util.Base64
 import java.net.ServerSocket
 import java.net.Socket
 import java.io.BufferedReader
@@ -20,18 +21,18 @@ import kotlin.concurrent.thread
 import kotlinx.coroutines.runBlocking
 
 /**
- * [Version: v2026-02-13-DebugLog]
- * 수정 내용:
- * 1. 1608 바이트 키 에러의 원인을 찾기 위해, 서버가 보낸 에러 메시지(HTML) 내용을 로그캣에 출력하는 기능 추가.
- * -> 로그캣에서 "[BunnyPoorCdn] Key Error Body:" 검색 요망.
- * 2. Referer 정책을 'c.html' 주소 자체로 변경 (브라우저 동작과 유사하게 맞춤).
+ * [Version: v2026-02-13-Chrome144-JsonFix]
+ * 1. User-Agent 및 Sec-Ch-Ua 헤더를 사용자의 Chrome 144 환경과 100% 일치시킴.
+ * 2. Key 요청 시 'mode=obfuscated' 파라미터를 제거하여 원본 바이너리 키 요청 시도.
+ * 3. 만약 서버가 강제로 JSON(1608 bytes)을 줄 경우, JSON 파싱 후 'encrypted_key'를 추출하여 디코딩.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
     
-    private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    // [수정] 사용자 스크린샷 기반 Chrome 144 UA
+    private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
@@ -60,7 +61,6 @@ class BunnyPoorCdn : ExtractorApi() {
         var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = "https://tvwiki5.net/"
 
-        // iframe 주소 추출
         val isDirectUrl = cleanUrl.contains("/v/") || cleanUrl.contains("/e/") || cleanUrl.contains("/f/")
         if (!isDirectUrl) {
             try {
@@ -76,7 +76,7 @@ class BunnyPoorCdn : ExtractorApi() {
             }
         }
 
-        // c.html(=M3U8)을 타겟으로 인터셉트
+        // c.html 인터셉트
         val resolver = WebViewResolver(
             interceptUrl = Regex("""/c\.html"""), 
             useOkhttp = false,
@@ -104,13 +104,20 @@ class BunnyPoorCdn : ExtractorApi() {
                 val cookieManager = CookieManager.getInstance()
                 val cookie = cookieManager.getCookie(capturedUrl) ?: ""
                 
-                // [수정] Referer를 c.html URL로 설정 (HLS 키 요청 시 일반적인 동작)
+                // [수정] 스크린샷과 동일한 헤더 구성
                 capturedHeaders = mutableMapOf(
                     "User-Agent" to DESKTOP_UA,
-                    "Referer" to capturedUrl, 
-                    "Origin" to "https://player.bunny-frame.online", // Origin은 유지
+                    "Referer" to "https://player.bunny-frame.online/",
+                    "Origin" to "https://player.bunny-frame.online",
                     "Cookie" to cookie,
-                    "Accept" to "*/*"
+                    "Accept" to "*/*",
+                    // [중요] 스크린샷의 Sec-Ch-Ua 그대로 적용
+                    "Sec-Ch-Ua" to "\"Not(A:Brand\";v=\"8\", \"Chromium\";v=\"144\", \"Google Chrome\";v=\"144\"",
+                    "Sec-Ch-Ua-Mobile" to "?0",
+                    "Sec-Ch-Ua-Platform" to "\"Windows\"",
+                    "Sec-Fetch-Site" to "cross-site",
+                    "Sec-Fetch-Mode" to "cors",
+                    "Sec-Fetch-Dest" to "empty"
                 )
             }
         } catch (e: Exception) {
@@ -119,11 +126,9 @@ class BunnyPoorCdn : ExtractorApi() {
 
         if (capturedUrl != null && capturedHeaders != null) {
             try {
-                // 1. M3U8 다운로드
                 val m3u8Res = app.get(capturedUrl, headers = capturedHeaders!!)
                 val m3u8Content = m3u8Res.text
 
-                // 2. 프록시 서버 시작
                 val proxy = ProxyWebServer()
                 proxy.start()
                 proxy.updateSession(capturedHeaders!!)
@@ -132,7 +137,6 @@ class BunnyPoorCdn : ExtractorApi() {
                 val proxyPort = proxy.port
                 val proxyRoot = "http://127.0.0.1:$proxyPort"
 
-                // 3. M3U8 재작성
                 val newLines = mutableListOf<String>()
                 val lines = m3u8Content.lines()
                 
@@ -156,6 +160,7 @@ class BunnyPoorCdn : ExtractorApi() {
                                 val originalKeyPath = keyUriMatch.groupValues[1]
                                 val fullKeyUrl = resolveUrl(originalKeyPath)
                                 val encodedKeyUrl = URLEncoder.encode(fullKeyUrl, "UTF-8")
+                                // 키 요청을 프록시로 돌림
                                 val newLine = line.replace(originalKeyPath, "$proxyRoot/proxy/key?url=$encodedKeyUrl")
                                 newLines.add(newLine)
                             } else {
@@ -183,6 +188,7 @@ class BunnyPoorCdn : ExtractorApi() {
                 return true
 
             } catch (e: Exception) {
+                // Fallback
                 callback(
                     newExtractorLink(name, name, capturedUrl, ExtractorLinkType.M3U8) {
                         this.referer = "https://player.bunny-frame.online/"
@@ -251,23 +257,43 @@ class BunnyPoorCdn : ExtractorApi() {
                         val urlParam = path.substringAfter("url=").substringBefore(" ")
                         val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
                         
+                        // [핵심] 키 요청일 경우 mode=obfuscated 파라미터를 강제로 제거
+                        // 이렇게 하면 서버가 JSON이 아닌 순수 바이너리 키를 줄 가능성이 높음
+                        var finalTargetUrl = targetUrl
+                        if (path.contains("/key")) {
+                            finalTargetUrl = finalTargetUrl.replace("&mode=obfuscated", "").replace("?mode=obfuscated", "")
+                        }
+
                         runBlocking {
                             try {
-                                val res = app.get(targetUrl, headers = currentHeaders)
+                                val res = app.get(finalTargetUrl, headers = currentHeaders)
                                 
                                 if (res.isSuccessful) {
-                                    val rawData = res.body.bytes()
-                                    val contentType = if (path.contains("/key")) "application/octet-stream" else "video/mp2t"
+                                    var rawData = res.body.bytes()
                                     
-                                    // [디버깅] 키 요청인데 16바이트가 아니면 에러 내용을 로그에 출력
-                                    if (path.contains("/key") && rawData.size != 16) {
-                                        val errorBody = String(rawData)
-                                        println("==================================================")
-                                        println("[BunnyPoorCdn] Key Error Body (Size: ${rawData.size} bytes):")
-                                        println(errorBody)
-                                        println("==================================================")
+                                    // [안전장치] 만약 파라미터를 지웠는데도 JSON({...)이 날아왔다면?
+                                    // JSON을 파싱해서 encrypted_key만 추출
+                                    if (path.contains("/key") && rawData.isNotEmpty() && rawData[0] == '{'.code.toByte()) {
+                                        try {
+                                            val jsonString = String(rawData)
+                                            // 정규식으로 encrypted_key 추출
+                                            val keyMatch = Regex(""""encrypted_key"\s*:\s*"([^"]+)"""").find(jsonString)
+                                            if (keyMatch != null) {
+                                                val b64Key = keyMatch.groupValues[1]
+                                                // Base64 디코딩
+                                                val decodedKey = Base64.decode(b64Key, Base64.DEFAULT)
+                                                // 만약 16바이트라면 이게 정답
+                                                if (decodedKey.size == 16) {
+                                                    rawData = decodedKey
+                                                    println("[BunnyPoorCdn] JSON Key 추출 및 디코딩 성공!")
+                                                }
+                                            }
+                                        } catch (e: Exception) {
+                                            // 파싱 실패시 원본 rawData 그대로 전송 (어차피 에러날 것임)
+                                        }
                                     }
 
+                                    val contentType = if (path.contains("/key")) "application/octet-stream" else "video/mp2t"
                                     val header = "HTTP/1.1 200 OK\r\n" +
                                                  "Content-Type: $contentType\r\n" +
                                                  "Content-Length: ${rawData.size}\r\n" +
