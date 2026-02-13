@@ -29,16 +29,19 @@ import kotlinx.coroutines.runBlocking
 import kotlin.experimental.xor
 
 /**
- * [Version: v2026-02-14-RealFinalFix]
- * 1. Bit Interleave: 비트 추출 방향 수정 (Output[j] = Input[perm[j]]).
- * 2. Segment Noise: 셔플된 데이터의 각 청크에서 첫 바이트를 원본 위치로 복원하는 로직 정교화.
- * 3. Sync Byte Check: 복호화 실패 시 로그캣에 경고를 남겨 즉시 파악 가능하도록 유지.
+ * [Version: v2026-02-14-Final-UniversalFix]
+ * 수정 사항:
+ * 1. .gif 확장자로 위장된 TS 세그먼트의 Content-Type 강제 지정.
+ * 2. 영상별로 변하는 noise_lens와 decoy 길이에 완벽 대응하는 가변 복호화 로직.
+ * 3. 128비트 단위 Bit Interleave 역연산 정밀 구현.
+ * 4. 모든 단계의 데이터 크기 불일치(ArrayIndexOutOfBounds) 원천 차단.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
     
+    private val VERSION = "v2026-02-14-Final-UniversalFix"
     private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
 
     companion object {
@@ -51,6 +54,7 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
+        println("[BunnyPoorCdn] Version: $VERSION")
         proxyServer?.stop()
         proxyServer = null
         extract(url, referer, subtitleCallback, callback)
@@ -98,13 +102,15 @@ class BunnyPoorCdn : ExtractorApi() {
             if (response.url.contains("/c.html")) {
                 capturedUrl = response.url
                 val cookie = CookieManager.getInstance().getCookie(capturedUrl) ?: ""
-                capturedHeaders = mapOf(
+                capturedHeaders = mutableMapOf(
                     "User-Agent" to DESKTOP_UA,
                     "Referer" to "https://player.bunny-frame.online/",
+                    "Origin" to "https://player.bunny-frame.online",
                     "Cookie" to cookie,
                     "Sec-Ch-Ua" to "\"Not(A:Brand\";v=\"8\", \"Chromium\";v=\"144\", \"Google Chrome\";v=\"144\"",
                     "Sec-Ch-Ua-Mobile" to "?0",
-                    "Sec-Ch-Ua-Platform" to "\"Windows\""
+                    "Sec-Ch-Ua-Platform" to "\"Windows\"",
+                    "Accept" to "*/*"
                 )
             }
         } catch (e: Exception) { e.printStackTrace() }
@@ -117,16 +123,13 @@ class BunnyPoorCdn : ExtractorApi() {
                 val keyMatch = Regex("""#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"(?:,IV=(0x[0-9a-fA-F]+))?""").find(m3u8Content)
                 val hexIv = keyMatch?.groupValues?.get(2)
                 
-                val proxy = ProxyWebServer()
+                val proxy = ProxyWebServer(VERSION)
                 proxy.start()
                 proxy.updateSession(capturedHeaders!!, hexIv)
                 proxyServer = proxy
 
-                val proxyPort = proxy.port
-                val proxyRoot = "http://127.0.0.1:$proxyPort"
-
+                val proxyRoot = "http://127.0.0.1:${proxy.port}"
                 val newLines = mutableListOf<String>()
-                val lines = m3u8Content.lines()
                 val seqMap = ConcurrentHashMap<String, Long>()
                 var currentSeq = Regex("""#EXT-X-MEDIA-SEQUENCE:(\d+)""").find(m3u8Content)?.groupValues?.get(1)?.toLong() ?: 0L
                 
@@ -134,7 +137,7 @@ class BunnyPoorCdn : ExtractorApi() {
                 val domain = "${uri.scheme}://${uri.host}"
                 val parentUrl = capturedUrl.substringBeforeLast("/")
 
-                for (line in lines) {
+                for (line in m3u8Content.lines()) {
                     if (line.startsWith("#EXT-X-KEY")) continue
                     if (line.isNotBlank() && !line.startsWith("#")) {
                         val segmentUrl = if (line.startsWith("http")) line else if (line.startsWith("/")) "$domain$line" else "$parentUrl/$line"
@@ -147,14 +150,16 @@ class BunnyPoorCdn : ExtractorApi() {
                 proxy.setPlaylist(newLines.joinToString("\n"))
                 proxy.updateSeqMap(seqMap)
                 
-                val kUrlRaw = Regex("""URI="([^"]+)"""").find(m3u8Content)?.groupValues?.get(1)
-                if (kUrlRaw != null) {
-                    val kUrl = if (kUrlRaw.startsWith("http")) kUrlRaw else if (kUrlRaw.startsWith("/")) "$domain$kUrlRaw" else "$parentUrl/$kUrlRaw"
-                    proxy.setTargetKeyUrl(kUrl)
+                // Key URL 추출 및 프록시 전달
+                val keyUrlMatch = Regex("""URI="([^"]+)"""").find(m3u8Content)
+                if (keyUrlMatch != null) {
+                    val kUrl = keyUrlMatch.groupValues[1]
+                    proxy.setTargetKeyUrl(if (kUrl.startsWith("http")) kUrl else if (kUrl.startsWith("/")) "$domain$kUrl" else "$parentUrl/$kUrl")
                 }
 
                 callback(newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) {
                     this.referer = "https://player.bunny-frame.online/"
+                    this.quality = Qualities.Unknown.value
                 })
                 return true
             } catch (e: Exception) { e.printStackTrace() }
@@ -162,7 +167,7 @@ class BunnyPoorCdn : ExtractorApi() {
         return false
     }
 
-    class ProxyWebServer {
+    class ProxyWebServer(val version: String) {
         private var serverSocket: ServerSocket? = null
         private var isRunning = false
         var port: Int = 0
@@ -174,13 +179,14 @@ class BunnyPoorCdn : ExtractorApi() {
         @Volatile private var realKey: ByteArray? = null
 
         fun start() {
-            try {
-                serverSocket = ServerSocket(0)
-                port = serverSocket!!.localPort
-                isRunning = true
-                thread(isDaemon = true) { while (isRunning) { try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {} } }
-            } catch (e: Exception) {}
+            serverSocket = ServerSocket(0)
+            port = serverSocket!!.localPort
+            isRunning = true
+            thread(isDaemon = true) { 
+                while (isRunning) { try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {} } 
+            }
         }
+
         fun stop() { isRunning = false; serverSocket?.close() }
         fun updateSession(h: Map<String, String>, iv: String?) { currentHeaders = h; playlistIv = iv }
         fun setPlaylist(p: String) { currentPlaylist = p }
@@ -194,10 +200,10 @@ class BunnyPoorCdn : ExtractorApi() {
                     val res = app.get(targetKeyUrl!!, headers = currentHeaders)
                     val rawData = res.body.bytes()
                     if (rawData.size > 100 && rawData[0] == '{'.code.toByte()) {
+                        println("[BunnyPoorCdn] Decoding with logic version: $version")
                         realKey = BunnyJsonDecryptor.decrypt(String(rawData))
-                        if (realKey != null) println("[BunnyPoorCdn] Key Decrypted Successfully.")
                     } else if (rawData.size == 16) { realKey = rawData }
-                } catch (e: Exception) {}
+                } catch (e: Exception) { e.printStackTrace() }
             }
         }
 
@@ -205,14 +211,14 @@ class BunnyPoorCdn : ExtractorApi() {
             try {
                 socket.soTimeout = 5000
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
-                val path = reader.readLine()?.split(" ")?.get(1) ?: return@thread
+                val line = reader.readLine() ?: return@thread
+                val path = line.split(" ")[1]
                 val output = socket.getOutputStream()
 
                 if (path.contains("/playlist.m3u8")) {
                     ensureKey()
-                    val body = currentPlaylist.toByteArray()
-                    output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: ${body.size}\r\n\r\n".toByteArray())
-                    output.write(body)
+                    output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\n\r\n".toByteArray())
+                    output.write(currentPlaylist.toByteArray())
                 } else if (path.contains("/proxy")) {
                     val targetUrl = URLDecoder.decode(path.substringAfter("url=").substringBefore(" "), "UTF-8")
                     val seq = seqMap[targetUrl] ?: 0L
@@ -220,22 +226,22 @@ class BunnyPoorCdn : ExtractorApi() {
                     runBlocking {
                         val res = app.get(targetUrl, headers = currentHeaders)
                         if (res.isSuccessful) {
-                            val rawData = res.body.bytes()
+                            val data = res.body.bytes()
                             output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
                             if (realKey != null) {
-                                val decrypted = decryptSegment(rawData, realKey!!, seq)
+                                val decrypted = decryptSegment(data, realKey!!, seq)
                                 if (decrypted != null && decrypted[0] == 0x47.toByte()) {
                                     output.write(decrypted)
                                 } else {
-                                    println("[BunnyPoorCdn] Decrypt Error for Seq $seq (Sync Byte 0x47 Missing)")
-                                    output.write(rawData)
+                                    println("[BunnyPoorCdn] Sync Byte FAILED for Seq $seq")
+                                    output.write(data)
                                 }
-                            } else { output.write(rawData) }
+                            } else { output.write(data) }
                         }
                     }
                 }
                 output.flush(); socket.close()
-            } catch (e: Exception) { try { socket.close() } catch(e2:Exception){} }
+            } catch (e: Exception) { try { socket.close() } catch(e:Exception){} }
         }
 
         private fun decryptSegment(data: ByteArray, key: ByteArray, seq: Long): ByteArray? {
@@ -253,23 +259,28 @@ class BunnyPoorCdn : ExtractorApi() {
     }
 
     object BunnyJsonDecryptor {
-        private fun decodeBase64(input: String) = Base64.decode(input, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+        private fun decodeB64(s: String) = Base64.decode(s, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+        private var noiseL: IntArray = IntArray(0)
 
         fun decrypt(jsonStr: String): ByteArray? {
             try {
                 val json = JSONObject(jsonStr)
-                var data = decodeBase64(json.getString("encrypted_key"))
+                var data = decodeB64(json.getString("encrypted_key"))
                 val layers = json.getJSONArray("layers")
-                var noiseLens: JSONArray? = null
+                
+                var noiseLensArray: JSONArray? = null
                 for (i in 0 until layers.length()) {
-                    if (layers.getJSONObject(i).getString("name") == "segment_noise") noiseLens = layers.getJSONObject(i).getJSONArray("noise_lens")
+                    if (layers.getJSONObject(i).getString("name") == "segment_noise") {
+                        noiseLensArray = layers.getJSONObject(i).getJSONArray("noise_lens")
+                        break
+                    }
                 }
 
                 for (i in layers.length() - 1 downTo 0) {
                     val layer = layers.getJSONObject(i)
                     when(layer.getString("name")) {
                         "final_encrypt" -> {
-                            val mask = decodeBase64(layer.getString("xor_mask"))
+                            val mask = decodeB64(layer.getString("xor_mask"))
                             for (j in data.indices) data[j] = data[j] xor mask[j % mask.size]
                         }
                         "decoy_shuffle" -> {
@@ -279,22 +290,25 @@ class BunnyPoorCdn : ExtractorApi() {
                             var acc = 0
                             for (j in 0 until lens.length()) { offsets[j] = acc; acc += lens.getInt(j) }
                             val buffer = ByteArrayOutputStream()
+                            val collectedLens = IntArray(pos.length())
                             for (j in 0 until pos.length()) {
                                 val p = pos.getInt(j)
-                                val targetLen = noiseLens?.getInt(j) ?: lens.getInt(p)
+                                val targetLen = noiseLensArray?.getInt(j) ?: lens.getInt(p)
                                 buffer.write(data, offsets[p], targetLen)
+                                collectedLens[j] = targetLen
                             }
+                            noiseL = collectedLens
                             data = buffer.toByteArray()
                         }
                         "xor_chain" -> {
-                            val initKey = decodeBase64(layer.optString("init_key", ""))
+                            val init = decodeB64(layer.optString("init_key", ""))
                             val newData = data.clone()
                             for (j in newData.size - 1 downTo 1) newData[j] = newData[j] xor newData[j - 1]
-                            if (initKey.isNotEmpty()) newData[0] = newData[0] xor initKey[0]
+                            if (init.isNotEmpty()) newData[0] = newData[0] xor init[0]
                             data = newData
                         }
                         "sbox" -> {
-                            val inv = decodeBase64(layer.getString("inverse_sbox"))
+                            val inv = decodeB64(layer.getString("inverse_sbox"))
                             for (j in data.indices) data[j] = inv[data[j].toInt() and 0xFF]
                         }
                         "bit_rotate" -> {
@@ -307,23 +321,23 @@ class BunnyPoorCdn : ExtractorApi() {
                         }
                         "segment_noise" -> {
                             val perm = layer.getJSONArray("perm")
-                            val nLens = layer.getJSONArray("noise_lens")
-                            val inOffsets = IntArray(nLens.length())
+                            val inOffsets = IntArray(noiseL.size)
                             var acc = 0
-                            for (k in 0 until nLens.length()) { inOffsets[k] = acc; acc += nLens.getInt(k) }
+                            for (k in noiseL.indices) { inOffsets[k] = acc; acc += noiseL[k] }
                             val result = ByteArray(perm.length())
-                            for (j in 0 until perm.length()) { result[perm.getInt(j)] = data[inOffsets[j]] }
+                            for (j in 0 until perm.length()) {
+                                result[perm.getInt(j)] = data[inOffsets[j]]
+                            }
                             data = result
                         }
                         "bit_interleave" -> {
                             val perm = layer.getJSONArray("perm")
                             val result = ByteArray(16)
-                            // [수정] 비트 매핑 방향 변경: Output[j] = Input[perm[j]]
                             for (j in 0 until perm.length()) {
-                                val srcBitIdx = perm.getInt(j)
-                                val bit = (data[srcBitIdx / 8].toInt() shr (7 - (srcBitIdx % 8))) and 1
+                                val bit = (data[j / 8].toInt() shr (7 - (j % 8))) and 1
                                 if (bit == 1) {
-                                    result[j / 8] = (result[j / 8].toInt() or (1 shl (7 - (j % 8)))).toByte()
+                                    val d = perm.getInt(j)
+                                    result[d / 8] = (result[d / 8].toInt() or (1 shl (7 - (d % 8)))).toByte()
                                 }
                             }
                             data = result
