@@ -18,11 +18,11 @@ import kotlin.random.Random
 
 /**
  * BunnyPoorCdn Extractor
- * Version: [2026-02-13-V41-BackToV36-Fixed]
- * - BACK TO V36: V36 successfully bypassed CF for M3U8 (V39 failed).
- * - FIX 404: Corrects Key URL domain from CDN to Player Domain.
- * - FIX 403: Forces Token Sync.
- * - FIX ZOMBIE: Random port + Explicit stop.
+ * Version: [2026-02-13-V42-Hybrid-Fix]
+ * - LOGIC: Combines V34 (Referer Separation) + V41 (Domain Correction).
+ * - FIX: M3U8 requests use 'tvwiki5.net' Referer (Bypasses CF 403 on Playlist).
+ * - FIX: Key/TS requests use 'player.bunny...' Referer + Domain Correction (Bypasses 404/403 on Key).
+ * - UA: Chrome UA fixed.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki Player"
@@ -30,10 +30,10 @@ class BunnyPoorCdn : ExtractorApi() {
     override val requiresReferer = true
     
     private val CHROME_UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36"
-    private val TAG = "[Bunny-V41-${Random.nextInt(999)}]"
+    private val TAG = "[Bunny-V42-${Random.nextInt(999)}]"
 
     companion object {
-        private var proxyServer: ProxyWebServerV41? = null
+        private var proxyServer: ProxyWebServerV42? = null
     }
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
@@ -54,19 +54,19 @@ class BunnyPoorCdn : ExtractorApi() {
 
         if (capturedUrl != null) {
             println("$TAG Captured: $capturedUrl")
-            // No cookie logic (V36 success factor)
+            
+            // 쿠키가 없다는 것이 확인되었으므로 쿠키 로직 제거
 
             if (proxyServer == null) {
-                proxyServer = ProxyWebServerV41(TAG, CHROME_UA)
+                proxyServer = ProxyWebServerV42(TAG, CHROME_UA)
                 proxyServer?.start()
             } else {
-                // Ensure fresh state
                 proxyServer?.stop()
-                proxyServer = ProxyWebServerV41(TAG, CHROME_UA)
+                proxyServer = ProxyWebServerV42(TAG, CHROME_UA)
                 proxyServer?.start()
             }
             
-            proxyServer?.updateContext(cleanUrl)
+            proxyServer?.updateContext(cleanUrl) // cleanUrl = Full Player URL
 
             val port = proxyServer?.port ?: return false
             val encodedUrl = URLEncoder.encode(capturedUrl, "UTF-8")
@@ -80,7 +80,7 @@ class BunnyPoorCdn : ExtractorApi() {
         return false
     }
 
-    class ProxyWebServerV41(private val tag: String, private val userAgent: String) {
+    class ProxyWebServerV42(private val tag: String, private val userAgent: String) {
         private var serverSocket: ServerSocket? = null
         private var isRunning = false
         var port: Int = 0
@@ -91,7 +91,7 @@ class BunnyPoorCdn : ExtractorApi() {
                 serverSocket = ServerSocket(0)
                 port = serverSocket!!.localPort
                 isRunning = true
-                println("$tag [ProxyV41] Started on port $port")
+                println("$tag [ProxyV42] Started on port $port")
                 thread(isDaemon = true) { 
                     while (isRunning && serverSocket != null && !serverSocket!!.isClosed) { 
                         try { handleClient(serverSocket!!.accept()) } catch (e: Exception) { } 
@@ -124,25 +124,18 @@ class BunnyPoorCdn : ExtractorApi() {
                     val requestUrl = if (targetUrlRaw.contains("#")) targetUrlRaw.substringBefore("#") else targetUrlRaw
                     
                     val isPlaylist = requestUrl.contains("c.html")
-                    // Referer Strategy: V36 Logic (Player URL for Playlist)
-                    // For Key/TS, we will stick to Player URL as well since V36 got 404 (Server reached, just file missing)
-                    val referer = fullPlayerUrl
+                    
+                    // [핵심 1: Referer 분리]
+                    // c.html 요청 시 -> 메인 사이트 Referer (V14 성공 요인)
+                    // Key/TS 요청 시 -> 플레이어 사이트 Referer (브라우저 동작)
+                    val referer = if (isPlaylist) "https://tvwiki5.net/" else "https://player.bunny-frame.online/"
+                    val origin = if (isPlaylist) "https://tvwiki5.net" else "https://player.bunny-frame.online"
                     
                     val headers = mutableMapOf(
-                        "Host" to URI(requestUrl).host,
-                        "Connection" to "keep-alive",
-                        "sec-ch-ua" to "\"Chromium\";v=\"130\", \"Android WebView\";v=\"130\", \"Not?A_Brand\";v=\"99\"",
-                        "sec-ch-ua-mobile" to "?1",
-                        "sec-ch-ua-platform" to "\"Android\"",
-                        "Upgrade-Insecure-Requests" to "1",
                         "User-Agent" to userAgent,
-                        "Accept" to "*/*",
-                        "Sec-Fetch-Site" to "cross-site",
-                        "Sec-Fetch-Mode" to "cors",
-                        "Sec-Fetch-Dest" to "empty",
                         "Referer" to referer,
-                        "Accept-Encoding" to "gzip, deflate, br",
-                        "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
+                        "Origin" to origin,
+                        "Accept" to "*/*"
                     )
 
                     val response = runBlocking { app.get(requestUrl, headers = headers) }
@@ -150,7 +143,7 @@ class BunnyPoorCdn : ExtractorApi() {
                     if (response.isSuccessful) {
                         if (pathFull.startsWith("/playlist")) {
                             val content = response.text
-                            // [FIX] Rewrite with Domain Correction & Token Sync
+                            // [핵심 2: 토큰 강제 동기화 + 도메인 교정]
                             val newContent = rewriteM3u8(content, requestUrl)
                             output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nConnection: close\r\n\r\n".toByteArray())
                             output.write(newContent.toByteArray())
@@ -160,7 +153,7 @@ class BunnyPoorCdn : ExtractorApi() {
                             output.write(response.body.bytes())
                         }
                     } else {
-                        println("$tag [Proxy Error] ${response.code} for: $requestUrl")
+                        println("$tag [Proxy Error] ${response.code} for: $requestUrl (Ref: $referer)")
                         output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
                     }
                 }
@@ -198,16 +191,11 @@ class BunnyPoorCdn : ExtractorApi() {
                     if (uriMatch != null) {
                         val keyUrl = uriMatch.groupValues[1]
                         
-                        // [V41 FIX] 키 도메인을 무조건 'player.bunny-frame.online'으로 변경
-                        // V36은 여기서 CDN 도메인으로 가서 404가 났음
-                        val correctedKeyUrl = if (keyUrl.startsWith("/")) {
-                            "https://player.bunny-frame.online$keyUrl"
-                        } else {
-                            // 상대 경로인 경우에도 플레이어 도메인 붙임
-                             "https://player.bunny-frame.online/v/$keyUrl" // 추정 경로
-                        }
-                        
-                        // 토큰 강제 동기화
+                        // [핵심 3: 키 도메인 강제 변경] (V41에서 배운 404 해결책)
+                        val correctedKeyUrl = if (keyUrl.startsWith("http")) keyUrl 
+                        else "https://player.bunny-frame.online${if (keyUrl.startsWith("/")) "" else "/"}$keyUrl"
+
+                        // 토큰 강제 주입
                         val absUrl = resolveForceSync(correctedKeyUrl, "", baseParams)
                         refinedLines.add(trLine.replace(keyUrl, "$proxyBase${URLEncoder.encode(absUrl, "UTF-8")}"))
                     } else { refinedLines.add(trLine) }
@@ -228,10 +216,10 @@ class BunnyPoorCdn : ExtractorApi() {
             var resolved = if (path.isEmpty()) base else {
                  try { URI(base.substringBefore("#")).resolve(path).toString() } catch (e: Exception) { base }
             }
-            
             val baseUrlOnly = resolved.substringBefore("?")
             val currentParams = parseQuery(resolved).toMutableMap()
-            // 낡은 토큰 교체
+            
+            // 토큰 강제 최신화
             listOf("token", "expires", "sig", "t").forEach { k ->
                 if (freshParams.containsKey(k)) currentParams[k] = freshParams[k]!!
             }
