@@ -17,23 +17,23 @@ import kotlinx.coroutines.runBlocking
 
 /**
  * BunnyPoorCdn Extractor
- * Version: [2026-02-13-V36-NoCookie-FullMask]
- * - FACT: User confirmed NO COOKIES. Removed all cookie logic.
- * - FIX: Implemented Full Chrome Header Masking (Sec-Ch-Ua, etc.) to bypass Cloudflare without cookies.
- * - FIX: Hardcoded modern Chrome UA.
- * - LOGIC: Force Token Sync kept active for sub-resources.
+ * Version: [2026-02-13-V38-Key-Bridge-Reset]
+ * - STRATEGY: "Alternative 3 - Bridge". Pre-downloads the Key byte array and serves it locally.
+ * - FIX 1 (404): Corrects Key Domain. Forces Key URL to use 'player.bunny-frame.online' instead of CDN.
+ * - FIX 2 (403): Bypasses Key blocking by serving the key from RAM (No network request by Player).
+ * - RESET: Removed complex header logic. Uses simple System UA.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki Player"
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
     
-    // 최신 Chrome Android UA 고정
-    private val CHROME_UA = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36"
-    private val TAG = "[Bunny-V36]"
+    // 시스템 기본 UA 사용 (WebView와 일치)
+    private val SYSTEM_UA = System.getProperty("http.agent") ?: "Mozilla/5.0 (Linux; Android 10; Mobile; rv:120.0) Gecko/120.0 Firefox/120.0"
+    private val TAG = "[Bunny-V38-Bridge]"
 
     companion object {
-        private var proxyServer: ProxyWebServerV36? = null
+        private var proxyServer: ProxyWebServerV38? = null
     }
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
@@ -48,26 +48,89 @@ class BunnyPoorCdn : ExtractorApi() {
 
         val resolver = WebViewResolver(interceptUrl = interceptRegex, useOkhttp = false, timeout = 15000L)
         try {
-            // WebView 요청 시에도 Chrome UA 사용
-            val response = app.get(url = cleanUrl, headers = mapOf("Referer" to cleanReferer, "User-Agent" to CHROME_UA), interceptor = resolver)
+            val response = app.get(url = cleanUrl, headers = mapOf("Referer" to cleanReferer, "User-Agent" to SYSTEM_UA), interceptor = resolver)
             if (interceptRegex.containsMatchIn(response.url)) capturedUrl = response.url
         } catch (e: Exception) { println("$TAG WebView failed: ${e.message}") }
 
         if (capturedUrl != null) {
             println("$TAG Captured: $capturedUrl")
-            // 쿠키 관련 로직 전부 삭제함
+            
+            // 1. M3U8 내용 다운로드
+            val cookie = CookieManager.getInstance().getCookie(capturedUrl) ?: ""
+            val headers = mutableMapOf("User-Agent" to SYSTEM_UA, "Referer" to "https://tvwiki5.net/")
+            if (cookie.isNotEmpty()) headers["Cookie"] = cookie
 
+            var m3u8Content = ""
+            try {
+                m3u8Content = app.get(capturedUrl, headers = headers).text
+            } catch (e: Exception) {
+                println("$TAG M3U8 Download Failed: ${e.message}")
+                return false
+            }
+
+            // 2. [Bridge Core] Key URL 찾기 및 도메인 교정
+            var keyBytes: ByteArray? = null
+            if (m3u8Content.contains("#EXT-X-KEY")) {
+                val keyLine = m3u8Content.lines().find { it.startsWith("#EXT-X-KEY") }
+                val uriMatch = Regex("""URI="([^"]+)"""").find(keyLine ?: "")
+                if (uriMatch != null) {
+                    val rawKeyPath = uriMatch.groupValues[1]
+                    
+                    // [404 해결] 키 도메인을 CDN이 아닌 플레이어 서버로 강제 지정
+                    // capturedUrl(M3U8)에서 쿼리(토큰) 추출
+                    val baseQuery = capturedUrl.substringAfter("?", "")
+                    
+                    // Key URL 재조립: https://player.bunny-frame.online + /v/key7... + ?token=...
+                    val correctedKeyUrl = if (rawKeyPath.startsWith("http")) {
+                        rawKeyPath // 이미 절대 경로면 유지 (보통 아님)
+                    } else {
+                        // 중요: 도메인을 mainUrl(player...)로 교체
+                        "$mainUrl${if (rawKeyPath.startsWith("/")) "" else "/"}$rawKeyPath"
+                    }
+                    
+                    // 토큰 붙이기
+                    val finalKeyUrl = if (baseQuery.isNotEmpty() && !correctedKeyUrl.contains("token=")) {
+                        "$correctedKeyUrl${if (correctedKeyUrl.contains("?")) "&" else "?"}$baseQuery"
+                    } else correctedKeyUrl
+
+                    println("$TAG Pre-fetching Key from: $finalKeyUrl")
+
+                    // 3. [Bridge Core] 키 미리 다운로드 (Pre-load)
+                    try {
+                        // 키 요청 헤더: Referer를 플레이어 주소로 설정
+                        val keyHeaders = mapOf(
+                            "User-Agent" to SYSTEM_UA,
+                            "Referer" to "$mainUrl/",
+                            "Origin" to mainUrl
+                        ).toMutableMap()
+                        if (cookie.isNotEmpty()) keyHeaders["Cookie"] = cookie
+
+                        val keyResponse = app.get(finalKeyUrl, headers = keyHeaders)
+                        if (keyResponse.isSuccessful) {
+                            keyBytes = keyResponse.body.bytes()
+                            println("$TAG Key Downloaded! Size: ${keyBytes.size} bytes")
+                        } else {
+                            println("$TAG Key Fetch Error: ${keyResponse.code}")
+                        }
+                    } catch (e: Exception) {
+                        println("$TAG Key Fetch Exception: ${e.message}")
+                    }
+                }
+            }
+
+            // 4. 프록시 서버 시작 (키 데이터 전달)
             if (proxyServer == null) {
-                proxyServer = ProxyWebServerV36(TAG, CHROME_UA)
+                proxyServer = ProxyWebServerV38(TAG)
                 proxyServer?.start()
             }
-            // 전체 플레이어 URL을 Referer용으로 전달
-            proxyServer?.updateContext(cleanUrl)
+            // M3U8 원본, 쿠키, 그리고 **미리 받은 키**를 전달
+            proxyServer?.updateContext(m3u8Content, capturedUrl, cookie, keyBytes)
 
             val port = proxyServer?.port ?: return false
-            val encodedUrl = URLEncoder.encode(capturedUrl, "UTF-8")
-            
-            callback(newExtractorLink(name, name, "http://127.0.0.1:$port/playlist?url=$encodedUrl#.m3u8", ExtractorLinkType.M3U8) {
+            // 플레이어에게 줄 주소는 프록시의 로컬 주소
+            val proxyUrl = "http://127.0.0.1:$port/playlist.m3u8"
+
+            callback(newExtractorLink(name, name, proxyUrl, ExtractorLinkType.M3U8) {
                 this.referer = cleanUrl
                 this.quality = Qualities.Unknown.value
             })
@@ -76,31 +139,42 @@ class BunnyPoorCdn : ExtractorApi() {
         return false
     }
 
-    class ProxyWebServerV36(private val tag: String, private val userAgent: String) {
+    class ProxyWebServerV38(private val tag: String) {
         private var serverSocket: ServerSocket? = null
+        private var isRunning = false
         var port: Int = 0
-        @Volatile private var fullPlayerUrl: String = ""
+        
+        @Volatile private var m3u8Content: String = ""
+        @Volatile private var m3u8Url: String = ""
+        @Volatile private var currentCookie: String = ""
+        @Volatile private var cachedKey: ByteArray? = null
+        
+        private val mobileUa = System.getProperty("http.agent") ?: "Mozilla/5.0"
 
         fun start() {
             try {
                 serverSocket = ServerSocket(0)
                 port = serverSocket!!.localPort
-                println("$tag [ProxyV36] Started on port $port")
+                isRunning = true
+                println("$tag [ProxyV38] Started on port $port")
                 thread(isDaemon = true) { 
-                    while (serverSocket != null && !serverSocket!!.isClosed) { 
+                    while (isRunning && serverSocket != null) { 
                         try { handleClient(serverSocket!!.accept()) } catch (e: Exception) { } 
                     } 
                 }
             } catch (e: Exception) { println("$tag Start Failed: $e") }
         }
 
-        fun updateContext(playerUrl: String) { 
-            fullPlayerUrl = playerUrl
+        fun updateContext(content: String, url: String, cookie: String, key: ByteArray?) { 
+            m3u8Content = content
+            m3u8Url = url
+            currentCookie = cookie
+            cachedKey = key
         }
 
         private fun handleClient(socket: Socket) = thread {
             try {
-                socket.soTimeout = 15000
+                socket.soTimeout = 10000
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
                 val requestLine = reader.readLine() ?: return@thread
                 val parts = requestLine.split(" ")
@@ -108,128 +182,82 @@ class BunnyPoorCdn : ExtractorApi() {
                 val pathFull = parts[1]
                 val output = socket.getOutputStream()
 
-                if (pathFull.startsWith("/playlist") || pathFull.startsWith("/proxy")) {
-                    val targetUrlRaw = getQueryParam(pathFull, "url") ?: return@thread
-                    val requestUrl = if (targetUrlRaw.contains("#")) targetUrlRaw.substringBefore("#") else targetUrlRaw
-                    
-                    val isPlaylist = requestUrl.contains("c.html")
-                    // Referer: M3U8 요청시엔 Player URL, 나머지는 M3U8 URL(을 모르니 일단 Player URL 시도)
-                    // V14 성공 사례: M3U8 요청 시 Player URL Referer가 먹혔음.
-                    val referer = fullPlayerUrl
-                    
-                    // [핵심] Cloudflare 우회용 풀세트 헤더 (쿠키 없음)
-                    val headers = mutableMapOf(
-                        "Host" to URI(requestUrl).host,
-                        "Connection" to "keep-alive",
-                        "sec-ch-ua" to "\"Chromium\";v=\"130\", \"Android WebView\";v=\"130\", \"Not?A_Brand\";v=\"99\"",
-                        "sec-ch-ua-mobile" to "?1",
-                        "sec-ch-ua-platform" to "\"Android\"",
-                        "Upgrade-Insecure-Requests" to "1",
-                        "User-Agent" to userAgent,
-                        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-                        "Sec-Fetch-Site" to "cross-site", // 초기 진입은 cross-site
-                        "Sec-Fetch-Mode" to "navigate",
-                        "Sec-Fetch-User" to "?1",
-                        "Sec-Fetch-Dest" to "iframe",
-                        "Referer" to referer,
-                        "Accept-Encoding" to "gzip, deflate, br",
-                        "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
-                    )
-
-                    // Key/TS 요청일 경우 헤더 미세 조정
-                    if (!isPlaylist) {
-                        headers["Sec-Fetch-Dest"] = "empty"
-                        headers["Sec-Fetch-Mode"] = "cors"
-                        headers["Sec-Fetch-Site"] = "same-origin" // 도메인이 같다고 가정
-                        headers.remove("Upgrade-Insecure-Requests")
-                        headers.remove("Sec-Fetch-User")
-                    }
-
-                    val response = runBlocking { app.get(requestUrl, headers = headers) }
-
-                    if (response.isSuccessful) {
-                        if (pathFull.startsWith("/playlist")) {
-                            val content = response.text
-                            val newContent = rewriteM3u8(content, requestUrl)
-                            output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nConnection: close\r\n\r\n".toByteArray())
-                            output.write(newContent.toByteArray())
-                        } else {
-                            val contentType = response.headers["Content-Type"] ?: "application/octet-stream"
-                            output.write("HTTP/1.1 200 OK\r\nContent-Type: $contentType\r\nConnection: close\r\n\r\n".toByteArray())
-                            output.write(response.body.bytes())
-                        }
+                // 1. 플레이리스트 요청 처리
+                if (pathFull.contains("playlist.m3u8")) {
+                    // M3U8 내용 변조: Key URL을 로컬 주소로 변경
+                    var newContent = m3u8Content
+                    if (cachedKey != null) {
+                        // 키가 확보되었다면 로컬 키 주소로 교체
+                        newContent = newContent.replace(Regex("""URI="([^"]+)""""), """URI="http://127.0.0.1:$port/local_key.bin"""")
+                        println("$tag Serving Rewritten M3U8 (Key -> Local)")
                     } else {
-                        println("$tag [Proxy Error] ${response.code} for: $requestUrl")
-                        if (response.code == 403) {
-                             // 디버깅용: HTML 본문 로그 출력
-                             println("$tag [CRITICAL BODY] ${response.text.take(300)}")
-                        }
+                        // 키 확보 실패 시, 도메인이라도 고쳐서 시도 (Fallback)
+                        println("$tag Serving M3U8 (Key Fallback Mode)")
+                    }
+                    
+                    // TS 파일 경로 절대 경로화 (도메인 404 방지)
+                    newContent = resolveTsPaths(newContent, m3u8Url)
+
+                    output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nConnection: close\r\n\r\n".toByteArray())
+                    output.write(newContent.toByteArray())
+                } 
+                // 2. 로컬 키 요청 처리 (핵심: 브릿지)
+                else if (pathFull.contains("local_key.bin")) {
+                    if (cachedKey != null) {
+                        println("$tag Serving Key from Memory (${cachedKey!!.size} bytes)")
+                        output.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n".toByteArray())
+                        output.write(cachedKey!!)
+                    } else {
                         output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
+                    }
+                }
+                // 3. TS 파일 프록시 (기존 방식 유지)
+                else if (pathFull.startsWith("/proxy")) {
+                    val targetUrl = getQueryParam(pathFull, "url")
+                    if (targetUrl != null) {
+                        val headers = mutableMapOf("User-Agent" to mobileUa, "Referer" to "https://player.bunny-frame.online/", "Accept" to "*/*")
+                        if (currentCookie.isNotEmpty()) headers["Cookie"] = currentCookie
+
+                        val response = runBlocking { app.get(targetUrl, headers = headers) }
+                        if (response.isSuccessful) {
+                            output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nConnection: close\r\n\r\n".toByteArray())
+                            output.write(response.body.bytes())
+                        } else {
+                            output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
+                        }
                     }
                 }
                 output.flush(); socket.close()
             } catch (e: Exception) { try { socket.close() } catch(e2:Exception){} }
         }
 
+        private fun resolveTsPaths(content: String, baseUrl: String): String {
+            val lines = content.lines().toMutableList()
+            val proxyBase = "http://127.0.0.1:$port/proxy?url="
+            
+            // TS 파일은 보통 CDN(poorcdn)에 있으므로 baseUrl(c.html의 주소)을 따름
+            for (i in lines.indices) {
+                val line = lines[i].trim()
+                if (line.isNotEmpty() && !line.startsWith("#")) {
+                    val absUrl = try {
+                        URI(baseUrl.substringBefore("#")).resolve(line).toString()
+                    } catch (e: Exception) { line }
+                    
+                    // TS URL에도 토큰이 없으면 부모 토큰 주입 (안전장치)
+                    val finalUrl = if (!absUrl.contains("token=") && baseUrl.contains("?")) {
+                        "$absUrl&${baseUrl.substringAfter("?")}"
+                    } else absUrl
+
+                    lines[i] = "$proxyBase${URLEncoder.encode(finalUrl, "UTF-8")}"
+                }
+            }
+            return lines.joinToString("\n")
+        }
+
         private fun getQueryParam(path: String, key: String): String? {
             return try {
                 path.substringAfter("?").split("&").find { it.startsWith("$key=") }?.substringAfter("=")?.let { URLDecoder.decode(it, "UTF-8") }
             } catch (e: Exception) { null }
-        }
-
-        private fun parseQuery(url: String): Map<String, String> {
-            val params = mutableMapOf<String, String>()
-            if (!url.contains("?")) return params
-            url.substringAfter("?").split("&").forEach { pair ->
-                val p = pair.split("=", limit = 2)
-                if (p.size == 2) params[p[0]] = p[1]
-            }
-            return params
-        }
-
-        private fun rewriteM3u8(content: String, baseUrl: String): String {
-            val lines = content.lines()
-            val refinedLines = mutableListOf<String>()
-            val proxyBase = "http://127.0.0.1:$port/proxy?url="
-            val playlistProxyBase = "http://127.0.0.1:$port/playlist?url="
-            val baseParams = parseQuery(baseUrl)
-
-            for (line in lines) {
-                val trLine = line.trim()
-                if (trLine.isEmpty()) continue
-                if (trLine.startsWith("#EXT-X-KEY")) {
-                    val uriMatch = Regex("""URI="([^"]+)"""").find(trLine)
-                    if (uriMatch != null) {
-                        val keyUrl = uriMatch.groupValues[1]
-                        val absUrl = resolveForceSync(baseUrl, keyUrl, baseParams)
-                        refinedLines.add(trLine.replace(keyUrl, "$proxyBase${URLEncoder.encode(absUrl, "UTF-8")}"))
-                    } else { refinedLines.add(trLine) }
-                } else if (!trLine.startsWith("#")) {
-                    val absUrl = resolveForceSync(baseUrl, trLine, baseParams)
-                    val encoded = URLEncoder.encode(absUrl, "UTF-8")
-                    if (absUrl.contains(".m3u8") || absUrl.contains("c.html")) {
-                        refinedLines.add("$playlistProxyBase$encoded")
-                    } else {
-                        refinedLines.add("$proxyBase$encoded")
-                    }
-                } else { refinedLines.add(trLine) }
-            }
-            return refinedLines.joinToString("\n")
-        }
-
-        private fun resolveForceSync(base: String, path: String, freshParams: Map<String, String>): String {
-            var resolved = try { URI(base.substringBefore("#")).resolve(path).toString() } catch (e: Exception) {
-                if (path.startsWith("/")) "${URI(base).scheme}://${URI(base).host}$path"
-                else "${base.substringBefore("?").substringBeforeLast("/")}/$path"
-            }
-            val baseUrlOnly = resolved.substringBefore("?")
-            val currentParams = parseQuery(resolved).toMutableMap()
-            // 토큰 강제 최신화
-            listOf("token", "expires", "sig", "t").forEach { k ->
-                if (freshParams.containsKey(k)) currentParams[k] = freshParams[k]!!
-            }
-            val newQuery = currentParams.entries.joinToString("&") { "${it.key}=${it.value}" }
-            return if (newQuery.isNotEmpty()) "$baseUrlOnly?$newQuery" else resolved
         }
     }
 }
