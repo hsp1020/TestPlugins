@@ -36,10 +36,9 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * [Version: v31-BuildFix-Clean]
- * 1. Build Fix: Reflection 제거 및 Companion Object 멤버 Visibility를 'internal'로 변경하여 접근 오류 해결.
- * 2. Logic: v30의 JS Hooking, 대기 로직 유지.
- * 3. Fix: CountDownLatch 재사용 불가 문제 해결 (매번 새로 생성).
+ * [Version: v32-BuildFix-StaticMethod]
+ * 1. Build Fix: 'hexToBytes' 함수를 Companion Object로 이동하여 Static Context 접근 허용.
+ * 2. Logic: v31과 동일 (JS Hooking + Proxy).
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -50,12 +49,22 @@ class BunnyPoorCdn : ExtractorApi() {
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
-        private const val TAG = "[Bunny-v31]"
+        private const val TAG = "[Bunny-v32]"
 
-        // [Fix] private -> internal (Nested Class에서 직접 접근 가능하도록)
         @Volatile internal var globalKey: ByteArray? = null
-        // [Fix] val -> var (매번 새로 생성해야 하므로)
         @Volatile internal var keyLatch = CountDownLatch(1)
+
+        // [Fix] 인스턴스 영역에서 여기로 이동 (Static 접근 가능하도록)
+        fun hexToBytes(hex: String): ByteArray {
+            val len = hex.length
+            val data = ByteArray(len / 2)
+            var i = 0
+            while (i < len) {
+                data[i / 2] = ((Character.digit(hex[i], 16) shl 4) + Character.digit(hex[i + 1], 16)).toByte()
+                i += 2
+            }
+            return data
+        }
     }
 
     override suspend fun getUrl(
@@ -67,9 +76,8 @@ class BunnyPoorCdn : ExtractorApi() {
         proxyServer?.stop()
         proxyServer = null
         
-        // 상태 초기화
         globalKey = null
-        keyLatch = CountDownLatch(1) // 새 Latch 생성
+        keyLatch = CountDownLatch(1)
         
         extract(url, referer, subtitleCallback, callback)
     }
@@ -102,7 +110,7 @@ class BunnyPoorCdn : ExtractorApi() {
             }
         }
 
-        // 프록시 서버 가동 (키 대기 상태로 시작)
+        // 프록시 서버 가동
         startProxy(cleanUrl, callback)
         return true
     }
@@ -221,7 +229,6 @@ class BunnyPoorCdn : ExtractorApi() {
 
         suspend fun stealKey(url: String, ua: String, referer: String) {
             withContext(Dispatchers.Main) {
-                // [Fix] !! 사용
                 val webView = WebView(AcraApplication.context!!)
                 
                 webView.settings.apply {
@@ -237,8 +244,8 @@ class BunnyPoorCdn : ExtractorApi() {
                         if (msg.startsWith("MAGIC_KEY_FOUND:")) {
                             val keyHex = msg.substringAfter("MAGIC_KEY_FOUND:")
                             
-                            // [Fix] 전역 변수에 키 저장 & Latch 해제 (Direct Access)
-                            BunnyPoorCdn.globalKey = hexToBytes(keyHex)
+                            // [Fix] Companion.hexToBytes 호출 (이제 Static이라 접근 가능)
+                            BunnyPoorCdn.globalKey = BunnyPoorCdn.hexToBytes(keyHex)
                             BunnyPoorCdn.keyLatch.countDown()
                             
                             println("$TAG Found Key: $keyHex")
@@ -331,7 +338,7 @@ class BunnyPoorCdn : ExtractorApi() {
                     // [Key Wait Logic]
                     if (BunnyPoorCdn.globalKey == null) {
                         println("$TAG Waiting for key...")
-                        // [Fix] Direct Access to latch
+                        // [Fix] Companion.keyLatch 접근
                         BunnyPoorCdn.keyLatch.await(15, TimeUnit.SECONDS)
                     }
 
@@ -346,7 +353,6 @@ class BunnyPoorCdn : ExtractorApi() {
                                 val rawData = res.body.bytes()
                                 output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
                                 
-                                // [Fix] Direct Access to globalKey
                                 val key = BunnyPoorCdn.globalKey
                                 val decrypted = if (key != null) {
                                     decryptWithBlindTrim(rawData, key, seq)
@@ -390,16 +396,5 @@ class BunnyPoorCdn : ExtractorApi() {
                 return cipher.doFinal(data.copyOfRange(offset, data.size))
             } catch (e: Exception) { return null }
         }
-    }
-
-    private fun hexToBytes(hex: String): ByteArray {
-        val len = hex.length
-        val data = ByteArray(len / 2)
-        var i = 0
-        while (i < len) {
-            data[i / 2] = ((Character.digit(hex[i], 16) shl 4) + Character.digit(hex[i + 1], 16)).toByte()
-            i += 2
-        }
-        return data
     }
 }
