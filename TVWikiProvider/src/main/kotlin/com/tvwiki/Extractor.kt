@@ -31,10 +31,10 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * [Version: v7-TotalBruteForce]
- * 1. Key Gen Strategy: Rotate(L/R) x Interleave(Gather/Scatter) x Base64(Default/URLSafe) 등 모든 조합 생성.
- * 2. Decrypt Strategy: 생성된 모든 키에 대해 Offset 0~15 + IV Mode(Std/Zero) 전수 조사.
- * 3. Auto-Lock: 0x47 발견 시 해당 Logic Profile을 메모리에 고정하여 이후 요청 가속화.
+ * [Version: v8-Hell-BruteForce]
+ * 1. Key Logic Explosion: (Rotate L/R) * (Interleave Gather/Scatter) * (SegNoise New/Old) = 8가지 키 동시 생성.
+ * 2. Decrypt Explosion: (IV Std/Zero/LE) * (Offset 0..15) = 64가지 복호화 시도.
+ * 3. Total: 512가지 조합을 런타임에 전수 조사하여 0x47 Sync Byte를 찾아냄.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -45,7 +45,7 @@ class BunnyPoorCdn : ExtractorApi() {
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
-        private const val TAG = "[Bunny-v7]"
+        private const val TAG = "[Bunny-v8]"
     }
 
     override suspend fun getUrl(
@@ -207,7 +207,7 @@ class BunnyPoorCdn : ExtractorApi() {
         // --- Multi-Key Logic ---
         data class KeyCandidate(
             val keyBytes: ByteArray,
-            val description: String // "RotL-Gather", "RotR-Scatter" 등
+            val description: String // "RotL-Gather-NewSeg", etc.
         )
         @Volatile private var candidateKeys: List<KeyCandidate> = emptyList()
         @Volatile private var confirmedKey: KeyCandidate? = null
@@ -220,7 +220,7 @@ class BunnyPoorCdn : ExtractorApi() {
         )
         @Volatile private var confirmedProfile: DecryptProfile? = null
 
-        private val VER = "[Bunny-v7-Proxy]"
+        private val VER = "[Bunny-v8-Proxy]"
 
         fun start() {
             try {
@@ -262,12 +262,9 @@ class BunnyPoorCdn : ExtractorApi() {
 
                     if (rawData.size > 100 && rawData[0] == '{'.code.toByte()) {
                         val jsonStr = String(rawData).trim()
-                        // [핵심] 가능한 모든 조합의 키를 생성
+                        // [핵심] 모든 경우의 수 생성 (8가지)
                         candidateKeys = BunnyJsonDecryptor.generateAllPossibleKeys(jsonStr)
                         println("$VER Key Candidates Generated: ${candidateKeys.size}")
-                        candidateKeys.forEach { 
-                            println("$VER Candidate [${it.description}]: ${bytesToHex(it.keyBytes)}")
-                        }
                     } else if (rawData.size == 16) {
                         confirmedKey = KeyCandidate(rawData, "Raw-16Byte")
                         println("$VER Raw Key Confirmed.")
@@ -343,16 +340,12 @@ class BunnyPoorCdn : ExtractorApi() {
             }
 
             // 2. [Total Brute Force] 모든 키 x 모든 오프셋 x 모든 IV
-            // 우선순위: 확정된 키가 있으면 그것만, 없으면 전체 후보군
             val keysToTry = if (confirmedKey != null) listOf(confirmedKey!!) else candidateKeys
-            
-            // IV Modes: 1(BE), 3(Zero), 2(LE), 0(Explicit)
-            val ivModes = mutableListOf(1, 3, 2, 0)
+            val ivModes = mutableListOf(1, 3, 2, 0) // 1:BE, 3:Zero, 2:LE, 0:Explicit
             
             for (keyObj in keysToTry) {
                 // Input Offset: 0~15
                 for (inOff in 0..15) {
-                    // 데이터 길이 체크
                     if (data.size <= inOff) break
                     val len = data.size - inOff
                     val alignLen = (len / 16) * 16
@@ -368,13 +361,11 @@ class BunnyPoorCdn : ExtractorApi() {
                             // 성공한 설정 저장
                             confirmedKey = keyObj
                             confirmedProfile = DecryptProfile(ivMode, inOff, outOff)
-                            
                             return dec.copyOfRange(outOff, dec.size)
                         }
                     }
                 }
             }
-            
             return null
         }
 
@@ -422,26 +413,29 @@ class BunnyPoorCdn : ExtractorApi() {
     object BunnyJsonDecryptor {
         private fun decodeBase64(input: String): ByteArray = Base64.decode(input, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
         
-        // [핵심] 모든 경우의 수 생성
+        // [핵심] 모든 경우의 수 생성 (8가지)
         fun generateAllPossibleKeys(jsonStr: String): List<ProxyWebServer.KeyCandidate> {
             val list = mutableListOf<ProxyWebServer.KeyCandidate>()
             
-            // Boolean 조합: Rotate(Left/Right) x Interleave(Gather/Scatter)
+            // Boolean Combinations: 
+            // Rotate(Left/Right) x Interleave(Gather/Scatter) x SegNoise(New/Old)
             val booleans = listOf(true, false)
             
             for (rotLeft in booleans) {
                 for (gather in booleans) {
-                    val key = decryptInternal(jsonStr, rotLeft, gather)
-                    if (key != null) {
-                        val desc = "Rot:${if(rotLeft)"L" else "R"}_Int:${if(gather)"Gat" else "Sca"}"
-                        list.add(ProxyWebServer.KeyCandidate(key, desc))
+                    for (segNew in booleans) {
+                        val key = decryptInternal(jsonStr, rotLeft, gather, segNew)
+                        if (key != null) {
+                            val desc = "Rot:${if(rotLeft)"L" else "R"}_Int:${if(gather)"Gat" else "Sca"}_Seg:${if(segNew)"New" else "Old"}"
+                            list.add(ProxyWebServer.KeyCandidate(key, desc))
+                        }
                     }
                 }
             }
             return list
         }
 
-        private fun decryptInternal(jsonStr: String, rotateLeft: Boolean, interleaveGather: Boolean): ByteArray? {
+        private fun decryptInternal(jsonStr: String, rotateLeft: Boolean, interleaveGather: Boolean, segNoiseNew: Boolean): ByteArray? {
             try {
                 val json = JSONObject(jsonStr)
                 var data = decodeBase64(json.getString("encrypted_key"))
@@ -497,7 +491,7 @@ class BunnyPoorCdn : ExtractorApi() {
                             for (j in data.indices) {
                                 val rot = rotations.getInt(j % rotations.length())
                                 val b = data[j].toInt() and 0xFF
-                                // [Dynamic Logic]
+                                // [Combination 1] Left vs Right
                                 val r = if (rotateLeft) (b shl rot) or (b ushr (8 - rot))
                                         else (b ushr rot) or (b shl (8 - rot))
                                 newData[j] = r.toByte()
@@ -511,7 +505,8 @@ class BunnyPoorCdn : ExtractorApi() {
                             val result = ByteArray(perm.length())
                             for (j in 0 until perm.length()) {
                                 val originalIndex = perm.getInt(j)
-                                val chunkLen = noiseL.getInt(originalIndex)
+                                // [Combination 3] New Logic (Correct) vs Old Logic (Legacy)
+                                val chunkLen = noiseL.getInt(if (segNoiseNew) originalIndex else j) 
                                 if (currentReadOffset < data.size) result[originalIndex] = data[currentReadOffset]
                                 currentReadOffset += chunkLen
                             }
@@ -525,7 +520,7 @@ class BunnyPoorCdn : ExtractorApi() {
                                 val destByteIdx: Int
                                 val destBitPos: Int
                                 
-                                // [Dynamic Logic]
+                                // [Combination 2] Gather vs Scatter
                                 if (interleaveGather) {
                                     val srcBitIdx = perm.getInt(j)
                                     bitVal = (data[srcBitIdx / 8].toInt() shr (7 - (srcBitIdx % 8))) and 1
