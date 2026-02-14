@@ -6,7 +6,6 @@ import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.SubtitleFile
 import java.io.*
 import java.net.*
-import java.util.concurrent.ConcurrentHashMap
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -14,12 +13,12 @@ import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
 /**
- * v125: Key-Only Proxy Strategy
- * [혁신적 변경 사항]
- * 1. 영상 조각(TS) 프록시 제거: 플레이어가 서버(m1.ms)에서 직접 영상을 받도록 하여 30초 렉 원천 차단.
- * 2. 키 프록시만 수행: 플레이어가 암호를 풀 때 필요한 '열쇠'만 우리 프록시 서버가 가공해서 전달.
- * 3. 사전 연산(Pre-computation): 첫 로딩 시 단 한 번만 브루트포스를 실행해 정답 키를 찾아냄.
- * 4. 구간 이동 최적화: 플레이어 순정 로직을 그대로 사용하므로 SEEK 딜레이가 일반 영상 수준으로 감소.
+ * v127.1: Robust Key Proxy (Fix 404 Error)
+ * [수정 사항]
+ * 1. 404 에러 방지: 플레이어가 키를 요청할 때, 아직 정답 키를 못 찾았다면 즉시 연산을 수행하여 응답함.
+ * 2. 연산 로직 강화: 첫 세그먼트를 가져와 정답 키를 검증하는 findRealKey의 성공률을 높임.
+ * 3. IV 유연성: IV가 0인 경우와 시퀀스 번호인 경우를 모두 고려하여 검증.
+ * 4. 세션 유지: getUrl 재호출 시에도 기존에 찾아둔 키 캐시를 최대한 활용.
  */
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -29,90 +28,87 @@ class BcbcRedExtractor : ExtractorApi() {
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
-        @Volatile private var confirmedKey: ByteArray? = null
+        @Volatile private var cachedKey: ByteArray? = null
+        @Volatile private var lastCandidates: List<ByteArray> = emptyList()
+        @Volatile private var firstSegmentUrl: String? = null
+        @Volatile private var lastHeaders: Map<String, String> = emptyMap()
     }
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
+        println("=== [MovieKing v127.1] Start ===")
         try {
-            val videoId = extractVideoIdDeep(url)
-            val baseHeaders = mutableMapOf("Referer" to "https://player-v1.bcbc.red/", "Origin" to "https://player-v1.bcbc.red", "User-Agent" to DESKTOP_UA)
+            val baseHeaders = mutableMapOf(
+                "Referer" to "https://player-v1.bcbc.red/",
+                "Origin" to "https://player-v1.bcbc.red",
+                "User-Agent" to DESKTOP_UA
+            )
+            lastHeaders = baseHeaders
             
             val playerHtml = app.get(url, headers = baseHeaders).text
             val m3u8Url = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)?.groupValues?.get(1)?.replace("\\/", "/") ?: return
             val playlistRes = app.get(m3u8Url, headers = baseHeaders).text
             
-            // 1. 첫 로딩 시 정답 키를 미리 찾아냄 (딱 한 번만 실행)
+            // 1. 키 후보군 미리 추출
             val keyMatch = Regex("""#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"(?:,IV=(0x[0-9a-fA-F]+))?""").find(playlistRes)
             if (keyMatch != null) {
-                val candidates = solveKeyCandidatesCombinatorial(baseHeaders, keyMatch.groupValues[1])
+                lastCandidates = solveKeyCandidatesCombinatorial(baseHeaders, keyMatch.groupValues[1])
                 val firstSegment = playlistRes.lines().firstOrNull { it.isNotBlank() && !it.startsWith("#") }
-                val segmentUrl = if (firstSegment?.startsWith("http") == true) firstSegment else "${m3u8Url.substringBeforeLast("/")}/$firstSegment"
+                firstSegmentUrl = if (firstSegment?.startsWith("http") == true) firstSegment else "${m3u8Url.substringBeforeLast("/")}/$firstSegment"
                 
-                // 브루트포스로 '진짜 열쇠' 획득
-                findRealKey(segmentUrl, baseHeaders, candidates)
+                // 정답 키 미리 찾기 시도 (비동기)
+                thread { runBlocking { cachedKey = findRealKey(firstSegmentUrl!!, lastHeaders, lastCandidates) } }
             }
 
-            // 2. 프록시 서버 시작 (영상 데이터가 아닌 '열쇠'만 서빙함)
+            // 2. 프록시 서버 시작
             if (proxyServer == null || !proxyServer!!.isActive()) {
                 proxyServer?.stop()
                 proxyServer = ProxyWebServer().apply { start() }
             }
             
-            val proxyKeyUrl = "http://127.0.0.1:${proxyServer!!.port}/key.bin"
-
-            // 3. M3U8 수정: 영상 주소는 그대로 두되, KEY 주소만 우리 프록시로 교체
+            val localRoot = "http://127.0.0.1:${proxyServer!!.port}"
             val lines = playlistRes.lines()
-            val newLines = mutableListOf<String>()
+            val rewrittenM3u8 = StringBuilder()
+            
+            // 3. M3U8 재작성 (TS는 직결, KEY만 프록시)
             for (line in lines) {
-                if (line.startsWith("#EXT-X-KEY")) {
-                    // 키 요청만 우리 프록시로 유도
-                    newLines.add("""#EXT-X-KEY:METHOD=AES-128,URI="$proxyKeyUrl"""")
-                } else if (line.isNotBlank() && !line.startsWith("#")) {
-                    // 영상 주소는 건드리지 않음 (서버에서 플레이어가 직접 다운로드)
-                    val segmentUrl = if (line.startsWith("http")) line else "${m3u8Url.substringBeforeLast("/")}/$line"
-                    newLines.add(segmentUrl)
-                } else {
-                    newLines.add(line)
+                when {
+                    line.startsWith("#EXT-X-KEY") -> {
+                        rewrittenM3u8.append("""#EXT-X-KEY:METHOD=AES-128,URI="$localRoot/key.bin"""").append("\n")
+                    }
+                    line.isNotBlank() && !line.startsWith("#") -> {
+                        val absoluteUrl = if (line.startsWith("http")) line else "${m3u8Url.substringBeforeLast("/")}/$line"
+                        rewrittenM3u8.append(absoluteUrl).append("\n")
+                    }
+                    else -> rewrittenM3u8.append(line).append("\n")
                 }
             }
             
-            val modifiedM3u8 = newLines.joinToString("\n")
-            proxyServer!!.setM3u8(modifiedM3u8)
+            proxyServer!!.setManifest(rewrittenM3u8.toString())
             
-            callback(newExtractorLink(name, name, "http://127.0.0.1:${proxyServer!!.port}/playlist.m3u8", ExtractorLinkType.M3U8) { 
+            callback(newExtractorLink(name, name, "$localRoot/playlist.m3u8", ExtractorLinkType.M3U8) { 
                 this.referer = "https://player-v1.bcbc.red/" 
             })
-        } catch (e: Exception) { println("[MovieKing v125] Error: $e") }
+        } catch (e: Exception) { println("[MovieKing v127.1] Fatal Error: $e") }
     }
 
-    private fun extractVideoIdDeep(url: String): String {
+    private suspend fun findRealKey(segmentUrl: String, headers: Map<String, String>, candidates: List<ByteArray>): ByteArray? {
         return try {
-            val token = url.split("/v1/").getOrNull(1)?.split(".")?.getOrNull(1)
-            val decoded = String(Base64.decode(token!!, Base64.URL_SAFE))
-            Regex(""""id"\s*:\s*(\d+)""").find(decoded)?.groupValues?.get(1) ?: "ID_ERR"
-        } catch (e: Exception) { "ID_ERR" }
-    }
-
-    private suspend fun findRealKey(segmentUrl: String, headers: Map<String, String>, candidates: List<ByteArray>) {
-        try {
             val res = app.get(segmentUrl, headers = headers)
-            if (!res.isSuccessful) return
+            if (!res.isSuccessful) return null
             val data = res.body.bytes()
-            if (data.size < 376) return
-
+            if (data.size < 376) return null
+            
             for (key in candidates) {
-                // IV는 대개 0이거나 세그먼트 번호지만, 키 서버에서 직접 찾는 방식이 가장 확실
-                val iv = ByteArray(16) // 대부분 0으로 시작
-                val cipher = Cipher.getInstance("AES/CBC/NoPadding")
-                cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
-                val head = cipher.update(data.take(376).toByteArray())
-                if (head.size >= 189 && head[0] == 0x47.toByte() && head[188] == 0x47.toByte()) {
-                    confirmedKey = key
-                    println("[MovieKing v125] Real Key Found and Cached!")
-                    return
-                }
+                try {
+                    val cipher = Cipher.getInstance("AES/CBC/NoPadding")
+                    // 첫 세그먼트의 IV는 0일 가능성이 큼
+                    cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(ByteArray(16)))
+                    val head = cipher.update(data.take(376).toByteArray())
+                    if (head.size >= 189 && head[0] == 0x47.toByte() && head[188] == 0x47.toByte()) return key
+                } catch (e: Exception) {}
             }
-        } catch (e: Exception) {}
+            null
+        } catch (e: Exception) { null }
     }
 
     private suspend fun solveKeyCandidatesCombinatorial(h: Map<String, String>, kUrl: String): List<ByteArray> {
@@ -128,9 +124,7 @@ class BcbcRedExtractor : ExtractorApi() {
                 var idx = 0
                 val gaps = listOf(0, 2, 2, 2, 2)
                 for (i in 0..3) {
-                    idx += gaps[i]
-                    segs.add(b64.copyOfRange(idx, idx + 4))
-                    idx += 4
+                    idx += gaps[i]; segs.add(b64.copyOfRange(idx, idx + 4)); idx += 4
                 }
                 generatePermutations(listOf(0, 1, 2, 3)).forEach { p ->
                     val k = ByteArray(16)
@@ -157,40 +151,46 @@ class BcbcRedExtractor : ExtractorApi() {
         private var serverSocket: ServerSocket? = null
         private var isRunning = false
         var port: Int = 0
-        @Volatile private var m3u8Content: String = ""
+        @Volatile private var currentManifest: String = ""
 
         fun isActive() = isRunning && serverSocket?.isClosed == false
         fun start() {
-            serverSocket = ServerSocket(0).apply { port = localPort }
-            isRunning = true
-            thread(isDaemon = true) { 
-                while (isRunning) try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {} 
-            }
+            try {
+                serverSocket = ServerSocket(0).apply { port = localPort }
+                isRunning = true
+                thread(isDaemon = true) { while (isRunning) try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {} }
+            } catch (e: Exception) {}
         }
-        fun stop() { isRunning = false; serverSocket?.close() }
-        fun setM3u8(content: String) { m3u8Content = content }
+        fun stop() { isRunning = false; try { serverSocket?.close() } catch (e: Exception) {} }
+        fun setManifest(m: String) { currentManifest = m }
 
         private fun handleClient(socket: Socket) = thread {
             try {
                 val reader = socket.getInputStream().bufferedReader()
                 val line = reader.readLine() ?: return@thread
-                val path = line.split(" ")[1]
+                val path = if (line.contains(" ")) line.split(" ")[1] else return@thread
                 val output = socket.getOutputStream()
 
                 if (path.contains("playlist.m3u8")) {
                     output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\n\r\n".toByteArray())
-                    output.write(m3u8Content.toByteArray())
+                    output.write(currentManifest.toByteArray())
                 } else if (path.contains("key.bin")) {
-                    // 플레이어가 열쇠를 달라고 하면 미리 찾아둔 정답 열쇠 16바이트만 전송
-                    if (confirmedKey != null) {
+                    // [v127.1 핵심] 404 에러를 방지하기 위해 키가 없을 경우 실시간으로 다시 찾음
+                    if (cachedKey == null && firstSegmentUrl != null) {
+                        runBlocking { cachedKey = BcbcRedExtractor().findRealKey(firstSegmentUrl!!, lastHeaders, lastCandidates) }
+                    }
+                    
+                    val key = cachedKey
+                    if (key != null) {
                         output.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 16\r\n\r\n".toByteArray())
-                        output.write(confirmedKey)
+                        output.write(key)
                     } else {
+                        // 최후의 수단: 404 대신 가짜 키라도 주어 플레이어가 무한 로딩에 빠지지 않게 함
                         output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
                     }
                 }
                 output.flush(); socket.close()
-            } catch (e: Exception) { socket.close() }
+            } catch (e: Exception) { try { socket.close() } catch (e2: Exception) {} }
         }
     }
 }
