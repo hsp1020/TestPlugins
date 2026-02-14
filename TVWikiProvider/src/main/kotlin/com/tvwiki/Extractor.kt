@@ -22,7 +22,7 @@ import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CountDownLatch // 대기용
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
@@ -36,10 +36,10 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * [Version: v30-Final-Solution]
- * 1. JS Injection Timing: onProgressChanged 추가로 주입 시점 극대화.
- * 2. Proxy Wait: 키가 확보될 때까지 프록시 응답을 지연시켜 ExoPlayer 에러 방지.
- * 3. Retry: 키 미확보 시 WebView 새로고침 시도.
+ * [Version: v31-BuildFix-Clean]
+ * 1. Build Fix: Reflection 제거 및 Companion Object 멤버 Visibility를 'internal'로 변경하여 접근 오류 해결.
+ * 2. Logic: v30의 JS Hooking, 대기 로직 유지.
+ * 3. Fix: CountDownLatch 재사용 불가 문제 해결 (매번 새로 생성).
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -50,10 +50,12 @@ class BunnyPoorCdn : ExtractorApi() {
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
-        // 전역 키 저장소 (프록시와 공유)
-        @Volatile private var globalKey: ByteArray? = null
-        private val keyLatch = CountDownLatch(1) // 키 대기용
-        private const val TAG = "[Bunny-v30]"
+        private const val TAG = "[Bunny-v31]"
+
+        // [Fix] private -> internal (Nested Class에서 직접 접근 가능하도록)
+        @Volatile internal var globalKey: ByteArray? = null
+        // [Fix] val -> var (매번 새로 생성해야 하므로)
+        @Volatile internal var keyLatch = CountDownLatch(1)
     }
 
     override suspend fun getUrl(
@@ -64,9 +66,10 @@ class BunnyPoorCdn : ExtractorApi() {
     ) {
         proxyServer?.stop()
         proxyServer = null
-        globalKey = null // 키 초기화
-        // Latch 재생성 (Count 1)
-        while (keyLatch.count > 0) keyLatch.countDown() // 기존 대기 해제
+        
+        // 상태 초기화
+        globalKey = null
+        keyLatch = CountDownLatch(1) // 새 Latch 생성
         
         extract(url, referer, subtitleCallback, callback)
     }
@@ -92,15 +95,14 @@ class BunnyPoorCdn : ExtractorApi() {
             } catch (e: Exception) {}
         }
 
-        // [비동기] JS Hooking 시작 (결과 기다리지 않고 프록시 준비)
-        // 키가 찾아지면 globalKey에 저장되고 keyLatch가 열림
+        // [비동기] JS Hooking 시작
         thread {
             runBlocking {
                 JsKeyStealer.stealKey(cleanUrl, DESKTOP_UA, cleanReferer)
             }
         }
 
-        // 3. 프록시 서버 가동 (키 없이 일단 시작)
+        // 프록시 서버 가동 (키 대기 상태로 시작)
         startProxy(cleanUrl, callback)
         return true
     }
@@ -219,6 +221,7 @@ class BunnyPoorCdn : ExtractorApi() {
 
         suspend fun stealKey(url: String, ua: String, referer: String) {
             withContext(Dispatchers.Main) {
+                // [Fix] !! 사용
                 val webView = WebView(AcraApplication.context!!)
                 
                 webView.settings.apply {
@@ -233,10 +236,10 @@ class BunnyPoorCdn : ExtractorApi() {
                         val msg = consoleMessage?.message() ?: ""
                         if (msg.startsWith("MAGIC_KEY_FOUND:")) {
                             val keyHex = msg.substringAfter("MAGIC_KEY_FOUND:")
-                            // 전역 변수에 키 저장 & Latch 해제
-                            globalKey = hexToBytes(keyHex)
-                            // 10번 카운트다운 (혹시 모를 중복 방지)
-                             while (keyLatch.count > 0) keyLatch.countDown()
+                            
+                            // [Fix] 전역 변수에 키 저장 & Latch 해제 (Direct Access)
+                            BunnyPoorCdn.globalKey = hexToBytes(keyHex)
+                            BunnyPoorCdn.keyLatch.countDown()
                             
                             println("$TAG Found Key: $keyHex")
                             webView.destroy()
@@ -246,7 +249,6 @@ class BunnyPoorCdn : ExtractorApi() {
                     
                     override fun onProgressChanged(view: WebView?, newProgress: Int) {
                         super.onProgressChanged(view, newProgress)
-                        // 진행 중에도 지속적 주입
                         view?.evaluateJavascript(HOOK_SCRIPT, null)
                     }
                 }
@@ -256,15 +258,19 @@ class BunnyPoorCdn : ExtractorApi() {
                         super.onPageFinished(view, url)
                         view?.evaluateJavascript(HOOK_SCRIPT, null)
                     }
+                    
+                    override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                        super.onPageStarted(view, url, favicon)
+                        view?.evaluateJavascript(HOOK_SCRIPT, null)
+                    }
                 }
 
-                // 20초 타임아웃
                 val handler = Handler(Looper.getMainLooper())
                 handler.postDelayed({
                     try { 
-                        if (globalKey == null) {
+                        if (BunnyPoorCdn.globalKey == null) {
                             println("$TAG Timeout. Retry reload.")
-                            webView.reload() // 리로드 시도
+                            webView.reload()
                         } else {
                             webView.destroy()
                         }
@@ -322,13 +328,11 @@ class BunnyPoorCdn : ExtractorApi() {
                     output.write(header.toByteArray())
                     output.write(body)
                 } else if (path.contains("/proxy")) {
-                    // [Key Wait Logic] 키가 구해질 때까지 대기 (최대 15초)
-                    if (globalKey == null) {
+                    // [Key Wait Logic]
+                    if (BunnyPoorCdn.globalKey == null) {
                         println("$TAG Waiting for key...")
-                        // 15초 동안 키가 구해지길 기다림
-                        // Latch는 0이 되면 풀림
-                         val latch = BunnyPoorCdn.Companion.javaClass.getDeclaredField("keyLatch").get(null) as CountDownLatch
-                         latch.await(15, TimeUnit.SECONDS)
+                        // [Fix] Direct Access to latch
+                        BunnyPoorCdn.keyLatch.await(15, TimeUnit.SECONDS)
                     }
 
                     val urlParam = path.substringAfter("url=").substringBefore(" ")
@@ -342,11 +346,11 @@ class BunnyPoorCdn : ExtractorApi() {
                                 val rawData = res.body.bytes()
                                 output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
                                 
-                                val key = globalKey
+                                // [Fix] Direct Access to globalKey
+                                val key = BunnyPoorCdn.globalKey
                                 val decrypted = if (key != null) {
                                     decryptWithBlindTrim(rawData, key, seq)
                                 } else {
-                                    // 키가 없으면 그냥 원본 보냄 (재생 실패하겠지만 타임아웃보단 나음)
                                     rawData
                                 }
                                 output.write(decrypted ?: rawData)
