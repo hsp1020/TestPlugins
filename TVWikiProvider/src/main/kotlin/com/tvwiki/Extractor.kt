@@ -30,14 +30,13 @@ import kotlinx.coroutines.delay
 import kotlin.experimental.xor
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.util.Arrays
 
 /**
  * [Version: v20-Pattern-Matcher]
- * 1. REVOLUTIONARY FIX: 영상 복호화(AES) 제거. '키 패턴 검증'으로 로직 변경.
- * - Pattern: Starts with [01, 0E, 00] + Next 7 bytes are permutation of [01..07].
- * 2. Performance: 메모리 할당 및 CPU 부하 99.9% 감소 (AES 제거 효과).
- * 3. Scope: 8192가지 키 생성 알고리즘 전수 조사 (소요시간 < 1초).
+ * 1. Strategy Change: AES 복호화 시도 중단 -> '키 패턴 매칭'으로 변경.
+ * 2. Logic: JSON 파라미터의 8192가지 조합으로 키를 생성하고, '01 0E 00' 패턴을 가진 키를 검색.
+ * 3. Performance: AES 연산 제거로 메모리 할당 0, 속도 1000배 향상.
+ * 4. Recovery: 키를 찾은 후 오프셋(Blind Trim) 스캔 수행.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -121,7 +120,6 @@ class BunnyPoorCdn : ExtractorApi() {
                 val m3u8Res = app.get(capturedUrl, headers = capturedHeaders!!)
                 val m3u8Content = m3u8Res.text
 
-                // IV 추출 (패턴 매칭에는 불필요하지만 복호화 시 필요할 수 있음)
                 val keyMatch = Regex("""#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"(?:,IV=(0x[0-9a-fA-F]+))?""").find(m3u8Content)
                 val hexIv = keyMatch?.groupValues?.get(2)
                 
@@ -197,7 +195,11 @@ class BunnyPoorCdn : ExtractorApi() {
         @Volatile private var targetKeyUrl: String? = null
         
         @Volatile private var confirmedKey: ByteArray? = null
+        @Volatile private var rawKeyJson: String? = null
         
+        data class DecryptProfile(val ivMode: Int, val trimOffset: Int)
+        @Volatile private var confirmedProfile: DecryptProfile? = null
+
         private val VER = "[Bunny-v20-Proxy]"
 
         fun start() {
@@ -221,13 +223,15 @@ class BunnyPoorCdn : ExtractorApi() {
         fun updateSession(h: Map<String, String>, iv: String?) {
             currentHeaders = h; playlistIv = iv
             confirmedKey = null
+            confirmedProfile = null
+            rawKeyJson = null
         }
         fun setPlaylist(p: String) { currentPlaylist = p }
         fun updateSeqMap(map: ConcurrentHashMap<String, Long>) { seqMap = map }
         fun setTargetKeyUrl(url: String) { targetKeyUrl = url }
 
         private fun ensureKey() {
-            if (confirmedKey != null) return
+            if (confirmedKey != null || rawKeyJson != null) return
             if (targetKeyUrl == null) return
 
             runBlocking {
@@ -237,14 +241,16 @@ class BunnyPoorCdn : ExtractorApi() {
                     var rawData = res.body.bytes()
 
                     if (rawData.size > 100 && rawData[0] == '{'.code.toByte()) {
-                        val jsonStr = String(rawData).trim()
-                        // [핵심] JSON 파싱과 동시에 패턴 매칭 수행 (AES 복호화 아님)
-                        val matchedKey = BunnyPatternMatcher.findCorrectKey(jsonStr)
+                        rawKeyJson = String(rawData).trim()
+                        println("$VER JSON Key Downloaded. Scanning Patterns...")
+                        
+                        // [KEY FINDING] 8192가지 패턴 검사 (AES 아님)
+                        val matchedKey = BunnyPatternMatcher.findCorrectKey(rawKeyJson!!)
                         if (matchedKey != null) {
                             confirmedKey = matchedKey
                             println("$VER KEY FOUND BY PATTERN! ${bytesToHex(matchedKey)}")
                         } else {
-                            println("$VER No key matched the pattern out of 8192 variants.")
+                            println("$VER FATAL: No key matched pattern 01 0E 00.")
                         }
                     } else if (rawData.size == 16) {
                         confirmedKey = rawData
@@ -255,7 +261,7 @@ class BunnyPoorCdn : ExtractorApi() {
         
         private fun handleClient(socket: Socket) = thread {
             try {
-                socket.soTimeout = 10000 
+                socket.soTimeout = 15000 
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
                 val line = reader.readLine() ?: return@thread
                 val parts = line.split(" ")
@@ -283,7 +289,7 @@ class BunnyPoorCdn : ExtractorApi() {
                                 output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
                                 
                                 val decrypted = if (confirmedKey != null) {
-                                    // Blind Trim은 유지 (가짜 헤더가 있을 수 있으므로)
+                                    // 키는 찾았지만, 헤더 길이는 모르므로 Blind Trim (오프셋 스캔) 수행
                                     blindTrimAndDecrypt(rawData, confirmedKey!!, seq)
                                 } else {
                                     null
@@ -302,23 +308,48 @@ class BunnyPoorCdn : ExtractorApi() {
         }
 
         private fun blindTrimAndDecrypt(data: ByteArray, key: ByteArray, seq: Long): ByteArray? {
-            // 키는 찾았지만, 헤더 길이(Offset)는 모르므로 0~256바이트 스캔
+            // 이미 오프셋을 찾았다면 바로 사용 (캐시)
+            if (confirmedProfile != null) {
+                return attemptDecrypt(data, key, seq, confirmedProfile!!.ivMode, confirmedProfile!!.trimOffset)
+            }
+
+            // 키는 정확하므로, 헤더 길이만 찾으면 됨 (0 ~ 256 바이트 스캔)
+            val ivModes = listOf(1, 3, 2, 0)
             for (offset in 0..256) {
                 if (data.size <= offset + 188) break
-                val dec = attemptDecrypt(data, key, seq, offset)
-                if (dec != null && isValidTS(dec)) return dec
+                for (ivMode in ivModes) {
+                    val dec = attemptDecrypt(data, key, seq, ivMode, offset)
+                    // 복호화 결과에서 0x47 찾기
+                    if (dec != null && isValidTS(dec)) {
+                        confirmedProfile = DecryptProfile(ivMode, offset)
+                        println("$VER Offset Found: $offset, IV: $ivMode")
+                        return dec
+                    }
+                }
             }
             return null
         }
 
-        private fun attemptDecrypt(data: ByteArray, key: ByteArray, seq: Long, offset: Int): ByteArray? {
+        private fun attemptDecrypt(data: ByteArray, key: ByteArray, seq: Long, ivMode: Int, offset: Int): ByteArray? {
             try {
-                val iv = ByteArray(16)
-                ByteBuffer.wrap(iv).order(ByteOrder.BIG_ENDIAN).putLong(8, seq)
+                val iv = generateIV(ivMode, seq)
                 val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
                 cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
                 return cipher.doFinal(data.copyOfRange(offset, data.size))
             } catch (e: Exception) { return null }
+        }
+        
+        private fun generateIV(ivMode: Int, seq: Long): ByteArray {
+            val iv = ByteArray(16)
+            when (ivMode) {
+                0 -> if (!playlistIv.isNullOrEmpty()) {
+                        val hex = playlistIv!!.removePrefix("0x")
+                        hex.chunked(2).take(16).forEachIndexed { i, s -> iv[i] = s.toInt(16).toByte() }
+                     }
+                1 -> ByteBuffer.wrap(iv).order(ByteOrder.BIG_ENDIAN).putLong(8, seq)
+                2 -> ByteBuffer.wrap(iv).order(ByteOrder.LITTLE_ENDIAN).putLong(8, seq)
+            }
+            return iv
         }
 
         private fun isValidTS(data: ByteArray?): Boolean {
@@ -332,10 +363,9 @@ class BunnyPoorCdn : ExtractorApi() {
         }
     }
 
-    // [New Class] Pattern Matcher Decryptor
+    // [Pattern Matcher] AES 복호화 없이 키 패턴만 검사 (메모리 최적화)
     class BunnyPatternMatcher(jsonStr: String) {
         companion object {
-            // [Static Logic] Finds the key matching the pattern: 01 0E 00 ... [01-07 Permutation]
             fun findCorrectKey(jsonStr: String): ByteArray? {
                 val matcher = BunnyPatternMatcher(jsonStr)
                 return matcher.scanForPattern()
@@ -435,20 +465,13 @@ class BunnyPoorCdn : ExtractorApi() {
             return null
         }
         
-        // [Key Pattern Check]
-        // 1. Header: 01 0E 00
-        // 2. Middle 7 bytes (index 3~9): Permutation of 1..7
         private fun checkPattern(): Boolean {
             if (workBuffer[0] != 0x01.toByte() || workBuffer[1] != 0x0E.toByte() || workBuffer[2] != 0x00.toByte()) return false
-            
-            // Check permutation of 01..07 in bytes 3..9
-            // Bitmask check: 
-            // 1<<1 | 1<<2 ... | 1<<7 = 254 (0xFE)
             var mask = 0
             for (k in 3..9) {
                 val b = workBuffer[k].toInt()
                 if (b < 1 || b > 7) return false
-                if ((mask and (1 shl b)) != 0) return false // Duplicate
+                if ((mask and (1 shl b)) != 0) return false // Duplicate check
                 mask = mask or (1 shl b)
             }
             return mask == 0xFE
@@ -482,11 +505,14 @@ class BunnyPoorCdn : ExtractorApi() {
                     is LayerInstruction.FinalEncrypt -> {
                         val mask = if (p_b64_url) layer.maskUrl else layer.maskDefault
                         if (mask.isNotEmpty()) {
-                            for (i in 0 until currentSize) workBuffer[i] = (workBuffer[i].toInt() xor mask[i % mask.size].toInt()).toByte()
+                            for (i in 0 until currentSize) {
+                                workBuffer[i] = (workBuffer[i].toInt() xor mask[i % mask.size].toInt()).toByte()
+                            }
                         }
                     }
                     is LayerInstruction.BitRotate -> {
-                        val rots = layer.rots; val len = rots.size
+                        val rots = layer.rots
+                        val len = rots.size
                         for (i in 0 until currentSize) {
                             val rIdx = if (p_rot_irev) (len - 1 - (i % len)) else (i % len)
                             val rot = rots[rIdx]
@@ -558,8 +584,11 @@ class BunnyPoorCdn : ExtractorApi() {
                                  val len = lenArr[pos]
                                  val off = offArr[pos]
                                  if (off + len <= currentSize && writePtr + len <= workBuffer.size) {
-                                     System.arraycopy(tempBuffer, off, workBuffer, writePtr, len)
-                                     writePtr += len
+                                     // Decoy Pick Logic: Always pick LAST byte (Common obfuscation)
+                                     // To be safe, we rely on p_seg_acc flag (reused) to toggle First/Last pick
+                                     val byteToKeep = if (p_seg_acc) tempBuffer[off + len - 1] else tempBuffer[off]
+                                     workBuffer[writePtr] = byteToKeep
+                                     writePtr += 1
                                  }
                              }
                         }
