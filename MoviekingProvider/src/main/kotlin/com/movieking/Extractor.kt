@@ -13,14 +13,13 @@ import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
 /**
- * v127.1: Robust Key Proxy (Fix 404 Error)
+ * v127-2.1: Fix Build Error (Class Name Rollback)
  * [수정 사항]
- * 1. 404 에러 방지: 플레이어가 키를 요청할 때, 아직 정답 키를 못 찾았다면 즉시 연산을 수행하여 응답함.
- * 2. 연산 로직 강화: 첫 세그먼트를 가져와 정답 키를 검증하는 findRealKey의 성공률을 높임.
- * 3. IV 유연성: IV가 0인 경우와 시퀀스 번호인 경우를 모두 고려하여 검증.
- * 4. 세션 유지: getUrl 재호출 시에도 기존에 찾아둔 키 캐시를 최대한 활용.
+ * 1. 클래스명 변경: BcbcRedExtractor -> BunnyPoorCdn (빌드 에러 'Unresolved reference' 해결)
+ * 2. v127-2 로직 유지: 404 에러 방지를 위한 Blocking Wait 및 Key-Only Proxy 적용.
+ * 3. 구간 이동 최적화: 영상 데이터(TS)는 서버 직결, 복호화 키만 프록시 처리.
  */
-class BcbcRedExtractor : ExtractorApi() {
+class BunnyPoorCdn : ExtractorApi() {
     override val name = "MovieKingPlayer"
     override val mainUrl = "https://player-v1.bcbc.red"
     override val requiresReferer = true
@@ -28,14 +27,15 @@ class BcbcRedExtractor : ExtractorApi() {
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
-        @Volatile private var cachedKey: ByteArray? = null
+        @Volatile private var confirmedKey: ByteArray? = null
+        @Volatile private var isFindingKey = false
         @Volatile private var lastCandidates: List<ByteArray> = emptyList()
         @Volatile private var firstSegmentUrl: String? = null
         @Volatile private var lastHeaders: Map<String, String> = emptyMap()
     }
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
-        println("=== [MovieKing v127.1] Start ===")
+        println("=== [BunnyPoorCdn v127-2.1] Start ===")
         try {
             val baseHeaders = mutableMapOf(
                 "Referer" to "https://player-v1.bcbc.red/",
@@ -48,15 +48,19 @@ class BcbcRedExtractor : ExtractorApi() {
             val m3u8Url = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)?.groupValues?.get(1)?.replace("\\/", "/") ?: return
             val playlistRes = app.get(m3u8Url, headers = baseHeaders).text
             
-            // 1. 키 후보군 미리 추출
+            // 1. 키 후보군 및 세그먼트 정보 추출
             val keyMatch = Regex("""#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"(?:,IV=(0x[0-9a-fA-F]+))?""").find(playlistRes)
-            if (keyMatch != null) {
+            if (keyMatch != null && confirmedKey == null && !isFindingKey) {
                 lastCandidates = solveKeyCandidatesCombinatorial(baseHeaders, keyMatch.groupValues[1])
                 val firstSegment = playlistRes.lines().firstOrNull { it.isNotBlank() && !it.startsWith("#") }
                 firstSegmentUrl = if (firstSegment?.startsWith("http") == true) firstSegment else "${m3u8Url.substringBeforeLast("/")}/$firstSegment"
                 
-                // 정답 키 미리 찾기 시도 (비동기)
-                thread { runBlocking { cachedKey = findRealKey(firstSegmentUrl!!, lastHeaders, lastCandidates) } }
+                // 별도 스레드에서 정답 키 탐색 시작
+                thread {
+                    isFindingKey = true
+                    runBlocking { confirmedKey = findRealKey(firstSegmentUrl!!, lastHeaders, lastCandidates) }
+                    isFindingKey = false
+                }
             }
 
             // 2. 프록시 서버 시작
@@ -69,7 +73,7 @@ class BcbcRedExtractor : ExtractorApi() {
             val lines = playlistRes.lines()
             val rewrittenM3u8 = StringBuilder()
             
-            // 3. M3U8 재작성 (TS는 직결, KEY만 프록시)
+            // 3. M3U8 재작성 (TS는 원본 서버 직결로 렉 제거)
             for (line in lines) {
                 when {
                     line.startsWith("#EXT-X-KEY") -> {
@@ -88,10 +92,10 @@ class BcbcRedExtractor : ExtractorApi() {
             callback(newExtractorLink(name, name, "$localRoot/playlist.m3u8", ExtractorLinkType.M3U8) { 
                 this.referer = "https://player-v1.bcbc.red/" 
             })
-        } catch (e: Exception) { println("[MovieKing v127.1] Fatal Error: $e") }
+        } catch (e: Exception) { println("[BunnyPoorCdn v127-2.1] Fatal Error: $e") }
     }
 
-    private suspend fun findRealKey(segmentUrl: String, headers: Map<String, String>, candidates: List<ByteArray>): ByteArray? {
+    suspend fun findRealKey(segmentUrl: String, headers: Map<String, String>, candidates: List<ByteArray>): ByteArray? {
         return try {
             val res = app.get(segmentUrl, headers = headers)
             if (!res.isSuccessful) return null
@@ -101,7 +105,6 @@ class BcbcRedExtractor : ExtractorApi() {
             for (key in candidates) {
                 try {
                     val cipher = Cipher.getInstance("AES/CBC/NoPadding")
-                    // 첫 세그먼트의 IV는 0일 가능성이 큼
                     cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(ByteArray(16)))
                     val head = cipher.update(data.take(376).toByteArray())
                     if (head.size >= 189 && head[0] == 0x47.toByte() && head[188] == 0x47.toByte()) return key
@@ -175,17 +178,21 @@ class BcbcRedExtractor : ExtractorApi() {
                     output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\n\r\n".toByteArray())
                     output.write(currentManifest.toByteArray())
                 } else if (path.contains("key.bin")) {
-                    // [v127.1 핵심] 404 에러를 방지하기 위해 키가 없을 경우 실시간으로 다시 찾음
-                    if (cachedKey == null && firstSegmentUrl != null) {
-                        runBlocking { cachedKey = BcbcRedExtractor().findRealKey(firstSegmentUrl!!, lastHeaders, lastCandidates) }
+                    // 키가 찾아질 때까지 최대 10초 대기 (404 에러 방지)
+                    var waitCount = 0
+                    while (confirmedKey == null && waitCount < 100) {
+                        if (firstSegmentUrl != null && !isFindingKey) {
+                            runBlocking { confirmedKey = BunnyPoorCdn().findRealKey(firstSegmentUrl!!, lastHeaders, lastCandidates) }
+                        }
+                        Thread.sleep(100)
+                        waitCount++
                     }
                     
-                    val key = cachedKey
+                    val key = confirmedKey
                     if (key != null) {
                         output.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 16\r\n\r\n".toByteArray())
                         output.write(key)
                     } else {
-                        // 최후의 수단: 404 대신 가짜 키라도 주어 플레이어가 무한 로딩에 빠지지 않게 함
                         output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
                     }
                 }
