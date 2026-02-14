@@ -14,7 +14,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.network.WebViewResolver
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.ServerSocket
@@ -23,6 +22,8 @@ import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -35,13 +36,10 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * [Version: v37-Sequential-Hybrid]
- * 1. FIX: WebView Threading Issue 해결. (병렬 실행 제거 -> 순차 실행)
- * 2. Key: v33의 JS Hooking 로직을 그대로 복구 (Constructor Hooking).
- * 3. Flow: 
- * [1] 메인 스레드에서 Key 탈취 (v33) 
- * -> [2] 성공 시 M3U8 URL 확보 (구버전) 
- * -> [3] Proxy 가동
+ * [Version: v33-Final-Hooking]
+ * 1. JS Injection: 'onPageStarted', 'doUpdateVisitedHistory' 등 모든 타이밍에 Hook Script 주입.
+ * 2. Script Upgrade: 'Object.defineProperty' 방어 로직 추가 및 'Uint8Array' 감시 강화.
+ * 3. Base: 빌드 성공한 v32 기반.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -52,7 +50,21 @@ class BunnyPoorCdn : ExtractorApi() {
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
-        private const val TAG = "[Bunny-v37]"
+        private const val TAG = "[Bunny-v33]"
+
+        @Volatile internal var globalKey: ByteArray? = null
+        @Volatile internal var keyLatch = CountDownLatch(1)
+
+        fun hexToBytes(hex: String): ByteArray {
+            val len = hex.length
+            val data = ByteArray(len / 2)
+            var i = 0
+            while (i < len) {
+                data[i / 2] = ((Character.digit(hex[i], 16) shl 4) + Character.digit(hex[i + 1], 16)).toByte()
+                i += 2
+            }
+            return data
+        }
     }
 
     override suspend fun getUrl(
@@ -63,6 +75,10 @@ class BunnyPoorCdn : ExtractorApi() {
     ) {
         proxyServer?.stop()
         proxyServer = null
+        
+        globalKey = null
+        keyLatch = CountDownLatch(1)
+        
         extract(url, referer, subtitleCallback, callback)
     }
 
@@ -87,69 +103,29 @@ class BunnyPoorCdn : ExtractorApi() {
             } catch (e: Exception) {}
         }
 
-        // [Step 1] v33 방식: 메인 스레드에서 확실하게 키를 훔쳐옴 (비동기 아님, 기다림)
-        println("$TAG Step 1: Stealing Key...")
-        val stolenKeyHex = JsKeyStealer.stealKey(cleanUrl, DESKTOP_UA, cleanReferer)
-
-        if (stolenKeyHex == null) {
-            println("$TAG Failed to steal key. Aborting.")
-            return false
-        }
-        
-        // 키 확보 성공
-        val keyBytes = hexToBytes(stolenKeyHex)
-        println("$TAG Key Acquired: $stolenKeyHex")
-
-        // [Step 2] 구버전 방식: WebViewResolver로 M3U8 주소만 따옴 (쿠키 안씀)
-        println("$TAG Step 2: Fetching M3U8 URL...")
-        val resolver = WebViewResolver(
-            interceptUrl = Regex("""/c\.html|playlist\.m3u8"""), 
-            useOkhttp = false,
-            timeout = 30000L
-        )
-        
-        var capturedUrl: String? = null
-        try {
-            val response = app.get(
-                url = cleanUrl,
-                headers = mapOf("Referer" to cleanReferer, "User-Agent" to DESKTOP_UA),
-                interceptor = resolver
-            )
-            if (response.url.contains("/c.html") || response.url.contains("playlist.m3u8")) {
-                capturedUrl = response.url
+        // [비동기] JS Hooking 시작
+        thread {
+            runBlocking {
+                JsKeyStealer.stealKey(cleanUrl, DESKTOP_UA, cleanReferer)
             }
-        } catch (e: Exception) { e.printStackTrace() }
-
-        if (capturedUrl != null) {
-            println("$TAG URL Found: $capturedUrl. Starting Proxy.")
-            // [Step 3] 프록시 가동
-            startProxy(capturedUrl, keyBytes, callback)
-            return true
         }
-        
-        return false
+
+        // 프록시 서버 가동
+        startProxy(cleanUrl, callback)
+        return true
     }
 
     private suspend fun startProxy(
         targetUrl: String, 
-        key: ByteArray, 
         callback: (ExtractorLink) -> Unit
     ) {
         try {
-            val headers = mapOf(
-                "User-Agent" to DESKTOP_UA,
-                "Referer" to "https://player.bunny-frame.online/"
-            )
-
-            val m3u8Res = app.get(targetUrl, headers = headers)
+            val m3u8Res = app.get(targetUrl, headers = mapOf("User-Agent" to DESKTOP_UA, "Referer" to "https://tvwiki5.net/"))
+            val m3u8Url = m3u8Res.url
             val m3u8Content = m3u8Res.text
 
-            val keyMatch = Regex("""#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"(?:,IV=(0x[0-9a-fA-F]+))?""").find(m3u8Content)
-            val hexIv = keyMatch?.groupValues?.get(2)
-            
             val proxy = ProxyWebServer()
             proxy.start()
-            proxy.updateSession(key, hexIv) // 키와 IV 주입
             proxyServer = proxy
 
             val proxyPort = proxy.port
@@ -160,9 +136,9 @@ class BunnyPoorCdn : ExtractorApi() {
             val seqMap = ConcurrentHashMap<String, Long>()
             var currentSeq = Regex("""#EXT-X-MEDIA-SEQUENCE:(\d+)""").find(m3u8Content)?.groupValues?.get(1)?.toLong() ?: 0L
             
-            val uri = URI(targetUrl)
+            val uri = URI(m3u8Url)
             val domain = "${uri.scheme}://${uri.host}"
-            val parentUrl = targetUrl.substringBeforeLast("/")
+            val parentUrl = m3u8Url.substringBeforeLast("/")
 
             for (line in lines) {
                 if (line.startsWith("#EXT-X-KEY")) {
@@ -198,63 +174,90 @@ class BunnyPoorCdn : ExtractorApi() {
         }
     }
 
-    // [v33 Logic] JS Key Stealer - 가장 강력했던 버전 복구
     object JsKeyStealer {
         private const val HOOK_SCRIPT = """
             (function() {
-                if (window.isHooked) return;
-                window.isHooked = true;
-                if (typeof G !== 'undefined') window.G = false;
+                try {
+                    if (window.isHooked) return;
+                    window.isHooked = true;
 
-                function checkAndLog(source) {
-                    if (source && source.length === 16) {
-                        if (source[0] === 0x01 && source[1] === 0x0e && source[2] === 0x00) {
-                            try {
-                                var body = Array.from(source.slice(3, 10));
-                                body.sort(function(a, b) { return a - b; });
-                                var isValid = true;
-                                for (var i = 0; i < 7; i++) {
-                                    if (body[i] !== (i + 1)) { isValid = false; break; }
-                                }
-                                if (isValid) {
-                                    var hex = Array.from(source).map(function(b) {
-                                        return ('0' + (b & 0xFF).toString(16)).slice(-2);
-                                    }).join('');
-                                    console.log("MAGIC_KEY_FOUND:" + hex);
-                                    return true;
-                                }
-                            } catch (e) {}
+                    // 1. 전역 변수 초기화 (보안 체크 우회)
+                    if (typeof G !== 'undefined') window.G = false;
+
+                    // 2. 키 패턴 검사 함수
+                    function checkAndLog(source) {
+                        if (source && source.length === 16) {
+                            if (source[0] === 0x01 && source[1] === 0x0e && source[2] === 0x00) {
+                                try {
+                                    var body = Array.from(source.slice(3, 10));
+                                    body.sort(function(a, b) { return a - b; });
+                                    var isValid = true;
+                                    for (var i = 0; i < 7; i++) {
+                                        if (body[i] !== (i + 1)) { isValid = false; break; }
+                                    }
+                                    if (isValid) {
+                                        var hex = Array.from(source).map(function(b) {
+                                            return ('0' + (b & 0xFF).toString(16)).slice(-2);
+                                        }).join('');
+                                        console.log("MAGIC_KEY_FOUND:" + hex);
+                                        return true;
+                                    }
+                                } catch (e) {}
+                            }
                         }
+                        return false;
                     }
-                    return false;
+
+                    // 3. Uint8Array.prototype.set 후킹
+                    const originalSet = Uint8Array.prototype.set;
+                    Object.defineProperty(Uint8Array.prototype, 'set', {
+                        value: function(source, offset) {
+                            if (source) checkAndLog(source);
+                            return originalSet.apply(this, arguments);
+                        },
+                        writable: true,
+                        configurable: true
+                    });
+
+                    // 4. Uint8Array 생성자 후킹 (new Uint8Array([...]))
+                    const OriginalUint8Array = window.Uint8Array;
+                    function HookedUint8Array(arg1, arg2, arg3) {
+                        var arr;
+                        if (arguments.length === 0) arr = new OriginalUint8Array();
+                        else if (arguments.length === 1) arr = new OriginalUint8Array(arg1);
+                        else if (arguments.length === 2) arr = new OriginalUint8Array(arg1, arg2);
+                        else arr = new OriginalUint8Array(arg1, arg2, arg3);
+                        
+                        checkAndLog(arr);
+                        return arr;
+                    }
+                    
+                    // 프로토타입 체인 복구
+                    HookedUint8Array.prototype = OriginalUint8Array.prototype;
+                    HookedUint8Array.BYTES_PER_ELEMENT = OriginalUint8Array.BYTES_PER_ELEMENT;
+                    HookedUint8Array.from = OriginalUint8Array.from;
+                    HookedUint8Array.of = OriginalUint8Array.of;
+                    
+                    // window.Uint8Array 덮어쓰기 (Object.defineProperty 사용)
+                    try {
+                        Object.defineProperty(window, 'Uint8Array', {
+                            value: HookedUint8Array,
+                            writable: true,
+                            configurable: true
+                        });
+                    } catch(e) {
+                        window.Uint8Array = HookedUint8Array;
+                    }
+
+                    console.log("HOOK_INSTALLED");
+                } catch(e) {
+                    console.log("HOOK_ERROR:" + e.message);
                 }
-
-                const originalSet = Uint8Array.prototype.set;
-                Uint8Array.prototype.set = function(source, offset) {
-                    if (source) checkAndLog(source);
-                    return originalSet.apply(this, arguments);
-                };
-
-                const OriginalUint8Array = window.Uint8Array;
-                window.Uint8Array = function(arg1, arg2, arg3) {
-                    var arr;
-                    if (arguments.length === 0) arr = new OriginalUint8Array();
-                    else if (arguments.length === 1) arr = new OriginalUint8Array(arg1);
-                    else if (arguments.length === 2) arr = new OriginalUint8Array(arg1, arg2);
-                    else arr = new OriginalUint8Array(arg1, arg2, arg3);
-                    checkAndLog(arr);
-                    return arr;
-                };
-                window.Uint8Array.prototype = OriginalUint8Array.prototype;
-                window.Uint8Array.from = OriginalUint8Array.from;
-                window.Uint8Array.of = OriginalUint8Array.of;
-                Object.defineProperty(window.Uint8Array, 'name', { value: 'Uint8Array' });
             })();
         """
 
-        suspend fun stealKey(url: String, ua: String, referer: String): String? {
-            return withContext(Dispatchers.Main) {
-                val resultDeferred = CompletableDeferred<String?>()
+        suspend fun stealKey(url: String, ua: String, referer: String) {
+            withContext(Dispatchers.Main) {
                 val webView = WebView(AcraApplication.context!!)
                 
                 webView.settings.apply {
@@ -269,15 +272,19 @@ class BunnyPoorCdn : ExtractorApi() {
                         val msg = consoleMessage?.message() ?: ""
                         if (msg.startsWith("MAGIC_KEY_FOUND:")) {
                             val keyHex = msg.substringAfter("MAGIC_KEY_FOUND:")
-                            if (!resultDeferred.isCompleted) {
-                                resultDeferred.complete(keyHex)
-                            }
+                            BunnyPoorCdn.globalKey = BunnyPoorCdn.hexToBytes(keyHex)
+                            BunnyPoorCdn.keyLatch.countDown()
+                            println("$TAG Found Key: $keyHex")
+                            webView.destroy()
+                        } else if (msg.startsWith("HOOK_ERROR:")) {
+                             println("$TAG JS Hook Error: $msg")
                         }
                         return true
                     }
                     
                     override fun onProgressChanged(view: WebView?, newProgress: Int) {
                         super.onProgressChanged(view, newProgress)
+                        // 지속적 주입
                         view?.evaluateJavascript(HOOK_SCRIPT, null)
                     }
                 }
@@ -287,31 +294,32 @@ class BunnyPoorCdn : ExtractorApi() {
                         super.onPageFinished(view, url)
                         view?.evaluateJavascript(HOOK_SCRIPT, null)
                     }
+                    
                     override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                         super.onPageStarted(view, url, favicon)
                         view?.evaluateJavascript(HOOK_SCRIPT, null)
                     }
-                }
-
-                // 20초 타임아웃
-                val handler = Handler(Looper.getMainLooper())
-                val timeoutRunnable = Runnable {
-                    if (!resultDeferred.isCompleted) {
-                        // 타임아웃 시 재시도 대신 실패 처리 (무한 루프 방지)
-                        resultDeferred.complete(null)
-                        try { webView.destroy() } catch(e:Exception){}
+                    
+                    override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                         super.doUpdateVisitedHistory(view, url, isReload)
+                         view?.evaluateJavascript(HOOK_SCRIPT, null)
                     }
                 }
-                handler.postDelayed(timeoutRunnable, 20000)
+
+                val handler = Handler(Looper.getMainLooper())
+                handler.postDelayed({
+                    try { 
+                        if (BunnyPoorCdn.globalKey == null) {
+                            println("$TAG Timeout. Retry reload.")
+                            webView.reload()
+                        } else {
+                            webView.destroy()
+                        }
+                    } catch(e:Exception){}
+                }, 10000)
 
                 val headers = mapOf("Referer" to referer)
                 webView.loadUrl(url, headers)
-
-                val result = resultDeferred.await()
-                handler.removeCallbacks(timeoutRunnable)
-                try { webView.destroy() } catch(e:Exception){}
-                
-                result
             }
         }
     }
@@ -322,8 +330,7 @@ class BunnyPoorCdn : ExtractorApi() {
         var port: Int = 0
         @Volatile private var currentPlaylist: String = ""
         @Volatile private var seqMap: ConcurrentHashMap<String, Long> = ConcurrentHashMap()
-        @Volatile private var playlistIv: String? = null
-        @Volatile private var decryptionKey: ByteArray? = null
+        @Volatile private var trimOffset: Int = -1
 
         fun start() {
             try {
@@ -341,11 +348,6 @@ class BunnyPoorCdn : ExtractorApi() {
         fun stop() {
             isRunning = false
             try { serverSocket?.close(); serverSocket = null } catch (e: Exception) {}
-        }
-        
-        fun updateSession(key: ByteArray, iv: String?) {
-            decryptionKey = key
-            playlistIv = iv
         }
         
         fun setPlaylist(p: String) { currentPlaylist = p }
@@ -367,6 +369,12 @@ class BunnyPoorCdn : ExtractorApi() {
                     output.write(header.toByteArray())
                     output.write(body)
                 } else if (path.contains("/proxy")) {
+                    // [Key Wait]
+                    if (BunnyPoorCdn.globalKey == null) {
+                        println("$TAG Waiting for key...")
+                        BunnyPoorCdn.keyLatch.await(15, TimeUnit.SECONDS)
+                    }
+
                     val urlParam = path.substringAfter("url=").substringBefore(" ")
                     val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
                     val seq = seqMap[targetUrl] ?: 0L
@@ -378,10 +386,9 @@ class BunnyPoorCdn : ExtractorApi() {
                                 val rawData = res.body.bytes()
                                 output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
                                 
-                                val key = decryptionKey
+                                val key = BunnyPoorCdn.globalKey
                                 val decrypted = if (key != null) {
-                                    // 키가 있으므로 바로 복호화
-                                    attemptDecrypt(rawData, key, seq)
+                                    decryptWithBlindTrim(rawData, key, seq)
                                 } else {
                                     rawData
                                 }
@@ -398,31 +405,29 @@ class BunnyPoorCdn : ExtractorApi() {
             }
         }
 
-        private fun attemptDecrypt(data: ByteArray, key: ByteArray, seq: Long): ByteArray? {
-            return try {
-                val iv = ByteArray(16)
-                if (!playlistIv.isNullOrEmpty()) {
-                     val hex = playlistIv!!.removePrefix("0x")
-                     hex.chunked(2).take(16).forEachIndexed { i, s -> iv[i] = s.toInt(16).toByte() }
-                } else {
-                     ByteBuffer.wrap(iv).order(ByteOrder.BIG_ENDIAN).putLong(8, seq)
+        private fun decryptWithBlindTrim(data: ByteArray, key: ByteArray, seq: Long): ByteArray? {
+            if (trimOffset != -1) {
+                return attemptDecrypt(data, key, seq, trimOffset)
+            }
+            for (offset in 0..256) {
+                if (data.size <= offset + 188) break
+                val dec = attemptDecrypt(data, key, seq, offset)
+                if (dec != null && dec.size > 188 && dec[0] == 0x47.toByte()) {
+                    trimOffset = offset
+                    return dec
                 }
-                
+            }
+            return null
+        }
+
+        private fun attemptDecrypt(data: ByteArray, key: ByteArray, seq: Long, offset: Int): ByteArray? {
+            try {
+                val iv = ByteArray(16)
+                ByteBuffer.wrap(iv).order(ByteOrder.BIG_ENDIAN).putLong(8, seq)
                 val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
                 cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
-                cipher.doFinal(data)
-            } catch (e: Exception) { null }
+                return cipher.doFinal(data.copyOfRange(offset, data.size))
+            } catch (e: Exception) { return null }
         }
-    }
-
-    private fun hexToBytes(hex: String): ByteArray {
-        val len = hex.length
-        val data = ByteArray(len / 2)
-        var i = 0
-        while (i < len) {
-            data[i / 2] = ((Character.digit(hex[i], 16) shl 4) + Character.digit(hex[i + 1], 16)).toByte()
-            i += 2
-        }
-        return data
     }
 }
