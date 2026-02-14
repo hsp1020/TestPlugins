@@ -33,9 +33,9 @@ import java.nio.ByteOrder
 import java.util.Arrays
 
 /**
- * [Version: v20-BuildFix]
- * 1. Build Error Fix: Nullable 'ByteArray?' type mismatch 해결. (confirmedKey!! 처리 및 인자 사용 통일)
- * 2. Logic: v20의 '키 패턴 매칭' 로직 100% 유지.
+ * [Version: v21-BuildFix-Final]
+ * 1. Build Error Fixed: 'confirmedKey' 접근 시 로컬 변수 캡처(Local Capture) 방식을 사용하여 Null Safety 에러 해결.
+ * 2. Logic: v20의 '키 패턴 매칭(01 0E 00)' 및 'Blind Trim' 로직 100% 유지.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -46,7 +46,7 @@ class BunnyPoorCdn : ExtractorApi() {
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
-        private const val TAG = "[Bunny-v20-Fix]"
+        private const val TAG = "[Bunny-v21]"
     }
 
     override suspend fun getUrl(
@@ -199,7 +199,7 @@ class BunnyPoorCdn : ExtractorApi() {
         data class DecryptProfile(val ivMode: Int, val trimOffset: Int)
         @Volatile private var confirmedProfile: DecryptProfile? = null
 
-        private val VER = "[Bunny-v20-Proxy]"
+        private val VER = "[Bunny-v21-Proxy]"
 
         fun start() {
             try {
@@ -257,7 +257,7 @@ class BunnyPoorCdn : ExtractorApi() {
         
         private fun handleClient(socket: Socket) = thread {
             try {
-                socket.soTimeout = 10000 
+                socket.soTimeout = 15000 
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
                 val line = reader.readLine() ?: return@thread
                 val parts = line.split(" ")
@@ -284,9 +284,10 @@ class BunnyPoorCdn : ExtractorApi() {
                                 val rawData = res.body.bytes()
                                 output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
                                 
-                                val decrypted = if (confirmedKey != null) {
-                                    // [Fix] confirmedKey!! 사용 및 함수 호출 시 confirmedKey 대신 매개변수로 전달
-                                    blindTrimAndDecrypt(rawData, confirmedKey!!, seq)
+                                // [Fix] confirmedKey를 로컬 변수에 캡처하여 Smart Cast 보장
+                                val currentKey = confirmedKey
+                                val decrypted = if (currentKey != null) {
+                                    blindTrimAndDecrypt(rawData, currentKey, seq)
                                 } else {
                                     null
                                 }
@@ -304,9 +305,10 @@ class BunnyPoorCdn : ExtractorApi() {
         }
 
         private fun blindTrimAndDecrypt(data: ByteArray, key: ByteArray, seq: Long): ByteArray? {
-            // [Fix] 전역변수 confirmedKey가 아니라 인자로 받은 key를 사용해야 안전함
-            if (confirmedProfile != null) {
-                return attemptDecrypt(data, key, seq, confirmedProfile!!.ivMode, confirmedProfile!!.trimOffset)
+            // 캐시된 프로필 확인
+            val profile = confirmedProfile
+            if (profile != null) {
+                return attemptDecrypt(data, key, seq, profile.ivMode, profile.trimOffset)
             }
 
             val ivModes = listOf(1, 3, 2, 0)
@@ -575,8 +577,8 @@ class BunnyPoorCdn : ExtractorApi() {
                                  val len = lenArr[pos]
                                  val off = offArr[pos]
                                  if (off + len <= currentSize && writePtr + len <= workBuffer.size) {
-                                     // Decoy Extract 1 byte
-                                     // Use p_seg_acc bit to decide First vs Last
+                                     // Decoy Pick Logic: Always pick LAST byte (Common obfuscation)
+                                     // To be safe, we rely on p_seg_acc bit to toggle First/Last pick
                                      val byteToKeep = if (p_seg_acc) tempBuffer[off + len - 1] else tempBuffer[off]
                                      workBuffer[writePtr] = byteToKeep
                                      writePtr += 1
