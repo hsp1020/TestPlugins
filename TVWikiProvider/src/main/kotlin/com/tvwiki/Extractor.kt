@@ -34,9 +34,11 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * [Version: v28-Context-Fix]
- * 1. Build Fix: 'AcraApplication.context' (Nullable) -> 'AcraApplication.context!!' (Non-Null) 강제 형변환.
- * 2. Logic: JS Hooking + Proxy Server 로직 유지.
+ * [Version: v29-Aggressive-Hooking]
+ * 1. JS Upgrade: Uint8Array 생성자(Constructor)와 .set() 메소드 모두 Hooking.
+ * -> 키가 어떤 방식으로 생성되든 메모리에 나타나는 순간 즉시 포착.
+ * 2. Logic: 3-7-6 패턴 검증 유지.
+ * 3. Base: 빌드 성공한 v28 기반.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -47,7 +49,7 @@ class BunnyPoorCdn : ExtractorApi() {
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
-        private const val TAG = "[Bunny-v28]"
+        private const val TAG = "[Bunny-v29]"
     }
 
     override suspend fun getUrl(
@@ -158,33 +160,73 @@ class BunnyPoorCdn : ExtractorApi() {
     }
 
     object JsKeyStealer {
+        // [업그레이드된 후킹 스크립트]
+        // 1. Uint8Array.prototype.set (기존)
+        // 2. new Uint8Array() 생성자 (추가) - 이걸로 생성하는 경우도 놓치지 않음
         private const val HOOK_SCRIPT = """
             (function() {
+                // 이미 주입되었으면 스킵
+                if (window.isHooked) return;
+                window.isHooked = true;
+
                 if (typeof G !== 'undefined') window.G = false;
-                const originalSet = Uint8Array.prototype.set;
-                
-                Uint8Array.prototype.set = function(source, offset) {
-                    if (source instanceof Uint8Array && source.length === 16) {
+
+                function checkAndLog(source) {
+                    if (source && source.length === 16) {
                         if (source[0] === 0x01 && source[1] === 0x0e && source[2] === 0x00) {
-                            var body = source.slice(3, 10);
-                            body.sort();
-                            var isValid = true;
-                            for (var i = 0; i < 7; i++) {
-                                if (body[i] !== (i + 1)) {
-                                    isValid = false;
-                                    break;
+                            try {
+                                var body = Array.from(source.slice(3, 10));
+                                body.sort(function(a, b) { return a - b; });
+                                
+                                var isValid = true;
+                                for (var i = 0; i < 7; i++) {
+                                    if (body[i] !== (i + 1)) {
+                                        isValid = false;
+                                        break;
+                                    }
                                 }
-                            }
-                            if (isValid) {
-                                var hex = Array.from(source).map(function(b) {
-                                    return ('0' + b.toString(16)).slice(-2);
-                                }).join('');
-                                console.log("MAGIC_KEY_FOUND:" + hex);
-                            }
+                                
+                                if (isValid) {
+                                    var hex = Array.from(source).map(function(b) {
+                                        return ('0' + (b & 0xFF).toString(16)).slice(-2);
+                                    }).join('');
+                                    console.log("MAGIC_KEY_FOUND:" + hex);
+                                    return true;
+                                }
+                            } catch (e) {}
                         }
                     }
+                    return false;
+                }
+
+                // 1. Hook .set()
+                const originalSet = Uint8Array.prototype.set;
+                Uint8Array.prototype.set = function(source, offset) {
+                    if (source) checkAndLog(source);
                     return originalSet.apply(this, arguments);
                 };
+
+                // 2. Hook Constructor (new Uint8Array([...]))
+                const OriginalUint8Array = window.Uint8Array;
+                window.Uint8Array = function(arg1, arg2, arg3) {
+                    var arr;
+                    if (arguments.length === 0) arr = new OriginalUint8Array();
+                    else if (arguments.length === 1) arr = new OriginalUint8Array(arg1);
+                    else if (arguments.length === 2) arr = new OriginalUint8Array(arg1, arg2);
+                    else arr = new OriginalUint8Array(arg1, arg2, arg3);
+                    
+                    // 생성된 배열 검사
+                    checkAndLog(arr);
+                    return arr;
+                };
+                
+                // 프로토타입 및 정적 메소드 복구
+                window.Uint8Array.prototype = OriginalUint8Array.prototype;
+                window.Uint8Array.from = OriginalUint8Array.from;
+                window.Uint8Array.of = OriginalUint8Array.of;
+                Object.defineProperty(window.Uint8Array, 'name', { value: 'Uint8Array' });
+
+                console.log("Hooks installed successfully.");
             })();
         """
 
@@ -223,6 +265,7 @@ class BunnyPoorCdn : ExtractorApi() {
                     
                     override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                         super.onPageStarted(view, url, favicon)
+                        // 시작하자마자 후킹
                         view?.evaluateJavascript(HOOK_SCRIPT, null)
                     }
                 }
