@@ -8,6 +8,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
@@ -28,14 +29,17 @@ import kotlin.concurrent.thread
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.runBlocking
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 /**
- * [Version: v26-JS-Hooking-Filtered]
- * 1. Logic Update: '3-7-6 구조의 법칙'을 JS Hooking 스크립트에 적용.
- * - 고정(3): 01 0e 00 확인
- * - 패턴(7): 01~07 순열 확인 (Sort 검증)
- * - 난수(6): 무시 (통과)
- * 2. Stability: 가짜 키(더미 데이터) 필터링으로 정확도 100% 보장.
+ * [Version: v27-BuildFix-Complete]
+ * 1. Build Fixes:
+ * - 'startProxy' -> 'suspend fun'으로 변경 (suspend 함수 호출 문제 해결).
+ * - 'app.context' -> 'AcraApplication.context'로 변경 (Unresolved reference 해결).
+ * - Missing Imports 추가 (runBlocking, ByteBuffer, ByteOrder).
+ * 2. Logic: v26의 'JS Hooking & 3-7-6 Filtering' 로직 100% 유지.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -46,7 +50,7 @@ class BunnyPoorCdn : ExtractorApi() {
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
-        private const val TAG = "[Bunny-v26]"
+        private const val TAG = "[Bunny-v27]"
     }
 
     override suspend fun getUrl(
@@ -99,7 +103,8 @@ class BunnyPoorCdn : ExtractorApi() {
         }
     }
 
-    private fun startProxy(
+    // [Fix] suspend 키워드 추가 (app.get, newExtractorLink 호출을 위해 필수)
+    private suspend fun startProxy(
         targetUrl: String, 
         key: ByteArray, 
         callback: (ExtractorLink) -> Unit
@@ -208,7 +213,8 @@ class BunnyPoorCdn : ExtractorApi() {
         suspend fun stealKey(url: String, ua: String, referer: String): String? {
             return withContext(Dispatchers.Main) {
                 val resultDeferred = CompletableDeferred<String?>()
-                val webView = WebView(app.context)
+                // [Fix] app.context -> AcraApplication.context
+                val webView = WebView(AcraApplication.context)
                 
                 webView.settings.apply {
                     javaScriptEnabled = true
@@ -243,7 +249,7 @@ class BunnyPoorCdn : ExtractorApi() {
                     }
                 }
 
-                // 타임아웃 15초 (키 생성까지 시간이 걸릴 수 있으므로 넉넉히)
+                // 타임아웃 15초
                 val handler = Handler(Looper.getMainLooper())
                 val timeoutRunnable = Runnable {
                     if (!resultDeferred.isCompleted) {
@@ -325,6 +331,7 @@ class BunnyPoorCdn : ExtractorApi() {
                     val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
                     val seq = seqMap[targetUrl] ?: 0L
 
+                    // [Fix] 일반 스레드에서 suspend 함수 호출을 위해 runBlocking 사용
                     runBlocking {
                         try {
                             // 영상 다운로드 시 헤더 최소화
