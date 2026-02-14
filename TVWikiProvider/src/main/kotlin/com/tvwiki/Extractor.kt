@@ -36,9 +36,10 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * [Version: v32-BuildFix-StaticMethod]
- * 1. Build Fix: 'hexToBytes' 함수를 Companion Object로 이동하여 Static Context 접근 허용.
- * 2. Logic: v31과 동일 (JS Hooking + Proxy).
+ * [Version: v33-Final-Hooking]
+ * 1. JS Injection: 'onPageStarted', 'doUpdateVisitedHistory' 등 모든 타이밍에 Hook Script 주입.
+ * 2. Script Upgrade: 'Object.defineProperty' 방어 로직 추가 및 'Uint8Array' 감시 강화.
+ * 3. Base: 빌드 성공한 v32 기반.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -49,12 +50,11 @@ class BunnyPoorCdn : ExtractorApi() {
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
-        private const val TAG = "[Bunny-v32]"
+        private const val TAG = "[Bunny-v33]"
 
         @Volatile internal var globalKey: ByteArray? = null
         @Volatile internal var keyLatch = CountDownLatch(1)
 
-        // [Fix] 인스턴스 영역에서 여기로 이동 (Static 접근 가능하도록)
         fun hexToBytes(hex: String): ByteArray {
             val len = hex.length
             val data = ByteArray(len / 2)
@@ -177,53 +177,82 @@ class BunnyPoorCdn : ExtractorApi() {
     object JsKeyStealer {
         private const val HOOK_SCRIPT = """
             (function() {
-                if (window.isHooked) return;
-                window.isHooked = true;
-                if (typeof G !== 'undefined') window.G = false;
+                try {
+                    if (window.isHooked) return;
+                    window.isHooked = true;
 
-                function checkAndLog(source) {
-                    if (source && source.length === 16) {
-                        if (source[0] === 0x01 && source[1] === 0x0e && source[2] === 0x00) {
-                            try {
-                                var body = Array.from(source.slice(3, 10));
-                                body.sort(function(a, b) { return a - b; });
-                                var isValid = true;
-                                for (var i = 0; i < 7; i++) {
-                                    if (body[i] !== (i + 1)) { isValid = false; break; }
-                                }
-                                if (isValid) {
-                                    var hex = Array.from(source).map(function(b) {
-                                        return ('0' + (b & 0xFF).toString(16)).slice(-2);
-                                    }).join('');
-                                    console.log("MAGIC_KEY_FOUND:" + hex);
-                                    return true;
-                                }
-                            } catch (e) {}
+                    // 1. 전역 변수 초기화 (보안 체크 우회)
+                    if (typeof G !== 'undefined') window.G = false;
+
+                    // 2. 키 패턴 검사 함수
+                    function checkAndLog(source) {
+                        if (source && source.length === 16) {
+                            if (source[0] === 0x01 && source[1] === 0x0e && source[2] === 0x00) {
+                                try {
+                                    var body = Array.from(source.slice(3, 10));
+                                    body.sort(function(a, b) { return a - b; });
+                                    var isValid = true;
+                                    for (var i = 0; i < 7; i++) {
+                                        if (body[i] !== (i + 1)) { isValid = false; break; }
+                                    }
+                                    if (isValid) {
+                                        var hex = Array.from(source).map(function(b) {
+                                            return ('0' + (b & 0xFF).toString(16)).slice(-2);
+                                        }).join('');
+                                        console.log("MAGIC_KEY_FOUND:" + hex);
+                                        return true;
+                                    }
+                                } catch (e) {}
+                            }
                         }
+                        return false;
                     }
-                    return false;
+
+                    // 3. Uint8Array.prototype.set 후킹
+                    const originalSet = Uint8Array.prototype.set;
+                    Object.defineProperty(Uint8Array.prototype, 'set', {
+                        value: function(source, offset) {
+                            if (source) checkAndLog(source);
+                            return originalSet.apply(this, arguments);
+                        },
+                        writable: true,
+                        configurable: true
+                    });
+
+                    // 4. Uint8Array 생성자 후킹 (new Uint8Array([...]))
+                    const OriginalUint8Array = window.Uint8Array;
+                    function HookedUint8Array(arg1, arg2, arg3) {
+                        var arr;
+                        if (arguments.length === 0) arr = new OriginalUint8Array();
+                        else if (arguments.length === 1) arr = new OriginalUint8Array(arg1);
+                        else if (arguments.length === 2) arr = new OriginalUint8Array(arg1, arg2);
+                        else arr = new OriginalUint8Array(arg1, arg2, arg3);
+                        
+                        checkAndLog(arr);
+                        return arr;
+                    }
+                    
+                    // 프로토타입 체인 복구
+                    HookedUint8Array.prototype = OriginalUint8Array.prototype;
+                    HookedUint8Array.BYTES_PER_ELEMENT = OriginalUint8Array.BYTES_PER_ELEMENT;
+                    HookedUint8Array.from = OriginalUint8Array.from;
+                    HookedUint8Array.of = OriginalUint8Array.of;
+                    
+                    // window.Uint8Array 덮어쓰기 (Object.defineProperty 사용)
+                    try {
+                        Object.defineProperty(window, 'Uint8Array', {
+                            value: HookedUint8Array,
+                            writable: true,
+                            configurable: true
+                        });
+                    } catch(e) {
+                        window.Uint8Array = HookedUint8Array;
+                    }
+
+                    console.log("HOOK_INSTALLED");
+                } catch(e) {
+                    console.log("HOOK_ERROR:" + e.message);
                 }
-
-                const originalSet = Uint8Array.prototype.set;
-                Uint8Array.prototype.set = function(source, offset) {
-                    if (source) checkAndLog(source);
-                    return originalSet.apply(this, arguments);
-                };
-
-                const OriginalUint8Array = window.Uint8Array;
-                window.Uint8Array = function(arg1, arg2, arg3) {
-                    var arr;
-                    if (arguments.length === 0) arr = new OriginalUint8Array();
-                    else if (arguments.length === 1) arr = new OriginalUint8Array(arg1);
-                    else if (arguments.length === 2) arr = new OriginalUint8Array(arg1, arg2);
-                    else arr = new OriginalUint8Array(arg1, arg2, arg3);
-                    checkAndLog(arr);
-                    return arr;
-                };
-                window.Uint8Array.prototype = OriginalUint8Array.prototype;
-                window.Uint8Array.from = OriginalUint8Array.from;
-                window.Uint8Array.of = OriginalUint8Array.of;
-                Object.defineProperty(window.Uint8Array, 'name', { value: 'Uint8Array' });
             })();
         """
 
@@ -243,19 +272,19 @@ class BunnyPoorCdn : ExtractorApi() {
                         val msg = consoleMessage?.message() ?: ""
                         if (msg.startsWith("MAGIC_KEY_FOUND:")) {
                             val keyHex = msg.substringAfter("MAGIC_KEY_FOUND:")
-                            
-                            // [Fix] Companion.hexToBytes 호출 (이제 Static이라 접근 가능)
                             BunnyPoorCdn.globalKey = BunnyPoorCdn.hexToBytes(keyHex)
                             BunnyPoorCdn.keyLatch.countDown()
-                            
                             println("$TAG Found Key: $keyHex")
                             webView.destroy()
+                        } else if (msg.startsWith("HOOK_ERROR:")) {
+                             println("$TAG JS Hook Error: $msg")
                         }
                         return true
                     }
                     
                     override fun onProgressChanged(view: WebView?, newProgress: Int) {
                         super.onProgressChanged(view, newProgress)
+                        // 지속적 주입
                         view?.evaluateJavascript(HOOK_SCRIPT, null)
                     }
                 }
@@ -269,6 +298,11 @@ class BunnyPoorCdn : ExtractorApi() {
                     override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                         super.onPageStarted(view, url, favicon)
                         view?.evaluateJavascript(HOOK_SCRIPT, null)
+                    }
+                    
+                    override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                         super.doUpdateVisitedHistory(view, url, isReload)
+                         view?.evaluateJavascript(HOOK_SCRIPT, null)
                     }
                 }
 
@@ -335,10 +369,9 @@ class BunnyPoorCdn : ExtractorApi() {
                     output.write(header.toByteArray())
                     output.write(body)
                 } else if (path.contains("/proxy")) {
-                    // [Key Wait Logic]
+                    // [Key Wait]
                     if (BunnyPoorCdn.globalKey == null) {
                         println("$TAG Waiting for key...")
-                        // [Fix] Companion.keyLatch 접근
                         BunnyPoorCdn.keyLatch.await(15, TimeUnit.SECONDS)
                     }
 
