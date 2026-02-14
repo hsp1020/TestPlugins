@@ -366,4 +366,132 @@ class BunnyPoorCdn : ExtractorApi() {
                 val layers = json.getJSONArray("layers")
                 var noiseLens: JSONArray? = null
                 for (i in 0 until layers.length()) {
-                    if (layers.getJSONObject(
+                    if (layers.getJSONObject(i).getString("name") == "segment_noise") {
+                        noiseLens = layers.getJSONObject(i).getJSONArray("noise_lens")
+                        break
+                    }
+                }
+                
+                for (i in layers.length() - 1 downTo 0) {
+                    val layer = layers.getJSONObject(i)
+                    val name = layer.getString("name")
+                    
+                    data = when(name) {
+                        "final_encrypt" -> {
+                            val mask = layer.getString("xor_mask")
+                            val maskBytes = decodeBase64(mask)
+                            xor(data, maskBytes)
+                        }
+                        "decoy_shuffle" -> {
+                            val positions = layer.getJSONArray("real_positions")
+                            val lengths = layer.getJSONArray("segment_lengths")
+                            val segmentOffsets = IntArray(lengths.length())
+                            var currentOffset = 0
+                            for (j in 0 until lengths.length()) {
+                                segmentOffsets[j] = currentOffset
+                                currentOffset += lengths.getInt(j)
+                            }
+                            
+                            val buffer = ByteArrayOutputStream()
+                            for (j in 0 until positions.length()) {
+                                val pos = positions.getInt(j)
+                                val len = lengths.getInt(pos)
+                                val offset = segmentOffsets[pos]
+                                val validLen = noiseLens?.getInt(j) ?: 1
+                                
+                                if (validLen > 0 && offset + validLen <= data.size) {
+                                    buffer.write(data, offset, validLen)
+                                }
+                            }
+                            buffer.toByteArray()
+                        }
+                        "xor_chain" -> {
+                            val initKeyB64 = layer.optString("init_key", null)
+                            val ivBytes = if (initKeyB64 != null) decodeBase64(initKeyB64) else ByteArray(0)
+                            val newData = data.clone()
+                            for (j in newData.size - 1 downTo 1) {
+                                newData[j] = newData[j] xor newData[j-1]
+                            }
+                            if (newData.isNotEmpty() && ivBytes.isNotEmpty()) {
+                                newData[0] = newData[0] xor ivBytes[0]
+                            }
+                            newData
+                        }
+                        "sbox" -> {
+                            val invSboxStr = layer.getString("inverse_sbox")
+                            val invSbox = decodeBase64(invSboxStr)
+                            val newData = ByteArray(data.size)
+                            for (j in data.indices) {
+                                val idx = data[j].toInt() and 0xFF
+                                newData[j] = invSbox[idx]
+                            }
+                            newData
+                        }
+                        "bit_rotate" -> {
+                            val rotations = layer.getJSONArray("rotations")
+                            val newData = ByteArray(data.size)
+                            for (j in data.indices) {
+                                val rot = rotations.getInt(j % rotations.length())
+                                val b = data[j].toInt() and 0xFF
+                                val r = (b ushr rot) or (b shl (8 - rot))
+                                newData[j] = r.toByte()
+                            }
+                            newData
+                        }
+                        "segment_noise" -> {
+                            val perm = layer.getJSONArray("perm")
+                            val noiseL = layer.getJSONArray("noise_lens")
+                            val originalOffsets = IntArray(noiseL.length())
+                            var acc = 0
+                            for(k in 0 until noiseL.length()) {
+                                originalOffsets[k] = acc
+                                acc += noiseL.getInt(k)
+                            }
+
+                            val result = ByteArray(perm.length())
+                            for (j in 0 until perm.length()) {
+                                val originalIndex = perm.getInt(j) 
+                                val offset = originalOffsets[j]
+                                if (offset < data.size) {
+                                    result[originalIndex] = data[offset]
+                                }
+                            }
+                            result
+                        }
+                        "bit_interleave" -> {
+                            val perm = layer.getJSONArray("perm")
+                            val newData = ByteArray(16) // Always 128 bits
+                            for (j in 0 until perm.length()) {
+                                val srcByteIdx = j / 8
+                                val srcBitPos = 7 - (j % 8)
+                                val bitVal = (data[srcByteIdx].toInt() shr srcBitPos) and 1
+                                
+                                val destBitIdx = perm.getInt(j)
+                                val destByteIdx = destBitIdx / 8
+                                val destBitPos = 7 - (destBitIdx % 8)
+                                
+                                if (bitVal == 1) {
+                                    newData[destByteIdx] = (newData[destByteIdx].toInt() or (1 shl destBitPos)).toByte()
+                                }
+                            }
+                            newData
+                        }
+                        else -> data
+                    }
+                }
+                return data
+            } catch (e: Exception) {
+                e.printStackTrace()
+                return null
+            }
+        }
+        
+        private fun xor(data: ByteArray, key: ByteArray): ByteArray {
+            val out = ByteArray(data.size)
+            for (i in data.indices) {
+                out[i] = data[i] xor key[i % key.size]
+            }
+            return out
+        }
+    }
+}
