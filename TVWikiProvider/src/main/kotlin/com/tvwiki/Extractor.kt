@@ -33,9 +33,9 @@ import java.nio.ByteOrder
 import java.util.Arrays
 
 /**
- * [Version: v21-BuildFix-Final]
- * 1. Build Error Fixed: 'confirmedKey' 접근 시 로컬 변수 캡처(Local Capture) 방식을 사용하여 Null Safety 에러 해결.
- * 2. Logic: v20의 '키 패턴 매칭(01 0E 00)' 및 'Blind Trim' 로직 100% 유지.
+ * [Version: v22-BuildFix-Ultimate]
+ * 1. Build Fix: '@Volatile' 변수의 Smart Cast 불가능 문제 해결. (Local Variable Capture 적용)
+ * 2. Logic: v20의 '키 패턴 매칭' 로직 100% 유지. (AES 시도 없이 패턴으로 즉시 찾음)
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -46,7 +46,7 @@ class BunnyPoorCdn : ExtractorApi() {
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
-        private const val TAG = "[Bunny-v21]"
+        private const val TAG = "[Bunny-v22]"
     }
 
     override suspend fun getUrl(
@@ -199,7 +199,7 @@ class BunnyPoorCdn : ExtractorApi() {
         data class DecryptProfile(val ivMode: Int, val trimOffset: Int)
         @Volatile private var confirmedProfile: DecryptProfile? = null
 
-        private val VER = "[Bunny-v21-Proxy]"
+        private val VER = "[Bunny-v22-Proxy]"
 
         fun start() {
             try {
@@ -284,7 +284,7 @@ class BunnyPoorCdn : ExtractorApi() {
                                 val rawData = res.body.bytes()
                                 output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
                                 
-                                // [Fix] confirmedKey를 로컬 변수에 캡처하여 Smart Cast 보장
+                                // [Fix for Build Error] 로컬 변수에 캡처하여 Null Safety 보장
                                 val currentKey = confirmedKey
                                 val decrypted = if (currentKey != null) {
                                     blindTrimAndDecrypt(rawData, currentKey, seq)
@@ -305,7 +305,7 @@ class BunnyPoorCdn : ExtractorApi() {
         }
 
         private fun blindTrimAndDecrypt(data: ByteArray, key: ByteArray, seq: Long): ByteArray? {
-            // 캐시된 프로필 확인
+            // [Fix] 전역 변수 대신 로컬 변수 캡처
             val profile = confirmedProfile
             if (profile != null) {
                 return attemptDecrypt(data, key, seq, profile.ivMode, profile.trimOffset)
