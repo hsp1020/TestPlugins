@@ -34,12 +34,9 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * [Version: v27-BuildFix-Complete]
- * 1. Build Fixes:
- * - 'startProxy' -> 'suspend fun'으로 변경 (suspend 함수 호출 문제 해결).
- * - 'app.context' -> 'AcraApplication.context'로 변경 (Unresolved reference 해결).
- * - Missing Imports 추가 (runBlocking, ByteBuffer, ByteOrder).
- * 2. Logic: v26의 'JS Hooking & 3-7-6 Filtering' 로직 100% 유지.
+ * [Version: v28-Context-Fix]
+ * 1. Build Fix: 'AcraApplication.context' (Nullable) -> 'AcraApplication.context!!' (Non-Null) 강제 형변환.
+ * 2. Logic: JS Hooking + Proxy Server 로직 유지.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -50,7 +47,7 @@ class BunnyPoorCdn : ExtractorApi() {
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
-        private const val TAG = "[Bunny-v27]"
+        private const val TAG = "[Bunny-v28]"
     }
 
     override suspend fun getUrl(
@@ -59,7 +56,6 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // 기존 프록시 정리
         proxyServer?.stop()
         proxyServer = null
         extract(url, referer, subtitleCallback, callback)
@@ -75,7 +71,6 @@ class BunnyPoorCdn : ExtractorApi() {
         var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = "https://tvwiki5.net/"
 
-        // 1. Iframe URL이 아닌 경우 HTML 파싱하여 확보
         if (!cleanUrl.contains("/v/") && !cleanUrl.contains("/e/")) {
             try {
                 val refRes = app.get(cleanReferer, headers = mapOf("User-Agent" to DESKTOP_UA))
@@ -87,35 +82,30 @@ class BunnyPoorCdn : ExtractorApi() {
             } catch (e: Exception) {}
         }
 
-        // 2. [JS Injection] 웹뷰를 띄워서 '검증된 진짜 키'만 훔쳐옴
+        // JS Hooking으로 키 탈취
         val stolenKeyHex = JsKeyStealer.stealKey(cleanUrl, DESKTOP_UA, cleanReferer)
         
         if (stolenKeyHex != null) {
             println("$TAG REAL KEY CAPTURED: $stolenKeyHex")
             val keyBytes = hexToBytes(stolenKeyHex)
-            
-            // 3. 훔친 키로 프록시 서버 가동 (재생 시작)
             startProxy(cleanUrl, keyBytes, callback)
             return true
         } else {
-            println("$TAG Failed to steal key. No matching pattern found.")
+            println("$TAG Failed to steal key via JS injection.")
             return false
         }
     }
 
-    // [Fix] suspend 키워드 추가 (app.get, newExtractorLink 호출을 위해 필수)
     private suspend fun startProxy(
         targetUrl: String, 
         key: ByteArray, 
         callback: (ExtractorLink) -> Unit
     ) {
         try {
-            // M3U8 주소 확보
             val m3u8Res = app.get(targetUrl, headers = mapOf("User-Agent" to DESKTOP_UA, "Referer" to "https://tvwiki5.net/"))
             val m3u8Url = m3u8Res.url
             val m3u8Content = m3u8Res.text
 
-            // 프록시 서버 시작
             val proxy = ProxyWebServer()
             proxy.start()
             proxy.updateSession(key) 
@@ -124,7 +114,6 @@ class BunnyPoorCdn : ExtractorApi() {
             val proxyPort = proxy.port
             val proxyRoot = "http://127.0.0.1:$proxyPort"
 
-            // M3U8 재작성 (로컬 프록시 태우기)
             val newLines = mutableListOf<String>()
             val lines = m3u8Content.lines()
             val seqMap = ConcurrentHashMap<String, Long>()
@@ -136,7 +125,6 @@ class BunnyPoorCdn : ExtractorApi() {
 
             for (line in lines) {
                 if (line.startsWith("#EXT-X-KEY")) {
-                    // 키 라인은 제거 (프록시가 복호화 담당)
                     continue 
                 }
                 if (line.isNotBlank() && !line.startsWith("#")) {
@@ -170,24 +158,16 @@ class BunnyPoorCdn : ExtractorApi() {
     }
 
     object JsKeyStealer {
-        // [핵심] 3-7-6 법칙 검증 로직이 포함된 JS 스크립트
         private const val HOOK_SCRIPT = """
             (function() {
                 if (typeof G !== 'undefined') window.G = false;
                 const originalSet = Uint8Array.prototype.set;
                 
                 Uint8Array.prototype.set = function(source, offset) {
-                    // 1차 필터: 16바이트 길이 확인
                     if (source instanceof Uint8Array && source.length === 16) {
-                        
-                        // 2차 필터: 고정 영역 (01 0e 00) 확인
                         if (source[0] === 0x01 && source[1] === 0x0e && source[2] === 0x00) {
-                            
-                            // 3차 필터: 패턴 영역 (3~9번 인덱스) 검증
-                            // 01부터 07까지의 숫자가 중복 없이 들어있는지 확인
                             var body = source.slice(3, 10);
-                            body.sort(); // 정렬해서 1,2,3,4,5,6,7 인지 확인
-                            
+                            body.sort();
                             var isValid = true;
                             for (var i = 0; i < 7; i++) {
                                 if (body[i] !== (i + 1)) {
@@ -195,9 +175,7 @@ class BunnyPoorCdn : ExtractorApi() {
                                     break;
                                 }
                             }
-                            
                             if (isValid) {
-                                // 모든 검증 통과 -> 진짜 키!
                                 var hex = Array.from(source).map(function(b) {
                                     return ('0' + b.toString(16)).slice(-2);
                                 }).join('');
@@ -213,14 +191,15 @@ class BunnyPoorCdn : ExtractorApi() {
         suspend fun stealKey(url: String, ua: String, referer: String): String? {
             return withContext(Dispatchers.Main) {
                 val resultDeferred = CompletableDeferred<String?>()
-                // [Fix] app.context -> AcraApplication.context
-                val webView = WebView(AcraApplication.context)
+                
+                // [Fix] Nullable Context 처리: !! 사용
+                val webView = WebView(AcraApplication.context!!)
                 
                 webView.settings.apply {
                     javaScriptEnabled = true
                     domStorageEnabled = true
                     userAgentString = ua
-                    blockNetworkImage = true // 이미지 로딩 차단 (속도 및 안정성)
+                    blockNetworkImage = true
                 }
 
                 webView.webChromeClient = object : WebChromeClient() {
@@ -242,14 +221,12 @@ class BunnyPoorCdn : ExtractorApi() {
                         view?.evaluateJavascript(HOOK_SCRIPT, null)
                     }
                     
-                    // 더 빠른 훅킹을 위해 페이지 시작 시점에도 주입
                     override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                         super.onPageStarted(view, url, favicon)
                         view?.evaluateJavascript(HOOK_SCRIPT, null)
                     }
                 }
 
-                // 타임아웃 15초
                 val handler = Handler(Looper.getMainLooper())
                 val timeoutRunnable = Runnable {
                     if (!resultDeferred.isCompleted) {
@@ -260,7 +237,6 @@ class BunnyPoorCdn : ExtractorApi() {
                 }
                 handler.postDelayed(timeoutRunnable, 15000)
 
-                // 로딩 시작
                 val headers = mapOf("Referer" to referer)
                 webView.loadUrl(url, headers)
 
@@ -281,8 +257,6 @@ class BunnyPoorCdn : ExtractorApi() {
         @Volatile private var currentPlaylist: String = ""
         @Volatile private var seqMap: ConcurrentHashMap<String, Long> = ConcurrentHashMap()
         @Volatile private var decryptionKey: ByteArray? = null
-        
-        // 키는 정확하지만, TS 파일 앞부분에 쓰레기 데이터(Offset)가 있을 수 있으므로 유지
         @Volatile private var trimOffset: Int = -1
 
         fun start() {
@@ -305,7 +279,7 @@ class BunnyPoorCdn : ExtractorApi() {
         
         fun updateSession(key: ByteArray) {
             decryptionKey = key
-            trimOffset = -1 // Reset trim offset
+            trimOffset = -1
         }
         
         fun setPlaylist(p: String) { currentPlaylist = p }
@@ -331,10 +305,8 @@ class BunnyPoorCdn : ExtractorApi() {
                     val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
                     val seq = seqMap[targetUrl] ?: 0L
 
-                    // [Fix] 일반 스레드에서 suspend 함수 호출을 위해 runBlocking 사용
                     runBlocking {
                         try {
-                            // 영상 다운로드 시 헤더 최소화
                             val res = app.get(targetUrl, headers = mapOf("User-Agent" to "Mozilla/5.0"))
                             if (res.isSuccessful) {
                                 val rawData = res.body.bytes()
@@ -360,16 +332,12 @@ class BunnyPoorCdn : ExtractorApi() {
         }
 
         private fun decryptWithBlindTrim(data: ByteArray, key: ByteArray, seq: Long): ByteArray? {
-            // 오프셋을 이미 찾았다면 바로 적용 (성능 최적화)
             if (trimOffset != -1) {
                 return attemptDecrypt(data, key, seq, trimOffset)
             }
-
-            // 키는 확실하므로, 헤더 길이만 찾으면 됨 (0 ~ 256 바이트 스캔)
             for (offset in 0..256) {
                 if (data.size <= offset + 188) break
                 val dec = attemptDecrypt(data, key, seq, offset)
-                // 0x47 (Sync Byte) 확인
                 if (dec != null && dec.size > 188 && dec[0] == 0x47.toByte()) {
                     trimOffset = offset
                     return dec
@@ -380,7 +348,6 @@ class BunnyPoorCdn : ExtractorApi() {
 
         private fun attemptDecrypt(data: ByteArray, key: ByteArray, seq: Long, offset: Int): ByteArray? {
             try {
-                // IV: Big Endian Sequence
                 val iv = ByteArray(16)
                 ByteBuffer.wrap(iv).order(ByteOrder.BIG_ENDIAN).putLong(8, seq)
                 val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
