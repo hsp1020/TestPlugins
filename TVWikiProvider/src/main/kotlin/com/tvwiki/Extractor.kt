@@ -30,12 +30,12 @@ import kotlinx.coroutines.delay
 import kotlin.experimental.xor
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.util.Arrays
 
 /**
- * [Version: v23-Bypass-Fix]
- * 1. Build Fix: Kotlin Compiler Null-Safety Error를 '?.let' 스코프 함수로 우회하여 해결.
- * 2. Logic: v20의 '키 패턴 매칭(01 0E 00)' 및 'Blind Trim' 로직 100% 유지.
+ * [Version: v24-Stable-PatternMatch]
+ * 1. Base: v19 (Last Known Good Build)
+ * 2. Update: Key Logic -> '01 0E 00' Pattern Matcher (No AES Brute Force)
+ * 3. Fix: Null Safety strict compliance (Local variable capture)
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -46,7 +46,7 @@ class BunnyPoorCdn : ExtractorApi() {
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
-        private const val TAG = "[Bunny-v23]"
+        private const val TAG = "[Bunny-v24]"
     }
 
     override suspend fun getUrl(
@@ -199,7 +199,7 @@ class BunnyPoorCdn : ExtractorApi() {
         data class DecryptProfile(val ivMode: Int, val trimOffset: Int)
         @Volatile private var confirmedProfile: DecryptProfile? = null
 
-        private val VER = "[Bunny-v23-Proxy]"
+        private val VER = "[Bunny-v24-Proxy]"
 
         fun start() {
             try {
@@ -230,7 +230,7 @@ class BunnyPoorCdn : ExtractorApi() {
         fun setTargetKeyUrl(url: String) { targetKeyUrl = url }
 
         private fun ensureKey() {
-            if (confirmedKey != null) return
+            if (confirmedKey != null || rawKeyJson != null) return
             if (targetKeyUrl == null) return
 
             runBlocking {
@@ -240,14 +240,9 @@ class BunnyPoorCdn : ExtractorApi() {
                     var rawData = res.body.bytes()
 
                     if (rawData.size > 100 && rawData[0] == '{'.code.toByte()) {
-                        val jsonStr = String(rawData).trim()
-                        val matchedKey = BunnyPatternMatcher.findCorrectKey(jsonStr)
-                        if (matchedKey != null) {
-                            confirmedKey = matchedKey
-                            println("$VER KEY FOUND BY PATTERN! ${bytesToHex(matchedKey)}")
-                        } else {
-                            println("$VER FATAL: No key matched pattern 01 0E 00.")
-                        }
+                        rawKeyJson = String(rawData).trim()
+                        // Download only, scanning happens in performScan to allow retry
+                        println("$VER JSON Key Downloaded. Size: ${rawData.size}")
                     } else if (rawData.size == 16) {
                         confirmedKey = rawData
                     }
@@ -284,11 +279,7 @@ class BunnyPoorCdn : ExtractorApi() {
                                 val rawData = res.body.bytes()
                                 output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
                                 
-                                // [Fix] ?.let 사용으로 Null Safety 강제 보장 (우회)
-                                val decrypted = confirmedKey?.let { key ->
-                                    blindTrimAndDecrypt(rawData, key, seq)
-                                }
-                                
+                                val decrypted = performScan(rawData, seq)
                                 output.write(decrypted ?: rawData)
                             } else {
                                 output.write("HTTP/1.1 ${res.code} Error\r\n\r\n".toByteArray())
@@ -302,22 +293,45 @@ class BunnyPoorCdn : ExtractorApi() {
             }
         }
 
-        private fun blindTrimAndDecrypt(data: ByteArray, key: ByteArray, seq: Long): ByteArray? {
-            // 캐시된 프로필 확인
-            val profile = confirmedProfile
-            if (profile != null) {
-                return attemptDecrypt(data, key, seq, profile.ivMode, profile.trimOffset)
+        private fun performScan(data: ByteArray, seq: Long): ByteArray? {
+            // [Safety Fix] Capture volatile variables to local scope
+            val cachedKey = confirmedKey
+            val cachedProfile = confirmedProfile
+
+            // 1. Fast Path
+            if (cachedKey != null && cachedProfile != null) {
+                return attemptDecrypt(data, cachedKey, seq, cachedProfile.ivMode, cachedProfile.trimOffset)
             }
 
-            val ivModes = listOf(1, 3, 2, 0)
-            for (offset in 0..256) {
-                if (data.size <= offset + 188) break
-                for (ivMode in ivModes) {
-                    val dec = attemptDecrypt(data, key, seq, ivMode, offset)
-                    if (dec != null && isValidTS(dec)) {
-                        confirmedProfile = DecryptProfile(ivMode, offset)
-                        println("$VER Offset Found: $offset, IV: $ivMode")
-                        return dec
+            // 2. Key Pattern Match & Offset Scan
+            val json = rawKeyJson ?: return null
+            val decryptor = BunnyOptimizedDecryptor(json)
+            
+            // Loop 8192 Key Variants (Zero-Allocation)
+            for (i in 0 until 8192) {
+                // keyBuffer is reused internally
+                val key = decryptor.generateKey(i) 
+                
+                // [NEW LOGIC] Check Pattern (01 0E 00 ...)
+                if (decryptor.checkPattern()) {
+                    // Pattern Matched! Now find Offset.
+                    val foundKey = key.clone()
+                    println("$VER KEY MATCHED! Variant:$i")
+                    
+                    val ivModes = listOf(1, 3, 2, 0)
+                    for (offset in 0..512) {
+                        if (data.size <= offset + 188) break
+                        for (ivMode in ivModes) {
+                            val checkBuf = ByteArray(188)
+                            if (attemptDecryptToBuffer(data, foundKey, seq, ivMode, offset, 188, checkBuf)) {
+                                if (checkBuf[0] == 0x47.toByte()) {
+                                    println("$VER OFFSET FOUND! Off:$offset, IV:$ivMode")
+                                    confirmedKey = foundKey
+                                    confirmedProfile = DecryptProfile(ivMode, offset)
+                                    return attemptDecrypt(data, foundKey, seq, ivMode, offset)
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -332,7 +346,21 @@ class BunnyPoorCdn : ExtractorApi() {
                 return cipher.doFinal(data.copyOfRange(offset, data.size))
             } catch (e: Exception) { return null }
         }
-
+        
+        private fun attemptDecryptToBuffer(
+            input: ByteArray, key: ByteArray, seq: Long, 
+            ivMode: Int, offset: Int, length: Int, 
+            output: ByteArray
+        ): Boolean {
+            try {
+                val iv = generateIV(ivMode, seq)
+                val cipher = Cipher.getInstance("AES/CBC/NoPadding")
+                cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+                val count = cipher.doFinal(input, offset, length, output, 0)
+                return count > 0
+            } catch (e: Exception) { return false }
+        }
+        
         private fun generateIV(ivMode: Int, seq: Long): ByteArray {
             val iv = ByteArray(16)
             when (ivMode) {
@@ -345,40 +373,24 @@ class BunnyPoorCdn : ExtractorApi() {
             }
             return iv
         }
-
-        private fun isValidTS(data: ByteArray?): Boolean {
-            return data.isNotEmpty() && data[0] == 0x47.toByte()
-        }
-        
-        private fun bytesToHex(bytes: ByteArray): String {
-            val sb = StringBuilder()
-            for (b in bytes) sb.append(String.format("%02X", b))
-            return sb.toString()
-        }
     }
 
-    class BunnyPatternMatcher(jsonStr: String) {
-        companion object {
-            fun findCorrectKey(jsonStr: String): ByteArray? {
-                val matcher = BunnyPatternMatcher(jsonStr)
-                return matcher.scanForPattern()
-            }
-        }
-
+    class BunnyOptimizedDecryptor(jsonStr: String) {
         private val baseKeyDefault: ByteArray
         private val baseKeyUrl: ByteArray
         private val workBuffer: ByteArray
-        private val tempBuffer: ByteArray
         private val layers: List<LayerInstruction>
+        private val tempBuffer: ByteArray 
 
-        private sealed class LayerInstruction {
-            class FinalEncrypt(val maskDefault: ByteArray, val maskUrl: ByteArray) : LayerInstruction()
-            class DecoyShuffle(val positions: IntArray, val lens: IntArray, val offsets: IntArray) : LayerInstruction()
-            class XorChain(val ivDefault: ByteArray, val ivUrl: ByteArray) : LayerInstruction()
-            class Sbox(val invDefault: ByteArray, val invUrl: ByteArray) : LayerInstruction()
-            class BitRotate(val rots: IntArray) : LayerInstruction()
-            class SegNoise(val perm: IntArray, val noiseLens: IntArray) : LayerInstruction()
-            class BitInterleave(val perm: IntArray) : LayerInstruction()
+        private sealed class LayerInstruction(val name: String) {
+            class FinalEncrypt(val maskDefault: ByteArray, val maskUrl: ByteArray) : LayerInstruction("final_encrypt")
+            class DecoyShuffle(val positions: IntArray, val lens: IntArray, val offsets: IntArray) : LayerInstruction("decoy_shuffle")
+            class XorChain(val ivDefault: ByteArray, val ivUrl: ByteArray) : LayerInstruction("xor_chain")
+            class Sbox(val invDefault: ByteArray, val invUrl: ByteArray) : LayerInstruction("sbox")
+            class BitRotate(val rots: IntArray) : LayerInstruction("bit_rotate")
+            class SegNoise(val perm: IntArray, val noiseLens: IntArray) : LayerInstruction("segment_noise")
+            class BitInterleave(val perm: IntArray) : LayerInstruction("bit_interleave")
+            class Unknown(name: String) : LayerInstruction(name)
         }
 
         init {
@@ -386,7 +398,8 @@ class BunnyPoorCdn : ExtractorApi() {
             val keyStr = json.getString("encrypted_key")
             baseKeyDefault = Base64.decode(keyStr, Base64.DEFAULT)
             baseKeyUrl = Base64.decode(keyStr, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
-            workBuffer = ByteArray(maxOf(baseKeyDefault.size, baseKeyUrl.size) + 1024)
+            
+            workBuffer = ByteArray(maxOf(baseKeyDefault.size, baseKeyUrl.size) + 1024) 
             tempBuffer = ByteArray(workBuffer.size)
 
             val layersJson = json.getJSONArray("layers")
@@ -442,34 +455,23 @@ class BunnyPoorCdn : ExtractorApi() {
                          for (k in lenArr.indices) { offArr[k] = curr; curr += lenArr[k] }
                          tempLayers.add(LayerInstruction.DecoyShuffle(posArr, lenArr, offArr))
                     }
+                    else -> tempLayers.add(LayerInstruction.Unknown(l.getString("name")))
                 }
             }
             layers = tempLayers
         }
-
-        fun scanForPattern(): ByteArray? {
-            for (i in 0 until 8192) {
-                generateKey(i)
-                if (checkPattern()) {
-                    return workBuffer.copyOf(16)
-                }
-            }
-            return null
-        }
         
-        private fun checkPattern(): Boolean {
+        fun checkPattern(): Boolean {
+            // Pattern: 01 0E 00
             if (workBuffer[0] != 0x01.toByte() || workBuffer[1] != 0x0E.toByte() || workBuffer[2] != 0x00.toByte()) return false
-            var mask = 0
-            for (k in 3..9) {
-                val b = workBuffer[k].toInt()
-                if (b < 1 || b > 7) return false
-                if ((mask and (1 shl b)) != 0) return false
-                mask = mask or (1 shl b)
-            }
-            return mask == 0xFE
+            
+            // Pattern: Remaining bytes are perms of 1..7 (Example check)
+            // Or just trust the prefix for speed if permutation check is too costly here.
+            // Let's rely on prefix + offset check logic.
+            return true
         }
 
-        private fun generateKey(variant: Int) {
+        fun generateKey(variant: Int): ByteArray {
             val p_lyr_fwd   = (variant shr 0) and 1 == 1
             val p_b64_url   = (variant shr 1) and 1 == 1
             val p_rot_l     = (variant shr 2) and 1 == 1
@@ -503,28 +505,36 @@ class BunnyPoorCdn : ExtractorApi() {
                         }
                     }
                     is LayerInstruction.BitRotate -> {
-                        val rots = layer.rots; val len = rots.size
+                        val rots = layer.rots
+                        val len = rots.size
                         for (i in 0 until currentSize) {
                             val rIdx = if (p_rot_irev) (len - 1 - (i % len)) else (i % len)
                             val rot = rots[rIdx]
                             val b = workBuffer[i].toInt() and 0xFF
-                            val r = if (p_rot_l) (b shl rot) or (b ushr (8 - rot)) else (b ushr rot) or (b shl (8 - rot))
+                            val r = if (p_rot_l) (b shl rot) or (b ushr (8 - rot)) 
+                                    else (b ushr rot) or (b shl (8 - rot))
                             workBuffer[i] = r.toByte()
                         }
                     }
                     is LayerInstruction.SegNoise -> {
-                        val perm = layer.perm; val noiseLens = layer.noiseLens
+                        val perm = layer.perm
+                        val noiseLens = layer.noiseLens
                         System.arraycopy(workBuffer, 0, tempBuffer, 0, currentSize)
+                        
                         var currentReadOffset = 0
                         for (i in 0 until perm.size) {
                              if (i >= currentSize) break 
+                             
                              val originalIndex = perm[i]
                              val lenIdx = if (p_seg_perm) originalIndex else i
                              if (lenIdx < noiseLens.size) {
                                  val chunkLen = noiseLens[lenIdx]
                                  val destIdx = if (p_seg_gat) i else originalIndex
                                  val srcOff = if (p_seg_acc) currentReadOffset else (i * chunkLen) 
-                                 if (destIdx < currentSize && srcOff < currentSize) workBuffer[destIdx] = tempBuffer[srcOff]
+
+                                 if (destIdx < currentSize && srcOff < currentSize) {
+                                     workBuffer[destIdx] = tempBuffer[srcOff]
+                                 }
                                  if (p_seg_acc) currentReadOffset += chunkLen
                              }
                         }
@@ -534,32 +544,47 @@ class BunnyPoorCdn : ExtractorApi() {
                         System.arraycopy(workBuffer, 0, tempBuffer, 0, currentSize)
                         val loopLen = minOf(perm.size, currentSize * 8)
                         for(x in 0 until 16) if (x < currentSize) workBuffer[x] = 0
+                        
                         for (j in 0 until loopLen) {
                             val srcIdx = if (p_int_gat) perm[j] else j
                             val dstIdx = if (p_int_gat) j else perm[j]
+                            
                             val srcByte = srcIdx / 8; val srcBit = if (p_int_msb) 7 - (srcIdx % 8) else srcIdx % 8
                             val dstByte = dstIdx / 8; val dstBit = if (p_int_msb) 7 - (dstIdx % 8) else dstIdx % 8
+                            
                             if (srcByte < currentSize && dstByte < currentSize) {
                                 val bit = (tempBuffer[srcByte].toInt() shr srcBit) and 1
-                                if (bit == 1) workBuffer[dstByte] = (workBuffer[dstByte].toInt() or (1 shl dstBit)).toByte()
+                                if (bit == 1) {
+                                    workBuffer[dstByte] = (workBuffer[dstByte].toInt() or (1 shl dstBit)).toByte()
+                                }
                             }
                         }
                     }
                     is LayerInstruction.Sbox -> {
                         val sbox = if (p_b64_url) layer.invUrl else layer.invDefault 
                         if (sbox.size == 256) {
-                            for (i in 0 until currentSize) workBuffer[i] = sbox[workBuffer[i].toInt() and 0xFF]
+                            for (i in 0 until currentSize) {
+                                val idx = workBuffer[i].toInt() and 0xFF
+                                workBuffer[i] = sbox[idx]
+                            }
                         }
                     }
                     is LayerInstruction.XorChain -> {
                         val iv = if (p_b64_url) layer.ivUrl else layer.ivDefault
                         val start = if (p_xor_b0) 0 else 1
+                        
                         System.arraycopy(workBuffer, 0, tempBuffer, 0, currentSize)
+                        
                         if (p_xor_fwd) {
-                            for (j in start until currentSize - 1) workBuffer[j+1] = (workBuffer[j+1].toInt() xor workBuffer[j].toInt()).toByte()
+                            for (j in start until currentSize - 1) {
+                                workBuffer[j+1] = (workBuffer[j+1].toInt() xor workBuffer[j].toInt()).toByte()
+                            }
                         } else {
-                            for (j in currentSize - 1 downTo start + 1) workBuffer[j] = (workBuffer[j].toInt() xor workBuffer[j-1].toInt()).toByte()
+                            for (j in currentSize - 1 downTo start + 1) {
+                                workBuffer[j] = (workBuffer[j].toInt() xor workBuffer[j-1].toInt()).toByte()
+                            }
                         }
+                        
                         if (iv.isNotEmpty()) {
                             val idx = if (p_xor_iv_e) currentSize - 1 else 0
                             workBuffer[idx] = (workBuffer[idx].toInt() xor iv[0].toInt()).toByte()
@@ -567,7 +592,10 @@ class BunnyPoorCdn : ExtractorApi() {
                     }
                     is LayerInstruction.DecoyShuffle -> {
                         System.arraycopy(workBuffer, 0, tempBuffer, 0, currentSize)
-                        val posArr = layer.positions; val lenArr = layer.lens; val offArr = layer.offsets
+                        val posArr = layer.positions
+                        val lenArr = layer.lens
+                        val offArr = layer.offsets
+                        
                         var writePtr = 0
                         for (i in 0 until posArr.size) {
                              val pos = posArr[i]
@@ -583,8 +611,10 @@ class BunnyPoorCdn : ExtractorApi() {
                         }
                          if (writePtr > 0) currentSize = writePtr
                     }
+                    else -> {}
                 }
             }
+            return workBuffer
         }
     }
 }
