@@ -14,7 +14,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.URI
 import kotlin.concurrent.thread
-import android.util.Base64
+import android.util.Log
 
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -33,7 +33,6 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("[TVWiki-Debug] getUrl 시작 - URL: $url")
         proxyServer?.stop()
         extract(url, referer, subtitleCallback, callback)
     }
@@ -45,156 +44,116 @@ class BunnyPoorCdn : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
         thumbnailHint: String? = null,
     ): Boolean {
+        println("[TVWiki-Snatch] 탈취 프로세스 시작 - 대상: $url")
         var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = "https://tvwiki5.net/"
 
-        // 1. iframe 추출
-        val isDirectUrl = cleanUrl.contains("/v/") || cleanUrl.contains("/e/") || cleanUrl.contains("/f/")
-        if (!isDirectUrl) {
-            try {
-                val refRes = app.get(cleanReferer, headers = mapOf("User-Agent" to DESKTOP_UA))
-                val iframeMatch = Regex("""src=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
-                    ?: Regex("""data-player\d*=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
-                if (iframeMatch != null) {
-                    cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&").trim()
-                    println("[TVWiki-Debug] iframe 주소 갱신: $cleanUrl")
-                }
-            } catch (e: Exception) { 
-                println("[TVWiki-Debug] iframe 추출 실패: ${e.message}")
-            }
-        }
-
-        var capturedUrl: String? = null
-        val resolver = WebViewResolver(
-            interceptUrl = Regex("""/c\.html"""), 
-            useOkhttp = false,
-            timeout = 30000L
-        )
+        // 1. 플레이어 원본 HTML 확보
+        val playerPageRes = app.get(cleanUrl, headers = mapOf("Referer" to cleanReferer, "User-Agent" to DESKTOP_UA))
+        val originalHtml = playerPageRes.text
         
-        // 2. c.html 가로채기
+        // 2. 프록시 가동
+        proxyServer = ProxyWebServer().apply { start() }
+        val proxyPort = proxyServer!!.port
+        println("[TVWiki-Snatch] 로컬 프록시 대기 중 (Port: $proxyPort)")
+
+        // 3. 5가지 절대 규칙 검증 로직이 포함된 Hook 스크립트
+        val hookScript = """
+            <base href="https://player.bunny-frame.online/">
+            <script>
+            (function() {
+                try {
+                    var originalSet = Uint8Array.prototype.set;
+                    var found = false;
+
+                    function logToApp(status, hex, msg) {
+                        var url = "http://SnatchLog/report?status=" + status + "&key=" + hex + "&msg=" + encodeURIComponent(msg);
+                        new Image().src = url;
+                    }
+
+                    function checkKey(arr) {
+                        if (arr.length !== 16) return { v: false, m: "Length mismatch(" + arr.length + ")" };
+                        
+                        // 규칙 1: 01 0e 00 시작
+                        if (arr[0] !== 1 || arr[1] !== 14 || arr[2] !== 0) {
+                            return { v: false, m: "Prefix mismatch(" + arr[0] + "," + arr[1] + "," + arr[2] + ")" };
+                        }
+                        
+                        // 규칙 2: 4~10바이트 패턴 영역 (1~7 순열)
+                        var pattern = Array.from(arr.slice(3, 10)).sort(function(a,b){return a-b;});
+                        for (var i = 0; i < 7; i++) {
+                            if (pattern[i] !== i + 1) return { v: false, m: "Pattern(1-7) mismatch" };
+                        }
+                        
+                        return { v: true, m: "Success" };
+                    }
+
+                    Uint8Array.prototype.set = function(source, offset) {
+                        if (!found && source instanceof Uint8Array && source.length === 16) {
+                            var hex = Array.from(source).map(function(b){return('0'+b.toString(16)).slice(-2);}).join('');
+                            var res = checkKey(source);
+                            
+                            if (res.v) {
+                                found = true;
+                                logToApp("MATCH", hex, "Found real key!");
+                                window.location.href = "http://SnatchResult/found?key=" + hex;
+                            } else {
+                                logToApp("REJECT", hex, res.m);
+                            }
+                        }
+                        return originalSet.apply(this, arguments);
+                    };
+                    console.log("Snatcher Active");
+                } catch (e) { logToApp("ERROR", "", e.toString()); }
+            })();
+            </script>
+        """.trimIndent()
+
+        proxyServer!!.prepare(originalHtml.replaceFirst("<head>", "<head>$hookScript"), cleanUrl)
+
+        // 4. 웹뷰 실행 및 결과 가로채기
+        val keyResolver = WebViewResolver(
+            interceptUrl = Regex("""http://SnatchResult/found\?key=([a-fA-F0-9]+)"""),
+            useOkhttp = false,
+            timeout = 25000L
+        )
+
+        var foundKeyHex: String? = null
         try {
-            println("[TVWiki-Debug] WebView 가동하여 c.html 가로채기 시도...")
-            val requestHeaders = mapOf("Referer" to cleanReferer, "User-Agent" to DESKTOP_UA)
-            val response = app.get(url = cleanUrl, headers = requestHeaders, interceptor = resolver)
-            if (response.url.contains("/c.html")) {
-                capturedUrl = response.url
-                println("[TVWiki-Debug] c.html 가로채기 성공: $capturedUrl")
-            }
-        } catch (e: Exception) { 
-            println("[TVWiki-Debug] c.html 가로채기 중 오류: ${e.message}")
+            println("[TVWiki-Snatch] 웹뷰에서 플레이어 로직 실행 중...")
+            val response = app.get("http://127.0.0.1:$proxyPort/index.html", interceptor = keyResolver)
+            foundKeyHex = Regex("""key=([a-fA-F0-9]+)""").find(response.url)?.groupValues?.get(1)
+        } catch (e: Exception) {
+            foundKeyHex = Regex("""key=([a-fA-F0-9]+)""").find(e.message ?: "")?.groupValues?.get(1)
         }
 
-        if (capturedUrl != null) {
-            val cookieManager = CookieManager.getInstance()
-            val cookie = cookieManager.getCookie(capturedUrl)
-            val headers = mutableMapOf(
-                "User-Agent" to DESKTOP_UA,
-                "Referer" to "https://player.bunny-frame.online/",
-                "Origin" to "https://player.bunny-frame.online"
-            )
-            if (!cookie.isNullOrEmpty()) headers["Cookie"] = cookie
+        if (foundKeyHex != null) {
+            println("[TVWiki-Snatch] ★★★ 키 탈취 성공! 값: $foundKeyHex ★★★")
+            val keyBytes = foundKeyHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+            proxyServer!!.setKey(keyBytes)
 
+            // c.html(m3u8) 확보 및 변조 대기
             try {
-                println("[TVWiki-Debug] c.html 내용 분석 중...")
-                val originalContent = app.get(capturedUrl, headers = headers).text
-                
-                if (originalContent.contains("key7") || originalContent.contains("mode=obfuscated")) {
-                    println("[TVWiki-Debug] Key7 암호화 감지! 웹뷰 후킹 프로세스 진입")
-                    
-                    proxyServer = ProxyWebServer().apply { start() }
-                    val proxyPort = proxyServer!!.port
-                    println("[TVWiki-Debug] 로컬 프록시 서버 가동됨 (Port: $proxyPort)")
-                    
-                    // JS 후킹 코드 작성 (3-7-6 구조 검증 포함)
-                    val hookScript = """
-                        <base href="https://player.bunny-frame.online/">
-                        <script>
-                        (function() {
-                            try {
-                                var originalSet = Uint8Array.prototype.set;
-                                var found = false;
-                                
-                                function isValidKey(arr) {
-                                    if (arr.length !== 16) return false;
-                                    // 규칙 1: 01 0e 00 시작
-                                    if (arr[0] !== 1 || arr[1] !== 14 || arr[2] !== 0) return false;
-                                    // 규칙 2: 4~10바이트가 1~7 숫자의 순열인지 확인
-                                    var pattern = Array.from(arr.slice(3, 10)).sort(function(a,b){return a-b;});
-                                    for (var i = 0; i < 7; i++) {
-                                        if (pattern[i] !== i + 1) return false;
-                                    }
-                                    return true;
-                                }
+                val cHtmlResolver = WebViewResolver(interceptUrl = Regex("""/c\.html"""), timeout = 10000L)
+                val cHtmlRes = app.get(cleanUrl, headers = mapOf("User-Agent" to DESKTOP_UA), interceptor = cHtmlResolver)
+                val m3u8Url = cHtmlRes.url
+                val m3u8Raw = app.get(m3u8Url, headers = mapOf("User-Agent" to DESKTOP_UA)).text
+                proxyServer!!.setM3u8(m3u8Raw, m3u8Url)
 
-                                Uint8Array.prototype.set = function(source, offset) {
-                                    if (!found && source instanceof Uint8Array && isValidKey(source)) {
-                                        found = true;
-                                        var hex = Array.from(source).map(function(b) { 
-                                            return ('0' + b.toString(16)).slice(-2); 
-                                        }).join('');
-                                        // 앱이 가로챌 URL로 키 전송
-                                        window.location.href = "http://TvWikiKeyGrabber/found?key=" + hex;
-                                    }
-                                    return originalSet.apply(this, arguments);
-                                };
-                                console.log("Hook Ready.");
-                            } catch (e) { }
-                        })();
-                        </script>
-                    """.trimIndent()
-
-                    proxyServer!!.prepare(hookScript, capturedUrl, originalContent)
-                    
-                    val keyResolver = WebViewResolver(
-                        interceptUrl = Regex("""http://TvWikiKeyGrabber/found\?key=([a-fA-F0-9]+)"""),
-                        useOkhttp = false,
-                        timeout = 20000L
-                    )
-                    
-                    var foundKeyHex: String? = null
-                    try {
-                        println("[TVWiki-Debug] 키 사냥용 웹뷰 실행 중 (최대 20초)...")
-                        val hookUrl = "http://127.0.0.1:$proxyPort/c.html"
-                        val response = app.get(hookUrl, headers = headers, interceptor = keyResolver)
-                        foundKeyHex = Regex("""key=([a-fA-F0-9]+)""").find(response.url)?.groupValues?.get(1)
-                    } catch (e: Exception) {
-                        foundKeyHex = Regex("""key=([a-fA-F0-9]+)""").find(e.message ?: "")?.groupValues?.get(1)
+                callback(
+                    newExtractorLink(name, name, "http://127.0.0.1:$proxyPort/video.m3u8", ExtractorLinkType.M3U8) {
+                        this.referer = "https://player.bunny-frame.online/"
+                        this.quality = Qualities.Unknown.value
                     }
-
-                    if (foundKeyHex != null) {
-                        println("[TVWiki-Debug] ★★★ 키 탈취 성공: $foundKeyHex ★★★")
-                        val keyBytes = foundKeyHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-                        proxyServer!!.setKey(keyBytes)
-                        
-                        println("[TVWiki-Debug] 최종 재생 링크 전송 중...")
-                        callback(
-                            newExtractorLink(name, name, "http://127.0.0.1:$proxyPort/video.m3u8", ExtractorLinkType.M3U8) {
-                                this.referer = "https://player.bunny-frame.online/"
-                                this.quality = Qualities.Unknown.value
-                                this.headers = headers
-                            }
-                        )
-                        return true
-                    } else {
-                        println("[TVWiki-Debug] !!! 키 탈취 실패 (검증 조건을 만족하는 키가 발견되지 않음) !!!")
-                    }
-                }
-            } catch (e: Exception) { 
-                println("[TVWiki-Debug] 예외 발생: ${e.message}")
+                )
+                return true
+            } catch (e: Exception) {
+                println("[TVWiki-Snatch] M3U8 확보 실패: ${e.message}")
             }
+        } else {
+            println("[TVWiki-Snatch] !!! 키 탈취 실패 (규칙에 맞는 키가 25초 내에 생성되지 않음) !!!")
+        }
 
-            // 일반 모드
-            println("[TVWiki-Debug] 일반 모드 재생 시도 (key7 미감지 혹은 실패)")
-            callback(
-                newExtractorLink(name, name, "$capturedUrl#.m3u8", ExtractorLinkType.M3U8) {
-                    this.referer = "https://player.bunny-frame.online/"
-                    this.quality = Qualities.Unknown.value
-                    this.headers = headers
-                }
-            )
-            return true
-        } 
-        println("[TVWiki-Debug] extract 프로세스 실패")
         return false
     }
 
@@ -202,10 +161,9 @@ class BunnyPoorCdn : ExtractorApi() {
         private var serverSocket: ServerSocket? = null
         private var isRunning = false
         var port: Int = 0
-        
-        private var hookScript: String = ""
-        private var originalUrl: String = ""
-        private var originalContent: String = ""
+        private var hookedHtml = ""
+        private var m3u8Raw = ""
+        private var m3u8Url = ""
         private var key: ByteArray? = null
 
         fun start() {
@@ -218,21 +176,13 @@ class BunnyPoorCdn : ExtractorApi() {
                         try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {}
                     }
                 }
-            } catch (e: Exception) { }
+            } catch (e: Exception) {}
         }
 
-        fun stop() {
-            isRunning = false
-            try { serverSocket?.close() } catch (e: Exception) {}
-        }
-
-        fun prepare(script: String, url: String, content: String) {
-            hookScript = script
-            originalUrl = url
-            originalContent = content
-        }
-
+        fun stop() { isRunning = false; try { serverSocket?.close() } catch (e: Exception) {} }
+        fun prepare(html: String, url: String) { hookedHtml = html }
         fun setKey(k: ByteArray) { key = k }
+        fun setM3u8(raw: String, url: String) { m3u8Raw = raw; m3u8Url = url }
 
         private fun handleClient(socket: Socket) {
             thread {
@@ -242,39 +192,36 @@ class BunnyPoorCdn : ExtractorApi() {
                     val path = line.split(" ").getOrNull(1) ?: ""
                     val output = socket.getOutputStream()
 
-                    println("[TVWiki-Debug] 프록시 요청 수신: $path")
-
                     when {
-                        path.contains("/c.html") -> {
-                            val html = "<html><head>$hookScript</head><body></body></html>"
-                            val response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: ${html.length}\r\n\r\n$html"
-                            output.write(response.toByteArray())
+                        path.contains("/report") -> {
+                            val status = path.substringAfter("status=", "").substringBefore("&")
+                            val msg = java.net.URLDecoder.decode(path.substringAfter("msg=", "").substringBefore("&"), "UTF-8")
+                            val k = path.substringAfter("key=", "").substringBefore("&")
+                            println("[TVWiki-Snatch][JS-Log] $status | Key: $k | Reason: $msg")
+                            output.write("HTTP/1.1 204 No Content\r\n\r\n".toByteArray())
+                        }
+                        path.contains("/index.html") -> {
+                            output.write("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n$hookedHtml".toByteArray())
                         }
                         path.contains("/video.m3u8") -> {
-                            val baseUrl = originalUrl.substringBeforeLast("/")
-                            val modified = originalContent.lines().joinToString("\n") { l ->
+                            val baseUrl = m3u8Url.substringBeforeLast("/")
+                            val modified = m3u8Raw.lines().joinToString("\n") { l ->
                                 when {
                                     l.contains("#EXT-X-KEY") -> l.replace(Regex("""URI="([^"]+)""""), """URI="http://127.0.0.1:$port/key.bin"""")
                                     !l.startsWith("#") && l.isNotEmpty() && !l.startsWith("http") -> "$baseUrl/$l"
                                     else -> l
                                 }
                             }
-                            val response = "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: ${modified.toByteArray().size}\r\n\r\n"
-                            output.write(response.toByteArray())
-                            output.write(modified.toByteArray())
+                            output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\n\r\n$modified".toByteArray())
                         }
                         path.contains("/key.bin") -> {
-                            println("[TVWiki-Debug] 플레이어가 복호화 키를 요청했습니다.")
-                            val response = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: ${key?.size ?: 0}\r\n\r\n"
-                            output.write(response.toByteArray())
+                            output.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n".toByteArray())
                             key?.let { output.write(it) }
                         }
                     }
                     output.flush()
                     socket.close()
-                } catch (e: Exception) { 
-                    try { socket.close() } catch(e2: Exception) {} 
-                }
+                } catch (e: Exception) { socket.close() }
             }
         }
     }
