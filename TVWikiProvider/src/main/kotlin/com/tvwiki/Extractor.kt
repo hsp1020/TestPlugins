@@ -31,10 +31,9 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * [Version: v2026-02-14-SlidingWindow]
- * 1. Sliding Window Decrypt: 입력 데이터의 시작점(Offset)을 0~15바이트씩 밀어가며 'NoPadding'으로 강제 복호화.
- * 2. Deep Scan: 복호화된 결과물 전체에서 TS Sync Byte(0x47) 패턴을 검색하여 유효한 스트림을 찾아냄.
- * 3. AES-CBC Self-Healing: IV가 틀려도 2번째 블록부터는 복구되는 특성을 이용하여 IV 의존성 제거.
+ * [Version: v2026-02-14-BuildFix]
+ * 1. Build Fix: slidingWindowDecrypt 함수 내 Null Safety 오류 수정 (Argument type mismatch 해결).
+ * 2. Logic: Sliding Window Decrypt (Offset Scan) 로직 유지.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -208,7 +207,7 @@ class BunnyPoorCdn : ExtractorApi() {
         
         @Volatile private var realKey: ByteArray? = null
         
-        // 캐싱: 성공한 오프셋 및 IV 모드
+        // 캐싱: 성공한 오프셋
         data class DecryptProfile(val offset: Int)
         @Volatile private var confirmedProfile: DecryptProfile? = null
 
@@ -296,7 +295,6 @@ class BunnyPoorCdn : ExtractorApi() {
                                     if (decrypted != null) {
                                         output.write(decrypted)
                                     } else {
-                                        // 실패 시 원본이라도 전송
                                         output.write(rawData)
                                     }
                                 } else {
@@ -314,17 +312,16 @@ class BunnyPoorCdn : ExtractorApi() {
             }
         }
 
-        // [핵심] Sliding Window Decrypt
+        // [수정] Null Safety 적용
         private fun slidingWindowDecrypt(data: ByteArray, key: ByteArray): ByteArray? {
             // 1. 캐시된 프로필 확인
             confirmedProfile?.let { profile ->
                 val dec = attemptDecrypt(data, key, profile.offset)
-                if (findSyncByte(dec) != -1) return dec
+                if (dec != null && findSyncByte(dec) != -1) return dec
                 confirmedProfile = null
             }
 
-            // 2. Offset 0~15 시도 (블록 정렬 맞추기)
-            // NoPadding + ZeroIV 사용 -> 키만 맞으면 2번째 블록부터 복호화됨
+            // 2. Offset 0~15 시도
             val iv = ByteArray(16) // Zero IV
             val cipher = Cipher.getInstance("AES/CBC/NoPadding")
             cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
@@ -332,7 +329,6 @@ class BunnyPoorCdn : ExtractorApi() {
             for (offset in 0..15) {
                 if (data.size <= offset) break
                 
-                // 데이터 길이가 16의 배수가 되도록 조정 (NoPadding 필수조건)
                 val len = data.size - offset
                 val alignLen = (len / 16) * 16
                 if (alignLen <= 0) continue
@@ -341,12 +337,10 @@ class BunnyPoorCdn : ExtractorApi() {
                     val slice = data.copyOfRange(offset, offset + alignLen)
                     val decrypted = cipher.doFinal(slice)
                     
-                    // TS Sync Byte (0x47) 검색
                     val syncIndex = findSyncByte(decrypted)
                     if (syncIndex != -1) {
                         println("[BunnyPoorCdn] Crack Success! Offset: $offset, SyncIndex: $syncIndex")
                         confirmedProfile = DecryptProfile(offset)
-                        // Sync Byte부터 시작하도록 잘라서 반환
                         return decrypted.copyOfRange(syncIndex, decrypted.size)
                     }
                 } catch (e: Exception) {}
@@ -374,7 +368,6 @@ class BunnyPoorCdn : ExtractorApi() {
         }
 
         private fun findSyncByte(data: ByteArray): Int {
-            // 처음 2KB 내에서 0x47 패턴 검색 (188바이트 간격)
             val limit = minOf(data.size, 2048)
             for (i in 0 until limit - 376) {
                 if (data[i] == 0x47.toByte() && data[i+188] == 0x47.toByte() && data[i+376] == 0x47.toByte()) {
@@ -493,7 +486,7 @@ class BunnyPoorCdn : ExtractorApi() {
                         }
                         "bit_interleave" -> {
                             val perm = layer.getJSONArray("perm")
-                            val newData = ByteArray(16)
+                            val newData = ByteArray(16) // Always 128 bits
                             for (j in 0 until perm.length()) {
                                 val srcByteIdx = j / 8
                                 val srcBitPos = 7 - (j % 8)
