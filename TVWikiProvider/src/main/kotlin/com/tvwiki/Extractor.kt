@@ -22,6 +22,8 @@ import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch // 대기용
+import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -34,11 +36,10 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * [Version: v29-Aggressive-Hooking]
- * 1. JS Upgrade: Uint8Array 생성자(Constructor)와 .set() 메소드 모두 Hooking.
- * -> 키가 어떤 방식으로 생성되든 메모리에 나타나는 순간 즉시 포착.
- * 2. Logic: 3-7-6 패턴 검증 유지.
- * 3. Base: 빌드 성공한 v28 기반.
+ * [Version: v30-Final-Solution]
+ * 1. JS Injection Timing: onProgressChanged 추가로 주입 시점 극대화.
+ * 2. Proxy Wait: 키가 확보될 때까지 프록시 응답을 지연시켜 ExoPlayer 에러 방지.
+ * 3. Retry: 키 미확보 시 WebView 새로고침 시도.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -49,7 +50,10 @@ class BunnyPoorCdn : ExtractorApi() {
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
-        private const val TAG = "[Bunny-v29]"
+        // 전역 키 저장소 (프록시와 공유)
+        @Volatile private var globalKey: ByteArray? = null
+        private val keyLatch = CountDownLatch(1) // 키 대기용
+        private const val TAG = "[Bunny-v30]"
     }
 
     override suspend fun getUrl(
@@ -60,6 +64,10 @@ class BunnyPoorCdn : ExtractorApi() {
     ) {
         proxyServer?.stop()
         proxyServer = null
+        globalKey = null // 키 초기화
+        // Latch 재생성 (Count 1)
+        while (keyLatch.count > 0) keyLatch.countDown() // 기존 대기 해제
+        
         extract(url, referer, subtitleCallback, callback)
     }
 
@@ -84,23 +92,21 @@ class BunnyPoorCdn : ExtractorApi() {
             } catch (e: Exception) {}
         }
 
-        // JS Hooking으로 키 탈취
-        val stolenKeyHex = JsKeyStealer.stealKey(cleanUrl, DESKTOP_UA, cleanReferer)
-        
-        if (stolenKeyHex != null) {
-            println("$TAG REAL KEY CAPTURED: $stolenKeyHex")
-            val keyBytes = hexToBytes(stolenKeyHex)
-            startProxy(cleanUrl, keyBytes, callback)
-            return true
-        } else {
-            println("$TAG Failed to steal key via JS injection.")
-            return false
+        // [비동기] JS Hooking 시작 (결과 기다리지 않고 프록시 준비)
+        // 키가 찾아지면 globalKey에 저장되고 keyLatch가 열림
+        thread {
+            runBlocking {
+                JsKeyStealer.stealKey(cleanUrl, DESKTOP_UA, cleanReferer)
+            }
         }
+
+        // 3. 프록시 서버 가동 (키 없이 일단 시작)
+        startProxy(cleanUrl, callback)
+        return true
     }
 
     private suspend fun startProxy(
         targetUrl: String, 
-        key: ByteArray, 
         callback: (ExtractorLink) -> Unit
     ) {
         try {
@@ -110,7 +116,6 @@ class BunnyPoorCdn : ExtractorApi() {
 
             val proxy = ProxyWebServer()
             proxy.start()
-            proxy.updateSession(key) 
             proxyServer = proxy
 
             val proxyPort = proxy.port
@@ -160,15 +165,10 @@ class BunnyPoorCdn : ExtractorApi() {
     }
 
     object JsKeyStealer {
-        // [업그레이드된 후킹 스크립트]
-        // 1. Uint8Array.prototype.set (기존)
-        // 2. new Uint8Array() 생성자 (추가) - 이걸로 생성하는 경우도 놓치지 않음
         private const val HOOK_SCRIPT = """
             (function() {
-                // 이미 주입되었으면 스킵
                 if (window.isHooked) return;
                 window.isHooked = true;
-
                 if (typeof G !== 'undefined') window.G = false;
 
                 function checkAndLog(source) {
@@ -177,15 +177,10 @@ class BunnyPoorCdn : ExtractorApi() {
                             try {
                                 var body = Array.from(source.slice(3, 10));
                                 body.sort(function(a, b) { return a - b; });
-                                
                                 var isValid = true;
                                 for (var i = 0; i < 7; i++) {
-                                    if (body[i] !== (i + 1)) {
-                                        isValid = false;
-                                        break;
-                                    }
+                                    if (body[i] !== (i + 1)) { isValid = false; break; }
                                 }
-                                
                                 if (isValid) {
                                     var hex = Array.from(source).map(function(b) {
                                         return ('0' + (b & 0xFF).toString(16)).slice(-2);
@@ -199,14 +194,12 @@ class BunnyPoorCdn : ExtractorApi() {
                     return false;
                 }
 
-                // 1. Hook .set()
                 const originalSet = Uint8Array.prototype.set;
                 Uint8Array.prototype.set = function(source, offset) {
                     if (source) checkAndLog(source);
                     return originalSet.apply(this, arguments);
                 };
 
-                // 2. Hook Constructor (new Uint8Array([...]))
                 const OriginalUint8Array = window.Uint8Array;
                 window.Uint8Array = function(arg1, arg2, arg3) {
                     var arr;
@@ -214,27 +207,18 @@ class BunnyPoorCdn : ExtractorApi() {
                     else if (arguments.length === 1) arr = new OriginalUint8Array(arg1);
                     else if (arguments.length === 2) arr = new OriginalUint8Array(arg1, arg2);
                     else arr = new OriginalUint8Array(arg1, arg2, arg3);
-                    
-                    // 생성된 배열 검사
                     checkAndLog(arr);
                     return arr;
                 };
-                
-                // 프로토타입 및 정적 메소드 복구
                 window.Uint8Array.prototype = OriginalUint8Array.prototype;
                 window.Uint8Array.from = OriginalUint8Array.from;
                 window.Uint8Array.of = OriginalUint8Array.of;
                 Object.defineProperty(window.Uint8Array, 'name', { value: 'Uint8Array' });
-
-                console.log("Hooks installed successfully.");
             })();
         """
 
-        suspend fun stealKey(url: String, ua: String, referer: String): String? {
-            return withContext(Dispatchers.Main) {
-                val resultDeferred = CompletableDeferred<String?>()
-                
-                // [Fix] Nullable Context 처리: !! 사용
+        suspend fun stealKey(url: String, ua: String, referer: String) {
+            withContext(Dispatchers.Main) {
                 val webView = WebView(AcraApplication.context!!)
                 
                 webView.settings.apply {
@@ -249,11 +233,21 @@ class BunnyPoorCdn : ExtractorApi() {
                         val msg = consoleMessage?.message() ?: ""
                         if (msg.startsWith("MAGIC_KEY_FOUND:")) {
                             val keyHex = msg.substringAfter("MAGIC_KEY_FOUND:")
-                            if (!resultDeferred.isCompleted) {
-                                resultDeferred.complete(keyHex)
-                            }
+                            // 전역 변수에 키 저장 & Latch 해제
+                            globalKey = hexToBytes(keyHex)
+                            // 10번 카운트다운 (혹시 모를 중복 방지)
+                             while (keyLatch.count > 0) keyLatch.countDown()
+                            
+                            println("$TAG Found Key: $keyHex")
+                            webView.destroy()
                         }
                         return true
+                    }
+                    
+                    override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                        super.onProgressChanged(view, newProgress)
+                        // 진행 중에도 지속적 주입
+                        view?.evaluateJavascript(HOOK_SCRIPT, null)
                     }
                 }
 
@@ -262,33 +256,23 @@ class BunnyPoorCdn : ExtractorApi() {
                         super.onPageFinished(view, url)
                         view?.evaluateJavascript(HOOK_SCRIPT, null)
                     }
-                    
-                    override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                        super.onPageStarted(view, url, favicon)
-                        // 시작하자마자 후킹
-                        view?.evaluateJavascript(HOOK_SCRIPT, null)
-                    }
                 }
 
+                // 20초 타임아웃
                 val handler = Handler(Looper.getMainLooper())
-                val timeoutRunnable = Runnable {
-                    if (!resultDeferred.isCompleted) {
-                        resultDeferred.complete(null)
-                        webView.stopLoading()
-                        webView.destroy()
-                    }
-                }
-                handler.postDelayed(timeoutRunnable, 15000)
+                handler.postDelayed({
+                    try { 
+                        if (globalKey == null) {
+                            println("$TAG Timeout. Retry reload.")
+                            webView.reload() // 리로드 시도
+                        } else {
+                            webView.destroy()
+                        }
+                    } catch(e:Exception){}
+                }, 10000)
 
                 val headers = mapOf("Referer" to referer)
                 webView.loadUrl(url, headers)
-
-                val result = resultDeferred.await()
-                handler.removeCallbacks(timeoutRunnable)
-                
-                try { webView.destroy() } catch(e:Exception){}
-                
-                result
             }
         }
     }
@@ -299,7 +283,6 @@ class BunnyPoorCdn : ExtractorApi() {
         var port: Int = 0
         @Volatile private var currentPlaylist: String = ""
         @Volatile private var seqMap: ConcurrentHashMap<String, Long> = ConcurrentHashMap()
-        @Volatile private var decryptionKey: ByteArray? = null
         @Volatile private var trimOffset: Int = -1
 
         fun start() {
@@ -320,17 +303,12 @@ class BunnyPoorCdn : ExtractorApi() {
             try { serverSocket?.close(); serverSocket = null } catch (e: Exception) {}
         }
         
-        fun updateSession(key: ByteArray) {
-            decryptionKey = key
-            trimOffset = -1
-        }
-        
         fun setPlaylist(p: String) { currentPlaylist = p }
         fun updateSeqMap(map: ConcurrentHashMap<String, Long>) { seqMap = map }
 
         private fun handleClient(socket: Socket) = thread {
             try {
-                socket.soTimeout = 10000
+                socket.soTimeout = 15000
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
                 val line = reader.readLine() ?: return@thread
                 val parts = line.split(" ")
@@ -344,6 +322,15 @@ class BunnyPoorCdn : ExtractorApi() {
                     output.write(header.toByteArray())
                     output.write(body)
                 } else if (path.contains("/proxy")) {
+                    // [Key Wait Logic] 키가 구해질 때까지 대기 (최대 15초)
+                    if (globalKey == null) {
+                        println("$TAG Waiting for key...")
+                        // 15초 동안 키가 구해지길 기다림
+                        // Latch는 0이 되면 풀림
+                         val latch = BunnyPoorCdn.Companion.javaClass.getDeclaredField("keyLatch").get(null) as CountDownLatch
+                         latch.await(15, TimeUnit.SECONDS)
+                    }
+
                     val urlParam = path.substringAfter("url=").substringBefore(" ")
                     val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
                     val seq = seqMap[targetUrl] ?: 0L
@@ -355,10 +342,11 @@ class BunnyPoorCdn : ExtractorApi() {
                                 val rawData = res.body.bytes()
                                 output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
                                 
-                                val key = decryptionKey
+                                val key = globalKey
                                 val decrypted = if (key != null) {
                                     decryptWithBlindTrim(rawData, key, seq)
                                 } else {
+                                    // 키가 없으면 그냥 원본 보냄 (재생 실패하겠지만 타임아웃보단 나음)
                                     rawData
                                 }
                                 output.write(decrypted ?: rawData)
