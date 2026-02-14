@@ -14,7 +14,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.URI
 import kotlin.concurrent.thread
-import android.util.Log
+import android.util.Base64
 
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -44,20 +44,26 @@ class BunnyPoorCdn : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
         thumbnailHint: String? = null,
     ): Boolean {
-        println("[TVWiki-Snatch] 탈취 프로세스 시작 - 대상: $url")
+        println("[TVWiki-Snatch] 추출 프로세스 시작")
         var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = "https://tvwiki5.net/"
 
-        // 1. 플레이어 원본 HTML 확보
-        val playerPageRes = app.get(cleanUrl, headers = mapOf("Referer" to cleanReferer, "User-Agent" to DESKTOP_UA))
+        // 1. 원본 플레이어 페이지 HTML 확보
+        println("[TVWiki-Snatch] 원본 페이지 획득 시도: $cleanUrl")
+        val playerPageRes = try {
+            app.get(cleanUrl, headers = mapOf("Referer" to cleanReferer, "User-Agent" to DESKTOP_UA))
+        } catch (e: Exception) {
+            println("[TVWiki-Snatch] 페이지 획득 실패: ${e.message}")
+            return false
+        }
         val originalHtml = playerPageRes.text
         
         // 2. 프록시 가동
         proxyServer = ProxyWebServer().apply { start() }
         val proxyPort = proxyServer!!.port
-        println("[TVWiki-Snatch] 로컬 프록시 대기 중 (Port: $proxyPort)")
+        println("[TVWiki-Snatch] 로컬 프록시 서버 오픈 (Port: $proxyPort)")
 
-        // 3. 5가지 절대 규칙 검증 로직이 포함된 Hook 스크립트
+        // 3. 5가지 절대 규칙 검증 로직이 포함된 Hook 스크립트 (로그 경로 수정)
         val hookScript = """
             <base href="https://player.bunny-frame.online/">
             <script>
@@ -66,9 +72,11 @@ class BunnyPoorCdn : ExtractorApi() {
                     var originalSet = Uint8Array.prototype.set;
                     var found = false;
 
+                    // 로그를 로컬 프록시 서버로 직접 전송
                     function logToApp(status, hex, msg) {
-                        var url = "http://SnatchLog/report?status=" + status + "&key=" + hex + "&msg=" + encodeURIComponent(msg);
-                        new Image().src = url;
+                        var logUrl = "http://127.0.0.1:$proxyPort/jslog?status=" + status + "&key=" + hex + "&msg=" + encodeURIComponent(msg);
+                        var img = new Image();
+                        img.src = logUrl;
                     }
 
                     function checkKey(arr) {
@@ -76,7 +84,7 @@ class BunnyPoorCdn : ExtractorApi() {
                         
                         // 규칙 1: 01 0e 00 시작
                         if (arr[0] !== 1 || arr[1] !== 14 || arr[2] !== 0) {
-                            return { v: false, m: "Prefix mismatch(" + arr[0] + "," + arr[1] + "," + arr[2] + ")" };
+                            return { v: false, m: "Prefix mismatch: " + arr[0] + "," + arr[1] + "," + arr[2] };
                         }
                         
                         // 규칙 2: 4~10바이트 패턴 영역 (1~7 순열)
@@ -95,15 +103,16 @@ class BunnyPoorCdn : ExtractorApi() {
                             
                             if (res.v) {
                                 found = true;
-                                logToApp("MATCH", hex, "Found real key!");
-                                window.location.href = "http://SnatchResult/found?key=" + hex;
+                                logToApp("MATCH", hex, "Real key found!");
+                                // 성공 시 전용 URL로 리다이렉트하여 Interceptor 깨움
+                                window.location.href = "http://127.0.0.1:$proxyPort/found?key=" + hex;
                             } else {
                                 logToApp("REJECT", hex, res.m);
                             }
                         }
                         return originalSet.apply(this, arguments);
                     };
-                    console.log("Snatcher Active");
+                    logToApp("INFO", "", "Hook Script Injected & Running");
                 } catch (e) { logToApp("ERROR", "", e.toString()); }
             })();
             </script>
@@ -113,26 +122,28 @@ class BunnyPoorCdn : ExtractorApi() {
 
         // 4. 웹뷰 실행 및 결과 가로채기
         val keyResolver = WebViewResolver(
-            interceptUrl = Regex("""http://SnatchResult/found\?key=([a-fA-F0-9]+)"""),
+            interceptUrl = Regex("""/found\?key=([a-fA-F0-9]+)"""),
             useOkhttp = false,
-            timeout = 25000L
+            timeout = 30000L
         )
 
         var foundKeyHex: String? = null
         try {
-            println("[TVWiki-Snatch] 웹뷰에서 플레이어 로직 실행 중...")
+            println("[TVWiki-Snatch] 웹뷰에서 플레이어 로직 실행 중... (최대 30초)")
+            // 프록시를 통해 변조된 페이지 로드
             val response = app.get("http://127.0.0.1:$proxyPort/index.html", interceptor = keyResolver)
             foundKeyHex = Regex("""key=([a-fA-F0-9]+)""").find(response.url)?.groupValues?.get(1)
         } catch (e: Exception) {
+            // Interceptor에 걸리면 예외가 발생하므로 여기서 추출
             foundKeyHex = Regex("""key=([a-fA-F0-9]+)""").find(e.message ?: "")?.groupValues?.get(1)
         }
 
         if (foundKeyHex != null) {
-            println("[TVWiki-Snatch] ★★★ 키 탈취 성공! 값: $foundKeyHex ★★★")
+            println("[TVWiki-Snatch] [FOUND_KEY] ★ 탈취 성공: $foundKeyHex ★")
             val keyBytes = foundKeyHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
             proxyServer!!.setKey(keyBytes)
 
-            // c.html(m3u8) 확보 및 변조 대기
+            // c.html(m3u8) 확보
             try {
                 val cHtmlResolver = WebViewResolver(interceptUrl = Regex("""/c\.html"""), timeout = 10000L)
                 val cHtmlRes = app.get(cleanUrl, headers = mapOf("User-Agent" to DESKTOP_UA), interceptor = cHtmlResolver)
@@ -148,10 +159,10 @@ class BunnyPoorCdn : ExtractorApi() {
                 )
                 return true
             } catch (e: Exception) {
-                println("[TVWiki-Snatch] M3U8 확보 실패: ${e.message}")
+                println("[TVWiki-Snatch] M3U8 확보 중 에러: ${e.message}")
             }
         } else {
-            println("[TVWiki-Snatch] !!! 키 탈취 실패 (규칙에 맞는 키가 25초 내에 생성되지 않음) !!!")
+            println("[TVWiki-Snatch] [FAILURE] 규칙에 맞는 키를 찾지 못하고 타임아웃되었습니다.")
         }
 
         return false
@@ -193,10 +204,10 @@ class BunnyPoorCdn : ExtractorApi() {
                     val output = socket.getOutputStream()
 
                     when {
-                        path.contains("/report") -> {
+                        path.contains("/jslog") -> {
                             val status = path.substringAfter("status=", "").substringBefore("&")
-                            val msg = java.net.URLDecoder.decode(path.substringAfter("msg=", "").substringBefore("&"), "UTF-8")
                             val k = path.substringAfter("key=", "").substringBefore("&")
+                            val msg = java.net.URLDecoder.decode(path.substringAfter("msg=", "").substringBefore("&"), "UTF-8")
                             println("[TVWiki-Snatch][JS-Log] $status | Key: $k | Reason: $msg")
                             output.write("HTTP/1.1 204 No Content\r\n\r\n".toByteArray())
                         }
@@ -218,6 +229,7 @@ class BunnyPoorCdn : ExtractorApi() {
                             output.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n".toByteArray())
                             key?.let { output.write(it) }
                         }
+                        else -> output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
                     }
                     output.flush()
                     socket.close()
