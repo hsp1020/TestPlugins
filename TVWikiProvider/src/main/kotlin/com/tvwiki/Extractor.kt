@@ -31,10 +31,10 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * [Version: v1-StrictDebug]
- * 사용자 요청 준수:
- * 1. 모든 로그에 [v1-Strict] 태그 부착.
- * 2. 모든 실행 흐름(Flow)에 로그 출력.
+ * [Version: v1-StrictDebug-BuildFix]
+ * 수정 사항:
+ * 1. ProxyWebServer 클래스 내 'const val' -> 'val'로 변경하여 빌드 에러 해결.
+ * 2. 기존의 모든 로깅 및 로직(Deep Scan, Segment Noise Fix) 100% 유지.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -244,11 +244,14 @@ class BunnyPoorCdn : ExtractorApi() {
         @Volatile private var currentPlaylist: String = ""
         @Volatile private var seqMap: ConcurrentHashMap<String, Long> = ConcurrentHashMap()
         @Volatile private var targetKeyUrl: String? = null
+        
         @Volatile private var realKey: ByteArray? = null
         
         data class DecryptProfile(val ivMode: Int, val inputOffset: Int, val outputOffset: Int)
         @Volatile private var confirmedProfile: DecryptProfile? = null
-        private const val VER = "[Bunny-v1-Proxy]"
+        
+        // [수정] const 제거 (일반 val로 변경)
+        private val VER = "[Bunny-v1-Proxy]"
 
         fun start() {
             try {
