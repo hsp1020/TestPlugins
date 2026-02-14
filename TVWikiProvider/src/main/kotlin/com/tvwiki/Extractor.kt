@@ -4,8 +4,6 @@ import android.os.Handler
 import android.os.Looper
 import android.webkit.ConsoleMessage
 import android.webkit.WebChromeClient
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.lagradost.cloudstream3.SubtitleFile
@@ -16,6 +14,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.network.WebViewResolver
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.ServerSocket
@@ -37,11 +36,11 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * [Version: v44-Final-Pro-Fix]
- * 1. FIX 403 ERROR: Proxy 서버의 요청 헤더에 Origin 및 Referer 강제 주입.
- * 2. Key Stealer (v33): 검증된 v33의 JS Hooking 로직 100% 복구.
- * 3. URL Interceptor: WebView 로딩 중 실제 c.html 주소를 낚아채어 ParserException 원천 차단.
- * 4. Stability: 모든 정보(Key + URL)가 모일 때까지 안전하게 대기 후 재생 시작.
+ * [Version: v45-Final-Perfect-Hybrid]
+ * 1. Rollback: v33의 'JS Hooking' 방식을 사용하여 키 추출 성공률 복구.
+ * 2. Fix 403: Proxy 요청 시 Origin/Referer 헤더를 주입하여 서버 차단 우회.
+ * 3. Separation: 키 추출(WebView)과 URL 확보(Resolver)를 독립적으로 실행하여 충돌 방지.
+ * 4. Stability: Latch 초기화 로직 강화로 대기 스킵 현상 해결.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -52,11 +51,11 @@ class BunnyPoorCdn : ExtractorApi() {
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
-        private const val TAG = "[Bunny-v44]"
+        private const val TAG = "[Bunny-v45]"
 
         @Volatile internal var globalKey: ByteArray? = null
-        @Volatile internal var globalM3u8Url: String? = null
-        @Volatile internal var readyLatch = CountDownLatch(1)
+        // 매번 새로 할당하기 위해 변수로 선언
+        @Volatile internal var keyLatch = CountDownLatch(1)
 
         fun hexToBytes(hex: String): ByteArray {
             val len = hex.length
@@ -80,8 +79,7 @@ class BunnyPoorCdn : ExtractorApi() {
         proxyServer?.stop()
         proxyServer = null
         globalKey = null
-        globalM3u8Url = null
-        readyLatch = CountDownLatch(1)
+        keyLatch = CountDownLatch(1) // 확실하게 초기화
         
         extract(url, referer, subtitleCallback, callback)
     }
@@ -100,34 +98,52 @@ class BunnyPoorCdn : ExtractorApi() {
             try {
                 val refRes = app.get(cleanReferer, headers = mapOf("User-Agent" to DESKTOP_UA))
                 val iframeMatch = Regex("""src=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
-                    ?: Regex("""data-player\d*=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
                 if (iframeMatch != null) {
                     cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&").trim()
                 }
             } catch (e: Exception) {}
         }
 
-        // [1] 메인 스레드에서 WebView 실행 (키와 진짜 URL 동시 탈취)
-        val finalUrl = cleanUrl
+        // [Track 1] 키 탈취 (v33 방식 - 간섭 없음)
+        val targetUrlForJs = cleanUrl
         Handler(Looper.getMainLooper()).post {
-            JsKeyStealer.captureEverything(finalUrl, DESKTOP_UA, cleanReferer)
+            JsKeyStealer.stealKey(targetUrlForJs, DESKTOP_UA, cleanReferer)
         }
 
-        // [2] 정보 수집 대기 (최대 20초)
-        println("$TAG [Wait] 정보 수집 대기 중...")
-        val success = withContext(Dispatchers.IO) {
-            readyLatch.await(20, TimeUnit.SECONDS)
+        // [Track 2] URL 확보 (구버전 방식)
+        var capturedM3u8Url: String? = null
+        try {
+            val resolver = WebViewResolver(
+                interceptUrl = Regex("""/c\.html|playlist\.m3u8"""), 
+                useOkhttp = false,
+                timeout = 15000L
+            )
+            val response = app.get(
+                url = cleanUrl,
+                headers = mapOf("Referer" to cleanReferer, "User-Agent" to DESKTOP_UA),
+                interceptor = resolver
+            )
+            if (response.url.contains("/c.html") || response.url.contains("playlist.m3u8")) {
+                capturedM3u8Url = response.url
+                println("$TAG [Fetcher] URL Captured: $capturedM3u8Url")
+            }
+        } catch (e: Exception) { 
+            println("$TAG [Fetcher] Timeout or Error: ${e.message}")
+        }
+
+        // [Wait] 키 확보 대기
+        println("$TAG [Main] Waiting for Key...")
+        withContext(Dispatchers.IO) {
+            keyLatch.await(20, TimeUnit.SECONDS)
         }
         
-        val extractedKey = globalKey
-        val extractedUrl = globalM3u8Url
-
-        if (extractedKey != null && extractedUrl != null) {
-            println("$TAG [Success] 모든 정보 확보 완료. 프록시 가동.")
-            startProxy(extractedUrl, extractedKey, callback)
+        val finalKey = globalKey
+        if (finalKey != null && capturedM3u8Url != null) {
+            println("$TAG [Success] Launching Hybrid Proxy.")
+            startProxy(capturedM3u8Url, finalKey, callback)
             return true
         } else {
-            println("$TAG [Fail] 필수 정보 누락. Key=${extractedKey != null}, URL=${extractedUrl != null}")
+            println("$TAG [Fail] Missing Data. Key=${finalKey != null}, URL=${capturedM3u8Url != null}")
             return false
         }
     }
@@ -138,32 +154,28 @@ class BunnyPoorCdn : ExtractorApi() {
         callback: (ExtractorLink) -> Unit
     ) {
         try {
-            // [중요] 403 에러 방지를 위한 핵심 헤더 설정
-            val headers = mapOf(
+            // [중요] 403 방지를 위한 브라우저 헤더 복제
+            val requestHeaders = mapOf(
                 "User-Agent" to DESKTOP_UA,
                 "Referer" to "https://player.bunny-frame.online/",
                 "Origin" to "https://player.bunny-frame.online"
             )
 
-            // 1. 진짜 M3U8 데이터 다운로드
-            val m3u8Res = app.get(targetUrl, headers = headers)
+            val m3u8Res = app.get(targetUrl, headers = requestHeaders)
             val m3u8Content = m3u8Res.text
 
-            // 2. IV 추출 (M3U8 내부 #EXT-X-KEY 라인)
             val keyMatch = Regex("""#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"(?:,IV=(0x[0-9a-fA-F]+))?""").find(m3u8Content)
             val hexIv = keyMatch?.groupValues?.get(2)
-            println("$TAG [Proxy] IV 감지: $hexIv")
             
-            // 3. 프록시 서버 시작
             val proxy = ProxyWebServer()
             proxy.start()
-            proxy.updateSession(key, hexIv, headers) // 탈취한 키와 헤더 주입
+            // 진짜 키와 헤더 주입
+            proxy.updateSession(key, hexIv, requestHeaders) 
             proxyServer = proxy
 
             val proxyPort = proxy.port
             val proxyRoot = "http://127.0.0.1:$proxyPort"
 
-            // 4. M3U8 플레이리스트 재작성
             val newLines = mutableListOf<String>()
             val lines = m3u8Content.lines()
             val seqMap = ConcurrentHashMap<String, Long>()
@@ -193,21 +205,16 @@ class BunnyPoorCdn : ExtractorApi() {
             proxy.setPlaylist(newLines.joinToString("\n"))
             proxy.updateSeqMap(seqMap)
 
-            // 5. 플레이어에 로컬 프록시 링크 전달
             callback(
                 newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) {
                     this.referer = "https://player.bunny-frame.online/"
                     this.quality = Qualities.Unknown.value
                 }
             )
-        } catch (e: Exception) {
-            println("$TAG [Proxy] 실행 중 오류: ${e.message}")
-            e.printStackTrace()
-        }
+        } catch (e: Exception) { e.printStackTrace() }
     }
 
     object JsKeyStealer {
-        // v33에서 검증된 3-7-6 구조 필터링 스크립트
         private const val HOOK_SCRIPT = """
             (function() {
                 if (window.isHooked) return;
@@ -260,14 +267,14 @@ class BunnyPoorCdn : ExtractorApi() {
             })();
         """
 
-        fun captureEverything(url: String, ua: String, referer: String) {
+        fun stealKey(url: String, ua: String, referer: String) {
             val webView = WebView(AcraApplication.context!!)
             
             webView.settings.apply {
                 javaScriptEnabled = true
                 domStorageEnabled = true
                 userAgentString = ua
-                blockNetworkImage = true 
+                blockNetworkImage = true
             }
 
             webView.webChromeClient = object : WebChromeClient() {
@@ -275,9 +282,10 @@ class BunnyPoorCdn : ExtractorApi() {
                     val msg = consoleMessage?.message() ?: ""
                     if (msg.startsWith("MAGIC_KEY_FOUND:")) {
                         val keyHex = msg.substringAfter("MAGIC_KEY_FOUND:")
-                        println("$TAG [JS] 진짜 키 발견: $keyHex")
+                        println("$TAG Found Key: $keyHex")
                         BunnyPoorCdn.globalKey = BunnyPoorCdn.hexToBytes(keyHex)
-                        checkAndRelease(webView)
+                        BunnyPoorCdn.keyLatch.countDown()
+                        webView.destroy()
                     }
                     return true
                 }
@@ -292,50 +300,21 @@ class BunnyPoorCdn : ExtractorApi() {
                     super.onPageFinished(view, url)
                     view?.evaluateJavascript(HOOK_SCRIPT, null)
                 }
-                
-                override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                    super.onPageStarted(view, url, favicon)
-                    view?.evaluateJavascript(HOOK_SCRIPT, null)
-                }
-
-                // [중요] 실제 스트리밍 URL(c.html) 포획
-                override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
-                    val reqUrl = request?.url.toString()
-                    if (reqUrl.contains("/c.html") || reqUrl.contains("playlist.m3u8")) {
-                        if (BunnyPoorCdn.globalM3u8Url == null) {
-                            println("$TAG [JS] M3U8 주소 포획: $reqUrl")
-                            BunnyPoorCdn.globalM3u8Url = reqUrl
-                            // 정보 확보 체크
-                            Handler(Looper.getMainLooper()).post { checkAndRelease(webView) }
-                        }
-                    }
-                    return super.shouldInterceptRequest(view, request)
-                }
             }
 
             val handler = Handler(Looper.getMainLooper())
             handler.postDelayed({
                 try { 
-                    if (BunnyPoorCdn.readyLatch.count > 0) {
-                         println("$TAG [JS] 타임아웃 발생. 대기 해제.")
-                         BunnyPoorCdn.readyLatch.countDown()
+                    if (BunnyPoorCdn.keyLatch.count > 0) {
+                         println("$TAG [JS] Timeout. Force releasing latch.")
+                         BunnyPoorCdn.keyLatch.countDown()
                          webView.destroy()
                     }
                 } catch(e:Exception){}
-            }, 20000)
+            }, 25000)
 
             val headers = mapOf("Referer" to referer)
             webView.loadUrl(url, headers)
-        }
-        
-        private fun checkAndRelease(webView: WebView) {
-            if (BunnyPoorCdn.globalKey != null && BunnyPoorCdn.globalM3u8Url != null) {
-                println("$TAG [JS] 모든 데이터 수집 완료. 메인 로직 가동.")
-                if (BunnyPoorCdn.readyLatch.count > 0) {
-                    BunnyPoorCdn.readyLatch.countDown()
-                    try { webView.destroy() } catch(e:Exception){}
-                }
-            }
         }
     }
 
@@ -347,7 +326,7 @@ class BunnyPoorCdn : ExtractorApi() {
         @Volatile private var seqMap: ConcurrentHashMap<String, Long> = ConcurrentHashMap()
         @Volatile private var playlistIv: String? = null
         @Volatile private var decryptionKey: ByteArray? = null
-        @Volatile private var requestHeaders: Map<String, String> = emptyMap()
+        @Volatile private var headers: Map<String, String> = emptyMap()
 
         fun start() {
             try {
@@ -367,10 +346,10 @@ class BunnyPoorCdn : ExtractorApi() {
             try { serverSocket?.close(); serverSocket = null } catch (e: Exception) {}
         }
         
-        fun updateSession(key: ByteArray, iv: String?, headers: Map<String, String>) {
+        fun updateSession(key: ByteArray, iv: String?, h: Map<String, String>) {
             decryptionKey = key
             playlistIv = iv
-            requestHeaders = headers // 403 방지용 헤더 저장
+            headers = h
         }
         
         fun setPlaylist(p: String) { currentPlaylist = p }
@@ -398,14 +377,18 @@ class BunnyPoorCdn : ExtractorApi() {
 
                     runBlocking {
                         try {
-                            // [핵심] 세그먼트 요청 시 403 에러 방지를 위해 저장해둔 헤더 사용
-                            val res = app.get(targetUrl, headers = requestHeaders)
+                            // [핵심] 주입받은 헤더(Referer/Origin)를 사용하여 403 우회
+                            val res = app.get(targetUrl, headers = headers)
                             if (res.isSuccessful) {
                                 val rawData = res.body.bytes()
                                 output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
                                 
                                 val key = decryptionKey
-                                val decrypted = if (key != null) attemptDecrypt(rawData, key, seq) else null
+                                val decrypted = if (key != null) {
+                                    attemptDecrypt(rawData, key, seq)
+                                } else {
+                                    rawData
+                                }
                                 output.write(decrypted ?: rawData)
                             } else {
                                 output.write("HTTP/1.1 ${res.code} Error\r\n\r\n".toByteArray())
@@ -431,7 +414,7 @@ class BunnyPoorCdn : ExtractorApi() {
                 
                 val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
                 cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
-                return cipher.doFinal(data)
+                cipher.doFinal(data)
             } catch (e: Exception) { null }
         }
     }
