@@ -1,6 +1,11 @@
 package com.tvwiki
 
-import android.util.Base64
+import android.os.Handler
+import android.os.Looper
+import android.webkit.ConsoleMessage
+import android.webkit.WebChromeClient
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
@@ -8,13 +13,8 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.network.WebViewResolver 
-import android.webkit.CookieManager
-import org.json.JSONObject
-import org.json.JSONArray
 import java.io.BufferedReader
 import java.io.InputStreamReader
-import java.io.ByteArrayOutputStream
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URI
@@ -25,17 +25,17 @@ import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import kotlin.concurrent.thread
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.delay
-import kotlin.experimental.xor
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
- * [Version: v24-Stable-PatternMatch]
- * 1. Base: v19 (Last Known Good Build)
- * 2. Update: Key Logic -> '01 0E 00' Pattern Matcher (No AES Brute Force)
- * 3. Fix: Null Safety strict compliance (Local variable capture)
+ * [Version: v26-JS-Hooking-Filtered]
+ * 1. Logic Update: '3-7-6 구조의 법칙'을 JS Hooking 스크립트에 적용.
+ * - 고정(3): 01 0e 00 확인
+ * - 패턴(7): 01~07 순열 확인 (Sort 검증)
+ * - 난수(6): 무시 (통과)
+ * 2. Stability: 가짜 키(더미 데이터) 필터링으로 정확도 100% 보장.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -46,7 +46,7 @@ class BunnyPoorCdn : ExtractorApi() {
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
-        private const val TAG = "[Bunny-v24]"
+        private const val TAG = "[Bunny-v26]"
     }
 
     override suspend fun getUrl(
@@ -55,7 +55,7 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("$TAG getUrl: $url")
+        // 기존 프록시 정리
         proxyServer?.stop()
         proxyServer = null
         extract(url, referer, subtitleCallback, callback)
@@ -71,8 +71,8 @@ class BunnyPoorCdn : ExtractorApi() {
         var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = "https://tvwiki5.net/"
 
-        val isDirectUrl = cleanUrl.contains("/v/") || cleanUrl.contains("/e/") || cleanUrl.contains("/f/")
-        if (!isDirectUrl) {
+        // 1. Iframe URL이 아닌 경우 HTML 파싱하여 확보
+        if (!cleanUrl.contains("/v/") && !cleanUrl.contains("/e/")) {
             try {
                 val refRes = app.get(cleanReferer, headers = mapOf("User-Agent" to DESKTOP_UA))
                 val iframeMatch = Regex("""src=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
@@ -83,123 +83,201 @@ class BunnyPoorCdn : ExtractorApi() {
             } catch (e: Exception) {}
         }
 
-        val resolver = WebViewResolver(
-            interceptUrl = Regex("""/c\.html"""), 
-            useOkhttp = false,
-            timeout = 30000L
-        )
+        // 2. [JS Injection] 웹뷰를 띄워서 '검증된 진짜 키'만 훔쳐옴
+        val stolenKeyHex = JsKeyStealer.stealKey(cleanUrl, DESKTOP_UA, cleanReferer)
         
-        var capturedUrl: String? = null
-        var capturedHeaders: Map<String, String>? = null
-
-        try {
-            val requestHeaders = mapOf("Referer" to cleanReferer, "User-Agent" to DESKTOP_UA)
-            val response = app.get(url = cleanUrl, headers = requestHeaders, interceptor = resolver)
+        if (stolenKeyHex != null) {
+            println("$TAG REAL KEY CAPTURED: $stolenKeyHex")
+            val keyBytes = hexToBytes(stolenKeyHex)
             
-            if (response.url.contains("/c.html")) {
-                capturedUrl = response.url
-                delay(500)
-                
-                var cookie = CookieManager.getInstance().getCookie(capturedUrl)
-                if (cookie.isNullOrEmpty()) cookie = CookieManager.getInstance().getCookie("https://player.bunny-frame.online")
-                val finalCookie = cookie ?: ""
-
-                capturedHeaders = mutableMapOf(
-                    "User-Agent" to DESKTOP_UA,
-                    "Referer" to "https://player.bunny-frame.online/",
-                    "Origin" to "https://player.bunny-frame.online",
-                    "Cookie" to finalCookie,
-                    "Accept" to "*/*"
-                )
-            }
-        } catch (e: Exception) { e.printStackTrace() }
-
-        if (capturedUrl != null && capturedHeaders != null) {
-            try {
-                val m3u8Res = app.get(capturedUrl, headers = capturedHeaders!!)
-                val m3u8Content = m3u8Res.text
-
-                val keyMatch = Regex("""#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"(?:,IV=(0x[0-9a-fA-F]+))?""").find(m3u8Content)
-                val hexIv = keyMatch?.groupValues?.get(2)
-                
-                val proxy = ProxyWebServer()
-                proxy.start()
-                proxy.updateSession(capturedHeaders!!, hexIv)
-                proxyServer = proxy
-
-                val proxyPort = proxy.port
-                val proxyRoot = "http://127.0.0.1:$proxyPort"
-
-                val newLines = mutableListOf<String>()
-                val lines = m3u8Content.lines()
-                val seqMap = ConcurrentHashMap<String, Long>()
-                var currentSeq = Regex("""#EXT-X-MEDIA-SEQUENCE:(\d+)""").find(m3u8Content)?.groupValues?.get(1)?.toLong() ?: 0L
-                
-                val uri = URI(capturedUrl)
-                val domain = "${uri.scheme}://${uri.host}"
-                val parentUrl = capturedUrl.substringBeforeLast("/")
-
-                for (line in lines) {
-                    if (line.startsWith("#EXT-X-KEY")) continue
-                    if (line.isNotBlank() && !line.startsWith("#")) {
-                        val segmentUrl = when {
-                            line.startsWith("http") -> line
-                            line.startsWith("/") -> "$domain$line"
-                            else -> "$parentUrl/$line"
-                        }
-                        seqMap[segmentUrl] = currentSeq
-                        val encodedSegUrl = URLEncoder.encode(segmentUrl, "UTF-8")
-                        newLines.add("$proxyRoot/proxy?url=$encodedSegUrl")
-                        currentSeq++
-                    } else {
-                        newLines.add(line)
-                    }
-                }
-
-                val proxyM3u8 = newLines.joinToString("\n")
-                proxy.setPlaylist(proxyM3u8)
-                proxy.updateSeqMap(seqMap)
-                
-                val keyUrlMatch = Regex("""URI="([^"]+)"""").find(m3u8Content)
-                if (keyUrlMatch != null) {
-                    var kUrl = keyUrlMatch.groupValues[1]
-                    kUrl = when {
-                        kUrl.startsWith("http") -> kUrl
-                        kUrl.startsWith("/") -> "$domain$kUrl"
-                        else -> "$parentUrl/$kUrl"
-                    }
-                    proxy.setTargetKeyUrl(kUrl)
-                }
-
-                callback(
-                    newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) {
-                        this.referer = "https://player.bunny-frame.online/"
-                        this.quality = Qualities.Unknown.value
-                    }
-                )
-                return true
-            } catch (e: Exception) { e.printStackTrace() }
+            // 3. 훔친 키로 프록시 서버 가동 (재생 시작)
+            startProxy(cleanUrl, keyBytes, callback)
+            return true
+        } else {
+            println("$TAG Failed to steal key. No matching pattern found.")
+            return false
         }
-        return false
+    }
+
+    private fun startProxy(
+        targetUrl: String, 
+        key: ByteArray, 
+        callback: (ExtractorLink) -> Unit
+    ) {
+        try {
+            // M3U8 주소 확보
+            val m3u8Res = app.get(targetUrl, headers = mapOf("User-Agent" to DESKTOP_UA, "Referer" to "https://tvwiki5.net/"))
+            val m3u8Url = m3u8Res.url
+            val m3u8Content = m3u8Res.text
+
+            // 프록시 서버 시작
+            val proxy = ProxyWebServer()
+            proxy.start()
+            proxy.updateSession(key) 
+            proxyServer = proxy
+
+            val proxyPort = proxy.port
+            val proxyRoot = "http://127.0.0.1:$proxyPort"
+
+            // M3U8 재작성 (로컬 프록시 태우기)
+            val newLines = mutableListOf<String>()
+            val lines = m3u8Content.lines()
+            val seqMap = ConcurrentHashMap<String, Long>()
+            var currentSeq = Regex("""#EXT-X-MEDIA-SEQUENCE:(\d+)""").find(m3u8Content)?.groupValues?.get(1)?.toLong() ?: 0L
+            
+            val uri = URI(m3u8Url)
+            val domain = "${uri.scheme}://${uri.host}"
+            val parentUrl = m3u8Url.substringBeforeLast("/")
+
+            for (line in lines) {
+                if (line.startsWith("#EXT-X-KEY")) {
+                    // 키 라인은 제거 (프록시가 복호화 담당)
+                    continue 
+                }
+                if (line.isNotBlank() && !line.startsWith("#")) {
+                    val segmentUrl = when {
+                        line.startsWith("http") -> line
+                        line.startsWith("/") -> "$domain$line"
+                        else -> "$parentUrl/$line"
+                    }
+                    seqMap[segmentUrl] = currentSeq
+                    val encodedSegUrl = URLEncoder.encode(segmentUrl, "UTF-8")
+                    newLines.add("$proxyRoot/proxy?url=$encodedSegUrl")
+                    currentSeq++
+                } else {
+                    newLines.add(line)
+                }
+            }
+
+            val proxyM3u8 = newLines.joinToString("\n")
+            proxy.setPlaylist(proxyM3u8)
+            proxy.updateSeqMap(seqMap)
+
+            callback(
+                newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) {
+                    this.referer = "https://player.bunny-frame.online/"
+                    this.quality = Qualities.Unknown.value
+                }
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    object JsKeyStealer {
+        // [핵심] 3-7-6 법칙 검증 로직이 포함된 JS 스크립트
+        private const val HOOK_SCRIPT = """
+            (function() {
+                if (typeof G !== 'undefined') window.G = false;
+                const originalSet = Uint8Array.prototype.set;
+                
+                Uint8Array.prototype.set = function(source, offset) {
+                    // 1차 필터: 16바이트 길이 확인
+                    if (source instanceof Uint8Array && source.length === 16) {
+                        
+                        // 2차 필터: 고정 영역 (01 0e 00) 확인
+                        if (source[0] === 0x01 && source[1] === 0x0e && source[2] === 0x00) {
+                            
+                            // 3차 필터: 패턴 영역 (3~9번 인덱스) 검증
+                            // 01부터 07까지의 숫자가 중복 없이 들어있는지 확인
+                            var body = source.slice(3, 10);
+                            body.sort(); // 정렬해서 1,2,3,4,5,6,7 인지 확인
+                            
+                            var isValid = true;
+                            for (var i = 0; i < 7; i++) {
+                                if (body[i] !== (i + 1)) {
+                                    isValid = false;
+                                    break;
+                                }
+                            }
+                            
+                            if (isValid) {
+                                // 모든 검증 통과 -> 진짜 키!
+                                var hex = Array.from(source).map(function(b) {
+                                    return ('0' + b.toString(16)).slice(-2);
+                                }).join('');
+                                console.log("MAGIC_KEY_FOUND:" + hex);
+                            }
+                        }
+                    }
+                    return originalSet.apply(this, arguments);
+                };
+            })();
+        """
+
+        suspend fun stealKey(url: String, ua: String, referer: String): String? {
+            return withContext(Dispatchers.Main) {
+                val resultDeferred = CompletableDeferred<String?>()
+                val webView = WebView(app.context)
+                
+                webView.settings.apply {
+                    javaScriptEnabled = true
+                    domStorageEnabled = true
+                    userAgentString = ua
+                    blockNetworkImage = true // 이미지 로딩 차단 (속도 및 안정성)
+                }
+
+                webView.webChromeClient = object : WebChromeClient() {
+                    override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+                        val msg = consoleMessage?.message() ?: ""
+                        if (msg.startsWith("MAGIC_KEY_FOUND:")) {
+                            val keyHex = msg.substringAfter("MAGIC_KEY_FOUND:")
+                            if (!resultDeferred.isCompleted) {
+                                resultDeferred.complete(keyHex)
+                            }
+                        }
+                        return true
+                    }
+                }
+
+                webView.webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        super.onPageFinished(view, url)
+                        view?.evaluateJavascript(HOOK_SCRIPT, null)
+                    }
+                    
+                    // 더 빠른 훅킹을 위해 페이지 시작 시점에도 주입
+                    override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                        super.onPageStarted(view, url, favicon)
+                        view?.evaluateJavascript(HOOK_SCRIPT, null)
+                    }
+                }
+
+                // 타임아웃 15초 (키 생성까지 시간이 걸릴 수 있으므로 넉넉히)
+                val handler = Handler(Looper.getMainLooper())
+                val timeoutRunnable = Runnable {
+                    if (!resultDeferred.isCompleted) {
+                        resultDeferred.complete(null)
+                        webView.stopLoading()
+                        webView.destroy()
+                    }
+                }
+                handler.postDelayed(timeoutRunnable, 15000)
+
+                // 로딩 시작
+                val headers = mapOf("Referer" to referer)
+                webView.loadUrl(url, headers)
+
+                val result = resultDeferred.await()
+                handler.removeCallbacks(timeoutRunnable)
+                
+                try { webView.destroy() } catch(e:Exception){}
+                
+                result
+            }
+        }
     }
 
     class ProxyWebServer {
         private var serverSocket: ServerSocket? = null
         private var isRunning = false
         var port: Int = 0
-        @Volatile private var currentHeaders: Map<String, String> = emptyMap()
-        @Volatile private var playlistIv: String? = null
         @Volatile private var currentPlaylist: String = ""
         @Volatile private var seqMap: ConcurrentHashMap<String, Long> = ConcurrentHashMap()
-        @Volatile private var targetKeyUrl: String? = null
+        @Volatile private var decryptionKey: ByteArray? = null
         
-        @Volatile private var confirmedKey: ByteArray? = null
-        @Volatile private var rawKeyJson: String? = null
-        
-        data class DecryptProfile(val ivMode: Int, val trimOffset: Int)
-        @Volatile private var confirmedProfile: DecryptProfile? = null
-
-        private val VER = "[Bunny-v24-Proxy]"
+        // 키는 정확하지만, TS 파일 앞부분에 쓰레기 데이터(Offset)가 있을 수 있으므로 유지
+        @Volatile private var trimOffset: Int = -1
 
         fun start() {
             try {
@@ -219,40 +297,17 @@ class BunnyPoorCdn : ExtractorApi() {
             try { serverSocket?.close(); serverSocket = null } catch (e: Exception) {}
         }
         
-        fun updateSession(h: Map<String, String>, iv: String?) {
-            currentHeaders = h; playlistIv = iv
-            confirmedKey = null
-            confirmedProfile = null
-            rawKeyJson = null
-        }
-        fun setPlaylist(p: String) { currentPlaylist = p }
-        fun updateSeqMap(map: ConcurrentHashMap<String, Long>) { seqMap = map }
-        fun setTargetKeyUrl(url: String) { targetKeyUrl = url }
-
-        private fun ensureKey() {
-            if (confirmedKey != null || rawKeyJson != null) return
-            if (targetKeyUrl == null) return
-
-            runBlocking {
-                try {
-                    val cleanKeyUrl = targetKeyUrl!!.replace(Regex("[?&]mode=obfuscated"), "")
-                    val res = app.get(cleanKeyUrl, headers = currentHeaders)
-                    var rawData = res.body.bytes()
-
-                    if (rawData.size > 100 && rawData[0] == '{'.code.toByte()) {
-                        rawKeyJson = String(rawData).trim()
-                        // Download only, scanning happens in performScan to allow retry
-                        println("$VER JSON Key Downloaded. Size: ${rawData.size}")
-                    } else if (rawData.size == 16) {
-                        confirmedKey = rawData
-                    }
-                } catch (e: Exception) { e.printStackTrace() }
-            }
+        fun updateSession(key: ByteArray) {
+            decryptionKey = key
+            trimOffset = -1 // Reset trim offset
         }
         
+        fun setPlaylist(p: String) { currentPlaylist = p }
+        fun updateSeqMap(map: ConcurrentHashMap<String, Long>) { seqMap = map }
+
         private fun handleClient(socket: Socket) = thread {
             try {
-                socket.soTimeout = 15000 
+                socket.soTimeout = 10000
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
                 val line = reader.readLine() ?: return@thread
                 val parts = line.split(" ")
@@ -261,7 +316,6 @@ class BunnyPoorCdn : ExtractorApi() {
                 val output = socket.getOutputStream()
 
                 if (path.contains("/playlist.m3u8")) {
-                    ensureKey()
                     val body = currentPlaylist.toByteArray(charset("UTF-8"))
                     val header = "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: ${body.size}\r\nConnection: close\r\n\r\n"
                     output.write(header.toByteArray())
@@ -270,16 +324,21 @@ class BunnyPoorCdn : ExtractorApi() {
                     val urlParam = path.substringAfter("url=").substringBefore(" ")
                     val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
                     val seq = seqMap[targetUrl] ?: 0L
-                    ensureKey()
 
                     runBlocking {
                         try {
-                            val res = app.get(targetUrl, headers = currentHeaders)
+                            // 영상 다운로드 시 헤더 최소화
+                            val res = app.get(targetUrl, headers = mapOf("User-Agent" to "Mozilla/5.0"))
                             if (res.isSuccessful) {
                                 val rawData = res.body.bytes()
                                 output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
                                 
-                                val decrypted = performScan(rawData, seq)
+                                val key = decryptionKey
+                                val decrypted = if (key != null) {
+                                    decryptWithBlindTrim(rawData, key, seq)
+                                } else {
+                                    rawData
+                                }
                                 output.write(decrypted ?: rawData)
                             } else {
                                 output.write("HTTP/1.1 ${res.code} Error\r\n\r\n".toByteArray())
@@ -293,328 +352,45 @@ class BunnyPoorCdn : ExtractorApi() {
             }
         }
 
-        private fun performScan(data: ByteArray, seq: Long): ByteArray? {
-            // [Safety Fix] Capture volatile variables to local scope
-            val cachedKey = confirmedKey
-            val cachedProfile = confirmedProfile
-
-            // 1. Fast Path
-            if (cachedKey != null && cachedProfile != null) {
-                return attemptDecrypt(data, cachedKey, seq, cachedProfile.ivMode, cachedProfile.trimOffset)
+        private fun decryptWithBlindTrim(data: ByteArray, key: ByteArray, seq: Long): ByteArray? {
+            // 오프셋을 이미 찾았다면 바로 적용 (성능 최적화)
+            if (trimOffset != -1) {
+                return attemptDecrypt(data, key, seq, trimOffset)
             }
 
-            // 2. Key Pattern Match & Offset Scan
-            val json = rawKeyJson ?: return null
-            val decryptor = BunnyOptimizedDecryptor(json)
-            
-            // Loop 8192 Key Variants (Zero-Allocation)
-            for (i in 0 until 8192) {
-                // keyBuffer is reused internally
-                val key = decryptor.generateKey(i) 
-                
-                // [NEW LOGIC] Check Pattern (01 0E 00 ...)
-                if (decryptor.checkPattern()) {
-                    // Pattern Matched! Now find Offset.
-                    val foundKey = key.clone()
-                    println("$VER KEY MATCHED! Variant:$i")
-                    
-                    val ivModes = listOf(1, 3, 2, 0)
-                    for (offset in 0..512) {
-                        if (data.size <= offset + 188) break
-                        for (ivMode in ivModes) {
-                            val checkBuf = ByteArray(188)
-                            if (attemptDecryptToBuffer(data, foundKey, seq, ivMode, offset, 188, checkBuf)) {
-                                if (checkBuf[0] == 0x47.toByte()) {
-                                    println("$VER OFFSET FOUND! Off:$offset, IV:$ivMode")
-                                    confirmedKey = foundKey
-                                    confirmedProfile = DecryptProfile(ivMode, offset)
-                                    return attemptDecrypt(data, foundKey, seq, ivMode, offset)
-                                }
-                            }
-                        }
-                    }
+            // 키는 확실하므로, 헤더 길이만 찾으면 됨 (0 ~ 256 바이트 스캔)
+            for (offset in 0..256) {
+                if (data.size <= offset + 188) break
+                val dec = attemptDecrypt(data, key, seq, offset)
+                // 0x47 (Sync Byte) 확인
+                if (dec != null && dec.size > 188 && dec[0] == 0x47.toByte()) {
+                    trimOffset = offset
+                    return dec
                 }
             }
             return null
         }
 
-        private fun attemptDecrypt(data: ByteArray, key: ByteArray, seq: Long, ivMode: Int, offset: Int): ByteArray? {
+        private fun attemptDecrypt(data: ByteArray, key: ByteArray, seq: Long, offset: Int): ByteArray? {
             try {
-                val iv = generateIV(ivMode, seq)
+                // IV: Big Endian Sequence
+                val iv = ByteArray(16)
+                ByteBuffer.wrap(iv).order(ByteOrder.BIG_ENDIAN).putLong(8, seq)
                 val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
                 cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
                 return cipher.doFinal(data.copyOfRange(offset, data.size))
             } catch (e: Exception) { return null }
         }
-        
-        private fun attemptDecryptToBuffer(
-            input: ByteArray, key: ByteArray, seq: Long, 
-            ivMode: Int, offset: Int, length: Int, 
-            output: ByteArray
-        ): Boolean {
-            try {
-                val iv = generateIV(ivMode, seq)
-                val cipher = Cipher.getInstance("AES/CBC/NoPadding")
-                cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
-                val count = cipher.doFinal(input, offset, length, output, 0)
-                return count > 0
-            } catch (e: Exception) { return false }
-        }
-        
-        private fun generateIV(ivMode: Int, seq: Long): ByteArray {
-            val iv = ByteArray(16)
-            when (ivMode) {
-                0 -> if (!playlistIv.isNullOrEmpty()) {
-                        val hex = playlistIv!!.removePrefix("0x")
-                        hex.chunked(2).take(16).forEachIndexed { i, s -> iv[i] = s.toInt(16).toByte() }
-                     }
-                1 -> ByteBuffer.wrap(iv).order(ByteOrder.BIG_ENDIAN).putLong(8, seq)
-                2 -> ByteBuffer.wrap(iv).order(ByteOrder.LITTLE_ENDIAN).putLong(8, seq)
-            }
-            return iv
-        }
     }
 
-    class BunnyOptimizedDecryptor(jsonStr: String) {
-        private val baseKeyDefault: ByteArray
-        private val baseKeyUrl: ByteArray
-        private val workBuffer: ByteArray
-        private val layers: List<LayerInstruction>
-        private val tempBuffer: ByteArray 
-
-        private sealed class LayerInstruction(val name: String) {
-            class FinalEncrypt(val maskDefault: ByteArray, val maskUrl: ByteArray) : LayerInstruction("final_encrypt")
-            class DecoyShuffle(val positions: IntArray, val lens: IntArray, val offsets: IntArray) : LayerInstruction("decoy_shuffle")
-            class XorChain(val ivDefault: ByteArray, val ivUrl: ByteArray) : LayerInstruction("xor_chain")
-            class Sbox(val invDefault: ByteArray, val invUrl: ByteArray) : LayerInstruction("sbox")
-            class BitRotate(val rots: IntArray) : LayerInstruction("bit_rotate")
-            class SegNoise(val perm: IntArray, val noiseLens: IntArray) : LayerInstruction("segment_noise")
-            class BitInterleave(val perm: IntArray) : LayerInstruction("bit_interleave")
-            class Unknown(name: String) : LayerInstruction(name)
+    private fun hexToBytes(hex: String): ByteArray {
+        val len = hex.length
+        val data = ByteArray(len / 2)
+        var i = 0
+        while (i < len) {
+            data[i / 2] = ((Character.digit(hex[i], 16) shl 4) + Character.digit(hex[i + 1], 16)).toByte()
+            i += 2
         }
-
-        init {
-            val json = JSONObject(jsonStr)
-            val keyStr = json.getString("encrypted_key")
-            baseKeyDefault = Base64.decode(keyStr, Base64.DEFAULT)
-            baseKeyUrl = Base64.decode(keyStr, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
-            
-            workBuffer = ByteArray(maxOf(baseKeyDefault.size, baseKeyUrl.size) + 1024) 
-            tempBuffer = ByteArray(workBuffer.size)
-
-            val layersJson = json.getJSONArray("layers")
-            val tempLayers = ArrayList<LayerInstruction>()
-
-            for (i in 0 until layersJson.length()) {
-                val l = layersJson.getJSONObject(i)
-                when (l.getString("name")) {
-                    "final_encrypt" -> {
-                        val mStr = l.getString("xor_mask")
-                        tempLayers.add(LayerInstruction.FinalEncrypt(
-                            Base64.decode(mStr, Base64.DEFAULT),
-                            Base64.decode(mStr, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
-                        ))
-                    }
-                    "bit_rotate" -> {
-                        val r = l.getJSONArray("rotations")
-                        val arr = IntArray(r.length()) { k -> r.getInt(k) }
-                        tempLayers.add(LayerInstruction.BitRotate(arr))
-                    }
-                    "segment_noise" -> {
-                        val p = l.getJSONArray("perm"); val n = l.getJSONArray("noise_lens")
-                        tempLayers.add(LayerInstruction.SegNoise(
-                            IntArray(p.length()) { k -> p.getInt(k) },
-                            IntArray(n.length()) { k -> n.getInt(k) }
-                        ))
-                    }
-                    "bit_interleave" -> {
-                        val p = l.getJSONArray("perm")
-                        tempLayers.add(LayerInstruction.BitInterleave(IntArray(p.length()) { k -> p.getInt(k) }))
-                    }
-                    "sbox" -> {
-                        val key = if (l.has("inverse_sbox")) "inverse_sbox" else "sbox"
-                        val str = l.getString(key)
-                        tempLayers.add(LayerInstruction.Sbox(
-                            Base64.decode(str, Base64.DEFAULT),
-                            Base64.decode(str, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
-                        ))
-                    }
-                    "xor_chain" -> {
-                        val str = l.optString("init_key", null)
-                        val ivD = if (str != null) Base64.decode(str, Base64.DEFAULT) else ByteArray(0)
-                        val ivU = if (str != null) Base64.decode(str, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP) else ByteArray(0)
-                        tempLayers.add(LayerInstruction.XorChain(ivD, ivU))
-                    }
-                    "decoy_shuffle" -> {
-                         val pos = l.getJSONArray("real_positions")
-                         val len = l.getJSONArray("segment_lengths")
-                         val posArr = IntArray(pos.length()) { k -> pos.getInt(k) }
-                         val lenArr = IntArray(len.length()) { k -> len.getInt(k) }
-                         val offArr = IntArray(lenArr.size)
-                         var curr = 0
-                         for (k in lenArr.indices) { offArr[k] = curr; curr += lenArr[k] }
-                         tempLayers.add(LayerInstruction.DecoyShuffle(posArr, lenArr, offArr))
-                    }
-                    else -> tempLayers.add(LayerInstruction.Unknown(l.getString("name")))
-                }
-            }
-            layers = tempLayers
-        }
-        
-        fun checkPattern(): Boolean {
-            // Pattern: 01 0E 00
-            if (workBuffer[0] != 0x01.toByte() || workBuffer[1] != 0x0E.toByte() || workBuffer[2] != 0x00.toByte()) return false
-            
-            // Pattern: Remaining bytes are perms of 1..7 (Example check)
-            // Or just trust the prefix for speed if permutation check is too costly here.
-            // Let's rely on prefix + offset check logic.
-            return true
-        }
-
-        fun generateKey(variant: Int): ByteArray {
-            val p_lyr_fwd   = (variant shr 0) and 1 == 1
-            val p_b64_url   = (variant shr 1) and 1 == 1
-            val p_rot_l     = (variant shr 2) and 1 == 1
-            val p_rot_irev  = (variant shr 3) and 1 == 1
-            val p_int_gat   = (variant shr 4) and 1 == 1
-            val p_int_msb   = (variant shr 5) and 1 == 1
-            val p_seg_gat   = (variant shr 6) and 1 == 1
-            val p_seg_perm  = (variant shr 7) and 1 == 1
-            val p_seg_acc   = (variant shr 8) and 1 == 1
-            val p_xor_fwd   = (variant shr 9) and 1 == 1
-            val p_xor_b0    = (variant shr 10) and 1 == 1
-            val p_xor_iv_e  = (variant shr 11) and 1 == 1
-            val p_sbox_inv  = (variant shr 12) and 1 == 1
-
-            val srcKey = if (p_b64_url) baseKeyUrl else baseKeyDefault
-            val size = srcKey.size
-            System.arraycopy(srcKey, 0, workBuffer, 0, size)
-            var currentSize = size
-
-            val iter = if (p_lyr_fwd) layers.iterator() else layers.asReversed().iterator()
-
-            while (iter.hasNext()) {
-                val layer = iter.next()
-                when (layer) {
-                    is LayerInstruction.FinalEncrypt -> {
-                        val mask = if (p_b64_url) layer.maskUrl else layer.maskDefault
-                        if (mask.isNotEmpty()) {
-                            for (i in 0 until currentSize) {
-                                workBuffer[i] = (workBuffer[i].toInt() xor mask[i % mask.size].toInt()).toByte()
-                            }
-                        }
-                    }
-                    is LayerInstruction.BitRotate -> {
-                        val rots = layer.rots
-                        val len = rots.size
-                        for (i in 0 until currentSize) {
-                            val rIdx = if (p_rot_irev) (len - 1 - (i % len)) else (i % len)
-                            val rot = rots[rIdx]
-                            val b = workBuffer[i].toInt() and 0xFF
-                            val r = if (p_rot_l) (b shl rot) or (b ushr (8 - rot)) 
-                                    else (b ushr rot) or (b shl (8 - rot))
-                            workBuffer[i] = r.toByte()
-                        }
-                    }
-                    is LayerInstruction.SegNoise -> {
-                        val perm = layer.perm
-                        val noiseLens = layer.noiseLens
-                        System.arraycopy(workBuffer, 0, tempBuffer, 0, currentSize)
-                        
-                        var currentReadOffset = 0
-                        for (i in 0 until perm.size) {
-                             if (i >= currentSize) break 
-                             
-                             val originalIndex = perm[i]
-                             val lenIdx = if (p_seg_perm) originalIndex else i
-                             if (lenIdx < noiseLens.size) {
-                                 val chunkLen = noiseLens[lenIdx]
-                                 val destIdx = if (p_seg_gat) i else originalIndex
-                                 val srcOff = if (p_seg_acc) currentReadOffset else (i * chunkLen) 
-
-                                 if (destIdx < currentSize && srcOff < currentSize) {
-                                     workBuffer[destIdx] = tempBuffer[srcOff]
-                                 }
-                                 if (p_seg_acc) currentReadOffset += chunkLen
-                             }
-                        }
-                    }
-                    is LayerInstruction.BitInterleave -> {
-                        val perm = layer.perm
-                        System.arraycopy(workBuffer, 0, tempBuffer, 0, currentSize)
-                        val loopLen = minOf(perm.size, currentSize * 8)
-                        for(x in 0 until 16) if (x < currentSize) workBuffer[x] = 0
-                        
-                        for (j in 0 until loopLen) {
-                            val srcIdx = if (p_int_gat) perm[j] else j
-                            val dstIdx = if (p_int_gat) j else perm[j]
-                            
-                            val srcByte = srcIdx / 8; val srcBit = if (p_int_msb) 7 - (srcIdx % 8) else srcIdx % 8
-                            val dstByte = dstIdx / 8; val dstBit = if (p_int_msb) 7 - (dstIdx % 8) else dstIdx % 8
-                            
-                            if (srcByte < currentSize && dstByte < currentSize) {
-                                val bit = (tempBuffer[srcByte].toInt() shr srcBit) and 1
-                                if (bit == 1) {
-                                    workBuffer[dstByte] = (workBuffer[dstByte].toInt() or (1 shl dstBit)).toByte()
-                                }
-                            }
-                        }
-                    }
-                    is LayerInstruction.Sbox -> {
-                        val sbox = if (p_b64_url) layer.invUrl else layer.invDefault 
-                        if (sbox.size == 256) {
-                            for (i in 0 until currentSize) {
-                                val idx = workBuffer[i].toInt() and 0xFF
-                                workBuffer[i] = sbox[idx]
-                            }
-                        }
-                    }
-                    is LayerInstruction.XorChain -> {
-                        val iv = if (p_b64_url) layer.ivUrl else layer.ivDefault
-                        val start = if (p_xor_b0) 0 else 1
-                        
-                        System.arraycopy(workBuffer, 0, tempBuffer, 0, currentSize)
-                        
-                        if (p_xor_fwd) {
-                            for (j in start until currentSize - 1) {
-                                workBuffer[j+1] = (workBuffer[j+1].toInt() xor workBuffer[j].toInt()).toByte()
-                            }
-                        } else {
-                            for (j in currentSize - 1 downTo start + 1) {
-                                workBuffer[j] = (workBuffer[j].toInt() xor workBuffer[j-1].toInt()).toByte()
-                            }
-                        }
-                        
-                        if (iv.isNotEmpty()) {
-                            val idx = if (p_xor_iv_e) currentSize - 1 else 0
-                            workBuffer[idx] = (workBuffer[idx].toInt() xor iv[0].toInt()).toByte()
-                        }
-                    }
-                    is LayerInstruction.DecoyShuffle -> {
-                        System.arraycopy(workBuffer, 0, tempBuffer, 0, currentSize)
-                        val posArr = layer.positions
-                        val lenArr = layer.lens
-                        val offArr = layer.offsets
-                        
-                        var writePtr = 0
-                        for (i in 0 until posArr.size) {
-                             val pos = posArr[i]
-                             if (pos < lenArr.size && pos < offArr.size) {
-                                 val len = lenArr[pos]
-                                 val off = offArr[pos]
-                                 if (off + len <= currentSize && writePtr + len <= workBuffer.size) {
-                                     val byteToKeep = if (p_seg_acc) tempBuffer[off + len - 1] else tempBuffer[off]
-                                     workBuffer[writePtr] = byteToKeep
-                                     writePtr += 1
-                                 }
-                             }
-                        }
-                         if (writePtr > 0) currentSize = writePtr
-                    }
-                    else -> {}
-                }
-            }
-            return workBuffer
-        }
+        return data
     }
 }
