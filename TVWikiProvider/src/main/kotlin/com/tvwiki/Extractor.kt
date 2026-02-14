@@ -31,10 +31,10 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * [Version: v2026-02-14-FullDump]
- * 1. Data Dump: 복호화된 데이터의 앞부분 3200바이트를 16진수로 로그캣에 분할 출력.
- * (로그캣 길이 제한 우회)
- * 2. Logic: 검증된 복호화 로직(UniversalKeyFix) 유지 + Standard IV 사용.
+ * [Version: v2026-02-14-SlidingWindow]
+ * 1. Sliding Window Decrypt: 입력 데이터의 시작점(Offset)을 0~15바이트씩 밀어가며 'NoPadding'으로 강제 복호화.
+ * 2. Deep Scan: 복호화된 결과물 전체에서 TS Sync Byte(0x47) 패턴을 검색하여 유효한 스트림을 찾아냄.
+ * 3. AES-CBC Self-Healing: IV가 틀려도 2번째 블록부터는 복구되는 특성을 이용하여 IV 의존성 제거.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -207,6 +207,10 @@ class BunnyPoorCdn : ExtractorApi() {
         @Volatile private var targetKeyUrl: String? = null
         
         @Volatile private var realKey: ByteArray? = null
+        
+        // 캐싱: 성공한 오프셋 및 IV 모드
+        data class DecryptProfile(val offset: Int)
+        @Volatile private var confirmedProfile: DecryptProfile? = null
 
         fun start() {
             try {
@@ -229,6 +233,7 @@ class BunnyPoorCdn : ExtractorApi() {
         fun updateSession(h: Map<String, String>, iv: String?) {
             currentHeaders = h; playlistIv = iv
             realKey = null
+            confirmedProfile = null
         }
         fun setPlaylist(p: String) { currentPlaylist = p }
         fun updateSeqMap(map: ConcurrentHashMap<String, Long>) { seqMap = map }
@@ -249,33 +254,12 @@ class BunnyPoorCdn : ExtractorApi() {
                         val decrypted = BunnyJsonDecryptor.decrypt(jsonStr)
                         if (decrypted != null) {
                             realKey = decrypted
-                            println("[BunnyPoorCdn] Key Generated: ${bytesToHex(decrypted, 16)}")
+                            println("[BunnyPoorCdn] Key Gen: ${Base64.encodeToString(realKey, Base64.NO_WRAP)}")
                         }
                     } else if (rawData.size == 16) {
                         realKey = rawData
                     }
                 } catch (e: Exception) { e.printStackTrace() }
-            }
-        }
-        
-        private fun bytesToHex(bytes: ByteArray, length: Int): String {
-            val sb = StringBuilder()
-            val len = minOf(bytes.size, length)
-            for (i in 0 until len) {
-                sb.append(String.format("%02X", bytes[i]))
-            }
-            return sb.toString()
-        }
-
-        // [Full Dump] 로그캣 제한을 우회하여 긴 로그 출력
-        private fun dumpLargeHex(label: String, bytes: ByteArray) {
-            // 3200바이트 덤프
-            val dumpSize = 3200
-            val hexString = bytesToHex(bytes, dumpSize)
-            
-            // 3000자씩 끊어서 출력 (로그캣 잘림 방지)
-            hexString.chunked(3000).forEachIndexed { index, chunk ->
-                println("[BunnyDump] $label [Part $index]: $chunk")
             }
         }
 
@@ -298,8 +282,6 @@ class BunnyPoorCdn : ExtractorApi() {
                 } else if (path.contains("/proxy")) {
                     val urlParam = path.substringAfter("url=").substringBefore(" ")
                     val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
-                    val seq = seqMap[targetUrl] ?: 0L
-                    
                     ensureKey()
 
                     runBlocking {
@@ -307,36 +289,17 @@ class BunnyPoorCdn : ExtractorApi() {
                             val res = app.get(targetUrl, headers = currentHeaders)
                             if (res.isSuccessful) {
                                 val rawData = res.body.bytes()
-                                
                                 output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
 
                                 if (realKey != null) {
-                                    val iv = ByteArray(16)
-                                    // Standard IV (Big Endian)
-                                    if (!playlistIv.isNullOrEmpty()) {
-                                         val hex = playlistIv!!.removePrefix("0x")
-                                         hex.chunked(2).take(16).forEachIndexed { i, s -> iv[i] = s.toInt(16).toByte() }
-                                    } else {
-                                        ByteBuffer.wrap(iv).order(ByteOrder.BIG_ENDIAN).putLong(8, seq)
-                                    }
-
-                                    try {
-                                        val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-                                        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(realKey!!, "AES"), IvParameterSpec(iv))
-                                        val decrypted = cipher.doFinal(rawData)
-                                        
-                                        // [Dump] 복호화 결과물 3200바이트 덤프
-                                        dumpLargeHex("Decrypted Data", decrypted)
-                                        
+                                    val decrypted = slidingWindowDecrypt(rawData, realKey!!)
+                                    if (decrypted != null) {
                                         output.write(decrypted)
-                                    } catch (e: Exception) {
-                                        println("[BunnyPoorCdn] Decrypt Error: ${e.message}")
-                                        // 실패 시 원본이라도 덤프
-                                        dumpLargeHex("Raw Data (Decrypt Failed)", rawData)
+                                    } else {
+                                        // 실패 시 원본이라도 전송
                                         output.write(rawData)
                                     }
                                 } else {
-                                    dumpLargeHex("Raw Data (No Key)", rawData)
                                     output.write(rawData)
                                 }
                             } else {
@@ -349,6 +312,76 @@ class BunnyPoorCdn : ExtractorApi() {
             } catch (e: Exception) { 
                 try { socket.close() } catch(e2:Exception){} 
             }
+        }
+
+        // [핵심] Sliding Window Decrypt
+        private fun slidingWindowDecrypt(data: ByteArray, key: ByteArray): ByteArray? {
+            // 1. 캐시된 프로필 확인
+            confirmedProfile?.let { profile ->
+                val dec = attemptDecrypt(data, key, profile.offset)
+                if (findSyncByte(dec) != -1) return dec
+                confirmedProfile = null
+            }
+
+            // 2. Offset 0~15 시도 (블록 정렬 맞추기)
+            // NoPadding + ZeroIV 사용 -> 키만 맞으면 2번째 블록부터 복호화됨
+            val iv = ByteArray(16) // Zero IV
+            val cipher = Cipher.getInstance("AES/CBC/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+
+            for (offset in 0..15) {
+                if (data.size <= offset) break
+                
+                // 데이터 길이가 16의 배수가 되도록 조정 (NoPadding 필수조건)
+                val len = data.size - offset
+                val alignLen = (len / 16) * 16
+                if (alignLen <= 0) continue
+
+                try {
+                    val slice = data.copyOfRange(offset, offset + alignLen)
+                    val decrypted = cipher.doFinal(slice)
+                    
+                    // TS Sync Byte (0x47) 검색
+                    val syncIndex = findSyncByte(decrypted)
+                    if (syncIndex != -1) {
+                        println("[BunnyPoorCdn] Crack Success! Offset: $offset, SyncIndex: $syncIndex")
+                        confirmedProfile = DecryptProfile(offset)
+                        // Sync Byte부터 시작하도록 잘라서 반환
+                        return decrypted.copyOfRange(syncIndex, decrypted.size)
+                    }
+                } catch (e: Exception) {}
+            }
+            
+            return null
+        }
+        
+        private fun attemptDecrypt(data: ByteArray, key: ByteArray, offset: Int): ByteArray? {
+            return try {
+                val len = data.size - offset
+                val alignLen = (len / 16) * 16
+                if (alignLen <= 0) return null
+                
+                val iv = ByteArray(16)
+                val cipher = Cipher.getInstance("AES/CBC/NoPadding")
+                cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+                
+                val slice = data.copyOfRange(offset, offset + alignLen)
+                val decrypted = cipher.doFinal(slice)
+                
+                val syncIndex = findSyncByte(decrypted)
+                if (syncIndex != -1) decrypted.copyOfRange(syncIndex, decrypted.size) else null
+            } catch(e: Exception) { null }
+        }
+
+        private fun findSyncByte(data: ByteArray): Int {
+            // 처음 2KB 내에서 0x47 패턴 검색 (188바이트 간격)
+            val limit = minOf(data.size, 2048)
+            for (i in 0 until limit - 376) {
+                if (data[i] == 0x47.toByte() && data[i+188] == 0x47.toByte() && data[i+376] == 0x47.toByte()) {
+                    return i
+                }
+            }
+            return -1
         }
     }
 
@@ -460,7 +493,7 @@ class BunnyPoorCdn : ExtractorApi() {
                         }
                         "bit_interleave" -> {
                             val perm = layer.getJSONArray("perm")
-                            val newData = ByteArray(16) // Always 128 bits
+                            val newData = ByteArray(16)
                             for (j in 0 until perm.length()) {
                                 val srcByteIdx = j / 8
                                 val srcBitPos = 7 - (j % 8)
