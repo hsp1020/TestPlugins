@@ -31,10 +31,9 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * [Version: v2026-02-14-IvRecovery]
- * 1. IV Recovery: ECB 모드로 첫 블록을 복호화하여 역으로 IV를 산출하는 스마트 크랙 로직 적용.
- * 2. Key Decryption: Python 검증 로직 탑재.
- * 3. Fallback: 실패 시에도 원본 스트림 전송.
+ * [Version: v2026-02-14-SmartSyncFind]
+ * 1. Sync Byte Scan: 복호화된 데이터의 첫 1KB 내에서 0x47(Sync Byte)을 검색하여 유효성 판단 (헤더 오프셋 대응).
+ * 2. IV Recovery: 단순 첫 바이트 비교가 아닌, 패턴 매칭 성공 시 해당 IV 채택.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -123,6 +122,7 @@ class BunnyPoorCdn : ExtractorApi() {
                 val m3u8Res = app.get(capturedUrl, headers = capturedHeaders!!)
                 val m3u8Content = m3u8Res.text
 
+                // IV 추출 (있으면)
                 val keyMatch = Regex("""#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"(?:,IV=(0x[0-9a-fA-F]+))?""").find(m3u8Content)
                 val hexIv = keyMatch?.groupValues?.get(2)
                 
@@ -206,7 +206,9 @@ class BunnyPoorCdn : ExtractorApi() {
         @Volatile private var targetKeyUrl: String? = null
         
         @Volatile private var realKey: ByteArray? = null
-        @Volatile private var cachedIv: ByteArray? = null
+        
+        data class DecryptProfile(val ivMode: Int, val padding: String)
+        @Volatile private var confirmedProfile: DecryptProfile? = null
 
         fun start() {
             try {
@@ -229,7 +231,7 @@ class BunnyPoorCdn : ExtractorApi() {
         fun updateSession(h: Map<String, String>, iv: String?) {
             currentHeaders = h; playlistIv = iv
             realKey = null
-            cachedIv = null
+            confirmedProfile = null
         }
         fun setPlaylist(p: String) { currentPlaylist = p }
         fun updateSeqMap(map: ConcurrentHashMap<String, Long>) { seqMap = map }
@@ -250,7 +252,7 @@ class BunnyPoorCdn : ExtractorApi() {
                         val decrypted = BunnyJsonDecryptor.decrypt(jsonStr)
                         if (decrypted != null) {
                             realKey = decrypted
-                            println("[BunnyPoorCdn] Decryption Success. Key Hex: ${bytesToHex(decrypted)}")
+                            println("[BunnyPoorCdn] Decryption Success. Key: ${Base64.encodeToString(realKey, Base64.NO_WRAP)}")
                         }
                     } else if (rawData.size == 16) {
                         realKey = rawData
@@ -258,17 +260,6 @@ class BunnyPoorCdn : ExtractorApi() {
                     }
                 } catch (e: Exception) { e.printStackTrace() }
             }
-        }
-        
-        private fun bytesToHex(bytes: ByteArray): String {
-            val hexArray = "0123456789ABCDEF".toCharArray()
-            val hexChars = CharArray(bytes.size * 2)
-            for (j in bytes.indices) {
-                val v = bytes[j].toInt() and 0xFF
-                hexChars[j * 2] = hexArray[v ushr 4]
-                hexChars[j * 2 + 1] = hexArray[v and 0x0F]
-            }
-            return String(hexChars)
         }
 
         private fun handleClient(socket: Socket) = thread {
@@ -301,8 +292,13 @@ class BunnyPoorCdn : ExtractorApi() {
                                 output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
 
                                 if (realKey != null) {
-                                    val decrypted = smartDecrypt(rawData, realKey!!, seq)
-                                    output.write(decrypted ?: rawData)
+                                    val decrypted = bruteForceDecrypt(rawData, realKey!!, seq)
+                                    if (decrypted != null) {
+                                        output.write(decrypted)
+                                    } else {
+                                        // 실패 시 원본 전송 (재생 실패 가능성 높음)
+                                        output.write(rawData)
+                                    }
                                 } else {
                                     output.write(rawData)
                                 }
@@ -318,72 +314,70 @@ class BunnyPoorCdn : ExtractorApi() {
             }
         }
 
-        // [핵심] IV Recovery & Smart Decrypt
-        private fun smartDecrypt(data: ByteArray, key: ByteArray, seq: Long): ByteArray? {
-            // 1. 이미 찾은 IV가 있으면 사용
-            if (cachedIv != null) {
-                // Sequence 기반이면 Seq 업데이트 필요. 여기서는 고정 IV인지 체크
-                // 보통 HLS는 Seq마다 IV가 바뀜. 하지만 패턴이 있을 것임.
-                // 일단 정석대로 Seq 기반 시도 후 Recovery 시도.
+        private fun bruteForceDecrypt(data: ByteArray, key: ByteArray, seq: Long): ByteArray? {
+            // 1. 캐시된 프로필 시도
+            confirmedProfile?.let { profile ->
+                val dec = attemptDecrypt(data, key, seq, profile.ivMode, profile.padding)
+                if (isValidTS(dec)) return dec
+                confirmedProfile = null 
             }
+
+            // 2. 모든 조합 시도
+            // IV Modes: 0=Explicit, 1=BigEndian, 2=LittleEndian, 3=Zero
+            val ivModes = mutableListOf(1, 2, 3)
+            if (!playlistIv.isNullOrEmpty()) ivModes.add(0, 0)
             
-            // 2. 표준 IV 시도
-            val ivStandard = ByteArray(16)
-            ByteBuffer.wrap(ivStandard).order(ByteOrder.BIG_ENDIAN).putLong(8, seq)
-            var decrypted = attemptDecrypt(data, key, ivStandard)
-            if (isValidTS(decrypted)) return decrypted
+            val paddings = listOf("PKCS5Padding", "NoPadding")
 
-            // 3. IV Recovery (ECB Attack)
-            // 첫 블록(16바이트)을 ECB로 복호화 -> P0'
-            // 진짜 P0의 첫 바이트는 0x47.
-            // P0[0] = P0'[0] ^ IV[0]  =>  0x47 = P0'[0] ^ IV[0]  =>  IV[0] = P0'[0] ^ 0x47
-            try {
-                val cipherECB = Cipher.getInstance("AES/ECB/NoPadding")
-                cipherECB.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"))
-                val firstBlock = data.copyOfRange(0, 16)
-                val p0_prime = cipherECB.doFinal(firstBlock)
-                
-                // IV[0] 추측
-                val estimatedIvByte0 = (p0_prime[0] xor 0x47.toByte())
-                
-                // 추측된 바이트로 IV 후보 생성 (Zero Padding 가정)
-                val recoveredIv = ByteArray(16)
-                recoveredIv[0] = estimatedIvByte0 
-                // 나머지 바이트는 Seq나 0일 확률 높음. 
-                // 하지만 IV 전체를 복구하긴 어려움.
-                // 만약 IV가 Sequence라면, IV[0]가 0일 확률이 매우 높음 (Seq가 엄청 크지 않은 이상).
-                
-                // 만약 estimatedIvByte0가 0이 아니라면, 뭔가 Offset이 있는 것임.
-                if (estimatedIvByte0 != 0.toByte()) {
-                    println("[BunnyPoorCdn] Non-zero IV Start detected: $estimatedIvByte0")
+            for (ivMode in ivModes) {
+                for (padding in paddings) {
+                    val dec = attemptDecrypt(data, key, seq, ivMode, padding)
+                    if (isValidTS(dec)) {
+                        println("[BunnyPoorCdn] Decrypt Success! Mode:$ivMode, Pad:$padding")
+                        confirmedProfile = DecryptProfile(ivMode, padding)
+                        return dec
+                    }
                 }
-                
-                // 다른 IV 모드 시도 (Little Endian)
-                val ivLE = ByteArray(16)
-                ByteBuffer.wrap(ivLE).order(ByteOrder.LITTLE_ENDIAN).putLong(8, seq)
-                decrypted = attemptDecrypt(data, key, ivLE)
-                if (isValidTS(decrypted)) return decrypted
-
-                // Zero IV 시도
-                decrypted = attemptDecrypt(data, key, ByteArray(16))
-                if (isValidTS(decrypted)) return decrypted
-                
-            } catch(e: Exception) {}
-
+            }
             return null
         }
 
-        private fun attemptDecrypt(data: ByteArray, key: ByteArray, iv: ByteArray): ByteArray? {
+        private fun attemptDecrypt(data: ByteArray, key: ByteArray, seq: Long, ivMode: Int, padding: String): ByteArray? {
             return try {
-                val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+                val iv = ByteArray(16)
+                when (ivMode) {
+                    0 -> {
+                        if (!playlistIv.isNullOrEmpty()) {
+                             val hex = playlistIv!!.removePrefix("0x")
+                             hex.chunked(2).take(16).forEachIndexed { i, s -> iv[i] = s.toInt(16).toByte() }
+                        }
+                    }
+                    1 -> ByteBuffer.wrap(iv).order(ByteOrder.BIG_ENDIAN).putLong(8, seq)
+                    2 -> ByteBuffer.wrap(iv).order(ByteOrder.LITTLE_ENDIAN).putLong(8, seq)
+                }
+
+                val cipher = Cipher.getInstance("AES/CBC/$padding")
                 cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
                 cipher.doFinal(data)
             } catch (e: Exception) { null }
         }
 
+        // [검증 강화] 0x47 Sync Byte 검색 (Offset 고려)
         private fun isValidTS(data: ByteArray?): Boolean {
-            if (data == null || data.size < 376) return false
-            return data[0] == 0x47.toByte() && data[188] == 0x47.toByte()
+            if (data == null || data.size < 188) return false
+            
+            // 처음 1KB 내에서 0x47 찾기
+            val scanLimit = minOf(data.size, 1024)
+            for (i in 0 until scanLimit - 188) {
+                if (data[i] == 0x47.toByte()) {
+                    // 연속된 패킷 확인 (False Positive 방지)
+                    // i+188 위치에도 0x47이 있는지 확인
+                    if (i + 188 < data.size && data[i + 188] == 0x47.toByte()) {
+                        return true
+                    }
+                }
+            }
+            return false
         }
     }
 
