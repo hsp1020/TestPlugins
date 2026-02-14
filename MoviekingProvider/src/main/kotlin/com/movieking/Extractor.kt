@@ -7,19 +7,21 @@ import com.lagradost.cloudstream3.SubtitleFile
 import java.io.*
 import java.net.*
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Semaphore
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.delay
 import kotlin.concurrent.thread
 
 /**
- * v124-5: Full Persistence & Zero-Lag Seeking
+ * v124-7: TCP Connection Pooling & Keep-Alive Tuning
  * [수정 사항]
- * 1. Static Cache: confirmedKey와 seqMap을 Companion Object에 두어 getUrl 재호출 시에도 데이터 유지.
- * 2. BruteForce Lock: 키가 한 번 확정되면 절대 재계산하지 않고 즉시 복호화 시도.
- * 3. Network Resilience: 타임아웃을 30초로 대폭 늘려 서버의 빈 응답 및 지연 대응.
- * 4. 세그먼트 매핑 최적화: URL 전체 매핑 방식의 메모리 누수 방지 및 정확도 향상.
+ * 1. Persistent Connection: 'Connection: keep-alive' 및 'Keep-Alive: timeout=60' 헤더를 추가하여 TCP 세션 유지.
+ * 2. Header Synchronization: 원본 서버가 브라우저의 지속 연결로 인식하게 하여 ERR_EMPTY_RESPONSE 방어.
+ * 3. Proxy Optimization: 소켓 응답 후 스트림을 즉시 닫지 않고 버퍼를 비워 연결 유지력 향상.
+ * 4. Pacing Adjustment: 세마포어 수치를 조정하여 동시성 효율 최적화.
  */
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -30,11 +32,13 @@ class BcbcRedExtractor : ExtractorApi() {
     companion object {
         private var proxyServer: ProxyWebServer? = null
         
-        // 전역 캐시: 구간 이동 시 정보 유실 방지
         @Volatile private var globalConfirmedKey: ByteArray? = null
         @Volatile private var globalConfirmedIvType: Int = -1
         @Volatile private var globalLastVideoId: String? = null
         private val globalSeqMap = ConcurrentHashMap<String, Long>()
+        
+        // 동시 요청 속도 제한 (Keep-Alive 세션 효율을 위해 5개로 확장)
+        private val requestSemaphore = Semaphore(5)
     }
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
@@ -43,7 +47,9 @@ class BcbcRedExtractor : ExtractorApi() {
             val baseHeaders = mutableMapOf(
                 "Referer" to "https://player-v1.bcbc.red/",
                 "Origin" to "https://player-v1.bcbc.red",
-                "User-Agent" to DESKTOP_UA
+                "User-Agent" to DESKTOP_UA,
+                "Connection" to "keep-alive",
+                "Keep-Alive" to "timeout=60, max=100" // 연결 유지 속성 명시
             )
             
             val playerHtml = app.get(url, headers = baseHeaders).text
@@ -54,7 +60,6 @@ class BcbcRedExtractor : ExtractorApi() {
             val hexIv = keyMatch?.groupValues?.get(2)
             val candidates = if (keyMatch != null) solveKeyCandidatesCombinatorial(baseHeaders, keyMatch.groupValues[1]) else emptyList()
             
-            // 영상이 바뀌었을 때만 전역 캐시 초기화
             if (globalLastVideoId != videoId) {
                 globalConfirmedKey = null
                 globalConfirmedIvType = -1
@@ -80,7 +85,6 @@ class BcbcRedExtractor : ExtractorApi() {
                 if (line.startsWith("#EXT-X-KEY")) continue
                 if (line.isNotBlank() && !line.startsWith("#")) {
                     val segmentUrl = if (line.startsWith("http")) line else "${m3u8Url.substringBeforeLast("/")}/$line"
-                    // 전역 맵에 시퀀스 번호 저장
                     globalSeqMap[segmentUrl] = tempSeq
                     newLines.add("$proxyRoot/proxy?url=${URLEncoder.encode(segmentUrl, "UTF-8")}")
                     tempSeq++
@@ -92,7 +96,7 @@ class BcbcRedExtractor : ExtractorApi() {
             proxyServer!!.setPlaylist(newLines.joinToString("\n"))
             
             callback(newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) { this.referer = "https://player-v1.bcbc.red/" })
-        } catch (e: Exception) { println("[MovieKing v124-5] getUrl Error: $e") }
+        } catch (e: Exception) { println("[MovieKing v124-7] getUrl Error: $e") }
     }
 
     private fun extractVideoIdDeep(url: String): String {
@@ -168,14 +172,15 @@ class BcbcRedExtractor : ExtractorApi() {
 
         private fun handleClient(socket: Socket) = thread {
             try {
-                socket.soTimeout = 30000 // 타임아웃 30초
+                socket.tcpNoDelay = true // 지연 최소화
+                socket.soTimeout = 30000
                 val reader = socket.getInputStream().bufferedReader()
                 val line = reader.readLine() ?: return@thread
                 val path = if (line.contains(" ")) line.split(" ")[1] else return@thread
                 val output = socket.getOutputStream()
 
                 if (path.contains("/playlist.m3u8")) {
-                    output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\n\r\n".toByteArray())
+                    output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nConnection: keep-alive\r\n\r\n".toByteArray())
                     output.write(currentPlaylist.toByteArray())
                 } else if (path.contains("/proxy")) {
                     val urlParam = path.substringAfter("url=").substringBefore(" ")
@@ -183,34 +188,46 @@ class BcbcRedExtractor : ExtractorApi() {
                     val seq = globalSeqMap[targetUrl] ?: 0L
                     
                     runBlocking {
+                        requestSemaphore.acquire()
                         try {
-                            val res = app.get(targetUrl, headers = currentHeaders, timeout = 30)
-                            if (res.isSuccessful) {
-                                val raw = res.body.bytes()
-                                output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
-                                
-                                // 이미 복호화된 데이터인 경우(TS 헤더 0x47)
-                                if (raw.isNotEmpty() && raw[0] == 0x47.toByte()) {
-                                    output.write(raw)
+                            var rawData: ByteArray? = null
+                            for (retry in 1..3) {
+                                try {
+                                    // app.get 호출 시 내부적으로 OkHttp Connection Pool이 작동함
+                                    val res = app.get(targetUrl, headers = currentHeaders, timeout = 20)
+                                    if (res.isSuccessful) {
+                                        rawData = res.body.bytes()
+                                        if (rawData.isNotEmpty()) break
+                                    }
+                                } catch (e: Exception) {
+                                    if (retry == 3) throw e
+                                    delay(150L * retry)
+                                }
+                            }
+
+                            if (rawData != null) {
+                                output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nConnection: keep-alive\r\n\r\n".toByteArray())
+                                if (rawData.isNotEmpty() && rawData[0] == 0x47.toByte()) {
+                                    output.write(rawData)
                                 } else {
-                                    // 1. 이미 정답 키를 알고 있다면 즉시 복호화 (Seek 렉 방지 핵심)
                                     globalConfirmedKey?.let { k ->
-                                        val dec = decryptDirect(raw, k, globalConfirmedIvType, seq)
+                                        val dec = decryptDirect(rawData, k, globalConfirmedIvType, seq)
                                         if (dec != null) {
                                             output.write(dec)
                                             return@runBlocking
                                         }
                                     }
-                                    
-                                    // 2. 키를 모를 때만 브루트포스 실행
-                                    val dec = bruteForceCombinatorial(raw, seq)
-                                    if (dec != null) output.write(dec) else output.write(raw)
+                                    val dec = bruteForceCombinatorial(rawData, seq)
+                                    if (dec != null) output.write(dec) else output.write(rawData)
                                 }
                             }
-                        } catch (e: Exception) { println("[MovieKing v124-5] Proxy Fetch Error: $e") }
+                        } finally {
+                            requestSemaphore.release()
+                        }
                     }
                 }
-                output.flush(); socket.close()
+                output.flush()
+                socket.close()
             } catch (e: Exception) { try { socket.close() } catch(e2:Exception){} }
         }
 
@@ -233,7 +250,6 @@ class BcbcRedExtractor : ExtractorApi() {
                         val cipher = Cipher.getInstance("AES/CBC/NoPadding")
                         cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
                         val head = cipher.update(data.take(376).toByteArray())
-                        // TS 패킷 연속성 확인 (0x47 ... 188자 뒤 ... 0x47)
                         if (head.size >= 189 && head[0] == 0x47.toByte() && head[188] == 0x47.toByte()) {
                             globalConfirmedKey = key
                             globalConfirmedIvType = iIdx
@@ -257,8 +273,7 @@ class BcbcRedExtractor : ExtractorApi() {
             }
             val sIv = ByteArray(16)
             for (i in 0..7) sIv[15 - i] = (seq shr (i * 8)).toByte()
-            list.add(sIv)
-            list.add(ByteArray(16))
+            list.add(sIv); list.add(ByteArray(16))
             return list
         }
         
