@@ -4,6 +4,8 @@ import android.os.Handler
 import android.os.Looper
 import android.webkit.ConsoleMessage
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.lagradost.cloudstream3.SubtitleFile
@@ -36,11 +38,11 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * [Version: v45-Final-Perfect-Hybrid]
- * 1. Rollback: v33의 'JS Hooking' 방식을 사용하여 키 추출 성공률 복구.
- * 2. Fix 403: Proxy 요청 시 Origin/Referer 헤더를 주입하여 서버 차단 우회.
- * 3. Separation: 키 추출(WebView)과 URL 확보(Resolver)를 독립적으로 실행하여 충돌 방지.
- * 4. Stability: Latch 초기화 로직 강화로 대기 스킵 현상 해결.
+ * [Version: v46-Final-Stability]
+ * 1. Key Logic (v33): Started/Finished/Progress 모든 시점에 JS 주입하여 키 탈취 성공률 극대화.
+ * 2. URL Fetch (Old): WebViewResolver를 사용하여 안정적으로 c.html 주소 확보.
+ * 3. 403 Fix: Proxy 서버 요청 시 Referer/Origin 헤더를 필수로 포함하여 서버 차단 우회.
+ * 4. Logs: 모든 핵심 단계의 println 로그 유지.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -51,10 +53,9 @@ class BunnyPoorCdn : ExtractorApi() {
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
-        private const val TAG = "[Bunny-v45]"
+        private const val TAG = "[Bunny-v46]"
 
         @Volatile internal var globalKey: ByteArray? = null
-        // 매번 새로 할당하기 위해 변수로 선언
         @Volatile internal var keyLatch = CountDownLatch(1)
 
         fun hexToBytes(hex: String): ByteArray {
@@ -79,7 +80,7 @@ class BunnyPoorCdn : ExtractorApi() {
         proxyServer?.stop()
         proxyServer = null
         globalKey = null
-        keyLatch = CountDownLatch(1) // 확실하게 초기화
+        keyLatch = CountDownLatch(1)
         
         extract(url, referer, subtitleCallback, callback)
     }
@@ -104,7 +105,7 @@ class BunnyPoorCdn : ExtractorApi() {
             } catch (e: Exception) {}
         }
 
-        // [Track 1] 키 탈취 (v33 방식 - 간섭 없음)
+        // [Track 1] 키 탈취 시작 (v33 훅킹 타이밍 복구)
         val targetUrlForJs = cleanUrl
         Handler(Looper.getMainLooper()).post {
             JsKeyStealer.stealKey(targetUrlForJs, DESKTOP_UA, cleanReferer)
@@ -128,10 +129,10 @@ class BunnyPoorCdn : ExtractorApi() {
                 println("$TAG [Fetcher] URL Captured: $capturedM3u8Url")
             }
         } catch (e: Exception) { 
-            println("$TAG [Fetcher] Timeout or Error: ${e.message}")
+            println("$TAG [Fetcher] Error or Timeout: ${e.message}")
         }
 
-        // [Wait] 키 확보 대기
+        // [Wait] 키 확보 대기 (UI 스레드 영향 없도록 IO에서 대기)
         println("$TAG [Main] Waiting for Key...")
         withContext(Dispatchers.IO) {
             keyLatch.await(20, TimeUnit.SECONDS)
@@ -139,7 +140,7 @@ class BunnyPoorCdn : ExtractorApi() {
         
         val finalKey = globalKey
         if (finalKey != null && capturedM3u8Url != null) {
-            println("$TAG [Success] Launching Hybrid Proxy.")
+            println("$TAG [Success] Launching Proxy with Key and URL.")
             startProxy(capturedM3u8Url, finalKey, callback)
             return true
         } else {
@@ -154,7 +155,7 @@ class BunnyPoorCdn : ExtractorApi() {
         callback: (ExtractorLink) -> Unit
     ) {
         try {
-            // [중요] 403 방지를 위한 브라우저 헤더 복제
+            // [Critical] 403 에러 방지 헤더
             val requestHeaders = mapOf(
                 "User-Agent" to DESKTOP_UA,
                 "Referer" to "https://player.bunny-frame.online/",
@@ -169,7 +170,6 @@ class BunnyPoorCdn : ExtractorApi() {
             
             val proxy = ProxyWebServer()
             proxy.start()
-            // 진짜 키와 헤더 주입
             proxy.updateSession(key, hexIv, requestHeaders) 
             proxyServer = proxy
 
@@ -291,6 +291,7 @@ class BunnyPoorCdn : ExtractorApi() {
                 }
                 override fun onProgressChanged(view: WebView?, newProgress: Int) {
                     super.onProgressChanged(view, newProgress)
+                    // [v33 복구] 진행 중 지속 주입
                     view?.evaluateJavascript(HOOK_SCRIPT, null)
                 }
             }
@@ -298,6 +299,12 @@ class BunnyPoorCdn : ExtractorApi() {
             webView.webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
+                    // [v33 복구] 완료 시 주입
+                    view?.evaluateJavascript(HOOK_SCRIPT, null)
+                }
+                override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                    super.onPageStarted(view, url, favicon)
+                    // [v33 복구] 시작 시 주입 (가장 중요)
                     view?.evaluateJavascript(HOOK_SCRIPT, null)
                 }
             }
@@ -306,7 +313,7 @@ class BunnyPoorCdn : ExtractorApi() {
             handler.postDelayed({
                 try { 
                     if (BunnyPoorCdn.keyLatch.count > 0) {
-                         println("$TAG [JS] Timeout. Force releasing latch.")
+                         println("$TAG [JS] Timeout! Releasing latch.")
                          BunnyPoorCdn.keyLatch.countDown()
                          webView.destroy()
                     }
@@ -326,7 +333,7 @@ class BunnyPoorCdn : ExtractorApi() {
         @Volatile private var seqMap: ConcurrentHashMap<String, Long> = ConcurrentHashMap()
         @Volatile private var playlistIv: String? = null
         @Volatile private var decryptionKey: ByteArray? = null
-        @Volatile private var headers: Map<String, String> = emptyMap()
+        @Volatile private var proxyHeaders: Map<String, String> = emptyMap()
 
         fun start() {
             try {
@@ -349,7 +356,7 @@ class BunnyPoorCdn : ExtractorApi() {
         fun updateSession(key: ByteArray, iv: String?, h: Map<String, String>) {
             decryptionKey = key
             playlistIv = iv
-            headers = h
+            proxyHeaders = h
         }
         
         fun setPlaylist(p: String) { currentPlaylist = p }
@@ -377,18 +384,14 @@ class BunnyPoorCdn : ExtractorApi() {
 
                     runBlocking {
                         try {
-                            // [핵심] 주입받은 헤더(Referer/Origin)를 사용하여 403 우회
-                            val res = app.get(targetUrl, headers = headers)
+                            // [Fix] 세그먼트 요청 시 403 에러 방지를 위해 저장해둔 헤더 사용
+                            val res = app.get(targetUrl, headers = proxyHeaders)
                             if (res.isSuccessful) {
                                 val rawData = res.body.bytes()
                                 output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
                                 
                                 val key = decryptionKey
-                                val decrypted = if (key != null) {
-                                    attemptDecrypt(rawData, key, seq)
-                                } else {
-                                    rawData
-                                }
+                                val decrypted = if (key != null) attemptDecrypt(rawData, key, seq) else null
                                 output.write(decrypted ?: rawData)
                             } else {
                                 output.write("HTTP/1.1 ${res.code} Error\r\n\r\n".toByteArray())
@@ -411,7 +414,6 @@ class BunnyPoorCdn : ExtractorApi() {
                 } else {
                      ByteBuffer.wrap(iv).order(ByteOrder.BIG_ENDIAN).putLong(8, seq)
                 }
-                
                 val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
                 cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
                 cipher.doFinal(data)
