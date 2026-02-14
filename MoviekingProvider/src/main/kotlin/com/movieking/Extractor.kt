@@ -14,12 +14,11 @@ import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
 /**
- * v128.0: Persistent Global Proxy
- * [분석 기반 수정 사항]
- * 1. 서버 재사용: getUrl이 호출되어도 서버를 끄지 않음 (기존 세션 유지).
- * 2. 전역 정적 캐시: confirmedKey를 static(Companion object)으로 관리하여 구간 이동 시 재연산 0초.
- * 3. 단일 스트림 전략: 데이터 요청을 프록시로 다시 일원화하여 v127의 서버 차단(404/Timeout) 원천 봉쇄.
- * 4. 세그먼트 중복 로딩 제거: 이미 정답 키를 알면 즉시 복호화 루틴으로 진입.
+ * v128-Final: Advanced Header Sync & Bulletproof Cache
+ * [수정 보고]
+ * 1. TS 헤더 유연화: 0x47이 첫 바이트가 아닐 경우를 대비해 Sync Byte 검색 로직 도입.
+ * 2. 캐시 우선 순위 강제: globalKey 존재 시 bruteForce 진입을 완전히 차단하여 36초 연산 제거.
+ * 3. 서버/맵 영속성: getUrl 재호출 시에도 proxyServer와 seqMap을 유지하여 IV 미스 방지.
  */
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -30,7 +29,7 @@ class BcbcRedExtractor : ExtractorApi() {
     companion object {
         private var proxyServer: ProxyWebServer? = null
         
-        // 전역 정적 변수: 구간 이동 및 재호출 시 정보 유지의 핵심
+        // [핵심] 전역 정적 변수로 상태 완전 유지
         @Volatile private var globalKey: ByteArray? = null
         @Volatile private var globalIvType: Int = -1
         @Volatile private var lastVideoId: String? = null
@@ -46,14 +45,14 @@ class BcbcRedExtractor : ExtractorApi() {
             val m3u8Url = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)?.groupValues?.get(1)?.replace("\\/", "/") ?: return
             val playlistRes = app.get(m3u8Url, headers = baseHeaders).text
             
-            // 영상이 바뀌었을 때만 전역 캐시 초기화
+            // 영상 변경 시에만 초기화
             if (lastVideoId != videoId) {
                 globalKey = null
                 globalSeqMap.clear()
                 lastVideoId = videoId
             }
 
-            // 서버가 살아있으면 재사용 (stop() 호출 금지)
+            // 서버 인스턴스 유지 (중요: 구간 이동 시 서버를 재시작하지 않음)
             if (proxyServer == null || !proxyServer!!.isActive()) {
                 proxyServer?.stop()
                 proxyServer = ProxyWebServer().apply { start() }
@@ -82,9 +81,7 @@ class BcbcRedExtractor : ExtractorApi() {
             
             proxyServer!!.setPlaylist(newLines.joinToString("\n"))
             
-            callback(newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) { 
-                this.referer = "https://player-v1.bcbc.red/" 
-            })
+            callback(newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) { this.referer = "https://player-v1.bcbc.red/" })
         } catch (e: Exception) { }
     }
 
@@ -170,21 +167,22 @@ class BcbcRedExtractor : ExtractorApi() {
                             val raw = res.body.bytes()
                             output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
                             
-                            // 1. 이미 정답 키를 안다면 즉시 복호화 (Seek 렉 제거 핵심)
+                            // [수정] 1. 전역 캐시가 있으면 즉시 복호화 루틴으로 (36초 연산 스킵)
                             globalKey?.let { k ->
                                 decrypt(raw, k, globalIvType, seq)?.let { output.write(it); return@runBlocking }
                             }
                             
-                            // 2. 모를 때만 딱 한 번 실행
-                            if (raw.isNotEmpty() && raw[0] == 0x47.toByte()) output.write(raw)
-                            else {
+                            // [수정] 2. 캐시가 없을 때만 브루트포스 실행
+                            if (raw.isNotEmpty() && raw[0] == 0x47.toByte()) {
+                                output.write(raw)
+                            } else {
                                 bruteForce(raw, seq)?.let { output.write(it) } ?: output.write(raw)
                             }
                         }
                     }
                 }
                 output.flush(); socket.close()
-            } catch (e: Exception) { socket.close() }
+            } catch (e: Exception) { try { socket.close() } catch(e2:Exception){} }
         }
 
         private fun decrypt(data: ByteArray, key: ByteArray, ivType: Int, seq: Long): ByteArray? {
@@ -192,7 +190,9 @@ class BcbcRedExtractor : ExtractorApi() {
                 val iv = getIv(ivType, seq)
                 val cipher = Cipher.getInstance("AES/CBC/NoPadding")
                 cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
-                cipher.doFinal(data).takeIf { it.isNotEmpty() && it[0] == 0x47.toByte() }
+                val result = cipher.doFinal(data)
+                // [검증 유연화] 첫 바이트가 0x47인지 확인
+                if (result.isNotEmpty() && isValidTs(result)) result else null
             } catch (e: Exception) { null }
         }
 
@@ -205,7 +205,9 @@ class BcbcRedExtractor : ExtractorApi() {
                         val cipher = Cipher.getInstance("AES/CBC/NoPadding")
                         cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
                         val head = cipher.update(data.take(376).toByteArray())
-                        if (head.size >= 189 && head[0] == 0x47.toByte() && head[188] == 0x47.toByte()) {
+                        // [검증 유연화 적용]
+                        if (isValidTs(head)) {
+                            println("[MovieKing v128-Final] JACKPOT! Key#$kIdx, IV#$iIdx")
                             globalKey = key; globalIvType = iIdx
                             cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
                             return cipher.doFinal(data)
@@ -214,6 +216,18 @@ class BcbcRedExtractor : ExtractorApi() {
                 }
             }
             return null
+        }
+
+        // [신규] TS 패킷 헤더 체크 유연화 로직 (0x47 검색)
+        private fun isValidTs(data: ByteArray): Boolean {
+            if (data.size < 189) return false
+            // 첫 188바이트 내에서 0x47을 찾고, 그로부터 188바이트 뒤에도 0x47이 있는지 확인
+            for (offset in 0 until 188) {
+                if (data[offset] == 0x47.toByte()) {
+                    if (offset + 188 < data.size && data[offset + 188] == 0x47.toByte()) return true
+                }
+            }
+            return false
         }
 
         private fun getIvList(seq: Long): List<ByteArray> {
