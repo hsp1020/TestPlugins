@@ -31,10 +31,9 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * [Version: v1-StrictDebug-BuildFix]
- * 수정 사항:
- * 1. ProxyWebServer 클래스 내 'const val' -> 'val'로 변경하여 빌드 에러 해결.
- * 2. 기존의 모든 로깅 및 로직(Deep Scan, Segment Noise Fix) 100% 유지.
+ * [Version: v4-Fix]
+ * 1. Critical Fix: Bit Interleave 로직을 Python(성공본)과 동일하게 'Gather' 방식(Dest[i] = Src[Perm[i]])으로 수정.
+ * 2. Logic: Deep Scan 및 Sliding Window 유지 (데이터 오프셋 대응).
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -45,7 +44,7 @@ class BunnyPoorCdn : ExtractorApi() {
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
-        private const val VER = "[v1-Strict]"
+        private const val VER = "[v4-Fix]"
     }
 
     override suspend fun getUrl(
@@ -59,7 +58,6 @@ class BunnyPoorCdn : ExtractorApi() {
             println("$VER 기존 ProxyServer 중지 시도.")
             proxyServer?.stop()
             proxyServer = null
-            println("$VER 기존 ProxyServer 중지 완료.")
         }
         extract(url, referer, subtitleCallback, callback)
     }
@@ -75,23 +73,16 @@ class BunnyPoorCdn : ExtractorApi() {
         
         var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = "https://tvwiki5.net/"
-        println("$VER Clean URL: $cleanUrl")
-
-        val isDirectUrl = cleanUrl.contains("/v/") || cleanUrl.contains("/e/") || cleanUrl.contains("/f/")
-        println("$VER isDirectUrl 여부: $isDirectUrl")
         
+        val isDirectUrl = cleanUrl.contains("/v/") || cleanUrl.contains("/e/") || cleanUrl.contains("/f/")
         if (!isDirectUrl) {
-            println("$VER iframe 탐색 로직 진입.")
             try {
                 val refRes = app.get(cleanReferer, headers = mapOf("User-Agent" to DESKTOP_UA))
                 val iframeMatch = Regex("""src=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
                     ?: Regex("""data-player\d*=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
-                
                 if (iframeMatch != null) {
                     cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&").trim()
                     println("$VER iframe URL 발견: $cleanUrl")
-                } else {
-                    println("$VER iframe URL 발견 실패.")
                 }
             } catch (e: Exception) {
                 println("$VER iframe 검색 중 Exception: ${e.message}")
@@ -108,24 +99,21 @@ class BunnyPoorCdn : ExtractorApi() {
         var capturedHeaders: Map<String, String>? = null
 
         try {
-            println("$VER WebView 요청 준비.")
             val requestHeaders = mapOf(
                 "Referer" to cleanReferer, 
                 "User-Agent" to DESKTOP_UA
             )
             
-            println("$VER app.get() 호출 시작.")
             val response = app.get(
                 url = cleanUrl,
                 headers = requestHeaders,
                 interceptor = resolver
             )
-            println("$VER app.get() 완료. 응답 URL: ${response.url}")
             
             if (response.url.contains("/c.html")) {
                 capturedUrl = response.url
                 val cookie = CookieManager.getInstance().getCookie(capturedUrl) ?: ""
-                println("$VER c.html 패턴 일치. Cookie 길이: ${cookie.length}")
+                println("$VER c.html 패턴 일치.")
                 
                 capturedHeaders = mutableMapOf(
                     "User-Agent" to DESKTOP_UA,
@@ -136,31 +124,25 @@ class BunnyPoorCdn : ExtractorApi() {
                     "Sec-Ch-Ua-Mobile" to "?0",
                     "Sec-Ch-Ua-Platform" to "\"Windows\""
                 )
-            } else {
-                 println("$VER c.html 패턴 불일치.")
             }
         } catch (e: Exception) { 
-            println("$VER WebView 로직 중 Exception: ${e.message}")
             e.printStackTrace() 
         }
 
         if (capturedUrl != null && capturedHeaders != null) {
             try {
-                println("$VER M3U8 원본 요청: $capturedUrl")
                 val m3u8Res = app.get(capturedUrl, headers = capturedHeaders!!)
                 val m3u8Content = m3u8Res.text
-                println("$VER M3U8 응답 수신 (Length: ${m3u8Content.length})")
 
                 // IV 추출
                 val keyMatch = Regex("""#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"(?:,IV=(0x[0-9a-fA-F]+))?""").find(m3u8Content)
                 val hexIv = keyMatch?.groupValues?.get(2)
-                println("$VER M3U8 파싱된 IV: $hexIv")
+                println("$VER M3U8 IV: $hexIv")
                 
                 val proxy = ProxyWebServer()
                 proxy.start()
                 proxy.updateSession(capturedHeaders!!, hexIv)
                 proxyServer = proxy
-                println("$VER ProxyServer 시작됨 (Port: ${proxy.port})")
 
                 val proxyPort = proxy.port
                 val proxyRoot = "http://127.0.0.1:$proxyPort"
@@ -169,7 +151,6 @@ class BunnyPoorCdn : ExtractorApi() {
                 val lines = m3u8Content.lines()
                 val seqMap = ConcurrentHashMap<String, Long>()
                 var currentSeq = Regex("""#EXT-X-MEDIA-SEQUENCE:(\d+)""").find(m3u8Content)?.groupValues?.get(1)?.toLong() ?: 0L
-                println("$VER Media Sequence Start: $currentSeq")
                 
                 val uri = URI(capturedUrl)
                 val domain = "${uri.scheme}://${uri.host}"
@@ -177,7 +158,6 @@ class BunnyPoorCdn : ExtractorApi() {
 
                 for (line in lines) {
                     if (line.startsWith("#EXT-X-KEY")) {
-                        println("$VER Original KEY tag removed: $line")
                         continue
                     }
                     
@@ -200,7 +180,6 @@ class BunnyPoorCdn : ExtractorApi() {
                 val proxyM3u8 = newLines.joinToString("\n")
                 proxy.setPlaylist(proxyM3u8)
                 proxy.updateSeqMap(seqMap)
-                println("$VER Proxy M3U8 생성 완료 (Lines: ${newLines.size})")
                 
                 val keyUrlMatch = Regex("""URI="([^"]+)"""").find(m3u8Content)
                 if (keyUrlMatch != null) {
@@ -211,9 +190,6 @@ class BunnyPoorCdn : ExtractorApi() {
                         else -> "$parentUrl/$kUrl"
                     }
                     proxy.setTargetKeyUrl(kUrl)
-                    println("$VER Key URL 설정됨: $kUrl")
-                } else {
-                    println("$VER Key URL 찾기 실패.")
                 }
 
                 callback(
@@ -222,16 +198,13 @@ class BunnyPoorCdn : ExtractorApi() {
                         this.quality = Qualities.Unknown.value
                     }
                 )
-                println("$VER Callback 호출 완료. 리턴 true.")
                 return true
 
             } catch (e: Exception) {
-                println("$VER extract 내부 Exception: ${e.message}")
                 e.printStackTrace()
             }
         }
         
-        println("$VER capturedUrl 또는 headers 누락으로 실패 리턴.")
         return false
     }
 
@@ -244,14 +217,11 @@ class BunnyPoorCdn : ExtractorApi() {
         @Volatile private var currentPlaylist: String = ""
         @Volatile private var seqMap: ConcurrentHashMap<String, Long> = ConcurrentHashMap()
         @Volatile private var targetKeyUrl: String? = null
-        
         @Volatile private var realKey: ByteArray? = null
         
         data class DecryptProfile(val ivMode: Int, val inputOffset: Int, val outputOffset: Int)
         @Volatile private var confirmedProfile: DecryptProfile? = null
-        
-        // [수정] const 제거 (일반 val로 변경)
-        private val VER = "[Bunny-v1-Proxy]"
+        private val VER = "[Bunny-v4-Proxy]"
 
         fun start() {
             try {
@@ -259,20 +229,14 @@ class BunnyPoorCdn : ExtractorApi() {
                 port = serverSocket!!.localPort
                 isRunning = true
                 thread(isDaemon = true) { 
-                    println("$VER Server Thread Started on port $port")
                     while (isRunning && serverSocket != null && !serverSocket!!.isClosed) { 
-                        try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {
-                            println("$VER Accept Exception: ${e.message}")
-                        } 
+                        try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {} 
                     } 
                 }
-            } catch (e: Exception) {
-                println("$VER Server Start Exception: ${e.message}")
-            }
+            } catch (e: Exception) {}
         }
 
         fun stop() {
-            println("$VER Server Stop 호출됨.")
             isRunning = false
             try { serverSocket?.close(); serverSocket = null } catch (e: Exception) {}
         }
@@ -281,7 +245,6 @@ class BunnyPoorCdn : ExtractorApi() {
             currentHeaders = h; playlistIv = iv
             realKey = null
             confirmedProfile = null
-            println("$VER Session Updated. IV: $iv")
         }
         fun setPlaylist(p: String) { currentPlaylist = p }
         fun updateSeqMap(map: ConcurrentHashMap<String, Long>) { seqMap = map }
@@ -289,56 +252,35 @@ class BunnyPoorCdn : ExtractorApi() {
 
         private fun ensureKey() {
             if (realKey != null) return
-            if (targetKeyUrl == null) {
-                println("$VER ensureKey: targetKeyUrl is null")
-                return
-            }
+            if (targetKeyUrl == null) return
 
             runBlocking {
                 try {
                     val cleanKeyUrl = targetKeyUrl!!.replace(Regex("[?&]mode=obfuscated"), "")
-                    println("$VER Key Download Start: $cleanKeyUrl")
                     val res = app.get(cleanKeyUrl, headers = currentHeaders)
                     var rawData = res.body.bytes()
-                    println("$VER Key Download End. Size: ${rawData.size}")
 
                     if (rawData.size > 100 && rawData[0] == '{'.code.toByte()) {
                         val jsonStr = String(rawData).trim()
-                        println("$VER JSON Key Format Detected.")
                         val decrypted = BunnyJsonDecryptor.decrypt(jsonStr)
                         if (decrypted != null) {
                             realKey = decrypted
-                            println("$VER Key Decrypt Success. Hex: ${bytesToHex(decrypted, 16)}")
-                        } else {
-                            println("$VER Key Decrypt Failed (null returned).")
+                            println("$VER Key Decrypted (v4): ${bytesToHex(decrypted, 16)}")
                         }
                     } else if (rawData.size == 16) {
                         realKey = rawData
-                        println("$VER Raw 16-byte Key Detected.")
-                    } else {
-                        println("$VER Unknown Key Format.")
                     }
-                } catch (e: Exception) { 
-                    println("$VER ensureKey Exception: ${e.message}")
-                    e.printStackTrace() 
-                }
+                } catch (e: Exception) { e.printStackTrace() }
             }
         }
         
         private fun bytesToHex(bytes: ByteArray, length: Int): String {
             val sb = StringBuilder()
-            for (i in 0 until minOf(bytes.size, length)) {
+            val len = minOf(bytes.size, length)
+            for (i in 0 until len) {
                 sb.append(String.format("%02X", bytes[i]))
             }
             return sb.toString()
-        }
-        
-        private fun dumpLargeHex(label: String, bytes: ByteArray) {
-            val dumpSize = 3200
-            val hexString = bytesToHex(bytes, dumpSize)
-            hexString.chunked(3000).forEachIndexed { index, chunk ->
-                println("$VER [DUMP] $label [Part $index]: $chunk")
-            }
         }
 
         private fun handleClient(socket: Socket) = thread {
@@ -346,7 +288,6 @@ class BunnyPoorCdn : ExtractorApi() {
                 socket.soTimeout = 5000
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
                 val line = reader.readLine() ?: return@thread
-                println("$VER Request: $line")
                 val parts = line.split(" ")
                 if (parts.size < 2) return@thread
                 val path = parts[1]
@@ -358,13 +299,11 @@ class BunnyPoorCdn : ExtractorApi() {
                     val header = "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: ${body.size}\r\nConnection: close\r\n\r\n"
                     output.write(header.toByteArray())
                     output.write(body)
-                    println("$VER Playlist Sent.")
                 } else if (path.contains("/proxy")) {
                     val urlParam = path.substringAfter("url=").substringBefore(" ")
                     val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
                     val seq = seqMap[targetUrl] ?: 0L
                     
-                    println("$VER Segment Request: $targetUrl (Seq: $seq)")
                     ensureKey()
 
                     runBlocking {
@@ -372,33 +311,24 @@ class BunnyPoorCdn : ExtractorApi() {
                             val res = app.get(targetUrl, headers = currentHeaders)
                             if (res.isSuccessful) {
                                 val rawData = res.body.bytes()
-                                println("$VER Segment Downloaded. Size: ${rawData.size}")
                                 output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
 
                                 if (realKey != null) {
                                     val decrypted = deepScanDecrypt(rawData, realKey!!, seq)
                                     if (decrypted != null) {
-                                        println("$VER Decrypt Success (DeepScan). Sending Decrypted Data.")
-                                        dumpLargeHex("Decrypted", decrypted)
+                                        println("$VER Decrypt Success. Sync Byte Found.")
                                         output.write(decrypted)
                                     } else {
-                                        println("$VER Decrypt Failed. Sending Raw Data.")
-                                        dumpLargeHex("Raw(Fail)", rawData)
+                                        println("$VER Decrypt Failed. Sending Raw.")
                                         output.write(rawData)
                                     }
                                 } else {
-                                    println("$VER Key is null. Sending Raw Data.")
-                                    dumpLargeHex("Raw(NoKey)", rawData)
                                     output.write(rawData)
                                 }
                             } else {
-                                println("$VER Segment Download Failed: ${res.code}")
                                 output.write("HTTP/1.1 ${res.code} Error\r\n\r\n".toByteArray())
                             }
-                        } catch (e: Exception) { 
-                            println("$VER Segment Handling Exception: ${e.message}")
-                            e.printStackTrace() 
-                        }
+                        } catch (e: Exception) { e.printStackTrace() }
                     }
                 }
                 output.flush(); socket.close()
@@ -408,26 +338,18 @@ class BunnyPoorCdn : ExtractorApi() {
         }
 
         private fun deepScanDecrypt(data: ByteArray, key: ByteArray, seq: Long): ByteArray? {
-            println("$VER deepScanDecrypt 진입.")
-            
-            // 1. 캐시된 프로필 확인
+            // 1. 캐시 시도
             confirmedProfile?.let { profile ->
-                println("$VER Cached Profile Found: IVMode=${profile.ivMode}, InOff=${profile.inputOffset}, OutOff=${profile.outputOffset}")
                 val dec = attemptDecrypt(data, key, seq, profile.ivMode, profile.inputOffset)
                 if (dec != null) {
                     val startIdx = findSyncByte(dec)
-                    if (startIdx != -1) {
-                         println("$VER Cached Profile Validated. SyncByte at $startIdx")
-                         return dec.copyOfRange(startIdx, dec.size)
-                    }
+                    if (startIdx != -1) return dec.copyOfRange(startIdx, dec.size)
                 }
-                println("$VER Cached Profile Failed. Resetting.")
                 confirmedProfile = null
             }
 
             // 2. 조합 탐색
             val ivModes = mutableListOf(1, 3, 2, 0) // 1:BE, 3:Zero, 2:LE, 0:Explicit
-            println("$VER Brute Force 시작. Modes: $ivModes")
             
             for (inputOffset in 0..15) {
                 if (data.size <= inputOffset) break
@@ -438,15 +360,13 @@ class BunnyPoorCdn : ExtractorApi() {
                 for (ivMode in ivModes) {
                     val dec = attemptDecrypt(data, key, seq, ivMode, inputOffset) ?: continue
                     val outputOffset = findSyncByte(dec)
-                    
                     if (outputOffset != -1) {
-                        println("$VER Sync Byte Found! InOff:$inputOffset, OutOff:$outputOffset, IVMode:$ivMode")
+                        println("$VER Found Profile: InOff:$inputOffset, OutOff:$outputOffset, IV:$ivMode")
                         confirmedProfile = DecryptProfile(ivMode, inputOffset, outputOffset)
                         return dec.copyOfRange(outputOffset, dec.size)
                     }
                 }
             }
-            println("$VER All Combinations Failed.")
             return null
         }
 
@@ -487,7 +407,7 @@ class BunnyPoorCdn : ExtractorApi() {
     }
 
     object BunnyJsonDecryptor {
-        private const val VER = "[Bunny-v1-KeyLogic]"
+        private const val VER = "[Bunny-v4-KeyLogic]"
         
         private fun decodeBase64(input: String): ByteArray {
             return Base64.decode(input, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
@@ -503,16 +423,12 @@ class BunnyPoorCdn : ExtractorApi() {
 
         fun decrypt(jsonStr: String): ByteArray? {
             try {
-                println("$VER Decrypt Start.")
                 val json = JSONObject(jsonStr)
                 val encryptedKeyB64 = json.getString("encrypted_key")
                 var data = decodeBase64(encryptedKeyB64)
-                println("$VER Raw Encrypted Key: ${bytesToHex(data, 16)}...")
                 
                 val layers = json.getJSONArray("layers")
                 var noiseLens: JSONArray? = null
-                
-                // Pre-scan for noise_lens
                 for (i in 0 until layers.length()) {
                     if (layers.getJSONObject(i).getString("name") == "segment_noise") {
                         noiseLens = layers.getJSONObject(i).getJSONArray("noise_lens")
@@ -523,15 +439,12 @@ class BunnyPoorCdn : ExtractorApi() {
                 for (i in layers.length() - 1 downTo 0) {
                     val layer = layers.getJSONObject(i)
                     val name = layer.getString("name")
-                    println("$VER Processing Layer: $name")
                     
                     data = when(name) {
                         "final_encrypt" -> {
                             val mask = layer.getString("xor_mask")
                             val maskBytes = decodeBase64(mask)
-                            val res = xor(data, maskBytes)
-                            println("$VER After final_encrypt: ${bytesToHex(res, 16)}")
-                            res
+                            xor(data, maskBytes)
                         }
                         "decoy_shuffle" -> {
                             val positions = layer.getJSONArray("real_positions")
@@ -554,9 +467,7 @@ class BunnyPoorCdn : ExtractorApi() {
                                     buffer.write(data, offset, validLen)
                                 }
                             }
-                            val res = buffer.toByteArray()
-                            println("$VER After decoy_shuffle: ${bytesToHex(res, 16)}")
-                            res
+                            buffer.toByteArray()
                         }
                         "xor_chain" -> {
                             val initKeyB64 = layer.optString("init_key", null)
@@ -568,7 +479,6 @@ class BunnyPoorCdn : ExtractorApi() {
                             if (newData.isNotEmpty() && ivBytes.isNotEmpty()) {
                                 newData[0] = newData[0] xor ivBytes[0]
                             }
-                            println("$VER After xor_chain: ${bytesToHex(newData, 16)}")
                             newData
                         }
                         "sbox" -> {
@@ -579,7 +489,6 @@ class BunnyPoorCdn : ExtractorApi() {
                                 val idx = data[j].toInt() and 0xFF
                                 newData[j] = invSbox[idx]
                             }
-                            println("$VER After sbox: ${bytesToHex(newData, 16)}")
                             newData
                         }
                         "bit_rotate" -> {
@@ -591,53 +500,52 @@ class BunnyPoorCdn : ExtractorApi() {
                                 val r = (b ushr rot) or (b shl (8 - rot))
                                 newData[j] = r.toByte()
                             }
-                            println("$VER After bit_rotate: ${bytesToHex(newData, 16)}")
                             newData
                         }
                         "segment_noise" -> {
                             val perm = layer.getJSONArray("perm")
                             val noiseL = layer.getJSONArray("noise_lens")
-                            
                             var currentReadOffset = 0
                             val result = ByteArray(perm.length())
                             
                             for (j in 0 until perm.length()) {
                                 val originalIndex = perm.getInt(j) 
                                 val chunkLen = noiseL.getInt(originalIndex) 
-                                
                                 if (currentReadOffset < data.size) {
                                     result[originalIndex] = data[currentReadOffset]
                                 }
                                 currentReadOffset += chunkLen
                             }
-                            println("$VER After segment_noise: ${bytesToHex(result, 16)}")
                             result
                         }
                         "bit_interleave" -> {
                             val perm = layer.getJSONArray("perm")
-                            val newData = ByteArray(16) 
-                            for (j in 0 until perm.length()) {
-                                val srcByteIdx = j / 8
-                                val srcBitPos = 7 - (j % 8)
+                            val newData = ByteArray(16)
+                            // [수정] Correct Gather Logic (Matches Python)
+                            // Dest[i] = Src[Perm[i]]
+                            // Perm[i] tells WHICH BIT from Src goes to i-th position in Dest
+                            for (i in 0 until perm.length()) {
+                                val srcBitIdx = perm.getInt(i) // Source Bit Index
+                                val srcByteIdx = srcBitIdx / 8
+                                val srcBitPos = 7 - (srcBitIdx % 8)
                                 val bitVal = (data[srcByteIdx].toInt() shr srcBitPos) and 1
                                 
-                                val destBitIdx = perm.getInt(j)
-                                val destByteIdx = destBitIdx / 8
-                                val destBitPos = 7 - (destBitIdx % 8)
+                                val destByteIdx = i / 8
+                                val destBitPos = 7 - (i % 8)
                                 
                                 if (bitVal == 1) {
                                     newData[destByteIdx] = (newData[destByteIdx].toInt() or (1 shl destBitPos)).toByte()
                                 }
                             }
-                            println("$VER After bit_interleave: ${bytesToHex(newData, 16)}")
                             newData
                         }
                         else -> data
                     }
                 }
+                println("$VER Key Gen Complete: ${bytesToHex(data, 16)}")
                 return data
             } catch (e: Exception) {
-                println("$VER Decrypt Exception: ${e.message}")
+                println("$VER Key Gen Exception: ${e.message}")
                 e.printStackTrace()
                 return null
             }
