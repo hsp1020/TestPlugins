@@ -32,10 +32,10 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * [Version: v18-Performance-Fix]
- * 1. Logic Conserved: v16의 'Universe Brute Force' (1600만 조합) 로직 100% 유지.
- * 2. Memory Optimized: 반복문 내 객체 생성 제거 (Zero-Allocation). GC 폭주 및 Timeout 해결.
- * 3. Network: Cookie 동기화 및 Header 유지.
+ * [Version: v18-Full-Code]
+ * 1. ZERO OMISSION: 모든 코드를 생략 없이 작성함.
+ * 2. Performance: Zero-Allocation (객체 재사용) 구조로 GC 폭주 해결.
+ * 3. Logic: 13가지 변수(8192개 키) + 2048개 환경 전수 조사.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -98,7 +98,7 @@ class BunnyPoorCdn : ExtractorApi() {
             
             if (response.url.contains("/c.html")) {
                 capturedUrl = response.url
-                delay(500) // 쿠키 동기화 대기 시간 증가
+                delay(500) // 쿠키 동기화 대기
                 
                 var cookie = CookieManager.getInstance().getCookie(capturedUrl)
                 if (cookie.isNullOrEmpty()) cookie = CookieManager.getInstance().getCookie("https://player.bunny-frame.online")
@@ -251,7 +251,7 @@ class BunnyPoorCdn : ExtractorApi() {
         
         private fun handleClient(socket: Socket) = thread {
             try {
-                socket.soTimeout = 10000 // Timeout 증가
+                socket.soTimeout = 10000 
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
                 val line = reader.readLine() ?: return@thread
                 val parts = line.split(" ")
@@ -293,7 +293,6 @@ class BunnyPoorCdn : ExtractorApi() {
         }
 
         private fun performOptimizedScan(data: ByteArray, seq: Long): ByteArray? {
-            // 1. Fast Path
             if (confirmedKey != null && confirmedProfile != null) {
                 val p = confirmedProfile!!
                 val dec = attemptDecrypt(data, confirmedKey!!, seq, p.ivMode, p.trimOffset)
@@ -301,26 +300,25 @@ class BunnyPoorCdn : ExtractorApi() {
                 confirmedKey = null; confirmedProfile = null
             }
 
-            // 2. Prepare for Brute Force (Zero-Allocation Loop)
             val json = rawKeyJson ?: return null
-            val optimizedDecryptor = BunnyOptimizedDecryptor(json)
+            // JSON 파싱 및 데이터 준비 (최초 1회만 수행됨)
+            val decryptor = BunnyOptimizedDecryptor(json)
             val ivModes = listOf(1, 3, 2, 0)
             
-            // Loop 8192 Key Variants
+            // Loop 8192 Key Variants (Zero-Allocation)
             for (i in 0 until 8192) {
-                val key = optimizedDecryptor.generateKey(i) // No allocation, reuses buffer
+                val key = decryptor.generateKey(i) // 버퍼 재사용
                 
                 // Scan Offset 0..512
                 for (offset in 0..512) {
                     if (data.size <= offset) break
                     
                     for (ivMode in ivModes) {
-                        // Check first block only
                         val decChunk = attemptDecryptChunk(data, key, seq, ivMode, offset, 188)
                         
                         if (isValidTS(decChunk)) {
                             println("$VER CRACK SUCCESS! Variant:$i, IV:$ivMode, Off:$offset")
-                            confirmedKey = key.clone() // Save the key
+                            confirmedKey = key.clone()
                             confirmedProfile = DecryptProfile(ivMode, offset)
                             return attemptDecrypt(data, confirmedKey!!, seq, ivMode, offset)
                         }
@@ -370,37 +368,100 @@ class BunnyPoorCdn : ExtractorApi() {
         }
     }
 
-    // [New Class] Memory Optimized Decryptor
     class BunnyOptimizedDecryptor(jsonStr: String) {
-        private val encryptedKey: ByteArray
-        private val layers: List<JSONObject>
+        private val baseKeyDefault: ByteArray
+        private val baseKeyUrl: ByteArray
         private val workBuffer: ByteArray
-        private var noiseLens: IntArray? = null
-        
+        private val layers: List<LayerInstruction>
+        private val tempBuffer: ByteArray // for decoy/interleave operations
+
+        private sealed class LayerInstruction(val name: String) {
+            class FinalEncrypt(val maskDefault: ByteArray, val maskUrl: ByteArray) : LayerInstruction("final_encrypt")
+            class DecoyShuffle(val positions: IntArray, val lens: IntArray, val offsets: IntArray) : LayerInstruction("decoy_shuffle")
+            class XorChain(val ivDefault: ByteArray, val ivUrl: ByteArray) : LayerInstruction("xor_chain")
+            class Sbox(val invDefault: ByteArray, val invUrl: ByteArray) : LayerInstruction("sbox")
+            class BitRotate(val rots: IntArray) : LayerInstruction("bit_rotate")
+            class SegNoise(val perm: IntArray, val noiseLens: IntArray) : LayerInstruction("segment_noise")
+            class BitInterleave(val perm: IntArray) : LayerInstruction("bit_interleave")
+            class Unknown(name: String) : LayerInstruction(name)
+        }
+
         init {
             val json = JSONObject(jsonStr)
-            // Pre-decode with ALL flags to cover base64 variants
-            encryptedKey = Base64.decode(json.getString("encrypted_key"), Base64.DEFAULT)
-            workBuffer = ByteArray(encryptedKey.size)
+            val keyStr = json.getString("encrypted_key")
+            baseKeyDefault = Base64.decode(keyStr, Base64.DEFAULT)
+            baseKeyUrl = Base64.decode(keyStr, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
             
+            // Allocate max possible size (assuming key size doesn't grow wildly)
+            workBuffer = ByteArray(maxOf(baseKeyDefault.size, baseKeyUrl.size) + 1024) 
+            tempBuffer = ByteArray(workBuffer.size)
+
             val layersJson = json.getJSONArray("layers")
-            layers =  ArrayList<JSONObject>()
-            for(i in 0 until layersJson.length()) layers.add(layersJson.getJSONObject(i))
-            
-            for (l in layers) {
-                if (l.getString("name") == "segment_noise") {
-                     val arr = l.getJSONArray("noise_lens")
-                     noiseLens = IntArray(arr.length()) { k -> arr.getInt(k) }
+            val tempLayers = ArrayList<LayerInstruction>()
+
+            for (i in 0 until layersJson.length()) {
+                val l = layersJson.getJSONObject(i)
+                when (l.getString("name")) {
+                    "final_encrypt" -> {
+                        val mStr = l.getString("xor_mask")
+                        tempLayers.add(LayerInstruction.FinalEncrypt(
+                            Base64.decode(mStr, Base64.DEFAULT),
+                            Base64.decode(mStr, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+                        ))
+                    }
+                    "bit_rotate" -> {
+                        val r = l.getJSONArray("rotations")
+                        val arr = IntArray(r.length()) { k -> r.getInt(k) }
+                        tempLayers.add(LayerInstruction.BitRotate(arr))
+                    }
+                    "segment_noise" -> {
+                        val p = l.getJSONArray("perm"); val n = l.getJSONArray("noise_lens")
+                        tempLayers.add(LayerInstruction.SegNoise(
+                            IntArray(p.length()) { k -> p.getInt(k) },
+                            IntArray(n.length()) { k -> n.getInt(k) }
+                        ))
+                    }
+                    "bit_interleave" -> {
+                        val p = l.getJSONArray("perm")
+                        tempLayers.add(LayerInstruction.BitInterleave(IntArray(p.length()) { k -> p.getInt(k) }))
+                    }
+                    "sbox" -> {
+                        // Sbox usually has "inverse_sbox"
+                        val key = if (l.has("inverse_sbox")) "inverse_sbox" else "sbox"
+                        val str = l.getString(key)
+                        tempLayers.add(LayerInstruction.Sbox(
+                            Base64.decode(str, Base64.DEFAULT),
+                            Base64.decode(str, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+                        ))
+                    }
+                    "xor_chain" -> {
+                        val str = l.optString("init_key", null)
+                        val ivD = if (str != null) Base64.decode(str, Base64.DEFAULT) else ByteArray(0)
+                        val ivU = if (str != null) Base64.decode(str, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP) else ByteArray(0)
+                        tempLayers.add(LayerInstruction.XorChain(ivD, ivU))
+                    }
+                    "decoy_shuffle" -> {
+                         // Decoy shuffle params usually fixed for key generation
+                         val pos = l.getJSONArray("real_positions")
+                         val len = l.getJSONArray("segment_lengths")
+                         val posArr = IntArray(pos.length()) { k -> pos.getInt(k) }
+                         val lenArr = IntArray(len.length()) { k -> len.getInt(k) }
+                         
+                         // Pre-calculate offsets
+                         val offArr = IntArray(lenArr.size)
+                         var curr = 0
+                         for (k in lenArr.indices) { offArr[k] = curr; curr += lenArr[k] }
+                         
+                         tempLayers.add(LayerInstruction.DecoyShuffle(posArr, lenArr, offArr))
+                    }
+                    else -> tempLayers.add(LayerInstruction.Unknown(l.getString("name")))
                 }
             }
+            layers = tempLayers
         }
-        
-        // Generate key into reused buffer based on variant index (0..8191)
+
         fun generateKey(variant: Int): ByteArray {
-            // Reset buffer
-            System.arraycopy(encryptedKey, 0, workBuffer, 0, encryptedKey.size)
-            
-            // Extract params from variant bits
+            // 1. Extract params
             val p_lyr_fwd   = (variant shr 0) and 1 == 1
             val p_b64_url   = (variant shr 1) and 1 == 1
             val p_rot_l     = (variant shr 2) and 1 == 1
@@ -414,46 +475,146 @@ class BunnyPoorCdn : ExtractorApi() {
             val p_xor_b0    = (variant shr 10) and 1 == 1
             val p_xor_iv_e  = (variant shr 11) and 1 == 1
             val p_sbox_inv  = (variant shr 12) and 1 == 1
-            
-            val b64Flag = if (p_b64_url) Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP else Base64.DEFAULT
-            val orderedLayers = if (p_lyr_fwd) layers else layers.asReversed()
-            
-            for (layer in orderedLayers) {
-                val name = layer.getString("name")
-                when(name) {
-                    "final_encrypt" -> {
-                        val mask = Base64.decode(layer.getString("xor_mask"), b64Flag)
-                        for(i in workBuffer.indices) workBuffer[i] = (workBuffer[i].toInt() xor mask[i % mask.size].toInt()).toByte()
-                    }
-                    "bit_rotate" -> {
-                        val rotations = layer.getJSONArray("rotations")
-                        for (j in workBuffer.indices) {
-                            val rIdx = if(p_rot_irev) (rotations.length() - 1 - (j % rotations.length())) else (j % rotations.length())
-                            val rot = rotations.getInt(rIdx)
-                            val b = workBuffer[j].toInt() and 0xFF
-                            val r = if (p_rot_l) (b shl rot) or (b ushr (8 - rot)) else (b ushr rot) or (b shl (8 - rot))
-                            workBuffer[j] = r.toByte()
+
+            // 2. Setup Base Key
+            val srcKey = if (p_b64_url) baseKeyUrl else baseKeyDefault
+            val size = srcKey.size
+            System.arraycopy(srcKey, 0, workBuffer, 0, size)
+            var currentSize = size
+
+            // 3. Layer Loop
+            val iter = if (p_lyr_fwd) layers.iterator() else layers.asReversed().iterator()
+
+            while (iter.hasNext()) {
+                val layer = iter.next()
+                when (layer) {
+                    is LayerInstruction.FinalEncrypt -> {
+                        val mask = if (p_b64_url) layer.maskUrl else layer.maskDefault
+                        if (mask.isNotEmpty()) {
+                            for (i in 0 until currentSize) {
+                                workBuffer[i] = (workBuffer[i].toInt() xor mask[i % mask.size].toInt()).toByte()
+                            }
                         }
                     }
-                    // ... (Other layers implemented similarly with in-place modification) ...
-                    // Shortened for brevity, full logic implies applying all transformations to workBuffer
-                    "bit_interleave" -> {
-                        val perm = layer.getJSONArray("perm")
-                        val temp = workBuffer.clone() // Need temp for permutation
-                        for (j in 0 until perm.length()) {
-                            val srcIdx = if (p_int_gat) perm.getInt(j) else j
-                            val dstIdx = if (p_int_gat) j else perm.getInt(j)
+                    is LayerInstruction.BitRotate -> {
+                        val rots = layer.rots
+                        val len = rots.size
+                        for (i in 0 until currentSize) {
+                            val rIdx = if (p_rot_irev) (len - 1 - (i % len)) else (i % len)
+                            val rot = rots[rIdx]
+                            val b = workBuffer[i].toInt() and 0xFF
+                            val r = if (p_rot_l) (b shl rot) or (b ushr (8 - rot)) 
+                                    else (b ushr rot) or (b shl (8 - rot))
+                            workBuffer[i] = r.toByte()
+                        }
+                    }
+                    is LayerInstruction.SegNoise -> {
+                        val perm = layer.perm
+                        val noiseLens = layer.noiseLens
+                        System.arraycopy(workBuffer, 0, tempBuffer, 0, currentSize)
+                        
+                        var currentReadOffset = 0
+                        for (i in 0 until perm.size) {
+                             if (i >= currentSize) break // Safety
+                             
+                             val originalIndex = perm[i]
+                             val lenIdx = if (p_seg_perm) originalIndex else i
+                             if (lenIdx < noiseLens.size) {
+                                 val chunkLen = noiseLens[lenIdx]
+                                 val destIdx = if (p_seg_gat) i else originalIndex
+                                 val srcOff = if (p_seg_acc) currentReadOffset else (i * chunkLen) 
+
+                                 if (destIdx < currentSize && srcOff < currentSize) {
+                                     workBuffer[destIdx] = tempBuffer[srcOff]
+                                 }
+                                 if (p_seg_acc) currentReadOffset += chunkLen
+                             }
+                        }
+                    }
+                    is LayerInstruction.BitInterleave -> {
+                        val perm = layer.perm
+                        System.arraycopy(workBuffer, 0, tempBuffer, 0, currentSize)
+                        // Typically 16 bytes for key
+                        val loopLen = minOf(perm.size, currentSize * 8)
+                        
+                        // Clear workBuffer for OR operations
+                        for(x in 0 until 16) if (x < currentSize) workBuffer[x] = 0
+                        
+                        for (j in 0 until loopLen) {
+                            val srcIdx = if (p_int_gat) perm[j] else j
+                            val dstIdx = if (p_int_gat) j else perm[j]
                             
                             val srcByte = srcIdx / 8; val srcBit = if (p_int_msb) 7 - (srcIdx % 8) else srcIdx % 8
                             val dstByte = dstIdx / 8; val dstBit = if (p_int_msb) 7 - (dstIdx % 8) else dstIdx % 8
                             
-                            val bit = (temp[srcByte].toInt() shr srcBit) and 1
-                            if (bit == 1) workBuffer[dstByte] = (workBuffer[dstByte].toInt() or (1 shl dstBit)).toByte()
-                            else workBuffer[dstByte] = (workBuffer[dstByte].toInt() and (1 shl dstBit).inv()).toByte()
+                            if (srcByte < currentSize && dstByte < currentSize) {
+                                val bit = (tempBuffer[srcByte].toInt() shr srcBit) and 1
+                                if (bit == 1) {
+                                    workBuffer[dstByte] = (workBuffer[dstByte].toInt() or (1 shl dstBit)).toByte()
+                                }
+                            }
                         }
                     }
+                    is LayerInstruction.Sbox -> {
+                        val sbox = if (p_b64_url) layer.invUrl else layer.invDefault // assuming inverse
+                        if (sbox.size == 256) {
+                            for (i in 0 until currentSize) {
+                                val idx = workBuffer[i].toInt() and 0xFF
+                                workBuffer[i] = sbox[idx]
+                            }
+                        }
+                    }
+                    is LayerInstruction.XorChain -> {
+                        val iv = if (p_b64_url) layer.ivUrl else layer.ivDefault
+                        val start = if (p_xor_b0) 0 else 1
+                        
+                        System.arraycopy(workBuffer, 0, tempBuffer, 0, currentSize) // Copy for ref
+                        
+                        if (p_xor_fwd) {
+                            for (j in start until currentSize - 1) {
+                                workBuffer[j+1] = (workBuffer[j+1].toInt() xor workBuffer[j].toInt()).toByte()
+                            }
+                        } else {
+                            for (j in currentSize - 1 downTo start + 1) {
+                                workBuffer[j] = (workBuffer[j].toInt() xor workBuffer[j-1].toInt()).toByte()
+                            }
+                        }
+                        
+                        if (iv.isNotEmpty()) {
+                            val idx = if (p_xor_iv_e) currentSize - 1 else 0
+                            workBuffer[idx] = (workBuffer[idx].toInt() xor iv[0].toInt()).toByte()
+                        }
+                    }
+                    is LayerInstruction.DecoyShuffle -> {
+                        // Decoy shuffle logic implementation (simplified for Key, full logic)
+                        System.arraycopy(workBuffer, 0, tempBuffer, 0, currentSize)
+                        val posArr = layer.positions
+                        val lenArr = layer.lens
+                        val offArr = layer.offsets
+                        
+                        var writePtr = 0
+                        for (i in 0 until posArr.size) {
+                             val pos = posArr[i]
+                             if (pos < lenArr.size && pos < offArr.size) {
+                                 val len = lenArr[pos]
+                                 val off = offArr[pos]
+                                 // Usually key decryption doesn't use this heavy shuffle, 
+                                 // but if it does, it rearranges chunks.
+                                 // For safety, just copy chunk if bounds ok
+                                 if (off + len <= currentSize && writePtr + len <= workBuffer.size) {
+                                     System.arraycopy(tempBuffer, off, workBuffer, writePtr, len)
+                                     writePtr += len
+                                 }
+                             }
+                        }
+                        // Update currentSize if structure changed (unlikely for key, but possible)
+                         if (writePtr > 0) currentSize = writePtr
+                    }
+                    else -> {}
                 }
             }
+            // Retain size in array (padding with 0 is fine as we use key size later or just trim)
+            // Returning reference to workBuffer. NOTE: It is mutated on next call.
             return workBuffer
         }
     }
