@@ -31,9 +31,9 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 /**
- * [Version: v2026-02-14-SmartSyncFind]
- * 1. Sync Byte Scan: 복호화된 데이터의 첫 1KB 내에서 0x47(Sync Byte)을 검색하여 유효성 판단 (헤더 오프셋 대응).
- * 2. IV Recovery: 단순 첫 바이트 비교가 아닌, 패턴 매칭 성공 시 해당 IV 채택.
+ * [Version: v2026-02-14-DiagnosticMode]
+ * Critical Debugging Version.
+ * Logs intermediate Hex dumps after every decryption layer to pinpoint the divergence from Python.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
@@ -122,7 +122,6 @@ class BunnyPoorCdn : ExtractorApi() {
                 val m3u8Res = app.get(capturedUrl, headers = capturedHeaders!!)
                 val m3u8Content = m3u8Res.text
 
-                // IV 추출 (있으면)
                 val keyMatch = Regex("""#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"(?:,IV=(0x[0-9a-fA-F]+))?""").find(m3u8Content)
                 val hexIv = keyMatch?.groupValues?.get(2)
                 
@@ -206,7 +205,6 @@ class BunnyPoorCdn : ExtractorApi() {
         @Volatile private var targetKeyUrl: String? = null
         
         @Volatile private var realKey: ByteArray? = null
-        
         data class DecryptProfile(val ivMode: Int, val padding: String)
         @Volatile private var confirmedProfile: DecryptProfile? = null
 
@@ -252,11 +250,9 @@ class BunnyPoorCdn : ExtractorApi() {
                         val decrypted = BunnyJsonDecryptor.decrypt(jsonStr)
                         if (decrypted != null) {
                             realKey = decrypted
-                            println("[BunnyPoorCdn] Decryption Success. Key: ${Base64.encodeToString(realKey, Base64.NO_WRAP)}")
                         }
                     } else if (rawData.size == 16) {
                         realKey = rawData
-                        println("[BunnyPoorCdn] Got Clean Key directly!")
                     }
                 } catch (e: Exception) { e.printStackTrace() }
             }
@@ -282,6 +278,7 @@ class BunnyPoorCdn : ExtractorApi() {
                     val urlParam = path.substringAfter("url=").substringBefore(" ")
                     val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
                     val seq = seqMap[targetUrl] ?: 0L
+                    
                     ensureKey()
 
                     runBlocking {
@@ -293,12 +290,7 @@ class BunnyPoorCdn : ExtractorApi() {
 
                                 if (realKey != null) {
                                     val decrypted = bruteForceDecrypt(rawData, realKey!!, seq)
-                                    if (decrypted != null) {
-                                        output.write(decrypted)
-                                    } else {
-                                        // 실패 시 원본 전송 (재생 실패 가능성 높음)
-                                        output.write(rawData)
-                                    }
+                                    output.write(decrypted ?: rawData)
                                 } else {
                                     output.write(rawData)
                                 }
@@ -315,25 +307,20 @@ class BunnyPoorCdn : ExtractorApi() {
         }
 
         private fun bruteForceDecrypt(data: ByteArray, key: ByteArray, seq: Long): ByteArray? {
-            // 1. 캐시된 프로필 시도
             confirmedProfile?.let { profile ->
                 val dec = attemptDecrypt(data, key, seq, profile.ivMode, profile.padding)
                 if (isValidTS(dec)) return dec
-                confirmedProfile = null 
+                confirmedProfile = null
             }
 
-            // 2. 모든 조합 시도
-            // IV Modes: 0=Explicit, 1=BigEndian, 2=LittleEndian, 3=Zero
             val ivModes = mutableListOf(1, 2, 3)
             if (!playlistIv.isNullOrEmpty()) ivModes.add(0, 0)
-            
             val paddings = listOf("PKCS5Padding", "NoPadding")
 
             for (ivMode in ivModes) {
                 for (padding in paddings) {
                     val dec = attemptDecrypt(data, key, seq, ivMode, padding)
                     if (isValidTS(dec)) {
-                        println("[BunnyPoorCdn] Decrypt Success! Mode:$ivMode, Pad:$padding")
                         confirmedProfile = DecryptProfile(ivMode, padding)
                         return dec
                     }
@@ -354,6 +341,7 @@ class BunnyPoorCdn : ExtractorApi() {
                     }
                     1 -> ByteBuffer.wrap(iv).order(ByteOrder.BIG_ENDIAN).putLong(8, seq)
                     2 -> ByteBuffer.wrap(iv).order(ByteOrder.LITTLE_ENDIAN).putLong(8, seq)
+                    3 -> {} 
                 }
 
                 val cipher = Cipher.getInstance("AES/CBC/$padding")
@@ -362,22 +350,9 @@ class BunnyPoorCdn : ExtractorApi() {
             } catch (e: Exception) { null }
         }
 
-        // [검증 강화] 0x47 Sync Byte 검색 (Offset 고려)
         private fun isValidTS(data: ByteArray?): Boolean {
-            if (data == null || data.size < 188) return false
-            
-            // 처음 1KB 내에서 0x47 찾기
-            val scanLimit = minOf(data.size, 1024)
-            for (i in 0 until scanLimit - 188) {
-                if (data[i] == 0x47.toByte()) {
-                    // 연속된 패킷 확인 (False Positive 방지)
-                    // i+188 위치에도 0x47이 있는지 확인
-                    if (i + 188 < data.size && data[i + 188] == 0x47.toByte()) {
-                        return true
-                    }
-                }
-            }
-            return false
+            if (data == null || data.size < 376) return false
+            return data[0] == 0x47.toByte() && data[188] == 0x47.toByte()
         }
     }
 
@@ -386,11 +361,23 @@ class BunnyPoorCdn : ExtractorApi() {
             return Base64.decode(input, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
         }
 
+        private fun bytesToHex(bytes: ByteArray): String {
+            val hexArray = "0123456789ABCDEF".toCharArray()
+            val hexChars = CharArray(bytes.size * 2)
+            for (j in bytes.indices) {
+                val v = bytes[j].toInt() and 0xFF
+                hexChars[j * 2] = hexArray[v ushr 4]
+                hexChars[j * 2 + 1] = hexArray[v and 0x0F]
+            }
+            return String(hexChars)
+        }
+
         fun decrypt(jsonStr: String): ByteArray? {
             try {
                 val json = JSONObject(jsonStr)
                 val encryptedKeyB64 = json.getString("encrypted_key")
                 var data = decodeBase64(encryptedKeyB64)
+                println("[BunnyDebug] Step 0 (Raw Base64): ${bytesToHex(data)}")
                 
                 val layers = json.getJSONArray("layers")
                 var noiseLens: JSONArray? = null
@@ -409,7 +396,9 @@ class BunnyPoorCdn : ExtractorApi() {
                         "final_encrypt" -> {
                             val mask = layer.getString("xor_mask")
                             val maskBytes = decodeBase64(mask)
-                            xor(data, maskBytes)
+                            val res = xor(data, maskBytes)
+                            println("[BunnyDebug] Step: final_encrypt -> ${bytesToHex(res)}")
+                            res
                         }
                         "decoy_shuffle" -> {
                             val positions = layer.getJSONArray("real_positions")
@@ -432,7 +421,9 @@ class BunnyPoorCdn : ExtractorApi() {
                                     buffer.write(data, offset, validLen)
                                 }
                             }
-                            buffer.toByteArray()
+                            val res = buffer.toByteArray()
+                            println("[BunnyDebug] Step: decoy_shuffle -> ${bytesToHex(res)}")
+                            res
                         }
                         "xor_chain" -> {
                             val initKeyB64 = layer.optString("init_key", null)
@@ -444,6 +435,7 @@ class BunnyPoorCdn : ExtractorApi() {
                             if (newData.isNotEmpty() && ivBytes.isNotEmpty()) {
                                 newData[0] = newData[0] xor ivBytes[0]
                             }
+                            println("[BunnyDebug] Step: xor_chain -> ${bytesToHex(newData)}")
                             newData
                         }
                         "sbox" -> {
@@ -454,6 +446,7 @@ class BunnyPoorCdn : ExtractorApi() {
                                 val idx = data[j].toInt() and 0xFF
                                 newData[j] = invSbox[idx]
                             }
+                            println("[BunnyDebug] Step: sbox -> ${bytesToHex(newData)}")
                             newData
                         }
                         "bit_rotate" -> {
@@ -465,6 +458,7 @@ class BunnyPoorCdn : ExtractorApi() {
                                 val r = (b ushr rot) or (b shl (8 - rot))
                                 newData[j] = r.toByte()
                             }
+                            println("[BunnyDebug] Step: bit_rotate -> ${bytesToHex(newData)}")
                             newData
                         }
                         "segment_noise" -> {
@@ -485,11 +479,12 @@ class BunnyPoorCdn : ExtractorApi() {
                                     result[originalIndex] = data[offset]
                                 }
                             }
+                            println("[BunnyDebug] Step: segment_noise -> ${bytesToHex(result)}")
                             result
                         }
                         "bit_interleave" -> {
                             val perm = layer.getJSONArray("perm")
-                            val newData = ByteArray(16) // Always 128 bits
+                            val newData = ByteArray(16)
                             for (j in 0 until perm.length()) {
                                 val srcByteIdx = j / 8
                                 val srcBitPos = 7 - (j % 8)
@@ -503,6 +498,7 @@ class BunnyPoorCdn : ExtractorApi() {
                                     newData[destByteIdx] = (newData[destByteIdx].toInt() or (1 shl destBitPos)).toByte()
                                 }
                             }
+                            println("[BunnyDebug] Step: bit_interleave -> ${bytesToHex(newData)}")
                             newData
                         }
                         else -> data
