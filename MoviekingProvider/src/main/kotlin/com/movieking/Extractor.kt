@@ -14,11 +14,11 @@ import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
 /**
- * v124-2: Smart Cache Only
- * [유저 요청 반영]
- * 1. Base: v124 (서버 재시작 로직 유지)
- * 2. Filename Mapping Rollback: 파일명 매핑 제거 -> 전체 URL 매핑 방식 복귀.
- * 3. Smart Caching Added: 정답 키 캐싱(cachedKey) 도입으로 렉/깍두기 해결.
+ * v124-3: Persistent Cache & Logic Optimization
+ * [수정 사항]
+ * 1. 서버 재시작 방지: 구간 이동 시 서버를 껐다 켜지 않고 세션만 업데이트하여 confirmedKey 유지.
+ * 2. 세션 업데이트 로직 개선: videoId가 같으면 정답 키 캐시를 초기화하지 않음.
+ * 3. 타임아웃 및 에러 로깅 보강: 서버 빈 응답 대응.
  */
 class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
@@ -31,10 +31,14 @@ class BcbcRedExtractor : ExtractorApi() {
     }
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
-        println("=== [MovieKing v124-2] getUrl Start ===")
+        println("=== [MovieKing v124-3] getUrl Start ===")
         try {
             val videoId = extractVideoIdDeep(url)
-            val baseHeaders = mutableMapOf("Referer" to "https://player-v1.bcbc.red/", "Origin" to "https://player-v1.bcbc.red", "User-Agent" to DESKTOP_UA)
+            val baseHeaders = mutableMapOf(
+                "Referer" to "https://player-v1.bcbc.red/",
+                "Origin" to "https://player-v1.bcbc.red",
+                "User-Agent" to DESKTOP_UA
+            )
             
             val playerHtml = app.get(url, headers = baseHeaders).text
             val m3u8Url = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)?.groupValues?.get(1)?.replace("\\/", "/") ?: return
@@ -45,14 +49,15 @@ class BcbcRedExtractor : ExtractorApi() {
             
             val candidates = if (keyMatch != null) solveKeyCandidatesCombinatorial(baseHeaders, keyMatch.groupValues[1]) else emptyList()
             
-            // [v124 로직 유지] 서버 재시작
-            proxyServer?.stop()
-            proxyServer = ProxyWebServer().apply {
-                start()
-                updateSession(baseHeaders, hexIv, candidates)
+            // [v124-3] 서버 인스턴스 유지 로직
+            if (proxyServer == null || !proxyServer!!.isActive()) {
+                proxyServer?.stop()
+                proxyServer = ProxyWebServer().apply { start() }
             }
             
-            // [Rollback] 파일명 매핑 제거 -> 전체 URL 매핑 (v123 방식)
+            // 세션 정보만 업데이트 (videoId 전달하여 캐시 유지 여부 결정)
+            proxyServer!!.updateSession(videoId, baseHeaders, hexIv, candidates)
+            
             val seqMap = ConcurrentHashMap<String, Long>()
             val lines = playlistRes.lines()
             val newLines = mutableListOf<String>()
@@ -64,10 +69,7 @@ class BcbcRedExtractor : ExtractorApi() {
                 if (line.startsWith("#EXT-X-KEY")) continue
                 if (line.isNotBlank() && !line.startsWith("#")) {
                     val segmentUrl = if (line.startsWith("http")) line else "${m3u8Url.substringBeforeLast("/")}/$line"
-                    
-                    // [Rollback] 전체 URL을 Key로 사용
                     seqMap[segmentUrl] = currentSeq
-                    
                     newLines.add("$proxyRoot/proxy?url=${URLEncoder.encode(segmentUrl, "UTF-8")}")
                     currentSeq++
                 } else {
@@ -80,7 +82,7 @@ class BcbcRedExtractor : ExtractorApi() {
             proxyServer!!.updateSeqMap(seqMap)
             
             callback(newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) { this.referer = "https://player-v1.bcbc.red/" })
-        } catch (e: Exception) { println("[MovieKing v124-2] FATAL Error: $e") }
+        } catch (e: Exception) { println("[MovieKing v124-3] FATAL Error: $e") }
     }
 
     private fun extractVideoIdDeep(url: String): String {
@@ -94,11 +96,6 @@ class BcbcRedExtractor : ExtractorApi() {
         return "ID_ERR"
     }
 
-    /**
-     * solveKeyCandidatesCombinatorial
-     * Version: 1.3.0
-     * Modification: 전체 코드 들여쓰기 1단계 추가 및 고정 Gap 로직 유지
-     */
     private suspend fun solveKeyCandidatesCombinatorial(h: Map<String, String>, kUrl: String): List<ByteArray> {
         val list = mutableListOf<ByteArray>()
         try {
@@ -107,61 +104,27 @@ class BcbcRedExtractor : ExtractorApi() {
             val encStr = Regex(""""encrypted_key"\s*:\s*"([^"]+)"""").find(json)?.groupValues?.get(1) ?: return emptyList()
             val b64 = try { Base64.decode(encStr, Base64.DEFAULT) } catch (e: Exception) { byteArrayOf() }
 
-            // 1. 표준 16바이트 키 처리
-            if (b64.size == 16) {
-                list.add(b64)
-            }
-
-            // 2. 특정 데이터 패턴(24바이트 등) 타겟팅 로직 (targetGaps: 0, 2, 2, 2, 2)
+            if (b64.size == 16) { list.add(b64) }
             if (b64.size >= 22) { 
                 val src = b64
                 val targetGaps = listOf(0, 2, 2, 2, 2)
                 val allPerms = generatePermutations(listOf(0, 1, 2, 3))
-
                 try {
                     val segs = mutableListOf<ByteArray>()
                     var idx = targetGaps[0]
-                    
-                    // 지정된 Gap 규칙에 따라 4개 세그먼트 추출
-                    segs.add(src.copyOfRange(idx, idx + 4))
-                    idx += 4 + targetGaps[1]
-                    
-                    segs.add(src.copyOfRange(idx, idx + 4))
-                    idx += 4 + targetGaps[2]
-                    
-                    segs.add(src.copyOfRange(idx, idx + 4))
-                    idx += 4 + targetGaps[3]
-                    
-                    segs.add(src.copyOfRange(idx, idx + 4))
-
-                    // 4개 세그먼트를 24가지 순열 조합으로 재구성
+                    for (i in 0 until 4) {
+                        segs.add(src.copyOfRange(idx, idx + 4))
+                        if (i < 4) idx += 4 + targetGaps[i+1]
+                    }
                     for (perm in allPerms) {
                         val k = ByteArray(16)
-                        for (j in 0 until 4) {
-                            System.arraycopy(segs[perm[j]], 0, k, j * 4, 4)
-                        }
+                        for (j in 0 until 4) { System.arraycopy(segs[perm[j]], 0, k, j * 4, 4) }
                         list.add(k)
                     }
-                } catch (e: Exception) {
-                    // 범위 초과 시 무시
-                }
+                } catch (e: Exception) {}
             }
-            
             return list.distinctBy { it.contentHashCode() }
-        } catch (e: Exception) {
-            return emptyList()
-        }
-    }
-
-    private fun generateDistributions(n: Int, k: Int): List<List<Int>> {
-        if (k == 1) return listOf(listOf(n))
-        val result = mutableListOf<List<Int>>()
-        for (i in 0..n) {
-            for (sub in generateDistributions(n - i, k - 1)) {
-                result.add(listOf(i) + sub)
-            }
-        }
-        return result
+        } catch (e: Exception) { return emptyList() }
     }
 
     private fun generatePermutations(list: List<Int>): List<List<Int>> {
@@ -170,9 +133,7 @@ class BcbcRedExtractor : ExtractorApi() {
         for (i in list.indices) {
             val elem = list[i]
             val rest = list.take(i) + list.drop(i + 1)
-            for (p in generatePermutations(rest)) {
-                result.add(listOf(elem) + p)
-            }
+            for (p in generatePermutations(rest)) { result.add(listOf(elem) + p) }
         }
         return result
     }
@@ -181,15 +142,18 @@ class BcbcRedExtractor : ExtractorApi() {
         private var serverSocket: ServerSocket? = null
         private var isRunning = false
         var port: Int = 0
+        
+        @Volatile private var lastVideoId: String? = null
         @Volatile private var currentHeaders: Map<String, String> = emptyMap()
         @Volatile private var playlistIv: String? = null
         @Volatile private var currentPlaylist: String = ""
         @Volatile private var keyCandidates: List<ByteArray> = emptyList()
         @Volatile private var seqMap: ConcurrentHashMap<String, Long> = ConcurrentHashMap()
         
-        // [Add] 스마트 캐싱 변수
         @Volatile private var confirmedKey: ByteArray? = null
         @Volatile private var confirmedIvType: Int = -1
+
+        fun isActive(): Boolean = isRunning && serverSocket != null && !serverSocket!!.isClosed
 
         fun start() {
             try {
@@ -197,11 +161,11 @@ class BcbcRedExtractor : ExtractorApi() {
                 port = serverSocket!!.localPort
                 isRunning = true
                 thread(isDaemon = true) { 
-                    while (isRunning && serverSocket != null && !serverSocket!!.isClosed) { 
+                    while (isRunning && isActive()) { 
                         try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {} 
                     } 
                 }
-            } catch (e: Exception) { println("[MovieKing v124-2] Server Start Failed: $e") }
+            } catch (e: Exception) { println("[MovieKing v124-3] Server Start Failed: $e") }
         }
 
         fun stop() {
@@ -209,17 +173,24 @@ class BcbcRedExtractor : ExtractorApi() {
             try { serverSocket?.close(); serverSocket = null } catch (e: Exception) {}
         }
         
-        fun updateSession(h: Map<String, String>, iv: String?, k: List<ByteArray>) {
+        fun updateSession(vId: String, h: Map<String, String>, iv: String?, k: List<ByteArray>) {
             currentHeaders = h; playlistIv = iv; keyCandidates = k
-            // 세션 초기화 시 캐시도 초기화
-            confirmedKey = null; confirmedIvType = -1
+            // [v124-3] 다른 영상일 때만 캐시 초기화
+            if (lastVideoId != vId) {
+                confirmedKey = null
+                confirmedIvType = -1
+                lastVideoId = vId
+                println("[MovieKing v124-3] New Video Session: $vId")
+            } else {
+                println("[MovieKing v124-3] Keep Cache for Video: $vId")
+            }
         }
         fun setPlaylist(p: String) { currentPlaylist = p }
         fun updateSeqMap(map: ConcurrentHashMap<String, Long>) { seqMap = map }
 
         private fun handleClient(socket: Socket) = thread {
             try {
-                socket.soTimeout = 5000
+                socket.soTimeout = 10000 // 타임아웃 10초로 연장
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
                 val line = reader.readLine() ?: return@thread
                 val path = line.split(" ")[1]
@@ -231,32 +202,37 @@ class BcbcRedExtractor : ExtractorApi() {
                 } else if (path.contains("/proxy")) {
                     val urlParam = path.substringAfter("url=").substringBefore(" ")
                     val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
-                    
-                    // [Rollback] 전체 URL로 매핑 조회 (v124 오리지널 방식)
                     val seq = seqMap[targetUrl] ?: 0L
                     
                     runBlocking {
-                        val res = app.get(targetUrl, headers = currentHeaders)
-                        if (res.isSuccessful) {
-                            val rawData = res.body.bytes()
-                            output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
+                        try {
+                            val res = app.get(targetUrl, headers = currentHeaders, timeout = 15)
+                            if (res.isSuccessful) {
+                                val rawData = res.body.bytes()
+                                output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
 
-                            if (rawData.isNotEmpty() && rawData[0] == 0x47.toByte() && rawData.size > 188 && rawData[188] == 0x47.toByte()) {
-                                output.write(rawData)
-                            } else {
-                                // [Add] 스마트 캐싱 로직 적용
-                                if (confirmedKey != null) {
-                                    val dec = decryptDirect(rawData, confirmedKey!!, confirmedIvType, seq)
-                                    if (dec != null) {
-                                        output.write(dec)
-                                        return@runBlocking
-                                    } else { confirmedKey = null } // 캐시 실패 시 초기화
+                                if (rawData.isNotEmpty() && rawData[0] == 0x47.toByte()) {
+                                    output.write(rawData)
+                                } else {
+                                    // 스마트 캐시 우선 적용
+                                    if (confirmedKey != null) {
+                                        val dec = decryptDirect(rawData, confirmedKey!!, confirmedIvType, seq)
+                                        if (dec != null && dec.isNotEmpty() && dec[0] == 0x47.toByte()) {
+                                            output.write(dec)
+                                            return@runBlocking
+                                        } else { 
+                                            println("[MovieKing v124-3] Cache Mismatch, retry brute-force")
+                                            confirmedKey = null 
+                                        }
+                                    }
+                                    
+                                    val dec = bruteForceCombinatorial(rawData, seq)
+                                    if (dec != null) output.write(dec) else output.write(rawData)
                                 }
-                                
-                                val dec = bruteForceCombinatorial(rawData, seq)
-                                if (dec != null) output.write(dec) else output.write(rawData)
+                            } else {
+                                println("[MovieKing v124-3] Proxy Fetch Failed: ${res.code}")
                             }
-                        }
+                        } catch (e: Exception) { println("[MovieKing v124-3] Network Error: $e") }
                     }
                 }
                 output.flush(); socket.close()
@@ -287,11 +263,9 @@ class BcbcRedExtractor : ExtractorApi() {
                         val head = cipher.update(data.take(checkSize).toByteArray())
                         
                         if (head.isNotEmpty() && head[0] == 0x47.toByte() && head.size > 188 && head[188] == 0x47.toByte()) {
-                            println("[MovieKing v124-2] JACKPOT! Key#$keyIdx")
-                            // [Add] 캐싱 저장
+                            println("[MovieKing v124-3] JACKPOT! Key#$keyIdx, IV#$ivIdx")
                             confirmedKey = key
                             confirmedIvType = ivIdx
-                            
                             cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
                             return cipher.doFinal(data)
                         }
