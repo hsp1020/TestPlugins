@@ -1,21 +1,46 @@
 package com.tvwiki
 
+import android.os.Handler
+import android.os.Looper
+import android.webkit.ConsoleMessage
+import android.webkit.WebChromeClient
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.network.WebViewResolver 
-import android.webkit.CookieManager
-import java.io.*
+import java.io.BufferedReader
+import java.io.InputStreamReader
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URI
+import java.net.URLDecoder
+import java.net.URLEncoder
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import javax.crypto.Cipher
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.SecretKeySpec
 import kotlin.concurrent.thread
-import android.util.Base64
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.runBlocking
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
+/**
+ * [Version: v33-Final-Hooking]
+ * 1. JS Injection: 'onPageStarted', 'doUpdateVisitedHistory' 등 모든 타이밍에 Hook Script 주입.
+ * 2. Script Upgrade: 'Object.defineProperty' 방어 로직 추가 및 'Uint8Array' 감시 강화.
+ * 3. Base: 빌드 성공한 v32 기반.
+ */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVWiki"
     override val mainUrl = "https://player.bunny-frame.online"
@@ -25,6 +50,21 @@ class BunnyPoorCdn : ExtractorApi() {
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
+        private const val TAG = "[Bunny-v33]"
+
+        @Volatile internal var globalKey: ByteArray? = null
+        @Volatile internal var keyLatch = CountDownLatch(1)
+
+        fun hexToBytes(hex: String): ByteArray {
+            val len = hex.length
+            val data = ByteArray(len / 2)
+            var i = 0
+            while (i < len) {
+                data[i / 2] = ((Character.digit(hex[i], 16) shl 4) + Character.digit(hex[i + 1], 16)).toByte()
+                i += 2
+            }
+            return data
+        }
     }
 
     override suspend fun getUrl(
@@ -34,6 +74,11 @@ class BunnyPoorCdn : ExtractorApi() {
         callback: (ExtractorLink) -> Unit
     ) {
         proxyServer?.stop()
+        proxyServer = null
+        
+        globalKey = null
+        keyLatch = CountDownLatch(1)
+        
         extract(url, referer, subtitleCallback, callback)
     }
 
@@ -44,197 +89,345 @@ class BunnyPoorCdn : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
         thumbnailHint: String? = null,
     ): Boolean {
-        println("[TVWiki-Snatch] 추출 프로세스 시작")
         var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = "https://tvwiki5.net/"
 
-        // 1. 원본 플레이어 페이지 HTML 확보
-        println("[TVWiki-Snatch] 원본 페이지 획득 시도: $cleanUrl")
-        val playerPageRes = try {
-            app.get(cleanUrl, headers = mapOf("Referer" to cleanReferer, "User-Agent" to DESKTOP_UA))
-        } catch (e: Exception) {
-            println("[TVWiki-Snatch] 페이지 획득 실패: ${e.message}")
-            return false
+        if (!cleanUrl.contains("/v/") && !cleanUrl.contains("/e/")) {
+            try {
+                val refRes = app.get(cleanReferer, headers = mapOf("User-Agent" to DESKTOP_UA))
+                val iframeMatch = Regex("""src=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
+                    ?: Regex("""data-player\d*=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
+                if (iframeMatch != null) {
+                    cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&").trim()
+                }
+            } catch (e: Exception) {}
         }
-        val originalHtml = playerPageRes.text
-        
-        // 2. 프록시 가동
-        proxyServer = ProxyWebServer().apply { start() }
-        val proxyPort = proxyServer!!.port
-        println("[TVWiki-Snatch] 로컬 프록시 서버 오픈 (Port: $proxyPort)")
 
-        // 3. 5가지 절대 규칙 검증 로직이 포함된 Hook 스크립트 (로그 경로 수정)
-        val hookScript = """
-            <base href="https://player.bunny-frame.online/">
-            <script>
+        // [비동기] JS Hooking 시작
+        thread {
+            runBlocking {
+                JsKeyStealer.stealKey(cleanUrl, DESKTOP_UA, cleanReferer)
+            }
+        }
+
+        // 프록시 서버 가동
+        startProxy(cleanUrl, callback)
+        return true
+    }
+
+    private suspend fun startProxy(
+        targetUrl: String, 
+        callback: (ExtractorLink) -> Unit
+    ) {
+        try {
+            val m3u8Res = app.get(targetUrl, headers = mapOf("User-Agent" to DESKTOP_UA, "Referer" to "https://tvwiki5.net/"))
+            val m3u8Url = m3u8Res.url
+            val m3u8Content = m3u8Res.text
+
+            val proxy = ProxyWebServer()
+            proxy.start()
+            proxyServer = proxy
+
+            val proxyPort = proxy.port
+            val proxyRoot = "http://127.0.0.1:$proxyPort"
+
+            val newLines = mutableListOf<String>()
+            val lines = m3u8Content.lines()
+            val seqMap = ConcurrentHashMap<String, Long>()
+            var currentSeq = Regex("""#EXT-X-MEDIA-SEQUENCE:(\d+)""").find(m3u8Content)?.groupValues?.get(1)?.toLong() ?: 0L
+            
+            val uri = URI(m3u8Url)
+            val domain = "${uri.scheme}://${uri.host}"
+            val parentUrl = m3u8Url.substringBeforeLast("/")
+
+            for (line in lines) {
+                if (line.startsWith("#EXT-X-KEY")) {
+                    continue 
+                }
+                if (line.isNotBlank() && !line.startsWith("#")) {
+                    val segmentUrl = when {
+                        line.startsWith("http") -> line
+                        line.startsWith("/") -> "$domain$line"
+                        else -> "$parentUrl/$line"
+                    }
+                    seqMap[segmentUrl] = currentSeq
+                    val encodedSegUrl = URLEncoder.encode(segmentUrl, "UTF-8")
+                    newLines.add("$proxyRoot/proxy?url=$encodedSegUrl")
+                    currentSeq++
+                } else {
+                    newLines.add(line)
+                }
+            }
+
+            val proxyM3u8 = newLines.joinToString("\n")
+            proxy.setPlaylist(proxyM3u8)
+            proxy.updateSeqMap(seqMap)
+
+            callback(
+                newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) {
+                    this.referer = "https://player.bunny-frame.online/"
+                    this.quality = Qualities.Unknown.value
+                }
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    object JsKeyStealer {
+        private const val HOOK_SCRIPT = """
             (function() {
                 try {
-                    var originalSet = Uint8Array.prototype.set;
-                    var found = false;
+                    if (window.isHooked) return;
+                    window.isHooked = true;
 
-                    // 로그를 로컬 프록시 서버로 직접 전송
-                    function logToApp(status, hex, msg) {
-                        var logUrl = "http://127.0.0.1:$proxyPort/jslog?status=" + status + "&key=" + hex + "&msg=" + encodeURIComponent(msg);
-                        var img = new Image();
-                        img.src = logUrl;
-                    }
+                    // 1. 전역 변수 초기화 (보안 체크 우회)
+                    if (typeof G !== 'undefined') window.G = false;
 
-                    function checkKey(arr) {
-                        if (arr.length !== 16) return { v: false, m: "Length mismatch(" + arr.length + ")" };
-                        
-                        // 규칙 1: 01 0e 00 시작
-                        if (arr[0] !== 1 || arr[1] !== 14 || arr[2] !== 0) {
-                            return { v: false, m: "Prefix mismatch: " + arr[0] + "," + arr[1] + "," + arr[2] };
-                        }
-                        
-                        // 규칙 2: 4~10바이트 패턴 영역 (1~7 순열)
-                        var pattern = Array.from(arr.slice(3, 10)).sort(function(a,b){return a-b;});
-                        for (var i = 0; i < 7; i++) {
-                            if (pattern[i] !== i + 1) return { v: false, m: "Pattern(1-7) mismatch" };
-                        }
-                        
-                        return { v: true, m: "Success" };
-                    }
-
-                    Uint8Array.prototype.set = function(source, offset) {
-                        if (!found && source instanceof Uint8Array && source.length === 16) {
-                            var hex = Array.from(source).map(function(b){return('0'+b.toString(16)).slice(-2);}).join('');
-                            var res = checkKey(source);
-                            
-                            if (res.v) {
-                                found = true;
-                                logToApp("MATCH", hex, "Real key found!");
-                                // 성공 시 전용 URL로 리다이렉트하여 Interceptor 깨움
-                                window.location.href = "http://127.0.0.1:$proxyPort/found?key=" + hex;
-                            } else {
-                                logToApp("REJECT", hex, res.m);
+                    // 2. 키 패턴 검사 함수
+                    function checkAndLog(source) {
+                        if (source && source.length === 16) {
+                            if (source[0] === 0x01 && source[1] === 0x0e && source[2] === 0x00) {
+                                try {
+                                    var body = Array.from(source.slice(3, 10));
+                                    body.sort(function(a, b) { return a - b; });
+                                    var isValid = true;
+                                    for (var i = 0; i < 7; i++) {
+                                        if (body[i] !== (i + 1)) { isValid = false; break; }
+                                    }
+                                    if (isValid) {
+                                        var hex = Array.from(source).map(function(b) {
+                                            return ('0' + (b & 0xFF).toString(16)).slice(-2);
+                                        }).join('');
+                                        console.log("MAGIC_KEY_FOUND:" + hex);
+                                        return true;
+                                    }
+                                } catch (e) {}
                             }
                         }
-                        return originalSet.apply(this, arguments);
-                    };
-                    logToApp("INFO", "", "Hook Script Injected & Running");
-                } catch (e) { logToApp("ERROR", "", e.toString()); }
-            })();
-            </script>
-        """.trimIndent()
-
-        proxyServer!!.prepare(originalHtml.replaceFirst("<head>", "<head>$hookScript"), cleanUrl)
-
-        // 4. 웹뷰 실행 및 결과 가로채기
-        val keyResolver = WebViewResolver(
-            interceptUrl = Regex("""/found\?key=([a-fA-F0-9]+)"""),
-            useOkhttp = false,
-            timeout = 30000L
-        )
-
-        var foundKeyHex: String? = null
-        try {
-            println("[TVWiki-Snatch] 웹뷰에서 플레이어 로직 실행 중... (최대 30초)")
-            // 프록시를 통해 변조된 페이지 로드
-            val response = app.get("http://127.0.0.1:$proxyPort/index.html", interceptor = keyResolver)
-            foundKeyHex = Regex("""key=([a-fA-F0-9]+)""").find(response.url)?.groupValues?.get(1)
-        } catch (e: Exception) {
-            // Interceptor에 걸리면 예외가 발생하므로 여기서 추출
-            foundKeyHex = Regex("""key=([a-fA-F0-9]+)""").find(e.message ?: "")?.groupValues?.get(1)
-        }
-
-        if (foundKeyHex != null) {
-            println("[TVWiki-Snatch] [FOUND_KEY] ★ 탈취 성공: $foundKeyHex ★")
-            val keyBytes = foundKeyHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-            proxyServer!!.setKey(keyBytes)
-
-            // c.html(m3u8) 확보
-            try {
-                val cHtmlResolver = WebViewResolver(interceptUrl = Regex("""/c\.html"""), timeout = 10000L)
-                val cHtmlRes = app.get(cleanUrl, headers = mapOf("User-Agent" to DESKTOP_UA), interceptor = cHtmlResolver)
-                val m3u8Url = cHtmlRes.url
-                val m3u8Raw = app.get(m3u8Url, headers = mapOf("User-Agent" to DESKTOP_UA)).text
-                proxyServer!!.setM3u8(m3u8Raw, m3u8Url)
-
-                callback(
-                    newExtractorLink(name, name, "http://127.0.0.1:$proxyPort/video.m3u8", ExtractorLinkType.M3U8) {
-                        this.referer = "https://player.bunny-frame.online/"
-                        this.quality = Qualities.Unknown.value
+                        return false;
                     }
-                )
-                return true
-            } catch (e: Exception) {
-                println("[TVWiki-Snatch] M3U8 확보 중 에러: ${e.message}")
-            }
-        } else {
-            println("[TVWiki-Snatch] [FAILURE] 규칙에 맞는 키를 찾지 못하고 타임아웃되었습니다.")
-        }
 
-        return false
+                    // 3. Uint8Array.prototype.set 후킹
+                    const originalSet = Uint8Array.prototype.set;
+                    Object.defineProperty(Uint8Array.prototype, 'set', {
+                        value: function(source, offset) {
+                            if (source) checkAndLog(source);
+                            return originalSet.apply(this, arguments);
+                        },
+                        writable: true,
+                        configurable: true
+                    });
+
+                    // 4. Uint8Array 생성자 후킹 (new Uint8Array([...]))
+                    const OriginalUint8Array = window.Uint8Array;
+                    function HookedUint8Array(arg1, arg2, arg3) {
+                        var arr;
+                        if (arguments.length === 0) arr = new OriginalUint8Array();
+                        else if (arguments.length === 1) arr = new OriginalUint8Array(arg1);
+                        else if (arguments.length === 2) arr = new OriginalUint8Array(arg1, arg2);
+                        else arr = new OriginalUint8Array(arg1, arg2, arg3);
+                        
+                        checkAndLog(arr);
+                        return arr;
+                    }
+                    
+                    // 프로토타입 체인 복구
+                    HookedUint8Array.prototype = OriginalUint8Array.prototype;
+                    HookedUint8Array.BYTES_PER_ELEMENT = OriginalUint8Array.BYTES_PER_ELEMENT;
+                    HookedUint8Array.from = OriginalUint8Array.from;
+                    HookedUint8Array.of = OriginalUint8Array.of;
+                    
+                    // window.Uint8Array 덮어쓰기 (Object.defineProperty 사용)
+                    try {
+                        Object.defineProperty(window, 'Uint8Array', {
+                            value: HookedUint8Array,
+                            writable: true,
+                            configurable: true
+                        });
+                    } catch(e) {
+                        window.Uint8Array = HookedUint8Array;
+                    }
+
+                    console.log("HOOK_INSTALLED");
+                } catch(e) {
+                    console.log("HOOK_ERROR:" + e.message);
+                }
+            })();
+        """
+
+        suspend fun stealKey(url: String, ua: String, referer: String) {
+            withContext(Dispatchers.Main) {
+                val webView = WebView(AcraApplication.context!!)
+                
+                webView.settings.apply {
+                    javaScriptEnabled = true
+                    domStorageEnabled = true
+                    userAgentString = ua
+                    blockNetworkImage = true
+                }
+
+                webView.webChromeClient = object : WebChromeClient() {
+                    override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+                        val msg = consoleMessage?.message() ?: ""
+                        if (msg.startsWith("MAGIC_KEY_FOUND:")) {
+                            val keyHex = msg.substringAfter("MAGIC_KEY_FOUND:")
+                            BunnyPoorCdn.globalKey = BunnyPoorCdn.hexToBytes(keyHex)
+                            BunnyPoorCdn.keyLatch.countDown()
+                            println("$TAG Found Key: $keyHex")
+                            webView.destroy()
+                        } else if (msg.startsWith("HOOK_ERROR:")) {
+                             println("$TAG JS Hook Error: $msg")
+                        }
+                        return true
+                    }
+                    
+                    override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                        super.onProgressChanged(view, newProgress)
+                        // 지속적 주입
+                        view?.evaluateJavascript(HOOK_SCRIPT, null)
+                    }
+                }
+
+                webView.webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        super.onPageFinished(view, url)
+                        view?.evaluateJavascript(HOOK_SCRIPT, null)
+                    }
+                    
+                    override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                        super.onPageStarted(view, url, favicon)
+                        view?.evaluateJavascript(HOOK_SCRIPT, null)
+                    }
+                    
+                    override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                         super.doUpdateVisitedHistory(view, url, isReload)
+                         view?.evaluateJavascript(HOOK_SCRIPT, null)
+                    }
+                }
+
+                val handler = Handler(Looper.getMainLooper())
+                handler.postDelayed({
+                    try { 
+                        if (BunnyPoorCdn.globalKey == null) {
+                            println("$TAG Timeout. Retry reload.")
+                            webView.reload()
+                        } else {
+                            webView.destroy()
+                        }
+                    } catch(e:Exception){}
+                }, 10000)
+
+                val headers = mapOf("Referer" to referer)
+                webView.loadUrl(url, headers)
+            }
+        }
     }
 
     class ProxyWebServer {
         private var serverSocket: ServerSocket? = null
         private var isRunning = false
         var port: Int = 0
-        private var hookedHtml = ""
-        private var m3u8Raw = ""
-        private var m3u8Url = ""
-        private var key: ByteArray? = null
+        @Volatile private var currentPlaylist: String = ""
+        @Volatile private var seqMap: ConcurrentHashMap<String, Long> = ConcurrentHashMap()
+        @Volatile private var trimOffset: Int = -1
 
         fun start() {
             try {
                 serverSocket = ServerSocket(0)
                 port = serverSocket!!.localPort
                 isRunning = true
-                thread(isDaemon = true) {
-                    while (isRunning) {
-                        try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {}
-                    }
+                thread(isDaemon = true) { 
+                    while (isRunning && serverSocket != null && !serverSocket!!.isClosed) { 
+                        try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {} 
+                    } 
                 }
             } catch (e: Exception) {}
         }
 
-        fun stop() { isRunning = false; try { serverSocket?.close() } catch (e: Exception) {} }
-        fun prepare(html: String, url: String) { hookedHtml = html }
-        fun setKey(k: ByteArray) { key = k }
-        fun setM3u8(raw: String, url: String) { m3u8Raw = raw; m3u8Url = url }
+        fun stop() {
+            isRunning = false
+            try { serverSocket?.close(); serverSocket = null } catch (e: Exception) {}
+        }
+        
+        fun setPlaylist(p: String) { currentPlaylist = p }
+        fun updateSeqMap(map: ConcurrentHashMap<String, Long>) { seqMap = map }
 
-        private fun handleClient(socket: Socket) {
-            thread {
-                try {
-                    val reader = socket.getInputStream().bufferedReader()
-                    val line = reader.readLine() ?: return@thread
-                    val path = line.split(" ").getOrNull(1) ?: ""
-                    val output = socket.getOutputStream()
+        private fun handleClient(socket: Socket) = thread {
+            try {
+                socket.soTimeout = 15000
+                val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
+                val line = reader.readLine() ?: return@thread
+                val parts = line.split(" ")
+                if (parts.size < 2) return@thread
+                val path = parts[1]
+                val output = socket.getOutputStream()
 
-                    when {
-                        path.contains("/jslog") -> {
-                            val status = path.substringAfter("status=", "").substringBefore("&")
-                            val k = path.substringAfter("key=", "").substringBefore("&")
-                            val msg = java.net.URLDecoder.decode(path.substringAfter("msg=", "").substringBefore("&"), "UTF-8")
-                            println("[TVWiki-Snatch][JS-Log] $status | Key: $k | Reason: $msg")
-                            output.write("HTTP/1.1 204 No Content\r\n\r\n".toByteArray())
-                        }
-                        path.contains("/index.html") -> {
-                            output.write("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n$hookedHtml".toByteArray())
-                        }
-                        path.contains("/video.m3u8") -> {
-                            val baseUrl = m3u8Url.substringBeforeLast("/")
-                            val modified = m3u8Raw.lines().joinToString("\n") { l ->
-                                when {
-                                    l.contains("#EXT-X-KEY") -> l.replace(Regex("""URI="([^"]+)""""), """URI="http://127.0.0.1:$port/key.bin"""")
-                                    !l.startsWith("#") && l.isNotEmpty() && !l.startsWith("http") -> "$baseUrl/$l"
-                                    else -> l
-                                }
-                            }
-                            output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\n\r\n$modified".toByteArray())
-                        }
-                        path.contains("/key.bin") -> {
-                            output.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n".toByteArray())
-                            key?.let { output.write(it) }
-                        }
-                        else -> output.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
+                if (path.contains("/playlist.m3u8")) {
+                    val body = currentPlaylist.toByteArray(charset("UTF-8"))
+                    val header = "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: ${body.size}\r\nConnection: close\r\n\r\n"
+                    output.write(header.toByteArray())
+                    output.write(body)
+                } else if (path.contains("/proxy")) {
+                    // [Key Wait]
+                    if (BunnyPoorCdn.globalKey == null) {
+                        println("$TAG Waiting for key...")
+                        BunnyPoorCdn.keyLatch.await(15, TimeUnit.SECONDS)
                     }
-                    output.flush()
-                    socket.close()
-                } catch (e: Exception) { socket.close() }
+
+                    val urlParam = path.substringAfter("url=").substringBefore(" ")
+                    val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
+                    val seq = seqMap[targetUrl] ?: 0L
+
+                    runBlocking {
+                        try {
+                            val res = app.get(targetUrl, headers = mapOf("User-Agent" to "Mozilla/5.0"))
+                            if (res.isSuccessful) {
+                                val rawData = res.body.bytes()
+                                output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
+                                
+                                val key = BunnyPoorCdn.globalKey
+                                val decrypted = if (key != null) {
+                                    decryptWithBlindTrim(rawData, key, seq)
+                                } else {
+                                    rawData
+                                }
+                                output.write(decrypted ?: rawData)
+                            } else {
+                                output.write("HTTP/1.1 ${res.code} Error\r\n\r\n".toByteArray())
+                            }
+                        } catch (e: Exception) { e.printStackTrace() }
+                    }
+                }
+                output.flush(); socket.close()
+            } catch (e: Exception) { 
+                try { socket.close() } catch(e2:Exception){} 
             }
+        }
+
+        private fun decryptWithBlindTrim(data: ByteArray, key: ByteArray, seq: Long): ByteArray? {
+            if (trimOffset != -1) {
+                return attemptDecrypt(data, key, seq, trimOffset)
+            }
+            for (offset in 0..256) {
+                if (data.size <= offset + 188) break
+                val dec = attemptDecrypt(data, key, seq, offset)
+                if (dec != null && dec.size > 188 && dec[0] == 0x47.toByte()) {
+                    trimOffset = offset
+                    return dec
+                }
+            }
+            return null
+        }
+
+        private fun attemptDecrypt(data: ByteArray, key: ByteArray, seq: Long, offset: Int): ByteArray? {
+            try {
+                val iv = ByteArray(16)
+                ByteBuffer.wrap(iv).order(ByteOrder.BIG_ENDIAN).putLong(8, seq)
+                val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+                cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+                return cipher.doFinal(data.copyOfRange(offset, data.size))
+            } catch (e: Exception) { return null }
         }
     }
 }
