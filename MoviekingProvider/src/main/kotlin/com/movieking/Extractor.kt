@@ -13,13 +13,14 @@ import kotlinx.coroutines.runBlocking
 import kotlin.concurrent.thread
 
 /**
- * v127-2.1: Fix Build Error (Class Name Rollback)
+ * v127-2: Key-Wait Proxy Strategy
  * [수정 사항]
- * 1. 클래스명 변경: BcbcRedExtractor -> BunnyPoorCdn (빌드 에러 'Unresolved reference' 해결)
- * 2. v127-2 로직 유지: 404 에러 방지를 위한 Blocking Wait 및 Key-Only Proxy 적용.
- * 3. 구간 이동 최적화: 영상 데이터(TS)는 서버 직결, 복호화 키만 프록시 처리.
+ * 1. Blocking Wait: 플레이어가 key.bin을 요청했을 때 정답 키가 없으면 최대 10초간 대기하여 404 에러 방지.
+ * 2. Background Pre-compute: getUrl 시작과 동시에 키 탐색 스레드를 분리하여 연산 시간 확보.
+ * 3. Direct TS Access: 영상 조각(TS)은 여전히 원본 서버(m1.ms)에서 직접 받으므로 구간 이동 렉 없음.
+ * 4. Persistence: 한 번 찾은 키는 메모리에 영구 저장하여 다음 재생 시 즉시 응답.
  */
-class BunnyPoorCdn : ExtractorApi() {
+class BcbcRedExtractor : ExtractorApi() {
     override val name = "MovieKingPlayer"
     override val mainUrl = "https://player-v1.bcbc.red"
     override val requiresReferer = true
@@ -29,41 +30,37 @@ class BunnyPoorCdn : ExtractorApi() {
         private var proxyServer: ProxyWebServer? = null
         @Volatile private var confirmedKey: ByteArray? = null
         @Volatile private var isFindingKey = false
-        @Volatile private var lastCandidates: List<ByteArray> = emptyList()
-        @Volatile private var firstSegmentUrl: String? = null
-        @Volatile private var lastHeaders: Map<String, String> = emptyMap()
     }
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
-        println("=== [BunnyPoorCdn v127-2.1] Start ===")
+        println("=== [MovieKing v127-2] Seek-Optimized Start ===")
         try {
             val baseHeaders = mutableMapOf(
                 "Referer" to "https://player-v1.bcbc.red/",
                 "Origin" to "https://player-v1.bcbc.red",
                 "User-Agent" to DESKTOP_UA
             )
-            lastHeaders = baseHeaders
             
             val playerHtml = app.get(url, headers = baseHeaders).text
             val m3u8Url = Regex("""data-m3u8\s*=\s*['"]([^'"]+)['"]""").find(playerHtml)?.groupValues?.get(1)?.replace("\\/", "/") ?: return
             val playlistRes = app.get(m3u8Url, headers = baseHeaders).text
             
-            // 1. 키 후보군 및 세그먼트 정보 추출
+            // 1. 키 후보군 및 첫 세그먼트 주소 확보
             val keyMatch = Regex("""#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"(?:,IV=(0x[0-9a-fA-F]+))?""").find(playlistRes)
             if (keyMatch != null && confirmedKey == null && !isFindingKey) {
-                lastCandidates = solveKeyCandidatesCombinatorial(baseHeaders, keyMatch.groupValues[1])
+                val candidates = solveKeyCandidatesCombinatorial(baseHeaders, keyMatch.groupValues[1])
                 val firstSegment = playlistRes.lines().firstOrNull { it.isNotBlank() && !it.startsWith("#") }
-                firstSegmentUrl = if (firstSegment?.startsWith("http") == true) firstSegment else "${m3u8Url.substringBeforeLast("/")}/$firstSegment"
+                val segmentUrl = if (firstSegment?.startsWith("http") == true) firstSegment else "${m3u8Url.substringBeforeLast("/")}/$firstSegment"
                 
-                // 별도 스레드에서 정답 키 탐색 시작
+                // 별도 스레드에서 즉시 정답 키 탐색 시작
                 thread {
                     isFindingKey = true
-                    runBlocking { confirmedKey = findRealKey(firstSegmentUrl!!, lastHeaders, lastCandidates) }
+                    runBlocking { confirmedKey = findRealKey(segmentUrl!!, baseHeaders, candidates) }
                     isFindingKey = false
                 }
             }
 
-            // 2. 프록시 서버 시작
+            // 2. 프록시 서버 시작 (열쇠 전용)
             if (proxyServer == null || !proxyServer!!.isActive()) {
                 proxyServer?.stop()
                 proxyServer = ProxyWebServer().apply { start() }
@@ -73,7 +70,7 @@ class BunnyPoorCdn : ExtractorApi() {
             val lines = playlistRes.lines()
             val rewrittenM3u8 = StringBuilder()
             
-            // 3. M3U8 재작성 (TS는 원본 서버 직결로 렉 제거)
+            // 3. M3U8 재작성 (TS는 원본 서버로 연결)
             for (line in lines) {
                 when {
                     line.startsWith("#EXT-X-KEY") -> {
@@ -92,10 +89,10 @@ class BunnyPoorCdn : ExtractorApi() {
             callback(newExtractorLink(name, name, "$localRoot/playlist.m3u8", ExtractorLinkType.M3U8) { 
                 this.referer = "https://player-v1.bcbc.red/" 
             })
-        } catch (e: Exception) { println("[BunnyPoorCdn v127-2.1] Fatal Error: $e") }
+        } catch (e: Exception) { println("[MovieKing v127-2] Fatal Error: $e") }
     }
 
-    suspend fun findRealKey(segmentUrl: String, headers: Map<String, String>, candidates: List<ByteArray>): ByteArray? {
+    private suspend fun findRealKey(segmentUrl: String, headers: Map<String, String>, candidates: List<ByteArray>): ByteArray? {
         return try {
             val res = app.get(segmentUrl, headers = headers)
             if (!res.isSuccessful) return null
@@ -161,7 +158,11 @@ class BunnyPoorCdn : ExtractorApi() {
             try {
                 serverSocket = ServerSocket(0).apply { port = localPort }
                 isRunning = true
-                thread(isDaemon = true) { while (isRunning) try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {} }
+                thread(isDaemon = true) { 
+                    while (isRunning) {
+                        try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {}
+                    }
+                }
             } catch (e: Exception) {}
         }
         fun stop() { isRunning = false; try { serverSocket?.close() } catch (e: Exception) {} }
@@ -178,12 +179,9 @@ class BunnyPoorCdn : ExtractorApi() {
                     output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\n\r\n".toByteArray())
                     output.write(currentManifest.toByteArray())
                 } else if (path.contains("key.bin")) {
-                    // 키가 찾아질 때까지 최대 10초 대기 (404 에러 방지)
+                    // [v127-2 핵심] 키가 찾아질 때까지 최대 10초간 대기 (404 방지)
                     var waitCount = 0
                     while (confirmedKey == null && waitCount < 100) {
-                        if (firstSegmentUrl != null && !isFindingKey) {
-                            runBlocking { confirmedKey = BunnyPoorCdn().findRealKey(firstSegmentUrl!!, lastHeaders, lastCandidates) }
-                        }
                         Thread.sleep(100)
                         waitCount++
                     }
