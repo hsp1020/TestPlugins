@@ -22,11 +22,10 @@ import java.net.URLDecoder
 import kotlin.concurrent.thread
 
 /**
- * Version: 11
+ * Version: 12 (Debug Mode)
  * Modification:
- * 1. LOGIC: Strict Key7 Detection (Only triggers if #EXT-X-KEY line contains '/v/key7')
- * 2. FIX: Covers all 3 cases provided by user (AES-128 / No Encryption / Key7)
- * 3. Maintain: Absolute Path Resolution & Decryption Logic
+ * 1. ADD: Extensive 'println' logs with [TVMON] tag for debugging
+ * 2. Logic: Same as Version 11 (Strict Key7 Detection + Absolute Path Fix)
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVMON"
@@ -45,6 +44,7 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
+        println("[TVMON] getUrl started. URL: $url, Referer: $referer")
         extract(url, referer, subtitleCallback, callback)
     }
 
@@ -55,19 +55,26 @@ class BunnyPoorCdn : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
         thumbnailHint: String? = null,
     ): Boolean {
+        println("[TVMON] extract function called")
         var cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = referer?.replace(Regex("[\\r\\n\\s]"), "")?.trim() ?: "https://tvmon.site/"
 
         // 1. iframe 주소 따기
         if (!cleanUrl.contains("v/f/") && !cleanUrl.contains("v/e/")) {
+            println("[TVMON] Searching for iframe in: $cleanReferer")
             try {
                 val refRes = app.get(cleanReferer)
                 val iframeMatch = Regex("""src=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
                     ?: Regex("""data-player\d*=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
                 if (iframeMatch != null) {
                     cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&").trim()
+                    println("[TVMON] Found iframe URL: $cleanUrl")
+                } else {
+                    println("[TVMON] No iframe found.")
                 }
-            } catch (e: Exception) {}
+            } catch (e: Exception) {
+                println("[TVMON] Error fetching referrer: ${e.message}")
+            }
         }
 
         var capturedUrl: String? = null
@@ -75,10 +82,12 @@ class BunnyPoorCdn : ExtractorApi() {
         // [입력 URL 체크]
         if (cleanUrl.contains("/c.html") && cleanUrl.contains("token=")) {
             capturedUrl = cleanUrl
+            println("[TVMON] Input URL is already c.html target: $capturedUrl")
         }
 
         // 2. c.html 요청 납치
         if (capturedUrl == null) {
+            println("[TVMON] Starting WebViewResolver for c.html...")
             val resolver = WebViewResolver(
                 interceptUrl = Regex("""/c\.html"""), 
                 useOkhttp = false,
@@ -99,13 +108,19 @@ class BunnyPoorCdn : ExtractorApi() {
                 
                 if (response.url.contains("/c.html") && response.url.contains("token=")) {
                     capturedUrl = response.url
+                    println("[TVMON] Captured c.html URL: $capturedUrl")
+                } else {
+                    println("[TVMON] Failed to capture c.html. Last URL: ${response.url}")
                 }
-            } catch (e: Exception) {}
+            } catch (e: Exception) {
+                println("[TVMON] Error during WebViewResolver: ${e.message}")
+            }
         }
 
         if (capturedUrl != null) {
             val cookieManager = CookieManager.getInstance()
             val cookie = cookieManager.getCookie(capturedUrl)
+            println("[TVMON] Cookies found: ${cookie?.take(20)}...")
 
             val headers = mutableMapOf(
                 "User-Agent" to DESKTOP_UA,
@@ -125,27 +140,33 @@ class BunnyPoorCdn : ExtractorApi() {
 
             // 요청 URL 정리
             val requestUrl = capturedUrl!!.substringBefore("#")
+            println("[TVMON] Requesting M3U8 content from: $requestUrl")
             
             try {
                 // M3U8 내용 가져오기
                 val m3u8Content = app.get(requestUrl, headers = headers).text
-                
-                // [Key7 판별 로직] 사용자 요청 사항 반영
-                // #EXT-X-KEY 라인이 존재하고, 그 라인에 "/v/key7"이 포함되어 있는가?
+                println("[TVMON] M3U8 Content Fetched (Length: ${m3u8Content.length})")
+                // println("[TVMON] Preview: ${m3u8Content.take(100)}") 
+
+                // [Key7 판별 로직]
                 val isKey7 = m3u8Content.lines().any { line ->
                     line.startsWith("#EXT-X-KEY") && line.contains("/v/key7")
                 }
+                println("[TVMON] isKey7 detected? $isKey7")
 
                 if (isKey7) {
-                    // === Case 3: Key7 발견 -> 프록시 가동 ===
+                    println("[TVMON] Starting Proxy Server...")
                     proxyServer?.stop()
                     proxyServer = ProxyWebServer().apply {
                         start()
                         updateSession(headers)
                     }
+                    println("[TVMON] Proxy Server started on port: ${proxyServer!!.port}")
 
-                    // Base URI 준비 (상대 경로 복원용)
-                    val baseUri = try { URI(requestUrl) } catch (e: Exception) { null }
+                    // Base URI 준비
+                    val baseUri = try { URI(requestUrl) } catch (e: Exception) { 
+                        println("[TVMON] URI Creation Failed: ${e.message}"); null 
+                    }
                     val sb = StringBuilder()
 
                     m3u8Content.lines().forEach { line ->
@@ -153,18 +174,17 @@ class BunnyPoorCdn : ExtractorApi() {
                         if (trimmed.isEmpty()) return@forEach
 
                         if (trimmed.startsWith("#")) {
-                            // Key 라인 처리
                             if (trimmed.startsWith("#EXT-X-KEY") && trimmed.contains("/v/key7")) {
                                 val regex = Regex("""URI="([^"]+)"""")
                                 val match = regex.find(trimmed)
                                 if (match != null) {
                                     val originalKeyUrl = match.groupValues[1]
+                                    println("[TVMON] Found Key URL: $originalKeyUrl")
                                     
-                                    // Key URL 절대 경로 변환
                                     val absoluteKeyUrl = resolveUrl(baseUri, requestUrl, originalKeyUrl)
-                                    val encodedKeyUrl = java.net.URLEncoder.encode(absoluteKeyUrl, "UTF-8")
+                                    println("[TVMON] Resolved Absolute Key URL: $absoluteKeyUrl")
                                     
-                                    // 프록시 주소로 교체
+                                    val encodedKeyUrl = java.net.URLEncoder.encode(absoluteKeyUrl, "UTF-8")
                                     val newLine = trimmed.replace(
                                         originalKeyUrl,
                                         "http://127.0.0.1:${proxyServer!!.port}/key?url=$encodedKeyUrl"
@@ -177,27 +197,30 @@ class BunnyPoorCdn : ExtractorApi() {
                                 sb.append(trimmed).append("\n")
                             }
                         } else {
-                            // 영상 세그먼트(TS/GIF) 절대 경로 변환
-                            // 프록시를 타면 로컬호스트 기준으로 찾기 때문에 무조건 변환 필요
+                            // 영상 세그먼트 변환
                             val absoluteSegmentUrl = resolveUrl(baseUri, requestUrl, trimmed)
+                            // println("[TVMON] Segment Resolved: $absoluteSegmentUrl") // 너무 많으니 주석 처리
                             sb.append(absoluteSegmentUrl).append("\n")
                         }
                     }
 
                     proxyServer!!.setPlaylist(sb.toString())
+                    val proxyUrl = "http://127.0.0.1:${proxyServer!!.port}/playlist.m3u8"
+                    println("[TVMON] Returning Proxy URL: $proxyUrl")
 
                     callback(
-                        newExtractorLink(name, name, "http://127.0.0.1:${proxyServer!!.port}/playlist.m3u8", ExtractorLinkType.M3U8) {
+                        newExtractorLink(name, name, proxyUrl, ExtractorLinkType.M3U8) {
                             this.referer = "https://player.bunny-frame.online/"
                             this.quality = Qualities.Unknown.value
                             this.headers = headers
                         }
                     )
                     return true
-                } 
+                } else {
+                    println("[TVMON] Key7 not detected. Returning original URL.")
+                }
                 
-                // === Case 1 & 2: Key7 아님 -> 원본 그대로 반환 ===
-                // CloudStream이 알아서 재생함
+                // Fallback (Key7 아님)
                 callback(
                     newExtractorLink(name, name, requestUrl, ExtractorLinkType.M3U8) {
                         this.referer = "https://player.bunny-frame.online/"
@@ -208,6 +231,7 @@ class BunnyPoorCdn : ExtractorApi() {
                 return true
 
             } catch (e: Exception) {
+                println("[TVMON] Critical Error in extract: ${e.message}")
                 e.printStackTrace()
             }
             
@@ -220,12 +244,13 @@ class BunnyPoorCdn : ExtractorApi() {
                 }
             )
             return true
-        } 
+        } else {
+            println("[TVMON] capturedUrl is null. Extraction failed.")
+        }
         
         return false
     }
 
-    // URL Resolution Helper
     private fun resolveUrl(baseUri: URI?, baseUrlStr: String, target: String): String {
         if (target.startsWith("http")) return target
         
@@ -241,11 +266,9 @@ class BunnyPoorCdn : ExtractorApi() {
 
     private fun manualResolve(base: String, target: String): String {
         if (target.startsWith("/")) {
-            // Root relative: http://host/path + /target -> http://host/target
             val hostUrl = if (base.indexOf("/", 8) != -1) base.substring(0, base.indexOf("/", 8)) else base
             return "$hostUrl$target"
         } else {
-            // Relative: http://host/path/file + target -> http://host/path/target
             val pathUrl = base.substringBeforeLast("/")
             return "$pathUrl/$target"
         }
@@ -274,6 +297,7 @@ class BunnyPoorCdn : ExtractorApi() {
     )
 
     private fun decryptKey7(jsonString: String): ByteArray {
+        println("[TVMON] decryptKey7 called.")
         try {
             val response = mapper.readValue(jsonString, Key7Response::class.java)
             var data = try {
@@ -281,10 +305,12 @@ class BunnyPoorCdn : ExtractorApi() {
             } catch (e: Exception) {
                 Base64.decode(response.encryptedKey, Base64.DEFAULT)
             }
+            println("[TVMON] Initial Encrypted Key Length: ${data.size}")
 
             var savedSegmentLengths: List<Int>? = null
 
             for (layer in response.layers.reversed()) {
+                // println("[TVMON] Processing Layer: ${layer.name}") // 레이어별 로그
                 data = when (layer.name) {
                     "final_encrypt" -> {
                         val mask = layer.xorMask!!.toByteArray()
@@ -319,6 +345,7 @@ class BunnyPoorCdn : ExtractorApi() {
                             }
                         }
                         savedSegmentLengths = tempLengths
+                        println("[TVMON] Decoy Shuffle: Saved ${tempLengths.size} segment lengths.")
                         outputStream.toByteArray()
                     }
                     "segment_noise" -> {
@@ -390,8 +417,10 @@ class BunnyPoorCdn : ExtractorApi() {
                     else -> data
                 }
             }
+            println("[TVMON] Decryption Complete. Final Key Length: ${data.size}")
             return data
         } catch (e: Exception) {
+            println("[TVMON] Decryption Failed: ${e.message}")
             e.printStackTrace()
             return ByteArray(0)
         }
@@ -410,11 +439,16 @@ class BunnyPoorCdn : ExtractorApi() {
                 port = serverSocket!!.localPort
                 isRunning = true
                 thread(isDaemon = true) { 
+                    println("[TVMON] Proxy Server Thread Started.")
                     while (isRunning && serverSocket != null && !serverSocket!!.isClosed) { 
-                        try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {} 
+                        try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {
+                            // println("[TVMON] Proxy Accept Error: ${e.message}") 
+                        } 
                     } 
                 }
-            } catch (e: Exception) { }
+            } catch (e: Exception) { 
+                println("[TVMON] Proxy Start Failed: ${e.message}")
+            }
         }
 
         fun stop() {
@@ -432,30 +466,36 @@ class BunnyPoorCdn : ExtractorApi() {
                 socket.soTimeout = 5000
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
                 val line = reader.readLine() ?: return
+                println("[TVMON] Proxy Request: $line") // 요청 로그
                 val parts = line.split(" ")
                 if (parts.size < 2) return
                 val path = parts[1]
                 val output = socket.getOutputStream()
 
                 if (path.contains("/playlist.m3u8")) {
+                    println("[TVMON] Serving Playlist via Proxy")
                     output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
                     output.write(currentPlaylist.toByteArray(charset("UTF-8")))
                 } else if (path.contains("/key")) {
                     val urlParam = path.substringAfter("url=").substringBefore(" ")
                     val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
+                    println("[TVMON] Serving Key via Proxy. Target: $targetUrl")
                     
                     val jsonResponse = runBlocking {
                         app.get(targetUrl, headers = currentHeaders).text
                     }
+                    // println("[TVMON] Key JSON Fetched: ${jsonResponse.take(50)}...")
                     
                     val decryptedKey = BunnyPoorCdn().decryptKey7(jsonResponse)
                     
                     output.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
                     output.write(decryptedKey)
+                    println("[TVMON] Key Served Successfully.")
                 }
                 output.flush()
                 socket.close()
             } catch (e: Exception) { 
+                println("[TVMON] Proxy Client Error: ${e.message}")
                 try { socket.close() } catch(e2:Exception){} 
             }
         }
