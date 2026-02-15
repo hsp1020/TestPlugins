@@ -7,25 +7,26 @@ import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.* // 요청하신 import 추가
+import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.network.WebViewResolver 
 import android.webkit.CookieManager
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.mapper
-import kotlinx.coroutines.runBlocking // suspend 함수 호출을 위한 import
+import kotlinx.coroutines.runBlocking
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.URI
 import java.net.URLDecoder
 import kotlin.concurrent.thread
 
 /**
- * Version: 4
+ * Version: 7
  * Modification:
- * 1. Build Error Fix: app.get suspend function call inside ProxyWebServer
- * 2. Added imports
- * 3. Logic: Same as Version 3 (Key7 Dynamic Length Handling)
+ * 1. CRITICAL FIX: Rewrite ALL segment URLs to Absolute Paths (프록시 사용 시 상대 경로 깨짐 문제 완벽 해결)
+ * 2. FIX: Handle '#.m3u8' suffix safely for network requests
+ * 3. Maintain: Key7 Decryption & Dynamic Length Handling
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVMON"
@@ -71,29 +72,36 @@ class BunnyPoorCdn : ExtractorApi() {
 
         var capturedUrl: String? = null
 
-        // 2. c.html 요청 납치
-        val resolver = WebViewResolver(
-            interceptUrl = Regex("""/c\.html"""), 
-            useOkhttp = false,
-            timeout = 15000L
-        )
-        
-        try {
-            val requestHeaders = mapOf(
-                "Referer" to "https://tvmon.site/", 
-                "User-Agent" to DESKTOP_UA
-            )
+        // [입력 URL 체크] 이미 c.html 형태라면 바로 사용
+        if (cleanUrl.contains("/c.html") && cleanUrl.contains("token=")) {
+            capturedUrl = cleanUrl
+        }
 
-            val response = app.get(
-                url = cleanUrl,
-                headers = requestHeaders,
-                interceptor = resolver
+        // 2. c.html 요청 납치 (아직 못 찾았으면)
+        if (capturedUrl == null) {
+            val resolver = WebViewResolver(
+                interceptUrl = Regex("""/c\.html"""), 
+                useOkhttp = false,
+                timeout = 15000L
             )
             
-            if (response.url.contains("/c.html") && response.url.contains("token=")) {
-                capturedUrl = response.url
-            }
-        } catch (e: Exception) {}
+            try {
+                val requestHeaders = mapOf(
+                    "Referer" to "https://tvmon.site/", 
+                    "User-Agent" to DESKTOP_UA
+                )
+
+                val response = app.get(
+                    url = cleanUrl,
+                    headers = requestHeaders,
+                    interceptor = resolver
+                )
+                
+                if (response.url.contains("/c.html") && response.url.contains("token=")) {
+                    capturedUrl = response.url
+                }
+            } catch (e: Exception) {}
+        }
 
         if (capturedUrl != null) {
             val cookieManager = CookieManager.getInstance()
@@ -115,12 +123,12 @@ class BunnyPoorCdn : ExtractorApi() {
                 headers["Cookie"] = cookie
             }
 
-            val m3u8Url = "$capturedUrl#.m3u8"
+            // [수정] #.m3u8 제거 후 실제 요청 (404 방지)
+            val requestUrl = capturedUrl!!.substringBefore("#")
             
             try {
-                val m3u8Content = app.get(m3u8Url, headers = headers).text
+                val m3u8Content = app.get(requestUrl, headers = headers).text
                 
-                // Key7 패턴이 발견되면 프록시 서버 구동
                 if (m3u8Content.contains("/v/key7")) {
                     proxyServer?.stop()
                     proxyServer = ProxyWebServer().apply {
@@ -128,20 +136,52 @@ class BunnyPoorCdn : ExtractorApi() {
                         updateSession(headers)
                     }
 
-                    // Key URI를 로컬 프록시 주소로 변조
-                    val newM3u8Content = m3u8Content.replace(
-                        Regex("""URI="([^"]+)"""")
-                    ) { matchResult ->
-                        val originalKeyUrl = matchResult.groupValues[1]
-                        if (originalKeyUrl.contains("/v/key7")) {
-                            val encodedKeyUrl = java.net.URLEncoder.encode(originalKeyUrl, "UTF-8")
-                            """URI="http://127.0.0.1:${proxyServer!!.port}/key?url=$encodedKeyUrl""""
+                    // [핵심 수정] Base URI 생성 (쿼리 파라미터 포함된 원본 URL 기준)
+                    val baseUri = URI(requestUrl)
+                    val sb = StringBuilder()
+
+                    // m3u8 라인별 분석 및 재조립
+                    m3u8Content.lines().forEach { line ->
+                        val trimmed = line.trim()
+                        if (trimmed.isEmpty()) return@forEach
+
+                        if (trimmed.startsWith("#")) {
+                            // Key URI 변조 (상대/절대 경로 모두 처리)
+                            if (trimmed.startsWith("#EXT-X-KEY") && trimmed.contains("/v/key7")) {
+                                val regex = Regex("""URI="([^"]+)"""")
+                                val match = regex.find(trimmed)
+                                if (match != null) {
+                                    val originalKeyUrl = match.groupValues[1]
+                                    // Key URL도 절대 경로로 변환
+                                    val absoluteKeyUrl = try {
+                                        baseUri.resolve(originalKeyUrl).toString()
+                                    } catch (e: Exception) { originalKeyUrl }
+                                    
+                                    val encodedKeyUrl = java.net.URLEncoder.encode(absoluteKeyUrl, "UTF-8")
+                                    val newLine = trimmed.replace(
+                                        originalKeyUrl,
+                                        "http://127.0.0.1:${proxyServer!!.port}/key?url=$encodedKeyUrl"
+                                    )
+                                    sb.append(newLine).append("\n")
+                                } else {
+                                    sb.append(trimmed).append("\n")
+                                }
+                            } else {
+                                sb.append(trimmed).append("\n")
+                            }
                         } else {
-                            matchResult.value
+                            // [사용자 지적 반영] 영상 세그먼트(ts) 주소 절대 경로로 변환
+                            // 프록시 사용 시 상대 경로는 localhost로 붙어버리므로 반드시 변환해야 함
+                            val absoluteSegmentUrl = try {
+                                baseUri.resolve(trimmed).toString()
+                            } catch (e: Exception) {
+                                trimmed
+                            }
+                            sb.append(absoluteSegmentUrl).append("\n")
                         }
                     }
 
-                    proxyServer!!.setPlaylist(newM3u8Content)
+                    proxyServer!!.setPlaylist(sb.toString())
 
                     callback(
                         newExtractorLink(name, name, "http://127.0.0.1:${proxyServer!!.port}/playlist.m3u8", ExtractorLinkType.M3U8) {
@@ -158,7 +198,7 @@ class BunnyPoorCdn : ExtractorApi() {
             
             // 일반 영상(Key7 아님)일 경우
             callback(
-                newExtractorLink(name, name, m3u8Url, ExtractorLinkType.M3U8) {
+                newExtractorLink(name, name, requestUrl, ExtractorLinkType.M3U8) {
                     this.referer = "https://player.bunny-frame.online/"
                     this.quality = Qualities.Unknown.value
                     this.headers = headers
@@ -171,7 +211,7 @@ class BunnyPoorCdn : ExtractorApi() {
     }
 
     // ==========================================
-    // Key7 Decryption Logic
+    // Key7 Decryption Logic (WASM Logic Reflected)
     // ==========================================
 
     data class Layer(
@@ -195,18 +235,14 @@ class BunnyPoorCdn : ExtractorApi() {
     private fun decryptKey7(jsonString: String): ByteArray {
         try {
             val response = mapper.readValue(jsonString, Key7Response::class.java)
-            // Base64 디코딩 (URL Safe 처리 포함)
             var data = try {
                 Base64.decode(response.encryptedKey, Base64.URL_SAFE)
             } catch (e: Exception) {
                 Base64.decode(response.encryptedKey, Base64.DEFAULT)
             }
 
-            // [중요] decoy_shuffle 단계에서 결정된 "실제 세그먼트들의 길이"를 저장하는 변수
             var savedSegmentLengths: List<Int>? = null
 
-            // 레이어를 역순으로 수행 (JSON 순서: Interleave -> ... -> Final)
-            // 복호화 순서: Final -> ... -> Interleave
             for (layer in response.layers.reversed()) {
                 data = when (layer.name) {
                     "final_encrypt" -> {
@@ -216,9 +252,6 @@ class BunnyPoorCdn : ExtractorApi() {
                         }
                     }
                     "decoy_shuffle" -> {
-                        // 1. Shuffled Blob 분해
-                        // perm[i]는 현재 데이터의 i번째 덩어리가 원본의 몇 번째 조각인지를 나타냄
-                        // 따라서 길이는 segmentLengths[perm[i]]를 사용
                         val segments = mutableMapOf<Int, ByteArray>()
                         val lengths = layer.segmentLengths!!
                         val perm = layer.perm!!
@@ -233,8 +266,6 @@ class BunnyPoorCdn : ExtractorApi() {
                             }
                         }
 
-                        // 2. Real Positions 추출 및 연결
-                        // 추출된 순서대로 길이를 저장하여 segment_noise에 전달
                         val realPositions = layer.realPositions!!
                         val outputStream = java.io.ByteArrayOutputStream()
                         val tempLengths = ArrayList<Int>()
@@ -246,18 +277,13 @@ class BunnyPoorCdn : ExtractorApi() {
                                 tempLengths.add(chunk.size)
                             }
                         }
-                        savedSegmentLengths = tempLengths // 저장
+                        savedSegmentLengths = tempLengths
                         outputStream.toByteArray()
                     }
                     "segment_noise" -> {
-                        // [핵심] decoy_shuffle에서 넘어온 실제 길이를 최우선 사용
-                        // noise_lens와 실제 길이가 다를 경우(Case 3), 실제 길이를 따라야 함
                         val actualLengths = savedSegmentLengths ?: layer.noiseLens ?: emptyList()
-                        
                         val chunks = ArrayList<ByteArray>()
                         var ptr = 0
-                        
-                        // 데이터 스트림을 순서대로 분할
                         for (len in actualLengths) {
                             if (ptr + len <= data.size) {
                                 chunks.add(data.copyOfRange(ptr, ptr + len))
@@ -266,23 +292,17 @@ class BunnyPoorCdn : ExtractorApi() {
                                 chunks.add(ByteArray(0))
                             }
                         }
-
-                        // 키 바이트 추출
                         val perm = layer.perm ?: (0 until 16).toList()
                         val keyBytes = ByteArray(16)
-                        
                         for (i in 0 until 16) {
                             if (i < chunks.size && chunks[i].isNotEmpty()) {
                                 val keyIndex = perm[i]
-                                if (keyIndex < 16) {
-                                    keyBytes[keyIndex] = chunks[i][0] // 첫 바이트가 Key
-                                }
+                                if (keyIndex < 16) keyBytes[keyIndex] = chunks[i][0]
                             }
                         }
                         keyBytes
                     }
                     "xor_chain" -> {
-                        // Decrypt: P[0] = C[0] ^ IV, P[i] = C[i] ^ C[i-1]
                         val initKeyBytes = Base64.decode(layer.initKey!!, Base64.DEFAULT)
                         val out = ByteArray(data.size)
                         if (data.isNotEmpty()) {
@@ -317,11 +337,9 @@ class BunnyPoorCdn : ExtractorApi() {
                             val srcByteIdx = i / 8
                             val srcBitIdx = 7 - (i % 8)
                             val bit = (data[srcByteIdx].toInt() shr srcBitIdx) and 1
-                            
                             val destIdx = perm[i]
                             val destByteIdx = destIdx / 8
                             val destBitIdx = 7 - (destIdx % 8)
-                            
                             if (bit == 1) {
                                 outBytes[destByteIdx] = (outBytes[destByteIdx].toInt() or (1 shl destBitIdx)).toByte()
                             }
@@ -385,7 +403,6 @@ class BunnyPoorCdn : ExtractorApi() {
                     val urlParam = path.substringAfter("url=").substringBefore(" ")
                     val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
                     
-                    // [빌드 에러 수정] suspend 함수인 app.get을 runBlocking으로 감싸서 호출
                     val jsonResponse = runBlocking {
                         app.get(targetUrl, headers = currentHeaders).text
                     }
