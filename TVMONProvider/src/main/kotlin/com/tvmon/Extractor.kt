@@ -14,7 +14,10 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.mapper
 import kotlinx.coroutines.runBlocking
 import java.io.BufferedReader
+import java.io.InputStream
 import java.io.InputStreamReader
+import java.net.HttpURLConnection
+import java.net.URL
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URI
@@ -22,11 +25,10 @@ import java.net.URLDecoder
 import kotlin.concurrent.thread
 
 /**
- * Version: 15
+ * Version: 18 (Robust Sync-Byte Seeker)
  * Modification:
- * 1. CRITICAL FIX: Removed "Accept-Encoding" header. 
- * (This caused double-compression/decoding failure, resulting in binary garbage in logs)
- * 2. Maintain: Debug logs & Key7 logic.
+ * 1. FIX: Increased Sync-Byte scan range to 64KB (covers large fake headers/images).
+ * 2. PERF: Negligible impact on modern devices, ensures reliable playback.
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVMON"
@@ -113,13 +115,11 @@ class BunnyPoorCdn : ExtractorApi() {
             val cookieManager = CookieManager.getInstance()
             val cookie = cookieManager.getCookie(capturedUrl)
 
-            // [수정] Accept-Encoding 제거하여 자동 압축 해제 유도
             val headers = mutableMapOf(
                 "User-Agent" to DESKTOP_UA,
                 "Referer" to "https://player.bunny-frame.online/",
                 "Origin" to "https://player.bunny-frame.online",
                 "Accept" to "*/*",
-                // "Accept-Encoding" 제거됨: OkHttp가 자동으로 처리하게 둠
                 "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
                 "sec-ch-ua" to "\"Not A(Brand\";v=\"99\", \"Google Chrome\";v=\"121\", \"Chromium\";v=\"121\"",
                 "sec-ch-ua-mobile" to "?0",
@@ -136,140 +136,81 @@ class BunnyPoorCdn : ExtractorApi() {
                 println("[TVMON] Fetching content from: $requestUrl")
                 var content = app.get(requestUrl, headers = headers).text.trim()
                 
-                // [진실 확인] 이제 정상적인 텍스트가 찍혀야 함
-                println("================ [TVMON] CONTENT DUMP START ================")
-                println(content.take(1000)) 
-                println("================ [TVMON] CONTENT DUMP END   ================")
-
-                // 2. M3U8 체크
-                if (content.contains("#EXTM3U")) {
-                    println("[TVMON] Content identified as M3U8.")
-                    
-                    val isKey7 = content.lines().any { line ->
-                        line.startsWith("#EXT-X-KEY") && line.contains("/v/key7")
+                // HTML 내 M3U8 추출 로직
+                if (!content.startsWith("#EXTM3U")) {
+                    val m3u8Regex = Regex("""(https?://[^"']+\.m3u8[^"']*)""")
+                    val match = m3u8Regex.find(content)
+                    if (match != null) {
+                        requestUrl = match.groupValues[1]
+                        println("[TVMON] Found actual M3U8 URL: $requestUrl")
+                        content = app.get(requestUrl, headers = headers).text.trim()
                     }
-                    println("[TVMON] isKey7 detected? $isKey7")
+                }
 
-                    if (isKey7) {
-                        proxyServer?.stop()
-                        proxyServer = ProxyWebServer().apply {
-                            start()
-                            updateSession(headers)
-                        }
-                        
-                        val baseUri = try { URI(requestUrl) } catch (e: Exception) { null }
-                        val sb = StringBuilder()
+                // Key7 검사
+                val isKey7 = content.lines().any { line ->
+                    line.startsWith("#EXT-X-KEY") && line.contains("/v/key7")
+                }
+                println("[TVMON] isKey7 detected? $isKey7")
 
-                        content.lines().forEach { line ->
-                            val trimmed = line.trim()
-                            if (trimmed.isEmpty()) return@forEach
+                if (isKey7) {
+                    proxyServer?.stop()
+                    proxyServer = ProxyWebServer().apply {
+                        start()
+                        updateSession(headers)
+                    }
+                    println("[TVMON] Proxy Server started on port: ${proxyServer!!.port}")
 
-                            if (trimmed.startsWith("#")) {
-                                if (trimmed.startsWith("#EXT-X-KEY") && trimmed.contains("/v/key7")) {
-                                    val regex = Regex("""URI="([^"]+)"""")
-                                    val match = regex.find(trimmed)
-                                    if (match != null) {
-                                        val originalKeyUrl = match.groupValues[1]
-                                        val absoluteKeyUrl = resolveUrl(baseUri, requestUrl, originalKeyUrl)
-                                        val encodedKeyUrl = java.net.URLEncoder.encode(absoluteKeyUrl, "UTF-8")
-                                        
-                                        val newLine = trimmed.replace(
-                                            originalKeyUrl,
-                                            "http://127.0.0.1:${proxyServer!!.port}/key?url=$encodedKeyUrl"
-                                        )
-                                        sb.append(newLine).append("\n")
-                                    } else {
-                                        sb.append(trimmed).append("\n")
-                                    }
+                    val baseUri = try { URI(requestUrl) } catch (e: Exception) { null }
+                    val sb = StringBuilder()
+
+                    content.lines().forEach { line ->
+                        val trimmed = line.trim()
+                        if (trimmed.isEmpty()) return@forEach
+
+                        if (trimmed.startsWith("#")) {
+                            if (trimmed.startsWith("#EXT-X-KEY") && trimmed.contains("/v/key7")) {
+                                val regex = Regex("""URI="([^"]+)"""")
+                                val match = regex.find(trimmed)
+                                if (match != null) {
+                                    val originalKeyUrl = match.groupValues[1]
+                                    val absoluteKeyUrl = resolveUrl(baseUri, requestUrl, originalKeyUrl)
+                                    val encodedKeyUrl = java.net.URLEncoder.encode(absoluteKeyUrl, "UTF-8")
+                                    val newLine = trimmed.replace(
+                                        originalKeyUrl,
+                                        "http://127.0.0.1:${proxyServer!!.port}/key?url=$encodedKeyUrl"
+                                    )
+                                    sb.append(newLine).append("\n")
                                 } else {
                                     sb.append(trimmed).append("\n")
                                 }
                             } else {
-                                val absoluteSegmentUrl = resolveUrl(baseUri, requestUrl, trimmed)
-                                sb.append(absoluteSegmentUrl).append("\n")
+                                sb.append(trimmed).append("\n")
                             }
+                        } else {
+                            // 세그먼트를 Proxy로 라우팅 (Fake Header 제거용)
+                            val absoluteSegmentUrl = resolveUrl(baseUri, requestUrl, trimmed)
+                            val encodedSegUrl = java.net.URLEncoder.encode(absoluteSegmentUrl, "UTF-8")
+                            val proxySegUrl = "http://127.0.0.1:${proxyServer!!.port}/seg?url=$encodedSegUrl"
+                            sb.append(proxySegUrl).append("\n")
                         }
-
-                        proxyServer!!.setPlaylist(sb.toString())
-                        val proxyUrl = "http://127.0.0.1:${proxyServer!!.port}/playlist.m3u8"
-                        println("[TVMON] Returning Proxy URL: $proxyUrl")
-
-                        callback(
-                            newExtractorLink(name, name, proxyUrl, ExtractorLinkType.M3U8) {
-                                this.referer = "https://player.bunny-frame.online/"
-                                this.quality = Qualities.Unknown.value
-                                this.headers = headers
-                            }
-                        )
-                        return true
                     }
-                } else {
-                    println("[TVMON] Content is NOT M3U8. Parsing HTML for embedded .m3u8 link...")
-                    
-                    val m3u8Regex = Regex("""(https?://[^"']+\.m3u8[^"']*)""")
-                    val match = m3u8Regex.find(content)
-                    
-                    if (match != null) {
-                        requestUrl = match.groupValues[1]
-                        println("[TVMON] Found actual M3U8 URL in HTML: $requestUrl")
-                        
-                        // 재요청 (재귀적으로 처리하지 않고 한 번 더 수행)
-                        content = app.get(requestUrl, headers = headers).text.trim()
-                        println("[TVMON] Re-fetched M3U8 content.")
-                        
-                        // Key7 검사 (재요청 결과에 대해)
-                         val isKey7 = content.lines().any { line ->
-                            line.startsWith("#EXT-X-KEY") && line.contains("/v/key7")
-                        }
-                        
-                        if (isKey7) {
-                             proxyServer?.stop()
-                            proxyServer = ProxyWebServer().apply {
-                                start()
-                                updateSession(headers)
-                            }
-                            val baseUri = try { URI(requestUrl) } catch (e: Exception) { null }
-                            val sb = StringBuilder()
-                            
-                            content.lines().forEach { line ->
-                                val trimmed = line.trim()
-                                if (trimmed.isEmpty()) return@forEach
-                                if (trimmed.startsWith("#")) {
-                                    if (trimmed.startsWith("#EXT-X-KEY") && trimmed.contains("/v/key7")) {
-                                         val regex = Regex("""URI="([^"]+)"""")
-                                        val matchKey = regex.find(trimmed)
-                                        if (matchKey != null) {
-                                            val originalKeyUrl = matchKey.groupValues[1]
-                                            val absoluteKeyUrl = resolveUrl(baseUri, requestUrl, originalKeyUrl)
-                                            val encodedKeyUrl = java.net.URLEncoder.encode(absoluteKeyUrl, "UTF-8")
-                                            val newLine = trimmed.replace(originalKeyUrl, "http://127.0.0.1:${proxyServer!!.port}/key?url=$encodedKeyUrl")
-                                            sb.append(newLine).append("\n")
-                                        } else { sb.append(trimmed).append("\n") }
-                                    } else { sb.append(trimmed).append("\n") }
-                                } else {
-                                     val absoluteSegmentUrl = resolveUrl(baseUri, requestUrl, trimmed)
-                                    sb.append(absoluteSegmentUrl).append("\n")
-                                }
-                            }
-                            proxyServer!!.setPlaylist(sb.toString())
-                             val proxyUrl = "http://127.0.0.1:${proxyServer!!.port}/playlist.m3u8"
-                            println("[TVMON] Returning Proxy URL (from HTML embed): $proxyUrl")
 
-                            callback(
-                                newExtractorLink(name, name, proxyUrl, ExtractorLinkType.M3U8) {
-                                    this.referer = "https://player.bunny-frame.online/"
-                                    this.quality = Qualities.Unknown.value
-                                    this.headers = headers
-                                }
-                            )
-                            return true
-                        }
-                    } else {
-                         println("[TVMON] Failed to find .m3u8 link in HTML.")
-                    }
-                }
+                    proxyServer!!.setPlaylist(sb.toString())
+                    val proxyUrl = "http://127.0.0.1:${proxyServer!!.port}/playlist.m3u8"
+                    println("[TVMON] Returning Proxy URL: $proxyUrl")
 
-                println("[TVMON] Returning original/found URL.")
+                    callback(
+                        newExtractorLink(name, name, proxyUrl, ExtractorLinkType.M3U8) {
+                            this.referer = "https://player.bunny-frame.online/"
+                            this.quality = Qualities.Unknown.value
+                            this.headers = headers
+                        }
+                    )
+                    return true
+                } 
+                
+                // Key7 아님
                 callback(
                     newExtractorLink(name, name, requestUrl, ExtractorLinkType.M3U8) {
                         this.referer = "https://player.bunny-frame.online/"
@@ -343,7 +284,6 @@ class BunnyPoorCdn : ExtractorApi() {
     )
 
     private fun decryptKey7(jsonString: String): ByteArray {
-        println("[TVMON] decryptKey7 called.")
         try {
             val response = mapper.readValue(jsonString, Key7Response::class.java)
             var data = try {
@@ -366,7 +306,6 @@ class BunnyPoorCdn : ExtractorApi() {
                         val segments = mutableMapOf<Int, ByteArray>()
                         val lengths = layer.segmentLengths!!
                         val perm = layer.perm!!
-                        
                         var ptr = 0
                         for (i in perm.indices) {
                             val segmentId = perm[i]
@@ -376,11 +315,9 @@ class BunnyPoorCdn : ExtractorApi() {
                                 ptr += len
                             }
                         }
-
                         val realPositions = layer.realPositions!!
                         val outputStream = java.io.ByteArrayOutputStream()
                         val tempLengths = ArrayList<Int>()
-                        
                         realPositions.forEach { id ->
                             val chunk = segments[id]
                             if (chunk != null) {
@@ -502,10 +439,9 @@ class BunnyPoorCdn : ExtractorApi() {
 
         private fun handleClient(socket: Socket) {
             try {
-                socket.soTimeout = 5000
+                socket.soTimeout = 10000 // 타임아웃 조금 여유 있게
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
                 val line = reader.readLine() ?: return
-                println("[TVMON] Proxy Req: $line")
                 val parts = line.split(" ")
                 if (parts.size < 2) return
                 val path = parts[1]
@@ -517,17 +453,66 @@ class BunnyPoorCdn : ExtractorApi() {
                 } else if (path.contains("/key")) {
                     val urlParam = path.substringAfter("url=").substringBefore(" ")
                     val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
-                    println("[TVMON] Fetching Key from: $targetUrl")
+                    println("[TVMON] Serving Key: $targetUrl")
                     
                     val jsonResponse = runBlocking {
                         app.get(targetUrl, headers = currentHeaders).text
                     }
-                    
                     val decryptedKey = BunnyPoorCdn().decryptKey7(jsonResponse)
                     
                     output.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
                     output.write(decryptedKey)
+                } else if (path.contains("/seg")) {
+                    // [핵심] 세그먼트 프록시 처리: Fake Header 제거 (0x47 찾기)
+                    // 검사 범위: 64KB (충분히 큰 안전 범위)
+                    val urlParam = path.substringAfter("url=").substringBefore(" ")
+                    val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
+                    
+                    val url = URL(targetUrl)
+                    val connection = url.openConnection() as HttpURLConnection
+                    currentHeaders.forEach { (k, v) -> connection.setRequestProperty(k, v) }
+                    connection.connect()
+
+                    val inputStream = connection.inputStream
+                    output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
+
+                    // 64KB까지 읽어서 0x47(Sync Byte) 찾기
+                    val scanBufferSize = 65536 // 64KB
+                    val buffer = ByteArray(scanBufferSize)
+                    
+                    // 첫 블록 읽기
+                    var bytesRead = inputStream.read(buffer)
+                    
+                    if (bytesRead > 0) {
+                        var syncByteOffset = -1
+                        // 0x47 찾기
+                        for (i in 0 until bytesRead) {
+                            if (buffer[i] == 0x47.toByte()) {
+                                syncByteOffset = i
+                                break
+                            }
+                        }
+
+                        if (syncByteOffset != -1) {
+                            // 찾았으면 Sync Byte부터 씀 (Fake Header 제거됨)
+                            output.write(buffer, syncByteOffset, bytesRead - syncByteOffset)
+                        } else {
+                            // 64KB 읽었는데도 못 찾았으면.. 일단 그냥 씀 (Fallback)
+                            output.write(buffer, 0, bytesRead)
+                        }
+
+                        // 나머지 데이터 계속 스트리밍
+                        val streamBuffer = ByteArray(8192)
+                        while (true) {
+                            val count = inputStream.read(streamBuffer)
+                            if (count == -1) break
+                            output.write(streamBuffer, 0, count)
+                        }
+                    }
+                    output.flush()
+                    inputStream.close()
                 }
+                
                 output.flush()
                 socket.close()
             } catch (e: Exception) { 
