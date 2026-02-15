@@ -6,11 +6,13 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
-import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.* // 요청하신 import 추가
 import com.lagradost.cloudstream3.network.WebViewResolver 
 import android.webkit.CookieManager
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.mapper
+import kotlinx.coroutines.runBlocking // suspend 함수 호출을 위한 import
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.ServerSocket
@@ -19,10 +21,11 @@ import java.net.URLDecoder
 import kotlin.concurrent.thread
 
 /**
- * Version: 3
- * Modification: 
- * 1. Key7 복호화 로직 완벽 대응 (Decoy Shuffle과 Segment Noise 간 길이 불일치 해결)
- * 2. 모든 변형 케이스(길이 가변)에 대해 동적 처리
+ * Version: 4
+ * Modification:
+ * 1. Build Error Fix: app.get suspend function call inside ProxyWebServer
+ * 2. Added imports
+ * 3. Logic: Same as Version 3 (Key7 Dynamic Length Handling)
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVMON"
@@ -382,7 +385,11 @@ class BunnyPoorCdn : ExtractorApi() {
                     val urlParam = path.substringAfter("url=").substringBefore(" ")
                     val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
                     
-                    val jsonResponse = app.get(targetUrl, headers = currentHeaders).text
+                    // [빌드 에러 수정] suspend 함수인 app.get을 runBlocking으로 감싸서 호출
+                    val jsonResponse = runBlocking {
+                        app.get(targetUrl, headers = currentHeaders).text
+                    }
+                    
                     val decryptedKey = BunnyPoorCdn().decryptKey7(jsonResponse)
                     
                     output.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
