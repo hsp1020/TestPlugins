@@ -1,14 +1,18 @@
 /**
- * [Version: v23.2-Ultimate-TVMON-Restored]
- * 1. [Restoration] TVMON(2번)의 Key7 판별, IV 추출, 플레이리스트 재작성 로직을 원본 그대로 복원.
- * 2. [Integration] 1번의 '전 타이밍 수동 주입'과 '전수 검증(Brute-force)' 엔진을 Key7 로직 내부에 결합.
- * 3. [Requirement] 16바이트 데이터 무조건 수집 및 실데이터 기반 0x47 검증 수행.
- * 4. [Debug] 실행 단계별 상세 추적 로그(println) 포함.
+ * [Version: v23.3-Build-Fix]
+ * 1. [Fix] 'android.webkit.CookieManager' 임포트 오류 및 getInstance() 참조 에러 수정.
+ * 2. [Preservation] v23.2의 Key7 복원, 전수 검증, 4대 타이밍 수동 주입 로직 완벽 유지.
+ * 3. [Debug] 실행 단계별 상세 추적 로그(println) 포함.
  */
 package com.tvmon
 
+import android.graphics.Bitmap
 import android.util.Base64
-import android.webkit.*
+import android.webkit.ConsoleMessage
+import android.webkit.CookieManager
+import android.webkit.WebChromeClient
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
@@ -37,7 +41,7 @@ class BunnyPoorCdn : ExtractorApi() {
 
     companion object {
         private var proxyServer: ProxyWebServer? = null
-        private const val TAG = "[TVMON-v23.2]"
+        private const val TAG = "[TVMON-v23.3]"
 
         val capturedKeys: MutableSet<String> = Collections.synchronizedSet(mutableSetOf<String>())
         @Volatile var verifiedKey: ByteArray? = null
@@ -65,26 +69,26 @@ class BunnyPoorCdn : ExtractorApi() {
     }
 
     suspend fun extract(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit, thumbnailHint: String? = null): Boolean {
-        println("$TAG [STEP 1] extract() 시작")
+        println("$TAG [STEP 1] extract() 프로세스 시작")
         var cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
         val cleanReferer = referer?.replace(Regex("[\\r\\n\\s]"), "")?.trim() ?: "https://tvmon.site/"
         
-        // 1. iframe 추출 (2번 원본 유지)
+        // 1. iframe 추출 로직 유지
         if (!cleanUrl.contains("v/f/") && !cleanUrl.contains("v/e/")) {
             try {
-                println("$TAG [STEP 1-1] iframe 파싱 시도")
+                println("$TAG [STEP 1-1] iframe 소스 찾는 중...")
                 val refRes = app.get(cleanReferer)
                 val iframeMatch = Regex("""src=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
                     ?: Regex("""data-player\d*=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
                 if (iframeMatch != null) {
                     cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&").trim()
-                    println("$TAG iframe 발견: $cleanUrl")
+                    println("$TAG iframe 추출 성공: $cleanUrl")
                 }
             } catch (e: Exception) { println("$TAG [ERROR] iframe 파싱 실패: ${e.message}") }
         }
 
-        // 2. 웹뷰 후킹 가동 (수동 주입 방식 결합)
-        println("$TAG [STEP 2] 웹뷰 기반 키 수집 가동")
+        // 2. 웹뷰 후킹 및 후보군 수집 초기화
+        println("$TAG [STEP 2] 웹뷰 후킹 스레드 준비")
         capturedKeys.clear()
         verifiedKey = null
         testSegmentUrl = null
@@ -95,40 +99,50 @@ class BunnyPoorCdn : ExtractorApi() {
             }
         }
 
-        // 3. M3U8 요청 및 Key7 판별 (2번 원본 유지)
-        val cookie = CookieManager.getInstance().getCookie(cleanUrl)
-        val headers = mutableMapOf("User-Agent" to DESKTOP_UA, "Referer" to "https://player.bunny-frame.online/", "Origin" to "https://player.bunny-frame.online")
-        if (!cookie.isNullOrEmpty()) headers["Cookie"] = cookie
+        // 3. M3U8 요청 및 헤더 설정
+        val cookieManager = CookieManager.getInstance()
+        val cookie = cookieManager.getCookie(cleanUrl)
+        val headers = mutableMapOf(
+            "User-Agent" to DESKTOP_UA, 
+            "Referer" to "https://player.bunny-frame.online/", 
+            "Origin" to "https://player.bunny-frame.online"
+        )
+        
+        if (!cookie.isNullOrEmpty()) {
+            headers["Cookie"] = cookie
+            println("$TAG [DEBUG] 쿠키 적용됨 (길이: ${cookie.length})")
+        }
 
         try {
-            println("$TAG [STEP 3] M3U8 데이터 요청")
+            println("$TAG [STEP 3] M3U8 데이터 가져오기 시도")
             var requestUrl = cleanUrl.substringBefore("#")
             var res = app.get(requestUrl, headers = headers)
             var content = res.text.trim()
 
             if (!content.startsWith("#EXTM3U")) {
+                println("$TAG 응답이 M3U8 형식이 아님. 내부 링크 재검색.")
                 Regex("""(https?://[^"']+\.m3u8[^"']*)""").find(content)?.let {
                     requestUrl = it.groupValues[1]
+                    println("$TAG 실제 M3U8 주소 재발견: $requestUrl")
                     content = app.get(requestUrl, headers = headers).text.trim()
                 }
             }
 
             val isKey7 = content.lines().any { it.startsWith("#EXT-X-KEY") && it.contains("/v/key7") }
-            println("$TAG [CHECK] Key7 암호화 여부: $isKey7")
+            println("$TAG [CHECK] Key7 암호화 상태: $isKey7")
 
             if (isKey7) {
-                println("$TAG [STEP 4] Key7 전용 프록시 서버 초기화")
+                println("$TAG [STEP 4] Key7 프록시 서버 기동")
                 proxyServer?.stop()
                 proxyServer = ProxyWebServer().apply {
                     start()
                     updateSession(headers)
                 }
 
-                // IV 추출 (2번 원본 유지)
                 val ivMatch = Regex("""IV=(0x[0-9a-fA-F]+)""").find(content)
                 val ivHex = ivMatch?.groupValues?.get(1) ?: "0x00000000000000000000000000000000"
                 currentIv = ivHex.removePrefix("0x").hexToByteArray()
-                println("$TAG [DATA] IV 확보: $ivHex")
+                println("$TAG [DEBUG] IV 추출 성공: $ivHex")
 
                 val baseUri = try { URI(requestUrl) } catch (e: Exception) { null }
                 val sb = StringBuilder()
@@ -149,7 +163,10 @@ class BunnyPoorCdn : ExtractorApi() {
                         } else sb.append(trimmed).append("\n")
                     } else {
                         val absoluteSegUrl = resolveUrl(baseUri, requestUrl, trimmed)
-                        if (testSegmentUrl == null) testSegmentUrl = absoluteSegUrl
+                        if (testSegmentUrl == null) {
+                            testSegmentUrl = absoluteSegUrl
+                            println("$TAG [DEBUG] 검증용 세그먼트 등록: $testSegmentUrl")
+                        }
                         val encodedSegUrl = URLEncoder.encode(absoluteSegUrl, "UTF-8")
                         sb.append("http://127.0.0.1:${proxyServer!!.port}/seg?url=$encodedSegUrl").append("\n")
                     }
@@ -164,13 +181,13 @@ class BunnyPoorCdn : ExtractorApi() {
                 return true
             }
 
-            println("$TAG Key7이 아니므로 일반 스트림 반환")
+            println("$TAG 일반 스트림으로 진행")
             callback(newExtractorLink(name, name, requestUrl, ExtractorLinkType.M3U8) {
                 this.referer = "https://player.bunny-frame.online/"; this.headers = headers
             })
             return true
 
-        } catch (e: Exception) { println("$TAG [ERROR] 추출 실패: ${e.message}") }
+        } catch (e: Exception) { println("$TAG [ERROR] extract 프로세스 예외: ${e.message}") }
         return false
     }
 
@@ -216,22 +233,27 @@ class BunnyPoorCdn : ExtractorApi() {
                     }
                     HookedUint8Array.prototype = OriginalUint8Array.prototype;
                     window.Uint8Array = HookedUint8Array;
-                    console.log("HOOK_LOADED_BRUTE_FORCE");
-                } catch(e) { console.log("HOOK_ERR:" + e.message); }
+                    console.log("ULTIMATE_HOOK_ACTIVE");
+                } catch(e) { console.log("HOOK_FAIL:" + e.message); }
             })();
         """
 
         suspend fun stealKey(url: String, ua: String, referer: String) {
             withContext(Dispatchers.Main) {
                 val webView = WebView(AcraApplication.context!!)
-                webView.settings.apply { javaScriptEnabled = true; domStorageEnabled = true; userAgentString = ua }
+                webView.settings.apply { 
+                    javaScriptEnabled = true 
+                    domStorageEnabled = true 
+                    userAgentString = ua 
+                }
+                
                 webView.webChromeClient = object : WebChromeClient() {
                     override fun onConsoleMessage(msg: ConsoleMessage?): Boolean {
                         val txt = msg?.message() ?: ""
                         if (txt.startsWith("BRUTE_CANDIDATE:")) {
                             val hex = txt.substringAfter("BRUTE_CANDIDATE:")
                             if (BunnyPoorCdn.capturedKeys.add(hex)) {
-                                println("$TAG [CANDIDATE] 후보 키 캡처: $hex")
+                                println("$TAG [WEBVIEW] 후보군 포착: $hex")
                             }
                         }
                         return true
@@ -240,8 +262,9 @@ class BunnyPoorCdn : ExtractorApi() {
                         view?.evaluateJavascript(HOOK_SCRIPT, null)
                     }
                 }
+                
                 webView.webViewClient = object : WebViewClient() {
-                    override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                    override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                         view?.evaluateJavascript(HOOK_SCRIPT, null)
                     }
                     override fun onPageFinished(view: WebView?, url: String?) {
@@ -251,6 +274,7 @@ class BunnyPoorCdn : ExtractorApi() {
                         view?.evaluateJavascript(HOOK_SCRIPT, null)
                     }
                 }
+                println("$TAG [ACTION] 웹뷰 페이지 로드 개시")
                 webView.loadUrl(url, mapOf("Referer" to referer))
             }
         }
@@ -268,13 +292,13 @@ class BunnyPoorCdn : ExtractorApi() {
                 serverSocket = ServerSocket(0).also { port = it.localPort }
                 isRunning = true
                 thread(isDaemon = true) {
-                    println("$TAG [PROXY] 시작됨 (포트: $port)")
+                    println("$TAG [PROXY] 가동 (포트: $port)")
                     while (isRunning) { try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {} }
                 }
-            } catch (e: Exception) { println("$TAG [ERROR] 프록시 구동 실패: ${e.message}") }
+            } catch (e: Exception) { println("$TAG [ERROR] 프록시 포트 할당 실패: ${e.message}") }
         }
 
-        fun stop() { isRunning = false; serverSocket?.close() }
+        fun stop() { isRunning = false; serverSocket?.close(); println("$TAG [PROXY] 중단됨") }
         fun updateSession(h: Map<String, String>) { currentHeaders = h }
         fun setPlaylist(p: String) { currentPlaylist = p }
 
@@ -293,13 +317,13 @@ class BunnyPoorCdn : ExtractorApi() {
                         output.write(currentPlaylist.toByteArray())
                     }
                     path.contains("/key") -> {
-                        println("$TAG [PROXY] Key 요청 수신. 후보군(${capturedKeys.size}개) 전수 검증 시작.")
+                        println("$TAG [PROXY] Key 요청 감지. 후보군 전수 검사 진행.")
                         if (verifiedKey == null) {
                             verifiedKey = verifyMultipleKeys()
                         }
                         output.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n".toByteArray())
                         output.write(verifiedKey ?: ByteArray(16))
-                        println("$TAG [PROXY] 검증된 키 반환 완료.")
+                        println("$TAG [PROXY] 키 응답 전송 완료")
                     }
                     path.contains("/seg") -> {
                         val targetUrl = URLDecoder.decode(path.substringAfter("url="), "UTF-8")
@@ -309,7 +333,6 @@ class BunnyPoorCdn : ExtractorApi() {
                         val inputStream = conn.inputStream
                         output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
 
-                        // 첫 세그먼트의 경우 오프셋 탐색을 통한 0x47 동기화 (2번 원본 유지)
                         val buffer = ByteArray(65536)
                         val bytesRead = inputStream.read(buffer)
                         if (bytesRead > 0) {
@@ -332,7 +355,7 @@ class BunnyPoorCdn : ExtractorApi() {
 
         private fun verifyMultipleKeys(): ByteArray? {
             val url = testSegmentUrl ?: return null
-            println("$TAG [VERIFY] 테스트 세그먼트 다운로드: $url")
+            println("$TAG [VERIFY] 테스트 세그먼트로 키 확인 중: $url")
             
             return try {
                 val responseData = runBlocking { app.get(url, headers = currentHeaders).body.bytes() }
@@ -344,17 +367,16 @@ class BunnyPoorCdn : ExtractorApi() {
                         val keyBytes = hex.hexToByteArray()
                         try {
                             val decrypted = decryptAES(testChunk, keyBytes, iv)
-                            // 0x47 동기화 바이트 확인
                             if (decrypted.isNotEmpty() && decrypted[0] == 0x47.toByte()) {
-                                println("$TAG [SUCCESS] 유효한 진짜 키 발견: $hex")
+                                println("$TAG [VERIFY-SUCCESS] 일치하는 키 식별: $hex")
                                 return keyBytes
                             }
                         } catch (e: Exception) {}
                     }
                 }
-                println("$TAG [FAIL] 모든 후보군이 일치하지 않음.")
+                println("$TAG [VERIFY-FAIL] 일치하는 키가 없음")
                 null
-            } catch (e: Exception) { println("$TAG [ERROR] 검증 로직 예외: ${e.message}"); null }
+            } catch (e: Exception) { println("$TAG [ERROR] 검증 로직 에러: ${e.message}"); null }
         }
 
         private fun decryptAES(data: ByteArray, key: ByteArray, iv: ByteArray): ByteArray {
