@@ -22,11 +22,11 @@ import java.net.URLDecoder
 import kotlin.concurrent.thread
 
 /**
- * Version: 7
+ * Version: 11
  * Modification:
- * 1. CRITICAL FIX: Rewrite ALL segment URLs to Absolute Paths (프록시 사용 시 상대 경로 깨짐 문제 완벽 해결)
- * 2. FIX: Handle '#.m3u8' suffix safely for network requests
- * 3. Maintain: Key7 Decryption & Dynamic Length Handling
+ * 1. LOGIC: Strict Key7 Detection (Only triggers if #EXT-X-KEY line contains '/v/key7')
+ * 2. FIX: Covers all 3 cases provided by user (AES-128 / No Encryption / Key7)
+ * 3. Maintain: Absolute Path Resolution & Decryption Logic
  */
 class BunnyPoorCdn : ExtractorApi() {
     override val name = "TVMON"
@@ -72,12 +72,12 @@ class BunnyPoorCdn : ExtractorApi() {
 
         var capturedUrl: String? = null
 
-        // [입력 URL 체크] 이미 c.html 형태라면 바로 사용
+        // [입력 URL 체크]
         if (cleanUrl.contains("/c.html") && cleanUrl.contains("token=")) {
             capturedUrl = cleanUrl
         }
 
-        // 2. c.html 요청 납치 (아직 못 찾았으면)
+        // 2. c.html 요청 납치
         if (capturedUrl == null) {
             val resolver = WebViewResolver(
                 interceptUrl = Regex("""/c\.html"""), 
@@ -123,41 +123,48 @@ class BunnyPoorCdn : ExtractorApi() {
                 headers["Cookie"] = cookie
             }
 
-            // [수정] #.m3u8 제거 후 실제 요청 (404 방지)
+            // 요청 URL 정리
             val requestUrl = capturedUrl!!.substringBefore("#")
             
             try {
+                // M3U8 내용 가져오기
                 val m3u8Content = app.get(requestUrl, headers = headers).text
                 
-                if (m3u8Content.contains("/v/key7")) {
+                // [Key7 판별 로직] 사용자 요청 사항 반영
+                // #EXT-X-KEY 라인이 존재하고, 그 라인에 "/v/key7"이 포함되어 있는가?
+                val isKey7 = m3u8Content.lines().any { line ->
+                    line.startsWith("#EXT-X-KEY") && line.contains("/v/key7")
+                }
+
+                if (isKey7) {
+                    // === Case 3: Key7 발견 -> 프록시 가동 ===
                     proxyServer?.stop()
                     proxyServer = ProxyWebServer().apply {
                         start()
                         updateSession(headers)
                     }
 
-                    // [핵심 수정] Base URI 생성 (쿼리 파라미터 포함된 원본 URL 기준)
-                    val baseUri = URI(requestUrl)
+                    // Base URI 준비 (상대 경로 복원용)
+                    val baseUri = try { URI(requestUrl) } catch (e: Exception) { null }
                     val sb = StringBuilder()
 
-                    // m3u8 라인별 분석 및 재조립
                     m3u8Content.lines().forEach { line ->
                         val trimmed = line.trim()
                         if (trimmed.isEmpty()) return@forEach
 
                         if (trimmed.startsWith("#")) {
-                            // Key URI 변조 (상대/절대 경로 모두 처리)
+                            // Key 라인 처리
                             if (trimmed.startsWith("#EXT-X-KEY") && trimmed.contains("/v/key7")) {
                                 val regex = Regex("""URI="([^"]+)"""")
                                 val match = regex.find(trimmed)
                                 if (match != null) {
                                     val originalKeyUrl = match.groupValues[1]
-                                    // Key URL도 절대 경로로 변환
-                                    val absoluteKeyUrl = try {
-                                        baseUri.resolve(originalKeyUrl).toString()
-                                    } catch (e: Exception) { originalKeyUrl }
                                     
+                                    // Key URL 절대 경로 변환
+                                    val absoluteKeyUrl = resolveUrl(baseUri, requestUrl, originalKeyUrl)
                                     val encodedKeyUrl = java.net.URLEncoder.encode(absoluteKeyUrl, "UTF-8")
+                                    
+                                    // 프록시 주소로 교체
                                     val newLine = trimmed.replace(
                                         originalKeyUrl,
                                         "http://127.0.0.1:${proxyServer!!.port}/key?url=$encodedKeyUrl"
@@ -170,13 +177,9 @@ class BunnyPoorCdn : ExtractorApi() {
                                 sb.append(trimmed).append("\n")
                             }
                         } else {
-                            // [사용자 지적 반영] 영상 세그먼트(ts) 주소 절대 경로로 변환
-                            // 프록시 사용 시 상대 경로는 localhost로 붙어버리므로 반드시 변환해야 함
-                            val absoluteSegmentUrl = try {
-                                baseUri.resolve(trimmed).toString()
-                            } catch (e: Exception) {
-                                trimmed
-                            }
+                            // 영상 세그먼트(TS/GIF) 절대 경로 변환
+                            // 프록시를 타면 로컬호스트 기준으로 찾기 때문에 무조건 변환 필요
+                            val absoluteSegmentUrl = resolveUrl(baseUri, requestUrl, trimmed)
                             sb.append(absoluteSegmentUrl).append("\n")
                         }
                     }
@@ -191,12 +194,24 @@ class BunnyPoorCdn : ExtractorApi() {
                         }
                     )
                     return true
-                }
+                } 
+                
+                // === Case 1 & 2: Key7 아님 -> 원본 그대로 반환 ===
+                // CloudStream이 알아서 재생함
+                callback(
+                    newExtractorLink(name, name, requestUrl, ExtractorLinkType.M3U8) {
+                        this.referer = "https://player.bunny-frame.online/"
+                        this.quality = Qualities.Unknown.value
+                        this.headers = headers
+                    }
+                )
+                return true
+
             } catch (e: Exception) {
                 e.printStackTrace()
             }
             
-            // 일반 영상(Key7 아님)일 경우
+            // 예외 발생 시 Fallback
             callback(
                 newExtractorLink(name, name, requestUrl, ExtractorLinkType.M3U8) {
                     this.referer = "https://player.bunny-frame.online/"
@@ -210,8 +225,34 @@ class BunnyPoorCdn : ExtractorApi() {
         return false
     }
 
+    // URL Resolution Helper
+    private fun resolveUrl(baseUri: URI?, baseUrlStr: String, target: String): String {
+        if (target.startsWith("http")) return target
+        
+        if (baseUri != null) {
+            return try {
+                baseUri.resolve(target).toString()
+            } catch (e: Exception) {
+                manualResolve(baseUrlStr, target)
+            }
+        }
+        return manualResolve(baseUrlStr, target)
+    }
+
+    private fun manualResolve(base: String, target: String): String {
+        if (target.startsWith("/")) {
+            // Root relative: http://host/path + /target -> http://host/target
+            val hostUrl = if (base.indexOf("/", 8) != -1) base.substring(0, base.indexOf("/", 8)) else base
+            return "$hostUrl$target"
+        } else {
+            // Relative: http://host/path/file + target -> http://host/path/target
+            val pathUrl = base.substringBeforeLast("/")
+            return "$pathUrl/$target"
+        }
+    }
+
     // ==========================================
-    // Key7 Decryption Logic (WASM Logic Reflected)
+    // Key7 Decryption Logic
     // ==========================================
 
     data class Layer(
