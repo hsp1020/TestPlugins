@@ -30,10 +30,10 @@ import javax.crypto.spec.SecretKeySpec
 import kotlin.concurrent.thread
 
 /**
- * Version: v23.1 (Build Error Fixed & Conditional Hooking)
+ * Version: v23.2 (WebViewResolver Signature Fix)
  * Modification:
- * 1. FIXED: Corrected WebViewResolver constructor parameters to avoid 'additionalJs' and 'interceptUrl' errors.
- * 2. FIXED: Resolved byte array inference error in verifyMultipleKeys.
+ * 1. FIXED: Changed 'interceptUrl' to 'interceptUrls' (List<Regex>) to resolve type mismatch.
+ * 2. FIXED: Aligned WebViewResolver constructor with the expected Library API.
  * 3. LOG: Maintained all println debug logs for every single process.
  * 4. OPTIMIZE: Hooking only runs if key7 is detected.
  */
@@ -58,7 +58,7 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("[TVMON][v23.1] getUrl 시작. 대상: $url")
+        println("[TVMON][v23.2] getUrl 시작. URL: $url")
         extract(url, referer, subtitleCallback, callback)
     }
 
@@ -89,9 +89,9 @@ class BunnyPoorCdn : ExtractorApi() {
 
         var capturedUrl: String? = null
         
-        // 2. c.html 주소 획득 (빌드 에러 수정됨: interceptUrl 필수 파라미터 제공)
+        // 2. c.html 주소 획득 (BUILD FIX: List<Regex> 타입으로 수정)
         println("[TVMON] [STEP 2] c.html URL 캡처 시도 (Fast Mode)...")
-        val fastResolver = WebViewResolver(Regex("""/c\.html"""), false)
+        val fastResolver = WebViewResolver(interceptUrls = listOf(Regex("""/c\.html""")))
         
         try {
             val fastRes = app.get(
@@ -118,7 +118,7 @@ class BunnyPoorCdn : ExtractorApi() {
             }
 
             try {
-                println("[TVMON] [STEP 3] M3U8 헤더 분석 중...")
+                println("[TVMON] [STEP 3] M3U8 내용 분석 시작...")
                 var requestUrl = capturedUrl.substringBefore("#")
                 var content = app.get(requestUrl, headers = headers).text.trim()
 
@@ -130,26 +130,24 @@ class BunnyPoorCdn : ExtractorApi() {
                     }
                 }
 
-                // 3. Key7 여부 확인 및 조건부 후킹
                 val isKey7 = content.contains("/v/key7")
                 println("[TVMON] [CHECK] Key7 여부: $isKey7")
 
                 if (isKey7) {
-                    println("[TVMON] [ACTION] Key7 탐지됨. 정밀 후킹 프로세스 가동 (6초 대기)...")
+                    println("[TVMON] [ACTION] Key7 탐지됨. 정밀 후킹 가동 (6초 대기)...")
                     
-                    // [BUILD FIX] 빌드 에러 방지를 위해 WebViewResolver 규격 준수
-                    // additionalJs 대신 interceptUrl을 명시적으로 전달
-                    val hookResolver = WebViewResolver(Regex("""/c\.html"""), false)
+                    // [BUILD FIX] List<Regex> 타입으로 수정
+                    val hookResolver = WebViewResolver(interceptUrls = listOf(Regex("""/c\.html""")))
                     
                     capturedKeys.clear()
                     verifiedKey = null
                     
-                    // 후킹 스크립트 실행을 위해 재로드 (리졸버가 콘솔 로그를 감시하도록 함)
+                    // 후킹 실행을 위해 재로드
                     app.get(url = cleanUrl, headers = headers, interceptor = hookResolver)
                     
-                    println("[TVMON] [WAIT] 키 후보군(3개 이상) 수집을 위해 대기합니다...")
+                    println("[TVMON] [WAIT] 키 후보군 수집을 위해 대기합니다...")
                     delay(6000) 
-                    println("[TVMON] 현재 수집된 키 후보 개수: ${capturedKeys.size}")
+                    println("[TVMON] 수집된 키 후보 개수: ${capturedKeys.size}")
                     
                     // 4. 프록시 서버 설정
                     println("[TVMON] [STEP 4] 프록시 서버 초기화...")
@@ -198,7 +196,7 @@ class BunnyPoorCdn : ExtractorApi() {
                     })
                     return true
                 } else {
-                    println("[TVMON] [SKIP] Key7이 아니므로 후킹 및 프록시 과정을 생략합니다.")
+                    println("[TVMON] [SKIP] Key7이 아니므로 논프록시로 진행합니다.")
                     callback(newExtractorLink(name, name, requestUrl, ExtractorLinkType.M3U8) {
                         this.referer = "https://player.bunny-frame.online/"; this.headers = headers
                     })
@@ -263,7 +261,7 @@ class BunnyPoorCdn : ExtractorApi() {
                         }
                         output.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
                         output.write(verifiedKey ?: ByteArray(16))
-                        println("[PROXY] [RES] 검증된 키 반환.")
+                        println("[PROXY] [RES] 검증된 키 반환 완료.")
                     }
                     path.contains("/seg") -> {
                         val targetUrl = URLDecoder.decode(path.substringAfter("url="), "UTF-8")
@@ -295,16 +293,15 @@ class BunnyPoorCdn : ExtractorApi() {
 
         private fun verifyMultipleKeys(): ByteArray? {
             val url = testSegmentUrl ?: return null
-            println("[VERIFY] 검증 시작. 대상: $url")
+            println("[VERIFY] 검증 시작. 타겟: $url")
             return try {
-                // [BUILD FIX] body.bytes() 호출 시 명시적으로 처리하여 추론 에러 방지
                 val responseData = runBlocking { 
                     app.get(url, headers = currentHeaders).body.bytes() 
                 }
                 val testChunk = responseData.copyOfRange(0, 1024)
 
                 synchronized(capturedKeys) {
-                    println("[VERIFY] 후보 ${capturedKeys.size}개에 대해 Brute-force 시도.")
+                    println("[VERIFY] 후보 ${capturedKeys.size}개 검사 중...")
                     for (hex in capturedKeys) {
                         val keyBytes = hex.hexToByteArray()
                         try {
@@ -316,9 +313,9 @@ class BunnyPoorCdn : ExtractorApi() {
                         } catch (e: Exception) { }
                     }
                 }
-                println("[VERIFY] [FAIL] 맞는 키가 없습니다.")
+                println("[VERIFY] [FAIL] 유효한 키를 찾지 못함.")
                 null
-            } catch (e: Exception) { println("[VERIFY] [ERROR] 검증 도중 오류: ${e.message}"); null }
+            } catch (e: Exception) { println("[VERIFY] [ERROR] 검증 오류: ${e.message}"); null }
         }
 
         private fun decryptAES(data: ByteArray, key: ByteArray, iv: ByteArray): ByteArray {
