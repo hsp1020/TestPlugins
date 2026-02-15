@@ -1,77 +1,23 @@
-package com.tvmon
+package com.tvwiki
 
-import android.os.Handler
-import android.os.Looper
-import android.webkit.ConsoleMessage
-import android.webkit.WebChromeClient
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.*
-import java.io.BufferedReader
-import java.io.InputStreamReader
-import java.net.ServerSocket
-import java.net.Socket
+import com.lagradost.cloudstream3.network.WebViewResolver 
+import android.webkit.CookieManager
 import java.net.URI
-import java.net.URLDecoder
-import java.net.URLEncoder
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CopyOnWriteArrayList
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
-import javax.crypto.Cipher
-import javax.crypto.spec.IvParameterSpec
-import javax.crypto.spec.SecretKeySpec
-import kotlin.concurrent.thread
-import kotlinx.coroutines.runBlocking
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.net.HttpURLConnection
-import java.net.URL
 
-/**
- * [Version: v34-Candidate-BruteForce]
- * 1. JS Logic: '0x01 0e 00' 필터링 제거. 16바이트면 무조건 수집 (중복 제거 포함).
- * 2. Kotlin Logic: 수집된 '후보 키(Candidates)'들을 실제 영상 데이터에 대입하여 검증.
- * 3. Validation: 복호화 결과가 '0x47'(Sync Byte)로 시작하면 정답 키로 확정.
- */
 class BunnyPoorCdn : ExtractorApi() {
-    override val name = "TVMON"
+    override val name = "TVWiki"
     override val mainUrl = "https://player.bunny-frame.online"
     override val requiresReferer = true
     
+    // Fiddler로 검증된 최신 Windows Chrome User-Agent
     private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-
-    companion object {
-        private var proxyServer: ProxyWebServer? = null
-        private const val TAG = "[Bunny-v34]"
-
-        // 정답 키 (검증 완료된 키)
-        @Volatile internal var verifiedKey: ByteArray? = null
-        
-        // 후보 키 리스트 (JS에서 보내온 것들)
-        internal val candidateKeys = CopyOnWriteArrayList<ByteArray>()
-        
-        // 키가 하나라도 들어올 때까지 대기하는 래치 (옵션)
-        @Volatile internal var candidatesLatch = CountDownLatch(1)
-
-        fun hexToBytes(hex: String): ByteArray {
-            val len = hex.length
-            val data = ByteArray(len / 2)
-            var i = 0
-            while (i < len) {
-                data[i / 2] = ((Character.digit(hex[i], 16) shl 4) + Character.digit(hex[i + 1], 16)).toByte()
-                i += 2
-            }
-            return data
-        }
-    }
 
     override suspend fun getUrl(
         url: String,
@@ -79,14 +25,7 @@ class BunnyPoorCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // 초기화
-        proxyServer?.stop()
-        proxyServer = null
-        verifiedKey = null
-        candidateKeys.clear()
-        candidatesLatch = CountDownLatch(1)
-        
-        println("$TAG getUrl started.")
+        println("[BunnyPoorCdn] getUrl 호출 - url: $url, referer: $referer")
         extract(url, referer, subtitleCallback, callback)
     }
 
@@ -97,350 +36,147 @@ class BunnyPoorCdn : ExtractorApi() {
         callback: (ExtractorLink) -> Unit,
         thumbnailHint: String? = null,
     ): Boolean {
+        println("[BunnyPoorCdn] extract 시작 ===================================")
+        println("[BunnyPoorCdn] 입력 URL: $url")
+        println("[BunnyPoorCdn] 입력 referer: $referer")
+        println("[BunnyPoorCdn] thumbnailHint: $thumbnailHint")
+        
+        // 1. URL 디코딩 및 공백 제거 (HTML 엔티티 &amp; 처리 필수)
         var cleanUrl = url.replace("&amp;", "&").replace(Regex("[\\r\\n\\s]"), "").trim()
-        val cleanReferer = "https://tvmon.site/" // TVMON Referer
+        println("[BunnyPoorCdn] cleanUrl 처리 후: $cleanUrl")
+        
+        // [중요] 리퍼러를 tvwiki로 강제 고정
+        val cleanReferer = "https://tvwiki5.net/"
+        println("[BunnyPoorCdn] 고정 referer: $cleanReferer")
 
-        // iframe 찾기 로직
-        if (!cleanUrl.contains("/v/") && !cleanUrl.contains("/e/")) {
+        // 2. iframe 주소 따기 (재탐색 로직)
+        // [수정] /v/ 만 있어도 유효한 주소로 인정하여 불필요한 재탐색 스킵
+        val isDirectUrl = cleanUrl.contains("/v/") || cleanUrl.contains("/e/") || cleanUrl.contains("/f/")
+        println("[BunnyPoorCdn] 직접 URL 여부(isDirectUrl): $isDirectUrl")
+        
+        if (!isDirectUrl) {
+            println("[BunnyPoorCdn] 직접 URL이 아님 - 재탐색 시작")
             try {
+                // 직접 링크가 아닌 경우에만 페이지를 다시 긁어옴
+                println("[BunnyPoorCdn] 리퍼러 페이지 요청: $cleanReferer")
                 val refRes = app.get(cleanReferer, headers = mapOf("User-Agent" to DESKTOP_UA))
+                println("[BunnyPoorCdn] 리퍼러 페이지 응답 코드: ${refRes.code}")
+                
                 val iframeMatch = Regex("""src=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
                     ?: Regex("""data-player\d*=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
+                
                 if (iframeMatch != null) {
                     cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&").trim()
-                    println("$TAG Found Iframe: $cleanUrl")
-                }
-            } catch (e: Exception) {}
-        }
-
-        // [비동기] JS Key Stealing 시작
-        thread {
-            runBlocking {
-                JsKeyStealer.stealKey(cleanUrl, DESKTOP_UA, cleanReferer)
-            }
-        }
-
-        // 프록시 서버 가동
-        startProxy(cleanUrl, callback)
-        return true
-    }
-
-    private suspend fun startProxy(
-        targetUrl: String, 
-        callback: (ExtractorLink) -> Unit
-    ) {
-        try {
-            // M3U8 다운로드 (여기서 Key7 체크)
-            val m3u8Res = app.get(targetUrl, headers = mapOf("User-Agent" to DESKTOP_UA, "Referer" to "https://tvmon.site/"))
-            val m3u8Url = m3u8Res.url
-            val m3u8Content = m3u8Res.text
-
-            val proxy = ProxyWebServer()
-            proxy.start()
-            proxyServer = proxy
-
-            val proxyPort = proxy.port
-            val proxyRoot = "http://127.0.0.1:$proxyPort"
-
-            val newLines = mutableListOf<String>()
-            val lines = m3u8Content.lines()
-            val seqMap = ConcurrentHashMap<String, Long>()
-            var currentSeq = Regex("""#EXT-X-MEDIA-SEQUENCE:(\d+)""").find(m3u8Content)?.groupValues?.get(1)?.toLong() ?: 0L
-            
-            val uri = URI(m3u8Url)
-            val domain = "${uri.scheme}://${uri.host}"
-            val parentUrl = m3u8Url.substringBeforeLast("/")
-
-            for (line in lines) {
-                val trimmed = line.trim()
-                if (trimmed.isEmpty()) continue
-
-                // 원본 Key 라인은 삭제 (우리가 프록시에서 직접 복호화하므로 플레이어에겐 평문인척 속임)
-                if (trimmed.startsWith("#EXT-X-KEY")) {
-                    continue 
-                }
-                
-                if (!trimmed.startsWith("#")) {
-                    val segmentUrl = when {
-                        trimmed.startsWith("http") -> trimmed
-                        trimmed.startsWith("/") -> "$domain$trimmed"
-                        else -> "$parentUrl/$trimmed"
-                    }
-                    seqMap[segmentUrl] = currentSeq
-                    
-                    // 모든 세그먼트를 프록시로 라우팅
-                    val encodedSegUrl = URLEncoder.encode(segmentUrl, "UTF-8")
-                    newLines.add("$proxyRoot/proxy?url=$encodedSegUrl")
-                    currentSeq++
+                    println("[BunnyPoorCdn] 재탐색 성공 - 새로운 cleanUrl: $cleanUrl")
                 } else {
-                    newLines.add(trimmed)
+                    println("[BunnyPoorCdn] 재탐색 실패 - iframe을 찾을 수 없음")
+                }
+            } catch (e: Exception) {
+                // 재탐색 실패 시 로그만 남기고 원래 URL로 시도
+                println("[BunnyPoorCdn] 재탐색 중 오류: ${e.message}")
+                e.printStackTrace()
+            }
+        } else {
+            println("[BunnyPoorCdn] 직접 URL이므로 재탐색 생략")
+        }
+
+        var capturedUrl: String? = null
+
+        // 3. c.html 요청 납치 (WebViewResolver)
+        // 타임아웃을 30초로 넉넉하게 설정
+        println("[BunnyPoorCdn] WebViewResolver 초기화")
+        val resolver = WebViewResolver(
+            interceptUrl = Regex("""/c\.html"""), 
+            useOkhttp = false,
+            timeout = 30000L
+        )
+        
+        try {
+            // [중요] WebView 요청 시 리퍼러와 UA를 정확하게 설정해야 서버가 403을 뱉지 않음
+            val requestHeaders = mapOf(
+                "Referer" to cleanReferer, 
+                "User-Agent" to DESKTOP_UA
+            )
+            
+            println("[BunnyPoorCdn] WebView 요청 시작 - URL: $cleanUrl")
+            println("[BunnyPoorCdn] 요청 헤더: $requestHeaders")
+
+            // cleanUrl(iframe) 접속 -> JS 실행 -> c.html 요청 가로채기
+            val response = app.get(
+                url = cleanUrl,
+                headers = requestHeaders,
+                interceptor = resolver
+            )
+            
+            println("[BunnyPoorCdn] WebView 응답 받음")
+            println("[BunnyPoorCdn] 최종 응답 URL: ${response.url}")
+            println("[BunnyPoorCdn] 응답 코드: ${response.code}")
+
+            // 토큰이 포함된 URL 획득 확인
+            if (response.url.contains("/c.html") && response.url.contains("token=")) {
+                capturedUrl = response.url
+                println("[BunnyPoorCdn] c.html URL 캡처 성공: $capturedUrl")
+            } else {
+                println("[BunnyPoorCdn] c.html URL 캡처 실패 - URL 패턴 불일치")
+                println("[BunnyPoorCdn] response.text 길이: ${response.text.length}")
+                // 응답 내용의 일부 로깅
+                if (response.text.length > 500) {
+                    println("[BunnyPoorCdn] response.text 첫 500자: ${response.text.substring(0, 500)}")
+                } else {
+                    println("[BunnyPoorCdn] response.text: ${response.text}")
                 }
             }
-
-            val proxyM3u8 = newLines.joinToString("\n")
-            proxy.setPlaylist(proxyM3u8)
-            proxy.updateSeqMap(seqMap)
-
-            println("$TAG Returning Proxy Playlist URL")
-            callback(
-                newExtractorLink(name, name, "$proxyRoot/playlist.m3u8", ExtractorLinkType.M3U8) {
-                    this.referer = "https://player.bunny-frame.online/"
-                    this.quality = Qualities.Unknown.value
-                }
-            )
         } catch (e: Exception) {
+            println("[BunnyPoorCdn] WebViewResolver 실행 중 오류: ${e.message}")
             e.printStackTrace()
         }
-    }
 
-    object JsKeyStealer {
-        // [수정된 HOOK SCRIPT]
-        // 조건: 16바이트면 모두 수집. 단, 중복(Set)은 제거하여 브리지 과부하 방지.
-        private const val HOOK_SCRIPT = """
-            (function() {
-                try {
-                    if (window.isHooked) return;
-                    window.isHooked = true;
-                    
-                    var seenKeys = new Set(); // 중복 방지용
+        if (capturedUrl != null) {
+            // [핵심] 획득한 c.html URL을 그대로 사용하되 끝에 #.m3u8을 붙여서 플레이어가 HLS로 인식하게 함
+            
+            // 쿠키 동기화
+            val cookieManager = CookieManager.getInstance()
+            val cookie = cookieManager.getCookie(capturedUrl)
+            println("[BunnyPoorCdn] 쿠키 획득: ${cookie?.take(100)}...")
 
-                    function checkAndLog(source) {
-                        // 조건 완화: 16바이트면 무조건 후보로 등록
-                        if (source && source.length === 16) {
-                            try {
-                                var hex = Array.from(source).map(function(b) {
-                                    return ('0' + (b & 0xFF).toString(16)).slice(-2);
-                                }).join('');
-                                
-                                // 이미 본 키가 아니면 전송
-                                if (!seenKeys.has(hex)) {
-                                    seenKeys.add(hex);
-                                    console.log("CANDIDATE_KEY:" + hex);
-                                }
-                            } catch (e) {}
-                        }
-                    }
+            // Fiddler 로그 기반 헤더 설정
+            val headers = mutableMapOf(
+                "User-Agent" to DESKTOP_UA,
+                "Referer" to "https://player.bunny-frame.online/",
+                "Origin" to "https://player.bunny-frame.online",
+                "Accept" to "*/*",
+                "Sec-Fetch-Site" to "cross-site",
+                "Sec-Fetch-Mode" to "cors",
+                "Sec-Fetch-Dest" to "empty",
+                "Accept-Encoding" to "gzip, deflate, br",
+                "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+                "sec-ch-ua" to "\"Chromium\";v=\"122\", \"Not(A:Brand\";v=\"24\", \"Google Chrome\";v=\"122\"",
+                "sec-ch-ua-mobile" to "?0",
+                "sec-ch-ua-platform" to "\"Windows\""
+            )
 
-                    const originalSet = Uint8Array.prototype.set;
-                    Object.defineProperty(Uint8Array.prototype, 'set', {
-                        value: function(source, offset) {
-                            if (source) checkAndLog(source);
-                            return originalSet.apply(this, arguments);
-                        },
-                        writable: true, configurable: true
-                    });
-
-                    const OriginalUint8Array = window.Uint8Array;
-                    function HookedUint8Array(arg1, arg2, arg3) {
-                        var arr;
-                        if (arguments.length === 0) arr = new OriginalUint8Array();
-                        else if (arguments.length === 1) arr = new OriginalUint8Array(arg1);
-                        else if (arguments.length === 2) arr = new OriginalUint8Array(arg1, arg2);
-                        else arr = new OriginalUint8Array(arg1, arg2, arg3);
-                        
-                        checkAndLog(arr);
-                        return arr;
-                    }
-                    
-                    HookedUint8Array.prototype = OriginalUint8Array.prototype;
-                    HookedUint8Array.BYTES_PER_ELEMENT = OriginalUint8Array.BYTES_PER_ELEMENT;
-                    HookedUint8Array.from = OriginalUint8Array.from;
-                    HookedUint8Array.of = OriginalUint8Array.of;
-                    
-                    try {
-                        Object.defineProperty(window, 'Uint8Array', {
-                            value: HookedUint8Array, writable: true, configurable: true
-                        });
-                    } catch(e) {
-                        window.Uint8Array = HookedUint8Array;
-                    }
-
-                    console.log("HOOK_INSTALLED");
-                } catch(e) {
-                    console.log("HOOK_ERROR:" + e.message);
-                }
-            })();
-        """
-
-        suspend fun stealKey(url: String, ua: String, referer: String) {
-            withContext(Dispatchers.Main) {
-                val webView = WebView(AcraApplication.context!!)
-                
-                webView.settings.apply {
-                    javaScriptEnabled = true
-                    domStorageEnabled = true
-                    userAgentString = ua
-                    blockNetworkImage = true
-                }
-
-                webView.webChromeClient = object : WebChromeClient() {
-                    override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
-                        val msg = consoleMessage?.message() ?: ""
-                        if (msg.startsWith("CANDIDATE_KEY:")) {
-                            val keyHex = msg.substringAfter("CANDIDATE_KEY:")
-                            val keyBytes = BunnyPoorCdn.hexToBytes(keyHex)
-                            
-                            // 후보 리스트에 추가
-                            BunnyPoorCdn.candidateKeys.addIfAbsent(keyBytes)
-                            
-                            // 첫 후보가 들어오면 대기 해제 (일단 시도해볼 수 있도록)
-                            if (BunnyPoorCdn.candidatesLatch.count > 0) {
-                                BunnyPoorCdn.candidatesLatch.countDown()
-                            }
-                            
-                            // println("$TAG Candidate Added: $keyHex (Total: ${BunnyPoorCdn.candidateKeys.size})")
-                        } else if (msg.startsWith("HOOK_ERROR:")) {
-                             println("$TAG JS Hook Error: $msg")
-                        }
-                        return true
-                    }
-                    
-                    override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                        super.onProgressChanged(view, newProgress)
-                        view?.evaluateJavascript(HOOK_SCRIPT, null)
-                    }
-                }
-
-                webView.webViewClient = object : WebViewClient() {
-                    override fun onPageFinished(view: WebView?, url: String?) {
-                        super.onPageFinished(view, url)
-                        view?.evaluateJavascript(HOOK_SCRIPT, null)
-                    }
-                    
-                    override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                        super.onPageStarted(view, url, favicon)
-                        view?.evaluateJavascript(HOOK_SCRIPT, null)
-                    }
-                    
-                    override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
-                         super.doUpdateVisitedHistory(view, url, isReload)
-                         view?.evaluateJavascript(HOOK_SCRIPT, null)
-                    }
-                }
-
-                // 20초 후 웹뷰 종료 (키 못찾아도 종료)
-                val handler = Handler(Looper.getMainLooper())
-                handler.postDelayed({
-                    try { 
-                        if (BunnyPoorCdn.verifiedKey == null) {
-                            println("$TAG Timeout. Candidates collected: ${BunnyPoorCdn.candidateKeys.size}")
-                        }
-                        webView.destroy() 
-                    } catch(e:Exception){}
-                }, 20000)
-
-                val headers = mapOf("Referer" to referer)
-                webView.loadUrl(url, headers)
+            if (!cookie.isNullOrEmpty()) {
+                headers["Cookie"] = cookie
             }
-        }
-    }
-
-    class ProxyWebServer {
-        private var serverSocket: ServerSocket? = null
-        private var isRunning = false
-        var port: Int = 0
-        @Volatile private var currentPlaylist: String = ""
-        @Volatile private var seqMap: ConcurrentHashMap<String, Long> = ConcurrentHashMap()
-
-        fun start() {
-            try {
-                serverSocket = ServerSocket(0)
-                port = serverSocket!!.localPort
-                isRunning = true
-                thread(isDaemon = true) { 
-                    while (isRunning && serverSocket != null && !serverSocket!!.isClosed) { 
-                        try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {} 
-                    } 
+            
+            val finalUrl = "$capturedUrl#.m3u8"
+            println("[BunnyPoorCdn] 최종 재생 URL 생성: $finalUrl")
+            println("[BunnyPoorCdn] 헤더 설정: $headers")
+            
+            callback(
+                newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
+                    this.referer = "https://player.bunny-frame.online/"
+                    this.quality = Qualities.Unknown.value
+                    this.headers = headers
                 }
-            } catch (e: Exception) {}
-        }
-
-        fun stop() {
-            isRunning = false
-            try { serverSocket?.close(); serverSocket = null } catch (e: Exception) {}
-        }
+            )
+            println("[BunnyPoorCdn] callback 호출 완료 - 성공")
+            println("[BunnyPoorCdn] extract 종료 ===================================")
+            return true
+        } 
         
-        fun setPlaylist(p: String) { currentPlaylist = p }
-        fun updateSeqMap(map: ConcurrentHashMap<String, Long>) { seqMap = map }
-
-        private fun handleClient(socket: Socket) = thread {
-            try {
-                socket.soTimeout = 15000
-                val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
-                val line = reader.readLine() ?: return@thread
-                val parts = line.split(" ")
-                if (parts.size < 2) return@thread
-                val path = parts[1]
-                val output = socket.getOutputStream()
-
-                if (path.contains("/playlist.m3u8")) {
-                    val body = currentPlaylist.toByteArray(charset("UTF-8"))
-                    val header = "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: ${body.size}\r\nConnection: close\r\n\r\n"
-                    output.write(header.toByteArray())
-                    output.write(body)
-                } else if (path.contains("/proxy")) {
-                    // [Key Wait] 키 후보가 하나라도 모일 때까지 대기
-                    if (BunnyPoorCdn.candidateKeys.isEmpty()) {
-                        println("$TAG Waiting for candidates...")
-                        BunnyPoorCdn.candidatesLatch.await(10, TimeUnit.SECONDS)
-                    }
-
-                    val urlParam = path.substringAfter("url=").substringBefore(" ")
-                    val targetUrl = URLDecoder.decode(urlParam, "UTF-8")
-                    val seq = seqMap[targetUrl] ?: 0L
-
-                    // 영상 데이터 다운로드
-                    val url = URL(targetUrl)
-                    val connection = url.openConnection() as HttpURLConnection
-                    connection.setRequestProperty("User-Agent", "Mozilla/5.0")
-                    connection.connect()
-                    
-                    val inputStream = connection.inputStream
-                    val rawData = inputStream.readBytes() // 전체를 메모리에 읽음 (검증을 위해)
-                    inputStream.close()
-
-                    // [Brute-Force Verification]
-                    // 이미 검증된 키가 있으면 그거 쓰고, 없으면 후보군 다 돌려보기
-                    var correctData: ByteArray? = null
-                    
-                    if (BunnyPoorCdn.verifiedKey != null) {
-                        correctData = attemptDecrypt(rawData, BunnyPoorCdn.verifiedKey!!, seq)
-                    } else {
-                        // 검증 안됐으면 후보군 전수 조사
-                        println("$TAG Testing ${BunnyPoorCdn.candidateKeys.size} candidates on Segment $seq")
-                        for (key in BunnyPoorCdn.candidateKeys) {
-                            val decrypted = attemptDecrypt(rawData, key, seq)
-                            // 검증 조건: 첫 바이트가 0x47 (MPEG-TS Sync Byte)
-                            if (decrypted != null && decrypted.isNotEmpty() && decrypted[0] == 0x47.toByte()) {
-                                println("$TAG Key VERIFIED! : ${Base64.encodeToString(key, Base64.NO_WRAP)}")
-                                BunnyPoorCdn.verifiedKey = key // 정답 키 저장
-                                correctData = decrypted
-                                break
-                            }
-                        }
-                    }
-
-                    val finalData = correctData ?: rawData // 실패하면 원본이라도 내보냄 (어차피 재생 안되겠지만)
-                    
-                    output.write("HTTP/1.1 200 OK\r\nContent-Type: video/mp2t\r\n\r\n".toByteArray())
-                    output.write(finalData)
-                }
-                output.flush(); socket.close()
-            } catch (e: Exception) { 
-                try { socket.close() } catch(e2:Exception){} 
-            }
-        }
-
-        private fun attemptDecrypt(data: ByteArray, key: ByteArray, seq: Long): ByteArray? {
-            try {
-                val iv = ByteArray(16)
-                ByteBuffer.wrap(iv).order(ByteOrder.BIG_ENDIAN).putLong(8, seq)
-                val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-                cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
-                return cipher.doFinal(data)
-            } catch (e: Exception) { 
-                return null 
-            }
-        }
+        println("[BunnyPoorCdn] capturedUrl이 null - 실패")
+        println("[BunnyPoorCdn] extract 종료 ===================================")
+        return false
     }
 }
