@@ -1,22 +1,22 @@
 [
     {
-        "iconUrl": "https://anilife.live/assets/img/animestream.png",
+        "iconUrl": "https://holyindia.org/assets/Pc/img/hd_logo.png",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 31600,
+        "fileSize": 9379,
         "status": 1,
         "language": "ko",
         "authors": [
             "hsp1020"
         ],
         "tvTypes": [
-            "Anime"
+            "Live"
         ],
         "version": 1,
-        "internalName": "AnilifeProvider",
-        "description": "\uc560\ub2c8\uba54\uc774\uc158 \ud55c\uae00 \uc790\ub9c9 \uc81c\uacf5",
-        "url": "https://raw.githubusercontent.com/hsp1020/TestPlugins/builds/AnilifeProvider.cs3",
-        "name": "AnilifeProvider"
+        "internalName": "KKTVProvider",
+        "description": "\uc2a4\ud3ec\uce20 \uc0dd\uc911\uacc4 \uc81c\uacf5",
+        "url": "https://raw.githubusercontent.com/hsp1020/TestPlugins/builds/KKTVProvider.cs3",
+        "name": "KKTVProvider"
     },
     {
         "iconUrl": "https://m135.kotbc2.com/img/ktblogo.gif",
