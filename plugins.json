@@ -1,9 +1,9 @@
 [
     {
-        "iconUrl": "https://raw.githubusercontent.com/doGior/doGiorsHadEnough/refs/heads/master/DaddyLive/live-streaming.png",
+        "iconUrl": "https://raw.githubusercontent.com/DaddyLiveProvider/refs/heads/master/DaddyLive/live-streaming.png",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 23735,
+        "fileSize": 23721,
         "status": 1,
         "authors": [
             "doGior"
