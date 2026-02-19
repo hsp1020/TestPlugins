@@ -82,6 +82,18 @@
         "name": "MoviekingProvider"
     },
     {
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
+        "status": 3,
+        "authors": [
+            
+        ],
+        "version": -1,
+        "internalName": "StremioAddon",
+        "url": "https://raw.githubusercontent.com/hsp1020/TestPlugins/builds/StremioAddon.cs3",
+        "name": "StremioAddon"
+    },
+    {
         "iconUrl": "https://tvmon.site/img/111.png",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
