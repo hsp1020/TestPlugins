@@ -3,7 +3,7 @@
         "iconUrl": "https://holyindia.org/assets/Pc/img/hd_logo.png",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 11790,
+        "fileSize": 11756,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -22,7 +22,7 @@
         "iconUrl": "https://m135.kotbc2.com/img/ktblogo.gif",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 20755,
+        "fileSize": 20717,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -44,7 +44,7 @@
         "iconUrl": "https://i.namu.wiki/i/4NbnTney9AChyoNRvChxbZQE806zcx9Z_wIjM32htHGOcp7ZOQWFvBCSyQfTu3NloC8WRcRE4hnGq2FNxOFdxjvYm82uiRnwMhu95ehEDONK8OSiIVctKBYVWmU7FjOItqs5Hf0OEZRbAbL9yE5a8w.webp",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 19052,
+        "fileSize": 18998,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -63,7 +63,7 @@
         "iconUrl": "https://mvking6.org/resource/favicon.ico",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 27762,
+        "fileSize": 27715,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -85,12 +85,11 @@
         "iconUrl": "https://raw.githubusercontent.com/hexated/cloudstream-extensions-hexated/master/StremioX/icon.png",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 125516,
+        "fileSize": 125215,
         "status": 1,
         "language": "en",
         "authors": [
-            "Hexated",
-            "phisher98"
+            "hsp1020"
         ],
         "tvTypes": [
             "TvSeries",
@@ -106,7 +105,7 @@
         "iconUrl": "https://tvmon.site/img/111.png",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 40900,
+        "fileSize": 40844,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -128,7 +127,7 @@
         "iconUrl": "https://tvwiki5.net/img/logo.png",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 46910,
+        "fileSize": 46832,
         "status": 1,
         "language": "ko",
         "authors": [
