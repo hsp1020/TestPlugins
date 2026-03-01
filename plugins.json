@@ -144,5 +144,27 @@
         "description": "\ud55c\uad6d \ub4dc\ub77c\ub9c8 \ubc0f TV \ud504\ub85c\uadf8\ub7a8 \ub2e4\uc2dc\ubcf4\uae30 \uc81c\uacf5",
         "url": "https://raw.githubusercontent.com/hsp1020/TestPlugins/builds/TVWikiProvider.cs3",
         "name": "TVWikiProvider"
+    },
+    {
+        "iconUrl": "https://upload.wikimedia.org/wikipedia/commons/thumb/0/09/YouTube_full-color_icon_%282017%29.svg/3840px-YouTube_full-color_icon_%282017%29.svg.png",
+        "jarFileSize": 49371,
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
+        "fileSize": 14438,
+        "status": 1,
+        "authors": [
+            "hsp1020"
+        ],
+        "tvTypes": [
+            "Other",
+            "Live",
+            "TvSeries"
+        ],
+        "version": 1,
+        "internalName": "YoutubeProvider",
+        "jarUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/builds/YoutubeProvider.jar",
+        "description": "Watch Youtube in Cloudstream",
+        "url": "https://raw.githubusercontent.com/hsp1020/TestPlugins/builds/YoutubeProvider.cs3",
+        "name": "YoutubeProvider"
     }
 ]
