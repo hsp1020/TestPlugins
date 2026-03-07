@@ -1,5 +1,23 @@
 [
     {
+        "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/DaddyLiveProvider/live-streaming.png",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
+        "fileSize": 18164,
+        "status": 1,
+        "authors": [
+            "hsp1020"
+        ],
+        "tvTypes": [
+            "Live"
+        ],
+        "version": 16,
+        "internalName": "DaddyLiveProvider",
+        "description": "Live TV from DaddyLive. You might need a VPN",
+        "url": "https://raw.githubusercontent.com/hsp1020/TestPlugins/builds/DaddyLiveProvider.cs3",
+        "name": "DaddyLiveProvider"
+    },
+    {
         "iconUrl": "https://holyindia.org/assets/Pc/img/hd_logo.png",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
