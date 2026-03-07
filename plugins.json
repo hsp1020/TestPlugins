@@ -119,27 +119,6 @@
         "name": "MoviekingProvider"
     },
     {
-        "iconUrl": "https://ani.ohli24.com/img/logo@2x.png",
-        "apiVersion": 1,
-        "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 22680,
-        "status": 1,
-        "language": "ko",
-        "authors": [
-            "hsp1020"
-        ],
-        "tvTypes": [
-            "AsianDrama",
-            "TvSeries",
-            "Movie"
-        ],
-        "version": 3,
-        "internalName": "OHLI24",
-        "description": "Anime and movies with Korean subtitles only (no Korean audio)",
-        "url": "https://raw.githubusercontent.com/hsp1020/TestPlugins/builds/OHLI24.cs3",
-        "name": "OHLI24"
-    },
-    {
         "iconUrl": "https://raw.githubusercontent.com/hexated/cloudstream-extensions-hexated/master/StremioX/icon.png",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
