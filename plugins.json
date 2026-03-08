@@ -122,25 +122,6 @@
         "name": "OHLI24"
     },
     {
-        "iconUrl": "https://streamed.pk/favicon.png",
-        "apiVersion": 1,
-        "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 14178,
-        "status": 1,
-        "language": "en",
-        "authors": [
-            "hsp1020"
-        ],
-        "tvTypes": [
-            "Live"
-        ],
-        "version": 1,
-        "internalName": "StreamedProvider",
-        "description": "Streamed",
-        "url": "https://raw.githubusercontent.com/hsp1020/TestPlugins/builds/StreamedProvider.cs3",
-        "name": "StreamedProvider"
-    },
-    {
         "iconUrl": "https://raw.githubusercontent.com/hexated/cloudstream-extensions-hexated/master/StremioX/icon.png",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
