@@ -44,10 +44,12 @@ class BunnyPoorCdn : ExtractorApi() {
     }
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
+        println("[v1.1 디버그] getUrl 실행됨")
         extract(url, referer, subtitleCallback, callback)
     }
 
     suspend fun extract(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit, thumbnailHint: String? = null): Boolean {
+        println("[v1.1 디버그] extract 시작 - url: $url")
         synchronized(this) { if (currentProxyServer != null) { currentProxyServer?.stop(); currentProxyServer = null } }
 
         var cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
@@ -58,16 +60,23 @@ class BunnyPoorCdn : ExtractorApi() {
                 val refRes = app.get(cleanReferer)
                 Regex("""(?:src|data-player\d*)=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)?.let {
                     cleanUrl = it.groupValues[1].replace("&amp;", "&").trim()
+                    println("[v1.1 디버그] cleanUrl 추출됨: $cleanUrl")
                 }
-            } catch (e: Exception) { }
+            } catch (e: Exception) { 
+                println("[v1.1 디버그] cleanUrl 추출 중 에러: ${e.message}")
+            }
         }
 
         var capturedUrl: String? = cleanUrl
         val currentSessionKeys = Collections.synchronizedSet(mutableSetOf<String>())
 
         if (!cleanUrl.contains("/c.html")) {
+            println("[v1.1 디버그] WebView 훅 실행")
             val webViewResult = runWebViewHook(cleanUrl, cleanReferer, currentSessionKeys)
-            if (webViewResult != null) capturedUrl = webViewResult
+            if (webViewResult != null) {
+                capturedUrl = webViewResult
+                println("[v1.1 디버그] WebView 훅 결과 캡처됨: $capturedUrl")
+            }
         }
 
         if (capturedUrl != null) {
@@ -77,22 +86,27 @@ class BunnyPoorCdn : ExtractorApi() {
 
             try {
                 var requestUrl = capturedUrl!!.substringBefore("#")
+                println("[v1.1 디버그] app.get 요청: $requestUrl")
                 var content = app.get(requestUrl, headers = headers).text.trim()
 
                 if (!content.startsWith("#EXTM3U")) {
                     Regex("""(https?://[^"']+\.m3u8[^"']*)""").find(content)?.let {
-                        requestUrl = it.groupValues[1]; content = app.get(requestUrl, headers = headers).text.trim()
+                        requestUrl = it.groupValues[1]
+                        println("[v1.1 디버그] M3U8 URL 추출됨: $requestUrl")
+                        content = app.get(requestUrl, headers = headers).text.trim()
                     }
                 }
 
                 if (content.contains("#EXT-X-STREAM-INF")) {
                     content.lines().lastOrNull { it.isNotBlank() && !it.startsWith("#") }?.let {
                         requestUrl = resolveUrl(try { URI(requestUrl) } catch(e: Exception){null}, requestUrl, it)
+                        println("[v1.1 디버그] 스트림 URL 확인됨: $requestUrl")
                         content = app.get(requestUrl, headers = headers).text.trim()
                     }
                 }
 
                 if (content.lines().any { it.startsWith("#EXT-X-KEY") && it.contains("/v/key7") }) {
+                    println("[v1.1 디버그] 암호화된 M3U8 처리 시작")
                     val newProxy = ProxyWebServer(currentSessionKeys).apply { start(); updateSession(headers) }
                     currentProxyServer = newProxy
 
@@ -119,13 +133,17 @@ class BunnyPoorCdn : ExtractorApi() {
                     }
                     
                     newProxy.setPlaylist(sb.toString())
+                    println("[v1.1 디버그] 로컬 프록시 설정 및 추출 완료. 포트: ${newProxy.port}")
                     callback(newExtractorLink(name, name, "http://127.0.0.1:${newProxy.port}/$videoId/playlist.m3u8", ExtractorLinkType.M3U8) { this.referer = "https://player.bunny-frame.online/"; this.headers = headers })
                     return true
                 } else {
+                    println("[v1.1 디버그] 일반 M3U8 추출 완료")
                     callback(newExtractorLink(name, name, requestUrl, ExtractorLinkType.M3U8) { this.referer = "https://player.bunny-frame.online/"; this.headers = headers })
                     return true
                 }
-            } catch (e: Exception) { }
+            } catch (e: Exception) { 
+                println("[v1.1 디버그] extract 예외 발생: ${e.message}")
+            }
         }
         return false
     }
@@ -185,6 +203,7 @@ class BunnyPoorCdn : ExtractorApi() {
                         if (msg.startsWith("CapturedKeyHex:")) {
                             val key = msg.substringAfter("CapturedKeyHex:").removePrefix("[SET]").removePrefix("[CRYPTO]")
                             if (sessionKeys.add(key)) { 
+                                println("[v1.1 디버그] ConsoleMessage에서 키 캡처 완료: $key")
                                 if (detectedCUrl != null && cont.isActive) {
                                     handler.removeCallbacksAndMessages(null)
                                     handler.post { try { webView?.destroy(); webView = null } catch(e: Exception){}; cont.resume(detectedCUrl) }
@@ -204,17 +223,23 @@ class BunnyPoorCdn : ExtractorApi() {
                         val reqUrl = request?.url?.toString() ?: ""
                         
                         if (reqUrl.contains("/key.bin") || reqUrl.contains("key7")) {
-                            thread {
+                            // [v1.1 수정] app.get(suspend 함수) 호출을 위해 thread 블록을 CoroutineScope(Dispatchers.IO).launch로 대체
+                            CoroutineScope(Dispatchers.IO).launch {
+                                println("[v1.1 디버그] key.bin 가로채기 시도: $reqUrl")
                                 try {
                                     val keyBytes = app.get(reqUrl).body.bytes()
+                                    println("[v1.1 디버그] 가져온 keyBytes 크기: ${keyBytes.size}")
                                     if (keyBytes.size == 16) {
                                         val hex = keyBytes.joinToString("") { "%02x".format(it) }
+                                        println("[v1.1 디버그] WebViewRequest에서 키 캡처 완료: $hex")
                                         if (sessionKeys.add(hex) && cont.isActive) {
                                             handler.removeCallbacksAndMessages(null)
                                             handler.post { try { webView?.destroy(); webView = null } catch(e: Exception){}; cont.resume(detectedCUrl) }
                                         }
                                     }
-                                } catch (e: Exception) {}
+                                } catch (e: Exception) {
+                                    println("[v1.1 디버그] key.bin 가로채기 중 예외: ${e.message}")
+                                }
                             }
                         }
 
@@ -255,19 +280,25 @@ class BunnyPoorCdn : ExtractorApi() {
         @Volatile private var testSegmentUrl: String? = null
 
         fun start() {
+            println("[v1.1 디버그] ProxyWebServer 시작 시도")
             try {
                 serverSocket = ServerSocket(0).also { port = it.localPort }
                 isRunning = true
                 CoroutineScope(Dispatchers.IO).launch {
+                    println("[v1.1 디버그] ProxyWebServer 동작 중. 포트: $port")
                     while (isRunning && serverSocket != null && !serverSocket!!.isClosed) { 
                         try { 
                             val socket = serverSocket!!.accept()
-                            // ★ 핵심: 에러를 방지하기 위해 클라이언트 연결마다 별도의 코루틴(launch) 생성 ★
-                            launch { handleClient(socket) }
-                        } catch (e: Exception) {} 
+                            // [수정: 에러 원인 제거] 소켓 처리를 개별 코루틴(launch)으로 분리
+                            launch { handleClient(socket) } 
+                        } catch (e: Exception) {
+                            println("[v1.1 디버그] 소켓 accept 중 예외: ${e.message}")
+                        } 
                     } 
                 }
-            } catch (e: Exception) { }
+            } catch (e: Exception) { 
+                println("[v1.1 디버그] ProxyWebServer 시작 실패: ${e.message}")
+            }
         }
 
         fun stop() { isRunning = false; try { serverSocket?.close() } catch(e: Exception) {} }
@@ -276,23 +307,82 @@ class BunnyPoorCdn : ExtractorApi() {
         fun setIv(iv: ByteArray) { currentIv = iv }
         fun setTestSegment(url: String) { if (testSegmentUrl == null) testSegmentUrl = url }
 
-        // ★ 핵심: suspend 키워드 명시 ★
+        // [수정: 에러 원인 제거] suspend 키워드 추가
         private suspend fun handleClient(socket: Socket) {
             try {
                 socket.soTimeout = 5000
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
                 val path = reader.readLine()?.split(" ")?.getOrNull(1) ?: return
                 val output = socket.getOutputStream()
+                println("[v1.1 디버그] 프록시 요청 수신 경로: $path")
 
                 if (path.contains("playlist.m3u8")) {
                     val payload = currentPlaylist.toByteArray()
                     output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nConnection: close\r\nContent-Length: ${payload.size}\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
                     output.write(payload)
                 } else if (path.contains("/key.bin")) {
-                    if (verifiedKey == null) verifiedKey = verifyMultipleKeys() // 이제 suspend 호출이 코루틴 바디 내부에서 적법하게 일어남!
+                    if (verifiedKey == null) verifiedKey = verifyMultipleKeys() // suspend 함수 정상 호출 가능!
                     val keyPayload = verifiedKey ?: ByteArray(16)
                     output.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\nContent-Length: ${keyPayload.size}\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
                     output.write(keyPayload)
                 }
                 output.flush()
-            } catch (e: Exception)
+            } catch (e: Exception) { 
+                println("[v1.1 디버그] 클라이언트 처리 중 예외: ${e.message}")
+            } finally { try { socket.close() } catch(e: Exception) {} }
+        }
+
+        // [수정: 에러 원인 제거] runBlocking 없이 순수 suspend 함수로 작성
+        private suspend fun verifyMultipleKeys(): ByteArray? {
+            val url = testSegmentUrl ?: return null
+            val targetIv = currentIv ?: ByteArray(16)
+            try {
+                val responseData = app.get(url, headers = currentHeaders).body.bytes()
+                val checkSize = 1024 
+                val safeCheckSize = if (responseData.size < checkSize) responseData.size else checkSize
+
+                synchronized(sessionKeys) {
+                    for ((index, hexKey) in sessionKeys.withIndex()) {
+                        try {
+                            val keyBytes = hexKey.hexToByteArray()
+                            for (offset in 0..512) {
+                                if (responseData.size < offset + safeCheckSize) break
+                                val testChunk = responseData.copyOfRange(offset, offset + safeCheckSize)
+                                val decrypted = decryptAES(testChunk, keyBytes, targetIv)
+                                
+                                if (decrypted.size >= 377 && decrypted[0] == 0x47.toByte() && decrypted[188] == 0x47.toByte() && decrypted[376] == 0x47.toByte()) {
+                                    println("[v1.1 디버그] 키 검증 성공 (인덱스: $index)")
+                                    return keyBytes
+                                }
+                            }
+                        } catch (e: Exception) {}
+                    }
+                    println("[v1.1 디버그] 유효한 키를 찾지 못함")
+                    return null
+                }
+            } catch (e: Exception) { 
+                println("[v1.1 디버그] verifyMultipleKeys 중 예외: ${e.message}")
+                return null 
+            }
+        }
+
+        private fun decryptAES(data: ByteArray, key: ByteArray, iv: ByteArray): ByteArray {
+            return try {
+                val cipher = Cipher.getInstance("AES/CBC/NoPadding")
+                cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+                cipher.doFinal(data)
+            } catch (e: Exception) { ByteArray(0) }
+        }
+    }
+}
+
+fun String.hexToByteArray(): ByteArray {
+    val len = length
+    val data = ByteArray(len / 2)
+    var i = 0
+    while (i < len) {
+        data[i / 2] = ((Character.digit(this[i], 16) shl 4) + Character.digit(this[i+1], 16)).toByte()
+        i += 2
+    }
+    return data
+}
