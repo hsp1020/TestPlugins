@@ -125,7 +125,7 @@
         "iconUrl": "https://raw.githubusercontent.com/hexated/cloudstream-extensions-hexated/master/StremioX/icon.png",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 180042,
+        "fileSize": 180219,
         "status": 1,
         "language": "en",
         "authors": [
@@ -145,7 +145,7 @@
         "iconUrl": "https://tvmon.site/img/111.png",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 45689,
+        "fileSize": 45690,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -157,7 +157,7 @@
             "AsianDrama",
             "Anime"
         ],
-        "version": 1,
+        "version": 2,
         "internalName": "TVMONProvider",
         "description": "\ud55c\uad6d \ub4dc\ub77c\ub9c8 \ubc0f TV \ud504\ub85c\uadf8\ub7a8 \ub2e4\uc2dc\ubcf4\uae30 \uc81c\uacf5",
         "url": "https://raw.githubusercontent.com/hsp1020/TestPlugins/builds/TVMONProvider.cs3",
