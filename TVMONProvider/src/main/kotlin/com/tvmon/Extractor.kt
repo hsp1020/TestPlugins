@@ -262,8 +262,8 @@ class BunnyPoorCdn : ExtractorApi() {
                     while (isRunning && serverSocket != null && !serverSocket!!.isClosed) { 
                         try { 
                             val socket = serverSocket!!.accept()
-                            // [수정점] runBlocking 에러 해결을 위해 완전 비동기 코루틴으로 호출 처리
-                            launch { handleClient(socket) }
+                            // [수정: 에러 원인 제거] 소켓 처리를 개별 코루틴(launch)으로 분리
+                            launch { handleClient(socket) } 
                         } catch (e: Exception) {} 
                     } 
                 }
@@ -276,7 +276,7 @@ class BunnyPoorCdn : ExtractorApi() {
         fun setIv(iv: ByteArray) { currentIv = iv }
         fun setTestSegment(url: String) { if (testSegmentUrl == null) testSegmentUrl = url }
 
-        // [수정점] suspend 함수로 변환하여 에러 발생 원천 차단
+        // [수정: 에러 원인 제거] suspend 키워드 추가
         private suspend fun handleClient(socket: Socket) {
             try {
                 socket.soTimeout = 5000
@@ -289,7 +289,7 @@ class BunnyPoorCdn : ExtractorApi() {
                     output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nConnection: close\r\nContent-Length: ${payload.size}\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
                     output.write(payload)
                 } else if (path.contains("/key.bin")) {
-                    if (verifiedKey == null) verifiedKey = verifyMultipleKeys()
+                    if (verifiedKey == null) verifiedKey = verifyMultipleKeys() // suspend 함수 정상 호출 가능!
                     val keyPayload = verifiedKey ?: ByteArray(16)
                     output.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\nContent-Length: ${keyPayload.size}\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
                     output.write(keyPayload)
@@ -299,7 +299,7 @@ class BunnyPoorCdn : ExtractorApi() {
             } finally { try { socket.close() } catch(e: Exception) {} }
         }
 
-        //[수정점] runBlocking 제거하고 안전한 suspend 함수로 변환
+        // [수정: 에러 원인 제거] runBlocking 없이 순수 suspend 함수로 작성
         private suspend fun verifyMultipleKeys(): ByteArray? {
             val url = testSegmentUrl ?: return null
             val targetIv = currentIv ?: ByteArray(16)
