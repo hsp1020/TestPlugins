@@ -262,8 +262,8 @@ class BunnyPoorCdn : ExtractorApi() {
                     while (isRunning && serverSocket != null && !serverSocket!!.isClosed) { 
                         try { 
                             val socket = serverSocket!!.accept()
-                            // [수정: 에러 원인 제거] 소켓 처리를 개별 코루틴(launch)으로 분리
-                            launch { handleClient(socket) } 
+                            // ★ 핵심: 에러를 방지하기 위해 클라이언트 연결마다 별도의 코루틴(launch) 생성 ★
+                            launch { handleClient(socket) }
                         } catch (e: Exception) {} 
                     } 
                 }
@@ -276,7 +276,7 @@ class BunnyPoorCdn : ExtractorApi() {
         fun setIv(iv: ByteArray) { currentIv = iv }
         fun setTestSegment(url: String) { if (testSegmentUrl == null) testSegmentUrl = url }
 
-        // [수정: 에러 원인 제거] suspend 키워드 추가
+        // ★ 핵심: suspend 키워드 명시 ★
         private suspend fun handleClient(socket: Socket) {
             try {
                 socket.soTimeout = 5000
@@ -289,62 +289,10 @@ class BunnyPoorCdn : ExtractorApi() {
                     output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nConnection: close\r\nContent-Length: ${payload.size}\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
                     output.write(payload)
                 } else if (path.contains("/key.bin")) {
-                    if (verifiedKey == null) verifiedKey = verifyMultipleKeys() // suspend 함수 정상 호출 가능!
+                    if (verifiedKey == null) verifiedKey = verifyMultipleKeys() // 이제 suspend 호출이 코루틴 바디 내부에서 적법하게 일어남!
                     val keyPayload = verifiedKey ?: ByteArray(16)
                     output.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\nContent-Length: ${keyPayload.size}\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
                     output.write(keyPayload)
                 }
                 output.flush()
-            } catch (e: Exception) { 
-            } finally { try { socket.close() } catch(e: Exception) {} }
-        }
-
-        // [수정: 에러 원인 제거] runBlocking 없이 순수 suspend 함수로 작성
-        private suspend fun verifyMultipleKeys(): ByteArray? {
-            val url = testSegmentUrl ?: return null
-            val targetIv = currentIv ?: ByteArray(16)
-            try {
-                val responseData = app.get(url, headers = currentHeaders).body.bytes()
-                val checkSize = 1024 
-                val safeCheckSize = if (responseData.size < checkSize) responseData.size else checkSize
-
-                synchronized(sessionKeys) {
-                    for ((index, hexKey) in sessionKeys.withIndex()) {
-                        try {
-                            val keyBytes = hexKey.hexToByteArray()
-                            for (offset in 0..512) {
-                                if (responseData.size < offset + safeCheckSize) break
-                                val testChunk = responseData.copyOfRange(offset, offset + safeCheckSize)
-                                val decrypted = decryptAES(testChunk, keyBytes, targetIv)
-                                
-                                if (decrypted.size >= 377 && decrypted[0] == 0x47.toByte() && decrypted[188] == 0x47.toByte() && decrypted[376] == 0x47.toByte()) {
-                                    return keyBytes
-                                }
-                            }
-                        } catch (e: Exception) {}
-                    }
-                    return null
-                }
-            } catch (e: Exception) { return null }
-        }
-
-        private fun decryptAES(data: ByteArray, key: ByteArray, iv: ByteArray): ByteArray {
-            return try {
-                val cipher = Cipher.getInstance("AES/CBC/NoPadding")
-                cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
-                cipher.doFinal(data)
-            } catch (e: Exception) { ByteArray(0) }
-        }
-    }
-}
-
-fun String.hexToByteArray(): ByteArray {
-    val len = length
-    val data = ByteArray(len / 2)
-    var i = 0
-    while (i < len) {
-        data[i / 2] = ((Character.digit(this[i], 16) shl 4) + Character.digit(this[i+1], 16)).toByte()
-        i += 2
-    }
-    return data
-}
+            } catch (e: Exception)
