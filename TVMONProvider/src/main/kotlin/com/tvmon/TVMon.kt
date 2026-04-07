@@ -48,7 +48,7 @@ class TVMon : MainAPI() {
     }
 
     private fun Element.toSearchResponse(): SearchResponse? {
-        val aTag = this.selectFirst("a.img") ?: return null
+        val aTag = this.selectFirst("a.img, a.poster") ?: this.selectFirst("a:has(img)")
         var link = fixUrl(aTag.attr("href"))
         val title = this.selectFirst("a.title")?.text()?.trim() ?: return null
 
