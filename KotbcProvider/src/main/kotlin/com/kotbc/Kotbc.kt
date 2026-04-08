@@ -65,8 +65,8 @@ class Kotbc : MainAPI() {
             
             // [공통 개선] 5개씩 병렬로 빠르게 스캔 (최대 150초 로딩 방지)
             coroutineScope {
-                val candidates = (startNum..startNum + 50).map { "https://m$it.kotbc2.com" }
-                val chunks = candidates.chunked(5)
+                val candidates = (startNum..startNum + 100).map { "https://m$it.kotbc2.com" }
+                val chunks = candidates.chunked(10)
                 
                 for (chunk in chunks) {
                     val deferreds = chunk.map { testUrl ->
