@@ -131,8 +131,8 @@ class TVWiki : MainAPI() {
             var foundDomain: String? = null
             
             coroutineScope {
-                val candidates = (startNum..startNum + 50).map { "https://tvwiki$it.net" }
-                val chunks = candidates.chunked(5) // 5개씩 묶어서 병렬 요청 (서버 밴 방지 및 속도 최적화)
+                val candidates = (startNum..startNum + 100).map { "https://tvwiki$it.net" }
+                val chunks = candidates.chunked(10) // 5개씩 묶어서 병렬 요청 (서버 밴 방지 및 속도 최적화)
                 
                 for (chunk in chunks) {
                     val deferreds = chunk.map { testDomain ->
