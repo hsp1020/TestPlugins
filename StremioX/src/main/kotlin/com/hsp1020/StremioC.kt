@@ -1,3 +1,4 @@
+// v1.129 (Fix: Jackson mapping issue for _tmdbId & Prefetch TMDB metadata)
 package com.hsp1020
 
 import com.fasterxml.jackson.annotation.JsonProperty
@@ -84,7 +85,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
     
     val customSession by lazy {
-        println("[StremioC v1.128-TRACKING] 커스텀 OkHttp 세션 초기화")
+        println("[StremioC v1.129-TRACKING] 커스텀 OkHttp 세션 초기화")
         val newClient = app.baseClient.newBuilder()
             .protocols(listOf(Protocol.HTTP_1_1))
             .dispatcher(Dispatcher().apply {
@@ -126,7 +127,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
     }
 
-    // [중복 제거 1] SearchResponse ID 추출 로직 공통화
     private fun SearchResponse.extractPureId(): String {
         return try {
             JSON_ID_EXTRACT_REGEX.find(this.url)?.groupValues?.get(1) ?: this.url
@@ -233,7 +233,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val now = System.currentTimeMillis()
                 val removedCount = globalPageCache.entries.removeIf { now - it.value.third > CACHE_TTL_MS }
                 if (removedCount) {
-                    println("[StremioC v1.128-TRACKING] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
+                    println("[StremioC v1.129-TRACKING] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
                 }
                 catalogSkipState.clear()
             }
@@ -252,7 +252,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
         
         if (!isNewRequest && page > 1) {
-            println("[StremioC v1.128-TRACKING] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
+            println("[StremioC v1.129-TRACKING] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
             return@coroutineScope newHomePageResponse(emptyList(), hasNext = true)
         }
         return@coroutineScope response
@@ -344,16 +344,22 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             } catch (e: Exception) { null }
         }
 
+        // v1.129: 안전하게 파싱된 tmdbIdExt를 사용하여 TMDB 사전 로드(Prefetch) 즉시 실행 최적화
+        val tmdbIdFromRes = res.moviedb_id?.toString() ?: res.tmdbIdExt
         val tmdbDeferred = if (res.id.startsWith("tmdb:")) {
+            val tmdbIdOnly = res.id.removePrefix("tmdb:")
             async(Dispatchers.IO) {
-                val tmdbIdOnly = res.id.removePrefix("tmdb:")
-                try {
-                    // [최적화 1] append_to_response에 recommendations 추가 (통신 1회로 병합)
-                    val mediaType = if (res.type == "movie") "movie" else "tv"
-                    val detailAppend = if (mediaType == "movie") "release_dates,credits,images,videos,external_ids,recommendations" else "content_ratings,credits,images,videos,external_ids,recommendations"
-                    val detailUrl = buildTmdbUrl("/$mediaType/$tmdbIdOnly", "append_to_response" to detailAppend, "include_image_language" to "ko")
-                    customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>()
-                } catch (e: Exception) { null }
+                val mediaType = if (res.type == "movie") "movie" else "tv"
+                val detailAppend = if (mediaType == "movie") "release_dates,credits,images,videos,external_ids,recommendations" else "content_ratings,credits,images,videos,external_ids,recommendations"
+                val detailUrl = buildTmdbUrl("/$mediaType/$tmdbIdOnly", "append_to_response" to detailAppend, "include_image_language" to "ko")
+                try { customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>() } catch (e: Exception) { null }
+            }
+        } else if (tmdbIdFromRes != null) {
+            async(Dispatchers.IO) {
+                val mediaType = if (res.type == "movie") "movie" else "tv"
+                val detailAppend = if (mediaType == "movie") "release_dates,credits,images,videos,external_ids,recommendations" else "content_ratings,credits,images,videos,external_ids,recommendations"
+                val detailUrl = buildTmdbUrl("/$mediaType/$tmdbIdFromRes", "append_to_response" to detailAppend, "include_image_language" to "ko")
+                try { customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>() } catch (e: Exception) { null }
             }
         } else null
 
@@ -370,7 +376,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val kitsuMeta = kitsuDeferred?.await()
         
         var finalProcessedId = res.id
-        
         var imdbId = preFetchedTmdbDetail?.external_ids?.imdb_id
         
         if (imdbId.isNullOrBlank()) {
@@ -487,7 +492,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         fun isSearchRequired(): Boolean = extra?.any { it.name == "search" && it.isRequired == true } == true
         fun supportsSearch(): Boolean = extra?.any { it.name == "search" } == true || extraSupported?.contains("search") == true
 
-        // [중복 제거 2] 카탈로그 API 통신 공통 모듈화
         private suspend fun fetchMetas(provider: StremioC, path: String): List<CatalogEntry> {
             return try {
                 val req = provider.customSession.get(provider.buildUrl(path), timeout = 120L)
@@ -539,7 +543,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         @JsonProperty("name") val name: String, 
         @JsonProperty("id") val id: String, 
         @JsonProperty("moviedb_id") val moviedb_id: Int? = null,
-        @JsonProperty("_tmdbId") val _tmdbId: String? = null, // v1.128: _tmdbId 필드 추가 
+        @JsonProperty("_tmdbId") val tmdbIdExt: String? = null, // v1.129: Jackson 파싱 누락 방지를 위해 명시적 매핑
+        @JsonProperty("_malId") val malIdExt: String? = null,
+        @JsonProperty("_kitsuId") val kitsuIdExt: String? = null,
         @JsonProperty("poster") val poster: String?, 
         @JsonProperty("background") val background: String?, 
         @JsonProperty("logo") val logo: String? = null,
@@ -558,7 +564,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             return provider.newMovieSearchResponse(name, this.toJson(), TvType.Others) { posterUrl = poster }
         }
 
-        // [중복 제거 3] 영화/단일비디오 판단 로직 공통화
         private fun isSingleMovie(finalType: String?, finalVideos: List<Video>?): Boolean {
             return (finalType == "movie" && finalVideos?.size == 1 && finalVideos[0].seasonNumber == 1 && (finalVideos[0].episode == 1 || finalVideos[0].number == 1)) ||
                    (finalVideos?.size == 1 && (finalVideos[0].seasonNumber ?: 0) == 0 && (finalVideos[0].episode ?: finalVideos[0].number ?: 0) == 0)
@@ -654,9 +659,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
                 val traktResults = traktDeferred.await()
                 val simklResults = simklDeferred.await()
-                
-                val traktIds = traktResults.map { it.first }.toSet()
-                val simklIds = simklResults.map { it.first }.toSet()
                 
                 val tmdbRecs = detailRes.recommendations?.results ?: emptyList()
                 val tmdbRecsIds = tmdbRecs.mapNotNull { it.id }.toSet()
@@ -831,11 +833,13 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 finalImdbId = logo?.let { IMDB_ID_REGEX.find(it)?.value } ?: poster?.let { IMDB_ID_REGEX.find(it)?.value } ?: background?.let { IMDB_ID_REGEX.find(it)?.value }
             }
 
-            // v1.128: _tmdbId를 파싱된 moviedb_id의 대체재로 참조하도록 수정
+            val detailedEntry = addonDeferred?.await() ?: this@CatalogEntry
+
+            // v1.129: 안전하게 파싱된 tmdbIdExt 활용 및 detailedEntry 내 데이터까지 2차 검증
             var tmdbIdStr: String? = if (this@CatalogEntry.id.startsWith("tmdb:")) {
                 this@CatalogEntry.id.removePrefix("tmdb:") 
             } else {
-                this@CatalogEntry.moviedb_id?.toString() ?: this@CatalogEntry._tmdbId
+                this@CatalogEntry.moviedb_id?.toString() ?: this@CatalogEntry.tmdbIdExt ?: detailedEntry.tmdbIdExt
             }
             
             val findApiDeferred = if (tmdbIdStr == null && finalImdbId?.startsWith("tt") == true) {
@@ -854,8 +858,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     } catch (e: Exception) { null }
                 }
             } else null
-
-            val detailedEntry = addonDeferred?.await() ?: this@CatalogEntry
 
             val finalVideos = detailedEntry.videos ?: this@CatalogEntry.videos
             val finalTrailersSources = detailedEntry.trailersSources ?: this@CatalogEntry.trailersSources
