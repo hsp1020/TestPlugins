@@ -418,10 +418,10 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
         runAllAsync(
             {
-                //[🚀 속도 병목 제거] 순차적 대기가 아닌 메인+서브 동시 탐색 (타임아웃 30초 단축으로 대기시간 증발)
+                //[🚀 속도 병목 제거] 순차적 대기가 아닌 메인+서브 동시 탐색 (타임아웃 60초 단축으로 대기시간 증발)
                 try {
                     val url = buildUrl("/stream/$targetType/$encodedPrimaryId.json")
-                    val res = customSession.get(url, timeout = 30L).parsedSafe<StreamsResponse>()
+                    val res = customSession.get(url, timeout = 60L).parsedSafe<StreamsResponse>()
                     res?.streams?.forEach { stream -> stream.runCallback(this@StremioC, subtitleCallback, callback) }
                 } catch (e: Exception) {}
             },
@@ -444,7 +444,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 async(Dispatchers.IO) {
                     try {
                         val url = "${site.url.cleanBaseUrl()}/stream/$type/$stremioId.json"
-                        val res = customSession.get(url, timeout = 30L).parsedSafe<StreamsResponse>() // 빠른 실패/타임아웃 유도
+                        val res = customSession.get(url, timeout = 60L).parsedSafe<StreamsResponse>() // 빠른 실패/타임아웃 유도
                         res?.streams?.forEach { stream -> stream.runCallback(this@StremioC, subtitleCallback, callback) }
                     } catch (e: Exception) {}
                 }
@@ -465,7 +465,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 async(Dispatchers.IO) {
                     try {
                         val url = "$api/subtitles/$type/$stremioId.json"
-                        val json = customSession.get(url, timeout = 30L).text
+                        val json = customSession.get(url, timeout = 60L).text
                         val subtitleResponse = parseJson<StremioSubtitleResponse>(json)
 
                         subtitleResponse.subtitles?.forEach { sub ->
