@@ -1,4 +1,3 @@
-// v1.128 (Fix: Add _tmdbId mapping for TMDB metadata and recommendations)
 package com.hsp1020
 
 import com.fasterxml.jackson.annotation.JsonProperty
