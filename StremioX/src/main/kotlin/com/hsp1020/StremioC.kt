@@ -1,4 +1,4 @@
-// v1.135 (Full Speed Optimization, Duplicate Cleaned, Bug Fixes, All Logs Removed)
+// v1.134 (Full Speed Optimization, Duplicate & Dirty Logic Cleaned, Bug Fixes)
 package com.hsp1020
 
 import com.fasterxml.jackson.annotation.JsonProperty
@@ -86,6 +86,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
     
     val customSession by lazy {
+        println("[StremioC v1.134-TRACKING] 커스텀 OkHttp 세션 초기화")
         val newClient = app.baseClient.newBuilder()
             .protocols(listOf(Protocol.HTTP_1_1))
             .dispatcher(Dispatcher().apply {
@@ -231,7 +232,10 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 activePageRequests.clear()
                 
                 val now = System.currentTimeMillis()
-                globalPageCache.entries.removeIf { now - it.value.third > CACHE_TTL_MS }
+                val removedCount = globalPageCache.entries.removeIf { now - it.value.third > CACHE_TTL_MS }
+                if (removedCount) {
+                    println("[StremioC v1.134-TRACKING] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
+                }
                 catalogSkipState.clear()
             }
             
@@ -249,6 +253,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
         
         if (!isNewRequest && page > 1) {
+            println("[StremioC v1.134-TRACKING] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
             return@coroutineScope newHomePageResponse(emptyList(), hasNext = true)
         }
         return@coroutineScope response
@@ -321,14 +326,17 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     }
 
     override suspend fun load(url: String): LoadResponse = coroutineScope {
+        //[🚀 병목/이중 파싱 제거 개선] 가볍게 JSONObject 사용으로 CPU 오버헤드 감소
         val res: CatalogEntry = if (url.startsWith("{")) {
             parseJson(url)
         } else {
             val responseText = customSession.get(url).text
             try {
+                // 구조 1: parseJson<CatalogResponse>.meta
                 val tmp = parseJson<CatalogResponse>(responseText).meta
                 tmp ?: throw Exception("Not CatalogResponse format")
             } catch (e: Exception) {
+                // 구조 2: {"meta": {...}} -> CPU를 최소화하기 위해 JsonObject.optJSONObject 사용
                 val metaObj = JSONObject(responseText).optJSONObject("meta")
                 if (metaObj != null) {
                     parseJson(metaObj.toString())
@@ -348,6 +356,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             } catch (e: Exception) { null }
         }
 
+        // [🧹 중복 및 지저분한 로직 제거] TMDB 통신 복사 붙여넣기 압축 처리
         val tmdbIdFromRes = res.moviedb_id?.toString() ?: res.tmdbIdExt
         val targetTmdbId = if (res.id.startsWith("tmdb:")) res.id.removePrefix("tmdb:") else tmdbIdFromRes
         
@@ -409,13 +418,16 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
         runAllAsync(
             {
+                //[🚀 속도 병목 제거] 순차적 대기가 아닌 메인+서브 동시 탐색 (타임아웃 30초 단축으로 대기시간 증발)
                 try {
                     val url = buildUrl("/stream/$targetType/$encodedPrimaryId.json")
                     val res = customSession.get(url, timeout = 30L).parsedSafe<StreamsResponse>()
                     res?.streams?.forEach { stream -> stream.runCallback(this@StremioC, subtitleCallback, callback) }
                 } catch (e: Exception) {}
             },
-            { invokeStremioX(targetType, globalId, loadData.season, loadData.episode, subtitleCallback, callback) },
+            { 
+                invokeStremioX(targetType, globalId, loadData.season, loadData.episode, subtitleCallback, callback) 
+            },
             { invokeWatchsomuch(loadData.imdbId, loadData.season, loadData.episode, subtitleCallback) },
             { invokeOpenSubs(loadData.imdbId, loadData.season, loadData.episode, subtitleCallback) },
             { invokeStremioSubtitles(targetType, globalId, loadData.season, loadData.episode, subtitleCallback) }
@@ -432,7 +444,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 async(Dispatchers.IO) {
                     try {
                         val url = "${site.url.cleanBaseUrl()}/stream/$type/$stremioId.json"
-                        val res = customSession.get(url, timeout = 30L).parsedSafe<StreamsResponse>()
+                        val res = customSession.get(url, timeout = 30L).parsedSafe<StreamsResponse>() // 빠른 실패/타임아웃 유도
                         res?.streams?.forEach { stream -> stream.runCallback(this@StremioC, subtitleCallback, callback) }
                     } catch (e: Exception) {}
                 }
@@ -580,7 +592,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
 
             val validImdbId = (detailRes.external_ids?.imdb_id ?: finalImdbId)?.takeIf { it.startsWith("tt") }
-
             val targetCountry = detailRes.origin_country?.firstOrNull()
             val targetLanguage = detailRes.original_language
             val isSameOrigin: (TmdbMedia?) -> Boolean = { media -> 
@@ -777,6 +788,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
 
         suspend fun toLoadResponse(provider: StremioC, imdbId: String?, addonDeferred: Deferred<CatalogEntry?>?, preFetchedDetail: TmdbDetailResponse? = null): LoadResponse = coroutineScope {
+            // [🧹 중복 및 버그 수정 1] MAL 필터링 누락 복구
             var finalImdbId = if (this@CatalogEntry.id.startsWith("tt")) this@CatalogEntry.id 
                               else imdbId?.takeIf { it.startsWith("tt") || it.startsWith("kitsu:") || it.startsWith("mal:") }
             
@@ -838,6 +850,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val finalTrailers = tmdbData?.fetchedTrailers?.ifEmpty { fallbackTrailers } ?: fallbackTrailers
             val movieId = if (!finalVideos.isNullOrEmpty() && !finalVideos[0].id.isNullOrBlank()) finalVideos[0].id else this@CatalogEntry.id
 
+            // [🧹 중복 코드 제거] LoadResponse 빌드 시 똑같이 중복되던 15줄의 코드를 변수로 압축 (가독성 최적화)
             val finalActors = if (tmdbData?.fetchedActors?.isNotEmpty() == true) tmdbData.fetchedActors else null
 
             if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
@@ -855,7 +868,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     finalName, "${provider.mainUrl}/meta/${finalType}/${this@CatalogEntry.id}.json", TvType.TvSeries, episodesList
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); plot = finalDescription; year = tmdbData?.fetchedYear; tags = finalGenre
-                    this.showStatus = tmdbData?.fetchedStatus 
+                    this.showStatus = tmdbData?.fetchedStatus // 시리즈 전용 항목
                     if (finalActors != null) this.actors = finalActors else addActors(finalCast)
                     addTrailer(finalTrailers.firstOrNull()); this.recommendations = tmdbData?.fetchedRecommendations; this.contentRating = tmdbData?.fetchedAgeRating
                     tmdbData?.fetchedLogo?.let { this.logoUrl = it }; tmdbIdStr?.let { addTMDbId(it) }; finalImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }
@@ -892,7 +905,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 this.description = finalEpDesc
                 this.season = displaySeason
                 this.episode = displayEpisode
-
                 val finalAirDate = tmdbEp?.airDate?.takeIf { it.isNotBlank() } ?: this@Video.firstAired ?: this@Video.released
                 finalAirDate?.takeIf { it.isNotBlank() }?.let { this.addDate(it) }
             }
