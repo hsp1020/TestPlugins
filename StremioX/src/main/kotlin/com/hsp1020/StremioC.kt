@@ -1,4 +1,4 @@
-// v1.130 (Fix: Restore missing traktIds and simklIds declarations causing build error)
+// v1.131 (Rollback to v1.130 & Confirmed TMDB Prefetch Logic for mal: id)
 package com.hsp1020
 
 import com.fasterxml.jackson.annotation.JsonProperty
@@ -85,7 +85,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
     
     val customSession by lazy {
-        println("[StremioC v1.130-TRACKING] 커스텀 OkHttp 세션 초기화")
+        println("[StremioC v1.131-TRACKING] 커스텀 OkHttp 세션 초기화")
         val newClient = app.baseClient.newBuilder()
             .protocols(listOf(Protocol.HTTP_1_1))
             .dispatcher(Dispatcher().apply {
@@ -233,7 +233,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val now = System.currentTimeMillis()
                 val removedCount = globalPageCache.entries.removeIf { now - it.value.third > CACHE_TTL_MS }
                 if (removedCount) {
-                    println("[StremioC v1.130-TRACKING] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
+                    println("[StremioC v1.131-TRACKING] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
                 }
                 catalogSkipState.clear()
             }
@@ -252,7 +252,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
         
         if (!isNewRequest && page > 1) {
-            println("[StremioC v1.130-TRACKING] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
+            println("[StremioC v1.131-TRACKING] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
             return@coroutineScope newHomePageResponse(emptyList(), hasNext = true)
         }
         return@coroutineScope response
@@ -344,6 +344,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             } catch (e: Exception) { null }
         }
 
+        // [복구 완료] mal: 등에서 _tmdbId를 파싱해 진짜 IMDB ID를 구하기 위한 TMDB 사전조회(Prefetch) 유지
         val tmdbIdFromRes = res.moviedb_id?.toString() ?: res.tmdbIdExt
         val tmdbDeferred = if (res.id.startsWith("tmdb:")) {
             val tmdbIdOnly = res.id.removePrefix("tmdb:")
@@ -659,7 +660,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val traktResults = traktDeferred.await()
                 val simklResults = simklDeferred.await()
                 
-                // v1.130: 누락되었던 traktIds, simklIds 변수 복구
                 val traktIds = traktResults.map { it.first }.toSet()
                 val simklIds = simklResults.map { it.first }.toSet()
                 
