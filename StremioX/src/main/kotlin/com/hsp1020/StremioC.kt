@@ -1,4 +1,3 @@
-// v1.129 (Fix: Jackson mapping issue for _tmdbId & Prefetch TMDB metadata)
 package com.hsp1020
 
 import com.fasterxml.jackson.annotation.JsonProperty
