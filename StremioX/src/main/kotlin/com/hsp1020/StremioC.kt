@@ -1,4 +1,4 @@
-// v1.131 (Rollback to v1.130 & Confirmed TMDB Prefetch Logic for mal: id)
+// v1.133 (Fix: Resolve Trakt/Simkl 404 locally without modifying LoadResponse ID)
 package com.hsp1020
 
 import com.fasterxml.jackson.annotation.JsonProperty
@@ -85,7 +85,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
     
     val customSession by lazy {
-        println("[StremioC v1.131-TRACKING] 커스텀 OkHttp 세션 초기화")
+        println("[StremioC v1.133-TRACKING] 커스텀 OkHttp 세션 초기화")
         val newClient = app.baseClient.newBuilder()
             .protocols(listOf(Protocol.HTTP_1_1))
             .dispatcher(Dispatcher().apply {
@@ -233,7 +233,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val now = System.currentTimeMillis()
                 val removedCount = globalPageCache.entries.removeIf { now - it.value.third > CACHE_TTL_MS }
                 if (removedCount) {
-                    println("[StremioC v1.131-TRACKING] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
+                    println("[StremioC v1.133-TRACKING] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
                 }
                 catalogSkipState.clear()
             }
@@ -252,7 +252,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
         
         if (!isNewRequest && page > 1) {
-            println("[StremioC v1.131-TRACKING] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
+            println("[StremioC v1.133-TRACKING] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
             return@coroutineScope newHomePageResponse(emptyList(), hasNext = true)
         }
         return@coroutineScope response
@@ -344,7 +344,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             } catch (e: Exception) { null }
         }
 
-        // [복구 완료] mal: 등에서 _tmdbId를 파싱해 진짜 IMDB ID를 구하기 위한 TMDB 사전조회(Prefetch) 유지
         val tmdbIdFromRes = res.moviedb_id?.toString() ?: res.tmdbIdExt
         val tmdbDeferred = if (res.id.startsWith("tmdb:")) {
             val tmdbIdOnly = res.id.removePrefix("tmdb:")
@@ -585,6 +584,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 return FetchedTmdbData(null, null, null, emptyList(), null, null, null, null, null, null, emptyMap())
             }
 
+            // v1.133: Trakt/Simkl 조회 시, TMDB에서 가져온 진짜 IMDB ID가 존재한다면 우선 적용 (안전장치)
+            val validImdbId = (detailRes.external_ids?.imdb_id ?: finalImdbId)?.takeIf { it.startsWith("tt") }
+
             val targetCountry = detailRes.origin_country?.firstOrNull()
             val targetLanguage = detailRes.original_language
             val isSameOrigin: (TmdbMedia?) -> Boolean = { media -> 
@@ -596,11 +598,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
             coroutineScope {
                 val traktDeferred = async(Dispatchers.IO) {
-                    if (finalImdbId == null || TRAKT_CLIENT_ID.isEmpty()) return@async emptyList<Pair<Int, String>>()
+                    if (validImdbId == null || TRAKT_CLIENT_ID.isEmpty()) return@async emptyList<Pair<Int, String>>()
                     val traktMediaType = if (tmdbMediaType == "movie") "movies" else "shows"
                     val expectedType = if (tmdbMediaType == "movie") "movie" else "tv"
                     try {
-                        val req = provider.customSession.get("https://api.trakt.tv/$traktMediaType/$finalImdbId/related?limit=30", headers = mapOf("Content-Type" to "application/json", "trakt-api-version" to "2", "trakt-api-key" to TRAKT_CLIENT_ID), timeout = 15)
+                        val req = provider.customSession.get("https://api.trakt.tv/$traktMediaType/$validImdbId/related?limit=30", headers = mapOf("Content-Type" to "application/json", "trakt-api-version" to "2", "trakt-api-key" to TRAKT_CLIENT_ID), timeout = 15)
                         if (req.isSuccessful && req.text.isNotBlank()) {
                             parseJson<List<TraktRelatedItem>>(req.text).mapNotNull {
                                 val tmdbId = it.ids?.tmdb ?: 0
@@ -611,12 +613,12 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
 
                 val simklDeferred = async(Dispatchers.IO) {
-                    if (finalImdbId == null || SIMKL_CLIENT_ID.isEmpty()) return@async emptyList<Pair<Int, String>>()
+                    if (validImdbId == null || SIMKL_CLIENT_ID.isEmpty()) return@async emptyList<Pair<Int, String>>()
                     val simklMediaType = if (tmdbMediaType == "movie") "movies" else "tv"
                     val parentExpectedType = if (tmdbMediaType == "movie") "movie" else "tv"
                     
                     try {
-                        val req = provider.customSession.get("https://api.simkl.com/$simklMediaType/$finalImdbId?extended=full&client_id=$SIMKL_CLIENT_ID", timeout = 15)
+                        val req = provider.customSession.get("https://api.simkl.com/$simklMediaType/$validImdbId?extended=full&client_id=$SIMKL_CLIENT_ID", timeout = 15)
                         if (req.isSuccessful && req.text.isNotBlank()) {
                             val simklRes = parseJson<SimklRecResponse>(req.text)
                             val rawSimklRecs = mutableListOf<Triple<Int, Int, String>>()
