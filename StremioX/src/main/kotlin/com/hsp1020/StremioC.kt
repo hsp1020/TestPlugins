@@ -1,4 +1,4 @@
-// v1.127 (Add mal: support & kitsu: id fallback for mal:)
+// v1.128 (Fix: Add _tmdbId mapping for TMDB metadata and recommendations)
 package com.hsp1020
 
 import com.fasterxml.jackson.annotation.JsonProperty
@@ -85,7 +85,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
     
     val customSession by lazy {
-        println("[StremioC v1.127-TRACKING] 커스텀 OkHttp 세션 초기화")
+        println("[StremioC v1.128-TRACKING] 커스텀 OkHttp 세션 초기화")
         val newClient = app.baseClient.newBuilder()
             .protocols(listOf(Protocol.HTTP_1_1))
             .dispatcher(Dispatcher().apply {
@@ -150,7 +150,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private fun buildStremioId(type: String?, id: String?, season: Int?, episode: Int?, isSubtitle: Boolean = false): String? {
         if (type == "series" && season != null && episode != null) {
             return when {
-                // v1.127: mal: 식별자 추가
                 id?.startsWith("kitsu:") == true || id?.startsWith("mal:") == true -> {
                     val parts = id.split(":")
                     val baseId = if (parts.size >= 2) "${parts[0]}:${parts[1]}" else id
@@ -235,7 +234,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val now = System.currentTimeMillis()
                 val removedCount = globalPageCache.entries.removeIf { now - it.value.third > CACHE_TTL_MS }
                 if (removedCount) {
-                    println("[StremioC v1.127-TRACKING] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
+                    println("[StremioC v1.128-TRACKING] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
                 }
                 catalogSkipState.clear()
             }
@@ -254,7 +253,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
         
         if (!isNewRequest && page > 1) {
-            println("[StremioC v1.127-TRACKING] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
+            println("[StremioC v1.128-TRACKING] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
             return@coroutineScope newHomePageResponse(emptyList(), hasNext = true)
         }
         return@coroutineScope response
@@ -359,7 +358,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
         } else null
 
-        // v1.127: mal: 식별자 추가 지원
         val kitsuDeferred = if (res.id.startsWith("kitsu:") || res.id.startsWith("mal:")) {
             async(Dispatchers.IO) {
                 try {
@@ -374,16 +372,13 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         
         var finalProcessedId = res.id
         
-        // TMDB에서 가져온 IMDB ID 우선
         var imdbId = preFetchedTmdbDetail?.external_ids?.imdb_id
         
-        // TMDB에서 IMDB ID를 못가져올경우 Kitsu 메타정보 활용
         if (imdbId.isNullOrBlank()) {
             val fetchedKitsuImdb = kitsuMeta?.imdb_id?.takeIf { it.startsWith("tt") }
             if (!fetchedKitsuImdb.isNullOrBlank()) {
                 imdbId = fetchedKitsuImdb
             } else if (res.id.startsWith("mal:") && !kitsuMeta?.id.isNullOrBlank()) {
-                // v1.127: mal: 의 경우 TMDB 등에서 IMDB ID 획득에 실패하면 Kitsu API에서 확보한 kitsu: 값을 대체 데이터로 적용
                 imdbId = kitsuMeta?.id
             }
         }
@@ -542,12 +537,23 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     )
 
     private data class CatalogEntry(
-        @JsonProperty("name") val name: String, @JsonProperty("id") val id: String, @JsonProperty("moviedb_id") val moviedb_id: Int? = null,
-        @JsonProperty("poster") val poster: String?, @JsonProperty("background") val background: String?, @JsonProperty("logo") val logo: String? = null,
-        @JsonProperty("description") val description: String?, @JsonProperty("imdbRating") val imdbRating: String?, @JsonProperty("type") val type: String?,
-        @JsonProperty("videos") val videos: List<Video>?, @JsonProperty("genre") val genre: List<String>?, @JsonProperty("genres") val genres: List<String> = emptyList(),
-        @JsonProperty("cast") val cast: List<String> = emptyList(), @JsonProperty("trailers") val trailersSources: List<Trailer> = emptyList(),
-        @JsonProperty("trailerStreams") val trailerStreams: List<TrailerStream> = emptyList(), @JsonProperty("links") val links: List<Link> = emptyList()
+        @JsonProperty("name") val name: String, 
+        @JsonProperty("id") val id: String, 
+        @JsonProperty("moviedb_id") val moviedb_id: Int? = null,
+        @JsonProperty("_tmdbId") val _tmdbId: String? = null, // v1.128: _tmdbId 필드 추가 
+        @JsonProperty("poster") val poster: String?, 
+        @JsonProperty("background") val background: String?, 
+        @JsonProperty("logo") val logo: String? = null,
+        @JsonProperty("description") val description: String?, 
+        @JsonProperty("imdbRating") val imdbRating: String?, 
+        @JsonProperty("type") val type: String?,
+        @JsonProperty("videos") val videos: List<Video>?, 
+        @JsonProperty("genre") val genre: List<String>?, 
+        @JsonProperty("genres") val genres: List<String> = emptyList(),
+        @JsonProperty("cast") val cast: List<String> = emptyList(), 
+        @JsonProperty("trailers") val trailersSources: List<Trailer> = emptyList(),
+        @JsonProperty("trailerStreams") val trailerStreams: List<TrailerStream> = emptyList(), 
+        @JsonProperty("links") val links: List<Link> = emptyList()
     ) {
         fun toSearchResponse(provider: StremioC): SearchResponse {
             return provider.newMovieSearchResponse(name, this.toJson(), TvType.Others) { posterUrl = poster }
@@ -653,7 +659,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val traktIds = traktResults.map { it.first }.toSet()
                 val simklIds = simklResults.map { it.first }.toSet()
                 
-                // [최적화 2] 2회 추가 통신하던 tmdbRecsDeferred를 삭제하고 append_to_response 데이터 재사용
                 val tmdbRecs = detailRes.recommendations?.results ?: emptyList()
                 val tmdbRecsIds = tmdbRecs.mapNotNull { it.id }.toSet()
 
@@ -817,7 +822,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
 
         suspend fun toLoadResponse(provider: StremioC, imdbId: String?, addonDeferred: Deferred<CatalogEntry?>?, preFetchedDetail: TmdbDetailResponse? = null): LoadResponse = coroutineScope {
-            // v1.127: imdbId가 kitsu: 형태로 넘어온 경우 최종 LoadData.imdbId에 매핑될 수 있도록 fallback 필터링 조건 추가
             var finalImdbId = if (this@CatalogEntry.id.startsWith("tt")) this@CatalogEntry.id else imdbId?.takeIf { it.startsWith("tt") || it.startsWith("kitsu:") }
             
             if (finalImdbId == null && this@CatalogEntry.links.isNotEmpty()) {
@@ -828,7 +832,12 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 finalImdbId = logo?.let { IMDB_ID_REGEX.find(it)?.value } ?: poster?.let { IMDB_ID_REGEX.find(it)?.value } ?: background?.let { IMDB_ID_REGEX.find(it)?.value }
             }
 
-            var tmdbIdStr: String? = if (this@CatalogEntry.id.startsWith("tmdb:")) this@CatalogEntry.id.removePrefix("tmdb:") else this@CatalogEntry.moviedb_id?.toString()
+            // v1.128: _tmdbId를 파싱된 moviedb_id의 대체재로 참조하도록 수정
+            var tmdbIdStr: String? = if (this@CatalogEntry.id.startsWith("tmdb:")) {
+                this@CatalogEntry.id.removePrefix("tmdb:") 
+            } else {
+                this@CatalogEntry.moviedb_id?.toString() ?: this@CatalogEntry._tmdbId
+            }
             
             val findApiDeferred = if (tmdbIdStr == null && finalImdbId?.startsWith("tt") == true) {
                 async(Dispatchers.IO) {
@@ -1019,7 +1028,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     }
 }
 
-// v1.127: Kitsu API 응답에서 kitsu: 아이디를 fallback으로 매핑하기 위해 id 필드 추가
 private data class KitsuMetaResponse(@JsonProperty("meta") val meta: KitsuMeta?)
 private data class KitsuMeta(@JsonProperty("imdb_id") val imdb_id: String?, @JsonProperty("id") val id: String?)
 private data class TraktRelatedIds(@JsonProperty("tmdb") val tmdb: Int?)
