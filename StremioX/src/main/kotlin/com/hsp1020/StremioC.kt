@@ -412,7 +412,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             {
                 try {
                     val url = buildUrl("/stream/$targetType/$encodedPrimaryId.json")
-                    val res = customSession.get(url, timeout = 30L).parsedSafe<StreamsResponse>()
+                    val res = customSession.get(url, timeout = 60L).parsedSafe<StreamsResponse>()
                     res?.streams?.forEach { stream -> stream.runCallback(this@StremioC, subtitleCallback, callback) }
                 } catch (e: Exception) {}
             },
