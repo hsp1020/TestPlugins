@@ -1,4 +1,4 @@
-// v1.133 (Fix: Resolve Trakt/Simkl 404 locally without modifying LoadResponse ID)
+// v1.135 (Fix: Parallelize stream loading, optimize JSON parsing, remove tracking logs)
 package com.hsp1020
 
 import com.fasterxml.jackson.annotation.JsonProperty
@@ -85,7 +85,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
     
     val customSession by lazy {
-        println("[StremioC v1.133-TRACKING] 커스텀 OkHttp 세션 초기화")
         val newClient = app.baseClient.newBuilder()
             .protocols(listOf(Protocol.HTTP_1_1))
             .dispatcher(Dispatcher().apply {
@@ -231,10 +230,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 activePageRequests.clear()
                 
                 val now = System.currentTimeMillis()
-                val removedCount = globalPageCache.entries.removeIf { now - it.value.third > CACHE_TTL_MS }
-                if (removedCount) {
-                    println("[StremioC v1.133-TRACKING] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
-                }
+                globalPageCache.entries.removeIf { now - it.value.third > CACHE_TTL_MS }
                 catalogSkipState.clear()
             }
             
@@ -252,7 +248,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
         
         if (!isNewRequest && page > 1) {
-            println("[StremioC v1.133-TRACKING] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
             return@coroutineScope newHomePageResponse(emptyList(), hasNext = true)
         }
         return@coroutineScope response
@@ -325,13 +320,22 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     }
 
     override suspend fun load(url: String): LoadResponse = coroutineScope {
+        // [최적화] 병목 2 해결: JSON 이중 파싱 방지 및 안전한 추출 로직 적용
         val res: CatalogEntry = if (url.startsWith("{")) {
             parseJson(url)
         } else {
             val responseText = customSession.get(url).text
-            parseJson<CatalogResponse>(responseText).meta 
-                ?: parseJson<Map<String, CatalogEntry>>(responseText)["meta"]
-                ?: throw IllegalStateException("유효한 메타데이터를 찾을 수 없습니다: $url")
+            var parsedMeta: CatalogEntry? = null
+            try {
+                parsedMeta = parseJson<CatalogResponse>(responseText).meta
+            } catch (e: Exception) {}
+            
+            if (parsedMeta == null) {
+                try {
+                    parsedMeta = parseJson<Map<String, CatalogEntry>>(responseText)["meta"]
+                } catch (e: Exception) {}
+            }
+            parsedMeta ?: throw IllegalStateException("유효한 메타데이터를 찾을 수 없습니다: $url")
         }
         
         val normalizedId = try { normalizeId(res.id) } catch (e: Exception) { res.id }
@@ -345,22 +349,16 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
 
         val tmdbIdFromRes = res.moviedb_id?.toString() ?: res.tmdbIdExt
-        val tmdbDeferred = if (res.id.startsWith("tmdb:")) {
-            val tmdbIdOnly = res.id.removePrefix("tmdb:")
+        val targetTmdbId = if (res.id.startsWith("tmdb:")) res.id.removePrefix("tmdb:") else tmdbIdFromRes
+        
+        val tmdbDeferred = targetTmdbId?.let { id ->
             async(Dispatchers.IO) {
                 val mediaType = if (res.type == "movie") "movie" else "tv"
                 val detailAppend = if (mediaType == "movie") "release_dates,credits,images,videos,external_ids,recommendations" else "content_ratings,credits,images,videos,external_ids,recommendations"
-                val detailUrl = buildTmdbUrl("/$mediaType/$tmdbIdOnly", "append_to_response" to detailAppend, "include_image_language" to "ko")
+                val detailUrl = buildTmdbUrl("/$mediaType/$id", "append_to_response" to detailAppend, "include_image_language" to "ko")
                 try { customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>() } catch (e: Exception) { null }
             }
-        } else if (tmdbIdFromRes != null) {
-            async(Dispatchers.IO) {
-                val mediaType = if (res.type == "movie") "movie" else "tv"
-                val detailAppend = if (mediaType == "movie") "release_dates,credits,images,videos,external_ids,recommendations" else "content_ratings,credits,images,videos,external_ids,recommendations"
-                val detailUrl = buildTmdbUrl("/$mediaType/$tmdbIdFromRes", "append_to_response" to detailAppend, "include_image_language" to "ko")
-                try { customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>() } catch (e: Exception) { null }
-            }
-        } else null
+        }
 
         val kitsuDeferred = if (res.id.startsWith("kitsu:") || res.id.startsWith("mal:")) {
             async(Dispatchers.IO) {
@@ -409,18 +407,16 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val encodedPrimaryId = try { URLEncoder.encode(primaryStremioId, "UTF-8").replace("+", "%20") } catch (e: Exception) { primaryStremioId }
         val globalStremioId = buildStremioId(targetType, globalId, loadData.season, loadData.episode) ?: globalId
 
+        // [최적화] 병목 1 해결: 메인 애드온(mainUrl)과 외부 애드온(invokeStremioX)을 병렬로 동시 호출하여 120초 타임아웃 차단
         runAllAsync(
             {
                 try {
                     val url = buildUrl("/stream/$targetType/$encodedPrimaryId.json")
-                    val res = customSession.get(url, timeout = 120L).parsedSafe<StreamsResponse>()
-                    if (!res?.streams.isNullOrEmpty()) {
-                        res?.streams?.forEach { stream -> stream.runCallback(this@StremioC, subtitleCallback, callback) }
-                    } else {
-                        invokeStremioX(targetType, globalId, loadData.season, loadData.episode, subtitleCallback, callback)
-                    }
+                    val res = customSession.get(url, timeout = 30L).parsedSafe<StreamsResponse>()
+                    res?.streams?.forEach { stream -> stream.runCallback(this@StremioC, subtitleCallback, callback) }
                 } catch (e: Exception) {}
             },
+            { invokeStremioX(targetType, globalId, loadData.season, loadData.episode, subtitleCallback, callback) },
             { invokeWatchsomuch(loadData.imdbId, loadData.season, loadData.episode, subtitleCallback) },
             { invokeOpenSubs(loadData.imdbId, loadData.season, loadData.episode, subtitleCallback) },
             { invokeStremioSubtitles(targetType, globalId, loadData.season, loadData.episode, subtitleCallback) }
@@ -584,7 +580,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 return FetchedTmdbData(null, null, null, emptyList(), null, null, null, null, null, null, emptyMap())
             }
 
-            // v1.133: Trakt/Simkl 조회 시, TMDB에서 가져온 진짜 IMDB ID가 존재한다면 우선 적용 (안전장치)
             val validImdbId = (detailRes.external_ids?.imdb_id ?: finalImdbId)?.takeIf { it.startsWith("tt") }
 
             val targetCountry = detailRes.origin_country?.firstOrNull()
@@ -828,7 +823,12 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
 
         suspend fun toLoadResponse(provider: StremioC, imdbId: String?, addonDeferred: Deferred<CatalogEntry?>?, preFetchedDetail: TmdbDetailResponse? = null): LoadResponse = coroutineScope {
-            var finalImdbId = if (this@CatalogEntry.id.startsWith("tt")) this@CatalogEntry.id else imdbId?.takeIf { it.startsWith("tt") || it.startsWith("kitsu:") }
+            // [최적화] mal: 아이디 누락 버그 방지
+            var finalImdbId = if (this@CatalogEntry.id.startsWith("tt")) {
+                this@CatalogEntry.id 
+            } else {
+                imdbId?.takeIf { it.startsWith("tt") || it.startsWith("kitsu:") || it.startsWith("mal:") }
+            }
             
             if (finalImdbId == null && this@CatalogEntry.links.isNotEmpty()) {
                 finalImdbId = this@CatalogEntry.links.firstOrNull { it.category == "imdb" }?.url?.substringAfterLast("/")?.takeIf { it.startsWith("tt") }
@@ -909,6 +909,10 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val finalTrailers = tmdbData?.fetchedTrailers?.ifEmpty { fallbackTrailers } ?: fallbackTrailers
             val movieId = if (!finalVideos.isNullOrEmpty() && !finalVideos[0].id.isNullOrBlank()) finalVideos[0].id else this@CatalogEntry.id
 
+            // [최적화] 공통 변수 사전 할당으로 Builder 블록의 15줄 중복 제거
+            val finalActors = if (tmdbData?.fetchedActors?.isNotEmpty() == true) tmdbData.fetchedActors else null
+            val finalTrailer = finalTrailers.firstOrNull()
+
             if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
                 return@coroutineScope provider.newMovieLoadResponse(
                     finalName,
@@ -922,9 +926,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     plot = finalDescription 
                     year = tmdbData?.fetchedYear
                     tags = finalGenre
-                    
-                    if (tmdbData?.fetchedActors?.isNotEmpty() == true) this.actors = tmdbData.fetchedActors else addActors(finalCast)
-                    
+                    if (finalActors != null) this.actors = finalActors else addActors(finalCast)
                     addTrailer(finalTrailers)                   
                     this.recommendations = tmdbData?.fetchedRecommendations
                     this.duration = tmdbData?.fetchedRuntime
@@ -935,7 +937,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
             } else {
                 val episodesList = processEpisodes(provider, finalImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType)
-
                 return@coroutineScope provider.newTvSeriesLoadResponse(
                     finalName,
                     "${provider.mainUrl}/meta/${finalType}/${this@CatalogEntry.id}.json",
@@ -949,10 +950,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     year = tmdbData?.fetchedYear
                     this.showStatus = tmdbData?.fetchedStatus
                     tags = finalGenre
-                    
-                    if (tmdbData?.fetchedActors?.isNotEmpty() == true) this.actors = tmdbData.fetchedActors else addActors(finalCast)
-                    
-                    addTrailer(finalTrailers.firstOrNull())
+                    if (finalActors != null) this.actors = finalActors else addActors(finalCast)
+                    addTrailer(finalTrailer)
                     this.recommendations = tmdbData?.fetchedRecommendations
                     this.contentRating = tmdbData?.fetchedAgeRating
                     tmdbData?.fetchedLogo?.let { this.logoUrl = it }
