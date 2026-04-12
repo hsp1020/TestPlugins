@@ -1,4 +1,4 @@
-// v1.138 (Fix: TMDB 컬렉션 개봉일 기준 정렬 추가 및 점수 한도 10점 캡 적용)
+// v1.139 (Fix: 추천 목록(Trakt/Simkl 등)의 API 고유 정렬 순위 보존 - 컬렉션에만 개봉일 정렬 적용)
 package com.hsp1020
 
 import com.fasterxml.jackson.annotation.JsonProperty
@@ -326,17 +326,14 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     }
 
     override suspend fun load(url: String): LoadResponse = coroutineScope {
-        //[🚀 병목/이중 파싱 제거 개선] 가볍게 JSONObject 사용으로 CPU 오버헤드 감소
         val res: CatalogEntry = if (url.startsWith("{")) {
             parseJson(url)
         } else {
             val responseText = customSession.get(url).text
             try {
-                // 구조 1: parseJson<CatalogResponse>.meta
                 val tmp = parseJson<CatalogResponse>(responseText).meta
                 tmp ?: throw Exception("Not CatalogResponse format")
             } catch (e: Exception) {
-                // 구조 2: {"meta": {...}} -> CPU를 최소화하기 위해 JsonObject.optJSONObject 사용
                 val metaObj = JSONObject(responseText).optJSONObject("meta")
                 if (metaObj != null) {
                     parseJson(metaObj.toString())
@@ -356,7 +353,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             } catch (e: Exception) { null }
         }
 
-        // [🧹 중복 및 지저분한 로직 제거] TMDB 통신 복사 붙여넣기 압축 처리
         val tmdbIdFromRes = res.moviedb_id?.toString() ?: res.tmdbIdExt
         val targetTmdbId = if (res.id.startsWith("tmdb:")) res.id.removePrefix("tmdb:") else tmdbIdFromRes
         
@@ -397,7 +393,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             finalProcessedId = imdbId
         }
 
-        //[v1.137] Kitsu ID를 구했다면 toLoadResponse로 넘겨서 movieId fallback에 사용할 수 있게 처리
         return@coroutineScope res.toLoadResponse(this@StremioC, finalProcessedId, addonDeferred, preFetchedTmdbDetail, kitsuMeta?.id)
     }
 
@@ -419,7 +414,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
         runAllAsync(
             {
-                //[🚀 속도 병목 제거] 순차적 대기가 아닌 메인+서브 동시 탐색 (타임아웃 30초 단축으로 대기시간 증발)
                 try {
                     val url = buildUrl("/stream/$targetType/$encodedPrimaryId.json")
                     val res = customSession.get(url, timeout = 30L).parsedSafe<StreamsResponse>()
@@ -690,7 +684,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
                 val allCandidates = (collectionParts + tmdbRecs + fetchedMissingMedia).distinctBy { it.id }.filter { it.id != null && it.id != tmdbIdStr.toIntOrNull() }
                 
-                //[v1.138 정렬/점수 개선] 최고 점수는 10점으로 제한하며, 1순위: 점수, 2순위: 개봉일(Release Date)로 정렬
+                //[v1.139 정렬 완벽 보정] 1순위: 점수 정렬 / 2순위: 컬렉션에만 개봉일 정렬 적용, 나머지(추천목록)는 원래 API 배열 순서(Stable Sort) 유지
                 val finalCombinedMedia = allCandidates.map { media ->
                     var score = 0.0 
                     if (collectionParts.any { it.id == media.id }) score += 10.0 
@@ -699,12 +693,18 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     if (media.id in simklIds) score += 2.0 
                     if (media.id in tmdbRecsIds) score += 1.7 
                     
-                    // 한계점수 제한 (컬렉션 순서 보존 용도)
-                    if (score > 10.0) score = 10.0
+                    if (score >= 10.0) score = 10.0
                     
                     Pair(media, score)
                 }.sortedWith(compareByDescending<Pair<TmdbMedia, Double>> { it.second }.thenBy { 
-                    it.first.releaseDate?.takeIf { d -> d.isNotBlank() } ?: it.first.firstAirDate?.takeIf { d -> d.isNotBlank() } ?: "9999-12-31"
+                    if (it.second >= 10.0) {
+                        // 10점(컬렉션 소속)인 경우에만 개봉일 오름차순 정렬
+                        it.first.releaseDate?.takeIf { d -> d.isNotBlank() } ?: it.first.firstAirDate?.takeIf { d -> d.isNotBlank() } ?: "9999-12-31"
+                    } else {
+                        // 그 외 추천 목록들은 점수가 같을 경우 개봉일 정렬을 무시하고 빈 값을 반환
+                        // 이렇게 하면 코틀린의 Stable Sort 성질에 의해 원래 API(Trakt, Simkl)에서 제공받은 고유 순위가 망가지지 않고 그대로 유지됨
+                        "" 
+                    }
                 }).map { it.first }.take(50) 
 
                 fetchedRecommendations = finalCombinedMedia.mapNotNull { media ->
