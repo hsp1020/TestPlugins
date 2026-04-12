@@ -1,4 +1,4 @@
-// v1.139 (Fix: 추천 목록(Trakt/Simkl 등)의 API 고유 정렬 순위 보존 - 컬렉션에만 개봉일 정렬 적용)
+// v1.140 (Feature: 추천 목록의 포스터를 xrdb 평점/뱃지가 결합된 커스텀 포스터 URL로 변경)
 package com.hsp1020
 
 import com.fasterxml.jackson.annotation.JsonProperty
@@ -684,7 +684,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
                 val allCandidates = (collectionParts + tmdbRecs + fetchedMissingMedia).distinctBy { it.id }.filter { it.id != null && it.id != tmdbIdStr.toIntOrNull() }
                 
-                //[v1.139 정렬 완벽 보정] 1순위: 점수 정렬 / 2순위: 컬렉션에만 개봉일 정렬 적용, 나머지(추천목록)는 원래 API 배열 순서(Stable Sort) 유지
                 val finalCombinedMedia = allCandidates.map { media ->
                     var score = 0.0 
                     if (collectionParts.any { it.id == media.id }) score += 10.0 
@@ -698,22 +697,25 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     Pair(media, score)
                 }.sortedWith(compareByDescending<Pair<TmdbMedia, Double>> { it.second }.thenBy { 
                     if (it.second >= 10.0) {
-                        // 10점(컬렉션 소속)인 경우에만 개봉일 오름차순 정렬
                         it.first.releaseDate?.takeIf { d -> d.isNotBlank() } ?: it.first.firstAirDate?.takeIf { d -> d.isNotBlank() } ?: "9999-12-31"
                     } else {
-                        // 그 외 추천 목록들은 점수가 같을 경우 개봉일 정렬을 무시하고 빈 값을 반환
-                        // 이렇게 하면 코틀린의 Stable Sort 성질에 의해 원래 API(Trakt, Simkl)에서 제공받은 고유 순위가 망가지지 않고 그대로 유지됨
                         "" 
                     }
                 }).map { it.first }.take(50) 
 
+                //[v1.140 포스터 개선] 기존 TMDB 오리지널 이미지 대신, 요청받은 xrdb 커스텀 뱃지 URL 포맷 할당
                 fetchedRecommendations = finalCombinedMedia.mapNotNull { media ->
                     val recTitle = media.title ?: media.name ?: media.originalTitle ?: return@mapNotNull null
-                    val posterUrl = provider.getOriImageUrl(media.posterPath)
-                    val outType = if ((media.mediaType ?: tmdbMediaType) == "tv") "series" else "movie"
+                    val recTmdbId = media.id ?: return@mapNotNull null
                     
-                    val recommendationEntry = CatalogEntry(name = recTitle, id = "tmdb:${media.id}", type = outType, poster = posterUrl, background = null, description = media.overview, imdbRating = null, videos = null, genre = null)
-                    provider.newMovieSearchResponse(recTitle, recommendationEntry.toJson(), if (outType == "movie") TvType.Movie else TvType.TvSeries) { this.posterUrl = posterUrl }
+                    val rawMediaType = media.mediaType ?: tmdbMediaType
+                    val posterType = if (rawMediaType == "tv") "tv" else "movie"
+                    val outType = if (rawMediaType == "tv") "series" else "movie"
+                    
+                    val customPosterUrl = "https://xrdb.ibbylabs.dev/poster/tmdb:$posterType:$recTmdbId.jpg?ratingStyle=plain&lang=ko-KR&ratingValueMode=normalized&posterGenreBadgeStyle=plain&posterGenreBadgePosition=topCenter&posterRatingPresentation=none&posterRatings=myanimelist%2Cimdb%2Cletterboxd%2Cmetacriticuser%2Ctomatoesaudience%2Ctrakt%2Ctmdb%2Cmetacritic%2Ctomatoes%2Crogerebert&posterStreamBadges=off&posterQualityBadges=&mdblistKey=d2tmbmhnrgdz7ft9re7j2gjr3&tmdbKey=cc9982c4801545a1481d167137ea7b53&imageText=original&posterRatingsLayout=right&posterRatingBadgeScale=115"
+                    
+                    val recommendationEntry = CatalogEntry(name = recTitle, id = "tmdb:${media.id}", type = outType, poster = customPosterUrl, background = null, description = media.overview, imdbRating = null, videos = null, genre = null)
+                    provider.newMovieSearchResponse(recTitle, recommendationEntry.toJson(), if (outType == "movie") TvType.Movie else TvType.TvSeries) { this.posterUrl = customPosterUrl }
                 }
             }
 
