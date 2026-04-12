@@ -416,7 +416,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             {
                 try {
                     val url = buildUrl("/stream/$targetType/$encodedPrimaryId.json")
-                    val res = customSession.get(url, timeout = 30L).parsedSafe<StreamsResponse>()
+                    val res = customSession.get(url, timeout = 120L).parsedSafe<StreamsResponse>()
                     res?.streams?.forEach { stream -> stream.runCallback(this@StremioC, subtitleCallback, callback) }
                 } catch (e: Exception) {}
             },
@@ -439,7 +439,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 async(Dispatchers.IO) {
                     try {
                         val url = "${site.url.cleanBaseUrl()}/stream/$type/$stremioId.json"
-                        val res = customSession.get(url, timeout = 30L).parsedSafe<StreamsResponse>() // 빠른 실패/타임아웃 유도
+                        val res = customSession.get(url, timeout = 120L).parsedSafe<StreamsResponse>() // 빠른 실패/타임아웃 유도
                         res?.streams?.forEach { stream -> stream.runCallback(this@StremioC, subtitleCallback, callback) }
                     } catch (e: Exception) {}
                 }
@@ -460,7 +460,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 async(Dispatchers.IO) {
                     try {
                         val url = "$api/subtitles/$type/$stremioId.json"
-                        val json = customSession.get(url, timeout = 30L).text
+                        val json = customSession.get(url, timeout = 120L).text
                         val subtitleResponse = parseJson<StremioSubtitleResponse>(json)
 
                         subtitleResponse.subtitles?.forEach { sub ->
