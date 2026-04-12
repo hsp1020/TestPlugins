@@ -1,4 +1,4 @@
-// v1.137 (Fix: Resolve mal: stream routing failure for Anime Movies)
+// v1.138 (Fix: TMDB 컬렉션 개봉일 기준 정렬 추가 및 점수 한도 10점 캡 적용)
 package com.hsp1020
 
 import com.fasterxml.jackson.annotation.JsonProperty
@@ -397,7 +397,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             finalProcessedId = imdbId
         }
 
-        // [v1.137] Kitsu ID를 구했다면 toLoadResponse로 넘겨서 movieId fallback에 사용할 수 있게 처리
+        //[v1.137] Kitsu ID를 구했다면 toLoadResponse로 넘겨서 movieId fallback에 사용할 수 있게 처리
         return@coroutineScope res.toLoadResponse(this@StremioC, finalProcessedId, addonDeferred, preFetchedTmdbDetail, kitsuMeta?.id)
     }
 
@@ -650,7 +650,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                                             } catch(e: Exception) { null }
                                         } else null
                                     }
-                                }.awaitAll().filterNotNull()
+                                }
+                                .awaitAll().filterNotNull()
                             }
                         } else emptyList()
                     } catch(e: Exception) { emptyList() }
@@ -689,6 +690,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
                 val allCandidates = (collectionParts + tmdbRecs + fetchedMissingMedia).distinctBy { it.id }.filter { it.id != null && it.id != tmdbIdStr.toIntOrNull() }
                 
+                //[v1.138 정렬/점수 개선] 최고 점수는 10점으로 제한하며, 1순위: 점수, 2순위: 개봉일(Release Date)로 정렬
                 val finalCombinedMedia = allCandidates.map { media ->
                     var score = 0.0 
                     if (collectionParts.any { it.id == media.id }) score += 10.0 
@@ -696,8 +698,14 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     if (media.id in traktIds) score += 2.5 
                     if (media.id in simklIds) score += 2.0 
                     if (media.id in tmdbRecsIds) score += 1.7 
+                    
+                    // 한계점수 제한 (컬렉션 순서 보존 용도)
+                    if (score > 10.0) score = 10.0
+                    
                     Pair(media, score)
-                }.sortedByDescending { it.second }.map { it.first }.take(50) 
+                }.sortedWith(compareByDescending<Pair<TmdbMedia, Double>> { it.second }.thenBy { 
+                    it.first.releaseDate?.takeIf { d -> d.isNotBlank() } ?: it.first.firstAirDate?.takeIf { d -> d.isNotBlank() } ?: "9999-12-31"
+                }).map { it.first }.take(50) 
 
                 fetchedRecommendations = finalCombinedMedia.mapNotNull { media ->
                     val recTitle = media.title ?: media.name ?: media.originalTitle ?: return@mapNotNull null
@@ -792,7 +800,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
         }
 
-        // [v1.137] load() 함수에서 구출해낸 kitsuMeta?.id (또는 JSON 내부의 _kitsuId)를 toLoadResponse로 직접 넘겨줍니다.
         suspend fun toLoadResponse(provider: StremioC, imdbId: String?, addonDeferred: Deferred<CatalogEntry?>?, preFetchedDetail: TmdbDetailResponse? = null, fetchedKitsuId: String? = null): LoadResponse = coroutineScope {
             var finalImdbId = if (this@CatalogEntry.id.startsWith("tt")) this@CatalogEntry.id 
                               else imdbId?.takeIf { it.startsWith("tt") || it.startsWith("kitsu:") || it.startsWith("mal:") }
@@ -854,13 +861,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val fallbackTrailers = finalTrailerStreams?.mapNotNull { it.ytId }?.ifEmpty { finalTrailersSources?.mapNotNull { it.source } }?.distinct()?.map { if (it.startsWith("http")) it else "https://m.youtube.com/watch?v=$it" } ?: emptyList()
             val finalTrailers = tmdbData?.fetchedTrailers?.ifEmpty { fallbackTrailers } ?: fallbackTrailers
 
-            // [v1.137] 영화의 movieId를 셋팅할 때 videos가 없다면 멍청하게 mal:을 쓰지 않고, 넘겨받은 Kitsu ID(kitsu:XXXX)를 최우선으로 할당하도록 구조를 개선했습니다.
             val fallbackMovieId = fetchedKitsuId ?: this@CatalogEntry.kitsuIdExt?.let { "kitsu:$it" } ?: this@CatalogEntry.id
             val movieId = if (!finalVideos.isNullOrEmpty() && !finalVideos[0].id.isNullOrBlank()) finalVideos[0].id else fallbackMovieId
 
             val finalActors = if (tmdbData?.fetchedActors?.isNotEmpty() == true) tmdbData.fetchedActors else null
 
-            // [사용자 지시 엄수] v1.135의 3번 해결방안(빌더 중복 제거)은 사용자가 지시하지 않았으므로, 원본 1.136 코드로 완벽히 복구(Rollback)하여 보존함.
             if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
                 return@coroutineScope provider.newMovieLoadResponse(
                     finalName, "${provider.mainUrl}/meta/${finalType}/${this@CatalogEntry.id}.json", TvType.Movie, LoadData(finalType, movieId, imdbId = finalImdbId, year = tmdbData?.fetchedYear)
@@ -876,7 +881,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     finalName, "${provider.mainUrl}/meta/${finalType}/${this@CatalogEntry.id}.json", TvType.TvSeries, episodesList
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); plot = finalDescription; year = tmdbData?.fetchedYear; tags = finalGenre
-                    this.showStatus = tmdbData?.fetchedStatus // 시리즈 전용 항목
+                    this.showStatus = tmdbData?.fetchedStatus 
                     if (finalActors != null) this.actors = finalActors else addActors(finalCast)
                     addTrailer(finalTrailers.firstOrNull()); this.recommendations = tmdbData?.fetchedRecommendations; this.contentRating = tmdbData?.fetchedAgeRating
                     tmdbData?.fetchedLogo?.let { this.logoUrl = it }; tmdbIdStr?.let { addTMDbId(it) }; finalImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }
@@ -1020,7 +1025,9 @@ private data class TmdbDetailResponse(
             posterPath = this.posterPath,
             overview = this.overview,
             origin_country = this.origin_country,
-            original_language = this.original_language
+            original_language = this.original_language,
+            releaseDate = this.releaseDate,
+            firstAirDate = this.firstAirDate
         )
     }
 }
@@ -1038,7 +1045,9 @@ private data class TmdbMedia(
     @JsonProperty("poster_path") val posterPath: String? = null,
     @JsonProperty("overview") val overview: String? = null,
     @JsonProperty("origin_country") val origin_country: List<String>? = null,
-    @JsonProperty("original_language") val original_language: String? = null
+    @JsonProperty("original_language") val original_language: String? = null,
+    @JsonProperty("release_date") val releaseDate: String? = null,
+    @JsonProperty("first_air_date") val firstAirDate: String? = null
 )
 
 private data class TmdbReleaseDates(@JsonProperty("results") val results: List<TmdbReleaseDateResult>?)
