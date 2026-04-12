@@ -1,4 +1,4 @@
-// v1.140 (Feature: 추천 목록의 포스터를 xrdb 평점/뱃지가 결합된 커스텀 포스터 URL로 변경)
+// v1.141 (Feature: 추천 목록 xrdb 커스텀 포스터 URL 최신 규격으로 업데이트)
 package com.hsp1020
 
 import com.fasterxml.jackson.annotation.JsonProperty
@@ -703,7 +703,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     }
                 }).map { it.first }.take(50) 
 
-                //[v1.140 포스터 개선] 기존 TMDB 오리지널 이미지 대신, 요청받은 xrdb 커스텀 뱃지 URL 포맷 할당
+                //[v1.141 포스터 개선] 유저가 제공한 최신 xrdb 커스텀 URL 포맷 적용
                 fetchedRecommendations = finalCombinedMedia.mapNotNull { media ->
                     val recTitle = media.title ?: media.name ?: media.originalTitle ?: return@mapNotNull null
                     val recTmdbId = media.id ?: return@mapNotNull null
@@ -712,7 +712,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     val posterType = if (rawMediaType == "tv") "tv" else "movie"
                     val outType = if (rawMediaType == "tv") "series" else "movie"
                     
-                    val customPosterUrl = "https://xrdb.ibbylabs.dev/poster/tmdb:$posterType:$recTmdbId.jpg?ratingStyle=plain&lang=ko-KR&ratingValueMode=normalized&posterGenreBadgeStyle=plain&posterGenreBadgePosition=topCenter&posterRatingPresentation=none&posterRatings=myanimelist%2Cimdb%2Cletterboxd%2Cmetacriticuser%2Ctomatoesaudience%2Ctrakt%2Ctmdb%2Cmetacritic%2Ctomatoes%2Crogerebert&posterStreamBadges=off&posterQualityBadges=&mdblistKey=d2tmbmhnrgdz7ft9re7j2gjr3&tmdbKey=cc9982c4801545a1481d167137ea7b53&imageText=original&posterRatingsLayout=right&posterRatingBadgeScale=115"
+                    val customPosterUrl = "https://xrdb.ibbylabs.dev/poster/tmdb:$posterType:$recTmdbId.jpg?idSource=tmdb&tmdbKey=cc9982c4801545a1481d167137ea7b53&mdblistKey=d2tmbmhnrgdz7ft9re7j2gjr3&posterRatings=myanimelist%2Cimdb%2Cletterboxd%2Cmetacriticuser%2Ctomatoesaudience%2Ctrakt%2Ctmdb%2Cmetacritic%2Ctomatoes%2Crogerebert&lang=ko-KR&ratingValueMode=normalized&posterGenreBadgeStyle=plain&posterGenreBadgePosition=topCenter&posterStreamBadges=off&posterQualityBadges=&posterRatingStyle=plain&posterRatingBadgeScale=115&imageText=original&posterRatingsLayout=right&posterRatingPresentation=none&posterNoBackgroundBadgeOutlineColor=%23ff0000"
                     
                     val recommendationEntry = CatalogEntry(name = recTitle, id = "tmdb:${media.id}", type = outType, poster = customPosterUrl, background = null, description = media.overview, imdbRating = null, videos = null, genre = null)
                     provider.newMovieSearchResponse(recTitle, recommendationEntry.toJson(), if (outType == "movie") TvType.Movie else TvType.TvSeries) { this.posterUrl = customPosterUrl }
