@@ -1,8 +1,9 @@
-// v1.141 (Feature: 추천 목록 xrdb 커스텀 포스터 URL 최신 규격으로 업데이트) + CineStream 연동 통합
+// v1.141 (Feature: 추천 목록 xrdb 커스텀 포스터 URL 최신 규격으로 업데이트) + CineStream 완벽 연동 및 버그픽스
 package com.hsp1020
 
+import android.content.Context
 import com.fasterxml.jackson.annotation.JsonProperty
-import com.lagradost.cloudstream3.APIHolder // CineStream 연동을 위한 APIHolder 추가
+import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.Actor
 import com.lagradost.cloudstream3.ActorData
@@ -430,6 +431,49 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         return true
     }
 
+    private suspend fun syncCineStreamSettings() {
+        try {
+            val context = AcraApplication.context ?: return
+            
+            // 1. CineStream 플러그인의 SharedPreferences 인스턴스를 찾아서 그 안의 모든 키를 강제로 StremioC 스코프로 복사합니다.
+            // CloudStream의 Preferences 격리 정책 때문에 발생하는 설정을 무시하는 현상을 완벽 차단합니다.
+            val cinePlugin = APIHolder.allPlugins.find { it.name.contains("CineStream", ignoreCase = true) || it.internalName.contains("CineStream", ignoreCase = true) }
+            
+            if (cinePlugin != null) {
+                try {
+                    val prefsMethod = cinePlugin.javaClass.getMethod("getPreferences")
+                    val cinePrefs = prefsMethod.invoke(cinePlugin) as? android.content.SharedPreferences
+                    
+                    cinePrefs?.all?.forEach { (key, value) ->
+                        com.lagradost.cloudstream3.CloudStreamApp.setKey(key, value)
+                    }
+                    return
+                } catch (e: Exception) {
+                    // 리플렉션 실패 시 다음 단계로 넘어감
+                }
+            }
+
+            // 2. 리플렉션에 실패했을 경우, SharedPreferences 파일을 직접 뒤져서 복사합니다.
+            val globalPrefs = androidx.preference.PreferenceManager.getDefaultSharedPreferences(context)
+            val cineKeys = listOf("ScrapeConcurrency", "DownloadEnable", "ProviderCineStream", "ProviderSimkl", "ProviderTmdb", "showbox_ui_token", "wyzie_subs_api_key", "gramcinema_bearer_token", "stremio_addons", "new_provider_default_on", "seen_providers", "provider_order") + globalPrefs.all.keys.filter { it.contains("p_") }
+            
+            // 앱 내부의 모든 가능성 있는 Prefix를 검사하여 CineStream이 남긴 흔적을 덮어씌웁니다.
+            val possiblePrefixes = listOf("", "plugin_CineStream_", "CineStream_", "com.megix.CineStream_")
+            val targetPrefix = possiblePrefixes.find { prefix -> globalPrefs.contains(prefix + "seen_providers") } ?: ""
+            
+            if (targetPrefix.isNotEmpty() || cineKeys.isNotEmpty()) {
+                cineKeys.forEach { key ->
+                    val actualKey = targetPrefix + key
+                    if (globalPrefs.contains(actualKey)) {
+                        com.lagradost.cloudstream3.CloudStreamApp.setKey(key, globalPrefs.all[actualKey])
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            println("CineStream Settings Sync Failed: ${e.message}")
+        }
+    }
+
     private suspend fun invokeCineStream(
         loadData: LoadData,
         targetType: String,
@@ -439,12 +483,15 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         callback: (ExtractorLink) -> Unit
     ) {
         try {
-            // 메모리에 올라온 확장 플러그인 중 CineStream 탐색
             val cineStreamProvider = APIHolder.allProviders.find { it.name.equals("CineStream", ignoreCase = true) } ?: return
 
+            // 사용자의 CineStream 설정(ON/OFF 등)이 StremioC 문맥에서 무시되지 않도록 강제로 세팅 연동
+            syncCineStreamSettings()
+
             val isKitsu = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
-            
-            // StremioC의 데이터를 CineStream의 LoadLinksData 규격에 맞춰 JSON Map으로 변환
+            val kitsuIdExt = if (isKitsu) globalId?.substringAfter("kitsu:")?.substringAfter("mal:") else null
+
+            // CineStream Extractors가 애니메이션 시즌/에피소드를 완벽하게 인식하도록 데이터를 매핑
             val cineData = mapOf(
                 "title" to (loadData.title ?: "Unknown"),
                 "id" to (globalId ?: loadData.id ?: ""),
@@ -454,11 +501,22 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "season" to loadData.season,
                 "episode" to loadData.episode,
                 "imdb_id" to loadData.imdbId,
+                
+                // 버그 픽스 1: 애니메 시즌을 식별할 수 있도록 세부 메타데이터 추가
+                "firstAired" to loadData.firstAired,
+                "imdbSeason" to loadData.imdbSeason,
+                "imdbEpisode" to loadData.imdbEpisode,
+                
+                // 버그 픽스 2: CineStream 내부 필터(아시아, 발리우드 등)가 정상 작동하도록 국가/장르 판별 결과 전달
                 "isAnime" to (loadData.isAnime || isKitsu),
-                "isKitsu" to isKitsu
+                "isBollywood" to loadData.isBollywood,
+                "isAsian" to loadData.isAsian,
+                "isCartoon" to loadData.isCartoon,
+                
+                "isKitsu" to isKitsu,
+                "kitsuId" to kitsuIdExt
             )
 
-            // CineStream의 loadLinks 호출 및 내 콜백으로 결과 전달
             cineStreamProvider.loadLinks(cineData.toJson(), isCasting, subtitleCallback, callback)
         } catch (e: Exception) {
             e.printStackTrace()
@@ -512,7 +570,25 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
     }
 
-    data class LoadData(val type: String? = null, val id: String? = null, val season: Int? = null, val episode: Int? = null, val imdbId: String? = null, val year: Int? = null, val title: String? = null, val tmdbId: Int? = null, val isAnime: Boolean = false)
+    // 버그픽스를 위해 누락되었던 필드(firstAired, 메타 플래그 등) 추가
+    data class LoadData(
+        val type: String? = null, 
+        val id: String? = null, 
+        val season: Int? = null, 
+        val episode: Int? = null, 
+        val imdbId: String? = null, 
+        val year: Int? = null, 
+        val title: String? = null, 
+        val tmdbId: Int? = null, 
+        val isAnime: Boolean = false,
+        val isBollywood: Boolean = false,
+        val isAsian: Boolean = false,
+        val isCartoon: Boolean = false,
+        val firstAired: String? = null,
+        val imdbSeason: Int? = null,
+        val imdbEpisode: Int? = null
+    )
+    
     data class CustomSite(@JsonProperty("parentJavaClass") val parentJavaClass: String, @JsonProperty("name") val name: String, @JsonProperty("url") val url: String, @JsonProperty("lang") val lang: String)
 
     private fun isImdborTmdb(url: String?): Boolean {
@@ -572,7 +648,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val fetchedTitle: String?, val fetchedOverview: String?, val fetchedLogo: String?,
         val fetchedTrailers: List<String>, val fetchedRecommendations: List<SearchResponse>?,
         val fetchedRuntime: Int?, val fetchedAgeRating: String?, val fetchedActors: List<ActorData>?,
-        val fetchedYear: Int?, val fetchedStatus: ShowStatus?, val episodeTmdbMeta: Map<String, TmdbEpisode>
+        val fetchedYear: Int?, val fetchedStatus: ShowStatus?, val episodeTmdbMeta: Map<String, TmdbEpisode>,
+        val fetchedOriginCountry: List<String>? // 국가 정보 추가
     )
 
     private data class CatalogEntry(
@@ -618,7 +695,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
             
             if (detailRes == null) {
-                return FetchedTmdbData(null, null, null, emptyList(), null, null, null, null, null, null, emptyMap())
+                return FetchedTmdbData(null, null, null, emptyList(), null, null, null, null, null, null, emptyMap(), emptyList())
             }
 
             val validImdbId = (detailRes.external_ids?.imdb_id ?: finalImdbId)?.takeIf { it.startsWith("tt") }
@@ -798,11 +875,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 detailRes.overview, detailRes.images?.logos?.firstOrNull()?.file_path?.let { "https://image.tmdb.org/t/p/w500$it" },
                 fetchedTrailers, fetchedRecommendations, if (isMovie) detailRes.runtime else null, fetchedAgeRating, crewList + castList,
                 (detailRes.releaseDate ?: detailRes.firstAirDate)?.split("-")?.first()?.toIntOrNull(),
-                if (detailRes.status == "Returning Series") ShowStatus.Ongoing else ShowStatus.Completed, episodeTmdbMeta
+                if (detailRes.status == "Returning Series") ShowStatus.Ongoing else ShowStatus.Completed, episodeTmdbMeta, detailRes.origin_country
             )
         }
 
-        private fun processEpisodes(provider: StremioC, finalImdbId: String?, episodeTmdbMeta: Map<String, TmdbEpisode>, targetVideos: List<Video>, type: String?, showTitle: String?, tmdbId: Int?, isAnime: Boolean): List<Episode> {
+        private fun processEpisodes(provider: StremioC, finalImdbId: String?, episodeTmdbMeta: Map<String, TmdbEpisode>, targetVideos: List<Video>, type: String?, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean): List<Episode> {
             val sortedVideos = targetVideos.groupBy { Pair(it.seasonNumber ?: 0, it.episode ?: it.number ?: 0) }.flatMap { (_, group) -> group.sortedBy { it.title ?: it.name ?: "" } }
             val maxRegularSeason = sortedVideos.mapNotNull { it.seasonNumber }.filter { it > 0 }.maxOrNull() ?: 0
             val targetSeasonForZero = maxRegularSeason + 1
@@ -833,7 +910,12 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     key = "${displaySeason}_${displayEpisode}"
                 }
                 uniqueEpisodeChecker.add(key)
-                video.toEpisode(provider, type, finalImdbId, episodeTmdbMeta, displaySeason, displayEpisode, showTitle, tmdbId, isAnime)
+                
+                // CineStream 호환을 위해 원본 IMDB Season / Episode 유지 전달
+                val imdbSeason = video.seasonNumber ?: 0
+                val imdbEpisode = video.episode ?: video.number ?: 0
+                
+                video.toEpisode(provider, type, finalImdbId, episodeTmdbMeta, displaySeason, displayEpisode, showTitle, tmdbId, isAnime, isBollywood, isAsian, isCartoon, imdbSeason, imdbEpisode)
             }
         }
 
@@ -903,12 +985,28 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
             val finalActors = if (tmdbData?.fetchedActors?.isNotEmpty() == true) tmdbData.fetchedActors else null
 
-            val isAnimeMedia = fetchedKitsuId != null || finalImdbId?.startsWith("mal:") == true || finalImdbId?.startsWith("kitsu:") == true || finalGenre?.contains("Anime") == true || finalGenre?.contains("Animation") == true
+            // [버그픽스] 메타데이터 (발리우드, 애니메이션 등) 명확한 판별 로직
+            val countries = tmdbData?.fetchedOriginCountry ?: emptyList()
+            val isBollywood = countries.any { it.contains("IN", true) || it.contains("India", true) }
+            val isAsian = countries.any { it.contains("KR", true) || it.contains("JP", true) || it.contains("CN", true) || it.contains("TH", true) || it.contains("TW", true) }
+            val isCartoon = finalGenre?.any { it.contains("Animation", true) } == true
+            val isAnimeMedia = fetchedKitsuId != null || finalImdbId?.startsWith("mal:") == true || finalImdbId?.startsWith("kitsu:") == true || finalGenre?.contains("Anime") == true || (countries.any { it.contains("JP", true) } && isCartoon)
 
             if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
                 return@coroutineScope provider.newMovieLoadResponse(
                     finalName, "${provider.mainUrl}/meta/${finalType}/${this@CatalogEntry.id}.json", TvType.Movie, 
-                    LoadData(finalType, movieId, imdbId = finalImdbId, year = tmdbData?.fetchedYear, title = finalName, tmdbId = tmdbIdStr?.toIntOrNull(), isAnime = isAnimeMedia)
+                    LoadData(
+                        type = finalType, 
+                        id = movieId, 
+                        imdbId = finalImdbId, 
+                        year = tmdbData?.fetchedYear, 
+                        title = finalName, 
+                        tmdbId = tmdbIdStr?.toIntOrNull(), 
+                        isAnime = isAnimeMedia,
+                        isBollywood = isBollywood,
+                        isAsian = isAsian,
+                        isCartoon = isCartoon
+                    )
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); plot = finalDescription; year = tmdbData?.fetchedYear; tags = finalGenre
                     if (finalActors != null) this.actors = finalActors else addActors(finalCast)
@@ -916,7 +1014,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     tmdbData?.fetchedLogo?.let { this.logoUrl = it }; tmdbIdStr?.let { addTMDbId(it) }; finalImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }
                 }
             } else {
-                val episodesList = processEpisodes(provider, finalImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, tmdbIdStr?.toIntOrNull(), isAnimeMedia)
+                val episodesList = processEpisodes(provider, finalImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, tmdbIdStr?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon)
                 return@coroutineScope provider.newTvSeriesLoadResponse(
                     finalName, "${provider.mainUrl}/meta/${finalType}/${this@CatalogEntry.id}.json", TvType.TvSeries, episodesList
                 ) {
@@ -944,11 +1042,29 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         @JsonProperty("released") val released: String? = null,
         @JsonProperty("tvdb_id") val tvdb_id: Int? = null
     ) {
-        fun toEpisode(provider: StremioC, type: String?, imdbId: String?, tmdbMetaMap: Map<String, TmdbEpisode>, displaySeason: Int, displayEpisode: Int, showTitle: String?, tmdbId: Int?, isAnime: Boolean): Episode {
-            return provider.newEpisode(LoadData(type, id, seasonNumber, episode ?: number, imdbId, title = showTitle, tmdbId = tmdbId, isAnime = isAnime)) {
+        fun toEpisode(provider: StremioC, type: String?, imdbId: String?, tmdbMetaMap: Map<String, TmdbEpisode>, displaySeason: Int, displayEpisode: Int, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, imdbSeason: Int?, imdbEpisode: Int?): Episode {
+            // [버그픽스] 해당 에피소드의 정확한 방영 연도/일자를 먼저 획득
+            val tmdbEp = tmdbMetaMap["${displaySeason}_${displayEpisode}"] ?: tmdbMetaMap["${seasonNumber ?: 0}_${episode ?: number ?: 0}"]
+            val finalAirDate = tmdbEp?.airDate?.takeIf { it.isNotBlank() } ?: this@Video.firstAired ?: this@Video.released
+            
+            return provider.newEpisode(LoadData(
+                type = type, 
+                id = id, 
+                season = displaySeason, 
+                episode = displayEpisode, 
+                imdbId = imdbId, 
+                title = showTitle, 
+                tmdbId = tmdbId, 
+                isAnime = isAnime,
+                isBollywood = isBollywood,
+                isAsian = isAsian,
+                isCartoon = isCartoon,
+                firstAired = finalAirDate, // 여기서 해당 시즌의 방영일을 전달 (CineStream MALSync 오류 해결)
+                imdbSeason = imdbSeason, // 원본 IMDB 데이터 유지
+                imdbEpisode = imdbEpisode // 원본 IMDB 데이터 유지
+            )) {
                 val rawTitle = this@Video.name ?: this@Video.title ?: "Episode $displayEpisode"
                 val cleanOriginalTitle = if (rawTitle.contains("📄")) rawTitle.substringAfter("📄").replace("\n", "").trim() else rawTitle.replace("\n", "").trim()
-                val tmdbEp = tmdbMetaMap["${displaySeason}_${displayEpisode}"] ?: tmdbMetaMap["${seasonNumber ?: 0}_${episode ?: number ?: 0}"]
                 
                 this.name = if (tmdbEp?.name != null) tmdbEp.name else cleanOriginalTitle
                 this.posterUrl = thumbnail ?: TRANSPARENT_PIXEL
@@ -959,7 +1075,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 this.season = displaySeason
                 this.episode = displayEpisode
 
-                val finalAirDate = tmdbEp?.airDate?.takeIf { it.isNotBlank() } ?: this@Video.firstAired ?: this@Video.released
                 finalAirDate?.takeIf { it.isNotBlank() }?.let { this.addDate(it) }
             }
         }
