@@ -1,4 +1,4 @@
-// v1.142 (Feature: TMDB 공식 영어 제목 en-US 직접 병렬 조회로 변경) + CineStream 영어 제목 매칭 & 100% 설정 동기화
+// v1.141 (Feature: 추천 목록 xrdb 커스텀 포스터 URL 최신 규격으로 업데이트) + CineStream 100% 병렬 영어제목 추출 및 완벽 설정 복제 패치
 package com.hsp1020
 
 import android.content.Context
@@ -138,7 +138,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     }
 
     private fun buildTmdbUrl(endpoint: String, vararg params: Pair<String, String>): String {
-        val queryParams = mapOf("api_key" to apiKey, "language" to "ko-KR") + params.toMap()
+        val queryParams = mutableMapOf("api_key" to apiKey)
+        queryParams.putAll(params.toMap())
         val queryString = queryParams.entries.joinToString("&") { "${it.key}=${it.value}" }
         return "$tmdbAPI$endpoint?$queryString"
     }
@@ -357,23 +358,22 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val tmdbIdFromRes = res.moviedb_id?.toString() ?: res.tmdbIdExt
         val targetTmdbId = if (res.id.startsWith("tmdb:")) res.id.removePrefix("tmdb:") else tmdbIdFromRes
         
+        // [병렬 코루틴 1] 한국어(기본 설정) TMDB 데이터 추출
         val tmdbDeferred = targetTmdbId?.let { id ->
             async(Dispatchers.IO) {
-                // v1.142 변경점: alternative_titles 호출 제거
                 val mediaType = if (res.type == "movie") "movie" else "tv"
                 val detailAppend = if (mediaType == "movie") "release_dates,credits,images,videos,external_ids,recommendations" else "content_ratings,credits,images,videos,external_ids,recommendations"
-                val detailUrl = buildTmdbUrl("/$mediaType/$id", "append_to_response" to detailAppend, "include_image_language" to "ko")
+                val detailUrl = buildTmdbUrl("/$mediaType/$id", "language" to "ko-KR", "append_to_response" to detailAppend, "include_image_language" to "ko")
                 try { customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>() } catch (e: Exception) { null }
             }
         }
 
-        // [v1.142-TRACKING] 공식 영어 제목(en-US) 획득을 위한 병렬 API 직접 호출 (속도 저하 방지용)
+        // [병렬 코루틴 2] 미국/영국/글로벌 영어권 공식 타이틀 스크래핑을 위한 EN-US 통신
         val tmdbEnDeferred = targetTmdbId?.let { id ->
             async(Dispatchers.IO) {
-                println("[StremioC v1.142-TRACKING] TMDB 공식 영어 제목 en-US 병렬 조회 실행 (ID: $id)")
                 val mediaType = if (res.type == "movie") "movie" else "tv"
-                val enUrl = buildTmdbUrl("/$mediaType/$id", "language" to "en-US")
-                try { customSession.get(enUrl).parsedSafe<TmdbDetailResponse>() } catch (e: Exception) { null }
+                val detailUrl = buildTmdbUrl("/$mediaType/$id", "language" to "en-US") // 빠르고 가볍게 텍스트만 요청
+                try { customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>() } catch (e: Exception) { null }
             }
         }
 
@@ -462,14 +462,18 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
             val source = sourcePrefs ?: return
 
-            // [핵심 패치] 하드코딩된 Key들을 없애고, CineStream에 저장된 모든 값을 타입에 맞게 무조건 복사(Clone)
+            // [100% 동기화 픽스] CineStream 저장소의 모든 키를 강제로 읽어 현재 Context에 타입별로 복사
             source.all.forEach { (key, value) ->
-                when (value) {
-                    is Boolean -> com.lagradost.cloudstream3.CloudStreamApp.setKey(key, value)
-                    is String -> com.lagradost.cloudstream3.CloudStreamApp.setKey(key, value)
-                    is Int -> com.lagradost.cloudstream3.CloudStreamApp.setKey(key, value)
-                    is Long -> com.lagradost.cloudstream3.CloudStreamApp.setKey(key, value)
-                    is Float -> com.lagradost.cloudstream3.CloudStreamApp.setKey(key, value)
+                try {
+                    when (value) {
+                        is Boolean -> com.lagradost.cloudstream3.CloudStreamApp.setKey(key, value)
+                        is String -> com.lagradost.cloudstream3.CloudStreamApp.setKey(key, value)
+                        is Int -> com.lagradost.cloudstream3.CloudStreamApp.setKey(key, value)
+                        is Long -> com.lagradost.cloudstream3.CloudStreamApp.setKey(key, value)
+                        is Float -> com.lagradost.cloudstream3.CloudStreamApp.setKey(key, value)
+                    }
+                } catch (e: Exception) {
+                    // 특정 변수 파싱 실패 시 패스
                 }
             }
         } catch (e: Exception) {
@@ -488,20 +492,21 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         try {
             val cineStreamProvider = APIHolder.allProviders.find { it.name.equals("CineStream", ignoreCase = true) } ?: return
 
-            // 사용자의 모든 CineStream 설정(토큰, 쿠키, ON/OFF, Concurrency 등) 완벽 동기화
+            // 사용자의 모든 CineStream 설정(토큰, 쿠키, ON/OFF, Concurrency 등) 완벽 동기화 실행
             syncCineStreamSettings()
 
             val isKitsuMedia = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
             val kitsuIdExt = if (isKitsuMedia) globalId?.substringAfter("kitsu:")?.substringAfter("mal:") else loadData.kitsuId
             
+            // IMDB_ID 정제 (CineStream은 id 파라미터가 Kitsu/MAL 형식이면 다운됨)
             val correctImdbIdForCineStream = loadData.imdbId ?: globalId?.takeIf { it.startsWith("tt") } ?: ""
             
-            // [한국 작품 검색 버그 핵심 패치]
-            // TMDB 공식 영어 제목(en-US API)을 최우선 검색어로 사용
+            // [한국어 작품 검색 버그 완전 해결]
+            // UI에 보이는 제목(한국어) 대신 백그라운드 코루틴에서 추출한 '공식 영어 제목'을 무조건 삽입
             val scrapingTitle = loadData.englishTitle ?: loadData.originalTitle ?: loadData.title ?: "Unknown"
 
             val cineData = mapOf(
-                "title" to scrapingTitle, // 외산 사이트 검색을 위한 영문 제목 
+                "title" to scrapingTitle, // 외산 사이트 검색을 위한 완벽한 영문 제목 
                 "id" to correctImdbIdForCineStream,
                 "tmdbId" to loadData.tmdbId,
                 "tvtype" to targetType,
@@ -520,7 +525,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "malId" to loadData.malId,
                 
                 "isAnime" to (loadData.isAnime || isKitsuMedia),
-                // CineStream의 애니메이션 프로바이더(MALSync) 정상 발동을 위해 isKitsu 속이기
+                // Kitsu 플래그를 속여 MALSync 기반 프로바이더 100% 작동 보장
                 "isKitsu" to false, 
                 "kitsuId" to kitsuIdExt,
                 
@@ -582,7 +587,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
     }
 
-    // 버그픽스: 영어 전용 타이틀 추가
     data class LoadData(
         val type: String? = null, 
         val id: String? = null, 
@@ -599,7 +603,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val firstAired: String? = null,
         val airedYear: Int? = null, 
         val originalTitle: String? = null, 
-        val englishTitle: String? = null, // 추가: 외산 스트리밍 사이트 전용
+        val englishTitle: String? = null, // 추가: 외산 사이트 전용 순수 영어 타이틀
         val imdbSeason: Int? = null,
         val imdbEpisode: Int? = null,
         val anilistId: Int? = null,
@@ -669,7 +673,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val fetchedYear: Int?, val fetchedStatus: ShowStatus?, val episodeTmdbMeta: Map<String, TmdbEpisode>,
         val fetchedOriginCountry: List<String>?,
         val fetchedOriginalTitle: String?,
-        val fetchedEnglishTitle: String? // 영문 타이틀 변수 추가
+        val fetchedEnglishTitle: String?
     )
 
     private data class CatalogEntry(
@@ -704,35 +708,25 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
         private suspend fun fetchTmdbDetails(
             provider: StremioC, tmdbMediaType: String, tmdbIdStr: String, isMovie: Boolean, finalImdbId: String?,
-            stremioType: String?, targetVideos: List<Video>?, preFetchedDetail: TmdbDetailResponse? = null, preFetchedEnDetail: TmdbDetailResponse? = null
-        ): FetchedTmdbData = coroutineScope {
+            stremioType: String?, targetVideos: List<Video>?, preFetchedDetail: TmdbDetailResponse? = null,
+            preFetchedEnDetail: TmdbDetailResponse? = null
+        ): FetchedTmdbData {
             var fetchedRecommendations: List<SearchResponse>? = null
             
-            // 기존 한국어 메타데이터와 영문 메타데이터 병렬 로드 (preFetched 데이터가 없을 경우에만 API 직접 호출 수행)
-            val (detailRes, enDetailRes) = coroutineScope {
-                val detailDeferred = async(Dispatchers.IO) {
-                    preFetchedDetail ?: run {
-                        val detailAppend = if (isMovie) "release_dates,credits,images,videos,external_ids,recommendations" else "content_ratings,credits,images,videos,external_ids,recommendations"
-                        val detailUrl = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr", "append_to_response" to detailAppend, "include_image_language" to "ko")
-                        provider.customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>()
-                    }
-                }
-
-                val enDetailDeferred = async(Dispatchers.IO) {
-                    preFetchedEnDetail ?: run {
-                        try {
-                            println("[StremioC v1.142-TRACKING] TMDB 공식 영어 제목 en-US 조회 (ID: $tmdbIdStr)")
-                            val enUrl = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr", "language" to "en-US")
-                            provider.customSession.get(enUrl).parsedSafe<TmdbDetailResponse>()
-                        } catch (e: Exception) { null }
-                    }
-                }
-                
-                Pair(detailDeferred.await(), enDetailDeferred.await())
+            val detailRes = preFetchedDetail ?: run {
+                val detailAppend = if (isMovie) "release_dates,credits,images,videos,external_ids,recommendations" else "content_ratings,credits,images,videos,external_ids,recommendations"
+                val detailUrl = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr", "language" to "ko-KR", "append_to_response" to detailAppend, "include_image_language" to "ko")
+                provider.customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>()
+            }
+            
+            // 코루틴 병렬 처리로 가져온 영어 공식 제목 메타데이터 안전하게 파싱
+            val enDetailRes = preFetchedEnDetail ?: run {
+                val enUrl = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr", "language" to "en-US")
+                provider.customSession.get(enUrl).parsedSafe<TmdbDetailResponse>()
             }
             
             if (detailRes == null) {
-                return@coroutineScope FetchedTmdbData(null, null, null, emptyList(), null, null, null, null, null, null, emptyMap(), emptyList(), null, null)
+                return FetchedTmdbData(null, null, null, emptyList(), null, null, null, null, null, null, emptyMap(), emptyList(), null, null)
             }
 
             val validImdbId = (detailRes.external_ids?.imdb_id ?: finalImdbId)?.takeIf { it.startsWith("tt") }
@@ -743,127 +737,129 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 media != null && ((targetCountry != null && media.origin_country?.contains(targetCountry) == true) || (targetLanguage != null && media.original_language == targetLanguage)) 
             }
 
-            val traktDeferred = async(Dispatchers.IO) {
-                if (validImdbId == null || TRAKT_CLIENT_ID.isEmpty()) return@async emptyList<Pair<Int, String>>()
-                val traktMediaType = if (tmdbMediaType == "movie") "movies" else "shows"
-                val expectedType = if (tmdbMediaType == "movie") "movie" else "tv"
-                try {
-                    val req = provider.customSession.get("https://api.trakt.tv/$traktMediaType/$validImdbId/related?limit=30", headers = mapOf("Content-Type" to "application/json", "trakt-api-version" to "2", "trakt-api-key" to TRAKT_CLIENT_ID), timeout = 15)
-                    if (req.isSuccessful && req.text.isNotBlank()) {
-                        parseJson<List<TraktRelatedItem>>(req.text).mapNotNull {
-                            val tmdbId = it.ids?.tmdb ?: 0
-                            if (tmdbId > 0) Pair(tmdbId, expectedType) else null
-                        }
-                    } else emptyList()
-                } catch(e: Exception) { emptyList() }
-            }
-
-            val simklDeferred = async(Dispatchers.IO) {
-                if (validImdbId == null || SIMKL_CLIENT_ID.isEmpty()) return@async emptyList<Pair<Int, String>>()
-                val simklMediaType = if (tmdbMediaType == "movie") "movies" else "tv"
-                val parentExpectedType = if (tmdbMediaType == "movie") "movie" else "tv"
-                
-                try {
-                    val req = provider.customSession.get("https://api.simkl.com/$simklMediaType/$validImdbId?extended=full&client_id=$SIMKL_CLIENT_ID", timeout = 15)
-                    if (req.isSuccessful && req.text.isNotBlank()) {
-                        val simklRes = parseJson<SimklRecResponse>(req.text)
-                        val rawSimklRecs = mutableListOf<Triple<Int, Int, String>>()
-                        
-                        simklRes.users_recommendations?.take(30)?.forEach { recItem ->
-                            val itemTypeRaw = recItem.type ?: parentExpectedType
-                            val itemTmdbType = if (itemTypeRaw.contains("movie")) "movie" else "tv"
-                            val tmdb = recItem.ids?.tmdb ?: 0
-                            val simkl = recItem.ids?.simkl ?: 0
-                            if (tmdb > 0 || simkl > 0) rawSimklRecs.add(Triple(tmdb, simkl, itemTmdbType))
-                        }
-                        
-                        coroutineScope {
-                            rawSimklRecs.map { (tmdbId, simklId, itemTmdbType) ->
-                                async(Dispatchers.IO) {
-                                    if (tmdbId > 0) Pair(tmdbId, itemTmdbType) 
-                                    else if (simklId > 0) {
-                                        try {
-                                            val simklReqType = if (itemTmdbType == "movie") "movies" else "tv"
-                                            val dReq = provider.customSession.get("https://api.simkl.com/$simklReqType/$simklId?client_id=$SIMKL_CLIENT_ID", timeout = 15)
-                                            if (dReq.isSuccessful && dReq.text.isNotBlank()) {
-                                                val fetchedTmdbId = parseJson<SimklDetailResponse>(dReq.text).ids?.tmdb ?: 0
-                                                if (fetchedTmdbId > 0) Pair(fetchedTmdbId, itemTmdbType) else null
-                                            } else null
-                                        } catch(e: Exception) { null }
-                                    } else null
-                                }
-                            }
-                            .awaitAll().filterNotNull()
-                        }
-                    } else emptyList()
-                } catch(e: Exception) { emptyList() }
-            }
-
-            val collectionParts = if (isMovie && detailRes.belongs_to_collection?.id != null) {
-                try {
-                    val colUrl = provider.buildTmdbUrl("/collection/${detailRes.belongs_to_collection.id}")
-                    provider.customSession.get(colUrl).parsedSafe<TmdbCollectionDetail>()?.parts ?: emptyList()
-                } catch (e: Exception) { emptyList() }
-            } else emptyList()
-
-            val traktResults = traktDeferred.await()
-            val simklResults = simklDeferred.await()
-            
-            val traktIds = traktResults.map { it.first }.toSet()
-            val simklIds = simklResults.map { it.first }.toSet()
-            
-            val tmdbRecs = detailRes.recommendations?.results ?: emptyList()
-            val tmdbRecsIds = tmdbRecs.mapNotNull { it.id }.toSet()
-
-            val existingTmdbIds = collectionParts.mapNotNull { it.id }.toSet() + tmdbRecsIds
-            
-            val missingPairs = (traktResults + simklResults).distinctBy { it.first }
-                .filter { !existingTmdbIds.contains(it.first) && it.first != tmdbIdStr.toIntOrNull() }
-
-            val missingMediaDeferred = missingPairs.map { pair ->
-                async(Dispatchers.IO) {
+            coroutineScope {
+                val traktDeferred = async(Dispatchers.IO) {
+                    if (validImdbId == null || TRAKT_CLIENT_ID.isEmpty()) return@async emptyList<Pair<Int, String>>()
+                    val traktMediaType = if (tmdbMediaType == "movie") "movies" else "shows"
+                    val expectedType = if (tmdbMediaType == "movie") "movie" else "tv"
                     try {
-                        val res = provider.customSession.get(provider.buildTmdbUrl("/${pair.second}/${pair.first}"), timeout = 10).parsedSafe<TmdbDetailResponse>()
-                        res?.toTmdbMedia(pair.second)
-                    } catch(e:Exception) { null }
+                        val req = provider.customSession.get("https://api.trakt.tv/$traktMediaType/$validImdbId/related?limit=30", headers = mapOf("Content-Type" to "application/json", "trakt-api-version" to "2", "trakt-api-key" to TRAKT_CLIENT_ID), timeout = 15)
+                        if (req.isSuccessful && req.text.isNotBlank()) {
+                            parseJson<List<TraktRelatedItem>>(req.text).mapNotNull {
+                                val tmdbId = it.ids?.tmdb ?: 0
+                                if (tmdbId > 0) Pair(tmdbId, expectedType) else null
+                            }
+                        } else emptyList()
+                    } catch(e: Exception) { emptyList() }
                 }
-            }
-            val fetchedMissingMedia = missingMediaDeferred.awaitAll().filterNotNull()
 
-            val allCandidates = (collectionParts + tmdbRecs + fetchedMissingMedia).distinctBy { it.id }.filter { it.id != null && it.id != tmdbIdStr.toIntOrNull() }
-            
-            val finalCombinedMedia = allCandidates.map { media ->
-                var score = 0.0 
-                if (collectionParts.any { it.id == media.id }) score += 10.0 
-                if (isSameOrigin(media)) score += 1.0 
-                if (media.id in traktIds) score += 2.5 
-                if (media.id in simklIds) score += 2.0 
-                if (media.id in tmdbRecsIds) score += 1.7 
-                
-                if (score >= 10.0) score = 10.0
-                
-                Pair(media, score)
-            }.sortedWith(compareByDescending<Pair<TmdbMedia, Double>> { it.second }.thenBy { 
-                if (it.second >= 10.0) {
-                    it.first.releaseDate?.takeIf { d -> d.isNotBlank() } ?: it.first.firstAirDate?.takeIf { d -> d.isNotBlank() } ?: "9999-12-31"
-                } else {
-                    "" 
+                val simklDeferred = async(Dispatchers.IO) {
+                    if (validImdbId == null || SIMKL_CLIENT_ID.isEmpty()) return@async emptyList<Pair<Int, String>>()
+                    val simklMediaType = if (tmdbMediaType == "movie") "movies" else "tv"
+                    val parentExpectedType = if (tmdbMediaType == "movie") "movie" else "tv"
+                    
+                    try {
+                        val req = provider.customSession.get("https://api.simkl.com/$simklMediaType/$validImdbId?extended=full&client_id=$SIMKL_CLIENT_ID", timeout = 15)
+                        if (req.isSuccessful && req.text.isNotBlank()) {
+                            val simklRes = parseJson<SimklRecResponse>(req.text)
+                            val rawSimklRecs = mutableListOf<Triple<Int, Int, String>>()
+                            
+                            simklRes.users_recommendations?.take(30)?.forEach { recItem ->
+                                val itemTypeRaw = recItem.type ?: parentExpectedType
+                                val itemTmdbType = if (itemTypeRaw.contains("movie")) "movie" else "tv"
+                                val tmdb = recItem.ids?.tmdb ?: 0
+                                val simkl = recItem.ids?.simkl ?: 0
+                                if (tmdb > 0 || simkl > 0) rawSimklRecs.add(Triple(tmdb, simkl, itemTmdbType))
+                            }
+                            
+                            coroutineScope {
+                                rawSimklRecs.map { (tmdbId, simklId, itemTmdbType) ->
+                                    async(Dispatchers.IO) {
+                                        if (tmdbId > 0) Pair(tmdbId, itemTmdbType) 
+                                        else if (simklId > 0) {
+                                            try {
+                                                val simklReqType = if (itemTmdbType == "movie") "movies" else "tv"
+                                                val dReq = provider.customSession.get("https://api.simkl.com/$simklReqType/$simklId?client_id=$SIMKL_CLIENT_ID", timeout = 15)
+                                                if (dReq.isSuccessful && dReq.text.isNotBlank()) {
+                                                    val fetchedTmdbId = parseJson<SimklDetailResponse>(dReq.text).ids?.tmdb ?: 0
+                                                    if (fetchedTmdbId > 0) Pair(fetchedTmdbId, itemTmdbType) else null
+                                                } else null
+                                            } catch(e: Exception) { null }
+                                        } else null
+                                    }
+                                }
+                                .awaitAll().filterNotNull()
+                            }
+                        } else emptyList()
+                    } catch(e: Exception) { emptyList() }
                 }
-            }).map { it.first }.take(50) 
 
-            //[v1.141 포스터 개선] 유저가 제공한 최신 xrdb 커스텀 URL 포맷 적용
-            fetchedRecommendations = finalCombinedMedia.mapNotNull { media ->
-                val recTitle = media.title ?: media.name ?: media.originalTitle ?: return@mapNotNull null
-                val recTmdbId = media.id ?: return@mapNotNull null
+                val collectionParts = if (isMovie && detailRes.belongs_to_collection?.id != null) {
+                    try {
+                        val colUrl = provider.buildTmdbUrl("/collection/${detailRes.belongs_to_collection.id}")
+                        provider.customSession.get(colUrl).parsedSafe<TmdbCollectionDetail>()?.parts ?: emptyList()
+                    } catch (e: Exception) { emptyList() }
+                } else emptyList()
+
+                val traktResults = traktDeferred.await()
+                val simklResults = simklDeferred.await()
                 
-                val rawMediaType = media.mediaType ?: tmdbMediaType
-                val posterType = if (rawMediaType == "tv") "tv" else "movie"
-                val outType = if (rawMediaType == "tv") "series" else "movie"
+                val traktIds = traktResults.map { it.first }.toSet()
+                val simklIds = simklResults.map { it.first }.toSet()
                 
-                val customPosterUrl = "https://xrdb.ibbylabs.dev/poster/tmdb:$posterType:$recTmdbId.jpg?idSource=tmdb&tmdbKey=cc9982c4801545a1481d167137ea7b53&mdblistKey=d2tmbmhnrgdz7ft9re7j2gjr3&posterRatings=myanimelist%2Cimdb%2Cletterboxd%2Cmetacriticuser%2Ctomatoesaudience%2Ctrakt%2Ctmdb%2Cmetacritic%2Ctomatoes%2Crogerebert&lang=ko-KR&ratingValueMode=normalized&posterGenreBadgeStyle=plain&posterGenreBadgePosition=topCenter&posterStreamBadges=off&posterQualityBadges=&posterRatingStyle=plain&posterRatingBadgeScale=115&imageText=original&posterRatingsLayout=right&posterRatingPresentation=none&posterNoBackgroundBadgeOutlineColor=%23ff0000"
+                val tmdbRecs = detailRes.recommendations?.results ?: emptyList()
+                val tmdbRecsIds = tmdbRecs.mapNotNull { it.id }.toSet()
+
+                val existingTmdbIds = collectionParts.mapNotNull { it.id }.toSet() + tmdbRecsIds
                 
-                val recommendationEntry = CatalogEntry(name = recTitle, id = "tmdb:${media.id}", type = outType, poster = customPosterUrl, background = null, description = media.overview, imdbRating = null, videos = null, genre = null)
-                provider.newMovieSearchResponse(recTitle, recommendationEntry.toJson(), if (outType == "movie") TvType.Movie else TvType.TvSeries) { this.posterUrl = customPosterUrl }
+                val missingPairs = (traktResults + simklResults).distinctBy { it.first }
+                    .filter { !existingTmdbIds.contains(it.first) && it.first != tmdbIdStr.toIntOrNull() }
+
+                val missingMediaDeferred = missingPairs.map { pair ->
+                    async(Dispatchers.IO) {
+                        try {
+                            val res = provider.customSession.get(provider.buildTmdbUrl("/${pair.second}/${pair.first}"), timeout = 10).parsedSafe<TmdbDetailResponse>()
+                            res?.toTmdbMedia(pair.second)
+                        } catch(e:Exception) { null }
+                    }
+                }
+                val fetchedMissingMedia = missingMediaDeferred.awaitAll().filterNotNull()
+
+                val allCandidates = (collectionParts + tmdbRecs + fetchedMissingMedia).distinctBy { it.id }.filter { it.id != null && it.id != tmdbIdStr.toIntOrNull() }
+                
+                val finalCombinedMedia = allCandidates.map { media ->
+                    var score = 0.0 
+                    if (collectionParts.any { it.id == media.id }) score += 10.0 
+                    if (isSameOrigin(media)) score += 1.0 
+                    if (media.id in traktIds) score += 2.5 
+                    if (media.id in simklIds) score += 2.0 
+                    if (media.id in tmdbRecsIds) score += 1.7 
+                    
+                    if (score >= 10.0) score = 10.0
+                    
+                    Pair(media, score)
+                }.sortedWith(compareByDescending<Pair<TmdbMedia, Double>> { it.second }.thenBy { 
+                    if (it.second >= 10.0) {
+                        it.first.releaseDate?.takeIf { d -> d.isNotBlank() } ?: it.first.firstAirDate?.takeIf { d -> d.isNotBlank() } ?: "9999-12-31"
+                    } else {
+                        "" 
+                    }
+                }).map { it.first }.take(50) 
+
+                //[v1.141 포스터 개선] 유저가 제공한 최신 xrdb 커스텀 URL 포맷 적용
+                fetchedRecommendations = finalCombinedMedia.mapNotNull { media ->
+                    val recTitle = media.title ?: media.name ?: media.originalTitle ?: return@mapNotNull null
+                    val recTmdbId = media.id ?: return@mapNotNull null
+                    
+                    val rawMediaType = media.mediaType ?: tmdbMediaType
+                    val posterType = if (rawMediaType == "tv") "tv" else "movie"
+                    val outType = if (rawMediaType == "tv") "series" else "movie"
+                    
+                    val customPosterUrl = "https://xrdb.ibbylabs.dev/poster/tmdb:$posterType:$recTmdbId.jpg?idSource=tmdb&tmdbKey=cc9982c4801545a1481d167137ea7b53&mdblistKey=d2tmbmhnrgdz7ft9re7j2gjr3&posterRatings=myanimelist%2Cimdb%2Cletterboxd%2Cmetacriticuser%2Ctomatoesaudience%2Ctrakt%2Ctmdb%2Cmetacritic%2Ctomatoes%2Crogerebert&lang=ko-KR&ratingValueMode=normalized&posterGenreBadgeStyle=plain&posterGenreBadgePosition=topCenter&posterStreamBadges=off&posterQualityBadges=&posterRatingStyle=plain&posterRatingBadgeScale=115&imageText=original&posterRatingsLayout=right&posterRatingPresentation=none&posterNoBackgroundBadgeOutlineColor=%23ff0000"
+                    
+                    val recommendationEntry = CatalogEntry(name = recTitle, id = "tmdb:${media.id}", type = outType, poster = customPosterUrl, background = null, description = media.overview, imdbRating = null, videos = null, genre = null)
+                    provider.newMovieSearchResponse(recTitle, recommendationEntry.toJson(), if (outType == "movie") TvType.Movie else TvType.TvSeries) { this.posterUrl = customPosterUrl }
+                }
             }
 
             val fetchedAgeRating = if (isMovie) {
@@ -905,18 +901,17 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
             }
 
-            // [v1.142] TMDB에서 공식 영문 타이틀 추출 (오로지 en-US 쿼리 결과만 사용)
-            val extractedEnglishTitle = (if (isMovie) enDetailRes?.title else enDetailRes?.name)
-                ?: (if (detailRes.original_language == "en") detailRes.original_title ?: detailRes.original_name else null)
+            // TMDB 병렬 요청에서 완벽한 영문 타이틀 추출 (CineStream 외국 사이트 검색용)
+            val extractedEnglishTitle = enDetailRes?.title ?: enDetailRes?.name ?: detailRes.original_title ?: detailRes.original_name
 
-            return@coroutineScope FetchedTmdbData(
+            return FetchedTmdbData(
                 if (isMovie) detailRes.title ?: detailRes.original_title else detailRes.name ?: detailRes.original_name,
                 detailRes.overview, detailRes.images?.logos?.firstOrNull()?.file_path?.let { "https://image.tmdb.org/t/p/w500$it" },
                 fetchedTrailers, fetchedRecommendations, if (isMovie) detailRes.runtime else null, fetchedAgeRating, crewList + castList,
                 (detailRes.releaseDate ?: detailRes.firstAirDate)?.split("-")?.first()?.toIntOrNull(),
                 if (detailRes.status == "Returning Series") ShowStatus.Ongoing else ShowStatus.Completed, episodeTmdbMeta, detailRes.origin_country,
                 detailRes.original_title ?: detailRes.original_name,
-                extractedEnglishTitle
+                extractedEnglishTitle // 공식 영문 타이틀 반환
             )
         }
 
@@ -1235,8 +1230,7 @@ private data class TmdbDetailResponse(
     @JsonProperty("credits") val credits: TmdbCredits? = null,
     @JsonProperty("images") val images: TmdbImages? = null,
     @JsonProperty("videos") val videos: ResultsTrailer? = null,
-    @JsonProperty("external_ids") val external_ids: ExternalIds? = null,
-    @JsonProperty("alternative_titles") val alternative_titles: ResultsAltTitles? = null
+    @JsonProperty("external_ids") val external_ids: ExternalIds? = null
 ) {
     fun toTmdbMedia(mediaType: String): TmdbMedia {
         return TmdbMedia(
@@ -1254,17 +1248,6 @@ private data class TmdbDetailResponse(
         )
     }
 }
-
-// TMDB 영어 제목(alternative titles) 데이터 모델 추가 (API 호출에서는 더 이상 활용하지 않으나 데이터 보존 원칙에 따라 유지)
-data class AltTitles(
-    @JsonProperty("iso_3166_1") val iso_3166_1: String? = null,
-    @JsonProperty("title") val title: String? = null,
-    @JsonProperty("type") val type: String? = null
-)
-
-data class ResultsAltTitles(
-    @JsonProperty("results") val results: ArrayList<AltTitles>? = arrayListOf()
-)
 
 private data class TmdbImages(@JsonProperty("logos") val logos: List<TmdbLogo>? = null)
 private data class TmdbLogo(@JsonProperty("file_path") val file_path: String? = null)
