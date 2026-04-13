@@ -1,4 +1,4 @@
-// v1.141 (Feature: 추천 목록 xrdb 커스텀 포스터 URL 최신 규격으로 업데이트)
+// v1.142 (Feature: 런타임 동적 호출 방식을 통한 타 플러그인(CineStream) 소스 연동 지원)
 package com.hsp1020
 
 import com.fasterxml.jackson.annotation.JsonProperty
@@ -41,6 +41,7 @@ import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.hsp1020.SubsExtractors.invokeOpenSubs
 import com.hsp1020.SubsExtractors.invokeWatchsomuch
+import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.nicehttp.Requests
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -86,7 +87,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
     
     val customSession by lazy {
-        println("[StremioC v1.136-TRACKING] 커스텀 OkHttp 세션 초기화")
+        println("[StremioC v1.142-TRACKING] 커스텀 OkHttp 세션 초기화")
         val newClient = app.baseClient.newBuilder()
             .protocols(listOf(Protocol.HTTP_1_1))
             .dispatcher(Dispatcher().apply {
@@ -234,7 +235,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val now = System.currentTimeMillis()
                 val removedCount = globalPageCache.entries.removeIf { now - it.value.third > CACHE_TTL_MS }
                 if (removedCount) {
-                    println("[StremioC v1.136-TRACKING] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
+                    println("[StremioC v1.142-TRACKING] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
                 }
                 catalogSkipState.clear()
             }
@@ -253,7 +254,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
         
         if (!isNewRequest && page > 1) {
-            println("[StremioC v1.136-TRACKING] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
+            println("[StremioC v1.142-TRACKING] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
             return@coroutineScope newHomePageResponse(emptyList(), hasNext = true)
         }
         return@coroutineScope response
@@ -425,9 +426,42 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             },
             { invokeWatchsomuch(loadData.imdbId, loadData.season, loadData.episode, subtitleCallback) },
             { invokeOpenSubs(loadData.imdbId, loadData.season, loadData.episode, subtitleCallback) },
-            { invokeStremioSubtitles(targetType, globalId, loadData.season, loadData.episode, subtitleCallback) }
+            { invokeStremioSubtitles(targetType, globalId, loadData.season, loadData.episode, subtitleCallback) },
+            { invokeCineStream(loadData, subtitleCallback, callback) } // v1.142 CineStream 연동 추가
         )
         return true
+    }
+
+    // v1.142: CineStream의 LoadLinksData 포맷에 맞춰 데이터 변환 후 동적 호출
+    private suspend fun invokeCineStream(loadData: LoadData, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
+        try {
+            println("[StremioC v1.142-TRACKING] 타 플러그인(CineStream) 런타임 검색 시도")
+            // APIHolder를 통해 설치된 프로바이더 목록에서 CineStream 검색
+            val cineStreamProvider = APIHolder.allProviders.find { it.name == "CineStream" }
+            
+            if (cineStreamProvider != null) {
+                println("[StremioC v1.142-TRACKING] CineStream 프로바이더 발견 완료. 데이터 전달 및 loadLinks 호출")
+                
+                // CineStreamProvider가 요구하는 JSON (LoadLinksData) 포맷 구성
+                val cineStreamDataMap = mapOf(
+                    "title" to (loadData.title ?: ""),
+                    "id" to (loadData.id ?: ""),
+                    "tmdbId" to null,
+                    "tvtype" to (loadData.type ?: if ((loadData.season ?: 0) > 0) "series" else "movie"),
+                    "year" to loadData.year?.toString(),
+                    "season" to loadData.season,
+                    "episode" to loadData.episode,
+                    "imdb_id" to loadData.imdbId
+                )
+                
+                // CineStream의 loadLinks 실행
+                cineStreamProvider.loadLinks(cineStreamDataMap.toJson(), false, subtitleCallback, callback)
+            } else {
+                println("[StremioC v1.142-TRACKING] CineStream 프로바이더를 찾을 수 없음 (설치되지 않았거나 이름이 일치하지 않음)")
+            }
+        } catch (e: Exception) {
+            println("[StremioC v1.142-TRACKING] CineStream 연동 호출 중 에러 발생: ${e.message}")
+        }
     }
 
     private suspend fun invokeStremioX(type: String?, id: String?, season: Int?, episode: Int?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
@@ -477,7 +511,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
     }
 
-    data class LoadData(val type: String? = null, val id: String? = null, val season: Int? = null, val episode: Int? = null, val imdbId: String? = null, val year: Int? = null)
+    // v1.142: CineStream 연동을 위해 title 파라미터 추가
+    data class LoadData(val title: String? = null, val type: String? = null, val id: String? = null, val season: Int? = null, val episode: Int? = null, val imdbId: String? = null, val year: Int? = null)
     data class CustomSite(@JsonProperty("parentJavaClass") val parentJavaClass: String, @JsonProperty("name") val name: String, @JsonProperty("url") val url: String, @JsonProperty("lang") val lang: String)
 
     private fun isImdborTmdb(url: String?): Boolean {
@@ -703,7 +738,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     }
                 }).map { it.first }.take(50) 
 
-                //[v1.141 포스터 개선] 유저가 제공한 최신 xrdb 커스텀 URL 포맷 적용
                 fetchedRecommendations = finalCombinedMedia.mapNotNull { media ->
                     val recTitle = media.title ?: media.name ?: media.originalTitle ?: return@mapNotNull null
                     val recTmdbId = media.id ?: return@mapNotNull null
@@ -767,7 +801,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             )
         }
 
-        private fun processEpisodes(provider: StremioC, finalImdbId: String?, episodeTmdbMeta: Map<String, TmdbEpisode>, targetVideos: List<Video>, type: String?): List<Episode> {
+        private fun processEpisodes(provider: StremioC, finalImdbId: String?, episodeTmdbMeta: Map<String, TmdbEpisode>, targetVideos: List<Video>, type: String?, seriesTitle: String): List<Episode> {
             val sortedVideos = targetVideos.groupBy { Pair(it.seasonNumber ?: 0, it.episode ?: it.number ?: 0) }.flatMap { (_, group) -> group.sortedBy { it.title ?: it.name ?: "" } }
             val maxRegularSeason = sortedVideos.mapNotNull { it.seasonNumber }.filter { it > 0 }.maxOrNull() ?: 0
             val targetSeasonForZero = maxRegularSeason + 1
@@ -798,7 +832,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     key = "${displaySeason}_${displayEpisode}"
                 }
                 uniqueEpisodeChecker.add(key)
-                video.toEpisode(provider, type, finalImdbId, episodeTmdbMeta, displaySeason, displayEpisode)
+                // v1.142: CineStream의 title 검색을 위해 시리즈 타이틀(seriesTitle) 주입
+                video.toEpisode(provider, type, finalImdbId, episodeTmdbMeta, displaySeason, displayEpisode, seriesTitle)
             }
         }
 
@@ -869,8 +904,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val finalActors = if (tmdbData?.fetchedActors?.isNotEmpty() == true) tmdbData.fetchedActors else null
 
             if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
+                // v1.142: CineStream 연동을 위해 영화 제목(finalName)을 LoadData에 추가
                 return@coroutineScope provider.newMovieLoadResponse(
-                    finalName, "${provider.mainUrl}/meta/${finalType}/${this@CatalogEntry.id}.json", TvType.Movie, LoadData(finalType, movieId, imdbId = finalImdbId, year = tmdbData?.fetchedYear)
+                    finalName, "${provider.mainUrl}/meta/${finalType}/${this@CatalogEntry.id}.json", TvType.Movie, LoadData(title = finalName, type = finalType, id = movieId, imdbId = finalImdbId, year = tmdbData?.fetchedYear)
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); plot = finalDescription; year = tmdbData?.fetchedYear; tags = finalGenre
                     if (finalActors != null) this.actors = finalActors else addActors(finalCast)
@@ -878,7 +914,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     tmdbData?.fetchedLogo?.let { this.logoUrl = it }; tmdbIdStr?.let { addTMDbId(it) }; finalImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }
                 }
             } else {
-                val episodesList = processEpisodes(provider, finalImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType)
+                val episodesList = processEpisodes(provider, finalImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName)
                 return@coroutineScope provider.newTvSeriesLoadResponse(
                     finalName, "${provider.mainUrl}/meta/${finalType}/${this@CatalogEntry.id}.json", TvType.TvSeries, episodesList
                 ) {
@@ -906,8 +942,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         @JsonProperty("released") val released: String? = null,
         @JsonProperty("tvdb_id") val tvdb_id: Int? = null
     ) {
-        fun toEpisode(provider: StremioC, type: String?, imdbId: String?, tmdbMetaMap: Map<String, TmdbEpisode>, displaySeason: Int, displayEpisode: Int): Episode {
-            return provider.newEpisode(LoadData(type, id, seasonNumber, episode ?: number, imdbId)) {
+        fun toEpisode(provider: StremioC, type: String?, imdbId: String?, tmdbMetaMap: Map<String, TmdbEpisode>, displaySeason: Int, displayEpisode: Int, seriesTitle: String): Episode {
+            // v1.142: CineStream 연동을 위해 에피소드 LoadData에 시리즈 제목(seriesTitle) 주입
+            return provider.newEpisode(LoadData(title = seriesTitle, type = type, id = id, season = displaySeason, episode = displayEpisode, imdbId = imdbId)) {
                 val rawTitle = this@Video.name ?: this@Video.title ?: "Episode $displayEpisode"
                 val cleanOriginalTitle = if (rawTitle.contains("📄")) rawTitle.substringAfter("📄").replace("\n", "").trim() else rawTitle.replace("\n", "").trim()
                 val tmdbEp = tmdbMetaMap["${displaySeason}_${displayEpisode}"] ?: tmdbMetaMap["${seasonNumber ?: 0}_${episode ?: number ?: 0}"]
@@ -1068,3 +1105,5 @@ private data class TmdbEpisode(@JsonProperty("name") val name: String?, @JsonPro
 data class Trailers(@JsonProperty("key") val key: String? = null, @JsonProperty("type") val type: String? = null, @JsonProperty("published_at") val publishedAt: String? = null)
 data class ResultsTrailer(@JsonProperty("results") val results: ArrayList<Trailers>? = arrayListOf())
 data class ExternalIds(@JsonProperty("imdb_id") val imdb_id: String? = null, @JsonProperty("tvdb_id") val tvdb_id: String? = null)
+
+}
