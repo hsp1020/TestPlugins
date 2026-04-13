@@ -1,4 +1,4 @@
-// v1.141 (Feature: 추천 목록 xrdb 커스텀 포스터 URL 최신 규격으로 업데이트) + CineStream 100% 병렬 영어제목 추출 및 완벽 설정 복제 패치
+// v1.141 (Feature: 추천 목록 xrdb 커스텀 포스터 URL 최신 규격으로 업데이트) + CineStream 100% 병렬 영어제목 검색 및 세팅 완벽 복제 패치
 package com.hsp1020
 
 import android.content.Context
@@ -137,9 +137,10 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
     }
 
+    // [버그 픽스] 기본 언어를 무조건 한국어(ko-KR)로 세팅하여 추천 목록 및 컬렉션이 영어로 오염되는 현상 차단
     private fun buildTmdbUrl(endpoint: String, vararg params: Pair<String, String>): String {
-        val queryParams = mutableMapOf("api_key" to apiKey)
-        queryParams.putAll(params.toMap())
+        val queryParams = mutableMapOf("api_key" to apiKey, "language" to "ko-KR")
+        queryParams.putAll(params.toMap()) // en-US 요청 등 오버라이드가 필요할 때만 덮어씌워짐
         val queryString = queryParams.entries.joinToString("&") { "${it.key}=${it.value}" }
         return "$tmdbAPI$endpoint?$queryString"
     }
@@ -358,21 +359,23 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val tmdbIdFromRes = res.moviedb_id?.toString() ?: res.tmdbIdExt
         val targetTmdbId = if (res.id.startsWith("tmdb:")) res.id.removePrefix("tmdb:") else tmdbIdFromRes
         
-        // [병렬 코루틴 1] 한국어(기본 설정) TMDB 데이터 추출
+        // [병렬 코루틴 1] 한국어(ko-KR) TMDB 상세 메타데이터 (추천, 배우, 개봉일 등)
         val tmdbDeferred = targetTmdbId?.let { id ->
             async(Dispatchers.IO) {
                 val mediaType = if (res.type == "movie") "movie" else "tv"
                 val detailAppend = if (mediaType == "movie") "release_dates,credits,images,videos,external_ids,recommendations" else "content_ratings,credits,images,videos,external_ids,recommendations"
-                val detailUrl = buildTmdbUrl("/$mediaType/$id", "language" to "ko-KR", "append_to_response" to detailAppend, "include_image_language" to "ko")
+                // 빌더가 기본적으로 ko-KR을 넣도록 고쳤으므로 그대로 호출
+                val detailUrl = buildTmdbUrl("/$mediaType/$id", "append_to_response" to detailAppend, "include_image_language" to "ko")
                 try { customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>() } catch (e: Exception) { null }
             }
         }
 
-        // [병렬 코루틴 2] 미국/영국/글로벌 영어권 공식 타이틀 스크래핑을 위한 EN-US 통신
+        // [병렬 코루틴 2] 영어 공식 타이틀(en-US) 통신 (스크래핑 필터용) - 속도 지연 없음
         val tmdbEnDeferred = targetTmdbId?.let { id ->
             async(Dispatchers.IO) {
                 val mediaType = if (res.type == "movie") "movie" else "tv"
-                val detailUrl = buildTmdbUrl("/$mediaType/$id", "language" to "en-US") // 빠르고 가볍게 텍스트만 요청
+                // 파라미터로 en-US를 넘겨주면 내부적으로 map.putAll() 덕분에 영문으로 오버라이드 됨
+                val detailUrl = buildTmdbUrl("/$mediaType/$id", "language" to "en-US") 
                 try { customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>() } catch (e: Exception) { null }
             }
         }
@@ -454,7 +457,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             var sourcePrefs: android.content.SharedPreferences? = null
             for (name in possibleNames) {
                 val p = context.getSharedPreferences(name, Context.MODE_PRIVATE)
-                // 어떤 키워드든 CineStream의 흔적이 보이면 해당 저장소를 채택
+                // 어떤 키워드든 CineStream 고유의 설정 흔적이 보이면 채택
                 if (p.contains("seen_providers") || p.contains("provider_order") || p.contains("ScrapeConcurrency")) {
                     sourcePrefs = p
                     break
@@ -462,7 +465,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
             val source = sourcePrefs ?: return
 
-            // [100% 동기화 픽스] CineStream 저장소의 모든 키를 강제로 읽어 현재 Context에 타입별로 복사
+            // 100% 동기화: CineStream에 들어있는 모든 설정(토큰, 쿠키, 동시성, ON/OFF)을 통째로 끌어와서 복사
             source.all.forEach { (key, value) ->
                 try {
                     when (value) {
@@ -498,11 +501,10 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val isKitsuMedia = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
             val kitsuIdExt = if (isKitsuMedia) globalId?.substringAfter("kitsu:")?.substringAfter("mal:") else loadData.kitsuId
             
-            // IMDB_ID 정제 (CineStream은 id 파라미터가 Kitsu/MAL 형식이면 다운됨)
             val correctImdbIdForCineStream = loadData.imdbId ?: globalId?.takeIf { it.startsWith("tt") } ?: ""
             
-            // [한국어 작품 검색 버그 완전 해결]
-            // UI에 보이는 제목(한국어) 대신 백그라운드 코루틴에서 추출한 '공식 영어 제목'을 무조건 삽입
+            // [한국 작품 검색 불가 버그 100% 해결]
+            // TMDB 병렬 통신으로 빼온 오리지널 공식 영문 제목을 검색어로 꽂아넣습니다.
             val scrapingTitle = loadData.englishTitle ?: loadData.originalTitle ?: loadData.title ?: "Unknown"
 
             val cineData = mapOf(
@@ -525,7 +527,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "malId" to loadData.malId,
                 
                 "isAnime" to (loadData.isAnime || isKitsuMedia),
-                // Kitsu 플래그를 속여 MALSync 기반 프로바이더 100% 작동 보장
+                // Kitsu 플래그를 속여 MALSync 기반 프로바이더(Kaido, Animekai 등) 100% 작동 보장
                 "isKitsu" to false, 
                 "kitsuId" to kitsuIdExt,
                 
@@ -603,7 +605,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val firstAired: String? = null,
         val airedYear: Int? = null, 
         val originalTitle: String? = null, 
-        val englishTitle: String? = null, // 추가: 외산 사이트 전용 순수 영어 타이틀
+        val englishTitle: String? = null, // 미국 개봉 공식 영문 타이틀 변수
         val imdbSeason: Int? = null,
         val imdbEpisode: Int? = null,
         val anilistId: Int? = null,
@@ -715,11 +717,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             
             val detailRes = preFetchedDetail ?: run {
                 val detailAppend = if (isMovie) "release_dates,credits,images,videos,external_ids,recommendations" else "content_ratings,credits,images,videos,external_ids,recommendations"
-                val detailUrl = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr", "language" to "ko-KR", "append_to_response" to detailAppend, "include_image_language" to "ko")
+                val detailUrl = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr", "append_to_response" to detailAppend, "include_image_language" to "ko")
                 provider.customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>()
             }
             
-            // 코루틴 병렬 처리로 가져온 영어 공식 제목 메타데이터 안전하게 파싱
+            // 코루틴 병렬 처리로 가져온 영어 공식 제목 파싱 (결과 반영 시간 지연 제로)
             val enDetailRes = preFetchedEnDetail ?: run {
                 val enUrl = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr", "language" to "en-US")
                 provider.customSession.get(enUrl).parsedSafe<TmdbDetailResponse>()
@@ -855,7 +857,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     val posterType = if (rawMediaType == "tv") "tv" else "movie"
                     val outType = if (rawMediaType == "tv") "series" else "movie"
                     
-                    val customPosterUrl = "https://xrdb.ibbylabs.dev/poster/tmdb:$posterType:$recTmdbId.jpg?idSource=tmdb&tmdbKey=cc9982c4801545a1481d167137ea7b53&mdblistKey=d2tmbmhnrgdz7ft9re7j2gjr3&posterRatings=myanimelist%2Cimdb%2Cletterboxd%2Cmetacriticuser%2Ctomatoesaudience%2Ctrakt%2Ctmdb%2Cmetacritic%2Ctomatoes%2Crogerebert&lang=ko-KR&ratingValueMode=normalized&posterGenreBadgeStyle=plain&posterGenreBadgePosition=topCenter&posterStreamBadges=off&posterQualityBadges=&posterRatingStyle=plain&posterRatingBadgeScale=115&imageText=original&posterRatingsLayout=right&posterRatingPresentation=none&posterNoBackgroundBadgeOutlineColor=%23ff0000&providerAppearance=eyJ0b21hdG9lcyI6eyJzdGFja2VkQWNjZW50TW9kZSI6ImxvZ28ifX0"
+                    val customPosterUrl = "https://xrdb.ibbylabs.dev/poster/tmdb:$posterType:$recTmdbId.jpg?idSource=tmdb&tmdbKey=cc9982c4801545a1481d167137ea7b53&mdblistKey=d2tmbmhnrgdz7ft9re7j2gjr3&posterRatings=myanimelist%2Cimdb%2Cletterboxd%2Cmetacriticuser%2Ctomatoesaudience%2Ctrakt%2Ctmdb%2Cmetacritic%2Ctomatoes%2Crogerebert&lang=ko-KR&ratingValueMode=normalized&posterGenreBadgeStyle=plain&posterGenreBadgePosition=topCenter&posterStreamBadges=off&posterQualityBadges=&posterRatingStyle=plain&posterRatingBadgeScale=115&imageText=original&posterRatingsLayout=right&posterRatingPresentation=none&posterNoBackgroundBadgeOutlineColor=%23ff0000providerAppearance=eyJ0b21hdG9lcyI6eyJzdGFja2VkQWNjZW50TW9kZSI6ImxvZ28ifX0"
+                    
                     val recommendationEntry = CatalogEntry(name = recTitle, id = "tmdb:${media.id}", type = outType, poster = customPosterUrl, background = null, description = media.overview, imdbRating = null, videos = null, genre = null)
                     provider.newMovieSearchResponse(recTitle, recommendationEntry.toJson(), if (outType == "movie") TvType.Movie else TvType.TvSeries) { this.posterUrl = customPosterUrl }
                 }
@@ -900,7 +903,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
             }
 
-            // TMDB 병렬 요청에서 완벽한 영문 타이틀 추출 (CineStream 외국 사이트 검색용)
+            // TMDB 병렬 요청 결과에서 빼낸 오직 'en-US' 규격의 공식 영어 제목
             val extractedEnglishTitle = enDetailRes?.title ?: enDetailRes?.name ?: detailRes.original_title ?: detailRes.original_name
 
             return FetchedTmdbData(
@@ -910,7 +913,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 (detailRes.releaseDate ?: detailRes.firstAirDate)?.split("-")?.first()?.toIntOrNull(),
                 if (detailRes.status == "Returning Series") ShowStatus.Ongoing else ShowStatus.Completed, episodeTmdbMeta, detailRes.origin_country,
                 detailRes.original_title ?: detailRes.original_name,
-                extractedEnglishTitle // 공식 영문 타이틀 반환
+                extractedEnglishTitle
             )
         }
 
