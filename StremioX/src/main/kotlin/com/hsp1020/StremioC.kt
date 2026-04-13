@@ -1,4 +1,3 @@
-// v1.141 (Feature: 추천 목록 xrdb 커스텀 포스터 URL 최신 규격으로 업데이트) + CineStream 완벽 연동 및 버그픽스
 package com.hsp1020
 
 import android.content.Context
