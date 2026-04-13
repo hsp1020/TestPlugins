@@ -1,6 +1,7 @@
 [
     {
         "iconUrl": "https://anilife.live/assets/img/animestream.png",
+        "fileHash": "sha256-14624be60b1811596a7fa00d0ab3b0ab6033e88217d1447789d3c83c75cdbead",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
         "fileSize": 24805,
@@ -20,6 +21,7 @@
     },
     {
         "iconUrl": "https://holyindia.org/assets/Pc/img/hd_logo.png",
+        "fileHash": "sha256-4ae0f6d5a1d1005e433a744799ed5a5c8d95e683ff0625403b7406efb12db6f5",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
         "fileSize": 14092,
@@ -39,6 +41,7 @@
     },
     {
         "iconUrl": "https://m135.kotbc2.com/img/ktblogo.gif",
+        "fileHash": "sha256-e664d04fa73c121d32e5158da50640c8c46a8cdb104d6a35688c9ce405f6058f",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
         "fileSize": 28784,
@@ -61,6 +64,7 @@
     },
     {
         "iconUrl": "https://i.namu.wiki/i/4NbnTney9AChyoNRvChxbZQE806zcx9Z_wIjM32htHGOcp7ZOQWFvBCSyQfTu3NloC8WRcRE4hnGq2FNxOFdxjvYm82uiRnwMhu95ehEDONK8OSiIVctKBYVWmU7FjOItqs5Hf0OEZRbAbL9yE5a8w.webp",
+        "fileHash": "sha256-720829a4d9ae079bda6216d9cb82ca498b38d66889694a62db0518065aff755e",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
         "fileSize": 18635,
@@ -80,6 +84,7 @@
     },
     {
         "iconUrl": "https://mvking6.org/resource/favicon.ico",
+        "fileHash": "sha256-3559d5def39769f5a7265b6a46daa3521162f69306438e501c64589f15a0b77c",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
         "fileSize": 28149,
@@ -102,6 +107,7 @@
     },
     {
         "iconUrl": "https://ani.ohli24.com/img/logo@2x.png",
+        "fileHash": "sha256-79f910dabc25527c0e527ee678abc609202614c5f06efe242608a24a01c86f88",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
         "fileSize": 22680,
@@ -123,9 +129,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hexated/cloudstream-extensions-hexated/master/StremioX/icon.png",
+        "fileHash": "sha256-53c40781723850fb3c59b77ce57c7b734999c360bedc376640994406441b0dc9",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 198057,
+        "fileSize": 196126,
         "status": 1,
         "language": "en",
         "authors": [
@@ -143,6 +150,7 @@
     },
     {
         "iconUrl": "https://tvmon.site/img/111.png",
+        "fileHash": "sha256-7f66145921662f27f4571d0f861ae185d012060261f43cc32a7757cb253bff3b",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
         "fileSize": 44052,
@@ -165,6 +173,7 @@
     },
     {
         "iconUrl": "https://tvwiki5.net/img/logo.png",
+        "fileHash": "sha256-08f36fd9fd0d95615c9bac77281ebf37f6ac5afe196f995f0ff5ab6d1705706e",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
         "fileSize": 51188,
@@ -188,6 +197,7 @@
     {
         "iconUrl": "https://upload.wikimedia.org/wikipedia/commons/thumb/0/09/YouTube_full-color_icon_%282017%29.svg/3840px-YouTube_full-color_icon_%282017%29.svg.png",
         "jarFileSize": 49371,
+        "fileHash": "sha256-5dea364476395128ea2f3820fd522c3c2a0e88485869adf9252da5a8266577e4",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
         "fileSize": 14438,
@@ -205,6 +215,7 @@
         "jarUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/builds/YoutubeProvider.jar",
         "description": "Watch Youtube in Cloudstream",
         "url": "https://raw.githubusercontent.com/hsp1020/TestPlugins/builds/YoutubeProvider.cs3",
-        "name": "YoutubeProvider"
+        "name": "YoutubeProvider",
+        "jarHash": "sha256-e3b169e654ac2140d7f546f42b2d0033d0d04224b1ee5e7c3baca9d2b405353e"
     }
 ]
