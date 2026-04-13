@@ -1,4 +1,4 @@
-// v1.141 (Feature: 추천 목록 xrdb 커스텀 포스터 URL 최신 규격으로 업데이트) + CineStream 100% 프로바이더 호환성 패치
+// v1.141 (Feature: 추천 목록 xrdb 커스텀 포스터 URL 최신 규격으로 업데이트) + CineStream 100% 프로바이더 복구 패치
 package com.hsp1020
 
 import android.content.Context
@@ -479,14 +479,18 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val cineStreamProvider = APIHolder.allProviders.find { it.name.equals("CineStream", ignoreCase = true) } ?: return
             syncCineStreamSettings()
 
-            val isKitsu = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
-            val kitsuIdExt = if (isKitsu) globalId?.substringAfter("kitsu:")?.substringAfter("mal:") else loadData.kitsuId
+            val isKitsuMedia = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
+            val kitsuIdExt = if (isKitsuMedia) globalId?.substringAfter("kitsu:")?.substringAfter("mal:") else loadData.kitsuId
             
-            // 4khdhub, animekai 등에서 필수로 요구하는 규격과 변수명을 완벽히 동일하게 맞춘 JSON 매핑
+            // [해결책 1] ID는 무조건 순수 imdb_id 형식을 넣어야 CineStream 내부 cinemeta API 에러를 방지함
+            val correctImdbIdForCineStream = loadData.imdbId ?: globalId?.takeIf { it.startsWith("tt") } ?: ""
+            
+            // [해결책 2] UI는 한국어여도, 외국 사이트 검색(Scraping)을 위해 타이틀은 영문/로마자(original_title) 사용
+            val scrapingTitle = loadData.originalTitle ?: loadData.title ?: "Unknown"
+
             val cineData = mapOf(
-                "title" to (loadData.title ?: "Unknown"),
-                // "id" 에는 반드시 순수 imdb_id (tt~) 가 들어가야 함
-                "id" to (loadData.imdbId ?: globalId?.takeIf { it.startsWith("tt") } ?: ""),
+                "title" to scrapingTitle, 
+                "id" to correctImdbIdForCineStream,
                 "tmdbId" to loadData.tmdbId,
                 "tvtype" to targetType,
                 "year" to loadData.year?.toString(),
@@ -494,7 +498,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "episode" to loadData.episode,
                 "imdb_id" to loadData.imdbId,
                 
-                // 추가된 누락 필드들 (프로바이더 전수조사 기반)
                 "original_title" to loadData.originalTitle,
                 "airedYear" to loadData.airedYear,
                 "firstAired" to loadData.firstAired,
@@ -504,13 +507,14 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "anilistId" to loadData.anilistId,
                 "malId" to loadData.malId,
                 
-                "isAnime" to (loadData.isAnime || isKitsu),
+                "isAnime" to (loadData.isAnime || isKitsuMedia),
+                // [해결책 3] CineStream의 설계 결함 우회: isKitsu를 강제로 false로 주어야 MALSync 프로바이더가 발동됨
+                "isKitsu" to false, 
+                "kitsuId" to kitsuIdExt,
+                
                 "isBollywood" to loadData.isBollywood,
                 "isAsian" to loadData.isAsian,
-                "isCartoon" to loadData.isCartoon,
-                
-                "isKitsu" to isKitsu,
-                "kitsuId" to kitsuIdExt
+                "isCartoon" to loadData.isCartoon
             )
 
             cineStreamProvider.loadLinks(cineData.toJson(), isCasting, subtitleCallback, callback)
@@ -566,7 +570,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
     }
 
-    // CineStreamExtractors에서 사용하는 모든 누락된 필드명 100% 동기화 추가
+    // 버그픽스를 위해 누락되었던 필드(anilistId, malId, kitsuId 등) 100% 동기화 추가
     data class LoadData(
         val type: String? = null, 
         val id: String? = null, 
@@ -581,8 +585,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val isAsian: Boolean = false,
         val isCartoon: Boolean = false,
         val firstAired: String? = null,
-        val airedYear: Int? = null, // 추가: 4khdhub, movies4u, moviebox 등에서 사용
-        val originalTitle: String? = null, // 추가: 애니메 프로바이더들의 일본어 제목 매칭용
+        val airedYear: Int? = null, 
+        val originalTitle: String? = null, 
         val imdbSeason: Int? = null,
         val imdbEpisode: Int? = null,
         val anilistId: Int? = null,
@@ -651,7 +655,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val fetchedRuntime: Int?, val fetchedAgeRating: String?, val fetchedActors: List<ActorData>?,
         val fetchedYear: Int?, val fetchedStatus: ShowStatus?, val episodeTmdbMeta: Map<String, TmdbEpisode>,
         val fetchedOriginCountry: List<String>?,
-        val fetchedOriginalTitle: String? // 원어 제목 변수 추가
+        val fetchedOriginalTitle: String?
     )
 
     private data class CatalogEntry(
@@ -878,7 +882,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 fetchedTrailers, fetchedRecommendations, if (isMovie) detailRes.runtime else null, fetchedAgeRating, crewList + castList,
                 (detailRes.releaseDate ?: detailRes.firstAirDate)?.split("-")?.first()?.toIntOrNull(),
                 if (detailRes.status == "Returning Series") ShowStatus.Ongoing else ShowStatus.Completed, episodeTmdbMeta, detailRes.origin_country,
-                detailRes.original_title ?: detailRes.original_name // 원본 제목 매핑
+                detailRes.original_title ?: detailRes.original_name
             )
         }
 
@@ -1085,10 +1089,10 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 isAsian = isAsian,
                 isCartoon = isCartoon,
                 firstAired = finalAirDate, 
-                airedYear = airedYearInt, // 핵심 버그 픽스 (시즌 연도)
+                airedYear = airedYearInt, 
                 imdbSeason = imdbSeason, 
                 imdbEpisode = imdbEpisode,
-                originalTitle = originalTitle // 핵심 버그 픽스 (Kitsu/MAL 일본어 원제 매칭)
+                originalTitle = originalTitle 
             )) {
                 val rawTitle = this@Video.name ?: this@Video.title ?: "Episode $displayEpisode"
                 val cleanOriginalTitle = if (rawTitle.contains("📄")) rawTitle.substringAfter("📄").replace("\n", "").trim() else rawTitle.replace("\n", "").trim()
