@@ -1,4 +1,4 @@
-// v1.145 (BugFix: TMDB 얼터너티브 타이틀(Alternative Title) 오염 로직 완전 제거 및 공식 영문 타이틀 우선 매핑 적용)
+// v1.146 (Feature: 애니메이션 스크래핑 사각지대 제거 - CineStreamProvider(IMDB 기반) 실패 대비 CineTmdbProvider(TMDB 기반) 병렬 동시 탐색 투트랙 로직 추가 적용)
 package com.hsp1020
 
 import android.content.Context
@@ -87,7 +87,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
     
     val customSession by lazy {
-        println("[StremioC v1.145-TRACKING] 커스텀 OkHttp 세션 초기화")
+        println("[StremioC v1.146-TRACKING] 커스텀 OkHttp 세션 초기화")
         val newClient = app.baseClient.newBuilder()
             .protocols(listOf(Protocol.HTTP_1_1))
             .dispatcher(Dispatcher().apply {
@@ -137,10 +137,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
     }
 
-    // 기본 언어를 무조건 한국어(ko-KR)로 세팅하여 UI 및 추천 목록 제목이 영어로 오염되는 현상 방지
     private fun buildTmdbUrl(endpoint: String, vararg params: Pair<String, String>): String {
         val queryParams = mutableMapOf("api_key" to apiKey, "language" to "ko-KR")
-        queryParams.putAll(params.toMap()) // en-US 요청 등 오버라이드가 필요할 때만 덮어씌워짐
+        queryParams.putAll(params.toMap()) 
         val queryString = queryParams.entries.joinToString("&") { "${it.key}=${it.value}" }
         return "$tmdbAPI$endpoint?$queryString"
     }
@@ -237,7 +236,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val now = System.currentTimeMillis()
                 val removedCount = globalPageCache.entries.removeIf { now - it.value.third > CACHE_TTL_MS }
                 if (removedCount) {
-                    println("[StremioC v1.145-TRACKING] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
+                    println("[StremioC v1.146-TRACKING] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
                 }
                 catalogSkipState.clear()
             }
@@ -256,7 +255,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
         
         if (!isNewRequest && page > 1) {
-            println("[StremioC v1.145-TRACKING] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
+            println("[StremioC v1.146-TRACKING] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
             return@coroutineScope newHomePageResponse(emptyList(), hasNext = true)
         }
         return@coroutineScope response
@@ -359,18 +358,15 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val tmdbIdFromRes = res.moviedb_id?.toString() ?: res.tmdbIdExt
         val targetTmdbId = if (res.id.startsWith("tmdb:")) res.id.removePrefix("tmdb:") else tmdbIdFromRes
         
-        // [병렬 코루틴 1] UI용 한국어(ko-KR) TMDB 상세 메타데이터 (추천, 배우, 개봉일 등)
         val tmdbDeferred = targetTmdbId?.let { id ->
             async(Dispatchers.IO) {
                 val mediaType = if (res.type == "movie") "movie" else "tv"
-                // v1.145: alternative_titles 완전 제거됨
                 val detailAppend = if (mediaType == "movie") "release_dates,credits,images,videos,external_ids,recommendations" else "content_ratings,credits,images,videos,external_ids,recommendations"
                 val detailUrl = buildTmdbUrl("/$mediaType/$id", "append_to_response" to detailAppend, "include_image_language" to "ko")
                 try { customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>() } catch (e: Exception) { null }
             }
         }
 
-        //[병렬 코루틴 2] 외산 사이트 스크래핑 필터용 영어 공식 타이틀(en-US) 통신
         val tmdbEnDeferred = targetTmdbId?.let { id ->
             async(Dispatchers.IO) {
                 val mediaType = if (res.type == "movie") "movie" else "tv"
@@ -439,7 +435,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             { invokeWatchsomuch(loadData.imdbId, loadData.season, loadData.episode, subtitleCallback) },
             { invokeOpenSubs(loadData.imdbId, loadData.season, loadData.episode, subtitleCallback) },
             { invokeStremioSubtitles(targetType, globalId, loadData.season, loadData.episode, subtitleCallback) },
-            { invokeCineStream(loadData, targetType, globalId, isCasting, subtitleCallback, callback) }
+            { invokeCineStream(loadData, targetType, globalId, isCasting, subtitleCallback, callback) },
+            // [v1.146] CineTmdbProvider를 병렬로 동시 호출하여 애니메이션 검색 매핑 한계를 극복합니다.
+            { invokeCineTmdb(loadData, targetType, globalId, isCasting, subtitleCallback, callback) }
         )
         return true
     }
@@ -489,7 +487,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         try {
             var cineStreamProvider = APIHolder.allProviders.find { it.name.equals("CineStream", ignoreCase = true) }
 
-            // [카탈로그 OFF 시 강제 실행 해킹] 
             if (cineStreamProvider == null) {
                 try {
                     var targetClassLoader: ClassLoader? = null
@@ -521,9 +518,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         val clazz = targetClassLoader!!.loadClass("com.megix.CineStreamProvider")
                         cineStreamProvider = clazz.newInstance() as? MainAPI
                     }
-                } catch (e: Exception) {
-                    println("[StremioC] Failed to instantiate Ghost Provider: ${e.message}")
-                }
+                } catch (e: Exception) {}
             }
 
             if (cineStreamProvider == null) return
@@ -542,13 +537,10 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         }
                         
                     val builtInHosts = listOf("opensubtitles.stremio.homes", "subsense.nepiraw.com", "opensubtitles-v3.strem.io")
-                    
                     val isStremio = customHosts.contains(host) || builtInHosts.contains(host) || host.contains("strem", ignoreCase = true)
                     
                     if (isStremio && !sub.lang.contains("(Stremio)", ignoreCase = true)) {
-                        subtitleCallback.invoke(
-                            SubtitleFile("${sub.lang} (Stremio)", sub.url)
-                        )
+                        subtitleCallback.invoke(SubtitleFile("${sub.lang} (Stremio)", sub.url))
                     } else {
                         subtitleCallback.invoke(sub)
                     }
@@ -560,53 +552,151 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val isKitsuMedia = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
             val kitsuIdExt = if (isKitsuMedia) globalId?.substringAfter("kitsu:")?.substringAfter("mal:") else loadData.kitsuId
             val correctImdbIdForCineStream = loadData.imdbId ?: globalId?.takeIf { it.startsWith("tt") } ?: ""
-            val scrapingTitle = loadData.englishTitle ?: loadData.originalTitle ?: loadData.title ?: "Unknown"
+            val scrapingTitle = loadData.englishTitle?.takeIf { it.isNotBlank() } 
+                ?: loadData.originalTitle?.takeIf { it.isNotBlank() } 
+                ?: loadData.title 
+                ?: "Unknown"
 
             val isAnimeMedia = (loadData.isAnime || isKitsuMedia)
-            val isSeason2Plus = isAnimeMedia && (loadData.season ?: 0) > 1
-
-            val finalTitleForCineStream = if (isSeason2Plus) {
-                "$scrapingTitle Season ${loadData.season}"
-            } else {
-                scrapingTitle
-            }
-
-            val finalYearForCineStream = if (isSeason2Plus) {
-                loadData.airedYear?.toString() ?: loadData.year?.toString()
-            } else {
-                loadData.year?.toString()
-            }
+            val hasAnimeIds = loadData.anilistId != null || loadData.malId != null
+            val passAsKitsu = isKitsuMedia || hasAnimeIds
 
             val cineData = mapOf(
-                "title" to finalTitleForCineStream, 
-                "id" to correctImdbIdForCineStream,
+                "title" to scrapingTitle,
+                "id" to correctImdbIdForCineStream, // CineStream은 IMDB ID를 메인키로 사용
                 "tmdbId" to loadData.tmdbId,
                 "tvtype" to targetType,
-                "year" to finalYearForCineStream,
+                "year" to loadData.year?.toString(),
                 "season" to loadData.season,
                 "episode" to loadData.episode,
                 "imdb_id" to loadData.imdbId,
-                
                 "original_title" to loadData.originalTitle,
                 "airedYear" to loadData.airedYear,
                 "firstAired" to loadData.firstAired,
                 "imdbSeason" to loadData.imdbSeason,
                 "imdbEpisode" to loadData.imdbEpisode,
-                
                 "anilistId" to loadData.anilistId,
                 "malId" to loadData.malId,
-                
                 "isAnime" to isAnimeMedia,
-                "isKitsu" to false, 
+                "isKitsu" to passAsKitsu, 
                 "kitsuId" to kitsuIdExt,
-                
                 "isBollywood" to loadData.isBollywood,
                 "isAsian" to loadData.isAsian,
                 "isCartoon" to loadData.isCartoon
             )
 
-            println("[StremioC v1.145-TRACKING] CineStream 데이터 전달: $cineData")
+            println("[StremioC v1.146-TRACKING] CineStreamProvider (IMDB 기반) 호출: $cineData")
             cineStreamProvider.loadLinks(cineData.toJson(), isCasting, subtitleInterceptor, callback)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    // [v1.146] CineTmdbProvider를 직접 호출하여 TMDB ID 기반의 매핑 로직을 병렬 실행합니다.
+    private suspend fun invokeCineTmdb(
+        loadData: LoadData,
+        targetType: String,
+        globalId: String?,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        try {
+            var cineTmdbProvider = APIHolder.allProviders.find { it.name.equals("CineTmdb", ignoreCase = true) }
+
+            if (cineTmdbProvider == null) {
+                try {
+                    var targetClassLoader: ClassLoader? = null
+                    val pmClass = Class.forName("com.lagradost.cloudstream3.plugins.PluginManager")
+                    val pmInstance = pmClass.getField("INSTANCE").get(null)
+                    
+                    for (field in pmClass.declaredFields) {
+                        field.isAccessible = true
+                        val obj = try { field.get(pmInstance) } catch(e:Exception) { null }
+                        val items = when (obj) {
+                            is Map<*, *> -> obj.values
+                            is Collection<*> -> obj
+                            is Array<*> -> obj.toList()
+                            else -> null
+                        }
+                        
+                        items?.forEach { plugin ->
+                            if (plugin != null) {
+                                val pName = plugin.javaClass.name
+                                if (pName.contains("megix") || pName.contains("CineStream")) {
+                                    targetClassLoader = plugin.javaClass.classLoader
+                                }
+                            }
+                        }
+                        if (targetClassLoader != null) break
+                    }
+                    
+                    if (targetClassLoader != null) {
+                        val clazz = targetClassLoader!!.loadClass("com.megix.CineTmdbProvider")
+                        cineTmdbProvider = clazz.newInstance() as? MainAPI
+                    }
+                } catch (e: Exception) {}
+            }
+
+            if (cineTmdbProvider == null) return
+            
+            // TMDB ID가 없으면 CineTmdbProvider를 실행할 수 없으므로 안전 종료
+            val tmdbIdStr = loadData.tmdbId?.toString() ?: return 
+
+            syncCineStreamSettings()
+
+            val subtitleInterceptor: (SubtitleFile) -> Unit = { sub ->
+                try {
+                    val host = java.net.URI(sub.url).host ?: ""
+                    val customAddonsRaw = CloudStreamApp.getKey<String>("stremio_addons") ?: ""
+                    val customHosts = customAddonsRaw.lines().filter { it.isNotBlank() }.mapNotNull { if (it.split("|").size >= 2) java.net.URI(it.split("|")[1]).host else null }
+                    val builtInHosts = listOf("opensubtitles.stremio.homes", "subsense.nepiraw.com", "opensubtitles-v3.strem.io")
+                    val isStremio = customHosts.contains(host) || builtInHosts.contains(host) || host.contains("strem", ignoreCase = true)
+                    
+                    if (isStremio && !sub.lang.contains("(Stremio)", ignoreCase = true)) subtitleCallback.invoke(SubtitleFile("${sub.lang} (Stremio)", sub.url))
+                    else subtitleCallback.invoke(sub)
+                } catch (e: Exception) {
+                    subtitleCallback.invoke(sub)
+                }
+            }
+
+            val isKitsuMedia = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
+            val kitsuIdExt = if (isKitsuMedia) globalId?.substringAfter("kitsu:")?.substringAfter("mal:") else loadData.kitsuId
+            val scrapingTitle = loadData.englishTitle?.takeIf { it.isNotBlank() } 
+                ?: loadData.originalTitle?.takeIf { it.isNotBlank() } 
+                ?: loadData.title 
+                ?: "Unknown"
+
+            val isAnimeMedia = (loadData.isAnime || isKitsuMedia)
+            val hasAnimeIds = loadData.anilistId != null || loadData.malId != null
+            val passAsKitsu = isKitsuMedia || hasAnimeIds
+
+            val cineData = mapOf(
+                "title" to scrapingTitle,
+                "id" to tmdbIdStr, // 핵심 변경점: CineTmdbProvider는 TMDB ID를 메인키로 사용합니다.
+                "tmdbId" to loadData.tmdbId,
+                "tvtype" to targetType,
+                "year" to loadData.year?.toString(),
+                "season" to loadData.season,
+                "episode" to loadData.episode,
+                "imdb_id" to loadData.imdbId,
+                "original_title" to loadData.originalTitle,
+                "airedYear" to loadData.airedYear,
+                "firstAired" to loadData.firstAired,
+                "imdbSeason" to loadData.imdbSeason,
+                "imdbEpisode" to loadData.imdbEpisode,
+                "anilistId" to loadData.anilistId,
+                "malId" to loadData.malId,
+                "isAnime" to isAnimeMedia,
+                "isKitsu" to passAsKitsu, 
+                "kitsuId" to kitsuIdExt,
+                "isBollywood" to loadData.isBollywood,
+                "isAsian" to loadData.isAsian,
+                "isCartoon" to loadData.isCartoon
+            )
+
+            println("[StremioC v1.146-TRACKING] CineTmdbProvider (TMDB 기반) 병렬 호출: $cineData")
+            cineTmdbProvider.loadLinks(cineData.toJson(), isCasting, subtitleInterceptor, callback)
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -621,7 +711,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 async(Dispatchers.IO) {
                     try {
                         val url = "${site.url.cleanBaseUrl()}/stream/$type/$stremioId.json"
-                        val res = customSession.get(url, timeout = 120L).parsedSafe<StreamsResponse>() // 빠른 실패/타임아웃 유도
+                        val res = customSession.get(url, timeout = 120L).parsedSafe<StreamsResponse>() 
                         res?.streams?.forEach { stream -> stream.runCallback(this@StremioC, subtitleCallback, callback) }
                     } catch (e: Exception) {}
                 }
@@ -971,10 +1061,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
             }
 
-            // [v1.145] 얼터너티브 타이틀(Alternative Title) 오염 문제로 인해 해당 로직 완전 제거. 공식 영문 타이틀(en-US) 우선 적용.
+            // [v1.146] Alternative Title 로직 완전히 제거됨. 오직 en-US 공식 타이틀만 최우선 매핑합니다.
             val extractedEnglishTitle = enDetailRes?.title ?: enDetailRes?.name ?: detailRes.original_title ?: detailRes.original_name
-            println("[StremioC v1.145-TRACKING] 영문 공식 타이틀 추출 결과: $extractedEnglishTitle")
-
+            
             return FetchedTmdbData(
                 if (isMovie) detailRes.title ?: detailRes.original_title else detailRes.name ?: detailRes.original_name,
                 detailRes.overview, detailRes.images?.logos?.firstOrNull()?.file_path?.let { "https://image.tmdb.org/t/p/w500$it" },
