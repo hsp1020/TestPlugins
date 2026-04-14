@@ -1,4 +1,4 @@
-// v1.141 (Feature: 추천 목록 xrdb 커스텀 포스터 URL 최신 규격으로 업데이트) + CineStream 100% 병렬 영어제목 검색 및 세팅 완벽 복제 패치
+// v1.141 (Feature: 추천 목록 xrdb 커스텀 포스터 URL 최신 규격으로 업데이트) + CineStream 100% 병렬 영어제목 검색, 세팅 완벽 복제 및 XRDB 포스터 복구 패치
 package com.hsp1020
 
 import android.content.Context
@@ -137,7 +137,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
     }
 
-    // [버그 픽스] 기본 언어를 무조건 한국어(ko-KR)로 세팅하여 추천 목록 및 컬렉션이 영어로 오염되는 현상 차단
+    // [버그 픽스] 기본 언어를 무조건 한국어(ko-KR)로 세팅하여 UI 및 추천 목록 제목이 영어로 오염되는 현상 차단
     private fun buildTmdbUrl(endpoint: String, vararg params: Pair<String, String>): String {
         val queryParams = mutableMapOf("api_key" to apiKey, "language" to "ko-KR")
         queryParams.putAll(params.toMap()) // en-US 요청 등 오버라이드가 필요할 때만 덮어씌워짐
@@ -359,7 +359,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val tmdbIdFromRes = res.moviedb_id?.toString() ?: res.tmdbIdExt
         val targetTmdbId = if (res.id.startsWith("tmdb:")) res.id.removePrefix("tmdb:") else tmdbIdFromRes
         
-        // [병렬 코루틴 1] 한국어(ko-KR) TMDB 상세 메타데이터 (추천, 배우, 개봉일 등)
+        //[병렬 코루틴 1] UI용 한국어(ko-KR) TMDB 상세 메타데이터 (추천, 배우, 개봉일 등)
         val tmdbDeferred = targetTmdbId?.let { id ->
             async(Dispatchers.IO) {
                 val mediaType = if (res.type == "movie") "movie" else "tv"
@@ -370,7 +370,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
         }
 
-        // [병렬 코루틴 2] 영어 공식 타이틀(en-US) 통신 (스크래핑 필터용) - 속도 지연 없음
+        // [병렬 코루틴 2] 외산 사이트 스크래핑 필터용 영어 공식 타이틀(en-US) 통신
         val tmdbEnDeferred = targetTmdbId?.let { id ->
             async(Dispatchers.IO) {
                 val mediaType = if (res.type == "movie") "movie" else "tv"
@@ -501,10 +501,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val isKitsuMedia = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
             val kitsuIdExt = if (isKitsuMedia) globalId?.substringAfter("kitsu:")?.substringAfter("mal:") else loadData.kitsuId
             
+            // IMDB_ID 정제 (CineStream은 id 파라미터가 Kitsu/MAL 형식이면 다운됨)
             val correctImdbIdForCineStream = loadData.imdbId ?: globalId?.takeIf { it.startsWith("tt") } ?: ""
             
-            // [한국 작품 검색 불가 버그 100% 해결]
-            // TMDB 병렬 통신으로 빼온 오리지널 공식 영문 제목을 검색어로 꽂아넣습니다.
+            // [한국어 작품 검색 버그 완전 해결]
+            // UI에 보이는 제목(한국어) 대신 백그라운드 코루틴에서 추출한 '공식 영어 제목'을 무조건 삽입
             val scrapingTitle = loadData.englishTitle ?: loadData.originalTitle ?: loadData.title ?: "Unknown"
 
             val cineData = mapOf(
@@ -605,7 +606,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val firstAired: String? = null,
         val airedYear: Int? = null, 
         val originalTitle: String? = null, 
-        val englishTitle: String? = null, // 미국 개봉 공식 영문 타이틀 변수
+        val englishTitle: String? = null, // 추가: 외산 사이트 전용 순수 영어 타이틀
         val imdbSeason: Int? = null,
         val imdbEpisode: Int? = null,
         val anilistId: Int? = null,
@@ -806,9 +807,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val traktResults = traktDeferred.await()
                 val simklResults = simklDeferred.await()
                 
-                val traktIds = traktResults.map { it.first }.toSet()
-                val simklIds = simklResults.map { it.first }.toSet()
-                
                 val tmdbRecs = detailRes.recommendations?.results ?: emptyList()
                 val tmdbRecsIds = tmdbRecs.mapNotNull { it.id }.toSet()
 
@@ -848,7 +846,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     }
                 }).map { it.first }.take(50) 
 
-                //[v1.141 포스터 개선] 유저가 제공한 최신 xrdb 커스텀 URL 포맷 적용
+                //[완벽 복구] 유저가 제공한 최신 xrdb 커스텀 URL 포맷 100% 일치 적용
                 fetchedRecommendations = finalCombinedMedia.mapNotNull { media ->
                     val recTitle = media.title ?: media.name ?: media.originalTitle ?: return@mapNotNull null
                     val recTmdbId = media.id ?: return@mapNotNull null
@@ -857,7 +855,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     val posterType = if (rawMediaType == "tv") "tv" else "movie"
                     val outType = if (rawMediaType == "tv") "series" else "movie"
                     
-                    val customPosterUrl = "https://xrdb.ibbylabs.dev/poster/tmdb:$posterType:$recTmdbId.jpg?idSource=tmdb&tmdbKey=cc9982c4801545a1481d167137ea7b53&mdblistKey=d2tmbmhnrgdz7ft9re7j2gjr3&posterRatings=myanimelist%2Cimdb%2Cletterboxd%2Cmetacriticuser%2Ctomatoesaudience%2Ctrakt%2Ctmdb%2Cmetacritic%2Ctomatoes%2Crogerebert&lang=ko-KR&ratingValueMode=normalized&posterGenreBadgeStyle=plain&posterGenreBadgePosition=topCenter&posterStreamBadges=off&posterQualityBadges=&posterRatingStyle=plain&posterRatingBadgeScale=115&imageText=original&posterRatingsLayout=right&posterRatingPresentation=none&posterNoBackgroundBadgeOutlineColor=%23ff0000providerAppearance=eyJ0b21hdG9lcyI6eyJzdGFja2VkQWNjZW50TW9kZSI6ImxvZ28ifX0"
+                    val customPosterUrl = "https://xrdb.ibbylabs.dev/poster/tmdb:$posterType:$recTmdbId.jpg?idSource=tmdb&tmdbKey=cc9982c4801545a1481d167137ea7b53&mdblistKey=d2tmbmhnrgdz7ft9re7j2gjr3&posterRatings=myanimelist%2Cimdb%2Cletterboxd%2Cmetacriticuser%2Ctomatoesaudience%2Ctrakt%2Ctmdb%2Cmetacritic%2Ctomatoes%2Crogerebert&lang=ko&ratingValueMode=normalized&posterGenreBadgeStyle=plain&posterGenreBadgePosition=bottomLeft&posterStreamBadges=on&ageRatingBadgePosition=left-top&posterQualityBadges=&posterRatingStyle=glass&posterRatingBadgeScale=115&imageText=original&posterRatingsLayout=right&posterNoBackgroundBadgeOutlineColor=%23ff0000&providerAppearance=eyJ0b21hdG9lcyI6eyJzdGFja2VkQWNjZW50TW9kZSI6ImxvZ28ifX0"
                     
                     val recommendationEntry = CatalogEntry(name = recTitle, id = "tmdb:${media.id}", type = outType, poster = customPosterUrl, background = null, description = media.overview, imdbRating = null, videos = null, genre = null)
                     provider.newMovieSearchResponse(recTitle, recommendationEntry.toJson(), if (outType == "movie") TvType.Movie else TvType.TvSeries) { this.posterUrl = customPosterUrl }
