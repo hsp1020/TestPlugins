@@ -1,4 +1,4 @@
-// v1.141 (Feature: 추천 목록 xrdb 커스텀 포스터 URL 최신 규격으로 업데이트) + CineStream 카탈로그 OFF 시 강제 백그라운드 가동(Ghost Provider) 패치 및 100% 호환 완결판
+// v1.141 (Feature: 추천 목록 xrdb 커스텀 포스터 URL 최신 규격으로 업데이트) + CineStream 100% 호환(병렬 영문제목, 설정 동기화, 애니메 버그픽스) & 자막 가로채기(Stremio 태그 부착) 패치 (빌드 에러 픽스)
 package com.hsp1020
 
 import android.content.Context
@@ -137,9 +137,10 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
     }
 
+    // 기본 언어를 무조건 한국어(ko-KR)로 세팅하여 UI 및 추천 목록 제목이 영어로 오염되는 현상 방지
     private fun buildTmdbUrl(endpoint: String, vararg params: Pair<String, String>): String {
         val queryParams = mutableMapOf("api_key" to apiKey, "language" to "ko-KR")
-        queryParams.putAll(params.toMap()) 
+        queryParams.putAll(params.toMap()) // en-US 요청 등 오버라이드가 필요할 때만 덮어씌워짐
         val queryString = queryParams.entries.joinToString("&") { "${it.key}=${it.value}" }
         return "$tmdbAPI$endpoint?$queryString"
     }
@@ -358,6 +359,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val tmdbIdFromRes = res.moviedb_id?.toString() ?: res.tmdbIdExt
         val targetTmdbId = if (res.id.startsWith("tmdb:")) res.id.removePrefix("tmdb:") else tmdbIdFromRes
         
+        // [병렬 코루틴 1] UI용 한국어(ko-KR) TMDB 상세 메타데이터 (추천, 배우, 개봉일 등)
         val tmdbDeferred = targetTmdbId?.let { id ->
             async(Dispatchers.IO) {
                 val mediaType = if (res.type == "movie") "movie" else "tv"
@@ -367,6 +369,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
         }
 
+        //[병렬 코루틴 2] 외산 사이트 스크래핑 필터용 영어 공식 타이틀(en-US) 통신
         val tmdbEnDeferred = targetTmdbId?.let { id ->
             async(Dispatchers.IO) {
                 val mediaType = if (res.type == "movie") "movie" else "tv"
@@ -486,8 +489,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             var cineStreamProvider = APIHolder.allProviders.find { it.name.equals("CineStream", ignoreCase = true) }
 
             // [카탈로그 OFF 시 강제 실행 해킹] 
-            // 사용자가 카탈로그 3개를 모두 껐을 경우 APIHolder에 객체가 등록되지 않으므로, 
-            // PluginManager 클래스로더를 털어서 CineStreamProvider의 유령 객체(Ghost Provider)를 강제로 즉석 생성합니다.
             if (cineStreamProvider == null) {
                 try {
                     var targetClassLoader: ClassLoader? = null
@@ -524,7 +525,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
             }
 
-            if (cineStreamProvider == null) return // 플러그인이 아예 삭제되었을 경우
+            if (cineStreamProvider == null) return
 
             syncCineStreamSettings()
 
@@ -871,9 +872,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
                 val traktResults = traktDeferred.await()
                 val simklResults = simklDeferred.await()
-
-                val traktIds = traktResults.map { it.first }.toSet()
-                val simklIds = simklResults.map { it.first }.toSet
                 
                 val tmdbRecs = detailRes.recommendations?.results ?: emptyList()
                 val tmdbRecsIds = tmdbRecs.mapNotNull { it.id }.toSet()
@@ -895,6 +893,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
                 val allCandidates = (collectionParts + tmdbRecs + fetchedMissingMedia).distinctBy { it.id }.filter { it.id != null && it.id != tmdbIdStr.toIntOrNull() }
                 
+                val traktIds = traktResults.map { it.first }.toSet()
+                val simklIds = simklResults.map { it.first }.toSet()
+
                 val finalCombinedMedia = allCandidates.map { media ->
                     var score = 0.0 
                     if (collectionParts.any { it.id == media.id }) score += 10.0 
