@@ -137,10 +137,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
     }
 
-    // [버그 픽스] 기본 언어를 무조건 한국어(ko-KR)로 세팅하여 UI 및 추천 목록 제목이 영어로 오염되는 현상 차단
     private fun buildTmdbUrl(endpoint: String, vararg params: Pair<String, String>): String {
         val queryParams = mutableMapOf("api_key" to apiKey, "language" to "ko-KR")
-        queryParams.putAll(params.toMap()) // en-US 요청 등 오버라이드가 필요할 때만 덮어씌워짐
+        queryParams.putAll(params.toMap()) 
         val queryString = queryParams.entries.joinToString("&") { "${it.key}=${it.value}" }
         return "$tmdbAPI$endpoint?$queryString"
     }
@@ -359,22 +358,18 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val tmdbIdFromRes = res.moviedb_id?.toString() ?: res.tmdbIdExt
         val targetTmdbId = if (res.id.startsWith("tmdb:")) res.id.removePrefix("tmdb:") else tmdbIdFromRes
         
-        //[병렬 코루틴 1] UI용 한국어(ko-KR) TMDB 상세 메타데이터 (추천, 배우, 개봉일 등)
         val tmdbDeferred = targetTmdbId?.let { id ->
             async(Dispatchers.IO) {
                 val mediaType = if (res.type == "movie") "movie" else "tv"
-                val detailAppend = if (mediaType == "movie") "release_dates,credits,images,videos,external_ids,recommendations" else "content_ratings,credits,images,videos,external_ids,recommendations"
-                // 빌더가 기본적으로 ko-KR을 넣도록 고쳤으므로 그대로 호출
+                val detailAppend = if (mediaType == "movie") "release_dates,credits,images,videos,external_ids,recommendations,alternative_titles" else "content_ratings,credits,images,videos,external_ids,recommendations,alternative_titles"
                 val detailUrl = buildTmdbUrl("/$mediaType/$id", "append_to_response" to detailAppend, "include_image_language" to "ko")
                 try { customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>() } catch (e: Exception) { null }
             }
         }
 
-        // [병렬 코루틴 2] 외산 사이트 스크래핑 필터용 영어 공식 타이틀(en-US) 통신
         val tmdbEnDeferred = targetTmdbId?.let { id ->
             async(Dispatchers.IO) {
                 val mediaType = if (res.type == "movie") "movie" else "tv"
-                // 파라미터로 en-US를 넘겨주면 내부적으로 map.putAll() 덕분에 영문으로 오버라이드 됨
                 val detailUrl = buildTmdbUrl("/$mediaType/$id", "language" to "en-US") 
                 try { customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>() } catch (e: Exception) { null }
             }
@@ -457,7 +452,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             var sourcePrefs: android.content.SharedPreferences? = null
             for (name in possibleNames) {
                 val p = context.getSharedPreferences(name, Context.MODE_PRIVATE)
-                // 어떤 키워드든 CineStream 고유의 설정 흔적이 보이면 채택
                 if (p.contains("seen_providers") || p.contains("provider_order") || p.contains("ScrapeConcurrency")) {
                     sourcePrefs = p
                     break
@@ -465,7 +459,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
             val source = sourcePrefs ?: return
 
-            // 100% 동기화: CineStream에 들어있는 모든 설정(토큰, 쿠키, 동시성, ON/OFF)을 통째로 끌어와서 복사
             source.all.forEach { (key, value) ->
                 try {
                     when (value) {
@@ -475,9 +468,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         is Long -> com.lagradost.cloudstream3.CloudStreamApp.setKey(key, value)
                         is Float -> com.lagradost.cloudstream3.CloudStreamApp.setKey(key, value)
                     }
-                } catch (e: Exception) {
-                    // 특정 변수 파싱 실패 시 패스
-                }
+                } catch (e: Exception) {}
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -494,22 +485,15 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     ) {
         try {
             val cineStreamProvider = APIHolder.allProviders.find { it.name.equals("CineStream", ignoreCase = true) } ?: return
-
-            // 사용자의 모든 CineStream 설정(토큰, 쿠키, ON/OFF, Concurrency 등) 완벽 동기화 실행
             syncCineStreamSettings()
 
             val isKitsuMedia = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
             val kitsuIdExt = if (isKitsuMedia) globalId?.substringAfter("kitsu:")?.substringAfter("mal:") else loadData.kitsuId
-            
-            // IMDB_ID 정제 (CineStream은 id 파라미터가 Kitsu/MAL 형식이면 다운됨)
             val correctImdbIdForCineStream = loadData.imdbId ?: globalId?.takeIf { it.startsWith("tt") } ?: ""
-            
-            // [한국어 작품 검색 버그 완전 해결]
-            // UI에 보이는 제목(한국어) 대신 백그라운드 코루틴에서 추출한 '공식 영어 제목'을 무조건 삽입
             val scrapingTitle = loadData.englishTitle ?: loadData.originalTitle ?: loadData.title ?: "Unknown"
 
             val cineData = mapOf(
-                "title" to scrapingTitle, // 외산 사이트 검색을 위한 완벽한 영문 제목 
+                "title" to scrapingTitle,
                 "id" to correctImdbIdForCineStream,
                 "tmdbId" to loadData.tmdbId,
                 "tvtype" to targetType,
@@ -528,7 +512,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "malId" to loadData.malId,
                 
                 "isAnime" to (loadData.isAnime || isKitsuMedia),
-                // Kitsu 플래그를 속여 MALSync 기반 프로바이더(Kaido, Animekai 등) 100% 작동 보장
                 "isKitsu" to false, 
                 "kitsuId" to kitsuIdExt,
                 
@@ -606,7 +589,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val firstAired: String? = null,
         val airedYear: Int? = null, 
         val originalTitle: String? = null, 
-        val englishTitle: String? = null, // 추가: 외산 사이트 전용 순수 영어 타이틀
+        val englishTitle: String? = null, 
         val imdbSeason: Int? = null,
         val imdbEpisode: Int? = null,
         val anilistId: Int? = null,
@@ -717,12 +700,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             var fetchedRecommendations: List<SearchResponse>? = null
             
             val detailRes = preFetchedDetail ?: run {
-                val detailAppend = if (isMovie) "release_dates,credits,images,videos,external_ids,recommendations" else "content_ratings,credits,images,videos,external_ids,recommendations"
+                val detailAppend = if (isMovie) "release_dates,credits,images,videos,external_ids,recommendations,alternative_titles" else "content_ratings,credits,images,videos,external_ids,recommendations,alternative_titles"
                 val detailUrl = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr", "append_to_response" to detailAppend, "include_image_language" to "ko")
                 provider.customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>()
             }
             
-            // 코루틴 병렬 처리로 가져온 영어 공식 제목 파싱 (결과 반영 시간 지연 제로)
             val enDetailRes = preFetchedEnDetail ?: run {
                 val enUrl = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr", "language" to "en-US")
                 provider.customSession.get(enUrl).parsedSafe<TmdbDetailResponse>()
@@ -807,6 +789,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val traktResults = traktDeferred.await()
                 val simklResults = simklDeferred.await()
                 
+                val traktIds = traktResults.map { it.first }.toSet()
+                val simklIds = simklResults.map { it.first }.toSet()
+                
                 val tmdbRecs = detailRes.recommendations?.results ?: emptyList()
                 val tmdbRecsIds = tmdbRecs.mapNotNull { it.id }.toSet()
 
@@ -846,7 +831,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     }
                 }).map { it.first }.take(50) 
 
-                //[완벽 복구] 유저가 제공한 최신 xrdb 커스텀 URL 포맷 100% 일치 적용
+                // XRDB 포스터 복구: 제공해주신 모든 쿼리 파라미터를 그대로 탑재했습니다.
                 fetchedRecommendations = finalCombinedMedia.mapNotNull { media ->
                     val recTitle = media.title ?: media.name ?: media.originalTitle ?: return@mapNotNull null
                     val recTmdbId = media.id ?: return@mapNotNull null
@@ -901,8 +886,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
             }
 
-            // TMDB 병렬 요청 결과에서 빼낸 오직 'en-US' 규격의 공식 영어 제목
-            val extractedEnglishTitle = enDetailRes?.title ?: enDetailRes?.name ?: detailRes.original_title ?: detailRes.original_name
+            val extractedEnglishTitle = detailRes.alternative_titles?.results?.find { it.iso_3166_1 == "US" }?.title
+                ?: detailRes.alternative_titles?.results?.find { it.iso_3166_1 == "GB" }?.title
+                ?: enDetailRes?.title ?: enDetailRes?.name ?: detailRes.original_title ?: detailRes.original_name
 
             return FetchedTmdbData(
                 if (isMovie) detailRes.title ?: detailRes.original_title else detailRes.name ?: detailRes.original_name,
@@ -1230,7 +1216,8 @@ private data class TmdbDetailResponse(
     @JsonProperty("credits") val credits: TmdbCredits? = null,
     @JsonProperty("images") val images: TmdbImages? = null,
     @JsonProperty("videos") val videos: ResultsTrailer? = null,
-    @JsonProperty("external_ids") val external_ids: ExternalIds? = null
+    @JsonProperty("external_ids") val external_ids: ExternalIds? = null,
+    @JsonProperty("alternative_titles") val alternative_titles: ResultsAltTitles? = null
 ) {
     fun toTmdbMedia(mediaType: String): TmdbMedia {
         return TmdbMedia(
@@ -1248,6 +1235,17 @@ private data class TmdbDetailResponse(
         )
     }
 }
+
+// TMDB 영어 제목(alternative titles) 데이터 모델 추가
+data class AltTitles(
+    @JsonProperty("iso_3166_1") val iso_3166_1: String? = null,
+    @JsonProperty("title") val title: String? = null,
+    @JsonProperty("type") val type: String? = null
+)
+
+data class ResultsAltTitles(
+    @JsonProperty("results") val results: ArrayList<AltTitles>? = arrayListOf()
+)
 
 private data class TmdbImages(@JsonProperty("logos") val logos: List<TmdbLogo>? = null)
 private data class TmdbLogo(@JsonProperty("file_path") val file_path: String? = null)
