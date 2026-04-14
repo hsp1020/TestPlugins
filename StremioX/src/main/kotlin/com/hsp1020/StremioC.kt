@@ -1,10 +1,10 @@
-// v1.141 (Feature: 추천 목록 xrdb 커스텀 포스터 URL 최신 규격으로 업데이트) + CineStream 100% 호환(병렬 영문제목, 설정 동기화, 애니메 버그픽스) & 자막 가로채기(Stremio 태그 부착) 패치
+// v1.141 (Feature: 추천 목록 xrdb 커스텀 포스터 URL 최신 규격으로 업데이트) + CineStream 카탈로그 OFF 시 강제 백그라운드 가동(Ghost Provider) 패치 및 100% 호환 완결판
 package com.hsp1020
 
 import android.content.Context
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.APIHolder
-import com.lagradost.cloudstream3.AcraApplication
+import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.Actor
 import com.lagradost.cloudstream3.ActorData
 import com.lagradost.cloudstream3.Episode
@@ -145,7 +145,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     }
 
     private fun getValidStremioAddons(): List<CustomSite> {
-        val sites = AcraApplication.getKey<Array<CustomSite>>(USER_PROVIDER_API)?.toList() ?: emptyList()
+        val sites = CloudStreamApp.getKey<Array<CustomSite>>(USER_PROVIDER_API)?.toList() ?: emptyList()
         return sites.filter { it.parentJavaClass == "StremioX" || it.parentJavaClass == "StremioC" }
     }
 
@@ -361,7 +361,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val tmdbDeferred = targetTmdbId?.let { id ->
             async(Dispatchers.IO) {
                 val mediaType = if (res.type == "movie") "movie" else "tv"
-                val detailAppend = if (mediaType == "movie") "release_dates,credits,images,videos,external_ids,recommendations" else "content_ratings,credits,images,videos,external_ids,recommendations"
+                val detailAppend = if (mediaType == "movie") "release_dates,credits,images,videos,external_ids,recommendations,alternative_titles" else "content_ratings,credits,images,videos,external_ids,recommendations,alternative_titles"
                 val detailUrl = buildTmdbUrl("/$mediaType/$id", "append_to_response" to detailAppend, "include_image_language" to "ko")
                 try { customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>() } catch (e: Exception) { null }
             }
@@ -440,10 +440,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         return true
     }
 
-    @Suppress("DEPRECATION")
     private fun syncCineStreamSettings() {
         try {
-            val context = AcraApplication.context ?: return
+            val context = CloudStreamApp.context ?: return
             val possibleNames = listOf(
                 "CineStream", "CineStream_preferences", "plugin_CineStream", "plugin_CineStream_preferences", 
                 "com.megix", "com.megix_preferences", context.packageName + "_preferences"
@@ -462,11 +461,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             source.all.forEach { (key, value) ->
                 try {
                     when (value) {
-                        is Boolean -> com.lagradost.cloudstream3.CloudStreamApp.setKey(key, value)
-                        is String -> com.lagradost.cloudstream3.CloudStreamApp.setKey(key, value)
-                        is Int -> com.lagradost.cloudstream3.CloudStreamApp.setKey(key, value)
-                        is Long -> com.lagradost.cloudstream3.CloudStreamApp.setKey(key, value)
-                        is Float -> com.lagradost.cloudstream3.CloudStreamApp.setKey(key, value)
+                        is Boolean -> CloudStreamApp.setKey(key, value)
+                        is String -> CloudStreamApp.setKey(key, value)
+                        is Int -> CloudStreamApp.setKey(key, value)
+                        is Long -> CloudStreamApp.setKey(key, value)
+                        is Float -> CloudStreamApp.setKey(key, value)
                     }
                 } catch (e: Exception) {}
             }
@@ -484,16 +483,55 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         callback: (ExtractorLink) -> Unit
     ) {
         try {
-            val cineStreamProvider = APIHolder.allProviders.find { it.name.equals("CineStream", ignoreCase = true) } ?: return
+            var cineStreamProvider = APIHolder.allProviders.find { it.name.equals("CineStream", ignoreCase = true) }
+
+            // [카탈로그 OFF 시 강제 실행 해킹] 
+            // 사용자가 카탈로그 3개를 모두 껐을 경우 APIHolder에 객체가 등록되지 않으므로, 
+            // PluginManager 클래스로더를 털어서 CineStreamProvider의 유령 객체(Ghost Provider)를 강제로 즉석 생성합니다.
+            if (cineStreamProvider == null) {
+                try {
+                    var targetClassLoader: ClassLoader? = null
+                    val pmClass = Class.forName("com.lagradost.cloudstream3.plugins.PluginManager")
+                    val pmInstance = pmClass.getField("INSTANCE").get(null)
+                    
+                    for (field in pmClass.declaredFields) {
+                        field.isAccessible = true
+                        val obj = try { field.get(pmInstance) } catch(e:Exception) { null }
+                        val items = when (obj) {
+                            is Map<*, *> -> obj.values
+                            is Collection<*> -> obj
+                            is Array<*> -> obj.toList()
+                            else -> null
+                        }
+                        
+                        items?.forEach { plugin ->
+                            if (plugin != null) {
+                                val pName = plugin.javaClass.name
+                                if (pName.contains("megix") || pName.contains("CineStream")) {
+                                    targetClassLoader = plugin.javaClass.classLoader
+                                }
+                            }
+                        }
+                        if (targetClassLoader != null) break
+                    }
+                    
+                    if (targetClassLoader != null) {
+                        val clazz = targetClassLoader!!.loadClass("com.megix.CineStreamProvider")
+                        cineStreamProvider = clazz.newInstance() as? MainAPI
+                    }
+                } catch (e: Exception) {
+                    println("[StremioC] Failed to instantiate Ghost Provider: ${e.message}")
+                }
+            }
+
+            if (cineStreamProvider == null) return // 플러그인이 아예 삭제되었을 경우
 
             syncCineStreamSettings()
 
-            //[자막 가로채기(Interceptor) 로직 패치]
-            // CineStream이 뱉어내는 자막 중 Stremio 자막 애드온(내장+수동추가 모두)에서 온 것이면 언어명에 (Stremio) 태그를 강제로 붙입니다.
             val subtitleInterceptor: (SubtitleFile) -> Unit = { sub ->
                 try {
                     val host = java.net.URI(sub.url).host ?: ""
-                    val customAddonsRaw = com.lagradost.cloudstream3.CloudStreamApp.getKey<String>("stremio_addons") ?: ""
+                    val customAddonsRaw = CloudStreamApp.getKey<String>("stremio_addons") ?: ""
                     val customHosts = customAddonsRaw.lines()
                         .filter { it.isNotBlank() }
                         .mapNotNull { 
@@ -507,10 +545,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     
                     if (isStremio && !sub.lang.contains("(Stremio)", ignoreCase = true)) {
                         subtitleCallback.invoke(
-                            com.lagradost.cloudstream3.SubtitleFile(
-                                "${sub.lang} (Stremio)",
-                                sub.url
-                            )
+                            SubtitleFile("${sub.lang} (Stremio)", sub.url)
                         )
                     } else {
                         subtitleCallback.invoke(sub)
@@ -568,7 +603,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "isCartoon" to loadData.isCartoon
             )
 
-            // 원본 subtitleCallback 대신 StremioC에서 자체적으로 가로챈 subtitleInterceptor를 주입합니다.
             cineStreamProvider.loadLinks(cineData.toJson(), isCasting, subtitleInterceptor, callback)
         } catch (e: Exception) {
             e.printStackTrace()
@@ -839,7 +873,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val simklResults = simklDeferred.await()
 
                 val traktIds = traktResults.map { it.first }.toSet()
-                val simklIds = simklResults.map { it.first }.toSet()
+                val simklIds = simklResults.map { it.first }.toSet
                 
                 val tmdbRecs = detailRes.recommendations?.results ?: emptyList()
                 val tmdbRecsIds = tmdbRecs.mapNotNull { it.id }.toSet()
