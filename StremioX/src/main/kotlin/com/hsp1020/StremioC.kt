@@ -1,4 +1,4 @@
-// v1.141 (Feature: 추천 목록 xrdb 커스텀 포스터 URL 최신 규격으로 업데이트) + CineStream 100% 호환(병렬 영문제목, 설정 동기화, 애니메 버그픽스) & 자막 가로채기(Stremio 태그 부착) 패치 (빌드 에러 픽스)
+// v1.145 (BugFix: TMDB 얼터너티브 타이틀(Alternative Title) 오염 로직 완전 제거 및 공식 영문 타이틀 우선 매핑 적용)
 package com.hsp1020
 
 import android.content.Context
@@ -87,7 +87,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
     
     val customSession by lazy {
-        println("[StremioC v1.136-TRACKING] 커스텀 OkHttp 세션 초기화")
+        println("[StremioC v1.145-TRACKING] 커스텀 OkHttp 세션 초기화")
         val newClient = app.baseClient.newBuilder()
             .protocols(listOf(Protocol.HTTP_1_1))
             .dispatcher(Dispatcher().apply {
@@ -237,7 +237,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val now = System.currentTimeMillis()
                 val removedCount = globalPageCache.entries.removeIf { now - it.value.third > CACHE_TTL_MS }
                 if (removedCount) {
-                    println("[StremioC v1.136-TRACKING] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
+                    println("[StremioC v1.145-TRACKING] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
                 }
                 catalogSkipState.clear()
             }
@@ -256,7 +256,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
         
         if (!isNewRequest && page > 1) {
-            println("[StremioC v1.136-TRACKING] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
+            println("[StremioC v1.145-TRACKING] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
             return@coroutineScope newHomePageResponse(emptyList(), hasNext = true)
         }
         return@coroutineScope response
@@ -363,7 +363,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val tmdbDeferred = targetTmdbId?.let { id ->
             async(Dispatchers.IO) {
                 val mediaType = if (res.type == "movie") "movie" else "tv"
-                val detailAppend = if (mediaType == "movie") "release_dates,credits,images,videos,external_ids,recommendations,alternative_titles" else "content_ratings,credits,images,videos,external_ids,recommendations,alternative_titles"
+                // v1.145: alternative_titles 완전 제거됨
+                val detailAppend = if (mediaType == "movie") "release_dates,credits,images,videos,external_ids,recommendations" else "content_ratings,credits,images,videos,external_ids,recommendations"
                 val detailUrl = buildTmdbUrl("/$mediaType/$id", "append_to_response" to detailAppend, "include_image_language" to "ko")
                 try { customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>() } catch (e: Exception) { null }
             }
@@ -604,6 +605,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "isCartoon" to loadData.isCartoon
             )
 
+            println("[StremioC v1.145-TRACKING] CineStream 데이터 전달: $cineData")
             cineStreamProvider.loadLinks(cineData.toJson(), isCasting, subtitleInterceptor, callback)
         } catch (e: Exception) {
             e.printStackTrace()
@@ -784,7 +786,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             var fetchedRecommendations: List<SearchResponse>? = null
             
             val detailRes = preFetchedDetail ?: run {
-                val detailAppend = if (isMovie) "release_dates,credits,images,videos,external_ids,recommendations,alternative_titles" else "content_ratings,credits,images,videos,external_ids,recommendations,alternative_titles"
+                val detailAppend = if (isMovie) "release_dates,credits,images,videos,external_ids,recommendations" else "content_ratings,credits,images,videos,external_ids,recommendations"
                 val detailUrl = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr", "append_to_response" to detailAppend, "include_image_language" to "ko")
                 provider.customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>()
             }
@@ -969,9 +971,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
             }
 
-            val extractedEnglishTitle = detailRes.alternative_titles?.results?.find { it.iso_3166_1 == "US" }?.title
-                ?: detailRes.alternative_titles?.results?.find { it.iso_3166_1 == "GB" }?.title
-                ?: enDetailRes?.title ?: enDetailRes?.name ?: detailRes.original_title ?: detailRes.original_name
+            // [v1.145] 얼터너티브 타이틀(Alternative Title) 오염 문제로 인해 해당 로직 완전 제거. 공식 영문 타이틀(en-US) 우선 적용.
+            val extractedEnglishTitle = enDetailRes?.title ?: enDetailRes?.name ?: detailRes.original_title ?: detailRes.original_name
+            println("[StremioC v1.145-TRACKING] 영문 공식 타이틀 추출 결과: $extractedEnglishTitle")
 
             return FetchedTmdbData(
                 if (isMovie) detailRes.title ?: detailRes.original_title else detailRes.name ?: detailRes.original_name,
@@ -1299,8 +1301,7 @@ private data class TmdbDetailResponse(
     @JsonProperty("credits") val credits: TmdbCredits? = null,
     @JsonProperty("images") val images: TmdbImages? = null,
     @JsonProperty("videos") val videos: ResultsTrailer? = null,
-    @JsonProperty("external_ids") val external_ids: ExternalIds? = null,
-    @JsonProperty("alternative_titles") val alternative_titles: ResultsAltTitles? = null
+    @JsonProperty("external_ids") val external_ids: ExternalIds? = null
 ) {
     fun toTmdbMedia(mediaType: String): TmdbMedia {
         return TmdbMedia(
@@ -1318,16 +1319,6 @@ private data class TmdbDetailResponse(
         )
     }
 }
-
-data class AltTitles(
-    @JsonProperty("iso_3166_1") val iso_3166_1: String? = null,
-    @JsonProperty("title") val title: String? = null,
-    @JsonProperty("type") val type: String? = null
-)
-
-data class ResultsAltTitles(
-    @JsonProperty("results") val results: ArrayList<AltTitles>? = arrayListOf()
-)
 
 private data class TmdbImages(@JsonProperty("logos") val logos: List<TmdbLogo>? = null)
 private data class TmdbLogo(@JsonProperty("file_path") val file_path: String? = null)
