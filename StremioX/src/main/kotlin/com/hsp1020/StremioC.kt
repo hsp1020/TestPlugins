@@ -824,6 +824,10 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
                 val traktResults = traktDeferred.await()
                 val simklResults = simklDeferred.await()
+
+                
+                val traktIds = traktResults.map { it.first }.toSet()
+                val simklIds = simklResults.map { it.first }.toSet()
                 
                 val tmdbRecs = detailRes.recommendations?.results ?: emptyList()
                 val tmdbRecsIds = tmdbRecs.mapNotNull { it.id }.toSet()
