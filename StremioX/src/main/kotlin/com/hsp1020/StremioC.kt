@@ -1,4 +1,4 @@
-// v1.147 (BugFix: 애니메이션 "정반대의 너와 나" 스크래핑 불가 현상 수정 - CineTmdbProvider Payload "date" 누락 픽스 및 신작 애니메이션 IMDB 누락 대비 TMDB ID 기반 AniZip 직접 매핑 로직 추가)
+// v1.148 (BugFix: FetchedTmdbData 데이터 클래스의 방영일(releaseDate, firstAirDate) 프로퍼티 누락으로 인한 컴파일 빌드 에러 완벽 수정)
 package com.hsp1020
 
 import android.content.Context
@@ -87,7 +87,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
     
     val customSession by lazy {
-        println("[StremioC v1.147-TRACKING] 커스텀 OkHttp 세션 초기화")
+        println("[StremioC v1.148-TRACKING] 커스텀 OkHttp 세션 초기화")
         val newClient = app.baseClient.newBuilder()
             .protocols(listOf(Protocol.HTTP_1_1))
             .dispatcher(Dispatcher().apply {
@@ -236,7 +236,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val now = System.currentTimeMillis()
                 val removedCount = globalPageCache.entries.removeIf { now - it.value.third > CACHE_TTL_MS }
                 if (removedCount) {
-                    println("[StremioC v1.147-TRACKING] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
+                    println("[StremioC v1.148-TRACKING] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
                 }
                 catalogSkipState.clear()
             }
@@ -255,7 +255,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
         
         if (!isNewRequest && page > 1) {
-            println("[StremioC v1.147-TRACKING] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
+            println("[StremioC v1.148-TRACKING] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
             return@coroutineScope newHomePageResponse(emptyList(), hasNext = true)
         }
         return@coroutineScope response
@@ -572,7 +572,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "isCartoon" to loadData.isCartoon
             )
 
-            println("[StremioC v1.147-TRACKING] CineStreamProvider 호출 Payload: $cineData")
+            println("[StremioC v1.148-TRACKING] CineStreamProvider 호출 Payload: $cineData")
             cineStreamProvider.loadLinks(cineData.toJson(), isCasting, subtitleInterceptor, callback)
         } catch (e: Exception) {
             e.printStackTrace()
@@ -653,8 +653,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val hasAnimeIds = loadData.anilistId != null || loadData.malId != null
             val passAsKitsu = isKitsuMedia || hasAnimeIds
 
-            // [v1.147] 핵심 버그픽스: CineTmdbProvider가 내부적으로 convertTmdbToAnimeId를 실행할 수 있도록
-            // 반드시 TMDB의 오리지널 방영일인 "date"와 "airedDate" 파라미터를 정확히 전달합니다.
             val cineData = mapOf(
                 "title" to scrapingTitle,
                 "id" to tmdbIdStr, 
@@ -665,8 +663,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "episode" to loadData.episode,
                 "imdb_id" to loadData.imdbId,
                 "original_title" to loadData.originalTitle,
-                "date" to loadData.firstAired,      // v1.147 추가됨 (CineTmdbProvider.LinkData 호환용)
-                "airedDate" to loadData.firstAired, // v1.147 추가됨 (CineTmdbProvider.LinkData 호환용)
+                "date" to loadData.firstAired,
+                "airedDate" to loadData.firstAired, 
                 "firstAired" to loadData.firstAired,
                 "imdbSeason" to loadData.imdbSeason,
                 "imdbEpisode" to loadData.imdbEpisode,
@@ -680,7 +678,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "isCartoon" to loadData.isCartoon
             )
 
-            println("[StremioC v1.147-TRACKING] CineTmdbProvider 병렬 호출 Payload (date 파라미터 포함): $cineData")
+            println("[StremioC v1.148-TRACKING] CineTmdbProvider 병렬 호출 Payload: $cineData")
             cineTmdbProvider.loadLinks(cineData.toJson(), isCasting, subtitleInterceptor, callback)
         } catch (e: Exception) {
             e.printStackTrace()
@@ -820,7 +818,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val fetchedYear: Int?, val fetchedStatus: ShowStatus?, val episodeTmdbMeta: Map<String, TmdbEpisode>,
         val fetchedOriginCountry: List<String>?,
         val fetchedOriginalTitle: String?,
-        val fetchedEnglishTitle: String?
+        val fetchedEnglishTitle: String?,
+        val fetchedReleaseDate: String?, 
+        val fetchedFirstAirDate: String?
     )
 
     private data class CatalogEntry(
@@ -872,7 +872,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
             
             if (detailRes == null) {
-                return FetchedTmdbData(null, null, null, emptyList(), null, null, null, null, null, null, emptyMap(), emptyList(), null, null)
+                return FetchedTmdbData(null, null, null, emptyList(), null, null, null, null, null, null, emptyMap(), emptyList(), null, null, null, null)
             }
 
             val validImdbId = (detailRes.external_ids?.imdb_id ?: finalImdbId)?.takeIf { it.startsWith("tt") }
@@ -1055,7 +1055,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 (detailRes.releaseDate ?: detailRes.firstAirDate)?.split("-")?.first()?.toIntOrNull(),
                 if (detailRes.status == "Returning Series") ShowStatus.Ongoing else ShowStatus.Completed, episodeTmdbMeta, detailRes.origin_country,
                 detailRes.original_title ?: detailRes.original_name,
-                extractedEnglishTitle
+                extractedEnglishTitle,
+                detailRes.releaseDate,
+                detailRes.firstAirDate
             )
         }
 
@@ -1173,7 +1175,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             var fetchedAniListId: Int? = null
             var fetchedMalId: Int? = null
 
-            // [v1.147] 핵심 로직: 신작 애니메이션 IMDB 매핑 누락 대비 TMDB ID 기반 AniZip 직접 우회 타격
             if (isAnimeMedia) {
                 try {
                     var anizipRes = ""
@@ -1182,7 +1183,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         val anizipType = if (finalImdbId.startsWith("kitsu:")) "kitsu_id" else if (finalImdbId.startsWith("mal:")) "mal_id" else "imdb_id"
                         anizipRes = provider.customSession.get("https://api.ani.zip/mappings?$anizipType=$rawIdForAnizip").text
                     } else if (tmdbIdStr != null) {
-                        // IMDB ID가 없거나 유효하지 않은 최신 애니메이션의 경우 TMDB ID로 직접 찌릅니다.
                         anizipRes = provider.customSession.get("https://api.ani.zip/mappings?tmdb_id=$tmdbIdStr").text
                     }
 
@@ -1194,9 +1194,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                             fetchedMalId = mappings.optInt("mal_id").takeIf { it != 0 }
                         }
                     }
-                } catch (e: Exception) {
-                    println("[StremioC v1.147-TRACKING] AniZip 매핑 실패: ${e.message}")
-                }
+                } catch (e: Exception) {}
             }
 
             if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
@@ -1213,7 +1211,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         isBollywood = isBollywood,
                         isAsian = isAsian,
                         isCartoon = isCartoon,
-                        firstAired = tmdbData?.releaseDate ?: tmdbData?.firstAirDate,
+                        firstAired = tmdbData?.fetchedReleaseDate ?: tmdbData?.fetchedFirstAirDate,
                         anilistId = fetchedAniListId,
                         malId = fetchedMalId,
                         kitsuId = fetchedKitsuId ?: this@CatalogEntry.kitsuIdExt,
@@ -1231,8 +1229,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 
                 val finalEpisodes = episodesList.map { ep ->
                     val oldData = parseJson<LoadData>(ep.data)
-                    // 각 에피소드 데이터에도 TMDB에서 추출한 방영일(firstAired) 정보를 덮어씌워줍니다.
-                    val globalAiredDate = tmdbData?.firstAirDate ?: tmdbData?.releaseDate
+                    val globalAiredDate = tmdbData?.fetchedFirstAirDate ?: tmdbData?.fetchedReleaseDate
                     val newFirstAired = oldData.firstAired ?: globalAiredDate
                     val newData = oldData.copy(
                         firstAired = newFirstAired,
