@@ -59,9 +59,10 @@ class SettingsBottomFragment(
         return inflater.inflate(layout, container, false)
     }
 
-    // 1. CineStream 확장프로그램 설치 여부 확인 함수
+    //[핵심 수정] CineStream 확장프로그램 설치 여부 확인 함수 (Ghost Provider 감지 적용)
     private fun isCineStreamInstalled(): Boolean {
-        return APIHolder.allProviders.any { it.name.equals("CineStream", ignoreCase = true) }
+        // APIHolder 뿐만 아니라 카탈로그가 꺼져있을 때의 유령 객체(Ghost)까지 감지합니다.
+        return StremioC.getCineStreamProvider() != null
     }
 
     @SuppressLint("DiscouragedApi")
@@ -98,8 +99,8 @@ class SettingsBottomFragment(
 
         // ---------- [기능 추가 1] CineStream Toggle ----------
         try {
-            // XML에 추가될 @+id/switchCineStream (Switch 또는 CheckBox 형태 지원)
             val switchCineStream: CompoundButton = view.findView("switchCineStream")
+            // 여기서 Ghost Provider까지 완벽하게 스캔합니다.
             val isInstalled = isCineStreamInstalled()
 
             switchCineStream.isEnabled = isInstalled
@@ -227,7 +228,7 @@ class SettingsBottomFragment(
                         }
                     },
                     onEdit = { itemToEdit, position ->
-                        // [기능 추가 2] 수정 기능 호출
+                        //[기능 추가 2] 링크 수정(Edit) 다이얼로그 띄우기
                         showEditDialog(itemToEdit, position, rv)
                     }
                 )
@@ -256,7 +257,7 @@ class SettingsBottomFragment(
         return view
     }
 
-    // [기능 추가 2] 링크 수정(Edit) 다이얼로그 띄우기 (addlinks 레이아웃 재사용)
+    // [기능 추가 2] 링크 수정(Edit) 다이얼로그 띄우기
     private fun showEditDialog(itemToEdit: LinkItem, position: Int, rv: RecyclerView) {
         val dialogView = getLayout("addlinks", LayoutInflater.from(requireContext()), null)
         val etName: EditText
@@ -280,7 +281,6 @@ class SettingsBottomFragment(
         if (itemToEdit.type == "StremioX") {
             try { dialogView.findView<RadioButton>("rbX").isChecked = true } catch (_: Throwable) {}
         } else {
-            // 만약 rbC (StremioC) 버튼이 있다면 체크
             try { 
                 val rbCId = res.getIdentifier("rbC", "id", BuildConfig.LIBRARY_PACKAGE_NAME)
                 dialogView.findViewById<RadioButton>(rbCId)?.isChecked = true 
@@ -290,7 +290,7 @@ class SettingsBottomFragment(
         val dlg = AlertDialog.Builder(requireContext())
             .setTitle("Edit Link")
             .setView(dialogView)
-            .setPositiveButton("Update", null) // Update 버튼으로 변경
+            .setPositiveButton("Update", null)
             .setNegativeButton("Cancel", null)
             .create()
 
@@ -310,12 +310,10 @@ class SettingsBottomFragment(
                 val indexInDb = updatedList.indexOfFirst { it.id == itemToEdit.id }
                 
                 if (indexInDb != -1) {
-                    // 데이터 업데이트
                     val newItem = itemToEdit.copy(name = name.ifBlank { link }, link = link, type = type)
                     updatedList[indexInDb] = newItem
                     saveLinks(updatedList)
 
-                    // 어댑터 뷰 업데이트 반영
                     (rv.adapter as? LinksAdapter)?.updateItem(newItem, position)
                     showToast("Link Updated Successfully")
                 }
@@ -366,13 +364,11 @@ class SettingsBottomFragment(
                     )
                 )
             }
-
             list
         } catch (_: Exception) {
             mutableListOf()
         }
     }
-
 
     private fun saveLinks(list: List<LinkItem>) {
         val arr = org.json.JSONArray()
@@ -386,14 +382,13 @@ class SettingsBottomFragment(
             }
             arr.put(obj)
         }
-
         sharedPref.edit { putString(PREF_KEY_LINKS, arr.toString()) }
     }
 
     inner class LinksAdapter(
         private val items: MutableList<LinkItem>,
         private val onDelete: (LinkItem) -> Unit,
-        private val onEdit: (LinkItem, Int) -> Unit // 수정(Edit) 이벤트 콜백 추가
+        private val onEdit: (LinkItem, Int) -> Unit
     ) : RecyclerView.Adapter<LinksAdapter.VH>() {
 
         inner class VH(v: View) : RecyclerView.ViewHolder(v) {
@@ -416,17 +411,14 @@ class SettingsBottomFragment(
             holder.tvLink.text = item.link
             holder.tvType.text = item.type
 
-            // 삭제 버튼
             holder.btnDelete.setOnClickListener {
                 onDelete(item)
             }
 
-            // [추가] 링크 텍스트나 행을 누르면 수정(Edit) 다이얼로그 호출
+            // 아이템을 클릭하면 수정 창을 엽니다.
             holder.itemView.setOnClickListener {
                 onEdit(item, position)
             }
-            // 또는 링크 텍스트만 눌렀을 때 작동하게 하려면 아래 코드 사용
-            // holder.tvLink.setOnClickListener { onEdit(item, position) }
         }
 
         override fun getItemCount(): Int = items.size
@@ -439,7 +431,6 @@ class SettingsBottomFragment(
             }
         }
 
-        // [추가] 아이템 업데이트용 함수
         fun updateItem(newItem: LinkItem, position: Int) {
             if (position in items.indices) {
                 items[position] = newItem
