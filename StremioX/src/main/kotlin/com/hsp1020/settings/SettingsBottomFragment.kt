@@ -23,6 +23,7 @@ import androidx.core.content.edit
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.lagradost.api.Log
+import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.CommonActivity.showToast
 
@@ -58,8 +59,9 @@ class SettingsBottomFragment(
         return inflater.inflate(layout, container, false)
     }
 
-    // CineStream 확장프로그램 설치 여부 확인 함수 (Ghost Provider 감지 적용)
+    //[핵심 수정] CineStream 확장프로그램 설치 여부 확인 함수 (Ghost Provider 감지 적용)
     private fun isCineStreamInstalled(): Boolean {
+        // APIHolder 뿐만 아니라 카탈로그가 꺼져있을 때의 유령 객체(Ghost)까지 감지합니다.
         return StremioC.getCineStreamProvider() != null
     }
 
@@ -73,8 +75,10 @@ class SettingsBottomFragment(
         listOf("addlinks", "showlinks", "saveIcon").forEach { name ->
             val id = res.getIdentifier(name, "id", BuildConfig.LIBRARY_PACKAGE_NAME)
             if (id == 0) Log.w("SettingsBottomFragment", "View id '$name' not found")
+            else Log.d("SettingsBottomFragment", "View id '$name' -> $id")
         }
 
+        // safe find helpers (throws clear exceptions if missing)
         val addlinks: ImageView = try { view.findView("addlinks") } catch (e: Throwable) {
             throw Exception("addlinks ImageView not found in bottom_sheet_layout", e)
         }
@@ -93,33 +97,24 @@ class SettingsBottomFragment(
         showlinks.makeTvCompatible()
         saveIcon.makeTvCompatible()
 
-        // ---------- [CineStream Toggle] ----------
+        // ---------- [기능 추가 1] CineStream Toggle ----------
         try {
             val switchCineStream: CompoundButton = view.findView("switchCineStream")
+            // 여기서 Ghost Provider까지 완벽하게 스캔합니다.
             val isInstalled = isCineStreamInstalled()
 
             switchCineStream.isEnabled = isInstalled
             if (!isInstalled) {
                 switchCineStream.isChecked = false
                 switchCineStream.text = "CineStream (Not Installed)"
-                
-                // 안 깔려있으면 로컬, 전역 모두 강제 OFF 동기화
-                sharedPref.edit { putBoolean(PREF_KEY_CINESTREAM_ENABLED, false) }
-                CloudStreamApp.setKey(PREF_KEY_CINESTREAM_ENABLED, false)
+                sharedPref.edit { putBoolean(PREF_KEY_CINESTREAM_ENABLED, false) } // 안 깔려있으면 강제 OFF
             } else {
                 switchCineStream.text = "CineStream Integration"
-                
-                // 전역 키를 최우선으로 읽어옵니다.
-                val isEnabled = CloudStreamApp.getKey<Boolean>(PREF_KEY_CINESTREAM_ENABLED) 
-                    ?: sharedPref.getBoolean(PREF_KEY_CINESTREAM_ENABLED, true)
-                switchCineStream.isChecked = isEnabled
+                switchCineStream.isChecked = sharedPref.getBoolean(PREF_KEY_CINESTREAM_ENABLED, true)
             }
 
             switchCineStream.setOnCheckedChangeListener { _, isChecked ->
-                // 설정값을 로컬 저장소와 CloudStream 전역 저장소에 모두 박아버립니다.
                 sharedPref.edit { putBoolean(PREF_KEY_CINESTREAM_ENABLED, isChecked) }
-                CloudStreamApp.setKey(PREF_KEY_CINESTREAM_ENABLED, isChecked) 
-                
                 if (isChecked) showToast("CineStream Integration Enabled")
                 else showToast("CineStream Integration Disabled")
             }
@@ -139,6 +134,7 @@ class SettingsBottomFragment(
                 rg = dialogView.findView("radioGroup")
             } catch (t: Throwable) {
                 Toast.makeText(requireContext(), "Dialog fields not found", Toast.LENGTH_SHORT).show()
+                Log.e("SettingsBottomFragment", "Missing dialog views $t")
                 return@setOnClickListener
             }
 
@@ -204,6 +200,7 @@ class SettingsBottomFragment(
             val rv: RecyclerView = dialogView.findView("rvLinks")
             val tvNoLinks: TextView = dialogView.findView("tvNoLinks")
             val list = loadLinks().toMutableList()
+            Log.d("SettingsBottomFragment", "Loaded ${list.size} saved links")
 
             if (list.isEmpty()) {
                 tvNoLinks.visibility = View.VISIBLE
@@ -231,6 +228,7 @@ class SettingsBottomFragment(
                         }
                     },
                     onEdit = { itemToEdit, position ->
+                        //[기능 추가 2] 링크 수정(Edit) 다이얼로그 띄우기
                         showEditDialog(itemToEdit, position, rv)
                     }
                 )
@@ -259,7 +257,7 @@ class SettingsBottomFragment(
         return view
     }
 
-    // 링크 수정(Edit) 다이얼로그 띄우기
+    // [기능 추가 2] 링크 수정(Edit) 다이얼로그 띄우기
     private fun showEditDialog(itemToEdit: LinkItem, position: Int, rv: RecyclerView) {
         val dialogView = getLayout("addlinks", LayoutInflater.from(requireContext()), null)
         val etName: EditText
@@ -417,6 +415,7 @@ class SettingsBottomFragment(
                 onDelete(item)
             }
 
+            // 아이템을 클릭하면 수정 창을 엽니다.
             holder.itemView.setOnClickListener {
                 onEdit(item, position)
             }
