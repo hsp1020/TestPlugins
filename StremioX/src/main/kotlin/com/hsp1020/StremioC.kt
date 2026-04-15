@@ -1,4 +1,4 @@
-// v1.148 (Feature & Fix: CineStream 토글 설정 감지 적용 누락 파일명(StremioX) 추가 및 디버깅 로그 삽입)
+// v1.149 (Feature & Fix: CineStream 연동 시 tmdb ID 누락 문제 수정 및 디버깅 로그 강화)
 package com.hsp1020
 
 import android.content.Context
@@ -89,7 +89,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
     
     val customSession by lazy {
-        println("[StremioC v1.148] 커스텀 OkHttp 세션 초기화 (메모리 튜닝)")
+        println("[StremioC v1.149] 커스텀 OkHttp 세션 초기화 (메모리 튜닝)")
         val newClient = app.baseClient.newBuilder()
             .protocols(listOf(Protocol.HTTP_1_1))
             .dispatcher(Dispatcher().apply {
@@ -167,10 +167,10 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     if (targetClassLoader != null) {
                         val clazz = targetClassLoader!!.loadClass("com.megix.CineStreamProvider")
                         provider = clazz.newInstance() as? MainAPI
-                        println("[StremioC v1.148] CineStream Ghost Provider 강제 생성 완료 (카탈로그 OFF 상태 감지)")
+                        println("[StremioC v1.149] CineStream Ghost Provider 강제 생성 완료 (카탈로그 OFF 상태 감지)")
                     }
                 } catch (e: Exception) {
-                    println("[StremioC v1.148] Failed to instantiate Ghost Provider: ${e.message}")
+                    println("[StremioC v1.149] Failed to instantiate Ghost Provider: ${e.message}")
                 }
             }
             
@@ -293,7 +293,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val now = System.currentTimeMillis()
                 val removedCount = globalPageCache.entries.removeIf { now - it.value.third > CACHE_TTL_MS }
                 if (removedCount) {
-                    println("[StremioC v1.148] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
+                    println("[StremioC v1.149] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
                 }
                 catalogSkipState.clear()
             }
@@ -312,7 +312,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
         
         if (!isNewRequest && page > 1) {
-            println("[StremioC v1.148] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
+            println("[StremioC v1.149] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
             return@coroutineScope newHomePageResponse(emptyList(), hasNext = true)
         }
         return@coroutineScope response
@@ -541,21 +541,19 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val context = CloudStreamApp.context
         var isEnabled = true
         if (context != null) {
-            // v1.148 변경점: StremioXPlugin에서 사용하는 실제 SharedPreferences 파일명인 "StremioX" 추가
+            // v1.149 유지: StremioXPlugin에서 사용하는 실제 SharedPreferences 파일명인 "StremioX" 포함
             val possiblePrefNames = listOf("StremioX", "StremioX_preferences", "stremio_preferences", "com.hsp1020_preferences", context.packageName + "_preferences")
-            println("[StremioC v1.148] 디버그: 설정 파일 목록 확인 $possiblePrefNames")
             for (name in possiblePrefNames) {
                 val prefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
                 if (prefs.contains("cinestream_integration_enabled")) {
                     isEnabled = prefs.getBoolean("cinestream_integration_enabled", true)
-                    println("[StremioC v1.148] 디버그: 설정 파일($name)에서 CineStream 토글 값 발견 = $isEnabled")
                     break
                 }
             }
         }
 
         if (!isEnabled) {
-            println("[StremioC v1.148] 사용자가 설정에서 CineStream 연동을 비활성화하여 스킵합니다.")
+            println("[StremioC v1.149] 사용자가 설정에서 CineStream 연동을 비활성화하여 스킵합니다.")
             return
         }
 
@@ -594,7 +592,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
             val isKitsuMedia = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
             val kitsuIdExt = if (isKitsuMedia) globalId?.substringAfter("kitsu:")?.substringAfter("mal:") else loadData.kitsuId
-            val correctImdbIdForCineStream = loadData.imdbId ?: globalId?.takeIf { it.startsWith("tt") } ?: ""
+            
+            // FIX: v1.149 - CineStream으로 전달될 메인 ID 필터링 우회 로직 추가 (tmdb: 허용)
+            val correctImdbIdForCineStream = loadData.imdbId ?: globalId?.takeIf { it.startsWith("tt") || it.startsWith("tmdb:") } ?: ""
+            println("[StremioC v1.149] CineStream 전달용 메인 ID 추출 결과: $correctImdbIdForCineStream (원본 globalId: $globalId, imdbId: ${loadData.imdbId})")
+
             val scrapingTitle = loadData.englishTitle ?: loadData.originalTitle ?: loadData.title ?: "Unknown"
 
             val isAnimeMedia = (loadData.isAnime || isKitsuMedia)
@@ -640,7 +642,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "isCartoon" to loadData.isCartoon
             )
 
-            println("[StremioC v1.148] CineStream 데이터 전달: $cineData")
+            println("[StremioC v1.149] CineStream 데이터 전달: $cineData")
             cineStreamProvider.loadLinks(cineData.toJson(), isCasting, subtitleInterceptor, callback)
         } catch (e: Exception) {
             e.printStackTrace()
@@ -1006,7 +1008,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
 
             val extractedEnglishTitle = enDetailRes?.title ?: enDetailRes?.name ?: detailRes.original_title ?: detailRes.original_name
-            println("[StremioC v1.148] 영문 공식 타이틀 추출 결과: $extractedEnglishTitle")
+            println("[StremioC v1.149] 영문 공식 타이틀 추출 결과: $extractedEnglishTitle")
 
             return FetchedTmdbData(
                 if (isMovie) detailRes.title ?: detailRes.original_title else detailRes.name ?: detailRes.original_name,
