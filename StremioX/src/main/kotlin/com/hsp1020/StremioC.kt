@@ -1,4 +1,4 @@
-// v1.146 (Optimization: 커넥션 풀 메모리 누수 방지, 싱글톤 패턴 적용, 코드 중복 및 파싱 로직 최적화)
+// v1.147 (Feature & Fix: CineStream 토글 설정 감지 적용 및 Ghost Provider 감지 로직 모듈화)
 package com.hsp1020
 
 import android.content.Context
@@ -60,7 +60,6 @@ import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
-//[개선 #4] 중복되는 URL 인코딩 로직을 확장 함수로 분리하여 가독성 및 성능 최적화
 private fun String.urlEncode(): String = try { URLEncoder.encode(this, "UTF-8").replace("+", "%20") } catch (e: Exception) { this }
 
 private fun String.cleanBaseUrl(): String {
@@ -89,9 +88,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private val pageMutex = Mutex()
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
     
-    //[개선 #3] 커넥션 풀 크기 축소 및 유지 시간 감소 (100개/5분 -> 30개/1분)로 불필요한 백그라운드 메모리 점유 방지
     val customSession by lazy {
-        println("[StremioC v1.146-OPT] 커스텀 OkHttp 세션 초기화 (메모리 튜닝)")
+        println("[StremioC v1.147] 커스텀 OkHttp 세션 초기화 (메모리 튜닝)")
         val newClient = app.baseClient.newBuilder()
             .protocols(listOf(Protocol.HTTP_1_1))
             .dispatcher(Dispatcher().apply {
@@ -120,10 +118,65 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         private val globalPageCache = ConcurrentHashMap<String, Triple<List<SearchResponse>, Int, Long>>()
         private const val CACHE_TTL_MS = 60 * 60 * 1000L  // 1시간
         
-        // OOM 개선을 위한 전역 싱글톤 캐시
+        // --- CineStream Ghost Provider 전역 캐시 및 로직 모듈화 ---
         private var cachedCineStreamProvider: MainAPI? = null
         private var hasSearchedCineStream = false
         private var hasSyncedCineStreamSettings = false
+
+        /**
+         * 카탈로그가 꺼져있어도 PluginManager를 털어서 CineStream 설치 여부를 확실하게 감지하고 객체를 반환합니다.
+         * SettingsBottomFragment 등 외부에서도 설치 여부 판단 시 이 메서드를 활용할 수 있습니다.
+         */
+        fun getCineStreamProvider(): MainAPI? {
+            if (cachedCineStreamProvider != null) return cachedCineStreamProvider
+            if (hasSearchedCineStream) return null // 이미 찾았는데 없었으면 재탐색 안 함
+
+            hasSearchedCineStream = true
+            
+            // 1차 시도: 정상적으로 켜져있는지 확인
+            var provider = APIHolder.allProviders.find { it.name.equals("CineStream", ignoreCase = true) }
+
+            // 2차 시도: 카탈로그를 꺼서 안 보인다면 Ghost Provider 색출 (리플렉션 해킹)
+            if (provider == null) {
+                try {
+                    var targetClassLoader: ClassLoader? = null
+                    val pmClass = Class.forName("com.lagradost.cloudstream3.plugins.PluginManager")
+                    val pmInstance = pmClass.getField("INSTANCE").get(null)
+                    
+                    for (field in pmClass.declaredFields) {
+                        field.isAccessible = true
+                        val obj = try { field.get(pmInstance) } catch(e: Exception) { null }
+                        val items = when (obj) {
+                            is Map<*, *> -> obj.values
+                            is Collection<*> -> obj
+                            is Array<*> -> obj.toList()
+                            else -> null
+                        }
+                        
+                        items?.forEach { plugin ->
+                            if (plugin != null) {
+                                val pName = plugin.javaClass.name
+                                if (pName.contains("megix") || pName.contains("CineStream")) {
+                                    targetClassLoader = plugin.javaClass.classLoader
+                                }
+                            }
+                        }
+                        if (targetClassLoader != null) break
+                    }
+                    
+                    if (targetClassLoader != null) {
+                        val clazz = targetClassLoader!!.loadClass("com.megix.CineStreamProvider")
+                        provider = clazz.newInstance() as? MainAPI
+                        println("[StremioC v1.147] CineStream Ghost Provider 강제 생성 완료 (카탈로그 OFF 상태 감지)")
+                    }
+                } catch (e: Exception) {
+                    println("[StremioC v1.147] Failed to instantiate Ghost Provider: ${e.message}")
+                }
+            }
+            
+            cachedCineStreamProvider = provider
+            return provider
+        }
         
         fun getCachedPage(key: String): Pair<List<SearchResponse>, Int>? {
             val entry = globalPageCache[key] ?: return null
@@ -240,7 +293,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val now = System.currentTimeMillis()
                 val removedCount = globalPageCache.entries.removeIf { now - it.value.third > CACHE_TTL_MS }
                 if (removedCount) {
-                    println("[StremioC v1.146-OPT] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
+                    println("[StremioC v1.147] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
                 }
                 catalogSkipState.clear()
             }
@@ -259,7 +312,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
         
         if (!isNewRequest && page > 1) {
-            println("[StremioC v1.146-OPT] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
+            println("[StremioC v1.147] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
             return@coroutineScope newHomePageResponse(emptyList(), hasNext = true)
         }
         return@coroutineScope response
@@ -332,7 +385,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     }
 
     override suspend fun load(url: String): LoadResponse = coroutineScope {
-        // [개선 #4] 이중 파싱 구조를 단일화하여 성능 최적화
         val res: CatalogEntry = if (url.startsWith("{")) {
             parseJson(url)
         } else {
@@ -485,55 +537,28 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        try {
-            var cineStreamProvider = cachedCineStreamProvider
-
-            if (cineStreamProvider == null && !hasSearchedCineStream) {
-                hasSearchedCineStream = true 
-                
-                cineStreamProvider = APIHolder.allProviders.find { it.name.equals("CineStream", ignoreCase = true) }
-
-                if (cineStreamProvider == null) {
-                    try {
-                        var targetClassLoader: ClassLoader? = null
-                        val pmClass = Class.forName("com.lagradost.cloudstream3.plugins.PluginManager")
-                        val pmInstance = pmClass.getField("INSTANCE").get(null)
-                        
-                        for (field in pmClass.declaredFields) {
-                            field.isAccessible = true
-                            val obj = try { field.get(pmInstance) } catch(e:Exception) { null }
-                            val items = when (obj) {
-                                is Map<*, *> -> obj.values
-                                is Collection<*> -> obj
-                                is Array<*> -> obj.toList()
-                                else -> null
-                            }
-                            
-                            items?.forEach { plugin ->
-                                if (plugin != null) {
-                                    val pName = plugin.javaClass.name
-                                    if (pName.contains("megix") || pName.contains("CineStream")) {
-                                        targetClassLoader = plugin.javaClass.classLoader
-                                    }
-                                }
-                            }
-                            if (targetClassLoader != null) break
-                        }
-                        
-                        if (targetClassLoader != null) {
-                            val clazz = targetClassLoader!!.loadClass("com.megix.CineStreamProvider")
-                            cineStreamProvider = clazz.newInstance() as? MainAPI
-                            println("[StremioC] CineStream Ghost Provider 생성 완료")
-                        }
-                    } catch (e: Exception) {
-                        println("[StremioC] Failed to instantiate Ghost Provider: ${e.message}")
-                    }
+        // [ON/OFF 토글 확인 로직] - SettingsBottomFragment 에서 설정한 값 확인
+        val context = CloudStreamApp.context
+        var isEnabled = true
+        if (context != null) {
+            val possiblePrefNames = listOf("StremioX_preferences", "stremio_preferences", "com.hsp1020_preferences", context.packageName + "_preferences")
+            for (name in possiblePrefNames) {
+                val prefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
+                if (prefs.contains("cinestream_integration_enabled")) {
+                    isEnabled = prefs.getBoolean("cinestream_integration_enabled", true)
+                    break
                 }
-                
-                cachedCineStreamProvider = cineStreamProvider
             }
+        }
 
-            if (cineStreamProvider == null) return
+        if (!isEnabled) {
+            println("[StremioC v1.147] 사용자가 설정에서 CineStream 연동을 비활성화하여 스킵합니다.")
+            return
+        }
+
+        try {
+            // 위에서 만든 Ghost Provider 감지 싱글톤 활용
+            val cineStreamProvider = getCineStreamProvider() ?: return
 
             syncCineStreamSettings()
 
@@ -612,7 +637,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "isCartoon" to loadData.isCartoon
             )
 
-            println("[StremioC v1.146-OPT] CineStream 데이터 전달: $cineData")
+            println("[StremioC v1.147] CineStream 데이터 전달: $cineData")
             cineStreamProvider.loadLinks(cineData.toJson(), isCasting, subtitleInterceptor, callback)
         } catch (e: Exception) {
             e.printStackTrace()
@@ -978,7 +1003,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
 
             val extractedEnglishTitle = enDetailRes?.title ?: enDetailRes?.name ?: detailRes.original_title ?: detailRes.original_name
-            println("[StremioC v1.146-OPT] 영문 공식 타이틀 추출 결과: $extractedEnglishTitle")
+            println("[StremioC v1.147] 영문 공식 타이틀 추출 결과: $extractedEnglishTitle")
 
             return FetchedTmdbData(
                 if (isMovie) detailRes.title ?: detailRes.original_title else detailRes.name ?: detailRes.original_name,
