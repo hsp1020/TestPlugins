@@ -8,6 +8,7 @@ import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.CompoundButton
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.ImageView
@@ -22,6 +23,8 @@ import androidx.core.content.edit
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.lagradost.api.Log
+import com.lagradost.cloudstream3.APIHolder
+import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.CommonActivity.showToast
 
 class SettingsBottomFragment(
@@ -29,6 +32,7 @@ class SettingsBottomFragment(
     private val sharedPref: SharedPreferences
 ) : BottomSheetDialogFragment() {
     private val PREF_KEY_LINKS = "stremio_saved_links"
+    val PREF_KEY_CINESTREAM_ENABLED = "cinestream_integration_enabled" // CineStream 설정 키
 
     private val res = plugin.resources ?: throw Exception("Unable to access plugin resources")
 
@@ -53,6 +57,11 @@ class SettingsBottomFragment(
         val id = res.getIdentifier(name, "layout", BuildConfig.LIBRARY_PACKAGE_NAME)
         val layout = res.getLayout(id)
         return inflater.inflate(layout, container, false)
+    }
+
+    // 1. CineStream 확장프로그램 설치 여부 확인 함수
+    private fun isCineStreamInstalled(): Boolean {
+        return APIHolder.allProviders.any { it.name.equals("CineStream", ignoreCase = true) }
     }
 
     @SuppressLint("DiscouragedApi")
@@ -86,6 +95,31 @@ class SettingsBottomFragment(
         addlinks.makeTvCompatible()
         showlinks.makeTvCompatible()
         saveIcon.makeTvCompatible()
+
+        // ---------- [기능 추가 1] CineStream Toggle ----------
+        try {
+            // XML에 추가될 @+id/switchCineStream (Switch 또는 CheckBox 형태 지원)
+            val switchCineStream: CompoundButton = view.findView("switchCineStream")
+            val isInstalled = isCineStreamInstalled()
+
+            switchCineStream.isEnabled = isInstalled
+            if (!isInstalled) {
+                switchCineStream.isChecked = false
+                switchCineStream.text = "CineStream (Not Installed)"
+                sharedPref.edit { putBoolean(PREF_KEY_CINESTREAM_ENABLED, false) } // 안 깔려있으면 강제 OFF
+            } else {
+                switchCineStream.text = "CineStream Integration"
+                switchCineStream.isChecked = sharedPref.getBoolean(PREF_KEY_CINESTREAM_ENABLED, true)
+            }
+
+            switchCineStream.setOnCheckedChangeListener { _, isChecked ->
+                sharedPref.edit { putBoolean(PREF_KEY_CINESTREAM_ENABLED, isChecked) }
+                if (isChecked) showToast("CineStream Integration Enabled")
+                else showToast("CineStream Integration Disabled")
+            }
+        } catch (e: Throwable) {
+            Log.w("SettingsBottomFragment", "switchCineStream view not found in XML. Skipping toggle setup.")
+        }
 
         // ---------- ADD dialog ----------
         addlinks.setOnClickListener {
@@ -176,21 +210,27 @@ class SettingsBottomFragment(
 
                 rv.layoutManager = LinearLayoutManager(requireContext())
 
-                val adapter = LinksAdapter(list) { itemToDelete ->
-                    val updatedList = loadLinks().toMutableList()
-                    val removed = updatedList.removeAll { it.id == itemToDelete.id }
+                val adapter = LinksAdapter(
+                    items = list,
+                    onDelete = { itemToDelete ->
+                        val updatedList = loadLinks().toMutableList()
+                        val removed = updatedList.removeAll { it.id == itemToDelete.id }
 
-                    if (removed) {
-                        saveLinks(updatedList)
-                        (rv.adapter as? LinksAdapter)?.remove(itemToDelete)
-                        showToast("Deleted")
-                        if (updatedList.isEmpty()) {
-                            tvNoLinks.visibility = View.VISIBLE
-                            rv.visibility = View.GONE
+                        if (removed) {
+                            saveLinks(updatedList)
+                            (rv.adapter as? LinksAdapter)?.remove(itemToDelete)
+                            showToast("Deleted")
+                            if (updatedList.isEmpty()) {
+                                tvNoLinks.visibility = View.VISIBLE
+                                rv.visibility = View.GONE
+                            }
                         }
+                    },
+                    onEdit = { itemToEdit, position ->
+                        // [기능 추가 2] 수정 기능 호출
+                        showEditDialog(itemToEdit, position, rv)
                     }
-                }
-
+                )
 
                 rv.adapter = adapter
             }
@@ -216,6 +256,74 @@ class SettingsBottomFragment(
         return view
     }
 
+    // [기능 추가 2] 링크 수정(Edit) 다이얼로그 띄우기 (addlinks 레이아웃 재사용)
+    private fun showEditDialog(itemToEdit: LinkItem, position: Int, rv: RecyclerView) {
+        val dialogView = getLayout("addlinks", LayoutInflater.from(requireContext()), null)
+        val etName: EditText
+        val etLink: EditText
+        val rg: RadioGroup
+        
+        try {
+            etName = dialogView.findView("etName")
+            etLink = dialogView.findView("etLink")
+            rg = dialogView.findView("radioGroup")
+        } catch (t: Throwable) {
+            Toast.makeText(requireContext(), "Dialog fields not found", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val rbXId = res.getIdentifier("rbX", "id", BuildConfig.LIBRARY_PACKAGE_NAME)
+
+        // 기본값 세팅
+        etName.setText(itemToEdit.name)
+        etLink.setText(itemToEdit.link)
+        if (itemToEdit.type == "StremioX") {
+            try { dialogView.findView<RadioButton>("rbX").isChecked = true } catch (_: Throwable) {}
+        } else {
+            // 만약 rbC (StremioC) 버튼이 있다면 체크
+            try { 
+                val rbCId = res.getIdentifier("rbC", "id", BuildConfig.LIBRARY_PACKAGE_NAME)
+                dialogView.findViewById<RadioButton>(rbCId)?.isChecked = true 
+            } catch (_: Throwable) {}
+        }
+
+        val dlg = AlertDialog.Builder(requireContext())
+            .setTitle("Edit Link")
+            .setView(dialogView)
+            .setPositiveButton("Update", null) // Update 버튼으로 변경
+            .setNegativeButton("Cancel", null)
+            .create()
+
+        dlg.setOnShowListener {
+            val btnUpdate = dlg.getButton(AlertDialog.BUTTON_POSITIVE)
+            btnUpdate.setOnClickListener {
+                val name = etName.text.toString().trim()
+                val link = etLink.text.toString().trim()
+                val type = if (rg.checkedRadioButtonId == rbXId) "StremioX" else "StremioC"
+
+                if (link.isEmpty() || !(link.startsWith("http://") || link.startsWith("https://"))) {
+                    showToast("Enter a valid URL (http/https)")
+                    return@setOnClickListener
+                }
+
+                val updatedList = loadLinks().toMutableList()
+                val indexInDb = updatedList.indexOfFirst { it.id == itemToEdit.id }
+                
+                if (indexInDb != -1) {
+                    // 데이터 업데이트
+                    val newItem = itemToEdit.copy(name = name.ifBlank { link }, link = link, type = type)
+                    updatedList[indexInDb] = newItem
+                    saveLinks(updatedList)
+
+                    // 어댑터 뷰 업데이트 반영
+                    (rv.adapter as? LinksAdapter)?.updateItem(newItem, position)
+                    showToast("Link Updated Successfully")
+                }
+                dlg.dismiss()
+            }
+        }
+        dlg.show()
+    }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {}
 
@@ -284,7 +392,8 @@ class SettingsBottomFragment(
 
     inner class LinksAdapter(
         private val items: MutableList<LinkItem>,
-        private val onDelete: (LinkItem) -> Unit
+        private val onDelete: (LinkItem) -> Unit,
+        private val onEdit: (LinkItem, Int) -> Unit // 수정(Edit) 이벤트 콜백 추가
     ) : RecyclerView.Adapter<LinksAdapter.VH>() {
 
         inner class VH(v: View) : RecyclerView.ViewHolder(v) {
@@ -307,9 +416,17 @@ class SettingsBottomFragment(
             holder.tvLink.text = item.link
             holder.tvType.text = item.type
 
+            // 삭제 버튼
             holder.btnDelete.setOnClickListener {
                 onDelete(item)
             }
+
+            // [추가] 링크 텍스트나 행을 누르면 수정(Edit) 다이얼로그 호출
+            holder.itemView.setOnClickListener {
+                onEdit(item, position)
+            }
+            // 또는 링크 텍스트만 눌렀을 때 작동하게 하려면 아래 코드 사용
+            // holder.tvLink.setOnClickListener { onEdit(item, position) }
         }
 
         override fun getItemCount(): Int = items.size
@@ -321,7 +438,13 @@ class SettingsBottomFragment(
                 notifyItemRemoved(idx)
             }
         }
+
+        // [추가] 아이템 업데이트용 함수
+        fun updateItem(newItem: LinkItem, position: Int) {
+            if (position in items.indices) {
+                items[position] = newItem
+                notifyItemChanged(position)
+            }
+        }
     }
-
-
 }
