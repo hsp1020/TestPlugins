@@ -1,4 +1,4 @@
-// v1.4 (Feature: StreamPlay & StreamPlayAnime 무조건 동시 병렬 스크래핑, LinkData 페이로드 완벽 매핑, 설정 동기화 및 자막 중복 방지 인터셉터 적용)
+// v1.5 (BugFix: Kotlin when 절 제네릭 타입 추론 오류 및 PreferenceManager 의존성 누락 문제 해결)
 package com.hsp1020
 
 import android.content.Context
@@ -87,7 +87,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
     
     val customSession by lazy {
-        println("[StremioC v1.4-TRACKING] 커스텀 OkHttp 세션 초기화")
+        println("[StremioC v1.5-TRACKING] 커스텀 OkHttp 세션 초기화")
         val newClient = app.baseClient.newBuilder()
             .protocols(listOf(Protocol.HTTP_1_1))
             .dispatcher(Dispatcher().apply {
@@ -237,7 +237,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val now = System.currentTimeMillis()
                 val removedCount = globalPageCache.entries.removeIf { now - it.value.third > CACHE_TTL_MS }
                 if (removedCount) {
-                    println("[StremioC v1.4-TRACKING] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
+                    println("[StremioC v1.5-TRACKING] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
                 }
                 catalogSkipState.clear()
             }
@@ -256,7 +256,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
         
         if (!isNewRequest && page > 1) {
-            println("[StremioC v1.4-TRACKING] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
+            println("[StremioC v1.5-TRACKING] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
             return@coroutineScope newHomePageResponse(emptyList(), hasNext = true)
         }
         return@coroutineScope response
@@ -455,13 +455,13 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             { invokeOpenSubs(loadData.imdbId, loadData.season, loadData.episode, subtitleInterceptor) },
             { invokeStremioSubtitles(targetType, globalId, loadData.season, loadData.episode, subtitleInterceptor) },
             { invokeCineStream(loadData, targetType, globalId, isCasting, subtitleInterceptor, callback) },
-            // v1.4: StreamPlay 연동 (무조건 병렬 스크래핑)
+            // v1.5: StreamPlay 연동 (무조건 병렬 스크래핑)
             { invokeStreamPlay(loadData, targetType, globalId, isCasting, subtitleInterceptor, callback) }
         )
         return true
     }
 
-    // 1. StreamPlay 및 StreamPlayAnime 설정(Set 포함) 동기화
+    // 1. StreamPlay 및 StreamPlayAnime 설정(Set 포함) 동기화 (v1.5: when 추론 에러 완벽 수정)
     private fun syncStreamPlaySettings() {
         try {
             val context = CloudStreamApp.context ?: return
@@ -482,17 +482,16 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
             source.all.forEach { (key, value) ->
                 try {
-                    when (value) {
-                        is Boolean -> CloudStreamApp.setKey(key, value)
-                        is String -> CloudStreamApp.setKey(key, value)
-                        is Int -> CloudStreamApp.setKey(key, value)
-                        is Long -> CloudStreamApp.setKey(key, value)
-                        is Float -> CloudStreamApp.setKey(key, value)
-                        is Set<*> -> {
-                            val stringSet = value.filterIsInstance<String>().toSet()
-                            val prefs = androidx.preference.PreferenceManager.getDefaultSharedPreferences(context)
-                            prefs.edit().putStringSet(key, stringSet).apply()
-                        }
+                    if (value is Boolean) CloudStreamApp.setKey(key, value)
+                    else if (value is String) CloudStreamApp.setKey(key, value)
+                    else if (value is Int) CloudStreamApp.setKey(key, value)
+                    else if (value is Long) CloudStreamApp.setKey(key, value)
+                    else if (value is Float) CloudStreamApp.setKey(key, value)
+                    else if (value is Set<*>) {
+                        val stringSet = value.filterIsInstance<String>().toSet()
+                        // v1.5: 외부 라이브러리 참조 없이 안드로이드 기본 패키지로 접근
+                        val prefs = context.getSharedPreferences(context.packageName + "_preferences", Context.MODE_PRIVATE)
+                        prefs.edit().putStringSet(key, stringSet).apply()
                     }
                 } catch (e: Exception) { }
             }
@@ -552,7 +551,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         }
                     }
                 } catch (e: Exception) {
-                    println("[StremioC v1.4] StreamPlay 플러그인 동적 로드 실패: ${e.message}")
+                    println("[StremioC v1.5] StreamPlay 플러그인 동적 로드 실패: ${e.message}")
                 }
             }
 
@@ -584,36 +583,36 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             streamPlayData["isCartoon"] = loadData.isCartoon
             streamPlayData["isDub"] = false // 기본값 (내부 추출기가 판단)
 
-            println("[StremioC v1.4-TRACKING] StreamPlay/StreamPlayAnime 공통 페이로드 생성 완료: $streamPlayData")
+            println("[StremioC v1.5-TRACKING] StreamPlay/StreamPlayAnime 공통 페이로드 생성 완료: $streamPlayData")
             val jsonPayload = streamPlayData.toJson()
 
-            // v1.4 핵심: isAnimeMedia 조건 분기 없이 무조건 양쪽 모두 병렬(비동기) 스크래핑 지시
+            // v1.5 핵심: isAnimeMedia 조건 분기 없이 무조건 양쪽 모두 병렬(비동기) 스크래핑 지시
             coroutineScope {
                 val jobs = listOfNotNull(
                     spProvider?.let { provider ->
                         async(Dispatchers.IO) {
                             try {
-                                println("[StremioC v1.4-TRACKING] StreamPlay (일반) 강제 스크래핑 시작")
+                                println("[StremioC v1.5-TRACKING] StreamPlay (일반) 강제 스크래핑 시작")
                                 provider.loadLinks(jsonPayload, isCasting, subtitleInterceptor, callback)
                             } catch (e: Exception) {
-                                println("[StremioC v1.4-TRACKING] StreamPlay (일반) 처리 오류: ${e.message}")
+                                println("[StremioC v1.5-TRACKING] StreamPlay (일반) 처리 오류: ${e.message}")
                             }
                         }
                     },
                     spAnimeProvider?.let { animeProvider ->
                         async(Dispatchers.IO) {
                             try {
-                                println("[StremioC v1.4-TRACKING] StreamPlayAnime (애니) 강제 스크래핑 시작")
+                                println("[StremioC v1.5-TRACKING] StreamPlayAnime (애니) 강제 스크래핑 시작")
                                 animeProvider.loadLinks(jsonPayload, isCasting, subtitleInterceptor, callback)
                             } catch (e: Exception) {
-                                println("[StremioC v1.4-TRACKING] StreamPlayAnime (애니) 처리 오류: ${e.message}")
+                                println("[StremioC v1.5-TRACKING] StreamPlayAnime (애니) 처리 오류: ${e.message}")
                             }
                         }
                     }
                 )
                 // 내부 Semaphore 트래픽 제어가 작동하도록 기다림
                 jobs.awaitAll() 
-                println("[StremioC v1.4-TRACKING] StreamPlay 무차별 병렬 추출 완료")
+                println("[StremioC v1.5-TRACKING] StreamPlay 무차별 병렬 추출 완료")
             }
             
         } catch (e: Exception) {
@@ -621,6 +620,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
     }
 
+    // v1.5: when 추론 에러 완벽 수정
     private fun syncCineStreamSettings() {
         try {
             val context = CloudStreamApp.context ?: return
@@ -641,13 +641,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
             source.all.forEach { (key, value) ->
                 try {
-                    when (value) {
-                        is Boolean -> CloudStreamApp.setKey(key, value)
-                        is String -> CloudStreamApp.setKey(key, value)
-                        is Int -> CloudStreamApp.setKey(key, value)
-                        is Long -> CloudStreamApp.setKey(key, value)
-                        is Float -> CloudStreamApp.setKey(key, value)
-                    }
+                    if (value is Boolean) CloudStreamApp.setKey(key, value)
+                    else if (value is String) CloudStreamApp.setKey(key, value)
+                    else if (value is Int) CloudStreamApp.setKey(key, value)
+                    else if (value is Long) CloudStreamApp.setKey(key, value)
+                    else if (value is Float) CloudStreamApp.setKey(key, value)
                 } catch (e: Exception) {}
             }
         } catch (e: Exception) {
@@ -706,6 +704,33 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
             syncCineStreamSettings()
 
+            val subtitleInterceptor: (SubtitleFile) -> Unit = { sub ->
+                try {
+                    val host = java.net.URI(sub.url).host ?: ""
+                    val customAddonsRaw = CloudStreamApp.getKey<String>("stremio_addons") ?: ""
+                    val customHosts = customAddonsRaw.lines()
+                        .filter { it.isNotBlank() }
+                        .mapNotNull { 
+                            val parts = it.split("|")
+                            if (parts.size >= 2) java.net.URI(parts[1]).host else null
+                        }
+                        
+                    val builtInHosts = listOf("opensubtitles.stremio.homes", "subsense.nepiraw.com", "opensubtitles-v3.strem.io")
+                    
+                    val isStremio = customHosts.contains(host) || builtInHosts.contains(host) || host.contains("strem", ignoreCase = true)
+                    
+                    if (isStremio && !sub.lang.contains("(Stremio)", ignoreCase = true)) {
+                        subtitleCallback.invoke(
+                            SubtitleFile("${sub.lang} (Stremio)", sub.url)
+                        )
+                    } else {
+                        subtitleCallback.invoke(sub)
+                    }
+                } catch (e: Exception) {
+                    subtitleCallback.invoke(sub)
+                }
+            }
+
             val isKitsuMedia = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
             val kitsuIdExt = if (isKitsuMedia) globalId?.substringAfter("kitsu:")?.substringAfter("mal:") else loadData.kitsuId
             val correctImdbIdForCineStream = loadData.imdbId ?: globalId?.takeIf { it.startsWith("tt") } ?: ""
@@ -754,8 +779,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "isCartoon" to loadData.isCartoon
             )
 
-            println("[StremioC v1.4-TRACKING] CineStream 데이터 전달: $cineData")
-            cineStreamProvider.loadLinks(cineData.toJson(), isCasting, subtitleCallback, callback)
+            println("[StremioC v1.5-TRACKING] CineStream 데이터 전달: $cineData")
+            cineStreamProvider.loadLinks(cineData.toJson(), isCasting, subtitleInterceptor, callback)
         } catch (e: Exception) {
             e.printStackTrace()
         }
