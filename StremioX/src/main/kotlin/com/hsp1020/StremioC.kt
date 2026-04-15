@@ -1,4 +1,4 @@
-// v1.5 (BugFix: Kotlin when 절 제네릭 타입 추론 오류 및 PreferenceManager 의존성 누락 문제 해결)
+// v1.6 (BugFix: StreamPlay LinkData 완벽 매핑 적용 - Vidzee, Videasy, Animekai 등 누락 파라미터로 인한 스크래핑 실패 해결)
 package com.hsp1020
 
 import android.content.Context
@@ -87,7 +87,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
     
     val customSession by lazy {
-        println("[StremioC v1.5-TRACKING] 커스텀 OkHttp 세션 초기화")
+        println("[StremioC v1.6-TRACKING] 커스텀 OkHttp 세션 초기화")
         val newClient = app.baseClient.newBuilder()
             .protocols(listOf(Protocol.HTTP_1_1))
             .dispatcher(Dispatcher().apply {
@@ -237,7 +237,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val now = System.currentTimeMillis()
                 val removedCount = globalPageCache.entries.removeIf { now - it.value.third > CACHE_TTL_MS }
                 if (removedCount) {
-                    println("[StremioC v1.5-TRACKING] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
+                    println("[StremioC v1.6-TRACKING] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
                 }
                 catalogSkipState.clear()
             }
@@ -256,7 +256,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
         
         if (!isNewRequest && page > 1) {
-            println("[StremioC v1.5-TRACKING] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
+            println("[StremioC v1.6-TRACKING] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
             return@coroutineScope newHomePageResponse(emptyList(), hasNext = true)
         }
         return@coroutineScope response
@@ -455,13 +455,13 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             { invokeOpenSubs(loadData.imdbId, loadData.season, loadData.episode, subtitleInterceptor) },
             { invokeStremioSubtitles(targetType, globalId, loadData.season, loadData.episode, subtitleInterceptor) },
             { invokeCineStream(loadData, targetType, globalId, isCasting, subtitleInterceptor, callback) },
-            // v1.5: StreamPlay 연동 (무조건 병렬 스크래핑)
+            // v1.6: StreamPlay 연동 (무조건 병렬 스크래핑 및 완벽한 JSON 매핑 적용)
             { invokeStreamPlay(loadData, targetType, globalId, isCasting, subtitleInterceptor, callback) }
         )
         return true
     }
 
-    // 1. StreamPlay 및 StreamPlayAnime 설정(Set 포함) 동기화 (v1.5: when 추론 에러 완벽 수정)
+    // 1. StreamPlay 및 StreamPlayAnime 설정(Set 포함) 동기화
     private fun syncStreamPlaySettings() {
         try {
             val context = CloudStreamApp.context ?: return
@@ -489,7 +489,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     else if (value is Float) CloudStreamApp.setKey(key, value)
                     else if (value is Set<*>) {
                         val stringSet = value.filterIsInstance<String>().toSet()
-                        // v1.5: 외부 라이브러리 참조 없이 안드로이드 기본 패키지로 접근
                         val prefs = context.getSharedPreferences(context.packageName + "_preferences", Context.MODE_PRIVATE)
                         prefs.edit().putStringSet(key, stringSet).apply()
                     }
@@ -500,7 +499,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
     }
 
-    // 2. StreamPlay 및 StreamPlayAnime 동시 병렬 호출 로직
+    // 2. StreamPlay 및 StreamPlayAnime 동시 병렬 호출 로직 (v1.6: 페이로드 매핑 완벽 대응)
     private suspend fun invokeStreamPlay(
         loadData: LoadData,
         targetType: String,
@@ -551,7 +550,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         }
                     }
                 } catch (e: Exception) {
-                    println("[StremioC v1.5] StreamPlay 플러그인 동적 로드 실패: ${e.message}")
+                    println("[StremioC v1.6] StreamPlay 플러그인 동적 로드 실패: ${e.message}")
                 }
             }
 
@@ -562,57 +561,71 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val isKitsuMedia = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
             val isAnimeMedia = (loadData.isAnime || isKitsuMedia)
 
-            // StreamPlay 의 LinkData 규격에 맞춘 완벽한 JSON 페이로드 매핑 (Bridge)
+            // v1.6 핵심: StreamPlay 의 LinkData 규격에 맞춘 완벽한 JSON 파라미터 매핑
             val streamPlayData = mutableMapOf<String, Any?>()
             
+            streamPlayData["id"] = loadData.tmdbId // Vidzee, Videasy 요구값
+            streamPlayData["imdbId"] = loadData.imdbId ?: globalId?.takeIf { it.startsWith("tt") }
             streamPlayData["type"] = targetType
+            streamPlayData["season"] = loadData.season
+            streamPlayData["episode"] = loadData.episode
+            streamPlayData["epid"] = loadData.episode
+            streamPlayData["aniId"] = loadData.anilistId?.toString() // 타입 에러 방지용 캐스팅
+            streamPlayData["animeId"] = loadData.anilistId?.toString()
+            streamPlayData["malId"] = loadData.malId
+            
             streamPlayData["title"] = loadData.englishTitle ?: loadData.originalTitle ?: loadData.title ?: "Unknown"
             streamPlayData["year"] = loadData.airedYear ?: loadData.year
             streamPlayData["orgTitle"] = loadData.originalTitle
-            streamPlayData["season"] = loadData.season
-            streamPlayData["episode"] = loadData.episode
-
-            streamPlayData["imdbId"] = loadData.imdbId ?: globalId?.takeIf { it.startsWith("tt") }
-            streamPlayData["tmdbId"] = loadData.tmdbId
-            streamPlayData["aniId"] = loadData.anilistId // LoadData의 anilistId 를 aniId로 매핑
-            streamPlayData["malId"] = loadData.malId
-
+            
             streamPlayData["isAnime"] = isAnimeMedia
+            streamPlayData["airedYear"] = loadData.airedYear
+            streamPlayData["lastSeason"] = loadData.season
+            streamPlayData["epsTitle"] = "Episode ${loadData.episode ?: 1}"
+            streamPlayData["jpTitle"] = loadData.originalTitle ?: loadData.title // Animekai 방어 로직 통과용
+            
+            streamPlayData["date"] = loadData.firstAired
+            streamPlayData["airedDate"] = loadData.firstAired
+            
             streamPlayData["isAsian"] = loadData.isAsian
             streamPlayData["isBollywood"] = loadData.isBollywood
             streamPlayData["isCartoon"] = loadData.isCartoon
-            streamPlayData["isDub"] = false // 기본값 (내부 추출기가 판단)
+            streamPlayData["alttitle"] = loadData.englishTitle
+            streamPlayData["nametitle"] = loadData.title
+            
+            streamPlayData["isDub"] = false // 기본적으로 Sub 베이스 추출, 내부 추출기가 판단
+            streamPlayData["isMovie"] = (targetType == "movie" || targetType == "TvType.Movie")
 
-            println("[StremioC v1.5-TRACKING] StreamPlay/StreamPlayAnime 공통 페이로드 생성 완료: $streamPlayData")
+            println("[StremioC v1.6-TRACKING] StreamPlay/StreamPlayAnime 공통 페이로드 생성 완료: $streamPlayData")
             val jsonPayload = streamPlayData.toJson()
 
-            // v1.5 핵심: isAnimeMedia 조건 분기 없이 무조건 양쪽 모두 병렬(비동기) 스크래핑 지시
+            // 무조건 양쪽 모두 병렬(비동기) 스크래핑 지시
             coroutineScope {
                 val jobs = listOfNotNull(
                     spProvider?.let { provider ->
                         async(Dispatchers.IO) {
                             try {
-                                println("[StremioC v1.5-TRACKING] StreamPlay (일반) 강제 스크래핑 시작")
+                                println("[StremioC v1.6-TRACKING] StreamPlay (일반) 강제 스크래핑 시작")
                                 provider.loadLinks(jsonPayload, isCasting, subtitleInterceptor, callback)
                             } catch (e: Exception) {
-                                println("[StremioC v1.5-TRACKING] StreamPlay (일반) 처리 오류: ${e.message}")
+                                println("[StremioC v1.6-TRACKING] StreamPlay (일반) 처리 오류: ${e.message}")
                             }
                         }
                     },
                     spAnimeProvider?.let { animeProvider ->
                         async(Dispatchers.IO) {
                             try {
-                                println("[StremioC v1.5-TRACKING] StreamPlayAnime (애니) 강제 스크래핑 시작")
+                                println("[StremioC v1.6-TRACKING] StreamPlayAnime (애니) 강제 스크래핑 시작")
                                 animeProvider.loadLinks(jsonPayload, isCasting, subtitleInterceptor, callback)
                             } catch (e: Exception) {
-                                println("[StremioC v1.5-TRACKING] StreamPlayAnime (애니) 처리 오류: ${e.message}")
+                                println("[StremioC v1.6-TRACKING] StreamPlayAnime (애니) 처리 오류: ${e.message}")
                             }
                         }
                     }
                 )
                 // 내부 Semaphore 트래픽 제어가 작동하도록 기다림
                 jobs.awaitAll() 
-                println("[StremioC v1.5-TRACKING] StreamPlay 무차별 병렬 추출 완료")
+                println("[StremioC v1.6-TRACKING] StreamPlay 무차별 병렬 추출 완료")
             }
             
         } catch (e: Exception) {
@@ -620,7 +633,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
     }
 
-    // v1.5: when 추론 에러 완벽 수정
     private fun syncCineStreamSettings() {
         try {
             val context = CloudStreamApp.context ?: return
@@ -779,8 +791,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "isCartoon" to loadData.isCartoon
             )
 
-            println("[StremioC v1.5-TRACKING] CineStream 데이터 전달: $cineData")
-            cineStreamProvider.loadLinks(cineData.toJson(), isCasting, subtitleInterceptor, callback)
+            println("[StremioC v1.6-TRACKING] CineStream 데이터 전달: $cineData")
+            cineStreamProvider.loadLinks(cineData.toJson(), isCasting, subtitleCallback, callback)
         } catch (e: Exception) {
             e.printStackTrace()
         }
