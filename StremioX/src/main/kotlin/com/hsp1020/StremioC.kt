@@ -93,8 +93,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val newClient = app.baseClient.newBuilder()
             .protocols(listOf(Protocol.HTTP_1_1))
             .dispatcher(Dispatcher().apply {
-                maxRequests = 60
-                maxRequestsPerHost = 20
+                maxRequests = 100
+                maxRequestsPerHost = 100
             })
             .connectionPool(ConnectionPool(30, 1, TimeUnit.MINUTES))
             .build()
