@@ -1,4 +1,3 @@
-// v3.0
 package com.movieking
 
 import android.util.Base64
@@ -9,12 +8,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.BufferedReader
-import java.io.InputStreamReader
-import java.net.ServerSocket
-import java.net.Socket
-import java.net.URI
-import java.util.UUID
+import java.io.*
+import java.net.*
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -26,60 +21,12 @@ class BcbcRedExtractor : ExtractorApi() {
     private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
     companion object {
-        private var server: ServerSocket? = null
-        private var serverPort = 0
-        private val m3u8Cache = mutableMapOf<String, String>()
-
-        fun startServer() {
-            if (server != null) return
-            CoroutineScope(Dispatchers.IO).launch {
-                try {
-                    server = ServerSocket(0).apply { serverPort = localPort }
-                    while (true) {
-                        val socket = server?.accept() ?: break
-                        launch(Dispatchers.IO) {
-                            handleSocket(socket)
-                        }
-                    }
-                } catch (e: Exception) {
-                }
-            }
-        }
-
-        private fun handleSocket(socket: Socket) {
-            try {
-                val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
-                val out = socket.getOutputStream()
-                val requestLine = reader.readLine() ?: return
-                val parts = requestLine.split(" ")
-                if (parts.size >= 2 && parts[0] == "GET") {
-                    val id = parts[1].substringAfterLast("/")
-                    val m3u8 = m3u8Cache[id]
-                    if (m3u8 != null) {
-                        val response = "HTTP/1.1 200 OK\r\n" +
-                                "Content-Type: application/vnd.apple.mpegurl\r\n" +
-                                "Connection: close\r\n" +
-                                "\r\n" + m3u8
-                        out.write(response.toByteArray(charset("UTF-8")))
-                    } else {
-                        val response = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n"
-                        out.write(response.toByteArray(charset("UTF-8")))
-                    }
-                }
-                out.flush()
-            } catch (e: Exception) {
-            } finally {
-                try { socket.close() } catch (e: Exception) {}
-            }
-        }
-    }
-
-    init {
-        startServer()
+        private var proxyServer: ProxyWebServer? = null
     }
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
         try {
+            val videoId = extractVideoIdDeep(url)
             val uri = URI(url)
             val hostUrl = "${uri.scheme}://${uri.host}"
             val baseHeaders = mutableMapOf("Referer" to "$hostUrl/", "Origin" to hostUrl, "User-Agent" to DESKTOP_UA)
@@ -91,11 +38,12 @@ class BcbcRedExtractor : ExtractorApi() {
             val keyMatch = Regex("""#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"(?:,IV=(0x[0-9a-fA-F]+))?""").find(playlistRes)
             val hexIv = keyMatch?.groupValues?.get(2)
             
+            // [고유 개선] 무거운 CPU 연산을 백그라운드 코루틴으로 분리하여 ANR(UI 멈춤) 방지
             val candidates = if (keyMatch != null) withContext(Dispatchers.Default) { solveKeyCandidatesCombinatorial(baseHeaders, keyMatch.groupValues[1]) } else emptyList()
             
             val lines = playlistRes.lines()
-            val currentSeq = Regex("""#EXT-X-MEDIA-SEQUENCE:(\d+)""").find(playlistRes)?.groupValues?.get(1)?.toLong() ?: 0L
-            val firstSegmentUrl = lines.firstOrNull { it.isNotBlank() && !it.startsWith("#") }?.let { if (it.startsWith("http")) it else "${m3u8Url.substringBeforeLast("/")}/$it" }
+            var currentSeq = Regex("""#EXT-X-MEDIA-SEQUENCE:(\d+)""").find(playlistRes)?.groupValues?.get(1)?.toLong() ?: 0L
+            var firstSegmentUrl: String? = lines.firstOrNull { it.isNotBlank() && !it.startsWith("#") }?.let { if (it.startsWith("http")) it else "${m3u8Url.substringBeforeLast("/")}/$it" }
 
             var confirmedKey = ByteArray(16)
             var confirmedIvType = -1
@@ -113,9 +61,7 @@ class BcbcRedExtractor : ExtractorApi() {
                                 cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
                                 val head = cipher.update(firstSegBytes.take(checkSize).toByteArray())
                                 if (head.isNotEmpty() && head[0] == 0x47.toByte() && head.size > 188 && head[188] == 0x47.toByte()) {
-                                    confirmedKey = key
-                                    confirmedIvType = ivIdx
-                                    break@outer
+                                    confirmedKey = key; confirmedIvType = ivIdx; break@outer
                                 }
                             } catch (e: Exception) {}
                         }
@@ -123,31 +69,39 @@ class BcbcRedExtractor : ExtractorApi() {
                 } catch (e: Exception) {}
             }
 
-            val base64Key = Base64.encodeToString(confirmedKey, Base64.NO_WRAP)
-            val dataUriKey = "data:application/octet-stream;base64,$base64Key"
+            proxyServer?.stop()
+            proxyServer = ProxyWebServer().apply { start() }
 
             val newLines = mutableListOf<String>()
             for (line in lines) {
                 if (line.startsWith("#EXT-X-KEY")) {
-                    var newKeyLine = """#EXT-X-KEY:METHOD=AES-128,URI="$dataUriKey""""
+                    var newKeyLine = """#EXT-X-KEY:METHOD=AES-128,URI="http://127.0.0.1:${proxyServer!!.port}/key.bin""""
                     if (confirmedIvType == 0 && hexIv != null) newKeyLine += """,IV=$hexIv"""
                     else if (confirmedIvType == 2) newKeyLine += """,IV=0x00000000000000000000000000000000"""
                     newLines.add(newKeyLine)
                 } else if (line.isNotBlank() && !line.startsWith("#")) {
-                    val absoluteLine = if (line.startsWith("http")) line else "${m3u8Url.substringBeforeLast("/")}/$line"
-                    newLines.add(absoluteLine)
-                } else {
-                    newLines.add(line)
-                }
+                    newLines.add(if (line.startsWith("http")) line else "${m3u8Url.substringBeforeLast("/")}/$line")
+                } else newLines.add(line)
             }
             
-            val finalM3u8 = newLines.joinToString("\n")
-            val cacheId = UUID.randomUUID().toString()
-            m3u8Cache[cacheId] = finalM3u8
-            val proxyUrl = "http://127.0.0.1:$serverPort/$cacheId"
-            
-            callback(newExtractorLink(name, name, proxyUrl, ExtractorLinkType.M3U8) { this.referer = "$hostUrl/" })
+            proxyServer!!.updateData(newLines.joinToString("\n"), confirmedKey)
+            callback(newExtractorLink(name, name, "http://127.0.0.1:${proxyServer!!.port}/$videoId/playlist.m3u8", ExtractorLinkType.M3U8) { this.referer = "$hostUrl/" })
         } catch (e: Exception) {}
+    }
+
+    private fun extractVideoIdDeep(url: String): String {
+        try {
+            val parts = url.split(Regex("/v\\d+/"))
+            if (parts.size >= 2) {
+                val payload = parts[1].split(".").getOrNull(1)
+                if (payload != null) {
+                    val decoded = String(Base64.decode(payload, Base64.URL_SAFE))
+                    val idMatch = Regex(""""id"\s*:\s*(\d+)""").find(decoded)
+                    if (idMatch != null) return idMatch.groupValues[1]
+                }
+            }
+        } catch (e: Exception) {}
+        return "ID_ERR"
     }
 
     private fun getIvList(seq: Long, hexIv: String?): List<ByteArray> {
@@ -168,6 +122,7 @@ class BcbcRedExtractor : ExtractorApi() {
         return ivs
     }
 
+    // [고유 개선] 하드코딩된 암호화 갭 배열을 다중 패턴으로 유연화하여, 사이트 방어 대응력 확보
     private suspend fun solveKeyCandidatesCombinatorial(h: Map<String, String>, kUrl: String): List<ByteArray> {
         val list = mutableListOf<ByteArray>()
         try {
@@ -212,5 +167,51 @@ class BcbcRedExtractor : ExtractorApi() {
             for (p in generatePermutations(rest)) result.add(listOf(elem) + p)
         }
         return result
+    }
+
+    class ProxyWebServer {
+        private var serverSocket: ServerSocket? = null
+        private var isRunning = false
+        var port: Int = 0
+        @Volatile private var finalM3u8: String = ""
+        @Volatile private var finalKey: ByteArray = ByteArray(16)
+
+        fun updateData(m3u8: String, key: ByteArray) { finalM3u8 = m3u8; finalKey = key }
+
+        fun start() {
+            try {
+                serverSocket = ServerSocket(0)
+                port = serverSocket!!.localPort
+                isRunning = true
+                CoroutineScope(Dispatchers.IO).launch { 
+                    while (isRunning && serverSocket != null && !serverSocket!!.isClosed) { 
+                        try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {} 
+                    } 
+                }
+            } catch (e: Exception) {}
+        }
+
+        fun stop() { isRunning = false; try { serverSocket?.close(); serverSocket = null } catch (e: Exception) {} }
+        
+        private fun handleClient(socket: Socket) {
+            try {
+                socket.soTimeout = 5000
+                val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
+                val path = reader.readLine()?.split(" ")?.get(1) ?: return
+                val output = socket.getOutputStream()
+
+                //[공통 개선] Connection: close & Content-Length 로 무한 버퍼링 픽스
+                if (path.contains("/playlist.m3u8")) {
+                    val payload = finalM3u8.toByteArray(charset("UTF-8"))
+                    output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nConnection: close\r\nContent-Length: ${payload.size}\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
+                    output.write(payload)
+                } else if (path.contains("/key.bin")) {
+                    output.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\nContent-Length: ${finalKey.size}\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
+                    output.write(finalKey)
+                }
+                output.flush()
+            } catch (e: Exception) { 
+            } finally { try { socket.close() } catch(e2:Exception){} }
+        }
     }
 }
