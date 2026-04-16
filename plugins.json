@@ -84,10 +84,10 @@
     },
     {
         "iconUrl": "https://mvking6.org/resource/favicon.ico",
-        "fileHash": "sha256-b1fe8b898faab1cc8ea17078e90f3bb81b1478c4a053802dad810ba6d552e02f",
+        "fileHash": "sha256-3559d5def39769f5a7265b6a46daa3521162f69306438e501c64589f15a0b77c",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 28032,
+        "fileSize": 28149,
         "status": 1,
         "language": "ko",
         "authors": [
