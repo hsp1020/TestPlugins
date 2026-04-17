@@ -1,4 +1,4 @@
-// v1.17
+// v1.19
 package com.ultimaevo
 
 import android.os.Bundle
@@ -37,139 +37,139 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         }
 
         val title = TextView(ctx).apply {
-            text = "Ultima Evo 고급 설정"
-            textSize = 22f
+            text = "Ultima Evo 마스터 관리자"
+            textSize = 24f
             setPadding(0, 0, 0, 40)
         }
         mainLayout.addView(title)
 
-        val allProviders = APIHolder.allProviders.filter { it.hasMainPage && it.name != "Ultima Evo" }
+        val instanceCount = prefs.getInt("evo_instance_count", 3)
 
-        for (provider in allProviders) {
-            val provSwitchKey = "ext_toggle_${provider.name}"
-            val provSwitch = Switch(ctx).apply {
-                text = "${provider.name} 활성화"
-                textSize = 18f
-                setPadding(0, 20, 0, 10)
-                isChecked = prefs.getBoolean(provSwitchKey, false)
-            }
-            mainLayout.addView(provSwitch)
-
-            val catalogContainer = LinearLayout(ctx).apply {
+        for (i in 1..instanceCount) {
+            val insCategory = LinearLayout(ctx).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(50, 0, 0, 20)
-                visibility = if (provSwitch.isChecked) View.VISIBLE else View.GONE
+                setPadding(0, 30, 0, 30)
             }
-            mainLayout.addView(catalogContainer)
+            mainLayout.addView(insCategory)
 
-            provSwitch.setOnCheckedChangeListener { _, isChecked ->
-                prefs.edit().putBoolean(provSwitchKey, isChecked).apply()
-                catalogContainer.visibility = if (isChecked) View.VISIBLE else View.GONE
+            val insNameInput = EditText(ctx).apply {
+                hint = "통합 카탈로그 $i 이름"
+                setText(prefs.getString("evo_name_$i", "Ultima Evo $i"))
+                tag = "evo_name_$i"
+            }
+            insCategory.addView(insNameInput)
+
+            val searchToggle = Switch(ctx).apply {
+                text = "이 카탈로그에서 검색 기능 활성화"
+                isChecked = prefs.getBoolean("evo_search_enabled_$i", true)
+                setOnCheckedChangeListener { _, isChecked ->
+                    prefs.edit().putBoolean("evo_search_enabled_$i", isChecked).apply()
+                }
+            }
+            insCategory.addView(searchToggle)
+
+            val expandBtn = Button(ctx).apply { text = "내부 카탈로그 구성 편집 ▼" }
+            insCategory.addView(expandBtn)
+
+            val providerContainer = LinearLayout(ctx).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(40, 0, 0, 0)
+                visibility = View.GONE
+            }
+            insCategory.addView(providerContainer)
+
+            expandBtn.setOnClickListener {
+                providerContainer.visibility = if (providerContainer.visibility == View.GONE) View.VISIBLE else View.GONE
             }
 
-            val staticCats = provider.mainPage.map { it.name to it.data }
-            val cachedDynStr = prefs.getString("dynamic_catalogs_${provider.name}", "") ?: ""
-            val dynamicCats = if (cachedDynStr.isNotBlank()) cachedDynStr.split("|||").map { it to it } else emptyList()
-            val allCatalogs = (staticCats + dynamicCats).distinctBy { it.first }
+            val allProviders = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
 
-            // [수정됨] 조건문 삭제: 무조건 동기화 버튼을 최상단에 배치합니다.
-            val fetchBtn = Button(ctx).apply {
-                text = "🔄 ${provider.name} 카탈로그 강제 동기화"
-                setOnClickListener {
-                    this.text = "통신 중... 잠시만 기다려주세요"
-                    this.isEnabled = false
+            for (provider in allProviders) {
+                val provKey = "ext_toggle_${i}_${provider.name}"
+                val provSwitch = Switch(ctx).apply {
+                    text = "${provider.name} 포함"
+                    isChecked = prefs.getBoolean(provKey, false)
+                }
+                providerContainer.addView(provSwitch)
+
+                val catContainer = LinearLayout(ctx).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(40, 0, 0, 20)
+                    visibility = if (provSwitch.isChecked) View.VISIBLE else View.GONE
+                }
+                providerContainer.addView(catContainer)
+
+                provSwitch.setOnCheckedChangeListener { _, isChecked ->
+                    prefs.edit().putBoolean(provKey, isChecked).apply()
+                    catContainer.visibility = if (isChecked) View.VISIBLE else View.GONE
+                }
+
+                val syncBtn = Button(ctx).apply { text = "🔄 ${provider.name} 카탈로그 동기화" }
+                catContainer.addView(syncBtn)
+                syncBtn.setOnClickListener {
                     CoroutineScope(Dispatchers.IO).launch {
-                        try {
-                            // 안전한 통신을 위해 해당 Provider의 첫 번째 데이터를 추출하여 보냅니다.
-                            val reqName = provider.mainPage.firstOrNull()?.name ?: "Home"
-                            val reqData = provider.mainPage.firstOrNull()?.data ?: ""
-                            val request = MainPageRequest(reqName, reqData, false)
-                            
-                            val response = provider.getMainPage(1, request)
-                            if (response != null && response.items.isNotEmpty()) {
-                                val names = response.items.map { it.name }
-                                prefs.edit().putString("dynamic_catalogs_${provider.name}", names.joinToString("|||")).apply()
-                                withContext(Dispatchers.Main) {
-                                    this@apply.text = "✅ 완료! (설정 창을 닫았다 다시 열어주세요)"
-                                }
-                            } else {
-                                withContext(Dispatchers.Main) {
-                                    this@apply.text = "❌ 통신 실패 (파싱된 데이터 없음)"
-                                    this@apply.isEnabled = true
-                                }
-                            }
-                        } catch (e: Exception) {
-                            withContext(Dispatchers.Main) {
-                                this@apply.text = "❌ 네트워크 에러 발생"
-                                this@apply.isEnabled = true
-                            }
+                        val reqName = provider.mainPage.firstOrNull()?.name ?: "Home"
+                        val reqData = provider.mainPage.firstOrNull()?.data ?: ""
+                        val request = MainPageRequest(reqName, reqData, false)
+                        val response = provider.getMainPage(1, request)
+                        if (response != null && response.items.isNotEmpty()) {
+                            val names = response.items.map { it.name }
+                            prefs.edit().putString("dynamic_catalogs_${provider.name}", names.joinToString("|||")).apply()
                         }
                     }
                 }
-            }
-            catalogContainer.addView(fetchBtn)
 
-            // 기존에 저장된(또는 방금 불러온) 카탈로그 목록들을 스위치로 생성
-            for (cat in allCatalogs) {
-                val catalogName = cat.first
-                
-                val catSwitchKey = "cat_toggle_${provider.name}_${catalogName}"
-                val nameInputKey = "cat_rename_${provider.name}_${catalogName}"
-                val orderInputKey = "cat_order_${provider.name}_${catalogName}"
+                val staticCats = provider.mainPage.map { it.name to it.data }
+                val cachedDynStr = prefs.getString("dynamic_catalogs_${provider.name}", "") ?: ""
+                val dynamicCats = if (cachedDynStr.isNotBlank()) cachedDynStr.split("|||").map { it to it } else emptyList()
+                val allCats = (staticCats + dynamicCats).distinctBy { it.first }
 
-                val catSwitch = Switch(ctx).apply {
-                    text = "└ $catalogName"
-                    setPadding(0, 20, 0, 10)
-                    isChecked = prefs.getBoolean(catSwitchKey, false)
+                for (cat in allCats) {
+                    val cName = cat.first
+                    val toggleKey = "cat_toggle_${i}_${provider.name}_$cName"
+                    val renameKey = "cat_rename_${i}_${provider.name}_$cName"
+                    val orderKey = "cat_order_${i}_${provider.name}_$cName"
+
+                    val cSwitch = Switch(ctx).apply {
+                        text = "└ $cName 표시"
+                        isChecked = prefs.getBoolean(toggleKey, false)
+                    }
+                    catContainer.addView(cSwitch)
+
+                    val editLayout = LinearLayout(ctx).apply {
+                        orientation = LinearLayout.VERTICAL
+                        setPadding(40, 0, 0, 10)
+                        visibility = if (cSwitch.isChecked) View.VISIBLE else View.GONE
+                    }
+                    catContainer.addView(editLayout)
+
+                    cSwitch.setOnCheckedChangeListener { _, isChecked ->
+                        prefs.edit().putBoolean(toggleKey, isChecked).apply()
+                        editLayout.visibility = if (isChecked) View.VISIBLE else View.GONE
+                    }
+
+                    val rInput = EditText(ctx).apply {
+                        hint = "표시될 이름"
+                        setText(prefs.getString(renameKey, cName))
+                        tag = renameKey
+                    }
+                    editLayout.addView(rInput)
+
+                    val oInput = EditText(ctx).apply {
+                        hint = "정렬 순서"
+                        inputType = InputType.TYPE_CLASS_NUMBER
+                        setText(prefs.getString(orderKey, "99"))
+                        tag = "ORDER_INPUT|${i}|${provider.name}|${cName}" 
+                    }
+                    editLayout.addView(oInput)
                 }
-                catalogContainer.addView(catSwitch)
-
-                val detailsContainer = LinearLayout(ctx).apply {
-                    orientation = LinearLayout.VERTICAL
-                    setPadding(50, 0, 0, 20)
-                    visibility = if (catSwitch.isChecked) View.VISIBLE else View.GONE
-                }
-                catalogContainer.addView(detailsContainer)
-
-                catSwitch.setOnCheckedChangeListener { _, isChecked ->
-                    prefs.edit().putBoolean(catSwitchKey, isChecked).apply()
-                    detailsContainer.visibility = if (isChecked) View.VISIBLE else View.GONE
-                }
-
-                val nameInput = EditText(ctx).apply {
-                    hint = "새 이름 (기본: $catalogName)"
-                    setText(prefs.getString(nameInputKey, catalogName))
-                    tag = nameInputKey
-                }
-                detailsContainer.addView(nameInput)
-
-                val orderInput = EditText(ctx).apply {
-                    hint = "정렬 순서 (기본: 99)"
-                    inputType = InputType.TYPE_CLASS_NUMBER
-                    setText(prefs.getString(orderInputKey, "99"))
-                    tag = orderInputKey
-                }
-                detailsContainer.addView(orderInput)
             }
         }
 
         val saveBtn = Button(ctx).apply {
-            text = "저장 및 닫기"
+            text = "모든 설정 저장 및 닫기 (앱 재시작 권장)"
             setOnClickListener {
-                fun saveEditTexts(viewGroup: ViewGroup) {
-                    for (i in 0 until viewGroup.childCount) {
-                        val child = viewGroup.getChildAt(i)
-                        if (child is EditText) {
-                            val key = child.tag as? String
-                            if (key != null) {
-                                prefs.edit().putString(key, child.text.toString()).apply()
-                            }
-                        } else if (child is ViewGroup) {
-                            saveEditTexts(child)
-                        }
-                    }
-                }
-                saveEditTexts(mainLayout)
+                applyShiftingAndSave(mainLayout, prefs)
                 dismiss()
             }
         }
@@ -177,5 +177,46 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
         scrollView.addView(mainLayout)
         return scrollView
+    }
+
+    private fun applyShiftingAndSave(root: ViewGroup, prefs: android.content.SharedPreferences) {
+        val editor = prefs.edit()
+        val allOrderInputs = mutableListOf<Triple<String, Int, EditText>>()
+
+        fun collect(viewGroup: ViewGroup) {
+            for (i in 0 until viewGroup.childCount) {
+                val v = viewGroup.getChildAt(i)
+                if (v is EditText) {
+                    val tagStr = v.tag as? String ?: ""
+                    if (tagStr.startsWith("ORDER_INPUT")) {
+                        val currentVal = v.text.toString().toIntOrNull() ?: 99
+                        allOrderInputs.add(Triple(tagStr, currentVal, v))
+                    } else if (tagStr.isNotEmpty()) {
+                        editor.putString(tagStr, v.text.toString())
+                    }
+                } else if (v is ViewGroup) collect(v)
+            }
+        }
+        collect(root)
+
+        for (insId in 1..10) {
+            val currentInsOrders = allOrderInputs.filter { it.first.split("|")[1] == insId.toString() }
+            if (currentInsOrders.isEmpty()) continue
+
+            val sortedList = currentInsOrders.sortedBy { it.second }
+            var lastIdx = -1
+
+            for (item in sortedList) {
+                var targetIdx = item.second
+                if (targetIdx <= lastIdx) {
+                    targetIdx = lastIdx + 1
+                }
+                val tagParts = item.first.split("|")
+                val key = "cat_order_${tagParts[1]}_${tagParts[2]}_${tagParts[3]}"
+                editor.putString(key, targetIdx.toString())
+                lastIdx = targetIdx
+            }
+        }
+        editor.apply()
     }
 }
