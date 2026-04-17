@@ -1,8 +1,8 @@
-// v1.3
+// v1.4
 plugins {
     id("com.android.application")
     kotlin("android")
-    id("com.lagradost.cloudstream3.gradle") version "1.4.1"
+    id("com.lagradost.cloudstream3.gradle")
 }
 
 cloudstream {
