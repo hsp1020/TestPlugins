@@ -1,8 +1,8 @@
-// v1.11
+// v1.13
 package com.ultimaevo
 
 import android.content.Context
-import androidx.appcompat.app.AppCompatActivity
+import androidx.fragment.app.FragmentActivity
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 
@@ -26,7 +26,7 @@ class UltimaEvoPlugin : Plugin() {
         registerMainAPI(UltimaEvoProvider())
 
         openSettings = { ctx ->
-            val act = ctx as? AppCompatActivity
+            val act = ctx as? FragmentActivity
             if (act != null && !act.isFinishing && !act.isDestroyed) {
                 val dialog = UltimaEvoSettingsDialog()
                 dialog.show(act.supportFragmentManager, "UltimaEvoSettingsDialog")
