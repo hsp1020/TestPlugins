@@ -1,5 +1,5 @@
 // v1.5
-package com.example.ultimaevo
+package com.ultimaevo
 
 import android.content.Context
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
