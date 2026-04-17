@@ -1,5 +1,5 @@
 // v1.5
-package com.example.ultimaevo
+package com.ultimaevo
 
 import androidx.preference.PreferenceManager
 import com.lagradost.cloudstream3.APIHolder
