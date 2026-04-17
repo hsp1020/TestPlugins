@@ -1,20 +1,43 @@
-version = 1
+// v1.7
+plugins {
+    id("com.android.application")
+    kotlin("android")
+    id("com.lagradost.cloudstream3.gradle")
+}
+
+repositories {
+    google()
+    mavenCentral()
+}
 
 cloudstream {
-    description = "All in one Catalogs"
-    authors = listOf("hsp1020") // 본인 계정명으로 변경
-    language = "ko"
-    
-    status = 1 // 0: Down, 1: Ok, 2: Slow, 3: Beta
-    tvTypes = listOf(
-        "All"
-    )
-    
-    iconUrl = "https://raw.githubusercontent.com/phisher98/TVVVV/refs/heads/main/Icons/UltimaBeta.png"
+    name = "Ultima Evo"
+    description = "Advanced custom catalog manager for Cloudstream"
+    authors = listOf("Developer")
+    versionName = "1.0.0"
+    versionCode = 1
+}
+
+android {
+    namespace = "com.ultimaevo"
+    compileSdk = 34
+
+    defaultConfig {
+        minSdk = 21
+        targetSdk = 34
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = "1.8"
+    }
 }
 
 dependencies {
     val cloudstreamApi = "com.github.recloudstream:cloudstream:pre-release"
     compileOnly(cloudstreamApi)
-    implementation("androidx.preference:preference-ktx:1.2.1")
 }
