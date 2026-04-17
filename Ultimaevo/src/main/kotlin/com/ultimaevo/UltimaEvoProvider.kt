@@ -1,4 +1,4 @@
-// v1.7
+// v1.9
 package com.ultimaevo
 
 import android.preference.PreferenceManager
@@ -9,6 +9,8 @@ import com.lagradost.cloudstream3.MainPageData
 import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.newHomePageResponse
+import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.*
 
 class UltimaEvoProvider : MainAPI() {
     override var mainUrl = "ultima_evo"
@@ -75,7 +77,8 @@ class UltimaEvoProvider : MainAPI() {
 
             val originalRequest = MainPageRequest(
                 name = request.name,
-                data = originalData
+                data = originalData,
+                horizontalImages = request.horizontalImages
             )
 
             val response = targetProvider.getMainPage(page, originalRequest) ?: return newHomePageResponse(emptyList(), false)
