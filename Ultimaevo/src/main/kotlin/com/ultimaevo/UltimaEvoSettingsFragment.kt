@@ -9,6 +9,8 @@ import androidx.preference.PreferenceCategory
 import androidx.preference.PreferenceFragmentCompat
 import androidx.preference.SwitchPreferenceCompat
 import com.lagradost.cloudstream3.APIHolder
+import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.*
 
 class UltimaEvoSettingsFragment : PreferenceFragmentCompat() {
     override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
