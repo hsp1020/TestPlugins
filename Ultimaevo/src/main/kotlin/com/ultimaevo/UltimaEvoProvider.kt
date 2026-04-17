@@ -10,6 +10,8 @@ import com.lagradost.cloudstream3.MainPageData
 import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.newHomePageResponse
+import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.*
 
 class UltimaEvoProvider : MainAPI() {
     override var mainUrl = "ultima_evo"
