@@ -1,7 +1,8 @@
-// v1.7
+// v1.10
 package com.ultimaevo
 
 import android.content.Context
+import android.preference.PreferenceFragment
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 
@@ -19,6 +20,8 @@ class UltimaEvoPlugin : Plugin() {
     companion object {
         var pluginContext: Context? = null
     }
+
+    var settingsFragment: Class<out PreferenceFragment>? = UltimaEvoSettingsFragment::class.java
 
     override fun load(context: Context) {
         pluginContext = context
