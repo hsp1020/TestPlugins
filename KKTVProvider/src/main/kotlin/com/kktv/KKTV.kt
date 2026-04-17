@@ -1,4 +1,4 @@
-// v7.10 - 스트림 도메인 Base64/JSON 이스케이프 범용 정규식 추가 및 단계별 정밀 디버깅 로그 적용
+// v7.11 - ExoPlayer 2004(403 Forbidden) 차단 해결을 위한 Referer 원복 및 다중 플레이어 엔드포인트 순회 로직 추가
 package com.KingkongTv
 
 import android.net.Uri
@@ -27,19 +27,19 @@ class KingkongTv : MainAPI() {
 
     private suspend fun updateMainUrlIfNeeded() {
         try {
-            println("DEBUG [KingkongTv] v7.10: 포털 사이트($portalUrl)에서 최신 접속 주소 확인 시작")
+            println("DEBUG [KingkongTv] v7.11: 포털 사이트($portalUrl)에서 최신 접속 주소 확인 시작")
             val doc = app.get(portalUrl).document
             val latestUrl = doc.selectFirst("a.nav-cta")?.attr("href")
             
             if (!latestUrl.isNullOrBlank()) {
                 val cleanedUrl = latestUrl.trimEnd('/')
                 if (mainUrl != cleanedUrl) {
-                    println("DEBUG [KingkongTv] v7.10: 최신 주소 획득 완료 - $cleanedUrl (이전 주소: $mainUrl)")
+                    println("DEBUG [KingkongTv] v7.11: 최신 주소 획득 완료 - $cleanedUrl (이전 주소: $mainUrl)")
                     mainUrl = cleanedUrl
                 }
             }
         } catch (e: Exception) {
-            println("DEBUG [KingkongTv] v7.10: 최신 주소 확인 중 오류 발생 - ${e.message}")
+            println("DEBUG [KingkongTv] v7.11: 최신 주소 확인 중 오류 발생 - ${e.message}")
         }
     }
 
@@ -132,29 +132,18 @@ class KingkongTv : MainAPI() {
         val rawRef = uri.getQueryParameter("ref")
         val refererUrl = if (!rawRef.isNullOrBlank()) URLDecoder.decode(rawRef, "UTF-8") else "https://kktv.speed10-1.com/kktv/index.php"
         
-        println("DEBUG [KingkongTv] v7.10: === [STAGE 1] 링크 로드 파라미터 초기화 ===")
-        println("DEBUG [KingkongTv] v7.10: Stream ID = $streamId")
-        println("DEBUG [KingkongTv] v7.10: Referer = $refererUrl")
-
-        val playerPageUrl = if (refererUrl.contains("index.php")) {
-            refererUrl.replace("index.php", "pc_view.php").substringBefore("?") + "?stream=$streamId"
-        } else {
-            try {
-                val baseUri = java.net.URI(refererUrl)
-                "${baseUri.scheme}://${baseUri.host}/kktv/pc_view.php?stream=$streamId"
-            } catch (e: Exception) {
-                "https://kktv.speed10-1.com/kktv/pc_view.php?stream=$streamId"
-            }
-        }
+        println("DEBUG [KingkongTv] v7.11: === [STAGE 1] 링크 로드 시작 ===")
         
         val baseDomain = try {
-            val u = java.net.URI(playerPageUrl)
+            val u = java.net.URI(refererUrl)
             "${u.scheme}://${u.host}"
         } catch (e: Exception) {
             "https://kktv.speed10-1.com"
         }
 
-        println("DEBUG [KingkongTv] v7.10: 타겟 Player URL = $playerPageUrl")
+        // [수정 포인트 v7.11] 운영자가 기존 플레이어 경로를 삭제하여 404 에러가 나는 것을 회피하기 위해 다중 엔드포인트 파일명 순회
+        val endpoints = listOf("pc_view.php", "ch_view.php", "view.php", "player.php")
+        var m3u8Url: String? = null
 
         val headers = mapOf(
             "User-Agent" to userAgent,
@@ -162,126 +151,105 @@ class KingkongTv : MainAPI() {
             "Origin" to mainUrl
         )
 
+        for (endpoint in endpoints) {
+            val playerPageUrl = if (refererUrl.contains("index.php")) {
+                refererUrl.replace("index.php", endpoint).substringBefore("?") + "?stream=$streamId"
+            } else {
+                "$baseDomain/kktv/$endpoint?stream=$streamId"
+            }
+
+            println("DEBUG [KingkongTv] v7.11: 타겟 Player URL 시도 = $playerPageUrl")
+
+            try {
+                val responseResponse = app.get(playerPageUrl, headers = headers)
+                val response = responseResponse.text
+                
+                println("DEBUG [KingkongTv] v7.11: HTTP 상태 코드 = ${responseResponse.code}")
+                
+                // File not found(404)나 데이터가 빈 경우 다음 파일명으로 패스
+                if (responseResponse.code != 200 || response.contains("File not found", ignoreCase = true) || response.length < 50) {
+                    println("DEBUG [KingkongTv] v7.11: $endpoint 경로가 유효하지 않음 (404 또는 빈 페이지). 다음 엔드포인트 탐색")
+                    continue
+                }
+
+                println("DEBUG [KingkongTv] v7.11: $endpoint 응답 성공. 정규식 추출 시작")
+
+                m3u8Url = Regex("""(?i)(?:source|file|url|src|stream)\s*[:=]\s*['"](https?:[\\/]+[^'"]+)['"]""").find(response)?.groupValues?.get(1)?.replace("\\/", "/")
+                
+                if (m3u8Url == null) {
+                    val b64Match = Regex("""['"](aHR0cHM6Ly9[^'"]+|aHR0cDovLz[^'"]+)['"]""").find(response)?.groupValues?.get(1)
+                    if (b64Match != null) {
+                        try {
+                            m3u8Url = String(Base64.decode(b64Match, Base64.DEFAULT)).replace("\\/", "/")
+                        } catch (e: Exception) { }
+                    }
+                }
+                
+                if (m3u8Url == null) m3u8Url = Regex("""['"](https?:[\\/]+[^'"]+(?:\.m3u8|$streamId)[^'"]*)['"]""").find(response)?.groupValues?.get(1)?.replace("\\/", "/")
+                
+                if (m3u8Url == null) {
+                    val webrtcMatch = Regex("""['"](webrtc:[\\/]+[^'"]+)['"]""").find(response)?.groupValues?.get(1)?.replace("\\/", "/")
+                    if (webrtcMatch != null) m3u8Url = webrtcMatch.replace("webrtc://", "https://").replace(streamId, "$streamId.m3u8") 
+                }
+
+                if (m3u8Url != null) {
+                    println("DEBUG [KingkongTv] v7.11: $endpoint 경로에서 성공적으로 스트림 추출 완료 - $m3u8Url")
+                    break
+                }
+            } catch (e: Exception) {
+                println("DEBUG [KingkongTv] v7.11: $endpoint 요청 에러 - ${e.message}")
+            }
+        }
+
+        // 모든 파일 경로에서도 찾지 못했을 경우 썸네일 기반 추론 적용 (최후의 수단)
+        if (m3u8Url == null) {
+            var ogtvDomain = "play.ogtv3.com"
+            val rawPoster = uri.getQueryParameter("poster")
+            if (!rawPoster.isNullOrBlank()) {
+                val decodedPoster = URLDecoder.decode(rawPoster, "UTF-8")
+                val match = Regex("""ogtv(\d+)""").find(decodedPoster)
+                if (match != null) {
+                    ogtvDomain = "play.ogtv${match.groupValues[1]}.com"
+                }
+            }
+            m3u8Url = "https://$ogtvDomain/live/$streamId.m3u8?site=kktv"
+            println("DEBUG [KingkongTv] v7.11: 모든 엔드포인트 추출 실패. 가설 백업 도메인 할당 - $m3u8Url")
+        }
+
+        println("DEBUG [KingkongTv] v7.11: 최종 확정 M3U8 URL = $m3u8Url")
+
+        // [수정 포인트 v7.11] ExoPlayer 2004(403 Forbidden) 차단을 풀기 위해, 이전 버전의 오류였던 '영상 서버의 도메인'을 던지는 것이 아니라 본래 포털의 도메인(baseDomain)으로 Referer를 단단하게 고정합니다.
         try {
-            println("DEBUG [KingkongTv] v7.10: === [STAGE 2] Player 페이지 네트워크(Network) 요청 시작 ===")
-            val responseResponse = app.get(playerPageUrl, headers = headers)
-            val response = responseResponse.text
-            
-            println("DEBUG [KingkongTv] v7.10: HTTP 상태 코드 = ${responseResponse.code}")
-            println("DEBUG [KingkongTv] v7.10: 응답 데이터 길이 = ${response.length} bytes")
-            
-            val debugText = if (response.length > 800) response.take(400) + "\n...[중략]...\n" + response.takeLast(400) else response
-            println("DEBUG [KingkongTv] v7.10: [응답 본문 프리뷰 시작]\n$debugText\n[응답 본문 프리뷰 종료]")
-            
-            var m3u8Url: String? = null
-
-            println("DEBUG [KingkongTv] v7.10: === [STAGE 3] 정규식 패턴 매칭 시작 ===")
-            
-            // 1. JSON 이스케이프 문자열(\/)까지 고려한 명시적 패턴 탐색
-            m3u8Url = Regex("""(?i)(?:source|file|url|src|stream)\s*[:=]\s*['"](https?:[\\/]+[^'"]+)['"]""").find(response)?.groupValues?.get(1)?.replace("\\/", "/")
-            if (m3u8Url != null) println("DEBUG [KingkongTv] v7.10: 패턴 1 (명시적 속성) 성공 - $m3u8Url")
-
-            // 2. Base64 인코딩 패턴 탐색
-            if (m3u8Url == null) {
-                val b64Match = Regex("""['"](aHR0cHM6Ly9[^'"]+|aHR0cDovLz[^'"]+)['"]""").find(response)?.groupValues?.get(1)
-                if (b64Match != null) {
-                    try {
-                        m3u8Url = String(Base64.decode(b64Match, Base64.DEFAULT)).replace("\\/", "/")
-                        println("DEBUG [KingkongTv] v7.10: 패턴 2 (Base64 디코딩) 성공 - $m3u8Url")
-                    } catch (e: Exception) {
-                        println("DEBUG [KingkongTv] v7.10: 패턴 2 Base64 디코딩 실패")
-                    }
-                }
-            }
-
-            // 3. 확장자가 .m3u8 이거나 streamId를 포함하는 모든 http 링크 탐색 (가장 포괄적)
-            if (m3u8Url == null) {
-                m3u8Url = Regex("""['"](https?:[\\/]+[^'"]+(?:\.m3u8|$streamId)[^'"]*)['"]""").find(response)?.groupValues?.get(1)?.replace("\\/", "/")
-                if (m3u8Url != null) println("DEBUG [KingkongTv] v7.10: 패턴 3 (포괄적 탐색) 성공 - $m3u8Url")
-            }
-
-            // 4. WebRTC 변환 로직
-            if (m3u8Url == null) {
-                val webrtcMatch = Regex("""['"](webrtc:[\\/]+[^'"]+)['"]""").find(response)?.groupValues?.get(1)?.replace("\\/", "/")
-                if (webrtcMatch != null) {
-                    m3u8Url = webrtcMatch.replace("webrtc://", "https://").replace(streamId, "$streamId.m3u8") 
-                    println("DEBUG [KingkongTv] v7.10: 패턴 4 (WebRTC) 성공 - $m3u8Url")
-                }
-            }
-
-            // 5. 중첩 iframe 플레이어 재탐색
-            if (m3u8Url == null) {
-                val iframeSrc = Regex("""<iframe[^>]+src=['"]([^'"]+)['"]""").find(response)?.groupValues?.get(1)
-                if (iframeSrc != null) {
-                    val realIframeSrc = fixUrl(playerPageUrl, iframeSrc).replace("&amp;", "&")
-                    println("DEBUG [KingkongTv] v7.10: 패턴 5 중첩 iframe 발견, 2차 탐색 시도 - $realIframeSrc")
-                    try {
-                        val iframeResponse = app.get(realIframeSrc, headers = headers).text
-                        println("DEBUG [KingkongTv] v7.10: 2차 iframe 응답 길이 = ${iframeResponse.length} bytes")
-                        m3u8Url = Regex("""['"](https?:[\\/]+[^'"]+\.m3u8[^'"]*)['"]""").find(iframeResponse)?.groupValues?.get(1)?.replace("\\/", "/")
-                        if (m3u8Url != null) println("DEBUG [KingkongTv] v7.10: 패턴 5 (중첩 iframe 내부) 성공 - $m3u8Url")
-                    } catch (e: Exception) { 
-                        println("DEBUG [KingkongTv] v7.10: 2차 iframe 요청 중 예외 발생 - ${e.message}")
-                    }
-                }
-            }
-
-            // 6. 최후의 수단 (이전 버전의 타임아웃 주범이었으나 안전망으로 최소한만 남김)
-            if (m3u8Url == null) {
-                var ogtvDomain = "play.ogtv3.com"
-                val rawPoster = uri.getQueryParameter("poster")
-                if (!rawPoster.isNullOrBlank()) {
-                    val decodedPoster = URLDecoder.decode(rawPoster, "UTF-8")
-                    val match = Regex("""ogtv(\d+)""").find(decodedPoster)
-                    if (match != null) {
-                        ogtvDomain = "play.ogtv${match.groupValues[1]}.com"
-                    }
-                }
-                m3u8Url = "https://$ogtvDomain/live/$streamId.m3u8?site=kktv"
-                println("DEBUG [KingkongTv] v7.10: 강력 경고! 모든 추출 실패. 가설 백업 도메인 할당 - $m3u8Url")
-            }
-
-            println("DEBUG [KingkongTv] v7.10: === [STAGE 4] 최종 추출 완료 및 ExtractorLink 생성 ===")
-            println("DEBUG [KingkongTv] v7.10: 최종 확정 M3U8 URL = $m3u8Url")
-
-            // 도메인 추출 후 헤더용 Host 동적 생성
-            val streamDomain = try {
-                val u = java.net.URI(m3u8Url!!)
-                "${u.scheme}://${u.host}"
-            } catch (e: Exception) { baseDomain }
-
-            // [기존 로직 보존 v7.10] HTTPS/HTTP 동시 제공
             if (m3u8Url != null && m3u8Url!!.contains("play.ogtv") && m3u8Url!!.startsWith("https://")) {
                 callback.invoke(
                     newExtractorLink(source = name, name = "$name (HTTPS)", url = m3u8Url!!, type = ExtractorLinkType.M3U8) {
-                        this.referer = "$streamDomain/"
+                        this.referer = "$baseDomain/"
                         this.quality = Qualities.Unknown.value
-                        this.headers = mapOf("Origin" to streamDomain, "Referer" to "$streamDomain/", "User-Agent" to userAgent)
+                        this.headers = mapOf("Origin" to baseDomain, "Referer" to "$baseDomain/", "User-Agent" to userAgent)
                     }
                 )
                 
                 val bypassedUrl = m3u8Url!!.replaceFirst("https://", "http://")
                 callback.invoke(
                     newExtractorLink(source = name, name = "$name (HTTP 우회)", url = bypassedUrl, type = ExtractorLinkType.M3U8) {
-                        this.referer = "$streamDomain/"
+                        this.referer = "$baseDomain/"
                         this.quality = Qualities.Unknown.value
-                        this.headers = mapOf("Origin" to streamDomain, "Referer" to "$streamDomain/", "User-Agent" to userAgent)
+                        this.headers = mapOf("Origin" to baseDomain, "Referer" to "$baseDomain/", "User-Agent" to userAgent)
                     }
                 )
             } else {
                 callback.invoke(
                     newExtractorLink(source = name, name = name, url = m3u8Url!!, type = ExtractorLinkType.M3U8) {
-                        this.referer = "$streamDomain/"
+                        this.referer = "$baseDomain/"
                         this.quality = Qualities.Unknown.value
-                        this.headers = mapOf("Origin" to streamDomain, "Referer" to "$streamDomain/", "User-Agent" to userAgent)
+                        this.headers = mapOf("Origin" to baseDomain, "Referer" to "$baseDomain/", "User-Agent" to userAgent)
                     }
                 )
             }
-            println("DEBUG [KingkongTv] v7.10: === 모든 처리 정상 종료 ===")
-
+            println("DEBUG [KingkongTv] v7.11: === 플레이어에 링크 인계 성공 ===")
         } catch (e: Exception) {
-            println("DEBUG [KingkongTv] v7.10: === [ERROR] 치명적 에러 발생 ===")
-            println("DEBUG [KingkongTv] v7.10: 에러 메시지: ${e.message}")
+            println("DEBUG [KingkongTv] v7.11: === [ERROR] 치명적 에러 발생 ===")
+            println("DEBUG [KingkongTv] v7.11: 에러 메시지: ${e.message}")
             e.printStackTrace()
         }
         return true
