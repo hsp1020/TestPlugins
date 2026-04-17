@@ -1,17 +1,14 @@
-// v1.6
+// v1.7
 package com.ultimaevo
 
-import androidx.preference.PreferenceManager
+import android.preference.PreferenceManager
 import com.lagradost.cloudstream3.APIHolder
-import com.lagradost.cloudstream3.HomePageList
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.MainPageData
 import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.newHomePageResponse
-import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.*
 
 class UltimaEvoProvider : MainAPI() {
     override var mainUrl = "ultima_evo"
@@ -84,11 +81,7 @@ class UltimaEvoProvider : MainAPI() {
             val response = targetProvider.getMainPage(page, originalRequest) ?: return newHomePageResponse(emptyList(), false)
             
             val modifiedItems = response.items.map { homePageList ->
-                HomePageList(
-                    name = customName,
-                    list = homePageList.list,
-                    horizontalImages = homePageList.isHorizontalImages
-                )
+                homePageList.copy(name = customName)
             }
 
             return newHomePageResponse(modifiedItems, response.hasNext)
