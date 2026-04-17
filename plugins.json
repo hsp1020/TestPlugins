@@ -196,10 +196,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/phisher98/TVVVV/refs/heads/main/Icons/UltimaBeta.png",
-        "fileHash": "sha256-6dbb37164e01af355e39258ac261eb41c7509b26d1c37e1369cb66337c26c553",
+        "fileHash": "sha256-bbb6cb5aab701bf56f70d9e2c9dcb73099249820316f993c77ffd230f09a6675",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 17631,
+        "fileSize": 20694,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -207,6 +207,7 @@
         ],
         "tvTypes": [
             "All",
+            "Live",
             "Other"
         ],
         "version": 1,
