@@ -1,4 +1,4 @@
-// v1.15
+// v1.19
 package com.ultimaevo
 
 import android.preference.PreferenceManager
@@ -7,12 +7,13 @@ import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.MainPageData
 import com.lagradost.cloudstream3.MainPageRequest
+import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.newHomePageResponse
 
-class UltimaEvoProvider : MainAPI() {
-    override var mainUrl = "ultima_evo"
-    override var name = "Ultima Evo"
+class UltimaEvoProvider(private val instanceId: Int, private val customName: String) : MainAPI() {
+    override var mainUrl = "ultima_evo_$instanceId"
+    override var name = customName
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.Live)
 
@@ -20,10 +21,10 @@ class UltimaEvoProvider : MainAPI() {
         val context = UltimaEvoPlugin.pluginContext ?: return emptyList()
         val prefs = PreferenceManager.getDefaultSharedPreferences(context)
         val settings = mutableListOf<SavedCatalog>()
-        val allProviders = APIHolder.allProviders.filter { it.hasMainPage && it.name != "Ultima Evo" }
+        val allProviders = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
 
         for (provider in allProviders) {
-            val providerEnabled = prefs.getBoolean("ext_toggle_${provider.name}", false)
+            val providerEnabled = prefs.getBoolean("ext_toggle_${instanceId}_${provider.name}", false)
             if (!providerEnabled) continue
 
             val staticCats = provider.mainPage.map { it.name to it.data }
@@ -35,11 +36,11 @@ class UltimaEvoProvider : MainAPI() {
                 val catalogName = catPair.first
                 val catalogData = catPair.second
 
-                val catalogEnabled = prefs.getBoolean("cat_toggle_${provider.name}_${catalogName}", false)
+                val catalogEnabled = prefs.getBoolean("cat_toggle_${instanceId}_${provider.name}_$catalogName", false)
                 if (!catalogEnabled) continue
 
-                val customName = prefs.getString("cat_rename_${provider.name}_${catalogName}", catalogName) ?: catalogName
-                val orderStr = prefs.getString("cat_order_${provider.name}_${catalogName}", "99") ?: "99"
+                val renamed = prefs.getString("cat_rename_${instanceId}_${provider.name}_$catalogName", catalogName) ?: catalogName
+                val orderStr = prefs.getString("cat_order_${instanceId}_${provider.name}_$catalogName", "99") ?: "99"
                 val orderIndex = orderStr.toIntOrNull() ?: 99
 
                 settings.add(
@@ -47,7 +48,7 @@ class UltimaEvoProvider : MainAPI() {
                         providerName = provider.name,
                         originalCatalogName = catalogName,
                         originalCatalogData = catalogData,
-                        customCatalogName = customName,
+                        customCatalogName = renamed,
                         isEnabled = true,
                         orderIndex = orderIndex
                     )
@@ -65,44 +66,50 @@ class UltimaEvoProvider : MainAPI() {
             }
         }
 
-    override suspend fun getMainPage(
-        page: Int,
-        request: MainPageRequest
-    ): HomePageResponse? {
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         try {
             val parts = request.data.split("|||")
-            if (parts.size < 3) {
-                return newHomePageResponse(emptyList(), false)
-            }
+            if (parts.size < 3) return newHomePageResponse(emptyList(), false)
 
             val targetProviderName = parts[0]
             val originalData = parts[1]
-            val customName = parts[2]
+            val customCatalogTitle = parts[2]
             val originalCatalogName = parts.getOrNull(3) ?: ""
 
             val targetProvider = APIHolder.allProviders.find { it.name == targetProviderName } ?: return newHomePageResponse(emptyList(), false)
 
-            val originalRequest = MainPageRequest(
-                name = request.name,
-                data = originalData,
-                horizontalImages = request.horizontalImages
-            )
-
+            val originalRequest = MainPageRequest(request.name, originalData, request.horizontalImages)
             val response = targetProvider.getMainPage(page, originalRequest) ?: return newHomePageResponse(emptyList(), false)
             
             val filteredItems = if (originalCatalogName.isNotEmpty() && response.items.size > 1) {
                 response.items.filter { it.name == originalCatalogName }
-            } else {
-                response.items
-            }
+            } else response.items
 
-            val modifiedItems = filteredItems.map { homePageList ->
-                homePageList.copy(name = customName)
-            }
-
+            val modifiedItems = filteredItems.map { it.copy(name = customCatalogTitle) }
             return newHomePageResponse(modifiedItems, response.hasNext)
         } catch (e: Exception) {
             return newHomePageResponse(emptyList(), false)
         }
+    }
+
+    override suspend fun search(query: String): List<SearchResponse> {
+        val context = UltimaEvoPlugin.pluginContext ?: return emptyList()
+        val prefs = PreferenceManager.getDefaultSharedPreferences(context)
+        
+        val isSearchEnabled = prefs.getBoolean("evo_search_enabled_$instanceId", true)
+        if (!isSearchEnabled) return emptyList()
+
+        val settings = getUserSettings()
+        val providersToSearch = settings.map { it.providerName }.distinct()
+        val results = mutableListOf<SearchResponse>()
+
+        for (providerName in providersToSearch) {
+            val provider = APIHolder.allProviders.find { it.name == providerName } ?: continue
+            try {
+                val searchRes = provider.search(query)
+                results.addAll(searchRes)
+            } catch (e: Exception) { }
+        }
+        return results.distinctBy { it.url }
     }
 }
