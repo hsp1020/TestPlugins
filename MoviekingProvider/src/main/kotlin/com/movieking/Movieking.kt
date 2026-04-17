@@ -15,7 +15,7 @@ import kotlinx.coroutines.sync.withLock
 // v1.2 수정: 도메인 자동 갱신(리다이렉트 감지 및 캐싱) 로직 추가
 class MovieKing : MainAPI() {
     companion object {
-        var currentMainUrl = "https://mvking.top" 
+        var currentMainUrl = "https://mvking.net" 
         var isDomainChecked = false 
         private val domainMutex = Mutex()
         private const val PREFS_NAME = "MovieKing_Domain_Cache"
