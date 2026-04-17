@@ -1,4 +1,3 @@
-// v1.19
 package com.ultimaevo
 
 import android.os.Bundle
@@ -7,12 +6,7 @@ import android.text.InputType
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.widget.Button
-import android.widget.EditText
-import android.widget.LinearLayout
-import android.widget.ScrollView
-import android.widget.Switch
-import android.widget.TextView
+import android.widget.*
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.MainPageRequest
@@ -43,14 +37,36 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         }
         mainLayout.addView(title)
 
-        val instanceCount = prefs.getInt("evo_instance_count", 3)
+        // [신규] 통합 카탈로그 생성 개수 설정 섹션
+        val countLabel = TextView(ctx).apply { text = "생성할 통합 카탈로그 총 개수 (변경 시 앱 재시작 필요)" }
+        mainLayout.addView(countLabel)
+        
+        val instanceCountInput = EditText(ctx).apply {
+            hint = "예: 5"
+            inputType = InputType.TYPE_CLASS_NUMBER
+            val currentCount = prefs.getString("evo_instance_count", "1")
+            setText(currentCount)
+            tag = "evo_instance_count"
+        }
+        mainLayout.addView(instanceCountInput)
+
+        val currentCountStr = prefs.getString("evo_instance_count", "1") ?: "1"
+        val instanceCount = currentCountStr.toIntOrNull() ?: 1
 
         for (i in 1..instanceCount) {
             val insCategory = LinearLayout(ctx).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(0, 30, 0, 30)
+                setPadding(0, 40, 0, 40)
+                // 구분선 대용 배경 처리 (필요시)
             }
             mainLayout.addView(insCategory)
+
+            val insHeader = TextView(ctx).apply {
+                text = "■ 통합 카탈로그 #$i 설정"
+                textSize = 18f
+                setPadding(0, 0, 0, 10)
+            }
+            insCategory.addView(insHeader)
 
             val insNameInput = EditText(ctx).apply {
                 hint = "통합 카탈로그 $i 이름"
@@ -128,8 +144,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     val cName = cat.first
                     val toggleKey = "cat_toggle_${i}_${provider.name}_$cName"
                     val renameKey = "cat_rename_${i}_${provider.name}_$cName"
-                    val orderKey = "cat_order_${i}_${provider.name}_$cName"
-
+                    
                     val cSwitch = Switch(ctx).apply {
                         text = "└ $cName 표시"
                         isChecked = prefs.getBoolean(toggleKey, false)
@@ -158,7 +173,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     val oInput = EditText(ctx).apply {
                         hint = "정렬 순서"
                         inputType = InputType.TYPE_CLASS_NUMBER
-                        setText(prefs.getString(orderKey, "99"))
+                        setText(prefs.getString("cat_order_${i}_${provider.name}_$cName", "99"))
                         tag = "ORDER_INPUT|${i}|${provider.name}|${cName}" 
                     }
                     editLayout.addView(oInput)
@@ -167,7 +182,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         }
 
         val saveBtn = Button(ctx).apply {
-            text = "모든 설정 저장 및 닫기 (앱 재시작 권장)"
+            text = "모든 설정 저장 및 닫기"
             setOnClickListener {
                 applyShiftingAndSave(mainLayout, prefs)
                 dismiss()
@@ -189,6 +204,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 if (v is EditText) {
                     val tagStr = v.tag as? String ?: ""
                     if (tagStr.startsWith("ORDER_INPUT")) {
+                        val parts = tagStr.split("|")
                         val currentVal = v.text.toString().toIntOrNull() ?: 99
                         allOrderInputs.add(Triple(tagStr, currentVal, v))
                     } else if (tagStr.isNotEmpty()) {
@@ -199,7 +215,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         }
         collect(root)
 
-        for (insId in 1..10) {
+        // 최대 50개 인스턴스까지 지원 가능하도록 루프 처리
+        for (insId in 1..50) {
             val currentInsOrders = allOrderInputs.filter { it.first.split("|")[1] == insId.toString() }
             if (currentInsOrders.isEmpty()) continue
 
