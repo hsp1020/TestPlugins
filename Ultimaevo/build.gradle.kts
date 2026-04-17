@@ -12,3 +12,9 @@ cloudstream {
     
     iconUrl = "https://raw.githubusercontent.com/phisher98/TVVVV/refs/heads/main/Icons/UltimaBeta.png"
 }
+
+dependencies {
+    val cloudstreamApi = "com.github.recloudstream:cloudstream:pre-release"
+    compileOnly(cloudstreamApi)
+    implementation("androidx.preference:preference-ktx:1.2.1")
+}
