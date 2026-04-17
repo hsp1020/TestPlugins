@@ -1,8 +1,8 @@
-// v1.10
+// v1.11
 package com.ultimaevo
 
 import android.content.Context
-import android.preference.PreferenceFragment
+import androidx.appcompat.app.AppCompatActivity
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 
@@ -21,10 +21,16 @@ class UltimaEvoPlugin : Plugin() {
         var pluginContext: Context? = null
     }
 
-    var settingsFragment: Class<out PreferenceFragment>? = UltimaEvoSettingsFragment::class.java
-
     override fun load(context: Context) {
         pluginContext = context
         registerMainAPI(UltimaEvoProvider())
+
+        openSettings = { ctx ->
+            val act = ctx as? AppCompatActivity
+            if (act != null && !act.isFinishing && !act.isDestroyed) {
+                val dialog = UltimaEvoSettingsDialog()
+                dialog.show(act.supportFragmentManager, "UltimaEvoSettingsDialog")
+            }
+        }
     }
 }
