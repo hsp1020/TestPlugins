@@ -8,7 +8,7 @@ cloudstream {
     status = 1 // 0: Down, 1: Ok, 2: Slow, 3: Beta
     tvTypes = listOf(
         "All",
-        "Live"
+        "Live",
         "Other"
     )
     
