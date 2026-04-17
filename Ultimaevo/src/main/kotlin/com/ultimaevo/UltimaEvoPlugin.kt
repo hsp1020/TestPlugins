@@ -1,4 +1,3 @@
-// v1.19
 package com.ultimaevo
 
 import android.content.Context
@@ -26,7 +25,9 @@ class UltimaEvoPlugin : Plugin() {
         pluginContext = context
         val prefs = PreferenceManager.getDefaultSharedPreferences(context)
         
-        val instanceCount = prefs.getInt("evo_instance_count", 3)
+        // 사용자가 설정한 개수를 가져오며, 값이 없으면 기본 1개로 시작합니다.
+        val instanceCountStr = prefs.getString("evo_instance_count", "1") ?: "1"
+        val instanceCount = instanceCountStr.toIntOrNull() ?: 1
 
         for (i in 1..instanceCount) {
             val providerName = prefs.getString("evo_name_$i", "Ultima Evo $i") ?: "Ultima Evo $i"
