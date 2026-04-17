@@ -1,5 +1,5 @@
 // v1.5
-package com.example.ultimaevo
+package com.ultimaevo
 
 import android.os.Bundle
 import android.text.InputType
