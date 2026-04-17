@@ -1,4 +1,4 @@
-// v1.152 (Feature & Fix: CineStream 연동 시 tmdb ID의 시즌/에피소드 중복 결합 문제 해결 및 베이스 ID 정제 로직 추가, 영상 재생 시 OOM 크래시 방지를 위해 자막 JSON 파싱을 메모리 이중 할당(.text) 방식에서 스트림 파싱 방식(parsedSafe)으로 변경)
+// v1.153 (Feature & Fix: CineStream 연동 시 베이스 ID 정제 로직 유지. 미디어 스니핑으로 인한 OOM 크래시 방지를 위해 INFER_TYPE 제거 및 타입 명시화)
 package com.hsp1020
 
 import android.content.Context
@@ -35,7 +35,7 @@ import com.lagradost.cloudstream3.runAllAsync
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.INFER_TYPE
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.SubtitleHelper
 import com.lagradost.cloudstream3.utils.USER_PROVIDER_API
@@ -89,7 +89,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
     
     val customSession by lazy {
-        println("[StremioC v1.152] 커스텀 OkHttp 세션 초기화 (메모리 튜닝 - 연결 100개 유지)")
+        println("[StremioC v1.153] 커스텀 OkHttp 세션 초기화 (메모리 튜닝 - 연결 100개 유지)")
         val newClient = app.baseClient.newBuilder()
             .protocols(listOf(Protocol.HTTP_1_1))
             .dispatcher(Dispatcher().apply {
@@ -167,10 +167,10 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     if (targetClassLoader != null) {
                         val clazz = targetClassLoader!!.loadClass("com.megix.CineStreamProvider")
                         provider = clazz.newInstance() as? MainAPI
-                        println("[StremioC v1.152] CineStream Ghost Provider 강제 생성 완료 (카탈로그 OFF 상태 감지)")
+                        println("[StremioC v1.153] CineStream Ghost Provider 강제 생성 완료 (카탈로그 OFF 상태 감지)")
                     }
                 } catch (e: Exception) {
-                    println("[StremioC v1.152] Failed to instantiate Ghost Provider: ${e.message}")
+                    println("[StremioC v1.153] Failed to instantiate Ghost Provider: ${e.message}")
                 }
             }
             
@@ -293,7 +293,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val now = System.currentTimeMillis()
                 val removedCount = globalPageCache.entries.removeIf { now - it.value.third > CACHE_TTL_MS }
                 if (removedCount) {
-                    println("[StremioC v1.152] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
+                    println("[StremioC v1.153] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
                 }
                 catalogSkipState.clear()
             }
@@ -312,7 +312,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
         
         if (!isNewRequest && page > 1) {
-            println("[StremioC v1.152] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
+            println("[StremioC v1.153] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
             return@coroutineScope newHomePageResponse(emptyList(), hasNext = true)
         }
         return@coroutineScope response
@@ -551,7 +551,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
 
         if (!isEnabled) {
-            println("[StremioC v1.152] 사용자가 설정에서 CineStream 연동을 비활성화하여 스킵합니다.")
+            println("[StremioC v1.153] 사용자가 설정에서 CineStream 연동을 비활성화하여 스킵합니다.")
             return
         }
 
@@ -590,7 +590,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val isKitsuMedia = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
             val kitsuIdExt = if (isKitsuMedia) globalId?.substringAfter("kitsu:")?.substringAfter("mal:") else loadData.kitsuId
             
-            // FIX: v1.152 - tmdb ID 파싱 시 꼬리표(시즌/에피소드)를 잘라내고 베이스 ID만 추출하는 정제 로직
+            // FIX: v1.153 - tmdb ID 파싱 시 꼬리표(시즌/에피소드)를 잘라내고 베이스 ID만 추출하는 정제 로직
             val rawIdForCineStream = loadData.imdbId ?: globalId?.takeIf { it.startsWith("tt") || it.startsWith("tmdb:") } ?: ""
             val correctImdbIdForCineStream = if (rawIdForCineStream.startsWith("tmdb:")) {
                 val parts = rawIdForCineStream.split(":")
@@ -600,7 +600,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 rawIdForCineStream
             }
             
-            println("[StremioC v1.152] CineStream 전달용 메인 ID 정제 완료: $correctImdbIdForCineStream (원본 rawId: $rawIdForCineStream)")
+            println("[StremioC v1.153] CineStream 전달용 메인 ID 정제 완료: $correctImdbIdForCineStream (원본 rawId: $rawIdForCineStream)")
 
             val scrapingTitle = loadData.englishTitle ?: loadData.originalTitle ?: loadData.title ?: "Unknown"
 
@@ -647,7 +647,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "isCartoon" to loadData.isCartoon
             )
 
-            println("[StremioC v1.152] CineStream 데이터 전달: $cineData")
+            println("[StremioC v1.153] CineStream 데이터 전달: $cineData")
             cineStreamProvider.loadLinks(cineData.toJson(), isCasting, subtitleInterceptor, callback)
         } catch (e: Exception) {
             e.printStackTrace()
@@ -684,8 +684,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 async(Dispatchers.IO) {
                     try {
                         val url = "$api/subtitles/$type/$stremioId.json"
-                        println("[StremioC v1.152] 📥 자막 스트림 직접 파싱 시도: $url")
-                        // 스트림 파싱 방식으로 변경 (.text 사용 시 OOM 방지)
+                        println("[StremioC v1.153] 📥 자막 스트림 파싱 시도: $url")
                         val subtitleResponse = customSession.get(url, timeout = 120L).parsedSafe<StremioSubtitleResponse>()
 
                         subtitleResponse?.subtitles?.forEach { sub ->
@@ -697,7 +696,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                             }
                         }
                     } catch (e: Exception) {
-                        println("[StremioC v1.152] 자막 로드 실패: ${e.message}")
+                        println("[StremioC v1.153] 자막 로드 실패: ${e.message}")
                     }
                 }
             }.awaitAll()
@@ -1016,7 +1015,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
 
             val extractedEnglishTitle = enDetailRes?.title ?: enDetailRes?.name ?: detailRes.original_title ?: detailRes.original_name
-            println("[StremioC v1.152] 영문 공식 타이틀 추출 결과: $extractedEnglishTitle")
+            println("[StremioC v1.153] 영문 공식 타이틀 추출 결과: $extractedEnglishTitle")
 
             return FetchedTmdbData(
                 if (isMovie) detailRes.title ?: detailRes.original_title else detailRes.name ?: detailRes.original_name,
@@ -1275,8 +1274,14 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     ) {
         suspend fun runCallback(provider: StremioC, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
             if (url != null) {
-                val isM3u8 = url.contains(".m3u8", ignoreCase = true) || name?.contains("m3u8", true) == true || title?.contains("m3u8", true) == true
-                val linkType = if (isM3u8) com.lagradost.cloudstream3.utils.ExtractorLinkType.M3U8 else INFER_TYPE
+                // FIX: v1.153 - INFER_TYPE 사용으로 인한 MediaHTTPConnection OOM 크래시 방지. 타입 명시화.
+                val lowerUrl = url.lowercase()
+                val linkType = when {
+                    lowerUrl.contains(".m3u8") || name?.contains("m3u8", true) == true || title?.contains("m3u8", true) == true -> ExtractorLinkType.M3U8
+                    lowerUrl.contains(".mpd") -> ExtractorLinkType.DASH
+                    lowerUrl.contains(".torrent") -> ExtractorLinkType.TORRENT
+                    else -> ExtractorLinkType.VIDEO // 기존 INFER_TYPE을 제거하고 VIDEO 타입으로 고정
+                }
 
                 callback.invoke(newExtractorLink(name ?: "", fixSourceName(name, title), url, linkType) {
                     this.quality = getQuality(listOf(description, title, name))
