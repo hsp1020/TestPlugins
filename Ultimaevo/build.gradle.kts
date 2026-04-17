@@ -15,10 +15,9 @@ cloudstream {
 }
 
 dependencies {
-    val cloudstreamApi = "com.github.recloudstream:cloudstream:pre-release"
-    compileOnly(cloudstreamApi)
-    
-    // [UI 컴파일을 위한 필수 의존성 추가]
-    compileOnly("androidx.appcompat:appcompat:1.6.1")
-    compileOnly("com.google.android.material:material:1.11.0")
+    // UI 생성을 위한 Material 라이브러리 추가 (부모 파일에는 없으므로 여기서만 추가)
+    implementation("com.google.android.material:material:1.13.0")
+
+    val cloudstream by configurations
+    cloudstream("com.lagradost:cloudstream3:pre-release")
 }
