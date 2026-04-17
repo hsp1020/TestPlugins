@@ -15,6 +15,8 @@ import android.widget.Switch
 import android.widget.TextView
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.lagradost.cloudstream3.APIHolder
+import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.*
 
 class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
     override fun onCreateView(
