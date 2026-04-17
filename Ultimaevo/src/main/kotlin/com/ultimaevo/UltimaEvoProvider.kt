@@ -1,4 +1,3 @@
-// v1.20
 package com.ultimaevo
 
 import android.preference.PreferenceManager
@@ -107,7 +106,6 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
             val provider = APIHolder.allProviders.find { it.name == providerName } ?: continue
             try {
                 val searchRes = provider.search(query)
-                // Null 체크 로직 추가
                 if (searchRes != null) {
                     results.addAll(searchRes)
                 }
