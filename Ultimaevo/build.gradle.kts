@@ -13,3 +13,12 @@ cloudstream {
     
     iconUrl = "https://raw.githubusercontent.com/phisher98/TVVVV/refs/heads/main/Icons/UltimaBeta.png"
 }
+
+dependencies {
+    val cloudstreamApi = "com.github.recloudstream:cloudstream:pre-release"
+    compileOnly(cloudstreamApi)
+    
+    // [UI 컴파일을 위한 필수 의존성 추가]
+    compileOnly("androidx.appcompat:appcompat:1.6.1")
+    compileOnly("com.google.android.material:material:1.11.0")
+}
