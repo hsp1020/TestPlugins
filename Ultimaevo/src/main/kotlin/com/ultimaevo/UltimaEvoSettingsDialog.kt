@@ -1,4 +1,4 @@
-// v1.15
+// v1.16
 package com.ultimaevo
 
 import android.os.Bundle
@@ -80,7 +80,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         this.isEnabled = false
                         CoroutineScope(Dispatchers.IO).launch {
                             try {
-                                val request = MainPageRequest("Home", "", "")
+                                val request = MainPageRequest("Home", "", false)
                                 val response = provider.getMainPage(1, request)
                                 if (response != null && response.items.isNotEmpty()) {
                                     val names = response.items.map { it.name }
