@@ -1,4 +1,4 @@
-// 버전 정보: v1.4
+// 버전 정보: v1.6
 package com.movieking
 
 import android.content.Context
@@ -12,7 +12,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
-// v1.4 수정: 카테고리 경로 유실 리다이렉트 방어 및 도메인 동적 재요청 로직 완벽 적용
 class MovieKing : MainAPI() {
     companion object {
         var currentMainUrl = "https://mvking.net" 
@@ -56,13 +55,9 @@ class MovieKing : MainAPI() {
             try {
                 val res = app.get(currentMainUrl, headers = commonHeaders, timeout = 5L)
                 if (res.isSuccessful && res.text.contains("video-card")) {
-                    println("[MovieKing v1.4 DBG] 기존 주소 유효함: $currentMainUrl")
-                    isDomainChecked = true
-                    return@withLock
+                    isDomainChecked = true; return@withLock
                 }
-            } catch (e: Exception) {
-                println("[MovieKing v1.4 DBG] 기존 주소 접속 실패, 포털 탐색 시작")
-            }
+            } catch (e: Exception) {}
 
             try {
                 val portalDoc = app.get(PORTAL_URL, timeout = 10L).document
@@ -71,18 +66,12 @@ class MovieKing : MainAPI() {
                 }?.attr("href")?.trimEnd('/')
 
                 if (!latestUrl.isNullOrBlank()) {
-                    val finalUrl = if (latestUrl.startsWith("http")) latestUrl else "https://$latestUrl"
-                    println("[MovieKing v1.4 DBG] 포털에서 직접 주소 추출 성공: $finalUrl")
-                    currentMainUrl = finalUrl
+                    currentMainUrl = if (latestUrl.startsWith("http")) latestUrl else "https://$latestUrl"
                     mainUrl = currentMainUrl
                     isDomainChecked = true
                     prefs?.edit()?.putString(PREF_KEY, currentMainUrl)?.apply()
-                    return@withLock
                 }
-            } catch (e: Exception) {
-                println("[MovieKing v1.4 DBG] 포털 내 주소 추출 실패: ${e.message}")
-            }
-            
+            } catch (e: Exception) {}
             isDomainChecked = true 
         }
     }
@@ -91,41 +80,28 @@ class MovieKing : MainAPI() {
         checkAndUpdateDomain()
         val separator = if (request.data.contains("?")) "&" else "?"
         var url = "$mainUrl${request.data}${separator}page=$page"
-        println("[MovieKing v1.4 DBG] getMainPage 1차 요청: $url")
         
         return try {
             var res = app.get(url, headers = commonHeaders)
             val finalUrl = res.url
             val redirectedDomain = Regex("^https?://[^/]+").find(finalUrl)?.value ?: mainUrl
             
-            // v1.4 핵심 로직: 사용자가 지적한 "경로 유실 후 메인 도메인 리다이렉트" 감지
-            // 원래 요청했던 경로(예: /video/드라마)가 최종 리다이렉트된 URL에 살아있는지 디코딩하여 확인
             val decodedRequestData = URLDecoder.decode(request.data, "UTF-8").substringBefore("?")
             val decodedFinalUrl = URLDecoder.decode(finalUrl, "UTF-8")
 
             if (redirectedDomain != mainUrl || !decodedFinalUrl.contains(decodedRequestData)) {
-                println("[MovieKing v1.4 DBG] 경로 유실 리다이렉트 감지! 기존 도메인: $mainUrl, 최종 도메인: $redirectedDomain")
-                
-                // 새 도메인으로 갱신
                 if (redirectedDomain != mainUrl) {
-                    currentMainUrl = redirectedDomain
-                    mainUrl = redirectedDomain
+                    currentMainUrl = redirectedDomain; mainUrl = redirectedDomain
                     AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()?.putString(PREF_KEY, currentMainUrl)?.apply()
                 }
-
-                // 바뀐 도메인에 '원래 요청하려던 카테고리 경로'를 붙여서 2차 재요청
                 url = "$mainUrl${request.data}${separator}page=$page"
-                println("[MovieKing v1.4 DBG] 새 도메인으로 경로 복구 후 2차 재요청: $url")
                 res = app.get(url, headers = commonHeaders)
             }
 
             val doc = res.document
             val list = doc.select(".video-card").mapNotNull { it.toSearchResponse(request.name) }
-            
-            println("[MovieKing v1.4 DBG] getMainPage 파싱성공 - 아이템 개수: ${list.size}")
             newHomePageResponse(request.name, list, hasNext = list.isNotEmpty())
         } catch (e: Exception) {
-            println("[MovieKing v1.4 DBG] getMainPage 에러발생: ${e.message}")
             if (e is CancellationException) throw e 
             newHomePageResponse(request.name, emptyList(), hasNext = false)
         }
@@ -141,7 +117,8 @@ class MovieKing : MainAPI() {
 
         var finalHref = href
         if (fixedPoster.isNotEmpty()) {
-            try { finalHref = "$href&poster_url=${URLEncoder.encode(fixedPoster, "UTF-8")}" } catch (e: Exception) {}
+            val separator = if (href.contains("?")) "&" else "?"
+            try { finalHref = "$href${separator}poster_url=${URLEncoder.encode(fixedPoster, "UTF-8")}" } catch (e: Exception) {}
         }
 
         val type = if (categoryName == "영화" || href.contains("movie")) TvType.Movie else TvType.TvSeries
@@ -158,28 +135,62 @@ class MovieKing : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse {
         checkAndUpdateDomain()
-        var realUrl = url
-        // 구 도메인으로 요청이 들어왔을 경우 신규 도메인으로 치환
-        if (!realUrl.startsWith(mainUrl) && realUrl.contains("mvking")) {
-            realUrl = mainUrl + realUrl.replace(Regex("https?://[^/]+"), "")
+        println("[MovieKing v1.6 DBG] load 진입: $url")
+        
+        var passedPoster: String? = null
+        var cleanUrl = url
+
+        // 1. 순수 URL 확보: &poster_url 및 ?poster_url 파라미터 완전 제거
+        try {
+            val posterRegex = Regex("""([&?])poster_url=[^&]+""")
+            val match = posterRegex.find(url)
+            if (match != null) {
+                val param = match.value
+                passedPoster = URLDecoder.decode(param.substringAfter("="), "UTF-8")
+                cleanUrl = url.replace(param, "").replace("?&", "?").trimEnd('?', '&')
+                println("[MovieKing v1.6 DBG] URL 클리닝 성공: $cleanUrl")
+            }
+        } catch (e: Exception) {
+            println("[MovieKing v1.6 DBG] URL 클리닝 중 오류: ${e.message}")
         }
-        val doc = app.get(realUrl, headers = commonHeaders).document
-        val title = (doc.selectFirst("h3.title")?.text() ?: "Unknown").replace(titleRegex, "").trim()
-        val poster = doc.selectFirst(".single-video-left img")?.attr("src") ?: ""
-        val episodeList = doc.select(".video-slider-right-list .eps_a").map { newEpisode(fixUrl(it.attr("href"))) { this.name = it.text().trim() } }.reversed()
+
+        // 2. 도메인 보정: 청소된 cleanUrl을 기준으로 현재 활성화된 mainUrl 적용
+        val finalUrl = if (!cleanUrl.startsWith(mainUrl) && cleanUrl.contains("mvking")) {
+            mainUrl + cleanUrl.replace(Regex("^https?://[^/]+"), "")
+        } else {
+            cleanUrl
+        }
+
+        println("[MovieKing v1.6 DBG] 최종 상세페이지 요청: $finalUrl")
+        
+        val doc = app.get(finalUrl, headers = commonHeaders).document
+        val title = (doc.selectFirst("h3.title")?.text() ?: doc.selectFirst("h1.text-secondary")?.text() ?: "Unknown").replace(titleRegex, "").trim()
+        val poster = passedPoster ?: doc.selectFirst(".single-video-left img")?.attr("src") ?: ""
+        val intro = doc.selectFirst(".single-video-info-content h6:contains(소개)")?.nextElementSibling()?.text()?.trim() ?: "설명이 없습니다."
+        
+        val episodeList = doc.select(".video-slider-right-list .eps_a").map { 
+            newEpisode(fixUrl(it.attr("href"))) { this.name = it.text().trim() } 
+        }.reversed()
+
+        println("[MovieKing v1.6 DBG] 파싱 완료: 제목=$title, 에피소드 수=${episodeList.size}")
 
         return if (episodeList.size <= 1) {
-            newMovieLoadResponse(title, realUrl, TvType.Movie, realUrl) { this.posterUrl = fixUrl(poster) }
+            newMovieLoadResponse(title, finalUrl, TvType.Movie, finalUrl) { this.posterUrl = fixUrl(poster); this.plot = intro }
         } else {
-            newTvSeriesLoadResponse(title, realUrl, TvType.TvSeries, episodeList) { this.posterUrl = fixUrl(poster) }
+            newTvSeriesLoadResponse(title, finalUrl, TvType.TvSeries, episodeList) { this.posterUrl = fixUrl(poster); this.plot = intro }
         }
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         checkAndUpdateDomain()
+        var targetData = data
+        if (!targetData.startsWith(mainUrl) && targetData.contains("mvking")) {
+            targetData = mainUrl + targetData.replace(Regex("https?://[^/]+"), "")
+        }
+        
         try {
-            val src = app.get(data, headers = commonHeaders).document.selectFirst("iframe#view_iframe")?.attr("src")
-            if (src != null) { loadExtractor(fixUrl(src), data, subtitleCallback, callback); return true }
+            val src = app.get(targetData, headers = commonHeaders).document.selectFirst("iframe#view_iframe")?.attr("src")
+            if (src != null) { loadExtractor(fixUrl(src), targetData, subtitleCallback, callback); return true }
         } catch (e: Exception) { if (e is CancellationException) throw e }
         return false
     }
