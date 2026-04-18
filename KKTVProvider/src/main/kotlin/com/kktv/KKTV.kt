@@ -1,4 +1,4 @@
-// v8.9 - TVWiki 방식의 Headless WebView 가로채기(Intercept) 로직 적용 (play.js 동적 토큰 발급 완벽 우회)
+// v9.0 - 403 차단 완벽 해결: 모바일 전용 플레이어 동적 추적 및 합법적 M3U8 토큰 가로채기 로직 적용
 package com.KingkongTv
 
 import android.content.Context
@@ -136,7 +136,7 @@ class KingkongTv : MainAPI() {
         }
     }
 
-    // --- TVWiki 스타일의 백그라운드 WebView 가로채기(Intercept) 엔진 ---
+    // 모바일 웹뷰를 백그라운드에 띄워 재생기가 네트워크로 요청하는 실제 M3U8을 낚아채는 가로채기 함수
     private suspend fun getStreamUrlFromWebView(url: String, referer: String): String? = suspendCancellableCoroutine { cont ->
         val handler = Handler(Looper.getMainLooper())
         var webView: WebView? = null
@@ -152,31 +152,30 @@ class KingkongTv : MainAPI() {
                 val context = AcraApplication.context ?: return@post
                 webView = WebView(context)
                 
-                // play.js가 iOS로 착각하여 HLS(.m3u8) 주소와 합법적인 토큰을 조립하도록 유도
                 val iosUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1"
                 
                 webView?.settings?.apply {
                     javaScriptEnabled = true
                     domStorageEnabled = true
                     userAgentString = iosUserAgent
-                    mediaPlaybackRequiresUserGesture = false
+                    mediaPlaybackRequiresUserGesture = false // 동영상 자동 재생 허용 (M3U8 호출 유도)
                 }
 
                 val timeoutRunnable = Runnable {
                     if (cont.isActive) {
-                        println("KKTV_DEBUG [WebView] Timeout reached (10s).")
+                        println("KKTV_DEBUG [WebView] 15초 타임아웃 도달. 가로채기 실패.")
                         try { webView?.destroy(); webView = null } catch (e: Exception) {}
                         cont.resume(null)
                     }
                 }
-                handler.postDelayed(timeoutRunnable, 10000)
+                handler.postDelayed(timeoutRunnable, 15000)
 
                 webView?.webViewClient = object : WebViewClient() {
                     override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                         val reqUrl = request?.url?.toString() ?: ""
-                        // play.js가 스스로 만들어낸 합법적인 m3u8 또는 flv 요청을 가로챔
+                        // 억지로 치환한 가짜가 아닌, 서버가 뱉어낸 진짜 합법적 m3u8 또는 flv 요청을 포착
                         if (reqUrl.contains(".m3u8") || reqUrl.contains(".flv")) {
-                            println("KKTV_DEBUG [WebView] Intercepted valid stream URL: $reqUrl")
+                            println("KKTV_DEBUG [WebView] 합법적인 스트리밍 원본 URL 캡처 완료: $reqUrl")
                             if (cont.isActive) {
                                 handler.removeCallbacks(timeoutRunnable)
                                 handler.post {
@@ -188,10 +187,10 @@ class KingkongTv : MainAPI() {
                         return super.shouldInterceptRequest(view, request)
                     }
                 }
-                println("KKTV_DEBUG [WebView] Loading URL to run play.js: $url")
+                println("KKTV_DEBUG [WebView] 모바일 플레이어 로딩 시작: $url")
                 webView?.loadUrl(url, mapOf("Referer" to referer))
             } catch (e: Exception) {
-                println("KKTV_DEBUG [WebView] Exception: ${e.message}")
+                println("KKTV_DEBUG [WebView] 초기화 중 에러: ${e.message}")
                 if (cont.isActive) cont.resume(null)
             }
         }
@@ -212,16 +211,45 @@ class KingkongTv : MainAPI() {
         val cleanTitle = rawTitle.replace("🔥 ", "")
         val encodedTitle = URLEncoder.encode(cleanTitle, "UTF-8").replace("+", "%20")
         
-        val playerPageUrl = "https://kktv.speed10-1.com/kktv/theme/kktv/pages/pc/pc_view.php?ch=$streamId&title=$encodedTitle&start=on&num=1"
-        println("KKTV_DEBUG [Phase 1] Target Player URL: $playerPageUrl")
-        
         val iosUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1"
 
-        // 1. WebView를 통해 play.js 강제 실행 및 주소 가로채기 (가장 확실한 403 에러 우회법)
-        val interceptedUrl = getStreamUrlFromWebView(playerPageUrl, refererUrl)
+        println("KKTV_DEBUG [Phase 1] 메인 페이지에서 모바일 플레이어(Iframe) 원본 경로 탐색 시작")
+        val mainChannelUrl = "https://kktv.speed10-1.com/kktv/index.php"
+        val mainRes = try { app.get(mainChannelUrl, headers = mapOf("User-Agent" to iosUserAgent)).text } catch (e: Exception) { "" }
+        
+        // 아이폰 UA로 메인 페이지 접속 시 할당되는 모바일 전용 iframe 경로 추출
+        val mobileIframeMatch = Regex("""<iframe[^>]+id=['"]broadcastFrame['"][^>]+src=['"]([^'"]+)['"]""").find(mainRes)
+            ?: Regex("""<iframe[^>]+src=['"]([^'"]+)['"]""").find(mainRes)
 
+        val mobilePlayerUrl = if (mobileIframeMatch != null) {
+            val rawSrc = mobileIframeMatch.groupValues[1]
+            val baseUrl = fixUrl(mainChannelUrl, rawSrc).substringBefore("?")
+            "$baseUrl?ch=$streamId&title=$encodedTitle&start=on&num=1"
+        } else {
+            println("KKTV_DEBUG [Phase 1] 모바일 Iframe 탐색 실패. 기본 /m/ 경로를 추정하여 적용합니다.")
+            "https://kktv.speed10-1.com/kktv/theme/kktv/pages/m/m_view.php?ch=$streamId&title=$encodedTitle&start=on&num=1"
+        }
+        println("KKTV_DEBUG [Phase 2] 최종 조립된 모바일 플레이어 URL: $mobilePlayerUrl")
+
+        var interceptedUrl: String? = null
+        
+        // 1. HTML 파싱 선 시도 (WebView를 띄우지 않아도 되면 속도가 훨씬 빠르므로)
+        try {
+            val mobileResponse = app.get(mobilePlayerUrl, headers = mapOf("User-Agent" to iosUserAgent, "Referer" to refererUrl)).text
+            interceptedUrl = Regex("""['"](http[^'"]+\.(?:m3u8|flv)[^'"]*)['"]""").find(mobileResponse)?.groupValues?.get(1)
+            if (interceptedUrl != null) println("KKTV_DEBUG [Phase 3] 모바일 HTML 파싱을 통해 추출 성공: $interceptedUrl")
+        } catch (e: Exception) {
+            println("KKTV_DEBUG [Phase 3] 모바일 HTML 파싱 실패: ${e.message}")
+        }
+
+        // 2. HTML 파싱으로 못 찾았을 경우(난독화 등), WebView 백그라운드 구동으로 동적 추출
+        if (interceptedUrl == null) {
+            println("KKTV_DEBUG [Phase 4] HTML 파싱 실패. 모바일 WebView 렌더링 및 네트워크 가로채기(Intercept) 시작")
+            interceptedUrl = getStreamUrlFromWebView(mobilePlayerUrl, refererUrl)
+        }
+
+        // 3. ExtractorLink 반환 (403을 유발하던 강제 확장자 치환 폴백 코드는 전부 제거)
         if (interceptedUrl != null) {
-            println("KKTV_DEBUG [Phase 2] WebView Intercept Success: $interceptedUrl")
             val type = if (interceptedUrl.contains(".flv")) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
             
             val finalUrl = if (interceptedUrl.contains("play.ogtv3.com") && interceptedUrl.startsWith("https://")) {
@@ -230,10 +258,12 @@ class KingkongTv : MainAPI() {
                 interceptedUrl
             }
 
+            println("KKTV_DEBUG [Phase 5] 클라우드스트림 플레이어에 최종 전달되는 URL: $finalUrl")
+
             callback.invoke(
                 newExtractorLink(
                     source = name,
-                    name = "$name (WebView 우회)",
+                    name = "$name (Mobile 우회)",
                     url = finalUrl,
                     type = type
                 ) {
@@ -247,90 +277,10 @@ class KingkongTv : MainAPI() {
                 }
             )
             return true
+        } else {
+            println("KKTV_DEBUG [Error] 모든 모바일 우회 및 가로채기 방식 실패.")
+            return false
         }
-
-        // 2. WebView 가로채기 실패 시 기존 HTTP 파싱 로직으로 폴백 (안전망)
-        println("KKTV_DEBUG [Phase 2] WebView Intercept Failed. Fallback to Http Get.")
-        val headers = mapOf(
-            "User-Agent" to iosUserAgent,
-            "Referer" to refererUrl,
-            "Origin" to "https://kktv.speed10-1.com"
-        )
-
-        try {
-            val response = app.get(playerPageUrl, headers = headers).text
-            var flvUrl: String? = null
-            var m3u8Url: String? = null
-            
-            val streamMatch = Regex("""['"](http[^'"]+\.(?:sdp|m3u8)[^'"]*)['"]""").find(response)?.groupValues?.get(1)
-            
-            if (streamMatch != null) {
-                if (streamMatch.contains(".sdp")) {
-                    flvUrl = streamMatch.replace(".sdp", ".flv")
-                    m3u8Url = streamMatch.replace(".sdp", ".m3u8")
-                } else if (streamMatch.contains(".m3u8")) {
-                    m3u8Url = streamMatch
-                }
-            } else {
-                val webrtcMatch = Regex("""['"](webrtc://[^'"]+)['"]""").find(response)?.groupValues?.get(1)
-                if (webrtcMatch != null) {
-                    val baseHttpUrl = webrtcMatch.replace("webrtc://", "https://")
-                    flvUrl = baseHttpUrl.replace(streamId, "$streamId.flv")
-                    m3u8Url = baseHttpUrl.replace(streamId, "$streamId.m3u8")
-                }
-            }
-
-            if (flvUrl == null && m3u8Url == null) {
-                flvUrl = "https://cdnnowstream.com/cdnnow/$streamId.flv?site=kktv"
-                m3u8Url = "https://cdnnowstream.com/cdnnow/$streamId.m3u8?site=kktv"
-            }
-
-            if (flvUrl != null) {
-                val finalFlv = if (flvUrl.contains("play.ogtv3.com") && flvUrl.startsWith("https://")) flvUrl.replaceFirst("https://", "http://") else flvUrl
-                callback.invoke(
-                    newExtractorLink(
-                        source = name,
-                        name = "$name (FLV - 백업)",
-                        url = finalFlv,
-                        type = ExtractorLinkType.VIDEO
-                    ) {
-                        this.referer = "https://kktv.speed10-1.com/"
-                        this.quality = Qualities.Unknown.value
-                        this.headers = mapOf(
-                            "Origin" to "https://kktv.speed10-1.com",
-                            "Referer" to "https://kktv.speed10-1.com/",
-                            "User-Agent" to iosUserAgent
-                        )
-                    }
-                )
-            }
-
-            if (m3u8Url != null) {
-                val finalM3u8 = if (m3u8Url.contains("play.ogtv3.com") && m3u8Url.startsWith("https://")) m3u8Url.replaceFirst("https://", "http://") else m3u8Url
-                callback.invoke(
-                    newExtractorLink(
-                        source = name,
-                        name = "$name (M3U8 - 백업)",
-                        url = finalM3u8,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        this.referer = "https://kktv.speed10-1.com/"
-                        this.quality = Qualities.Unknown.value
-                        this.headers = mapOf(
-                            "Origin" to "https://kktv.speed10-1.com",
-                            "Referer" to "https://kktv.speed10-1.com/",
-                            "User-Agent" to iosUserAgent
-                        )
-                    }
-                )
-            }
-
-        } catch (e: Exception) {
-            println("KKTV_DEBUG [Error] loadLinks Fallback Exception: ${e.message}")
-            e.printStackTrace()
-        }
-
-        return true
     }
 
     private fun fixUrl(baseUrl: String, relativeUrl: String): String {
