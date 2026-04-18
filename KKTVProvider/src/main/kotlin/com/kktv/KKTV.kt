@@ -9,7 +9,7 @@ import java.net.URLDecoder
 import java.net.URLEncoder
 
 class KingkongTv : MainAPI() {
-    // 기본값으로 설정해두지만, 실행 시 updateMainUrlIfNeeded()에 의해 동적으로 변경됩니다.
+    // 기본값으로 설정해두지만, 실행 시 updateMainUrlIfNeeded()에 의해 동적으로 변경됩니다. 
     override var mainUrl = "https://holyindia.org"
     override var name = "KKTV"
     override val hasMainPage = true
