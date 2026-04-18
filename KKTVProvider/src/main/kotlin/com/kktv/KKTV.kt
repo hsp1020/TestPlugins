@@ -1,4 +1,4 @@
-// v7.8 - 플레이어 페이지 경로 변경 및 cdnnowstream 도메인 대응, 디버깅 로그 제거
+// v8.0 - 시작점 체인 요청 필수 파라미터(title, start, num) 복원 적용
 package com.KingkongTv
 
 import android.net.Uri
@@ -139,7 +139,11 @@ class KingkongTv : MainAPI() {
         val rawRef = uri.getQueryParameter("ref")
         val refererUrl = if (!rawRef.isNullOrBlank()) URLDecoder.decode(rawRef, "UTF-8") else "https://kktv.speed10-1.com/kktv/index.php"
         
-        val playerPageUrl = "https://kktv.speed10-1.com/kktv/theme/kktv/pages/pc/pc_view.php?ch=$streamId"
+        val rawTitle = uri.getQueryParameter("title") ?: ""
+        val cleanTitle = rawTitle.replace("🔥 ", "")
+        val encodedTitle = URLEncoder.encode(cleanTitle, "UTF-8").replace("+", "%20")
+        
+        val playerPageUrl = "https://kktv.speed10-1.com/kktv/theme/kktv/pages/pc/pc_view.php?ch=$streamId&title=$encodedTitle&start=on&num=1"
         
         val headers = mapOf(
             "User-Agent" to userAgent,
@@ -150,9 +154,12 @@ class KingkongTv : MainAPI() {
         try {
             val response = app.get(playerPageUrl, headers = headers).text
             
-            var m3u8Url = Regex("""['"](http[^'"]+\.m3u8[^'"]*)['"]""").find(response)?.groupValues?.get(1)
+            var m3u8Url: String? = null
+            val streamUrlMatch = Regex("""['"](http[^'"]+(?:\.m3u8|\.sdp)[^'"]*)['"]""").find(response)?.groupValues?.get(1)
             
-            if (m3u8Url == null) {
+            if (streamUrlMatch != null) {
+                m3u8Url = streamUrlMatch.replace(".sdp", ".m3u8")
+            } else {
                 val webrtcMatch = Regex("""['"](webrtc://[^'"]+)['"]""").find(response)?.groupValues?.get(1)
                 if (webrtcMatch != null) {
                     m3u8Url = webrtcMatch
@@ -165,11 +172,10 @@ class KingkongTv : MainAPI() {
                 m3u8Url = "https://cdnnowstream.com/cdnnow/$streamId.m3u8?site=kktv"
             }
 
-            val finalUrl = if (m3u8Url != null && m3u8Url!!.contains("play.ogtv3.com") && m3u8Url!!.startsWith("https://")) {
-                val bypassedUrl = m3u8Url!!.replaceFirst("https://", "http://")
-                bypassedUrl
+            val finalUrl = if (m3u8Url.contains("play.ogtv3.com") && m3u8Url.startsWith("https://")) {
+                m3u8Url.replaceFirst("https://", "http://")
             } else {
-                m3u8Url!!
+                m3u8Url
             }
 
             callback.invoke(
