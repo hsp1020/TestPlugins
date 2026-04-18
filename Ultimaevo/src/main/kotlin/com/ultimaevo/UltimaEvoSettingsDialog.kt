@@ -1,6 +1,9 @@
 package com.ultimaevo
 
 import android.app.AlertDialog
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.preference.PreferenceManager
 import android.text.InputType
@@ -18,6 +21,20 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
+
+    private val darkThemeBg by lazy {
+        GradientDrawable().apply {
+            setColor(Color.parseColor("#121212"))
+            setStroke(4, Color.WHITE)
+            cornerRadius = 24f
+        }
+    }
+
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+        (view.parent as? View)?.setBackgroundColor(Color.TRANSPARENT)
+    }
+
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
@@ -26,7 +43,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val ctx = requireContext()
         val prefs = PreferenceManager.getDefaultSharedPreferences(ctx)
 
-        val scrollView = ScrollView(ctx)
+        val scrollView = ScrollView(ctx).apply { background = darkThemeBg }
         val mainLayout = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(50, 50, 50, 50)
@@ -34,21 +51,51 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
         val title = TextView(ctx).apply {
             text = "Ultima Evo 마스터 관리자"
-            textSize = 24f
+            textSize = 22f
+            setTextColor(Color.WHITE)
             setPadding(0, 0, 0, 40)
             gravity = Gravity.CENTER
         }
         mainLayout.addView(title)
 
-        // 1. 통합 카탈로그 개수 설정
+        val syncAllBtn = Button(ctx).apply {
+            text = "🔄 모든 카탈로그 데이터 최초 동기화"
+            setTextColor(Color.WHITE)
+            setOnClickListener {
+                this.text = "통신 중..."
+                this.isEnabled = false
+                CoroutineScope(Dispatchers.IO).launch {
+                    val providers = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
+                    for (provider in providers) {
+                        try {
+                            val reqName = provider.mainPage.firstOrNull()?.name ?: "Home"
+                            val reqData = provider.mainPage.firstOrNull()?.data ?: ""
+                            val response = provider.getMainPage(1, MainPageRequest(reqName, reqData, false))
+                            if (response != null && response.items.isNotEmpty()) {
+                                val names = response.items.map { it.name }
+                                prefs.edit().putString("dynamic_catalogs_${provider.name}", names.joinToString("|||")).apply()
+                            }
+                        } catch (e: Exception) { }
+                    }
+                    withContext(Dispatchers.Main) {
+                        this@apply.text = "✅ 동기화 완료"
+                        this@apply.isEnabled = true
+                    }
+                }
+            }
+        }
+        mainLayout.addView(syncAllBtn)
+
         val countLayout = LinearLayout(ctx).apply { 
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 30, 0, 30)
         }
-        countLayout.addView(TextView(ctx).apply { text = "생성할 개수: "; textSize = 16f })
+        countLayout.addView(TextView(ctx).apply { text = "생성할 개수: "; textSize = 16f; setTextColor(Color.WHITE) })
         val instanceCountInput = EditText(ctx).apply {
             inputType = InputType.TYPE_CLASS_NUMBER
             setText(prefs.getString("evo_instance_count", "1"))
+            setTextColor(Color.WHITE)
             layoutParams = LinearLayout.LayoutParams(150, LinearLayout.LayoutParams.WRAP_CONTENT)
         }
         countLayout.addView(instanceCountInput)
@@ -56,23 +103,33 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
         val currentCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
 
-        // 2. 각 인스턴스별 설정 카드
         for (i in 1..currentCount) {
             val card = LinearLayout(ctx).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(30, 30, 30, 30)
-                background = ctx.getDrawable(android.R.drawable.dialog_holo_light_frame) // 간단한 카드 느낌
+                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                    setMargins(0, 20, 0, 20)
+                }
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#1E1E1E"))
+                    setStroke(2, Color.LTGRAY)
+                    cornerRadius = 16f
+                }
             }
             
             val nameInput = EditText(ctx).apply {
                 hint = "통합 카탈로그 $i 이름"
+                setHintTextColor(Color.GRAY)
+                setTextColor(Color.WHITE)
                 setText(prefs.getString("evo_name_$i", "Ultima Evo $i"))
                 tag = "evo_name_$i"
             }
             card.addView(nameInput)
 
             val searchSwitch = Switch(ctx).apply {
-                text = "검색 기능 활성화"
+                text = "이 카탈로그 검색 허용"
+                setTextColor(Color.WHITE)
+                setPadding(0, 20, 0, 20)
                 isChecked = prefs.getBoolean("evo_search_enabled_$i", true)
                 setOnCheckedChangeListener { _, isChecked -> prefs.edit().putBoolean("evo_search_enabled_$i", isChecked).apply() }
             }
@@ -80,6 +137,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
             val configBtn = Button(ctx).apply {
                 text = "내부 카탈로그 구성/정렬 편집 ⚙️"
+                setTextColor(Color.WHITE)
                 setOnClickListener { showEditCatalogsDialog(i) }
             }
             card.addView(configBtn)
@@ -89,10 +147,11 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
         val saveBtn = Button(ctx).apply {
             text = "메인 설정 저장 후 닫기"
+            setTextColor(Color.WHITE)
+            setPadding(0, 20, 0, 0)
             setOnClickListener {
                 val editor = prefs.edit()
                 editor.putString("evo_instance_count", instanceCountInput.text.toString())
-                // 이름 저장 로직
                 fun findNames(v: ViewGroup) {
                     for (idx in 0 until v.childCount) {
                         val child = v.getChildAt(idx)
@@ -115,16 +174,17 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
     private fun showEditCatalogsDialog(instanceId: Int) {
         val ctx = requireContext()
         val prefs = PreferenceManager.getDefaultSharedPreferences(ctx)
-        val builder = AlertDialog.Builder(ctx, android.R.style.Theme_DeviceDefault_NoActionBar_Fullscreen) // 전체화면 팝업
         
         val mainContainer = LinearLayout(ctx).apply { 
             orientation = LinearLayout.VERTICAL
             setPadding(20, 20, 20, 20)
+            background = darkThemeBg
         }
         
         val headerTitle = TextView(ctx).apply {
-            text = "통합 카탈로그 $instanceId 구성 (CineStream Style)"
+            text = "카탈로그 $instanceId 구성 편집"
             textSize = 20f
+            setTextColor(Color.WHITE)
             setPadding(0, 20, 0, 40)
             gravity = Gravity.CENTER
         }
@@ -133,95 +193,121 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val scroll = ScrollView(ctx)
         val listLayout = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
         
-        val allProviders = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
-
         class CatalogRow(
             val providerName: String, val catalogName: String,
-            val checkBox: CheckBox, val orderEdit: EditText, val renameEdit: EditText
+            val checkBox: CheckBox, val orderEdit: EditText, val renameEdit: EditText, val view: View
         )
         val rows = mutableListOf<CatalogRow>()
 
+        val allProviders = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
+        val allCatalogs = mutableListOf<Pair<String, String>>() 
+
         for (provider in allProviders) {
-            // 공급자 헤더 + 동기화 버튼
-            val pHead = LinearLayout(ctx).apply { 
+            val staticCats = provider.mainPage.map { it.name }
+            val dynamicCats = prefs.getString("dynamic_catalogs_${provider.name}", "")?.split("|||") ?: emptyList()
+            val combined = (staticCats + dynamicCats).filter { it.isNotBlank() }.distinct()
+            combined.forEach { allCatalogs.add(provider.name to it) }
+        }
+
+        fun triggerSort() {
+            val focused = listLayout.findFocus()
+            listLayout.removeAllViews()
+            val sorted = rows.sortedBy { it.orderEdit.text.toString().toIntOrNull() ?: 99 }
+            sorted.forEach { listLayout.addView(it.view) }
+            focused?.requestFocus()
+        }
+
+        for (cat in allCatalogs) {
+            val pName = cat.first
+            val cName = cat.second
+
+            val row = LinearLayout(ctx).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, 20, 0, 10)
+                setPadding(0, 10, 0, 10)
             }
-            pHead.addView(TextView(ctx).apply { text = provider.name; textSize = 16f; setTextColor(android.graphics.Color.YELLOW) })
-            val sync = Button(ctx).apply { text = "Sync"; layoutParams = LinearLayout.LayoutParams(200, 100) }
-            sync.setOnClickListener { /* 동기화 로직 생략(기존과 동일) */ }
-            pHead.addView(sync)
-            listLayout.addView(pHead)
 
-            val dynamicCats = prefs.getString("dynamic_catalogs_${provider.name}", "")?.split("|||") ?: emptyList()
-            val allCats = (provider.mainPage.map { it.name } + dynamicCats).filter { it.isNotBlank() }.distinct()
+            val cb = CheckBox(ctx).apply {
+                isChecked = prefs.getBoolean("cat_toggle_${instanceId}_${pName}_$cName", false)
+            }
+            row.addView(cb)
 
-            for (catName in allCats) {
-                // CineStream 스타일 집약 행
-                val row = LinearLayout(ctx).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    setPadding(10, 10, 10, 10)
+            val etOrder = EditText(ctx).apply {
+                inputType = InputType.TYPE_CLASS_NUMBER
+                setText(prefs.getString("cat_order_${instanceId}_${pName}_$cName", "99"))
+                layoutParams = LinearLayout.LayoutParams(120, LinearLayout.LayoutParams.WRAP_CONTENT)
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+            }
+            row.addView(etOrder)
+
+            val etRename = EditText(ctx).apply {
+                hint = "[$pName] $cName"
+                setText(prefs.getString("cat_rename_${instanceId}_${pName}_$cName", cName))
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                isEnabled = cb.isChecked
+                setTextColor(Color.WHITE)
+                setHintTextColor(Color.DKGRAY)
+                textSize = 14f
+            }
+            row.addView(etRename)
+
+            val up = TextView(ctx).apply { 
+                text = "▲"
+                textSize = 24f
+                setTextColor(Color.WHITE)
+                setPadding(20, 10, 20, 10) 
+            }
+            val down = TextView(ctx).apply { 
+                text = "▼"
+                textSize = 24f
+                setTextColor(Color.WHITE)
+                setPadding(20, 10, 20, 10) 
+            }
+            
+            row.addView(up)
+            row.addView(down)
+
+            cb.setOnCheckedChangeListener { _, isChecked -> etRename.isEnabled = isChecked }
+
+            val catalogRow = CatalogRow(pName, cName, cb, etOrder, etRename, row)
+            rows.add(catalogRow)
+
+            up.setOnClickListener {
+                val cur = etOrder.text.toString().toIntOrNull() ?: 99
+                if (cur > 1) {
+                    etOrder.setText((cur - 1).toString())
+                    triggerSort()
                 }
-
-                // 1. 체크박스
-                val cb = CheckBox(ctx).apply {
-                    isChecked = prefs.getBoolean("cat_toggle_${instanceId}_${provider.name}_$catName", false)
-                }
-                row.addView(cb)
-
-                // 2. 순서 숫자 입력창 (CineStream 스타일)
-                val etOrder = EditText(ctx).apply {
-                    inputType = InputType.TYPE_CLASS_NUMBER
-                    setText(prefs.getString("cat_order_${instanceId}_${provider.name}_$catName", "99"))
-                    layoutParams = LinearLayout.LayoutParams(100, LinearLayout.LayoutParams.WRAP_CONTENT)
-                    gravity = Gravity.CENTER
-                }
-                row.addView(etOrder)
-
-                // 3. 이름 수정창
-                val etRename = EditText(ctx).apply {
-                    setText(prefs.getString("cat_rename_${instanceId}_${provider.name}_$catName", catName))
-                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                    isEnabled = cb.isChecked
-                }
-                row.addView(etRename)
-
-                // 4. 화살표 버튼 (집약 배치)
-                val arrows = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
-                val up = TextView(ctx).apply { text = "▲"; textSize = 20f; setPadding(10, 0, 10, 0) }
-                val down = TextView(ctx).apply { text = "▼"; textSize = 20f; setPadding(10, 0, 10, 0) }
-                
-                up.setOnClickListener {
-                    val cur = etOrder.text.toString().toIntOrNull() ?: 99
-                    if (cur > 1) etOrder.setText((cur - 1).toString())
-                }
-                down.setOnClickListener {
-                    val cur = etOrder.text.toString().toIntOrNull() ?: 99
-                    etOrder.setText((cur + 1).toString())
-                }
-                
-                arrows.addView(up); arrows.addView(down)
-                row.addView(arrows)
-
-                cb.setOnCheckedChangeListener { _, isChecked -> etRename.isEnabled = isChecked }
-                
-                listLayout.addView(row)
-                rows.add(CatalogRow(provider.name, catName, cb, etOrder, etRename))
+            }
+            down.setOnClickListener {
+                val cur = etOrder.text.toString().toIntOrNull() ?: 99
+                etOrder.setText((cur + 1).toString())
+                triggerSort()
+            }
+            
+            etOrder.setOnFocusChangeListener { _, hasFocus ->
+                if (!hasFocus) triggerSort()
             }
         }
+
+        triggerSort()
 
         scroll.addView(listLayout)
         mainContainer.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
-        val footer = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
-        val applyBtn = Button(ctx).apply { text = "적용"; layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
-        val closeBtn = Button(ctx).apply { text = "취소"; layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
+        val footer = LinearLayout(ctx).apply { 
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 30, 0, 0)
+        }
+        val applyBtn = Button(ctx).apply { text = "적용"; setTextColor(Color.WHITE); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
+        val closeBtn = Button(ctx).apply { text = "취소"; setTextColor(Color.WHITE); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
         footer.addView(applyBtn); footer.addView(closeBtn)
         mainContainer.addView(footer)
 
+        val builder = AlertDialog.Builder(ctx)
         val dialog = builder.setView(mainContainer).create()
+        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
 
         applyBtn.setOnClickListener {
             val editor = prefs.edit()
@@ -239,7 +325,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 allOrders.add(Triple(row, currentVal, originalVal))
             }
 
-            // 자동 밀어내기 정렬 알고리즘 (Shifting)
             val sorted = allOrders.sortedWith(compareBy({ it.second }, { if (it.second == it.third) 1 else 0 }))
             var last = -1
             for (item in sorted) {
