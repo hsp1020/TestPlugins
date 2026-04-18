@@ -1,4 +1,4 @@
-// v14.4 - window.top === window.self (access-denied) 방어 로직 무력화 패치 완료
+// v14.5 - Ghost WebView 완벽 제거 (오디오 겹침 및 백그라운드 재생 버그 해결)
 package com.KingkongTv
 
 import android.content.Context
@@ -135,22 +135,53 @@ class KingkongTv : MainAPI() {
         val parts = data.split("|")
         if (parts.size < 4) return false
 
-        // 안전한 스트림 ID 추출
         val rawIdPart = parts[0].substringAfterLast("/")
         val streamId = Regex("""\d+""").find(rawIdPart)?.value ?: return false
         val parentReferer = URLDecoder.decode(parts[3], "UTF-8")
         
         val playerIframeUrl = "https://wdbroad.com/broadcast/$streamId/kktv"
-        println("DEBUG[KKTV v14.4] 웹뷰 스니핑 시작 - 대상 URL: $playerIframeUrl")
+        println("DEBUG [KKTV v14.5] 웹뷰 스니핑 시작 - 대상 URL: $playerIframeUrl")
 
         val hookResult = suspendCancellableCoroutine<Pair<String, Map<String, String>>?> { cont ->
             val handler = Handler(Looper.getMainLooper())
+            var webView: WebView? = null
+
+            // ★ 고스트 웹뷰 파괴를 위한 강력한 클린업 로직
+            val cleanup = Runnable {
+                handler.post {
+                    try {
+                        webView?.stopLoading()
+                        webView?.loadUrl("about:blank") // 현재 페이지 로드를 날려버림 (오디오 즉시 중단)
+                        webView?.clearHistory()
+                        webView?.removeAllViews()
+                        webView?.destroy()
+                        webView = null
+                        println("DEBUG [KKTV v14.5] 웹뷰 메모리 클린업 완료 (오디오 겹침 방지)")
+                    } catch (e: Exception) {}
+                }
+            }
+
+            val timeout = Runnable {
+                if (cont.isActive) {
+                    println("DEBUG[KKTV v14.5] 15초 타임아웃 발생 - m3u8 포착 실패")
+                    cont.resume(null)
+                }
+                cleanup.run()
+            }
+            handler.postDelayed(timeout, 15000)
+
+            // 사용자가 영상 로딩 중에 뒤로가기를 눌러 취소했을 때 확실히 죽임
+            cont.invokeOnCancellation {
+                handler.removeCallbacks(timeout)
+                cleanup.run()
+            }
+
             handler.post {
                 try {
                     val context = (AcraApplication.context ?: app) as Context
-                    val webView = WebView(context)
+                    webView = WebView(context)
                     
-                    webView.settings.apply {
+                    webView?.settings?.apply {
                         javaScriptEnabled = true
                         domStorageEnabled = true
                         mediaPlaybackRequiresUserGesture = false 
@@ -158,44 +189,33 @@ class KingkongTv : MainAPI() {
                         mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                     }
 
-                    val timeout = Runnable {
-                        if (cont.isActive) {
-                            println("DEBUG [KKTV v14.4] 15초 타임아웃 발생")
-                            try { webView.destroy() } catch (e: Exception) {}
-                            cont.resume(null)
-                        }
-                    }
-                    handler.postDelayed(timeout, 15000)
-
                     var isFound = false
 
-                    webView.webViewClient = object : WebViewClient() {
+                    webView?.webViewClient = object : WebViewClient() {
                         override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                             val reqUrl = request?.url?.toString() ?: ""
                             
-                            // 스트리밍 도메인이나 m3u8, chunklist 감지
                             if (!isFound && (reqUrl.contains("wdbroadcast.com") || reqUrl.contains(".m3u8") || reqUrl.contains("chunklist"))) {
                                 isFound = true
-                                println("DEBUG [KKTV v14.4] 🎯 M3U8 포착: $reqUrl")
+                                println("DEBUG[KKTV v14.5] 🎯 M3U8 포착: $reqUrl")
                                 handler.removeCallbacks(timeout)
                                 
                                 if (cont.isActive) {
                                     cont.resume(Pair(reqUrl, request?.requestHeaders ?: emptyMap()))
                                 }
-                                view?.post { try { webView.destroy() } catch (e: Exception) {} }
+                                
+                                // M3U8 주소를 넘기자마자 백그라운드 웹뷰를 즉시 폭파시킴
+                                cleanup.run()
                             }
                             return super.shouldInterceptRequest(view, request)
                         }
                     }
 
-                    // 쿠키 세팅 (필요시)
                     val cookie = CookieManager.getInstance().getCookie(parentReferer)
                     if (!cookie.isNullOrEmpty()) {
                         CookieManager.getInstance().setCookie("wdbroad.com", cookie)
                     }
 
-                    // ★ 핵심 패치: access-denied 방지를 위해 가상의 Iframe 껍데기를 만들어 로드합니다.
-                    // 이렇게 하면 웹뷰 안에서 window.top !== window.self 가 성립하여 차단을 통과합니다.
                     val wrapperHtml = """
                         <!DOCTYPE html>
                         <html>
@@ -206,11 +226,11 @@ class KingkongTv : MainAPI() {
                         </html>
                     """.trimIndent()
 
-                    // loadDataWithBaseURL을 통해 부모(본진)의 주소를 바탕으로 가짜 HTML을 실행합니다.
-                    webView.loadDataWithBaseURL(parentReferer, wrapperHtml, "text/html", "UTF-8", null)
+                    webView?.loadDataWithBaseURL(parentReferer, wrapperHtml, "text/html", "UTF-8", null)
                     
                 } catch (e: Exception) {
                     if (cont.isActive) cont.resume(null)
+                    cleanup.run()
                 }
             }
         }
@@ -223,7 +243,7 @@ class KingkongTv : MainAPI() {
                 headers["User-Agent"] = DESKTOP_UA
             }
             
-            // 미디어 서버 인증을 위해 플레이어가 구동되는 wdbroad.com을 레퍼러로 세팅
+            // 미디어 서버 인증을 위해 플레이어가 구동되는 wdbroad.com을 레퍼러로 강제 세팅
             headers["Referer"] = "https://wdbroad.com/"
             headers["Origin"] = "https://wdbroad.com"
 
@@ -237,13 +257,3 @@ class KingkongTv : MainAPI() {
                     this.headers = headers
                 }
             )
-            return true
-        }
-        return false
-    }
-
-    private fun fixUrl(baseUrl: String, relativeUrl: String): String {
-        if (relativeUrl.startsWith("http")) return relativeUrl
-        return try { java.net.URI(baseUrl).resolve(relativeUrl).toString() } catch (e: Exception) { relativeUrl }
-    }
-}
