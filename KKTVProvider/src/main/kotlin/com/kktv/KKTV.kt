@@ -1,3 +1,4 @@
+// v9.1 - wdbroad.com 직접 접속 차단 우회 및 정적 테이블 파싱 적용
 package com.KingkongTv
 
 import android.net.Uri
@@ -25,7 +26,8 @@ class KingkongTv : MainAPI() {
         val url = "$mainUrl${request.data}"
         
         try {
-            val contentDoc = app.get(url, referer = mainUrl).document
+            // 직접 접속 차단을 피하기 위해 Referer를 kingkongtv.org 등으로 설정하여 요청
+            val contentDoc = app.get(url, referer = "https://kingkongtv.org/").document
             val rows = contentDoc.select("table.board_list tbody tr")
 
             val sortedRows = rows.sortedByDescending { row ->
@@ -57,6 +59,7 @@ class KingkongTv : MainAPI() {
         var title = subjectTd.text().trim()
         val onclickStr = subjectTd.attr("onclick") ?: ""
         
+        // load_video('broadcast/155', ...) 형태에서 경로 추출
         val streamIdMatch = Regex("""load_video\('([^']+)'""").find(onclickStr)
         val streamPath = streamIdMatch?.groupValues?.get(1) ?: return null
         
@@ -77,6 +80,7 @@ class KingkongTv : MainAPI() {
         val encodedPoster = URLEncoder.encode(thumbUrl, "UTF-8")
         val encodedRef = URLEncoder.encode(refererUrl, "UTF-8")
 
+        // 추출한 경로(예: broadcast/155)를 기반으로 가공 주소 생성
         val fakeUrl = "$mainUrl/$streamPath?title=$encodedTitle&poster=$encodedPoster&ref=$encodedRef"
 
         return newMovieSearchResponse(title, fakeUrl, TvType.Others) {
@@ -117,8 +121,10 @@ class KingkongTv : MainAPI() {
         )
 
         try {
+            // 플레이어 페이지 호출 시에도 Referer 헤더를 필수로 포함
             val response = app.get(playerPageUrl, headers = headers).text
             
+            // m3u8 주소 추출 (사용자가 언급한 hmac 포함 주소 대응)
             var m3u8Url = Regex("""['"](http[^'"]+\.m3u8[^'"]*)['"]""").find(response)?.groupValues?.get(1)
             
             if (m3u8Url == null) {
@@ -131,6 +137,7 @@ class KingkongTv : MainAPI() {
             }
 
             if (m3u8Url != null) {
+                // SSL 우회 처리 로직 유지
                 val finalUrl = if (m3u8Url.contains("play.ogtv3.com") && m3u8Url.startsWith("https://")) {
                     m3u8Url.replaceFirst("https://", "http://")
                 } else {
