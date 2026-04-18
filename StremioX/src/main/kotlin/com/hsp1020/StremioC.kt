@@ -1,4 +1,4 @@
-// v1.153 (Feature & Fix: CineStream 연동 시 베이스 ID 정제 로직 유지. 미디어 스니핑으로 인한 OOM 크래시 방지를 위해 INFER_TYPE 제거 및 타입 명시화)
+// v1.154 (Feature & Fix: ✨ 병합 로직 제거 및 aiostreamserror 발생 시 URL 기준 TMDB 에피소드 강제 로드)
 package com.hsp1020
 
 import android.content.Context
@@ -89,7 +89,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
     
     val customSession by lazy {
-        println("[StremioC v1.153] 커스텀 OkHttp 세션 초기화 (메모리 튜닝 - 연결 100개 유지)")
+        println("[StremioC v1.154] 커스텀 OkHttp 세션 초기화 (메모리 튜닝 - 연결 100개 유지)")
         val newClient = app.baseClient.newBuilder()
             .protocols(listOf(Protocol.HTTP_1_1))
             .dispatcher(Dispatcher().apply {
@@ -167,10 +167,10 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     if (targetClassLoader != null) {
                         val clazz = targetClassLoader!!.loadClass("com.megix.CineStreamProvider")
                         provider = clazz.newInstance() as? MainAPI
-                        println("[StremioC v1.153] CineStream Ghost Provider 강제 생성 완료 (카탈로그 OFF 상태 감지)")
+                        println("[StremioC v1.154] CineStream Ghost Provider 강제 생성 완료 (카탈로그 OFF 상태 감지)")
                     }
                 } catch (e: Exception) {
-                    println("[StremioC v1.153] Failed to instantiate Ghost Provider: ${e.message}")
+                    println("[StremioC v1.154] Failed to instantiate Ghost Provider: ${e.message}")
                 }
             }
             
@@ -227,16 +227,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     }
     
     private fun mergeOverview(original: String?, newOverview: String?): String? {
-        if (newOverview.isNullOrBlank()) return original
-        if (original != null && original.contains("✨")) {
-            val splitIndex = original.indexOf("|")
-            return if (splitIndex != -1) {
-                original.substring(0, splitIndex + 1).trim() + " " + newOverview
-            } else {
-                newOverview
-            }
-        }
-        return newOverview
+        return if (!newOverview.isNullOrBlank()) newOverview else original
     }
 
     private fun baseUrl(): String {
@@ -293,7 +284,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val now = System.currentTimeMillis()
                 val removedCount = globalPageCache.entries.removeIf { now - it.value.third > CACHE_TTL_MS }
                 if (removedCount) {
-                    println("[StremioC v1.153] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
+                    println("[StremioC v1.154] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
                 }
                 catalogSkipState.clear()
             }
@@ -312,7 +303,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
         
         if (!isNewRequest && page > 1) {
-            println("[StremioC v1.153] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
+            println("[StremioC v1.154] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
             return@coroutineScope newHomePageResponse(emptyList(), hasNext = true)
         }
         return@coroutineScope response
@@ -397,6 +388,12 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
         }
         
+        val requestedMetaType = if (url.startsWith("{")) {
+            if (res.type == "series" || res.type == "tv") "tv" else if (res.type == "movie") "movie" else null
+        } else {
+            if (url.contains("/meta/series/")) "tv" else if (url.contains("/meta/movie/")) "movie" else null
+        }
+        
         val normalizedId = try { normalizeId(res.id) } catch (e: Exception) { res.id }
         val encodedId = normalizedId.urlEncode()
 
@@ -456,7 +453,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             finalProcessedId = imdbId
         }
 
-        return@coroutineScope res.toLoadResponse(this@StremioC, finalProcessedId, addonDeferred, preFetchedTmdbDetail, preFetchedTmdbEnDetail, kitsuMeta?.id)
+        return@coroutineScope res.toLoadResponse(this@StremioC, finalProcessedId, addonDeferred, preFetchedTmdbDetail, preFetchedTmdbEnDetail, kitsuMeta?.id, requestedMetaType)
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
@@ -551,7 +548,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
 
         if (!isEnabled) {
-            println("[StremioC v1.153] 사용자가 설정에서 CineStream 연동을 비활성화하여 스킵합니다.")
+            println("[StremioC v1.154] 사용자가 설정에서 CineStream 연동을 비활성화하여 스킵합니다.")
             return
         }
 
@@ -590,17 +587,15 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val isKitsuMedia = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
             val kitsuIdExt = if (isKitsuMedia) globalId?.substringAfter("kitsu:")?.substringAfter("mal:") else loadData.kitsuId
             
-            // FIX: v1.153 - tmdb ID 파싱 시 꼬리표(시즌/에피소드)를 잘라내고 베이스 ID만 추출하는 정제 로직
             val rawIdForCineStream = loadData.imdbId ?: globalId?.takeIf { it.startsWith("tt") || it.startsWith("tmdb:") } ?: ""
             val correctImdbIdForCineStream = if (rawIdForCineStream.startsWith("tmdb:")) {
                 val parts = rawIdForCineStream.split(":")
-                // "tmdb:315859:1:2" 같은 형태라면 앞의 "tmdb:315859"만 추출
                 if (parts.size >= 2) "${parts[0]}:${parts[1]}" else rawIdForCineStream
             } else {
                 rawIdForCineStream
             }
             
-            println("[StremioC v1.153] CineStream 전달용 메인 ID 정제 완료: $correctImdbIdForCineStream (원본 rawId: $rawIdForCineStream)")
+            println("[StremioC v1.154] CineStream 전달용 메인 ID 정제 완료: $correctImdbIdForCineStream (원본 rawId: $rawIdForCineStream)")
 
             val scrapingTitle = loadData.englishTitle ?: loadData.originalTitle ?: loadData.title ?: "Unknown"
 
@@ -647,7 +642,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "isCartoon" to loadData.isCartoon
             )
 
-            println("[StremioC v1.153] CineStream 데이터 전달: $cineData")
+            println("[StremioC v1.154] CineStream 데이터 전달: $cineData")
             cineStreamProvider.loadLinks(cineData.toJson(), isCasting, subtitleInterceptor, callback)
         } catch (e: Exception) {
             e.printStackTrace()
@@ -684,7 +679,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 async(Dispatchers.IO) {
                     try {
                         val url = "$api/subtitles/$type/$stremioId.json"
-                        println("[StremioC v1.153] 📥 자막 스트림 파싱 시도: $url")
+                        println("[StremioC v1.154] 📥 자막 스트림 파싱 시도: $url")
                         val subtitleResponse = customSession.get(url, timeout = 120L).parsedSafe<StremioSubtitleResponse>()
 
                         subtitleResponse?.subtitles?.forEach { sub ->
@@ -696,7 +691,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                             }
                         }
                     } catch (e: Exception) {
-                        println("[StremioC v1.153] 자막 로드 실패: ${e.message}")
+                        println("[StremioC v1.154] 자막 로드 실패: ${e.message}")
                     }
                 }
             }.awaitAll()
@@ -825,7 +820,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         private suspend fun fetchTmdbDetails(
             provider: StremioC, tmdbMediaType: String, tmdbIdStr: String, isMovie: Boolean, finalImdbId: String?,
             stremioType: String?, targetVideos: List<Video>?, preFetchedDetail: TmdbDetailResponse? = null,
-            preFetchedEnDetail: TmdbDetailResponse? = null
+            preFetchedEnDetail: TmdbDetailResponse? = null, isAiostreamsError: Boolean = false
         ): FetchedTmdbData {
             var fetchedRecommendations: List<SearchResponse>? = null
             
@@ -997,9 +992,13 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val fetchedTrailers = (detailRes.videos?.results ?: emptyList()).filter { it.type == "Trailer" || it.type == "Teaser" }.sortedWith(compareBy({ if (it.type == "Trailer") 0 else 1 }, { it.publishedAt ?: "9999-12-31" })).mapNotNull { it.key }.map { "https://m.youtube.com/watch?v=$it" }
 
             val episodeTmdbMeta = mutableMapOf<String, TmdbEpisode>()
-            if (stremioType == "other" && !isMovie && !targetVideos.isNullOrEmpty()) {
-                var requiredSeasons = targetVideos.mapNotNull { it.seasonNumber }.filter { it > 0 }.distinct()
-                if (requiredSeasons.isEmpty()) requiredSeasons = listOf(1)
+            if ((stremioType == "other" || isAiostreamsError) && !isMovie) {
+                var requiredSeasons = targetVideos?.mapNotNull { it.seasonNumber }?.filter { it > 0 }?.distinct() ?: emptyList()
+                if (requiredSeasons.isEmpty()) {
+                    val totalSeasons = detailRes?.number_of_seasons ?: 1
+                    requiredSeasons = if (totalSeasons > 0) (1..totalSeasons).toList() else listOf(1)
+                }
+                
                 if (requiredSeasons.isNotEmpty()) {
                     coroutineScope {
                         requiredSeasons.map { seasonNum ->
@@ -1015,7 +1014,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
 
             val extractedEnglishTitle = enDetailRes?.title ?: enDetailRes?.name ?: detailRes.original_title ?: detailRes.original_name
-            println("[StremioC v1.153] 영문 공식 타이틀 추출 결과: $extractedEnglishTitle")
+            println("[StremioC v1.154] 영문 공식 타이틀 추출 결과: $extractedEnglishTitle")
 
             return FetchedTmdbData(
                 if (isMovie) detailRes.title ?: detailRes.original_title else detailRes.name ?: detailRes.original_name,
@@ -1067,7 +1066,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
         }
 
-        suspend fun toLoadResponse(provider: StremioC, imdbId: String?, addonDeferred: Deferred<CatalogEntry?>?, preFetchedDetail: TmdbDetailResponse? = null, preFetchedEnDetail: TmdbDetailResponse? = null, fetchedKitsuId: String? = null): LoadResponse = coroutineScope {
+        suspend fun toLoadResponse(
+            provider: StremioC, imdbId: String?, addonDeferred: Deferred<CatalogEntry?>?, 
+            preFetchedDetail: TmdbDetailResponse? = null, preFetchedEnDetail: TmdbDetailResponse? = null, 
+            fetchedKitsuId: String? = null, urlMediaType: String? = null
+        ): LoadResponse = coroutineScope {
             var finalImdbId = if (this@CatalogEntry.id.startsWith("tt")) this@CatalogEntry.id 
                               else imdbId?.takeIf { it.startsWith("tt") || it.startsWith("kitsu:") || it.startsWith("mal:") }
             
@@ -1079,6 +1082,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
 
             val detailedEntry = addonDeferred?.await() ?: this@CatalogEntry
+            val isAiostreamsError = detailedEntry.id.contains("aiostreamserror") || this@CatalogEntry.id.contains("aiostreamserror")
             var tmdbIdStr: String? = if (this@CatalogEntry.id.startsWith("tmdb:")) this@CatalogEntry.id.removePrefix("tmdb:") else this@CatalogEntry.moviedb_id?.toString() ?: this@CatalogEntry.tmdbIdExt ?: detailedEntry.tmdbIdExt
             
             val findApiDeferred = if (tmdbIdStr == null && finalImdbId?.startsWith("tt") == true) {
@@ -1091,7 +1095,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
             } else null
 
-            val finalVideos = detailedEntry.videos ?: this@CatalogEntry.videos
+            var finalVideos = detailedEntry.videos ?: this@CatalogEntry.videos
             val finalTrailersSources = detailedEntry.trailersSources ?: this@CatalogEntry.trailersSources
             val finalTrailerStreams = detailedEntry.trailerStreams ?: this@CatalogEntry.trailerStreams
             val finalLinks = detailedEntry.links ?: this@CatalogEntry.links
@@ -1103,6 +1107,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val finalBackground = detailedEntry.background ?: this@CatalogEntry.background
             val finalImdbRating = detailedEntry.imdbRating ?: this@CatalogEntry.imdbRating
             val finalType = detailedEntry.type ?: this@CatalogEntry.type
+            val fallbackMovieId = fetchedKitsuId ?: this@CatalogEntry.kitsuIdExt?.let { "kitsu:$it" } ?: this@CatalogEntry.id
 
             var foundMediaType: String? = null
             if (findApiDeferred != null) {
@@ -1111,11 +1116,33 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
 
             var tmdbData: FetchedTmdbData? = null
+            var resolvedMediaType = "movie"
             if (tmdbIdStr != null) {
                 try {
-                    val refinedMediaType = foundMediaType ?: if (isSingleMovie(finalType, finalVideos) || finalType == "movie" || finalVideos.isNullOrEmpty()) "movie" else "tv"
-                    tmdbData = fetchTmdbDetails(provider, refinedMediaType, tmdbIdStr, refinedMediaType == "movie", finalImdbId, finalType, finalVideos, preFetchedDetail, preFetchedEnDetail)
+                    resolvedMediaType = urlMediaType ?: foundMediaType ?: if (isSingleMovie(finalType, finalVideos) || finalType == "movie" || finalVideos.isNullOrEmpty()) "movie" else "tv"
+                    tmdbData = fetchTmdbDetails(provider, resolvedMediaType, tmdbIdStr, resolvedMediaType == "movie", finalImdbId, finalType, finalVideos, preFetchedDetail, preFetchedEnDetail, isAiostreamsError)
                 } catch (e: Exception) {}
+            }
+
+            if (isAiostreamsError && tmdbData != null && resolvedMediaType == "tv" && finalVideos.isNullOrEmpty()) {
+                val generatedVideos = tmdbData.episodeTmdbMeta.mapNotNull { (key, tmdbEp) ->
+                    val parts = key.split("_")
+                    if (parts.size == 2) {
+                        val s = parts[0].toIntOrNull() ?: return@mapNotNull null
+                        val e = parts[1].toIntOrNull() ?: return@mapNotNull null
+                        Video(
+                            id = fallbackMovieId, 
+                            title = tmdbEp.name,
+                            seasonNumber = s,
+                            episode = e,
+                            overview = tmdbEp.overview,
+                            released = tmdbEp.airDate
+                        )
+                    } else null
+                }
+                if (generatedVideos.isNotEmpty()) {
+                    finalVideos = generatedVideos
+                }
             }
 
             var finalName = originalName ?: this@CatalogEntry.name
@@ -1128,7 +1155,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val fallbackTrailers = finalTrailerStreams?.mapNotNull { it.ytId }?.ifEmpty { finalTrailersSources?.mapNotNull { it.source } }?.distinct()?.map { if (it.startsWith("http")) it else "https://m.youtube.com/watch?v=$it" } ?: emptyList()
             val finalTrailers = tmdbData?.fetchedTrailers?.ifEmpty { fallbackTrailers } ?: fallbackTrailers
 
-            val fallbackMovieId = fetchedKitsuId ?: this@CatalogEntry.kitsuIdExt?.let { "kitsu:$it" } ?: this@CatalogEntry.id
             val movieId = if (!finalVideos.isNullOrEmpty() && !finalVideos[0].id.isNullOrBlank()) finalVideos[0].id else fallbackMovieId
 
             val finalActors = if (tmdbData?.fetchedActors?.isNotEmpty() == true) tmdbData.fetchedActors else null
@@ -1274,13 +1300,12 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     ) {
         suspend fun runCallback(provider: StremioC, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
             if (url != null) {
-                // FIX: v1.153 - INFER_TYPE 사용으로 인한 MediaHTTPConnection OOM 크래시 방지. 타입 명시화.
                 val lowerUrl = url.lowercase()
                 val linkType = when {
                     lowerUrl.contains(".m3u8") || name?.contains("m3u8", true) == true || title?.contains("m3u8", true) == true -> ExtractorLinkType.M3U8
                     lowerUrl.contains(".mpd") -> ExtractorLinkType.DASH
                     lowerUrl.contains(".torrent") -> ExtractorLinkType.TORRENT
-                    else -> ExtractorLinkType.VIDEO // 기존 INFER_TYPE을 제거하고 VIDEO 타입으로 고정
+                    else -> ExtractorLinkType.VIDEO 
                 }
 
                 callback.invoke(newExtractorLink(name ?: "", fixSourceName(name, title), url, linkType) {
@@ -1330,6 +1355,7 @@ private data class TmdbCollectionDetail(
 
 private data class TmdbDetailResponse(
     @JsonProperty("id") val id: Int? = null,
+    @JsonProperty("number_of_seasons") val number_of_seasons: Int? = null,
     @JsonProperty("title") val title: String? = null, 
     @JsonProperty("name") val name: String? = null, 
     @JsonProperty("original_title") val original_title: String? = null, 
