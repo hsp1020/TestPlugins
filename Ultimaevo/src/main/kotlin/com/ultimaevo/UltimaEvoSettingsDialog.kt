@@ -1,4 +1,4 @@
-// v1.27
+// v1.28
 package com.ultimaevo
 
 import android.app.AlertDialog
@@ -12,6 +12,7 @@ import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.*
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.lagradost.cloudstream3.APIHolder
@@ -23,8 +24,9 @@ import kotlinx.coroutines.withContext
 
 class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
-    private val darkThemeBg by lazy {
-        GradientDrawable().apply {
+    // [수정됨] 단일 객체 공유 방식 폐기 -> 호출 시마다 독립된 배경 객체 생성
+    private fun getDarkThemeBg(): GradientDrawable {
+        return GradientDrawable().apply {
             setColor(Color.parseColor("#121212"))
             setStroke(3, Color.WHITE)
             cornerRadius = 16f
@@ -44,7 +46,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val ctx = requireContext()
         val prefs = PreferenceManager.getDefaultSharedPreferences(ctx)
 
-        val scrollView = ScrollView(ctx).apply { background = darkThemeBg }
+        val scrollView = ScrollView(ctx).apply { background = getDarkThemeBg() }
         val mainLayout = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(30, 30, 30, 30)
@@ -185,7 +187,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val mainContainer = LinearLayout(ctx).apply { 
             orientation = LinearLayout.VERTICAL
             setPadding(15, 15, 15, 15)
-            background = darkThemeBg
+            background = getDarkThemeBg() // [수정됨] 독립된 배경 객체 적용
         }
         
         val headerTitle = TextView(ctx).apply {
@@ -225,7 +227,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             combined.forEach { allCatalogs.add(provider.name to it) }
         }
 
-        // [핵심 픽스] 스크롤 점핑과 포커스 증발을 막는 부드러운 In-place 정렬 알고리즘
         fun triggerSort() {
             val focusedView = listLayout.findFocus() as? EditText
             val selStart = focusedView?.selectionStart ?: 0
@@ -369,6 +370,9 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val builder = AlertDialog.Builder(ctx)
         val dialog = builder.setView(mainContainer).create()
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        
+        // [수정됨] 키보드 등장 시 팝업을 밀어올려 찌그러짐을 원천 차단
+        dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
 
         applyBtn.setOnClickListener {
             val editor = prefs.edit()
