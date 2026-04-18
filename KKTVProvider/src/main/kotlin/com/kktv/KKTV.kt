@@ -1,4 +1,4 @@
-// v8.2 - 로그캣 분석 기반 확정안: CDN 토큰(wsSecret) 무효화 방지를 위해 원본 .sdp URL 그대로 사용
+// v8.3 - 400 body error 해결: 합법적인 m3u8 주소 및 토큰 획득을 위해 iOS 사파리 User-Agent 위장 로직 적용
 package com.KingkongTv
 
 import android.net.Uri
@@ -16,6 +16,7 @@ class KingkongTv : MainAPI() {
     
     override val supportedTypes = setOf(TvType.Others)
 
+    // 메인 페이지 파싱은 기본 PC 환경 유지
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
     
     private val portalUrl = "https://kingkongtv.org"
@@ -145,8 +146,11 @@ class KingkongTv : MainAPI() {
         
         val playerPageUrl = "https://kktv.speed10-1.com/kktv/theme/kktv/pages/pc/pc_view.php?ch=$streamId&title=$encodedTitle&start=on&num=1"
         
+        // 아이폰 사파리 환경으로 강제 위장
+        val iosUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1"
+
         val headers = mapOf(
-            "User-Agent" to userAgent,
+            "User-Agent" to iosUserAgent,
             "Referer" to refererUrl,
             "Origin" to "https://kktv.speed10-1.com"
         )
@@ -154,25 +158,35 @@ class KingkongTv : MainAPI() {
         try {
             val response = app.get(playerPageUrl, headers = headers).text
             
-            var streamUrl = Regex("""['"](http[^'"]+(?:\.m3u8|\.sdp)[^'"]*)['"]""").find(response)?.groupValues?.get(1)
+            // 1. 아이폰 UA에 속아 .m3u8 확장자와 올바른 토큰을 반환했는지 탐색
+            var m3u8Url: String? = Regex("""['"](http[^'"]+\.m3u8[^'"]*)['"]""").find(response)?.groupValues?.get(1)
             
-            if (streamUrl == null) {
+            if (m3u8Url == null) {
+                // 2. 응답이 없다면 모바일 전용 경로(/m/m_view.php)로 2차 시도
+                val mobilePageUrl = playerPageUrl.replace("/pc/pc_view.php", "/m/m_view.php")
+                val mobileResponse = try { app.get(mobilePageUrl, headers = headers).text } catch(e: Exception) { "" }
+                m3u8Url = Regex("""['"](http[^'"]+\.m3u8[^'"]*)['"]""").find(mobileResponse)?.groupValues?.get(1)
+            }
+
+            if (m3u8Url == null) {
+                // 3. 최후의 수단: 여전히 sdp를 내려준다면 이전처럼 강제 변환 시도
+                val sdpMatch = Regex("""['"](http[^'"]+\.sdp[^'"]*)['"]""").find(response)?.groupValues?.get(1)
+                m3u8Url = sdpMatch?.replace(".sdp", ".m3u8")
+            }
+
+            if (m3u8Url == null) {
                 val webrtcMatch = Regex("""['"](webrtc://[^'"]+)['"]""").find(response)?.groupValues?.get(1)
-                if (webrtcMatch != null) {
-                    streamUrl = webrtcMatch
-                        .replace("webrtc://", "https://")
-                        .replace(streamId, "$streamId.m3u8") 
-                }
+                m3u8Url = webrtcMatch?.replace("webrtc://", "https://")?.replace(streamId, "$streamId.m3u8") 
             }
 
-            if (streamUrl == null) {
-                streamUrl = "https://cdnnowstream.com/cdnnow/$streamId.m3u8?site=kktv"
+            if (m3u8Url == null) {
+                m3u8Url = "https://cdnnowstream.com/cdnnow/$streamId.m3u8?site=kktv"
             }
 
-            val finalUrl = if (streamUrl.contains("play.ogtv3.com") && streamUrl.startsWith("https://")) {
-                streamUrl.replaceFirst("https://", "http://")
+            val finalUrl = if (m3u8Url!!.contains("play.ogtv3.com") && m3u8Url!!.startsWith("https://")) {
+                m3u8Url!!.replaceFirst("https://", "http://")
             } else {
-                streamUrl
+                m3u8Url!!
             }
 
             callback.invoke(
@@ -187,7 +201,7 @@ class KingkongTv : MainAPI() {
                     this.headers = mapOf(
                         "Origin" to "https://kktv.speed10-1.com",
                         "Referer" to "https://kktv.speed10-1.com/",
-                        "User-Agent" to userAgent
+                        "User-Agent" to iosUserAgent // 플레이어 단에도 동일하게 모바일 환경임을 증명
                     )
                 }
             )
