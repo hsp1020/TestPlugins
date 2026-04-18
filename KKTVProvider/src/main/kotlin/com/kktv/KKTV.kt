@@ -1,20 +1,22 @@
-// v8.7 - 화면이 없는 쌩웹뷰(Headless WebView)의 렌더링 중단 방지, 메인 루퍼 타임아웃 적용 및 전면 네트워크 스니핑
+// v9.0 - 5가지 디버깅 방법론 전면 통합 (정적 파싱 -> 내장 리졸버 -> 쌩웹뷰 스니핑 -> 프록시 서버)
 package com.KingkongTv
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import android.webkit.WebView
-import android.webkit.WebViewClient
+import android.util.Base64
+import android.webkit.*
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.*
 import org.jsoup.nodes.Element
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.net.ServerSocket
+import java.net.Socket
+import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
 import kotlin.coroutines.resume
@@ -26,7 +28,6 @@ class KingkongTv : MainAPI() {
     override var lang = "ko"
     override val supportedTypes = setOf(TvType.Others)
 
-    private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
     private val portalUrl = "https://kingkongtv.org"
 
     override val mainPage = mainPageOf(
@@ -35,19 +36,13 @@ class KingkongTv : MainAPI() {
 
     private suspend fun updateMainUrlIfNeeded() {
         try {
-            println("DEBUG [KingkongTv] v8.7: 포털 사이트 접속 시도 중...")
             val doc = app.get(portalUrl).document
             val latestUrl = doc.selectFirst("a.nav-cta")?.attr("href")
             if (!latestUrl.isNullOrBlank()) {
                 val cleanedUrl = latestUrl.trimEnd('/')
-                if (mainUrl != cleanedUrl) {
-                    println("DEBUG [KingkongTv] v8.7: 도메인 변경 감지 -> $cleanedUrl")
-                    mainUrl = cleanedUrl
-                }
+                if (mainUrl != cleanedUrl) mainUrl = cleanedUrl
             }
-        } catch (e: Exception) {
-            println("DEBUG [KingkongTv] v8.7: 도메인 업데이트 에러 - ${e.message}")
-        }
+        } catch (e: Exception) {}
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
@@ -56,7 +51,6 @@ class KingkongTv : MainAPI() {
         
         try {
             val mainDoc = app.get(url).document
-            
             var iframeSrc = mainDoc.selectFirst("iframe[src*='wdbroad.com/broadcast']")?.attr("src")
                 ?: mainDoc.selectFirst("iframe#broadcastFrame")?.attr("src")
                 ?: "https://kktv.speed10-1.com/kktv/index.php?tg=1ch&ca=0"
@@ -74,7 +68,6 @@ class KingkongTv : MainAPI() {
 
             return newHomePageResponse(HomePageList(request.name, home, true), false)
         } catch (e: Exception) {
-            println("DEBUG [KingkongTv] v8.7: 메인 페이지 로드 실패 - ${e.message}")
             return newHomePageResponse(request.name, emptyList())
         }
     }
@@ -140,145 +133,271 @@ class KingkongTv : MainAPI() {
         val uri = Uri.parse(data)
         val streamId = data.substringAfter("/live_stream/").substringBefore("?")
         val refererUrl = URLDecoder.decode(uri.getQueryParameter("ref") ?: "", "UTF-8")
-        
         val playerPageUrl = "https://wdbroad.com/broadcast/view.php?stream=$streamId"
-        println("DEBUG [KingkongTv] v8.7: 쌩웹뷰 스니핑 시작 - $playerPageUrl")
+        
+        println("DEBUG [KingkongTv] v9.0: === 다중 우회망(Fallback Chain) 추출 시작 ===")
+        
+        // [방법 5: 모듈화] 추출 로직을 KKTvExtractor로 분리하여 실행
+        return KKTvExtractor().extractWithFallbackChain(
+            url = playerPageUrl, 
+            referer = refererUrl, 
+            streamId = streamId, 
+            callback = callback
+        )
+    }
 
-        // 1. 메인 루퍼가 안정적으로 확보된 쌩웹뷰 스니핑 실행
-        var m3u8Url = getM3u8FromRawWebView(playerPageUrl, refererUrl)
+    private fun fixUrl(baseUrl: String, relativeUrl: String): String {
+        if (relativeUrl.startsWith("http")) return relativeUrl
+        return try { java.net.URI(baseUrl).resolve(relativeUrl).toString() } catch (e: Exception) { relativeUrl }
+    }
+}
 
-        // 2. 스니핑 실패 시 최후의 구형 정규식 백업 (보존)
-        if (m3u8Url == null) {
-            println("DEBUG [KingkongTv] v8.7: WebView 스니핑 실패. 정규식 백업 시도")
-            try {
-                val response = app.get(playerPageUrl, referer = refererUrl).text
-                m3u8Url = Regex("""https?://wdbroadcast\.com:8443/[^"']+\.m3u8[^"']*""").find(response)?.value
-                if (m3u8Url == null) m3u8Url = "https://play.ogtv3.com/live/$streamId.m3u8?site=kktv"
-            } catch (e: Exception) { }
+// [방법 5: 모듈화 아키텍처 적용]
+class KKTvExtractor : ExtractorApi() {
+    override val name = "KKTV_MultiEngine"
+    override val mainUrl = "https://wdbroad.com"
+    override val requiresReferer = true
+
+    private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
+
+    companion object {
+        @Volatile private var currentProxyServer: ProxyWebServer? = null
+    }
+
+    override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {}
+
+    suspend fun extractWithFallbackChain(url: String, referer: String, streamId: String, callback: (ExtractorLink) -> Unit): Boolean {
+        var finalUrl: String? = null
+        var solvedMethod = "알 수 없음"
+
+        // 1. [방법 4: 정적 데이터 분석 (Anilife 스타일)] - 가장 빠르고 가벼운 방법
+        println("DEBUG [KingkongTv] 🔍 [테스트 1단계] 방법 4: 정적 파싱 및 Base64 해독 시도...")
+        finalUrl = tryMethod4Static(url, referer)
+        if (finalUrl != null) solvedMethod = "방법 4 (정적 분석 및 Base64)"
+
+        // 2. [방법 1: 내장 WebViewResolver (TVWiki 스타일)] - JS 렌더링 후 DOM 캡처
+        if (finalUrl == null) {
+            println("DEBUG [KingkongTv] 🔍 [테스트 2단계] 방법 1: Cloudstream 내장 WebViewResolver 시도...")
+            finalUrl = tryMethod1Resolver(url, referer)
+            if (finalUrl != null) solvedMethod = "방법 1 (내장 WebViewResolver)"
         }
 
-        if (m3u8Url != null) {
-            println("DEBUG [KingkongTv] v8.7: 최종 추출된 영상 주소 - $m3u8Url")
-            callback.invoke(
-                newExtractorLink(
-                    source = name,
-                    name = name,
-                    url = m3u8Url,
-                    type = ExtractorLinkType.M3U8
-                ) {
-                    this.referer = "https://wdbroad.com/"
-                    this.quality = Qualities.Unknown.value
-                    this.headers = mapOf(
-                        "User-Agent" to userAgent,
-                        "Origin" to "https://wdbroad.com",
-                        "Referer" to "https://wdbroad.com/"
-                    )
-                }
-            )
+        // 3. [방법 2: MainLooper 쌩웹뷰 스니핑 (Kotbc 스타일)] - 모든 네트워크 트래픽 실시간 가로채기
+        if (finalUrl == null) {
+            println("DEBUG [KingkongTv] 🔍 [테스트 3단계] 방법 2: MainLooper 쌩웹뷰(Raw WebView) 스니핑 시도...")
+            finalUrl = tryMethod2RawWebView(url, referer)
+            if (finalUrl != null) solvedMethod = "방법 2 (쌩웹뷰 네트워크 스니핑)"
         }
 
+        // 4. 모든 방법 실패 시 구형 백업 주소 사용
+        if (finalUrl == null) {
+            println("DEBUG [KingkongTv] ❌ 모든 추출 방법 실패. 구형 백업 주소 사용.")
+            finalUrl = "https://play.ogtv3.com/live/$streamId.m3u8?site=kktv"
+            solvedMethod = "백업 하드코딩"
+        }
+
+        println("DEBUG [KingkongTv] 🎯 [결과 보고] 해결된 방식: $solvedMethod | 최종 주소: $finalUrl")
+
+        // 5. [방법 3: 로컬 프록시 서버 (Anilife 스타일)] - 추출된 주소의 재생 거부(CORS 등)를 막기 위해 프록시 우회
+        println("DEBUG [KingkongTv] 🔍 [테스트 4단계] 방법 3: 로컬 프록시 서버(ProxyWebServer) 구동 시도...")
+        val proxyUrl = runProxyServer(finalUrl) ?: finalUrl
+
+        callback.invoke(
+            newExtractorLink(
+                source = name,
+                name = solvedMethod,
+                url = proxyUrl,
+                type = ExtractorLinkType.M3U8
+            ) {
+                this.referer = "https://wdbroad.com/"
+                this.quality = Qualities.Unknown.value
+                this.headers = mapOf(
+                    "User-Agent" to userAgent,
+                    "Origin" to "https://wdbroad.com",
+                    "Referer" to "https://wdbroad.com/"
+                )
+            }
+        )
         return true
     }
 
+    private suspend fun tryMethod4Static(url: String, referer: String): String? {
+        try {
+            val response = app.get(url, headers = mapOf("Referer" to referer)).text
+            
+            // 일반 M3U8 정규식 매칭
+            var m3u8 = Regex("""https?://[^"']+\.m3u8[^"']*""").find(response)?.value
+            if (m3u8 != null) return m3u8
+
+            // 숨겨진 Base64 문자열 전체 디코딩 검사
+            val base64Pattern = Regex("""['"]([a-zA-Z0-9+/=]{40,})['"]""")
+            for (match in base64Pattern.findAll(response)) {
+                try {
+                    val decoded = String(Base64.decode(match.groupValues[1], Base64.DEFAULT), Charsets.UTF_8)
+                    if (decoded.contains(".m3u8")) {
+                        return Regex("""https?://[^"']+\.m3u8[^"']*""").find(decoded)?.value ?: decoded
+                    }
+                } catch (e: Exception) {}
+            }
+        } catch (e: Exception) {}
+        return null
+    }
+
+    private suspend fun tryMethod1Resolver(url: String, referer: String): String? {
+        try {
+            val interceptor = com.lagradost.cloudstream3.network.WebViewResolver(
+                Regex("""wdbroadcast|playlist|\.m3u8"""), 
+                timeout = 10000L
+            )
+            val response = app.get(url, headers = mapOf("Referer" to referer), interceptor = interceptor)
+            val html = response.text
+            return Regex("""https?://[^"']+\.m3u8[^"']*""").find(html)?.value
+        } catch (e: Exception) {}
+        return null
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
-    private suspend fun getM3u8FromRawWebView(url: String, referer: String): String? {
+    private suspend fun tryMethod2RawWebView(url: String, referer: String): String? {
         return withContext(Dispatchers.Main) {
             suspendCancellableCoroutine { cont ->
                 try {
-                    val context = KingkongTvPlugin.pluginContext
-                    if (context == null) {
-                        println("DEBUG [KingkongTv] v8.7: Context가 Null입니다. KKTVPlugin.kt가 업데이트되었는지 확인하세요.")
-                        if (cont.isActive) cont.resume(null)
-                        return@suspendCancellableCoroutine
-                    }
-
+                    val context: Context = (AcraApplication.context ?: app) as Context
                     val webView = WebView(context)
-                    
-                    // [수정 포인트 v8.7] 쌩웹뷰가 백그라운드에서도 크기를 갖도록 강제하여 렌더링 중단(Pause) 방지
-                    webView.layout(0, 0, 1920, 1080)
                     
                     webView.settings.apply {
                         javaScriptEnabled = true
                         domStorageEnabled = true
-                        mediaPlaybackRequiresUserGesture = false // 동영상 강제 자동 재생 허용
+                        mediaPlaybackRequiresUserGesture = false 
                         userAgentString = userAgent
+                        mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                     }
 
                     var isFound = false
+                    val handler = Handler(Looper.getMainLooper())
+
+                    val timeoutRunnable = Runnable {
+                        if (cont.isActive) {
+                            println("DEBUG [KingkongTv] [방법 2] 타임아웃 발생")
+                            cont.resume(null)
+                            try { webView.destroy() } catch (e: Exception) {}
+                        }
+                    }
+                    handler.postDelayed(timeoutRunnable, 15000)
 
                     webView.webViewClient = object : WebViewClient() {
-                        // 크롬 개발자 도구의 '네트워크(Network)' 탭을 완벽하게 모사
-                        override fun shouldInterceptRequest(
-                            view: WebView?,
-                            request: WebResourceRequest?
-                        ): WebResourceResponse? {
+                        override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                             val reqUrl = request?.url?.toString() ?: ""
                             
-                            // [수정 포인트 v8.7] 사이트가 영상을 어떻게 숨겼는지 파악하기 위해 모든 네트워크 트래픽 무조건 출력
-                            if (reqUrl.startsWith("http")) {
-                                println("DEBUG [KingkongTv] 🌐 [네트워크 포착]: $reqUrl")
-                            }
-
-                            // .m3u8 확장자가 발견되면 즉시 탈출
                             if (!isFound && reqUrl.contains(".m3u8")) {
                                 isFound = true
-                                println("DEBUG [KingkongTv] 🎯 [M3U8 스니핑 성공!]: $reqUrl")
-                                if (cont.isActive) {
-                                    cont.resume(reqUrl)
-                                }
-                                
-                                // 안전한 웹뷰 파괴를 위해 메인 루퍼로 넘김
-                                Handler(Looper.getMainLooper()).post {
-                                    try { view?.destroy() } catch (e: Exception) {}
-                                }
+                                handler.removeCallbacks(timeoutRunnable)
+                                if (cont.isActive) cont.resume(reqUrl)
+                                view?.post { try { webView.destroy() } catch (e: Exception) {} }
                             }
                             return super.shouldInterceptRequest(view, request)
                         }
 
                         override fun onPageFinished(view: WebView?, url: String?) {
                             super.onPageFinished(view, url)
-                            println("DEBUG [KingkongTv] v8.7: 페이지 로딩 완료, 영상 강제 재생을 위한 자바스크립트 주입")
-                            
                             view?.evaluateJavascript("""
                                 (function() {
-                                    var attemptClick = function() {
-                                        var buttons = document.querySelectorAll('button, .play-btn, .vjs-play-control, .jw-icon-display, div[class*="play"], .vjs-big-play-button');
-                                        for (var i = 0; i < buttons.length; i++) {
-                                            buttons[i].click();
-                                        }
-                                        var video = document.querySelector('video');
-                                        if(video) { video.play(); }
-                                    };
-                                    attemptClick(); 
-                                    setTimeout(attemptClick, 1000); 
-                                    setTimeout(attemptClick, 3000); 
+                                    Object.defineProperty(document, 'visibilityState', { get: function() { return 'visible'; } });
+                                    Object.defineProperty(document, 'hidden', { get: function() { return false; } });
+                                    var btns = document.querySelectorAll('button, .play-btn, div[class*="play"]');
+                                    for(var i=0; i<btns.length; i++) btns[i].click();
+                                    var v = document.querySelector('video'); if(v) v.play();
                                 })();
                             """.trimIndent(), null)
                         }
                     }
-
-                    // [수정 포인트 v8.7] 화면에 붙어있지 않은 뷰의 view.postDelayed는 작동하지 않으므로 순정 메인 루퍼 Handler 사용
-                    Handler(Looper.getMainLooper()).postDelayed({
-                        if (!isFound && cont.isActive) {
-                            println("DEBUG [KingkongTv] ⏳ [WebView 타임아웃] 15초간 M3U8 요청이 감지되지 않았습니다. 로그캣의 [네트워크 포착] 내역을 확인해주세요.")
-                            cont.resume(null)
-                            try { webView.destroy() } catch (e: Exception) {}
-                        }
-                    }, 15000)
-
-                    val headers = mutableMapOf("Referer" to referer)
-                    webView.loadUrl(url, headers)
-
+                    webView.loadUrl(url, mapOf("Referer" to referer))
                 } catch (e: Exception) {
-                    println("DEBUG [KingkongTv] v8.7: WebView 엔진 가동 중 에러 - ${e.message}")
                     if (cont.isActive) cont.resume(null)
                 }
             }
         }
     }
 
-    private fun fixUrl(baseUrl: String, relativeUrl: String): String {
-        if (relativeUrl.startsWith("http")) return relativeUrl
-        return try { java.net.URI(baseUrl).resolve(relativeUrl).toString() } catch (e: Exception) { relativeUrl }
+    private suspend fun runProxyServer(m3u8Url: String): String? {
+        try {
+            val content = app.get(m3u8Url, headers = mapOf("Referer" to "https://wdbroad.com/", "User-Agent" to userAgent)).text
+            if (!content.contains("#EXTM3U")) return null
+
+            var baseUri = try { URI(m3u8Url) } catch (e: Exception) { null }
+            val sb = StringBuilder()
+            
+            for (line in content.lines()) {
+                val trimmed = line.trim()
+                if (trimmed.isEmpty()) continue
+                if (trimmed.startsWith("#")) {
+                    sb.append(trimmed).append("\n")
+                } else {
+                    val absUrl = try { baseUri?.resolve(trimmed).toString() } catch (e: Exception) { trimmed }
+                    sb.append(absUrl).append("\n")
+                }
+            }
+
+            synchronized(this) { currentProxyServer?.stop(); currentProxyServer = null }
+            val proxy = ProxyWebServer().apply { 
+                updatePlaylist(sb.toString())
+                start() 
+            }
+            currentProxyServer = proxy
+            
+            println("DEBUG [KingkongTv] 🎯 [방법 3: 로컬 프록시 서버] 구축 완료: Port ${proxy.port}")
+            return "http://127.0.0.1:${proxy.port}/playlist.m3u8"
+        } catch (e: Exception) {
+            println("DEBUG [KingkongTv] ❌ [방법 3] 프록시 구축 실패, 원본 링크 반환")
+            return null
+        }
+    }
+
+    class ProxyWebServer {
+        var port: Int = 0
+        private var serverSocket: ServerSocket? = null
+        private var isRunning = false
+        @Volatile private var playlistData: String = ""
+
+        fun updatePlaylist(data: String) { playlistData = data }
+
+        fun start() {
+            try {
+                serverSocket = ServerSocket(0).also { port = it.localPort }
+                isRunning = true
+                CoroutineScope(Dispatchers.IO).launch { 
+                    while (isRunning && serverSocket != null && !serverSocket!!.isClosed) { 
+                        try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {} 
+                    } 
+                }
+            } catch (e: Exception) {}
+        }
+
+        fun stop() { 
+            isRunning = false
+            try { serverSocket?.close(); serverSocket = null } catch (e: Exception) {} 
+        }
+
+        private fun handleClient(socket: Socket) {
+            try {
+                socket.soTimeout = 5000
+                val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
+                val line = reader.readLine() ?: return
+                
+                while (true) { if (reader.readLine().isNullOrEmpty()) break }
+
+                val out = socket.getOutputStream()
+                if (line.contains("playlist.m3u8")) {
+                    val payload = playlistData.toByteArray(charset("UTF-8"))
+                    out.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nConnection: close\r\nContent-Length: ${payload.size}\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
+                    out.write(payload)
+                } else {
+                    out.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
+                }
+                out.flush()
+            } catch (e: Exception) {
+            } finally {
+                try { socket.close() } catch (e: Exception) {}
+            }
+        }
     }
 }
