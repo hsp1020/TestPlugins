@@ -1,4 +1,4 @@
-// v14.2 - Cloudstream 자동 URL 변환 방지(가짜 스킴 적용) 및 Iframe 직접 로드 패치
+// v14.3 - Cloudstream 캐시 및 URL 강제 변환 완벽 방어 (ID 강제 추출 적용)
 package com.KingkongTv
 
 import android.content.Context
@@ -105,7 +105,7 @@ class KingkongTv : MainAPI() {
         val encodedPoster = URLEncoder.encode(thumbUrl, "UTF-8")
         val encodedRef = URLEncoder.encode(refererUrl, "UTF-8") 
 
-        // ★ Cloudstream의 URL 자동 변환을 막기 위해 가짜 스킴(kktv://)을 붙여 절대 경로로 인식하게 함
+        // Cloudstream의 URL 훼손을 방지하기 위해 가짜 스킴 적용
         val dataStr = "kktv://${streamId}|$encodedTitle|$encodedPoster|$encodedRef"
 
         return newMovieSearchResponse(title, dataStr, TvType.Others) { 
@@ -135,14 +135,17 @@ class KingkongTv : MainAPI() {
         val parts = data.split("|")
         if (parts.size < 4) return false
 
-        // ★ 앞에 붙여두었던 가짜 스킴(kktv://)을 떼어내고 순수한 streamId만 추출
-        val streamId = parts[0].replace("kktv://", "") 
+        // ★ 핵심 패치: Cloudstream이 주소를 어떻게 합쳐놨든(https://kktv247.com/259 형태든)
+        // 맨 마지막 부분에서 순수 숫자(스트림 ID)만 강제로 뽑아냅니다.
+        val rawIdPart = parts[0].substringAfterLast("/")
+        val streamId = Regex("""\d+""").find(rawIdPart)?.value ?: return false
+        
         val parentReferer = URLDecoder.decode(parts[3], "UTF-8")
         
-        // 실제 미디어가 로드되는 타겟 iframe
+        // 정상적인 타겟 iframe URL 생성 완료
         val playerIframeUrl = "https://wdbroad.com/broadcast/$streamId/kktv"
         
-        println("DEBUG[KKTV v14.2] 웹뷰 스니핑 시작 - Player URL: $playerIframeUrl")
+        println("DEBUG [KKTV v14.3] 웹뷰 스니핑 시작 - Player URL: $playerIframeUrl")
 
         val hookResult = suspendCancellableCoroutine<Pair<String, Map<String, String>>?> { cont ->
             val handler = Handler(Looper.getMainLooper())
@@ -161,7 +164,7 @@ class KingkongTv : MainAPI() {
 
                     val timeout = Runnable {
                         if (cont.isActive) {
-                            println("DEBUG[KKTV v14.2] 15초 타임아웃 발생 - m3u8 포착 실패")
+                            println("DEBUG [KKTV v14.3] 15초 타임아웃 발생 - m3u8 포착 실패")
                             try { webView.destroy() } catch (e: Exception) {}
                             cont.resume(null)
                         }
@@ -177,7 +180,7 @@ class KingkongTv : MainAPI() {
                             // 스트리밍 도메인이나 m3u8, chunklist 감지
                             if (!isFound && (reqUrl.contains("wdbroadcast.com") || reqUrl.contains(".m3u8") || reqUrl.contains("chunklist"))) {
                                 isFound = true
-                                println("DEBUG [KKTV v14.2] 🎯 M3U8 통신 포착: $reqUrl")
+                                println("DEBUG [KKTV v14.3] 🎯 M3U8 통신 포착: $reqUrl")
                                 handler.removeCallbacks(timeout)
                                 
                                 if (cont.isActive) {
@@ -214,8 +217,7 @@ class KingkongTv : MainAPI() {
                 headers["User-Agent"] = DESKTOP_UA
             }
             
-            // ★ 중요: wdbroadcast 서버에 m3u8을 요청할 때 브라우저는 자기가 실행되는 wdbroad.com을 레퍼러로 전송함
-            // 따라서 익스트랙터에서도 아래와 같이 변조해주어야 403 Forbidden 에러가 발생하지 않음
+            // 미디어 서버에서 차단하지 않도록 wdbroad.com 레퍼러 강제 지정
             headers["Referer"] = "https://wdbroad.com/"
             headers["Origin"] = "https://wdbroad.com"
 
