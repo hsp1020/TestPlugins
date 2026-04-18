@@ -167,8 +167,11 @@ class KingkongTv : MainAPI() {
         val refererUrl = if (!rawRef.isNullOrBlank()) URLDecoder.decode(rawRef, "UTF-8") else "https://kktv.speed10-1.com/kktv/index.php"
         
         println("DEBUG [KingkongTv] v7.7: 링크 로드 시작 ID=$streamId, Referer=$refererUrl")
-
-        val playerPageUrl = "https://kktv.speed10-1.com/kktv/pc_view.php?stream=$streamId"
+        val rawTitle2 = uri.getQueryParameter("title") ?: ""
+        val cleanTitle2 = rawTitle2.replace("🔥 ", "")
+        val encodedTitle2 = URLEncoder.encode(cleanTitle2, "UTF-8").replace("+", "%20")
+        
+        val playerPageUrl = "https://kktv.speed10-1.com/kktv/theme/kktv/pages/pc/pc_view.php?ch=$streamId&title=$encodedTitle2&start=on&num=1"
         
         val headers = mapOf(
             "User-Agent" to userAgent,
