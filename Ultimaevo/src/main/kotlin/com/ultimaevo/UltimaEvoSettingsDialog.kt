@@ -58,34 +58,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         }
         mainLayout.addView(title)
 
-        val syncAllBtn = Button(ctx).apply {
-            text = "🔄 모든 카탈로그 데이터 최초 동기화"
-            setTextColor(Color.WHITE)
-            setOnClickListener {
-                this.text = "통신 중..."
-                this.isEnabled = false
-                CoroutineScope(Dispatchers.IO).launch {
-                    val providers = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
-                    for (provider in providers) {
-                        try {
-                            val reqName = provider.mainPage.firstOrNull()?.name ?: "Home"
-                            val reqData = provider.mainPage.firstOrNull()?.data ?: ""
-                            val response = provider.getMainPage(1, MainPageRequest(reqName, reqData, false))
-                            if (response != null && response.items.isNotEmpty()) {
-                                val names = response.items.map { it.name }
-                                prefs.edit().putString("dynamic_catalogs_${provider.name}", names.joinToString("|||")).apply()
-                            }
-                        } catch (e: Exception) { }
-                    }
-                    withContext(Dispatchers.Main) {
-                        this@apply.text = "✅ 동기화 완료"
-                        this@apply.isEnabled = true
-                    }
-                }
-            }
-        }
-        mainLayout.addView(syncAllBtn)
-
         val countLayout = LinearLayout(ctx).apply { 
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -182,9 +154,9 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         }
         
         val headerTitle = TextView(ctx).apply {
-            text = "카탈로그 $instanceId 구성 편집"
-            textSize = 20f
-            setTextColor(Color.WHITE)
+            text = "카탈로그 $instanceId 구성 (자동 동기화 중...)"
+            textSize = 18f
+            setTextColor(Color.CYAN)
             setPadding(0, 20, 0, 40)
             gravity = Gravity.CENTER
         }
@@ -198,6 +170,26 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             val checkBox: CheckBox, val orderEdit: EditText, val renameEdit: EditText, val view: View
         )
         val rows = mutableListOf<CatalogRow>()
+
+        // [핵심] 자동 네트워크 동기화 실행
+        CoroutineScope(Dispatchers.IO).launch {
+            val providers = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
+            for (provider in providers) {
+                try {
+                    val reqName = provider.mainPage.firstOrNull()?.name ?: "Home"
+                    val reqData = provider.mainPage.firstOrNull()?.data ?: ""
+                    val response = provider.getMainPage(1, MainPageRequest(reqName, reqData, false))
+                    if (response != null && response.items.isNotEmpty()) {
+                        val names = response.items.map { it.name }
+                        prefs.edit().putString("dynamic_catalogs_${provider.name}", names.joinToString("|||")).apply()
+                    }
+                } catch (e: Exception) { }
+            }
+            withContext(Dispatchers.Main) {
+                headerTitle.text = "카탈로그 $instanceId 구성 편집 (동기화 완료)"
+                headerTitle.setTextColor(Color.WHITE)
+            }
+        }
 
         val allProviders = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
         val allCatalogs = mutableListOf<Pair<String, String>>() 
@@ -224,7 +216,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             val row = LinearLayout(ctx).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, 10, 0, 10)
+                setPadding(0, 5, 0, 5)
             }
 
             val cb = CheckBox(ctx).apply {
@@ -235,14 +227,24 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             val etOrder = EditText(ctx).apply {
                 inputType = InputType.TYPE_CLASS_NUMBER
                 setText(prefs.getString("cat_order_${instanceId}_${pName}_$cName", "99"))
-                layoutParams = LinearLayout.LayoutParams(120, LinearLayout.LayoutParams.WRAP_CONTENT)
+                layoutParams = LinearLayout.LayoutParams(100, LinearLayout.LayoutParams.WRAP_CONTENT)
                 gravity = Gravity.CENTER
                 setTextColor(Color.WHITE)
+                textSize = 14f
             }
             row.addView(etOrder)
 
+            // [추가] 프로바이더 출처 표시 (수정 불가)
+            val tvProvider = TextView(ctx).apply {
+                text = "[$pName]"
+                setTextColor(Color.parseColor("#AAAAAA"))
+                textSize = 12f
+                setPadding(10, 0, 10, 0)
+                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            }
+            row.addView(tvProvider)
+
             val etRename = EditText(ctx).apply {
-                hint = "[$pName] $cName"
                 setText(prefs.getString("cat_rename_${instanceId}_${pName}_$cName", cName))
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
                 isEnabled = cb.isChecked
@@ -254,15 +256,15 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
             val up = TextView(ctx).apply { 
                 text = "▲"
-                textSize = 24f
+                textSize = 22f
                 setTextColor(Color.WHITE)
-                setPadding(20, 10, 20, 10) 
+                setPadding(15, 5, 10, 5) 
             }
             val down = TextView(ctx).apply { 
                 text = "▼"
-                textSize = 24f
+                textSize = 22f
                 setTextColor(Color.WHITE)
-                setPadding(20, 10, 20, 10) 
+                setPadding(10, 5, 15, 5) 
             }
             
             row.addView(up)
