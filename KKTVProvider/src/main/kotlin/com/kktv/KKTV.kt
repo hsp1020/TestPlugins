@@ -1,4 +1,4 @@
-// v8.0 - 시작점 체인 요청 필수 파라미터(title, start, num) 복원 적용
+// v8.2 - 로그캣 분석 기반 확정안: CDN 토큰(wsSecret) 무효화 방지를 위해 원본 .sdp URL 그대로 사용
 package com.KingkongTv
 
 import android.net.Uri
@@ -154,28 +154,25 @@ class KingkongTv : MainAPI() {
         try {
             val response = app.get(playerPageUrl, headers = headers).text
             
-            var m3u8Url: String? = null
-            val streamUrlMatch = Regex("""['"](http[^'"]+(?:\.m3u8|\.sdp)[^'"]*)['"]""").find(response)?.groupValues?.get(1)
+            var streamUrl = Regex("""['"](http[^'"]+(?:\.m3u8|\.sdp)[^'"]*)['"]""").find(response)?.groupValues?.get(1)
             
-            if (streamUrlMatch != null) {
-                m3u8Url = streamUrlMatch.replace(".sdp", ".m3u8")
-            } else {
+            if (streamUrl == null) {
                 val webrtcMatch = Regex("""['"](webrtc://[^'"]+)['"]""").find(response)?.groupValues?.get(1)
                 if (webrtcMatch != null) {
-                    m3u8Url = webrtcMatch
+                    streamUrl = webrtcMatch
                         .replace("webrtc://", "https://")
                         .replace(streamId, "$streamId.m3u8") 
                 }
             }
 
-            if (m3u8Url == null) {
-                m3u8Url = "https://cdnnowstream.com/cdnnow/$streamId.m3u8?site=kktv"
+            if (streamUrl == null) {
+                streamUrl = "https://cdnnowstream.com/cdnnow/$streamId.m3u8?site=kktv"
             }
 
-            val finalUrl = if (m3u8Url.contains("play.ogtv3.com") && m3u8Url.startsWith("https://")) {
-                m3u8Url.replaceFirst("https://", "http://")
+            val finalUrl = if (streamUrl.contains("play.ogtv3.com") && streamUrl.startsWith("https://")) {
+                streamUrl.replaceFirst("https://", "http://")
             } else {
-                m3u8Url
+                streamUrl
             }
 
             callback.invoke(
