@@ -1,4 +1,4 @@
-// v8.1 - 작은 카테고리 아이콘이 강제 확대되어 깨지는 현상을 방지하기 위해 썸네일(poster) 전달 로직 비활성화
+// v8.2 - 빌드 에러 수정 (ExtractorLink 파라미터 타입 불일치 해결 및 썸네일 비활성화 유지)
 package com.KingkongTv
 
 import android.net.Uri
@@ -24,15 +24,15 @@ class KingkongTv : MainAPI() {
 
     private suspend fun updateMainUrlIfNeeded() {
         try {
-            println("DEBUG [KingkongTv] v8.1: 포털($portalUrl) 체크 시작")
+            println("DEBUG [KingkongTv] v8.2: 포털($portalUrl) 체크 시작")
             val doc = app.get(portalUrl).document
             val latestUrl = doc.selectFirst("a.nav-cta")?.attr("href")
             if (!latestUrl.isNullOrBlank()) {
                 mainUrl = latestUrl.trimEnd('/')
-                println("DEBUG [KingkongTv] v8.1: 메인 도메인 업데이트 - $mainUrl")
+                println("DEBUG [KingkongTv] v8.2: 메인 도메인 업데이트 - $mainUrl")
             }
         } catch (e: Exception) {
-            println("DEBUG [KingkongTv] v8.1: 도메인 업데이트 중 가설 오류 발생 - ${e.message}")
+            println("DEBUG [KingkongTv] v8.2: 도메인 업데이트 중 가설 오류 발생 - ${e.message}")
         }
     }
 
@@ -41,7 +41,7 @@ class KingkongTv : MainAPI() {
         val url = "$mainUrl${request.data}"
         
         try {
-            println("DEBUG [KingkongTv] v8.1: 페이지 로드 - $url")
+            println("DEBUG [KingkongTv] v8.2: 페이지 로드 - $url")
             val mainDoc = app.get(url).document
             
             // 신규 wdbroad.com iframe 탐색 우선순위 상향
@@ -63,7 +63,7 @@ class KingkongTv : MainAPI() {
 
             return newHomePageResponse(HomePageList(request.name, home, true), false)
         } catch (e: Exception) {
-            println("DEBUG [KingkongTv] v8.1: 메인 에러 - ${e.message}")
+            println("DEBUG [KingkongTv] v8.2: 메인 에러 - ${e.message}")
             return newHomePageResponse(request.name, emptyList())
         }
     }
@@ -73,8 +73,6 @@ class KingkongTv : MainAPI() {
 
         var title: String? = null
         var streamId: String? = null
-        
-        // [기존 로직 보존] 썸네일 변수는 남겨두지만 할당 과정에서 사용하지 않습니다.
         var thumbUrlRaw: String? = null
 
         // 1. 신규 UI (onclick 인자 추출)
@@ -97,13 +95,11 @@ class KingkongTv : MainAPI() {
         if (title.isNullOrBlank() || streamId.isNullOrBlank()) return null
         if (this.selectFirst("td.subject")?.hasClass("bold") == true) title = "🔥 $title"
 
-        // [수정 포인트 v8.1] 썸네일 파라미터를 fakeUrl 생성에서 제외
-        // val thumbUrl = if (thumbUrlRaw != null) fixUrl(refererUrl, thumbUrlRaw) + "?t=${System.currentTimeMillis()}" else ""
+        // 썸네일 아이콘 강제 확대를 막기 위해 URL 파라미터에서 포스터 정보 제외
         val fakeUrl = "$mainUrl/live_stream/$streamId?title=${URLEncoder.encode(title, "UTF-8")}&ref=${URLEncoder.encode(refererUrl, "UTF-8")}"
 
         return newMovieSearchResponse(title, fakeUrl, TvType.Others) { 
-            // [수정 포인트 v8.1] Cloudstream이 아이콘을 확대하지 못하도록 포스터 URL 할당 해제 (텍스트로만 표시됨)
-            // this.posterUrl = thumbUrl 
+            // this.posterUrl = ... // UI에서 텍스트로만 렌더링하도록 썸네일 주입 비활성화
         }
     }
 
@@ -111,12 +107,8 @@ class KingkongTv : MainAPI() {
         val uri = Uri.parse(url)
         val title = URLDecoder.decode(uri.getQueryParameter("title") ?: "Live", "UTF-8")
         
-        // [수정 포인트 v8.1] fakeUrl에서 썸네일을 받지 않으므로 처리 생략
-        // val poster = uri.getQueryParameter("poster")?.let { URLDecoder.decode(it, "UTF-8") }
-        
         return newMovieLoadResponse(title, url, TvType.Others, url) { 
-            // this.posterUrl = poster
-            this.plot = "실시간 중계 - v8.1 엔진 (썸네일 비활성화)" 
+            this.plot = "실시간 중계 - v8.2 엔진 (썸네일 비활성화)" 
         }
     }
 
@@ -130,7 +122,7 @@ class KingkongTv : MainAPI() {
         val streamId = data.substringAfter("/live_stream/").substringBefore("?")
         val refererUrl = URLDecoder.decode(uri.getQueryParameter("ref") ?: "", "UTF-8")
         
-        println("DEBUG [KingkongTv] v8.1: 링크 분석 시작 ID=$streamId")
+        println("DEBUG [KingkongTv] v8.2: 링크 분석 시작 ID=$streamId")
 
         val playerPageUrl = "https://wdbroad.com/broadcast/view.php?stream=$streamId"
         
@@ -148,10 +140,18 @@ class KingkongTv : MainAPI() {
                 m3u8Url = "https://play.ogtv3.com/live/$streamId.m3u8?site=kktv" 
             }
 
-            println("DEBUG [KingkongTv] v8.1: 최종 추출 URL - $m3u8Url")
+            println("DEBUG [KingkongTv] v8.2: 최종 추출 URL - $m3u8Url")
 
+            // [수정 포인트 v8.2] 파라미터 타입 불일치 에러를 수정하고 명시적 네임드 파라미터 사용
             callback.invoke(
-                newExtractorLink(name, name, m3u8Url!!, "https://wdbroad.com/", Qualities.Unknown.value, true) {
+                newExtractorLink(
+                    source = name,
+                    name = name,
+                    url = m3u8Url!!,
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    this.referer = "https://wdbroad.com/"
+                    this.quality = Qualities.Unknown.value
                     this.headers = mapOf(
                         "User-Agent" to userAgent,
                         "Origin" to "https://wdbroad.com",
@@ -160,7 +160,8 @@ class KingkongTv : MainAPI() {
                 }
             )
         } catch (e: Exception) {
-            println("DEBUG [KingkongTv] v8.1: 링크 로드 가설 오류 - ${e.message}")
+            println("DEBUG [KingkongTv] v8.2: 링크 로드 가설 오류 - ${e.message}")
+            e.printStackTrace()
         }
 
         return true
