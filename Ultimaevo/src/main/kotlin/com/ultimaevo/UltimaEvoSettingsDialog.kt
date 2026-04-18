@@ -1,4 +1,4 @@
-// v1.25
+// v1.27
 package com.ultimaevo
 
 import android.app.AlertDialog
@@ -47,7 +47,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val scrollView = ScrollView(ctx).apply { background = darkThemeBg }
         val mainLayout = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
-            // 메인 여백 대폭 감소
             setPadding(30, 30, 30, 30)
         }
 
@@ -185,7 +184,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         
         val mainContainer = LinearLayout(ctx).apply { 
             orientation = LinearLayout.VERTICAL
-            // 팝업 내부 여백 최소화
             setPadding(15, 15, 15, 15)
             background = darkThemeBg
         }
@@ -194,10 +192,19 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             text = "카탈로그 $instanceId 구성 편집"
             textSize = 18f
             setTextColor(Color.WHITE)
-            setPadding(0, 10, 0, 20)
+            setPadding(0, 10, 0, 10)
             gravity = Gravity.CENTER
         }
         mainContainer.addView(headerTitle)
+
+        val warningText = TextView(ctx).apply {
+            text = "※ 맨 아래 '적용' 버튼을 누르면 정렬 번호가 자동으로 재정리됩니다."
+            textSize = 12f
+            setTextColor(Color.YELLOW)
+            setPadding(0, 0, 0, 20)
+            gravity = Gravity.CENTER
+        }
+        mainContainer.addView(warningText)
 
         val scroll = ScrollView(ctx)
         val listLayout = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
@@ -218,37 +225,52 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             combined.forEach { allCatalogs.add(provider.name to it) }
         }
 
-        // 실시간 정렬(Live Sorting) 로직
+        // [핵심 픽스] 스크롤 점핑과 포커스 증발을 막는 부드러운 In-place 정렬 알고리즘
         fun triggerSort() {
-            val focused = listLayout.findFocus()
-            listLayout.removeAllViews()
-            val sorted = rows.sortedBy { it.orderEdit.text.toString().toIntOrNull() ?: 99 }
-            sorted.forEach { listLayout.addView(it.view) }
-            focused?.requestFocus()
+            val focusedView = listLayout.findFocus() as? EditText
+            val selStart = focusedView?.selectionStart ?: 0
+            val selEnd = focusedView?.selectionEnd ?: 0
+
+            val sorted = rows.sortedWith(compareBy({ it.orderEdit.text.toString().toIntOrNull() ?: 99 }, { it.catalogName }))
+            
+            for (i in sorted.indices) {
+                val rowView = sorted[i].view
+                if (listLayout.getChildAt(i) != rowView) {
+                    listLayout.removeView(rowView)
+                    listLayout.addView(rowView, i)
+                }
+            }
+
+            focusedView?.requestFocus()
+            if (selStart in 0..(focusedView?.text?.length ?: 0) && selEnd in 0..(focusedView?.text?.length ?: 0)) {
+                focusedView?.setSelection(selStart, selEnd)
+            }
         }
 
-        for (cat in allCatalogs) {
+        val preSortedCatalogs = allCatalogs.map {
+            val order = prefs.getString("cat_order_${instanceId}_${it.first}_${it.second}", "99")?.toIntOrNull() ?: 99
+            Triple(it.first, it.second, order)
+        }.sortedBy { it.third }
+
+        for (cat in preSortedCatalogs) {
             val pName = cat.first
             val cName = cat.second
 
-            // 컴팩트한 가로형 1줄 레이아웃 설정
             val row = LinearLayout(ctx).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(0, 0, 0, 0)
                 layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                    setMargins(0, 4, 0, 4) // 줄간격 초압축
+                    setMargins(0, 4, 0, 4)
                 }
             }
 
-            // 1. 체크박스
             val cb = CheckBox(ctx).apply {
                 isChecked = prefs.getBoolean("cat_toggle_${instanceId}_${pName}_$cName", false)
                 setPadding(0, 0, 0, 0)
             }
             row.addView(cb)
 
-            // 2. 순서 입력창
             val etOrder = EditText(ctx).apply {
                 inputType = InputType.TYPE_CLASS_NUMBER
                 setText(prefs.getString("cat_order_${instanceId}_${pName}_$cName", "99"))
@@ -260,7 +282,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             }
             row.addView(etOrder)
 
-            // 3. [신규] 프로바이더 출처 명시 (수정 불가 텍스트박스)
             val etSource = EditText(ctx).apply {
                 setText(pName)
                 isFocusable = false
@@ -276,12 +297,10 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     cornerRadius = 8f
                 }
             }
-            // 살짝 띄우기 위해 마진 적용
             val sourceParams = etSource.layoutParams as LinearLayout.LayoutParams
             sourceParams.setMargins(10, 0, 10, 0)
             row.addView(etSource)
 
-            // 4. 이름 수정창
             val etRename = EditText(ctx).apply {
                 hint = cName
                 setText(prefs.getString("cat_rename_${instanceId}_${pName}_$cName", cName))
@@ -294,7 +313,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             }
             row.addView(etRename)
 
-            // 5. 화살표 (맨 우측, 가로로 나란히)
             val up = TextView(ctx).apply { 
                 text = "▲"
                 textSize = 16f
@@ -332,9 +350,9 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             etOrder.setOnFocusChangeListener { _, hasFocus ->
                 if (!hasFocus) triggerSort()
             }
+            
+            listLayout.addView(row)
         }
-
-        triggerSort()
 
         scroll.addView(listLayout)
         mainContainer.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
