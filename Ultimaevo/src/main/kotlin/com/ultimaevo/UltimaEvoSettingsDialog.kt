@@ -1,12 +1,11 @@
-// v1.32
 package com.ultimaevo
 
 import android.app.AlertDialog
+import android.content.Context
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
-import android.preference.PreferenceManager
 import android.text.InputType
 import android.view.Gravity
 import android.view.LayoutInflater
@@ -34,7 +33,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
-        println("[UltimaEvo-Debug] [Dialog] onViewCreated 호출됨")
+        println("[UltimaEvo-Debug] [Dialog] onViewCreated 호출")
         (view.parent as? View)?.setBackgroundColor(Color.TRANSPARENT)
     }
 
@@ -43,19 +42,19 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         container: ViewGroup?,
         savedInstanceState: Bundle?
     ): View {
-        println("[UltimaEvo-Debug] [Dialog] onCreateView 호출됨")
-        val ctx = UltimaEvoPlugin.pluginContext ?: requireContext()
-        println("[UltimaEvo-Debug] [Dialog] 사용될 Context (pluginContext가 null인지 확인): $ctx")
+        println("[UltimaEvo-Debug] [Dialog] onCreateView 시작")
+        val pluginCtx = UltimaEvoPlugin.pluginContext ?: requireContext()
         
-        val prefs = PreferenceManager.getDefaultSharedPreferences(ctx)
+        // [핵심] 단일 파일 직접 제어
+        val prefs = pluginCtx.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
 
-        val scrollView = ScrollView(ctx).apply { background = getDarkThemeBg() }
-        val mainLayout = LinearLayout(ctx).apply {
+        val scrollView = ScrollView(pluginCtx).apply { background = getDarkThemeBg() }
+        val mainLayout = LinearLayout(pluginCtx).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(30, 30, 30, 30)
         }
 
-        val title = TextView(ctx).apply {
+        val title = TextView(pluginCtx).apply {
             text = "Ultima Evo 마스터 관리자"
             textSize = 20f
             setTextColor(Color.WHITE)
@@ -64,17 +63,16 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         }
         mainLayout.addView(title)
 
-        val syncAllBtn = Button(ctx).apply {
+        val syncAllBtn = Button(pluginCtx).apply {
             text = "🔄 모든 카탈로그 데이터 최초 동기화"
             setTextColor(Color.WHITE)
             setPadding(10, 0, 10, 0)
             setOnClickListener {
-                println("[UltimaEvo-Debug] [Dialog] 전체 동기화 버튼 클릭됨")
+                println("[UltimaEvo-Debug] [Dialog] 전체 동기화 시작됨")
                 this.text = "통신 중..."
                 this.isEnabled = false
                 CoroutineScope(Dispatchers.IO).launch {
                     val providers = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
-                    println("[UltimaEvo-Debug] [Dialog] 동기화할 타겟 수: ${providers.size}")
                     for (provider in providers) {
                         try {
                             val reqName = provider.mainPage.firstOrNull()?.name ?: "Home"
@@ -82,15 +80,15 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                             val response = provider.getMainPage(1, MainPageRequest(reqName, reqData, false))
                             if (response != null && response.items.isNotEmpty()) {
                                 val names = response.items.map { it.name }
-                                println("[UltimaEvo-Debug] [Dialog] 동기화 파싱 성공 -> ${provider.name}: $names")
-                                prefs.edit().putString("dynamic_catalogs_${provider.name}", names.joinToString("|||")).apply()
+                                println("[UltimaEvo-Debug] [Dialog] ${provider.name} 파싱 완료: $names")
+                                prefs.edit().putString("dynamic_catalogs_${provider.name}", names.joinToString("|||")).apply() 
                             }
                         } catch (e: Exception) { 
-                            println("[UltimaEvo-Debug] [Dialog] 동기화 예외 -> ${provider.name}: ${e.message}")
+                            println("[UltimaEvo-Debug] [Dialog] ${provider.name} 동기화 예외: ${e.message}")
                         }
                     }
                     withContext(Dispatchers.Main) {
-                        println("[UltimaEvo-Debug] [Dialog] 동기화 프로세스 전체 종료")
+                        println("[UltimaEvo-Debug] [Dialog] 전체 동기화 완료")
                         this@apply.text = "✅ 동기화 완료"
                         this@apply.isEnabled = true
                     }
@@ -99,17 +97,17 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         }
         mainLayout.addView(syncAllBtn)
 
-        val countLayout = LinearLayout(ctx).apply { 
+        val countLayout = LinearLayout(pluginCtx).apply { 
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, 15, 0, 15)
         }
-        countLayout.addView(TextView(ctx).apply { text = "생성할 개수: "; textSize = 14f; setTextColor(Color.WHITE) })
-        val instanceCountInput = EditText(ctx).apply {
+        countLayout.addView(TextView(pluginCtx).apply { text = "생성할 개수: "; textSize = 14f; setTextColor(Color.WHITE) })
+        val instanceCountInput = EditText(pluginCtx).apply {
             inputType = InputType.TYPE_CLASS_NUMBER
             val initCount = prefs.getString("evo_instance_count", "1")
             setText(initCount)
-            println("[UltimaEvo-Debug] [Dialog] 화면에 찍힌 초기 생성 개수: $initCount")
+            println("[UltimaEvo-Debug] [Dialog] UI 표시 카탈로그 수: $initCount")
             setTextColor(Color.WHITE)
             setPadding(10, 10, 10, 10)
             layoutParams = LinearLayout.LayoutParams(120, LinearLayout.LayoutParams.WRAP_CONTENT)
@@ -120,7 +118,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val currentCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
 
         for (i in 1..currentCount) {
-            val card = LinearLayout(ctx).apply {
+            val card = LinearLayout(pluginCtx).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(20, 20, 20, 20)
                 layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
@@ -133,38 +131,37 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 }
             }
             
-            val savedName = prefs.getString("evo_name_$i", "Ultima Evo $i")
-            val nameInput = EditText(ctx).apply {
+            val nameInput = EditText(pluginCtx).apply {
                 hint = "통합 카탈로그 $i 이름"
                 setHintTextColor(Color.GRAY)
                 setTextColor(Color.WHITE)
                 textSize = 14f
                 setPadding(10, 10, 10, 10)
-                setText(savedName)
+                setText(prefs.getString("evo_name_$i", "Ultima Evo $i"))
                 tag = "evo_name_$i"
             }
             card.addView(nameInput)
 
-            val searchSwitch = Switch(ctx).apply {
+            val searchSwitch = Switch(pluginCtx).apply {
                 text = "이 카탈로그 검색 허용"
                 setTextColor(Color.WHITE)
                 textSize = 14f
                 setPadding(0, 10, 0, 10)
                 isChecked = prefs.getBoolean("evo_search_enabled_$i", true)
                 setOnCheckedChangeListener { _, isChecked -> 
-                    println("[UltimaEvo-Debug] [Dialog] 검색 스위치 변경 $i -> $isChecked")
-                    prefs.edit().putBoolean("evo_search_enabled_$i", isChecked).apply() 
+                    println("[UltimaEvo-Debug] [Dialog] 인스턴스 $i 검색스위치 조작: $isChecked")
+                    prefs.edit().putBoolean("evo_search_enabled_$i", isChecked).commit()
                 }
             }
             card.addView(searchSwitch)
 
-            val configBtn = Button(ctx).apply {
+            val configBtn = Button(pluginCtx).apply {
                 text = "내부 카탈로그 구성/정렬 편집 ⚙️"
                 setTextColor(Color.WHITE)
                 setPadding(10, 0, 10, 0)
                 setOnClickListener { 
-                    println("[UltimaEvo-Debug] [Dialog] 편집 팝업버튼 클릭됨 인스턴스 $i")
-                    showEditCatalogsDialog(i, ctx) 
+                    println("[UltimaEvo-Debug] [Dialog] 팝업 열기 클릭. 인스턴스: $i")
+                    showEditCatalogsDialog(i, pluginCtx) 
                 }
             }
             card.addView(configBtn)
@@ -172,7 +169,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             mainLayout.addView(card)
         }
 
-        val saveBtn = Button(ctx).apply {
+        val saveBtn = Button(pluginCtx).apply {
             text = "메인 설정 저장 후 닫기"
             setTextColor(Color.WHITE)
             setPadding(10, 10, 10, 10)
@@ -180,19 +177,20 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 println("[UltimaEvo-Debug] [Dialog] 메인 저장 버튼 클릭")
                 val editor = prefs.edit()
                 editor.putString("evo_instance_count", instanceCountInput.text.toString())
-                println("[UltimaEvo-Debug] [Dialog] 저장됨: evo_instance_count -> ${instanceCountInput.text}")
-                
                 fun findNames(v: ViewGroup) {
                     for (idx in 0 until v.childCount) {
                         val child = v.getChildAt(idx)
                         if (child is EditText && child.tag?.toString()?.startsWith("evo_name_") == true) {
                             editor.putString(child.tag.toString(), child.text.toString())
-                            println("[UltimaEvo-Debug] [Dialog] 저장됨: ${child.tag} -> ${child.text}")
+                            println("[UltimaEvo-Debug] [Dialog] 이름 저장: ${child.tag} -> ${child.text}")
                         } else if (child is ViewGroup) findNames(child)
                     }
                 }
                 findNames(mainLayout)
-                editor.apply()
+                
+                // [핵심] 100% 동기화 보장을 위한 commit
+                val success = editor.commit()
+                println("[UltimaEvo-Debug] [Dialog] 디스크 강제 쓰기 결과(commit): $success")
                 dismiss()
             }
         }
@@ -202,9 +200,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         return scrollView
     }
 
-    private fun showEditCatalogsDialog(instanceId: Int, ctx: android.content.Context) {
-        println("[UltimaEvo-Debug] [Popup] 팝업 생성 시작: 인스턴스 $instanceId")
-        val prefs = PreferenceManager.getDefaultSharedPreferences(ctx)
+    private fun showEditCatalogsDialog(instanceId: Int, ctx: Context) {
+        val prefs = ctx.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
         
         val mainContainer = LinearLayout(ctx).apply { 
             orientation = LinearLayout.VERTICAL
@@ -248,7 +245,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             val combined = (staticCats + dynamicCats).filter { it.isNotBlank() }.distinct()
             combined.forEach { allCatalogs.add(provider.name to it) }
         }
-        println("[UltimaEvo-Debug] [Popup] 발견된 전체 세부 카탈로그 수: ${allCatalogs.size}")
 
         fun triggerSort() {
             val focusedView = listLayout.findFocus() as? EditText
@@ -396,7 +392,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
 
         applyBtn.setOnClickListener {
-            println("[UltimaEvo-Debug] [Popup] 팝업창 최종 저장(적용) 버튼 클릭됨")
+            println("[UltimaEvo-Debug] [Popup] 팝업 적용 버튼 클릭됨 (베이킹 없음, 순수 값 저장)")
             val editor = prefs.edit()
             val allOrders = mutableListOf<Triple<CatalogRow, Int, Int>>()
 
@@ -406,8 +402,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 
                 editor.putBoolean(tKey, row.checkBox.isChecked)
                 editor.putString(rKey, row.renameEdit.text.toString())
-                
-                // 해당 카탈로그가 포함된 Provider 자체도 활성화
+
+                // 해당 카탈로그가 켜지면 상위 Provider도 활성화
                 val pKey = "ext_toggle_${instanceId}_${row.providerName}"
                 if (row.checkBox.isChecked) {
                     editor.putBoolean(pKey, true)
@@ -425,16 +421,17 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 if (target <= last) target = last + 1
                 val key = "cat_order_${instanceId}_${item.first.providerName}_${item.first.catalogName}"
                 editor.putString(key, target.toString())
-                println("[UltimaEvo-Debug] [Popup] 저장된 정렬값: $key -> $target")
+                println("[UltimaEvo-Debug] [Popup] 저장된 정렬: $key -> $target")
                 last = target
             }
-            editor.apply()
-            println("[UltimaEvo-Debug] [Popup] 팝업창 데이터 저장 완료 후 닫힘")
+            
+            // [핵심] 100% 동기화 보장을 위한 commit
+            val success = editor.commit()
+            println("[UltimaEvo-Debug] [Popup] 디스크 강제 쓰기 결과(commit): $success")
             dialog.dismiss()
         }
 
         closeBtn.setOnClickListener { dialog.dismiss() }
         dialog.show()
-        println("[UltimaEvo-Debug] [Popup] 팝업창 show() 완료")
     }
 }
