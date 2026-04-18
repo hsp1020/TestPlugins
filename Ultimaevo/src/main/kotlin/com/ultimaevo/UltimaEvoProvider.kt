@@ -1,4 +1,3 @@
-// v1.29
 package com.ultimaevo
 
 import android.preference.PreferenceManager
@@ -17,25 +16,52 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.Live)
 
+    private fun getUserSettings(): List<SavedCatalog> {
+        val context = UltimaEvoPlugin.pluginContext ?: return emptyList()
+        val prefs = PreferenceManager.getDefaultSharedPreferences(context)
+        val settings = mutableListOf<SavedCatalog>()
+        val allProviders = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
+
+        for (provider in allProviders) {
+            val providerEnabled = prefs.getBoolean("ext_toggle_${instanceId}_${provider.name}", false)
+            if (!providerEnabled) continue
+
+            val staticCats = provider.mainPage.map { it.name to it.data }
+            val cachedDynStr = prefs.getString("dynamic_catalogs_${provider.name}", "") ?: ""
+            val dynamicCats = if (cachedDynStr.isNotBlank()) cachedDynStr.split("|||").map { it to it } else emptyList()
+            val allCats = (staticCats + dynamicCats).distinctBy { it.first }
+
+            for (catPair in allCats) {
+                val catalogName = catPair.first
+                val catalogData = catPair.second
+
+                val catalogEnabled = prefs.getBoolean("cat_toggle_${instanceId}_${provider.name}_$catalogName", false)
+                if (!catalogEnabled) continue
+
+                val renamed = prefs.getString("cat_rename_${instanceId}_${provider.name}_$catalogName", catalogName) ?: catalogName
+                val orderStr = prefs.getString("cat_order_${instanceId}_${provider.name}_$catalogName", "99") ?: "99"
+                val orderIndex = orderStr.toIntOrNull() ?: 99
+
+                settings.add(
+                    SavedCatalog(
+                        providerName = provider.name,
+                        originalCatalogName = catalogName,
+                        originalCatalogData = catalogData,
+                        customCatalogName = renamed,
+                        isEnabled = true,
+                        orderIndex = orderIndex
+                    )
+                )
+            }
+        }
+        return settings.sortedBy { it.orderIndex }
+    }
+
     override val mainPage: List<MainPageData>
         get() {
-            val context = UltimaEvoPlugin.pluginContext ?: return emptyList()
-            val prefs = PreferenceManager.getDefaultSharedPreferences(context)
-            
-            // [핵심 픽스] 다른 플러그인을 뒤적거리지 않고, 미리 구워진(Baked) 문자열만 즉시 읽어옵니다.
-            val bakedStr = prefs.getString("evo_baked_catalogs_$instanceId", "") ?: ""
-            if (bakedStr.isBlank()) return emptyList()
-
-            return bakedStr.split("|||").mapNotNull {
-                val parts = it.split("|~|")
-                if (parts.size >= 4) {
-                    val pName = parts[0]
-                    val oData = parts[1]
-                    val cName = parts[2]
-                    val oName = parts[3]
-                    val combinedData = "$pName|||$oData|||$cName|||$oName"
-                    MainPageData(cName, combinedData)
-                } else null
+            return getUserSettings().map { catalog ->
+                val combinedData = "${catalog.providerName}|||${catalog.originalCatalogData}|||${catalog.customCatalogName}|||${catalog.originalCatalogName}"
+                MainPageData(catalog.customCatalogName, combinedData)
             }
         }
 
@@ -49,7 +75,6 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
             val customCatalogTitle = parts[2]
             val originalCatalogName = parts.getOrNull(3) ?: ""
 
-            // 이 시점(사용자가 탭을 누른 후)에는 모든 플러그인이 100% 로드되어 있으므로 안전합니다.
             val targetProvider = APIHolder.allProviders.find { it.name == targetProviderName } ?: return newHomePageResponse(emptyList(), false)
 
             val originalRequest = MainPageRequest(request.name, originalData, request.horizontalImages)
@@ -73,18 +98,11 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
         val isSearchEnabled = prefs.getBoolean("evo_search_enabled_$instanceId", true)
         if (!isSearchEnabled) return emptyList()
 
-        val bakedStr = prefs.getString("evo_baked_catalogs_$instanceId", "") ?: ""
-        if (bakedStr.isBlank()) return emptyList()
-
-        // 구워진 데이터에서 활성화된 프로바이더 이름만 추출하여 검색을 수행합니다.
-        val activeProviders = bakedStr.split("|||").mapNotNull { 
-            val parts = it.split("|~|")
-            if (parts.isNotEmpty()) parts[0] else null
-        }.distinct()
-
+        val settings = getUserSettings()
+        val providersToSearch = settings.map { it.providerName }.distinct()
         val results = mutableListOf<SearchResponse>()
 
-        for (providerName in activeProviders) {
+        for (providerName in providersToSearch) {
             val provider = APIHolder.allProviders.find { it.name == providerName } ?: continue
             try {
                 val searchRes = provider.search(query)
