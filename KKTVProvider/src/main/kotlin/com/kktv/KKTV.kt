@@ -24,7 +24,7 @@ class KingkongTv : MainAPI() {
     private val portalUrl = "https://kingkongtv.org"
 
     override val mainPage = mainPageOf(
-        "/live/sportstv" to "실시간 스포츠 중계",
+        "/live/sportstv2" to "실시간 스포츠 중계",
     )
 
     // [추가 포인트 v7.7] 메인 페이지 로드 전, 포털에서 최신 주소를 동적으로 긁어오는 함수
