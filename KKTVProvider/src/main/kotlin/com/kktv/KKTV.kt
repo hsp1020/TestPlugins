@@ -1,4 +1,4 @@
-// v14.0 - NotImplementedError 에러 수정 및 Kotbc 아키텍처 완전 이식
+// v14.1 - WebView 타임아웃 해결 및 다이렉트 Iframe 로드 방식으로 개선
 package com.KingkongTv
 
 import android.content.Context
@@ -123,11 +123,9 @@ class KingkongTv : MainAPI() {
         val parts = url.split("|")
         if (parts.size < 5) return null
 
-        val streamId = parts[0]
         val title = URLDecoder.decode(parts[1], "UTF-8")
         val poster = URLDecoder.decode(parts[2], "UTF-8")
         
-        // Kotbc 방식으로 상세 정보 반환
         return newMovieLoadResponse(title, url, TvType.Others, url) { 
             this.posterUrl = poster
             this.plot = "실시간 중계" 
@@ -143,10 +141,13 @@ class KingkongTv : MainAPI() {
         val parts = data.split("|")
         if (parts.size < 5) return false
 
-        val pageUrl = URLDecoder.decode(parts[3], "UTF-8")
-        val jsCall = URLDecoder.decode(parts[4], "UTF-8")
+        val streamId = parts[0] // ex) 903, 42
+        val parentReferer = URLDecoder.decode(parts[3], "UTF-8")
         
-        println("DEBUG [KKTV v14.0] 웹뷰 스니핑 시작 - Base: $pageUrl")
+        // JS 실행 방식을 버리고 실제 미디어가 로드되는 타겟 iframe으로 직행
+        val playerIframeUrl = "https://wdbroad.com/broadcast/$streamId/kktv"
+        
+        println("DEBUG[KKTV v14.1] 웹뷰 스니핑 시작 - Player URL: $playerIframeUrl")
 
         val hookResult = suspendCancellableCoroutine<Pair<String, Map<String, String>>?> { cont ->
             val handler = Handler(Looper.getMainLooper())
@@ -165,7 +166,7 @@ class KingkongTv : MainAPI() {
 
                     val timeout = Runnable {
                         if (cont.isActive) {
-                            println("DEBUG [KKTV v14.0] 15초 타임아웃")
+                            println("DEBUG [KKTV v14.1] 15초 타임아웃 발생")
                             try { webView.destroy() } catch (e: Exception) {}
                             cont.resume(null)
                         }
@@ -173,27 +174,15 @@ class KingkongTv : MainAPI() {
                     handler.postDelayed(timeout, 15000)
 
                     var isFound = false
-                    var isInjected = false
 
                     webView.webViewClient = object : WebViewClient() {
-                        override fun onPageFinished(view: WebView?, url: String?) {
-                            if (!isInjected && url == pageUrl) {
-                                isInjected = true
-                                println("DEBUG [KKTV v14.0] 페이지 로드 완료. 1.5초 대기 후 JS 실행")
-                                view?.postDelayed({
-                                    view.evaluateJavascript("""
-                                        try { $jsCall } catch(e) {}
-                                    """.trimIndent(), null)
-                                }, 1500)
-                            }
-                        }
-
                         override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                             val reqUrl = request?.url?.toString() ?: ""
                             
-                            if (!isFound && (reqUrl.contains("wdbroadcast.com") || reqUrl.contains(".m3u8"))) {
+                            // 스트리밍 도메인이나 m3u8, chunklist 감지
+                            if (!isFound && (reqUrl.contains("wdbroadcast.com") || reqUrl.contains(".m3u8") || reqUrl.contains("chunklist"))) {
                                 isFound = true
-                                println("DEBUG [KKTV v14.0] 🎯 M3U8 통신 포착: $reqUrl")
+                                println("DEBUG [KKTV v14.1] 🎯 M3U8 통신 포착: $reqUrl")
                                 handler.removeCallbacks(timeout)
                                 
                                 if (cont.isActive) {
@@ -201,10 +190,23 @@ class KingkongTv : MainAPI() {
                                 }
                                 view?.post { try { webView.destroy() } catch (e: Exception) {} }
                             }
-                            return null
+                            return super.shouldInterceptRequest(view, request)
                         }
                     }
-                    webView.loadUrl(pageUrl, mapOf("Referer" to pageUrl))
+                    
+                    // 웹뷰에서 Iframe을 로드할 때는 본진 사이트(parentReferer)를 레퍼러로 지정하여 차단 방지
+                    val headers = mutableMapOf(
+                        "Referer" to parentReferer,
+                        "Origin" to mainUrl
+                    )
+                    
+                    // 쿠키 세팅
+                    val cookie = CookieManager.getInstance().getCookie(parentReferer)
+                    if (!cookie.isNullOrEmpty()) {
+                        CookieManager.getInstance().setCookie("wdbroad.com", cookie)
+                    }
+
+                    webView.loadUrl(playerIframeUrl, headers)
                 } catch (e: Exception) {
                     if (cont.isActive) cont.resume(null)
                 }
@@ -214,11 +216,14 @@ class KingkongTv : MainAPI() {
         if (hookResult != null) {
             val (finalUrl, reqHeaders) = hookResult
             val headers = reqHeaders.toMutableMap()
+            
             if (headers.keys.none { it.equals("User-Agent", ignoreCase = true) }) {
                 headers["User-Agent"] = DESKTOP_UA
             }
-            val cookie = CookieManager.getInstance().getCookie(finalUrl)
-            if (!cookie.isNullOrEmpty()) headers["Cookie"] = cookie
+            
+            // ★ 중요: 미디어 서버에 요청할 때 레퍼러는 플레이어가 구동되는 도메인으로 설정해야 차단되지 않음
+            headers["Referer"] = "https://wdbroad.com/"
+            headers["Origin"] = "https://wdbroad.com"
 
             callback.invoke(
                 newExtractorLink(
