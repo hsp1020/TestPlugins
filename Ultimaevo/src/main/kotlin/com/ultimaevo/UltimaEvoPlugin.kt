@@ -25,7 +25,6 @@ class UltimaEvoPlugin : Plugin() {
         pluginContext = context
         val prefs = PreferenceManager.getDefaultSharedPreferences(context)
         
-        // 사용자가 설정한 개수를 가져오며, 값이 없으면 기본 1개로 시작합니다.
         val instanceCountStr = prefs.getString("evo_instance_count", "1") ?: "1"
         val instanceCount = instanceCountStr.toIntOrNull() ?: 1
 
