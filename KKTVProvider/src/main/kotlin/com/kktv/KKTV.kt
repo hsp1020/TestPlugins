@@ -1,4 +1,4 @@
-// v14.3 - Cloudstream 캐시 및 URL 강제 변환 완벽 방어 (ID 강제 추출 적용)
+// v14.4 - window.top === window.self (access-denied) 방어 로직 무력화 패치 완료
 package com.KingkongTv
 
 import android.content.Context
@@ -105,7 +105,7 @@ class KingkongTv : MainAPI() {
         val encodedPoster = URLEncoder.encode(thumbUrl, "UTF-8")
         val encodedRef = URLEncoder.encode(refererUrl, "UTF-8") 
 
-        // Cloudstream의 URL 훼손을 방지하기 위해 가짜 스킴 적용
+        // Cloudstream의 URL 훼손을 방지하기 위해 가짜 스킴(kktv://) 적용
         val dataStr = "kktv://${streamId}|$encodedTitle|$encodedPoster|$encodedRef"
 
         return newMovieSearchResponse(title, dataStr, TvType.Others) { 
@@ -135,17 +135,13 @@ class KingkongTv : MainAPI() {
         val parts = data.split("|")
         if (parts.size < 4) return false
 
-        // ★ 핵심 패치: Cloudstream이 주소를 어떻게 합쳐놨든(https://kktv247.com/259 형태든)
-        // 맨 마지막 부분에서 순수 숫자(스트림 ID)만 강제로 뽑아냅니다.
+        // 안전한 스트림 ID 추출
         val rawIdPart = parts[0].substringAfterLast("/")
         val streamId = Regex("""\d+""").find(rawIdPart)?.value ?: return false
-        
         val parentReferer = URLDecoder.decode(parts[3], "UTF-8")
         
-        // 정상적인 타겟 iframe URL 생성 완료
         val playerIframeUrl = "https://wdbroad.com/broadcast/$streamId/kktv"
-        
-        println("DEBUG [KKTV v14.3] 웹뷰 스니핑 시작 - Player URL: $playerIframeUrl")
+        println("DEBUG[KKTV v14.4] 웹뷰 스니핑 시작 - 대상 URL: $playerIframeUrl")
 
         val hookResult = suspendCancellableCoroutine<Pair<String, Map<String, String>>?> { cont ->
             val handler = Handler(Looper.getMainLooper())
@@ -164,7 +160,7 @@ class KingkongTv : MainAPI() {
 
                     val timeout = Runnable {
                         if (cont.isActive) {
-                            println("DEBUG [KKTV v14.3] 15초 타임아웃 발생 - m3u8 포착 실패")
+                            println("DEBUG [KKTV v14.4] 15초 타임아웃 발생")
                             try { webView.destroy() } catch (e: Exception) {}
                             cont.resume(null)
                         }
@@ -180,7 +176,7 @@ class KingkongTv : MainAPI() {
                             // 스트리밍 도메인이나 m3u8, chunklist 감지
                             if (!isFound && (reqUrl.contains("wdbroadcast.com") || reqUrl.contains(".m3u8") || reqUrl.contains("chunklist"))) {
                                 isFound = true
-                                println("DEBUG [KKTV v14.3] 🎯 M3U8 통신 포착: $reqUrl")
+                                println("DEBUG [KKTV v14.4] 🎯 M3U8 포착: $reqUrl")
                                 handler.removeCallbacks(timeout)
                                 
                                 if (cont.isActive) {
@@ -191,18 +187,28 @@ class KingkongTv : MainAPI() {
                             return super.shouldInterceptRequest(view, request)
                         }
                     }
-                    
-                    // Iframe 로드 시 차단 방지를 위한 메인 사이트 Referer
-                    val headers = mutableMapOf(
-                        "Referer" to parentReferer
-                    )
-                    
+
+                    // 쿠키 세팅 (필요시)
                     val cookie = CookieManager.getInstance().getCookie(parentReferer)
                     if (!cookie.isNullOrEmpty()) {
                         CookieManager.getInstance().setCookie("wdbroad.com", cookie)
                     }
 
-                    webView.loadUrl(playerIframeUrl, headers)
+                    // ★ 핵심 패치: access-denied 방지를 위해 가상의 Iframe 껍데기를 만들어 로드합니다.
+                    // 이렇게 하면 웹뷰 안에서 window.top !== window.self 가 성립하여 차단을 통과합니다.
+                    val wrapperHtml = """
+                        <!DOCTYPE html>
+                        <html>
+                        <head><meta name="referrer" content="no-referrer-when-downgrade"></head>
+                        <body style="margin:0;padding:0;background:#000;">
+                            <iframe src="$playerIframeUrl" style="width:100%;height:100%;border:none;" allow="autoplay; fullscreen"></iframe>
+                        </body>
+                        </html>
+                    """.trimIndent()
+
+                    // loadDataWithBaseURL을 통해 부모(본진)의 주소를 바탕으로 가짜 HTML을 실행합니다.
+                    webView.loadDataWithBaseURL(parentReferer, wrapperHtml, "text/html", "UTF-8", null)
+                    
                 } catch (e: Exception) {
                     if (cont.isActive) cont.resume(null)
                 }
@@ -217,7 +223,7 @@ class KingkongTv : MainAPI() {
                 headers["User-Agent"] = DESKTOP_UA
             }
             
-            // 미디어 서버에서 차단하지 않도록 wdbroad.com 레퍼러 강제 지정
+            // 미디어 서버 인증을 위해 플레이어가 구동되는 wdbroad.com을 레퍼러로 세팅
             headers["Referer"] = "https://wdbroad.com/"
             headers["Origin"] = "https://wdbroad.com"
 
