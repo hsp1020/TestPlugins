@@ -1,4 +1,4 @@
-// v1.154 (Feature & Fix: ✨ 병합 로직 제거 및 aiostreamserror 발생 시 URL 기준 TMDB 에피소드 강제 로드)
+// v1.154 (Feature & Fix: ✨ 기호 관련 로직 완전 제거 및 빈 비디오 목록 시 TMDB 에피소드 강제 호출 보강)
 package com.hsp1020
 
 import android.content.Context
@@ -118,25 +118,18 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         private val globalPageCache = ConcurrentHashMap<String, Triple<List<SearchResponse>, Int, Long>>()
         private const val CACHE_TTL_MS = 60 * 60 * 1000L  // 1시간
         
-        // --- CineStream Ghost Provider 전역 캐시 및 로직 모듈화 ---
         private var cachedCineStreamProvider: MainAPI? = null
         private var hasSearchedCineStream = false
         private var hasSyncedCineStreamSettings = false
 
-        /**
-         * 카탈로그가 꺼져있어도 PluginManager를 털어서 CineStream 설치 여부를 확실하게 감지하고 객체를 반환합니다.
-         * SettingsBottomFragment 등 외부에서도 설치 여부 판단 시 이 메서드를 활용할 수 있습니다.
-         */
         fun getCineStreamProvider(): MainAPI? {
             if (cachedCineStreamProvider != null) return cachedCineStreamProvider
-            if (hasSearchedCineStream) return null // 이미 찾았는데 없었으면 재탐색 안 함
+            if (hasSearchedCineStream) return null
 
             hasSearchedCineStream = true
             
-            // 1차 시도: 정상적으로 켜져있는지 확인
             var provider = APIHolder.allProviders.find { it.name.equals("CineStream", ignoreCase = true) }
 
-            // 2차 시도: 카탈로그를 꺼서 안 보인다면 Ghost Provider 색출 (리플렉션 해킹)
             if (provider == null) {
                 try {
                     var targetClassLoader: ClassLoader? = null
@@ -388,12 +381,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
         }
         
-        val requestedMetaType = if (url.startsWith("{")) {
-            if (res.type == "series" || res.type == "tv") "tv" else if (res.type == "movie") "movie" else null
-        } else {
-            if (url.contains("/meta/series/")) "tv" else if (url.contains("/meta/movie/")) "movie" else null
-        }
-        
         val normalizedId = try { normalizeId(res.id) } catch (e: Exception) { res.id }
         val encodedId = normalizedId.urlEncode()
 
@@ -453,7 +440,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             finalProcessedId = imdbId
         }
 
-        return@coroutineScope res.toLoadResponse(this@StremioC, finalProcessedId, addonDeferred, preFetchedTmdbDetail, preFetchedTmdbEnDetail, kitsuMeta?.id, requestedMetaType)
+        return@coroutineScope res.toLoadResponse(this@StremioC, finalProcessedId, addonDeferred, preFetchedTmdbDetail, preFetchedTmdbEnDetail, kitsuMeta?.id)
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
@@ -820,7 +807,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         private suspend fun fetchTmdbDetails(
             provider: StremioC, tmdbMediaType: String, tmdbIdStr: String, isMovie: Boolean, finalImdbId: String?,
             stremioType: String?, targetVideos: List<Video>?, preFetchedDetail: TmdbDetailResponse? = null,
-            preFetchedEnDetail: TmdbDetailResponse? = null, isAiostreamsError: Boolean = false
+            preFetchedEnDetail: TmdbDetailResponse? = null
         ): FetchedTmdbData {
             var fetchedRecommendations: List<SearchResponse>? = null
             
@@ -992,10 +979,12 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val fetchedTrailers = (detailRes.videos?.results ?: emptyList()).filter { it.type == "Trailer" || it.type == "Teaser" }.sortedWith(compareBy({ if (it.type == "Trailer") 0 else 1 }, { it.publishedAt ?: "9999-12-31" })).mapNotNull { it.key }.map { "https://m.youtube.com/watch?v=$it" }
 
             val episodeTmdbMeta = mutableMapOf<String, TmdbEpisode>()
-            if ((stremioType == "other" || isAiostreamsError) && !isMovie) {
+            val shouldFetchEpisodes = (!isMovie && targetVideos.isNullOrEmpty()) || (stremioType == "other" && !isMovie)
+            
+            if (shouldFetchEpisodes) {
                 var requiredSeasons = targetVideos?.mapNotNull { it.seasonNumber }?.filter { it > 0 }?.distinct() ?: emptyList()
                 if (requiredSeasons.isEmpty()) {
-                    val totalSeasons = detailRes?.number_of_seasons ?: 1
+                    val totalSeasons = detailRes.number_of_seasons ?: 1
                     requiredSeasons = if (totalSeasons > 0) (1..totalSeasons).toList() else listOf(1)
                 }
                 
@@ -1066,11 +1055,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
         }
 
-        suspend fun toLoadResponse(
-            provider: StremioC, imdbId: String?, addonDeferred: Deferred<CatalogEntry?>?, 
-            preFetchedDetail: TmdbDetailResponse? = null, preFetchedEnDetail: TmdbDetailResponse? = null, 
-            fetchedKitsuId: String? = null, urlMediaType: String? = null
-        ): LoadResponse = coroutineScope {
+        suspend fun toLoadResponse(provider: StremioC, imdbId: String?, addonDeferred: Deferred<CatalogEntry?>?, preFetchedDetail: TmdbDetailResponse? = null, preFetchedEnDetail: TmdbDetailResponse? = null, fetchedKitsuId: String? = null): LoadResponse = coroutineScope {
             var finalImdbId = if (this@CatalogEntry.id.startsWith("tt")) this@CatalogEntry.id 
                               else imdbId?.takeIf { it.startsWith("tt") || it.startsWith("kitsu:") || it.startsWith("mal:") }
             
@@ -1082,7 +1067,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
 
             val detailedEntry = addonDeferred?.await() ?: this@CatalogEntry
-            val isAiostreamsError = detailedEntry.id.contains("aiostreamserror") || this@CatalogEntry.id.contains("aiostreamserror")
             var tmdbIdStr: String? = if (this@CatalogEntry.id.startsWith("tmdb:")) this@CatalogEntry.id.removePrefix("tmdb:") else this@CatalogEntry.moviedb_id?.toString() ?: this@CatalogEntry.tmdbIdExt ?: detailedEntry.tmdbIdExt
             
             val findApiDeferred = if (tmdbIdStr == null && finalImdbId?.startsWith("tt") == true) {
@@ -1107,7 +1091,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val finalBackground = detailedEntry.background ?: this@CatalogEntry.background
             val finalImdbRating = detailedEntry.imdbRating ?: this@CatalogEntry.imdbRating
             val finalType = detailedEntry.type ?: this@CatalogEntry.type
-            val fallbackMovieId = fetchedKitsuId ?: this@CatalogEntry.kitsuIdExt?.let { "kitsu:$it" } ?: this@CatalogEntry.id
 
             var foundMediaType: String? = null
             if (findApiDeferred != null) {
@@ -1116,15 +1099,22 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
 
             var tmdbData: FetchedTmdbData? = null
-            var resolvedMediaType = "movie"
             if (tmdbIdStr != null) {
                 try {
-                    resolvedMediaType = urlMediaType ?: foundMediaType ?: if (isSingleMovie(finalType, finalVideos) || finalType == "movie" || finalVideos.isNullOrEmpty()) "movie" else "tv"
-                    tmdbData = fetchTmdbDetails(provider, resolvedMediaType, tmdbIdStr, resolvedMediaType == "movie", finalImdbId, finalType, finalVideos, preFetchedDetail, preFetchedEnDetail, isAiostreamsError)
+                    val refinedMediaType = foundMediaType ?: if (finalType == "series" || finalType == "tv") "tv" else if (isSingleMovie(finalType, finalVideos) || finalType == "movie" || finalVideos.isNullOrEmpty()) "movie" else "tv"
+                    tmdbData = fetchTmdbDetails(provider, refinedMediaType, tmdbIdStr, refinedMediaType == "movie", finalImdbId, finalType, finalVideos, preFetchedDetail, preFetchedEnDetail)
                 } catch (e: Exception) {}
             }
 
-            if (isAiostreamsError && tmdbData != null && resolvedMediaType == "tv" && finalVideos.isNullOrEmpty()) {
+            var finalName = originalName ?: this@CatalogEntry.name
+            if (tmdbData != null) {
+                if (!tmdbData.fetchedTitle.isNullOrBlank()) finalName = tmdbData.fetchedTitle
+                finalDescription = provider.mergeOverview(finalDescription, tmdbData.fetchedOverview)
+                if (finalType == "other") finalDescription = if (finalDescription.isNullOrBlank()) originalName else "$finalDescription | $originalName" 
+            }
+
+            val fallbackMovieId = fetchedKitsuId ?: this@CatalogEntry.kitsuIdExt?.let { "kitsu:$it" } ?: this@CatalogEntry.id
+            if (tmdbData != null && finalVideos.isNullOrEmpty() && tmdbData.episodeTmdbMeta.isNotEmpty()) {
                 val generatedVideos = tmdbData.episodeTmdbMeta.mapNotNull { (key, tmdbEp) ->
                     val parts = key.split("_")
                     if (parts.size == 2) {
@@ -1143,13 +1133,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 if (generatedVideos.isNotEmpty()) {
                     finalVideos = generatedVideos
                 }
-            }
-
-            var finalName = originalName ?: this@CatalogEntry.name
-            if (tmdbData != null) {
-                if (!tmdbData.fetchedTitle.isNullOrBlank()) finalName = tmdbData.fetchedTitle
-                finalDescription = provider.mergeOverview(finalDescription, tmdbData.fetchedOverview)
-                if (finalType == "other") finalDescription = if (finalDescription.isNullOrBlank()) originalName else "$finalDescription | $originalName" 
             }
 
             val fallbackTrailers = finalTrailerStreams?.mapNotNull { it.ytId }?.ifEmpty { finalTrailersSources?.mapNotNull { it.source } }?.distinct()?.map { if (it.startsWith("http")) it else "https://m.youtube.com/watch?v=$it" } ?: emptyList()
@@ -1300,12 +1283,13 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     ) {
         suspend fun runCallback(provider: StremioC, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
             if (url != null) {
+                // FIX: v1.153 - INFER_TYPE 사용으로 인한 MediaHTTPConnection OOM 크래시 방지. 타입 명시화.
                 val lowerUrl = url.lowercase()
                 val linkType = when {
                     lowerUrl.contains(".m3u8") || name?.contains("m3u8", true) == true || title?.contains("m3u8", true) == true -> ExtractorLinkType.M3U8
                     lowerUrl.contains(".mpd") -> ExtractorLinkType.DASH
                     lowerUrl.contains(".torrent") -> ExtractorLinkType.TORRENT
-                    else -> ExtractorLinkType.VIDEO 
+                    else -> ExtractorLinkType.VIDEO // 기존 INFER_TYPE을 제거하고 VIDEO 타입으로 고정
                 }
 
                 callback.invoke(newExtractorLink(name ?: "", fixSourceName(name, title), url, linkType) {
