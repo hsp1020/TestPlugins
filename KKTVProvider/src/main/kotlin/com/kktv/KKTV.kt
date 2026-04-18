@@ -16,7 +16,7 @@ class KingkongTv : MainAPI() {
     override val supportedTypes = setOf(TvType.Others)
 
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
-    private val portalUrl = "https://kingkongtv.org"
+    private val portalUrl = "https://kingkongtv.org",
 
     override val mainPage = mainPageOf(
         "/live/sportstv2" to "실시간 스포츠 중계"
