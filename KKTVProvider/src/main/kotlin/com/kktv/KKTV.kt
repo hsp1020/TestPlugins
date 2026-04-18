@@ -1,18 +1,11 @@
-// v12.0 - install_iframe() 등 후속 함수 잘림 버그 수정 및 WebChromeClient 콘솔 로깅 추가
+// v13.0 - load_video 함수가 로드될 때까지 반복 체크(Polling)하여 실행 보장
 package com.KingkongTv
 
 import android.content.Context
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
-import android.webkit.ConsoleMessage
-import android.webkit.CookieManager
-import android.webkit.WebChromeClient
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import android.webkit.WebSettings
-import android.webkit.WebView
-import android.webkit.WebViewClient
+import android.webkit.*
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -36,15 +29,11 @@ class KingkongTv : MainAPI() {
 
     private suspend fun updateMainUrlIfNeeded() {
         try {
-            println("DEBUG [KKTV v12.0] 포털 접속 시도...")
             val doc = app.get(portalUrl).document
             val latestUrl = doc.selectFirst("a.nav-cta")?.attr("href")
             if (!latestUrl.isNullOrBlank()) {
                 val cleanedUrl = latestUrl.trimEnd('/')
-                if (mainUrl != cleanedUrl) {
-                    println("DEBUG [KKTV v12.0] 도메인 갱신 -> $cleanedUrl")
-                    mainUrl = cleanedUrl
-                }
+                if (mainUrl != cleanedUrl) mainUrl = cleanedUrl
             }
         } catch (e: Exception) {}
     }
@@ -57,11 +46,11 @@ class KingkongTv : MainAPI() {
             val mainDoc = app.get(url).document
             var iframeSrc = mainDoc.selectFirst("iframe[src*='wdbroad.com/broadcast']")?.attr("src")
                 ?: mainDoc.selectFirst("iframe#broadcastFrame")?.attr("src")
-                ?: "https://kktv.speed10-1.com/kktv/index.php?tg=1ch&ca=0"
+            
+            if (iframeSrc.isNullOrBlank()) iframeSrc = "https://kktv.speed10-1.com/kktv/index.php?tg=1ch&ca=0"
+            if (iframeSrc!!.startsWith("//")) iframeSrc = "https:$iframeSrc"
 
-            if (iframeSrc.startsWith("//")) iframeSrc = "https:$iframeSrc"
-
-            val realUrl = fixUrl(url, iframeSrc)
+            val realUrl = fixUrl(url, iframeSrc!!)
             val contentDoc = app.get(realUrl, referer = url).document
             
             var rows = contentDoc.select("table.board_list tbody tr")
@@ -91,22 +80,8 @@ class KingkongTv : MainAPI() {
             title = Regex("""load_video\('[^']*',\s*'[^']*',\s*'([^']+)'""").find(onClickAttr)?.groupValues?.get(1)
             streamId = Regex("""load_video\('broadcast/(\d+)'""").find(onClickAttr)?.groupValues?.get(1)
             thumbUrlRaw = this.selectFirst("td.cateimg img")?.attr("src")
-            
-            // [핵심 변경 v12.0] 정규식으로 자르지 않고 onclick 안의 코드를 100% 통째로 가져옵니다.
             jsCall = onClickAttr.trim()
-            println("DEBUG [KKTV v12.0] 추출된 전체 JS -> $jsCall")
         } 
-        
-        if (title.isNullOrBlank()) {
-            val channelDiv = this.selectFirst("div.channel_on")
-            title = channelDiv?.attr("data-title")
-            streamId = channelDiv?.attr("data-stream")
-            thumbUrlRaw = this.selectFirst("td.thumb img")?.attr("src")
-        }
-
-        if (jsCall.isEmpty() && streamId != null) {
-            jsCall = "load_video('broadcast/$streamId', '1', '${title ?: ""}', '', 'kktv');"
-        }
         
         if (title.isNullOrBlank() || streamId.isNullOrBlank()) return null
         if (this.selectFirst("td.subject")?.hasClass("bold") == true) title = "🔥 $title"
@@ -123,33 +98,23 @@ class KingkongTv : MainAPI() {
 
         val fakeUrl = "$mainUrl/live_stream/$streamId?title=$encodedTitle&poster=$encodedPoster&ref=$encodedRef&jsCall=$encodedJsCall"
 
-        return newMovieSearchResponse(title, fakeUrl, TvType.Others) { 
-            this.posterUrl = thumbUrl
-        }
+        return newMovieSearchResponse(title, fakeUrl, TvType.Others) { this.posterUrl = thumbUrl }
     }
 
     override suspend fun load(url: String): LoadResponse? {
         val uri = Uri.parse(url)
         val title = URLDecoder.decode(uri.getQueryParameter("title") ?: "Live Stream", "UTF-8")
         val poster = uri.getQueryParameter("poster")?.let { URLDecoder.decode(it, "UTF-8") }
-
         return newMovieLoadResponse(title, url, TvType.Others, url) { 
             this.posterUrl = poster
             this.plot = "실시간 중계" 
         }
     }
 
-    override suspend fun loadLinks(
-        data: String,
-        isCasting: Boolean,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
+    override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val uri = Uri.parse(data)
-        
-        val refererUrl = URLDecoder.decode(uri.getQueryParameter("ref") ?: "$mainUrl/live/sportstv2", "UTF-8")
+        val refererUrl = URLDecoder.decode(uri.getQueryParameter("ref") ?: "", "UTF-8")
         val jsCall = URLDecoder.decode(uri.getQueryParameter("jsCall") ?: "", "UTF-8")
-        
         return KKTvExtractor().extract(refererUrl, jsCall, callback)
     }
 
@@ -163,151 +128,89 @@ class KKTvExtractor : ExtractorApi() {
     override val name = "KKTV"
     override val mainUrl = "https://wdbroad.com"
     override val requiresReferer = true
-
     private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
 
     data class InterceptResult(val url: String, val headers: Map<String, String>)
 
     override suspend fun getUrl(url: String, referer: String?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {}
 
-    suspend fun extract(
-        pageUrl: String,
-        jsCall: String,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        println("DEBUG [KKTV v12.0] WebView 훅 시작. 페이지: $pageUrl")
-        
+    suspend fun extract(pageUrl: String, jsCall: String, callback: (ExtractorLink) -> Unit): Boolean {
         val hookResult = runWebViewHook(pageUrl, jsCall)
-        
         if (hookResult != null) {
-            val finalUrl = hookResult.url
-            println("DEBUG [KKTV v12.0] WebView 캡처 최종 성공: $finalUrl")
-            
             val headers = hookResult.headers.toMutableMap()
-            if (headers.keys.none { it.equals("User-Agent", ignoreCase = true) }) {
-                headers["User-Agent"] = DESKTOP_UA
-            }
+            headers["User-Agent"] = DESKTOP_UA
+            val cookie = CookieManager.getInstance().getCookie(hookResult.url)
+            if (!cookie.isNullOrEmpty()) headers["Cookie"] = cookie
 
-            val cookie = CookieManager.getInstance().getCookie(finalUrl)
-            if (!cookie.isNullOrEmpty()) {
-                headers["Cookie"] = cookie
-            }
-
-            callback.invoke(
-                newExtractorLink(
-                    source = name,
-                    name = name,
-                    url = finalUrl,
-                    type = ExtractorLinkType.M3U8
-                ) {
-                    this.headers = headers
-                }
-            )
+            callback.invoke(newExtractorLink(name, name, hookResult.url, type = ExtractorLinkType.M3U8) { this.headers = headers })
             return true
-        } else {
-            println("DEBUG [KKTV v12.0] WebView 캡처 실패 또는 타임아웃")
-            return false
         }
+        return false
     }
 
     private suspend fun runWebViewHook(pageUrl: String, jsCall: String) = suspendCancellableCoroutine<InterceptResult?> { cont ->
         val handler = Handler(Looper.getMainLooper())
-        
         handler.post {
             try {
-                val context: Context = (AcraApplication.context ?: app) as Context
+                val context = (AcraApplication.context ?: app) as Context
                 val webView = WebView(context)
-                
                 webView.settings.apply {
                     javaScriptEnabled = true
                     domStorageEnabled = true
-                    mediaPlaybackRequiresUserGesture = false 
                     userAgentString = DESKTOP_UA
                     mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                 }
 
-                // [추가 v12.0] 웹뷰 내부 콘솔(JS 에러 등)을 로그캣으로 출력하여 Cloudflare 막힘 여부 등 파악
                 webView.webChromeClient = object : WebChromeClient() {
-                    override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
-                        println("DEBUG [KKTV v12.0] 💻 [브라우저 콘솔]: ${consoleMessage?.message()}")
-                        return super.onConsoleMessage(consoleMessage)
+                    override fun onConsoleMessage(cm: ConsoleMessage?): Boolean {
+                        println("DEBUG [KKTV v13.0] 💻 [콘솔]: ${cm?.message()}")
+                        return true
                     }
                 }
 
-                val discoveryTimeout = Runnable {
-                    if (cont.isActive) {
-                        println("DEBUG [KKTV v12.0] ⏳ 15초 타임아웃 초과. [브라우저 콘솔] 에러를 확인하세요.")
-                        try { webView.destroy() } catch (e: Exception) {}
-                        cont.resume(null)
-                    }
-                }
-                handler.postDelayed(discoveryTimeout, 15000)
+                val timeout = Runnable { if (cont.isActive) { cont.resume(null); try { webView.destroy() } catch (e: Exception) {} } }
+                handler.postDelayed(timeout, 20000)
 
                 var isFound = false
                 var isInjected = false
 
                 webView.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView?, url: String?) {
-                        super.onPageFinished(view, url)
-                        if (!isInjected && url == pageUrl && jsCall.isNotEmpty()) {
+                        if (!isInjected && url == pageUrl) {
                             isInjected = true
-                            println("DEBUG [KKTV v12.0] 메인 페이지 로드 완료. 1.5초 대기 후 전체 JS 실행 대기...")
-                            
-                            // [핵심 변경 v12.0] DOM과 Iframe이 완벽히 준비될 시간을 주고, 에러를 Catch하도록 안전하게 감싸서 실행합니다.
-                            view?.postDelayed({
-                                println("DEBUG [KKTV v12.0] 전체 JS 강제 실행 발동!")
-                                view.evaluateJavascript("""
-                                    (function() {
-                                        try {
-                                            if (typeof load_video !== 'function') {
-                                                console.log('에러: load_video 함수가 존재하지 않습니다! (Cloudflare 캡챠 페이지에 막혔을 확률이 높습니다.)');
-                                            } else {
-                                                $jsCall
-                                                console.log('전체 JS 함수 실행 성공!');
-                                            }
-                                        } catch(e) {
-                                            console.log('JS 실행 중 크래시 발생: ' + e);
+                            // [수정 포인트 v13.0] 함수가 로드될 때까지 0.5초마다 체크하는 Polling 로직 주입
+                            view?.evaluateJavascript("""
+                                (function() {
+                                    var checkCount = 0;
+                                    var interval = setInterval(function() {
+                                        checkCount++;
+                                        if (typeof load_video === 'function') {
+                                            console.log('🎯 load_video 함수 감지 성공! 실행합니다.');
+                                            $jsCall;
+                                            clearInterval(interval);
+                                        } else if (checkCount > 20) {
+                                            console.log('⏳ 함수 로딩 실패 타임아웃');
+                                            clearInterval(interval);
                                         }
-                                    })();
-                                """.trimIndent(), null)
-                            }, 1500)
+                                    }, 500);
+                                })();
+                            """.trimIndent(), null)
                         }
                     }
 
                     override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                         val reqUrl = request?.url?.toString() ?: ""
-                        
-                        // 디버깅을 위해 HTTP 통신을 모두 로그캣에 출력합니다.
-                        if (reqUrl.startsWith("http")) {
-                            // 너무 많은 이미지 요청이 로그를 도배하지 않도록 가볍게 필터링
-                            if (!reqUrl.contains(".png") && !reqUrl.contains(".jpg")) {
-                                println("DEBUG [KKTV v12.0] 🌐 [네트워크]: $reqUrl")
-                            }
-                        }
-                        
-                        if (!isFound && (reqUrl.contains("wdbroadcast.com") || reqUrl.contains(".m3u8") || reqUrl.contains("playlist"))) {
+                        if (!isFound && (reqUrl.contains("wdbroadcast.com") || reqUrl.contains(".m3u8"))) {
                             isFound = true
-                            println("DEBUG [KKTV v12.0] 🎯 M3U8 통신 포착 완료: $reqUrl")
-                            
-                            handler.removeCallbacks(discoveryTimeout)
-                            
-                            if (cont.isActive) {
-                                val requestHeaders = request?.requestHeaders ?: emptyMap()
-                                view?.post { try { webView.destroy() } catch (e: Exception) {} }
-                                cont.resume(InterceptResult(reqUrl, requestHeaders))
-                            }
-                            return null
+                            handler.removeCallbacks(timeout)
+                            if (cont.isActive) cont.resume(InterceptResult(reqUrl, request?.requestHeaders ?: emptyMap()))
+                            view?.post { try { webView.destroy() } catch (e: Exception) {} }
                         }
-                        return super.shouldInterceptRequest(view, request)
+                        return null
                     }
                 }
-
                 webView.loadUrl(pageUrl, mapOf("Referer" to pageUrl))
-
-            } catch (e: Exception) {
-                println("DEBUG [KKTV v12.0] WebView 초기화 에러: ${e.message}")
-                if (cont.isActive) cont.resume(null)
-            }
+            } catch (e: Exception) { if (cont.isActive) cont.resume(null) }
         }
     }
 }
