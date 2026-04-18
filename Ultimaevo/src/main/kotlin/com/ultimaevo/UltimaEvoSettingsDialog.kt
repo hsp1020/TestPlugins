@@ -1,4 +1,4 @@
-// v1.29
+// v1.28
 package com.ultimaevo
 
 import android.app.AlertDialog
@@ -24,6 +24,7 @@ import kotlinx.coroutines.withContext
 
 class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
+    // [수정됨] 단일 객체 공유 방식 폐기 -> 호출 시마다 독립된 배경 객체 생성
     private fun getDarkThemeBg(): GradientDrawable {
         return GradientDrawable().apply {
             setColor(Color.parseColor("#121212"))
@@ -186,7 +187,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val mainContainer = LinearLayout(ctx).apply { 
             orientation = LinearLayout.VERTICAL
             setPadding(15, 15, 15, 15)
-            background = getDarkThemeBg()
+            background = getDarkThemeBg() // [수정됨] 독립된 배경 객체 적용
         }
         
         val headerTitle = TextView(ctx).apply {
@@ -210,21 +211,20 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val scroll = ScrollView(ctx)
         val listLayout = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
         
-        // [핵심 추가] originalData를 Row 객체에 보관합니다.
         class CatalogRow(
-            val providerName: String, val catalogName: String, val originalData: String,
+            val providerName: String, val catalogName: String,
             val checkBox: CheckBox, val orderEdit: EditText, val renameEdit: EditText, val view: View
         )
         val rows = mutableListOf<CatalogRow>()
 
         val allProviders = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
-        val allCatalogs = mutableListOf<Triple<String, String, String>>() 
+        val allCatalogs = mutableListOf<Pair<String, String>>() 
 
         for (provider in allProviders) {
-            val staticCats = provider.mainPage.map { it.name to it.data }
-            val dynamicCats = prefs.getString("dynamic_catalogs_${provider.name}", "")?.split("|||")?.filter { it.isNotBlank() }?.map { it to it } ?: emptyList()
-            val combined = (staticCats + dynamicCats).distinctBy { it.first }
-            combined.forEach { allCatalogs.add(Triple(provider.name, it.first, it.second)) }
+            val staticCats = provider.mainPage.map { it.name }
+            val dynamicCats = prefs.getString("dynamic_catalogs_${provider.name}", "")?.split("|||") ?: emptyList()
+            val combined = (staticCats + dynamicCats).filter { it.isNotBlank() }.distinct()
+            combined.forEach { allCatalogs.add(provider.name to it) }
         }
 
         fun triggerSort() {
@@ -248,17 +248,14 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             }
         }
 
-        data class PreCat(val pName: String, val cName: String, val oData: String, val order: Int)
-
         val preSortedCatalogs = allCatalogs.map {
             val order = prefs.getString("cat_order_${instanceId}_${it.first}_${it.second}", "99")?.toIntOrNull() ?: 99
-            PreCat(it.first, it.second, it.third, order)
-        }.sortedBy { it.order }
+            Triple(it.first, it.second, order)
+        }.sortedBy { it.third }
 
         for (cat in preSortedCatalogs) {
-            val pName = cat.pName
-            val cName = cat.cName
-            val oData = cat.oData
+            val pName = cat.first
+            val cName = cat.second
 
             val row = LinearLayout(ctx).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -335,7 +332,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
             cb.setOnCheckedChangeListener { _, isChecked -> etRename.isEnabled = isChecked }
 
-            val catalogRow = CatalogRow(pName, cName, oData, cb, etOrder, etRename, row)
+            val catalogRow = CatalogRow(pName, cName, cb, etOrder, etRename, row)
             rows.add(catalogRow)
 
             up.setOnClickListener {
@@ -373,12 +370,13 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val builder = AlertDialog.Builder(ctx)
         val dialog = builder.setView(mainContainer).create()
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        
+        // [수정됨] 키보드 등장 시 팝업을 밀어올려 찌그러짐을 원천 차단
         dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
 
         applyBtn.setOnClickListener {
             val editor = prefs.edit()
             val allOrders = mutableListOf<Triple<CatalogRow, Int, Int>>()
-            val bakedList = mutableListOf<String>()
 
             for (row in rows) {
                 val tKey = "cat_toggle_${instanceId}_${row.providerName}_${row.catalogName}"
@@ -395,19 +393,11 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             val sorted = allOrders.sortedWith(compareBy({ it.second }, { if (it.second == it.third) 1 else 0 }))
             var last = -1
             for (item in sorted) {
-                val rowInfo = item.first
                 var target = item.second
                 if (target <= last) target = last + 1
-                editor.putString("cat_order_${instanceId}_${rowInfo.providerName}_${rowInfo.catalogName}", target.toString())
+                editor.putString("cat_order_${instanceId}_${item.first.providerName}_${item.first.catalogName}", target.toString())
                 last = target
-
-                // [데이터 굽기] 선택된 항목들만 전용 문자열로 압축합니다.
-                if (rowInfo.checkBox.isChecked) {
-                    val customName = rowInfo.renameEdit.text.toString().ifBlank { rowInfo.catalogName }
-                    bakedList.add("${rowInfo.providerName}|~|${rowInfo.originalData}|~|${customName}|~|${rowInfo.catalogName}")
-                }
             }
-            editor.putString("evo_baked_catalogs_$instanceId", bakedList.joinToString("|||"))
             editor.apply()
             dialog.dismiss()
         }
