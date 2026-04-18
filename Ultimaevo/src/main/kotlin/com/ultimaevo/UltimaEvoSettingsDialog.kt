@@ -1,1430 +1,437 @@
-// v1.154 (Feature & Fix: ✨ 병합 로직 제거 및 aiostreamserror 발생 시 URL 기준 TMDB 에피소드 강제 로드)
-package com.hsp1020
+package com.ultimaevo
 
+import android.app.AlertDialog
 import android.content.Context
-import com.fasterxml.jackson.annotation.JsonProperty
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.GradientDrawable
+import android.os.Bundle
+import android.text.InputType
+import android.view.Gravity
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
+import android.widget.*
+import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.lagradost.cloudstream3.APIHolder
-import com.lagradost.cloudstream3.CloudStreamApp
-import com.lagradost.cloudstream3.Actor
-import com.lagradost.cloudstream3.ActorData
-import com.lagradost.cloudstream3.Episode
-import com.lagradost.cloudstream3.HomePageList
-import com.lagradost.cloudstream3.HomePageResponse
-import com.lagradost.cloudstream3.LoadResponse
-import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
-import com.lagradost.cloudstream3.LoadResponse.Companion.addImdbId
-import com.lagradost.cloudstream3.LoadResponse.Companion.addTMDbId
-import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
-import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.MainPageRequest
-import com.lagradost.cloudstream3.Score
-import com.lagradost.cloudstream3.SearchResponse
-import com.lagradost.cloudstream3.ShowStatus
-import com.lagradost.cloudstream3.SubtitleFile
-import com.lagradost.cloudstream3.TvType
-import com.lagradost.cloudstream3.addDate
-import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.imdbUrlToIdNullable
-import com.lagradost.cloudstream3.newEpisode
-import com.lagradost.cloudstream3.newHomePageResponse
-import com.lagradost.cloudstream3.newMovieLoadResponse
-import com.lagradost.cloudstream3.newMovieSearchResponse
-import com.lagradost.cloudstream3.newSubtitleFile
-import com.lagradost.cloudstream3.newTvSeriesLoadResponse
-import com.lagradost.cloudstream3.runAllAsync
-import com.lagradost.cloudstream3.utils.AppUtils.parseJson
-import com.lagradost.cloudstream3.utils.AppUtils.toJson
-import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.ExtractorLinkType
-import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.SubtitleHelper
-import com.lagradost.cloudstream3.utils.USER_PROVIDER_API
-import com.lagradost.cloudstream3.utils.loadExtractor
-import com.lagradost.cloudstream3.utils.newExtractorLink
-import com.hsp1020.SubsExtractors.invokeOpenSubs
-import com.hsp1020.SubsExtractors.invokeWatchsomuch
-import com.lagradost.nicehttp.Requests
-import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import okhttp3.ConnectionPool
-import okhttp3.Dispatcher
-import okhttp3.Protocol
-import org.json.JSONObject
-import java.net.URLEncoder
-import java.util.Collections
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
-private fun String.urlEncode(): String = try { URLEncoder.encode(this, "UTF-8").replace("+", "%20") } catch (e: Exception) { this }
+class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
-private fun String.cleanBaseUrl(): String {
-    return this.substringBefore("?").replace("/manifest.json", "").trimEnd('/')
-}
-
-private inline fun <T> lruSet(maxSize: Int): MutableSet<T> {
-    return Collections.newSetFromMap(object : java.util.LinkedHashMap<T, Boolean>(maxSize, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<T, Boolean>): Boolean {
-            return size > maxSize
-        }
-    })
-}
-
-class StremioC(override var mainUrl: String, override var name: String) : MainAPI() {
-    override val supportedTypes = setOf(TvType.Others)
-    override val hasMainPage = true
-     
-    private var cachedManifest: Manifest? = null
-    private var lastManifestUrl: String = ""
-    private var lastCacheTime: Long = 0
-    
-    private val catalogSentIds = ConcurrentHashMap<String, MutableSet<String>>()
-    private val catalogSkipState = ConcurrentHashMap<String, Int>()
-    
-    private val pageMutex = Mutex()
-    private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
-    
-    val customSession by lazy {
-        println("[StremioC v1.154] 커스텀 OkHttp 세션 초기화 (메모리 튜닝 - 연결 100개 유지)")
-        val newClient = app.baseClient.newBuilder()
-            .protocols(listOf(Protocol.HTTP_1_1))
-            .dispatcher(Dispatcher().apply {
-                maxRequests = 100
-                maxRequestsPerHost = 100
-            })
-            .connectionPool(ConnectionPool(30, 1, TimeUnit.MINUTES))
-            .build()
-            
-        Requests(newClient).apply {
-            this.responseParser = app.responseParser
-            this.defaultHeaders = app.defaultHeaders
+    private fun getDarkThemeBg(): GradientDrawable {
+        return GradientDrawable().apply {
+            setColor(Color.parseColor("#121212"))
+            setStroke(3, Color.WHITE)
+            cornerRadius = 16f
         }
     }
 
-    companion object {
-        private const val tmdbAPI = "https://api.themoviedb.org/3"
-        private const val apiKey = "cc9982c4801545a1481d167137ea7b53"
-        private const val TRANSPARENT_PIXEL = "https://upload.wikimedia.org/wikipedia/commons/c/ca/1x1.png"
-        private const val TRAKT_CLIENT_ID = "6d8668915ed1953f5023ea090e206facc6261813243f567dea15a9a678783b6d" 
-        private const val SIMKL_CLIENT_ID = "f392628a1235f474859905f5453239c57715d9a197a89bd71cac975ddd9c4d39" 
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+        println("[UltimaEvo-Debug] [Dialog] onViewCreated 호출")
+        (view.parent as? View)?.setBackgroundColor(Color.TRANSPARENT)
+    }
+
+    override fun onCreateView(
+        inflater: LayoutInflater,
+        container: ViewGroup?,
+        savedInstanceState: Bundle?
+    ): View {
+        println("[UltimaEvo-Debug] [Dialog] onCreateView 시작")
+        val pluginCtx = UltimaEvoPlugin.pluginContext ?: requireContext()
         
-        private val IMDB_ID_REGEX = "tt[0-9]+".toRegex()
-        private val JSON_ID_EXTRACT_REGEX = "\"id\":\"([^\"]+)\"".toRegex()
-        
-        private val globalPageCache = ConcurrentHashMap<String, Triple<List<SearchResponse>, Int, Long>>()
-        private const val CACHE_TTL_MS = 60 * 60 * 1000L  // 1시간
-        
-        // --- CineStream Ghost Provider 전역 캐시 및 로직 모듈화 ---
-        private var cachedCineStreamProvider: MainAPI? = null
-        private var hasSearchedCineStream = false
-        private var hasSyncedCineStreamSettings = false
+        // [핵심] 단일 파일 직접 제어
+        val prefs = pluginCtx.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
 
-        /**
-         * 카탈로그가 꺼져있어도 PluginManager를 털어서 CineStream 설치 여부를 확실하게 감지하고 객체를 반환합니다.
-         * SettingsBottomFragment 등 외부에서도 설치 여부 판단 시 이 메서드를 활용할 수 있습니다.
-         */
-        fun getCineStreamProvider(): MainAPI? {
-            if (cachedCineStreamProvider != null) return cachedCineStreamProvider
-            if (hasSearchedCineStream) return null // 이미 찾았는데 없었으면 재탐색 안 함
-
-            hasSearchedCineStream = true
-            
-            // 1차 시도: 정상적으로 켜져있는지 확인
-            var provider = APIHolder.allProviders.find { it.name.equals("CineStream", ignoreCase = true) }
-
-            // 2차 시도: 카탈로그를 꺼서 안 보인다면 Ghost Provider 색출 (리플렉션 해킹)
-            if (provider == null) {
-                try {
-                    var targetClassLoader: ClassLoader? = null
-                    val pmClass = Class.forName("com.lagradost.cloudstream3.plugins.PluginManager")
-                    val pmInstance = pmClass.getField("INSTANCE").get(null)
-                    
-                    for (field in pmClass.declaredFields) {
-                        field.isAccessible = true
-                        val obj = try { field.get(pmInstance) } catch(e: Exception) { null }
-                        val items = when (obj) {
-                            is Map<*, *> -> obj.values
-                            is Collection<*> -> obj
-                            is Array<*> -> obj.toList()
-                            else -> null
-                        }
-                        
-                        items?.forEach { plugin ->
-                            if (plugin != null) {
-                                val pName = plugin.javaClass.name
-                                if (pName.contains("megix") || pName.contains("CineStream")) {
-                                    targetClassLoader = plugin.javaClass.classLoader
-                                }
-                            }
-                        }
-                        if (targetClassLoader != null) break
-                    }
-                    
-                    if (targetClassLoader != null) {
-                        val clazz = targetClassLoader!!.loadClass("com.megix.CineStreamProvider")
-                        provider = clazz.newInstance() as? MainAPI
-                        println("[StremioC v1.154] CineStream Ghost Provider 강제 생성 완료 (카탈로그 OFF 상태 감지)")
-                    }
-                } catch (e: Exception) {
-                    println("[StremioC v1.154] Failed to instantiate Ghost Provider: ${e.message}")
-                }
-            }
-            
-            cachedCineStreamProvider = provider
-            return provider
-        }
-        
-        fun getCachedPage(key: String): Pair<List<SearchResponse>, Int>? {
-            val entry = globalPageCache[key] ?: return null
-            if (System.currentTimeMillis() - entry.third < CACHE_TTL_MS) {
-                return Pair(entry.first, entry.second)
-            }
-            return null
-        }
-        
-        fun setCachedPage(key: String, data: List<SearchResponse>, skipIncrement: Int) {
-            globalPageCache[key] = Triple(data, skipIncrement, System.currentTimeMillis())
-        }
-    }
-
-    private fun SearchResponse.extractPureId(): String {
-        return try {
-            JSON_ID_EXTRACT_REGEX.find(this.url)?.groupValues?.get(1) ?: this.url
-        } catch (e: Exception) {
-            this.url
-        }
-    }
-
-    private fun buildTmdbUrl(endpoint: String, vararg params: Pair<String, String>): String {
-        val queryParams = mutableMapOf("api_key" to apiKey, "language" to "ko-KR")
-        queryParams.putAll(params.toMap()) 
-        val queryString = queryParams.entries.joinToString("&") { "${it.key}=${it.value}" }
-        return "$tmdbAPI$endpoint?$queryString"
-    }
-
-    private fun getValidStremioAddons(): List<CustomSite> {
-        val sites = CloudStreamApp.getKey<Array<CustomSite>>(USER_PROVIDER_API)?.toList() ?: emptyList()
-        return sites.filter { it.parentJavaClass == "StremioX" || it.parentJavaClass == "StremioC" }
-    }
-
-    private fun buildStremioId(type: String?, id: String?, season: Int?, episode: Int?, isSubtitle: Boolean = false): String? {
-        if (type == "series" && season != null && episode != null) {
-            return when {
-                id?.startsWith("kitsu:") == true || id?.startsWith("mal:") == true -> {
-                    val parts = id.split(":")
-                    val baseId = if (parts.size >= 2) "${parts[0]}:${parts[1]}" else id
-                    if (isSubtitle) "$baseId:$season:$episode" else "$baseId:$episode"
-                }
-                id?.endsWith(":$season:$episode") == true -> id
-                else -> "$id:$season:$episode"
-            }
-        }
-        return id
-    }
-    
-    private fun mergeOverview(original: String?, newOverview: String?): String? {
-        return if (!newOverview.isNullOrBlank()) newOverview else original
-    }
-
-    private fun baseUrl(): String {
-        return mainUrl.fixSourceUrl().cleanBaseUrl()
-    }
-
-    private fun querySuffix(): String {
-        return mainUrl.substringAfter("?", "")
-            .takeIf { it.isNotEmpty() }
-            ?.let { "?$it" }
-            ?: ""
-    }
-
-    private fun buildUrl(path: String): String {
-        return "${baseUrl()}$path${querySuffix()}"
-    }
-
-    private fun getActorUrl(link: String?): String? {
-        if (link == null) return null
-        return if (link.startsWith("/")) "https://image.tmdb.org/t/p/w300$link" else link
-    }
-
-    private suspend fun getManifest(): Manifest? {
-        val originalBase = mainUrl.substringBefore("?").trimEnd('/')
-        val currentUrl = if (originalBase.endsWith("manifest.json")) originalBase else "$originalBase/manifest.json"
-        
-        val now = System.currentTimeMillis()
-        val isExpired = (now - lastCacheTime) > 24 * 60 * 60 * 1000
-
-        if (cachedManifest != null && lastManifestUrl == currentUrl && !isExpired && !cachedManifest?.catalogs.isNullOrEmpty()) {
-            return cachedManifest
+        val scrollView = ScrollView(pluginCtx).apply { background = getDarkThemeBg() }
+        val mainLayout = LinearLayout(pluginCtx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(30, 30, 30, 30)
         }
 
-        val res = customSession.get(currentUrl, timeout = 120L).parsedSafe<Manifest>()
-
-        if (res != null && res.catalogs.isNotEmpty()) {
-            cachedManifest = res
-            lastManifestUrl = currentUrl
-            lastCacheTime = now
-            catalogSentIds.clear()
-            catalogSkipState.clear()
-        }      
-        return res ?: cachedManifest
-    }
-
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse = coroutineScope {
-        var isNewRequest = false
-        
-        val deferred = pageMutex.withLock {
-            if (page <= 1) {
-                catalogSentIds.clear()
-                activePageRequests.clear()
-                
-                val now = System.currentTimeMillis()
-                val removedCount = globalPageCache.entries.removeIf { now - it.value.third > CACHE_TTL_MS }
-                if (removedCount) {
-                    println("[StremioC v1.154] 🧹 1시간 이상 경과된 홈 카탈로그 캐시 정리 완료")
-                }
-                catalogSkipState.clear()
-            }
-            
-            if (!activePageRequests.containsKey(page)) {
-                isNewRequest = true
-                activePageRequests[page] = async { fetchMainPageData(page, request) }
-            }
-            activePageRequests[page]!!
+        val title = TextView(pluginCtx).apply {
+            text = "Ultima Evo 마스터 관리자"
+            textSize = 20f
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, 0, 20)
+            gravity = Gravity.CENTER
         }
-        
-        val response = deferred.await()
-        
-        pageMutex.withLock {
-            activePageRequests.remove(page)
-        }
-        
-        if (!isNewRequest && page > 1) {
-            println("[StremioC v1.154] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
-            return@coroutineScope newHomePageResponse(emptyList(), hasNext = true)
-        }
-        return@coroutineScope response
-    }
+        mainLayout.addView(title)
 
-    private suspend fun fetchMainPageData(page: Int, request: MainPageRequest): HomePageResponse {
-        mainUrl = mainUrl.fixSourceUrl()
-        val manifest = getManifest()
-        val targetCatalogs = manifest?.catalogs?.filter { !it.isSearchRequired() } ?: emptyList()
-        val lists = mutableListOf<HomePageList>()
-        
-        val chunkResults = coroutineScope {
-            targetCatalogs.map { catalog ->
-                async(Dispatchers.IO) {
-                    try {
-                        val catalogKey = "${catalog.id}-${catalog.type}"
-                        val currentSkip = catalogSkipState[catalogKey] ?: 0
-                        val cacheKey = "${this@StremioC.name}_${catalogKey}_$currentSkip"
-                        
-                        val cachedEntry = getCachedPage(cacheKey)
-                        
-                        val row = if (cachedEntry != null) {
-                            val displayType = catalog.type?.replaceFirstChar { it.uppercase() } ?: ""
-                            catalogSkipState[catalogKey] = currentSkip + cachedEntry.second
-                            HomePageList("${catalog.name ?: catalog.id} - $displayType", cachedEntry.first)
-                        } else {
-                            val resultPair = catalog.toHomePageList(provider = this@StremioC, skip = currentSkip)
-                            val freshRow = resultPair.first
-                            
-                            if (freshRow.list.isNotEmpty()) {
-                                setCachedPage(cacheKey, freshRow.list, resultPair.second)
-                                catalogSkipState[catalogKey] = currentSkip + resultPair.second
-                            }
-                            freshRow
-                        }
-                        
-                        val seenForThisCatalog = catalogSentIds.getOrPut(catalogKey) { 
-                            Collections.synchronizedSet(lruSet<String>(500))
-                        }
-                        
-                        val filteredItems = row.list.filter { item -> seenForThisCatalog.add(item.extractPureId()) }
-                        row.copy(list = filteredItems)
-                    } catch (e: Exception) { null }
-                }
-            }.awaitAll()
-        }.filterNotNull().filter { it.list.isNotEmpty() }
-        
-        lists.addAll(chunkResults)
-        return newHomePageResponse(lists, hasNext = true)
-    }
-
-    override suspend fun search(query: String): List<SearchResponse> {
-        mainUrl = mainUrl.fixSourceUrl()
-        val manifest = getManifest()
-        val supportedCatalogs = manifest?.catalogs?.filter { it.supportsSearch() } ?: emptyList()
-        
-        val searchResults = coroutineScope {
-            supportedCatalogs.map { catalog ->
-                async(Dispatchers.IO) {
-                    try { catalog.search(query, this@StremioC) } catch (e: Exception) { emptyList() }
-                }
-            }.awaitAll().flatten()
-        }
-
-        val seenIds = mutableSetOf<String>()
-        return searchResults.filter { item ->
-            val extractedId = item.extractPureId()
-            if (seenIds.contains(extractedId)) false else { seenIds.add(extractedId); true }
-        }
-    }
-
-    override suspend fun load(url: String): LoadResponse = coroutineScope {
-        val res: CatalogEntry = if (url.startsWith("{")) {
-            parseJson(url)
-        } else {
-            val responseText = customSession.get(url).text
-            try {
-                parseJson<CatalogResponse>(responseText).meta ?: throw Exception()
-            } catch (e: Exception) {
-                JSONObject(responseText).optJSONObject("meta")?.toString()?.let { parseJson(it) }
-                    ?: throw IllegalStateException("유효한 메타데이터를 찾을 수 없습니다: $url")
-            }
-        }
-        
-        val requestedMetaType = if (url.startsWith("{")) {
-            if (res.type == "series" || res.type == "tv") "tv" else if (res.type == "movie") "movie" else null
-        } else {
-            if (url.contains("/meta/series/")) "tv" else if (url.contains("/meta/movie/")) "movie" else null
-        }
-        
-        val normalizedId = try { normalizeId(res.id) } catch (e: Exception) { res.id }
-        val encodedId = normalizedId.urlEncode()
-
-        val addonDeferred = async(Dispatchers.IO) {
-            try {
-                val response = customSession.get(buildUrl("/meta/${res.type}/$encodedId.json")).parsedSafe<CatalogResponse>()
-                response?.meta ?: response?.metas?.firstOrNull { it.id == res.id } ?: response?.metas?.firstOrNull()
-            } catch (e: Exception) { null }
-        }
-
-        val tmdbIdFromRes = res.moviedb_id?.toString() ?: res.tmdbIdExt
-        val targetTmdbId = if (res.id.startsWith("tmdb:")) res.id.removePrefix("tmdb:") else tmdbIdFromRes
-        
-        val tmdbDeferred = targetTmdbId?.let { id ->
-            async(Dispatchers.IO) {
-                val mediaType = if (res.type == "movie") "movie" else "tv"
-                val detailAppend = if (mediaType == "movie") "release_dates,credits,images,videos,external_ids,recommendations" else "content_ratings,credits,images,videos,external_ids,recommendations"
-                val detailUrl = buildTmdbUrl("/$mediaType/$id", "append_to_response" to detailAppend, "include_image_language" to "ko")
-                try { customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>() } catch (e: Exception) { null }
-            }
-        }
-
-        val tmdbEnDeferred = targetTmdbId?.let { id ->
-            async(Dispatchers.IO) {
-                val mediaType = if (res.type == "movie") "movie" else "tv"
-                val detailUrl = buildTmdbUrl("/$mediaType/$id", "language" to "en-US") 
-                try { customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>() } catch (e: Exception) { null }
-            }
-        }
-
-        val kitsuDeferred = if (res.id.startsWith("kitsu:") || res.id.startsWith("mal:")) {
-            async(Dispatchers.IO) {
-                try {
-                    val kitsuRes = customSession.get("https://anime-kitsu.strem.fun/meta/${res.type}/${res.id}.json", timeout = 15L).parsedSafe<KitsuMetaResponse>()
-                    kitsuRes?.meta
-                } catch (e: Exception) { null }
-            }
-        } else null
-
-        val preFetchedTmdbDetail = tmdbDeferred?.await()
-        val preFetchedTmdbEnDetail = tmdbEnDeferred?.await()
-        val kitsuMeta = kitsuDeferred?.await()
-        
-        var finalProcessedId = res.id
-        var imdbId = preFetchedTmdbDetail?.external_ids?.imdb_id
-        
-        if (imdbId.isNullOrBlank()) {
-            val fetchedKitsuImdb = kitsuMeta?.imdb_id?.takeIf { it.startsWith("tt") }
-            if (!fetchedKitsuImdb.isNullOrBlank()) {
-                imdbId = fetchedKitsuImdb
-            } else if (res.id.startsWith("mal:") && !kitsuMeta?.id.isNullOrBlank()) {
-                imdbId = kitsuMeta?.id
-            }
-        }
-
-        if (!imdbId.isNullOrBlank() && (imdbId.startsWith("tt") || imdbId.startsWith("kitsu:"))) {
-            finalProcessedId = imdbId
-        }
-
-        return@coroutineScope res.toLoadResponse(this@StremioC, finalProcessedId, addonDeferred, preFetchedTmdbDetail, preFetchedTmdbEnDetail, kitsuMeta?.id, requestedMetaType)
-    }
-
-    override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
-        val loadData = try { parseJson<LoadData>(data) } catch (e: Exception) { null } ?: return false
-        
-        val primaryId = if (loadData.id?.startsWith("tmdb:") == true && !loadData.imdbId.isNullOrBlank()) {
-            loadData.imdbId
-        } else {
-            loadData.id ?: ""
-        }
-
-        val globalId = if (!loadData.imdbId.isNullOrBlank()) loadData.imdbId else primaryId
-        val targetType = loadData.type ?: if ((loadData.season ?: 0) > 0 || (loadData.episode ?: 0) > 0) "series" else "movie"
-        
-        val primaryStremioId = buildStremioId(targetType, primaryId, loadData.season, loadData.episode) ?: primaryId
-        val encodedPrimaryId = primaryStremioId.urlEncode()
-        val globalStremioId = buildStremioId(targetType, globalId, loadData.season, loadData.episode) ?: globalId
-
-        runAllAsync(
-            {
-                try {
-                    val url = buildUrl("/stream/$targetType/$encodedPrimaryId.json")
-                    val res = customSession.get(url, timeout = 120L).parsedSafe<StreamsResponse>()
-                    res?.streams?.forEach { stream -> stream.runCallback(this@StremioC, subtitleCallback, callback) }
-                } catch (e: Exception) {}
-            },
-            { invokeStremioX(targetType, globalId, loadData.season, loadData.episode, subtitleCallback, callback) },
-            { invokeWatchsomuch(loadData.imdbId, loadData.season, loadData.episode, subtitleCallback) },
-            { invokeOpenSubs(loadData.imdbId, loadData.season, loadData.episode, subtitleCallback) },
-            { invokeStremioSubtitles(targetType, globalId, loadData.season, loadData.episode, subtitleCallback) },
-            { invokeCineStream(loadData, targetType, globalId, isCasting, subtitleCallback, callback) }
-        )
-        return true
-    }
-
-    private fun syncCineStreamSettings() {
-        if (hasSyncedCineStreamSettings) return
-        
-        try {
-            val context = CloudStreamApp.context ?: return
-            val possibleNames = listOf(
-                "CineStream", "CineStream_preferences", "plugin_CineStream", "plugin_CineStream_preferences", 
-                "com.megix", "com.megix_preferences", context.packageName + "_preferences"
-            )
-            
-            var sourcePrefs: android.content.SharedPreferences? = null
-            for (name in possibleNames) {
-                val p = context.getSharedPreferences(name, Context.MODE_PRIVATE)
-                if (p.contains("seen_providers") || p.contains("provider_order") || p.contains("ScrapeConcurrency")) {
-                    sourcePrefs = p
-                    break
-                }
-            }
-            val source = sourcePrefs ?: return
-
-            source.all.forEach { (key, value) ->
-                try {
-                    when (value) {
-                        is Boolean -> CloudStreamApp.setKey(key, value)
-                        is String -> CloudStreamApp.setKey(key, value)
-                        is Int -> CloudStreamApp.setKey(key, value)
-                        is Long -> CloudStreamApp.setKey(key, value)
-                        is Float -> CloudStreamApp.setKey(key, value)
-                    }
-                } catch (e: Exception) {}
-            }
-            hasSyncedCineStreamSettings = true
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    private suspend fun invokeCineStream(
-        loadData: LoadData,
-        targetType: String,
-        globalId: String?,
-        isCasting: Boolean,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ) {
-        val context = CloudStreamApp.context
-        var isEnabled = true
-        if (context != null) {
-            val possiblePrefNames = listOf("StremioX", "StremioX_preferences", "stremio_preferences", "com.hsp1020_preferences", context.packageName + "_preferences")
-            for (name in possiblePrefNames) {
-                val prefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
-                if (prefs.contains("cinestream_integration_enabled")) {
-                    isEnabled = prefs.getBoolean("cinestream_integration_enabled", true)
-                    break
-                }
-            }
-        }
-
-        if (!isEnabled) {
-            println("[StremioC v1.154] 사용자가 설정에서 CineStream 연동을 비활성화하여 스킵합니다.")
-            return
-        }
-
-        try {
-            val cineStreamProvider = getCineStreamProvider() ?: return
-
-            syncCineStreamSettings()
-
-            val subtitleInterceptor: (SubtitleFile) -> Unit = { sub ->
-                try {
-                    val host = java.net.URI(sub.url).host ?: ""
-                    val customAddonsRaw = CloudStreamApp.getKey<String>("stremio_addons") ?: ""
-                    val customHosts = customAddonsRaw.lines()
-                        .filter { it.isNotBlank() }
-                        .mapNotNull { 
-                            val parts = it.split("|")
-                            if (parts.size >= 2) java.net.URI(parts[1]).host else null
-                        }
-                        
-                    val builtInHosts = listOf("opensubtitles.stremio.homes", "subsense.nepiraw.com", "opensubtitles-v3.strem.io")
-                    
-                    val isStremio = customHosts.contains(host) || builtInHosts.contains(host) || host.contains("strem", ignoreCase = true)
-                    
-                    if (isStremio && !sub.lang.contains("(Stremio)", ignoreCase = true)) {
-                        subtitleCallback.invoke(
-                            SubtitleFile("${sub.lang} (Stremio)", sub.url)
-                        )
-                    } else {
-                        subtitleCallback.invoke(sub)
-                    }
-                } catch (e: Exception) {
-                    subtitleCallback.invoke(sub)
-                }
-            }
-
-            val isKitsuMedia = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
-            val kitsuIdExt = if (isKitsuMedia) globalId?.substringAfter("kitsu:")?.substringAfter("mal:") else loadData.kitsuId
-            
-            val rawIdForCineStream = loadData.imdbId ?: globalId?.takeIf { it.startsWith("tt") || it.startsWith("tmdb:") } ?: ""
-            val correctImdbIdForCineStream = if (rawIdForCineStream.startsWith("tmdb:")) {
-                val parts = rawIdForCineStream.split(":")
-                if (parts.size >= 2) "${parts[0]}:${parts[1]}" else rawIdForCineStream
-            } else {
-                rawIdForCineStream
-            }
-            
-            println("[StremioC v1.154] CineStream 전달용 메인 ID 정제 완료: $correctImdbIdForCineStream (원본 rawId: $rawIdForCineStream)")
-
-            val scrapingTitle = loadData.englishTitle ?: loadData.originalTitle ?: loadData.title ?: "Unknown"
-
-            val isAnimeMedia = (loadData.isAnime || isKitsuMedia)
-            val isSeason2Plus = isAnimeMedia && (loadData.season ?: 0) > 1
-
-            val finalTitleForCineStream = if (isSeason2Plus) {
-                "$scrapingTitle Season ${loadData.season}"
-            } else {
-                scrapingTitle
-            }
-
-            val finalYearForCineStream = if (isSeason2Plus) {
-                loadData.airedYear?.toString() ?: loadData.year?.toString()
-            } else {
-                loadData.year?.toString()
-            }
-
-            val cineData = mapOf(
-                "title" to finalTitleForCineStream, 
-                "id" to correctImdbIdForCineStream,
-                "tmdbId" to loadData.tmdbId,
-                "tvtype" to targetType,
-                "year" to finalYearForCineStream,
-                "season" to loadData.season,
-                "episode" to loadData.episode,
-                "imdb_id" to loadData.imdbId,
-                
-                "original_title" to loadData.originalTitle,
-                "airedYear" to loadData.airedYear,
-                "firstAired" to loadData.firstAired,
-                "imdbSeason" to loadData.imdbSeason,
-                "imdbEpisode" to loadData.imdbEpisode,
-                
-                "anilistId" to loadData.anilistId,
-                "malId" to loadData.malId,
-                
-                "isAnime" to isAnimeMedia,
-                "isKitsu" to false, 
-                "kitsuId" to kitsuIdExt,
-                
-                "isBollywood" to loadData.isBollywood,
-                "isAsian" to loadData.isAsian,
-                "isCartoon" to loadData.isCartoon
-            )
-
-            println("[StremioC v1.154] CineStream 데이터 전달: $cineData")
-            cineStreamProvider.loadLinks(cineData.toJson(), isCasting, subtitleInterceptor, callback)
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    private suspend fun invokeStremioX(type: String?, id: String?, season: Int?, episode: Int?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
-        val filteredSites = getValidStremioAddons()
-        val stremioId = buildStremioId(type, id, season, episode) ?: return
-
-        coroutineScope {
-            filteredSites.map { site ->
-                async(Dispatchers.IO) {
-                    try {
-                        val url = "${site.url.cleanBaseUrl()}/stream/$type/$stremioId.json"
-                        val res = customSession.get(url, timeout = 120L).parsedSafe<StreamsResponse>() 
-                        res?.streams?.forEach { stream -> stream.runCallback(this@StremioC, subtitleCallback, callback) }
-                    } catch (e: Exception) {}
-                }
-            }.awaitAll()
-        }
-    }
-
-    private data class StremioSubtitleResponse(@JsonProperty("subtitles") val subtitles: List<Subtitle>?)
-    
-    private suspend fun invokeStremioSubtitles(type: String?, id: String?, season: Int?, episode: Int?, subtitleCallback: (SubtitleFile) -> Unit) {
-        val addonUrls = mutableSetOf(baseUrl())
-        getValidStremioAddons().forEach { addonUrls.add(it.url.cleanBaseUrl()) }
-
-        val stremioId = buildStremioId(type, id, season, episode, isSubtitle = true) ?: return
-
-        coroutineScope {
-            addonUrls.toList().map { api ->
-                async(Dispatchers.IO) {
-                    try {
-                        val url = "$api/subtitles/$type/$stremioId.json"
-                        println("[StremioC v1.154] 📥 자막 스트림 파싱 시도: $url")
-                        val subtitleResponse = customSession.get(url, timeout = 120L).parsedSafe<StremioSubtitleResponse>()
-
-                        subtitleResponse?.subtitles?.forEach { sub ->
-                            val lang = sub.lang ?: sub.lang_code ?: "Unknown"
-                            val fileUrl = sub.url
-                            if (!fileUrl.isNullOrBlank()) {
-                                val baseLangName = SubtitleHelper.fromTagToEnglishLanguageName(lang) ?: lang
-                                subtitleCallback.invoke(newSubtitleFile("$baseLangName (Stremio)", fileUrl))
-                            }
-                        }
-                    } catch (e: Exception) {
-                        println("[StremioC v1.154] 자막 로드 실패: ${e.message}")
-                    }
-                }
-            }.awaitAll()
-        }
-    }
-
-    data class LoadData(
-        val type: String? = null, 
-        val id: String? = null, 
-        val season: Int? = null, 
-        val episode: Int? = null, 
-        val imdbId: String? = null, 
-        val year: Int? = null, 
-        val title: String? = null, 
-        val tmdbId: Int? = null, 
-        val isAnime: Boolean = false,
-        val isBollywood: Boolean = false,
-        val isAsian: Boolean = false,
-        val isCartoon: Boolean = false,
-        val firstAired: String? = null,
-        val airedYear: Int? = null, 
-        val originalTitle: String? = null, 
-        val englishTitle: String? = null, 
-        val imdbSeason: Int? = null,
-        val imdbEpisode: Int? = null,
-        val anilistId: Int? = null,
-        val malId: Int? = null,
-        val kitsuId: String? = null
-    )
-    
-    data class CustomSite(@JsonProperty("parentJavaClass") val parentJavaClass: String, @JsonProperty("name") val name: String, @JsonProperty("url") val url: String, @JsonProperty("lang") val lang: String)
-
-    private fun isImdborTmdb(url: String?): Boolean {
-        return imdbUrlToIdNullable(url) != null || url?.startsWith("tmdb:") == true
-    }
-
-    private data class Manifest(val catalogs: List<Catalog>)
-    private data class Extra(@JsonProperty("name") val name: String?, @JsonProperty("isRequired") val isRequired: Boolean? = false)
-
-    private data class Catalog(var name: String?, val id: String, val type: String?, val types: MutableList<String> = mutableListOf(), @JsonProperty("extra") val extra: List<Extra>? = null, @JsonProperty("extraSupported") val extraSupported: List<String>? = null) {
-        init { if (type != null) types.add(type) }
-
-        fun isSearchRequired(): Boolean = extra?.any { it.name == "search" && it.isRequired == true } == true
-        fun supportsSearch(): Boolean = extra?.any { it.name == "search" } == true || extraSupported?.contains("search") == true
-
-        private suspend fun fetchMetas(provider: StremioC, path: String): List<CatalogEntry> {
-            return try {
-                val req = provider.customSession.get(provider.buildUrl(path), timeout = 120L)
-                if (req.isSuccessful && req.text.isNotBlank()) parseJson<CatalogResponse>(req.text).metas ?: emptyList() else emptyList()
-            } catch (e: Exception) { emptyList() }
-        }
-
-        suspend fun search(query: String, provider: StremioC): List<SearchResponse> {
-            val allMetas = coroutineScope {
-                types.map { type ->
-                    async(Dispatchers.IO) {
-                        val path = "/catalog/${type}/${id}/search=${query.urlEncode()}.json"
-                        fetchMetas(provider, path)
-                    }
-                }.awaitAll().flatten()
-            }
-            return allMetas.distinctBy { it.id }.map { it.toSearchResponse(provider) }
-        }
-
-        suspend fun toHomePageList(provider: StremioC, skip: Int): Pair<HomePageList, Int> {
-            val allMetas = coroutineScope {
-                types.map { type ->
-                    async(Dispatchers.IO) {
-                        val path = if (skip > 0) "/catalog/$type/$id/skip=$skip.json" else "/catalog/$type/$id.json"
-                        fetchMetas(provider, path)
-                    }
-                }.awaitAll().flatten()
-            }
-            val distinctEntries = allMetas.distinctBy { it.id }.map { it.toSearchResponse(provider) }
-            val displayType = type?.replaceFirstChar { it.uppercase() } ?: ""
-            return Pair(HomePageList("${name ?: id} - $displayType", distinctEntries), allMetas.size)
-        }
-    }
-
-    private data class CatalogResponse(val metas: List<CatalogEntry>?, val meta: CatalogEntry?)
-
-    private data class Trailer(val source: String?, val type: String?)
-    private data class TrailerStream(@JsonProperty("ytId") val ytId: String?, @JsonProperty("title") val title: String? = null)
-    private data class Link(@JsonProperty("name") val name: String? = null, @JsonProperty("category") val category: String? = null, @JsonProperty("url") val url: String? = null)
-
-    private data class FetchedTmdbData(
-        val fetchedTitle: String?, val fetchedOverview: String?, val fetchedLogo: String?,
-        val fetchedTrailers: List<String>, val fetchedRecommendations: List<SearchResponse>?,
-        val fetchedRuntime: Int?, val fetchedAgeRating: String?, val fetchedActors: List<ActorData>?,
-        val fetchedYear: Int?, val fetchedStatus: ShowStatus?, val episodeTmdbMeta: Map<String, TmdbEpisode>,
-        val fetchedOriginCountry: List<String>?,
-        val fetchedOriginalTitle: String?,
-        val fetchedEnglishTitle: String?
-    )
-
-    private data class CatalogEntry(
-        @JsonProperty("name") val name: String, 
-        @JsonProperty("id") val id: String, 
-        @JsonProperty("moviedb_id") val moviedb_id: Int? = null,
-        @JsonProperty("_tmdbId") val tmdbIdExt: String? = null, 
-        @JsonProperty("_malId") val malIdExt: String? = null,
-        @JsonProperty("_kitsuId") val kitsuIdExt: String? = null,
-        @JsonProperty("poster") val poster: String?, 
-        @JsonProperty("background") val background: String?, 
-        @JsonProperty("logo") val logo: String? = null,
-        @JsonProperty("description") val description: String?, 
-        @JsonProperty("imdbRating") val imdbRating: String?, 
-        @JsonProperty("type") val type: String?,
-        @JsonProperty("videos") val videos: List<Video>?, 
-        @JsonProperty("genre") val genre: List<String>?, 
-        @JsonProperty("genres") val genres: List<String> = emptyList(),
-        @JsonProperty("cast") val cast: List<String> = emptyList(), 
-        @JsonProperty("trailers") val trailersSources: List<Trailer> = emptyList(),
-        @JsonProperty("trailerStreams") val trailerStreams: List<TrailerStream> = emptyList(), 
-        @JsonProperty("links") val links: List<Link> = emptyList()
-    ) {
-        fun toSearchResponse(provider: StremioC): SearchResponse {
-            return provider.newMovieSearchResponse(name, this.toJson(), TvType.Others) { posterUrl = poster }
-        }
-
-        private fun isSingleMovie(finalType: String?, finalVideos: List<Video>?): Boolean {
-            return (finalType == "movie" && finalVideos?.size == 1 && finalVideos[0].seasonNumber == 1 && (finalVideos[0].episode == 1 || finalVideos[0].number == 1)) ||
-                   (finalVideos?.size == 1 && (finalVideos[0].seasonNumber ?: 0) == 0 && (finalVideos[0].episode ?: finalVideos[0].number ?: 0) == 0)
-        }
-
-        private suspend fun fetchTmdbDetails(
-            provider: StremioC, tmdbMediaType: String, tmdbIdStr: String, isMovie: Boolean, finalImdbId: String?,
-            stremioType: String?, targetVideos: List<Video>?, preFetchedDetail: TmdbDetailResponse? = null,
-            preFetchedEnDetail: TmdbDetailResponse? = null, isAiostreamsError: Boolean = false
-        ): FetchedTmdbData {
-            var fetchedRecommendations: List<SearchResponse>? = null
-            
-            val detailRes = preFetchedDetail ?: run {
-                val detailAppend = if (isMovie) "release_dates,credits,images,videos,external_ids,recommendations" else "content_ratings,credits,images,videos,external_ids,recommendations"
-                val detailUrl = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr", "append_to_response" to detailAppend, "include_image_language" to "ko")
-                provider.customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>()
-            }
-            
-            val enDetailRes = preFetchedEnDetail ?: run {
-                val enUrl = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr", "language" to "en-US")
-                provider.customSession.get(enUrl).parsedSafe<TmdbDetailResponse>()
-            }
-            
-            if (detailRes == null) {
-                return FetchedTmdbData(null, null, null, emptyList(), null, null, null, null, null, null, emptyMap(), emptyList(), null, null)
-            }
-
-            val validImdbId = (detailRes.external_ids?.imdb_id ?: finalImdbId)?.takeIf { it.startsWith("tt") }
-
-            val targetCountry = detailRes.origin_country?.firstOrNull()
-            val targetLanguage = detailRes.original_language
-            val isSameOrigin: (TmdbMedia?) -> Boolean = { media -> 
-                media != null && ((targetCountry != null && media.origin_country?.contains(targetCountry) == true) || (targetLanguage != null && media.original_language == targetLanguage)) 
-            }
-
-            coroutineScope {
-                val traktDeferred = async(Dispatchers.IO) {
-                    if (validImdbId == null || TRAKT_CLIENT_ID.isEmpty()) return@async emptyList<Pair<Int, String>>()
-                    val traktMediaType = if (tmdbMediaType == "movie") "movies" else "shows"
-                    val expectedType = if (tmdbMediaType == "movie") "movie" else "tv"
-                    try {
-                        val req = provider.customSession.get("https://api.trakt.tv/$traktMediaType/$validImdbId/related?limit=30", headers = mapOf("Content-Type" to "application/json", "trakt-api-version" to "2", "trakt-api-key" to TRAKT_CLIENT_ID), timeout = 15)
-                        if (req.isSuccessful && req.text.isNotBlank()) {
-                            parseJson<List<TraktRelatedItem>>(req.text).mapNotNull {
-                                val tmdbId = it.ids?.tmdb ?: 0
-                                if (tmdbId > 0) Pair(tmdbId, expectedType) else null
-                            }
-                        } else emptyList()
-                    } catch(e: Exception) { emptyList() }
-                }
-
-                val simklDeferred = async(Dispatchers.IO) {
-                    if (validImdbId == null || SIMKL_CLIENT_ID.isEmpty()) return@async emptyList<Pair<Int, String>>()
-                    val simklMediaType = if (tmdbMediaType == "movie") "movies" else "tv"
-                    val parentExpectedType = if (tmdbMediaType == "movie") "movie" else "tv"
-                    
-                    try {
-                        val req = provider.customSession.get("https://api.simkl.com/$simklMediaType/$validImdbId?extended=full&client_id=$SIMKL_CLIENT_ID", timeout = 15)
-                        if (req.isSuccessful && req.text.isNotBlank()) {
-                            val simklRes = parseJson<SimklRecResponse>(req.text)
-                            val rawSimklRecs = mutableListOf<Triple<Int, Int, String>>()
-                            
-                            simklRes.users_recommendations?.take(30)?.forEach { recItem ->
-                                val itemTypeRaw = recItem.type ?: parentExpectedType
-                                val itemTmdbType = if (itemTypeRaw.contains("movie")) "movie" else "tv"
-                                val tmdb = recItem.ids?.tmdb ?: 0
-                                val simkl = recItem.ids?.simkl ?: 0
-                                if (tmdb > 0 || simkl > 0) rawSimklRecs.add(Triple(tmdb, simkl, itemTmdbType))
-                            }
-                            
-                            coroutineScope {
-                                rawSimklRecs.map { (tmdbId, simklId, itemTmdbType) ->
-                                    async(Dispatchers.IO) {
-                                        if (tmdbId > 0) Pair(tmdbId, itemTmdbType) 
-                                        else if (simklId > 0) {
-                                            try {
-                                                val simklReqType = if (itemTmdbType == "movie") "movies" else "tv"
-                                                val dReq = provider.customSession.get("https://api.simkl.com/$simklReqType/$simklId?client_id=$SIMKL_CLIENT_ID", timeout = 15)
-                                                if (dReq.isSuccessful && dReq.text.isNotBlank()) {
-                                                    val fetchedTmdbId = parseJson<SimklDetailResponse>(dReq.text).ids?.tmdb ?: 0
-                                                    if (fetchedTmdbId > 0) Pair(fetchedTmdbId, itemTmdbType) else null
-                                                } else null
-                                            } catch(e: Exception) { null }
-                                        } else null
-                                    }
-                                }
-                                .awaitAll().filterNotNull()
-                            }
-                        } else emptyList()
-                    } catch(e: Exception) { emptyList() }
-                }
-
-                val collectionParts = if (isMovie && detailRes.belongs_to_collection?.id != null) {
-                    try {
-                        val colUrl = provider.buildTmdbUrl("/collection/${detailRes.belongs_to_collection.id}")
-                        provider.customSession.get(colUrl).parsedSafe<TmdbCollectionDetail>()?.parts ?: emptyList()
-                    } catch (e: Exception) { emptyList() }
-                } else emptyList()
-
-                val traktResults = traktDeferred.await()
-                val simklResults = simklDeferred.await()
-                
-                val tmdbRecs = detailRes.recommendations?.results ?: emptyList()
-                val tmdbRecsIds = tmdbRecs.mapNotNull { it.id }.toSet()
-
-                val existingTmdbIds = collectionParts.mapNotNull { it.id }.toSet() + tmdbRecsIds
-                
-                val missingPairs = (traktResults + simklResults).distinctBy { it.first }
-                    .filter { !existingTmdbIds.contains(it.first) && it.first != tmdbIdStr.toIntOrNull() }
-
-                val missingMediaDeferred = missingPairs.map { pair ->
-                    async(Dispatchers.IO) {
+        val syncAllBtn = Button(pluginCtx).apply {
+            text = "🔄 모든 카탈로그 데이터 최초 동기화"
+            setTextColor(Color.WHITE)
+            setPadding(10, 0, 10, 0)
+            setOnClickListener {
+                println("[UltimaEvo-Debug] [Dialog] 전체 동기화 시작됨")
+                this.text = "통신 중..."
+                this.isEnabled = false
+                CoroutineScope(Dispatchers.IO).launch {
+                    val providers = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
+                    for (provider in providers) {
                         try {
-                            val res = provider.customSession.get(provider.buildTmdbUrl("/${pair.second}/${pair.first}"), timeout = 10).parsedSafe<TmdbDetailResponse>()
-                            res?.toTmdbMedia(pair.second)
-                        } catch(e:Exception) { null }
-                    }
-                }
-                val fetchedMissingMedia = missingMediaDeferred.awaitAll().filterNotNull()
-
-                val allCandidates = (collectionParts + tmdbRecs + fetchedMissingMedia).distinctBy { it.id }.filter { it.id != null && it.id != tmdbIdStr.toIntOrNull() }
-                
-                val traktIds = traktResults.map { it.first }.toSet()
-                val simklIds = simklResults.map { it.first }.toSet()
-
-                val finalCombinedMedia = allCandidates.map { media ->
-                    var score = 0.0 
-                    if (collectionParts.any { it.id == media.id }) score += 10.0 
-                    if (isSameOrigin(media)) score += 1.0 
-                    if (media.id in traktIds) score += 2.5 
-                    if (media.id in simklIds) score += 2.0 
-                    if (media.id in tmdbRecsIds) score += 1.7 
-                    
-                    if (score >= 10.0) score = 10.0
-                    
-                    Pair(media, score)
-                }.sortedWith(compareByDescending<Pair<TmdbMedia, Double>> { it.second }.thenBy { 
-                    if (it.second >= 10.0) {
-                        it.first.releaseDate?.takeIf { d -> d.isNotBlank() } ?: it.first.firstAirDate?.takeIf { d -> d.isNotBlank() } ?: "9999-12-31"
-                    } else {
-                        "" 
-                    }
-                }).map { it.first }.take(50) 
-
-                fetchedRecommendations = finalCombinedMedia.mapNotNull { media ->
-                    val recTitle = media.title ?: media.name ?: media.originalTitle ?: return@mapNotNull null
-                    val recTmdbId = media.id ?: return@mapNotNull null
-                    
-                    val rawMediaType = media.mediaType ?: tmdbMediaType
-                    val posterType = if (rawMediaType == "tv") "tv" else "movie"
-                    val outType = if (rawMediaType == "tv") "series" else "movie"
-                    
-                    val customPosterUrl = "https://xrdb.ibbylabs.dev/poster/tmdb:$posterType:$recTmdbId.jpg?idSource=tmdb&tmdbKey=cc9982c4801545a1481d167137ea7b53&mdblistKey=d2tmbmhnrgdz7ft9re7j2gjr3&posterRatings=myanimelist%2Cimdb%2Cletterboxd%2Cmetacriticuser%2Ctomatoesaudience%2Ctrakt%2Ctmdb%2Cmetacritic%2Ctomatoes%2Crogerebert&lang=ko&ratingValueMode=normalized&posterGenreBadgeStyle=plain&posterGenreBadgePosition=bottomLeft&posterStreamBadges=on&ageRatingBadgePosition=left-top&posterQualityBadges=&posterRatingStyle=plain&posterRatingBadgeScale=115&imageText=original&posterRatingsLayout=right&posterNoBackgroundBadgeOutlineColor=%23ff0000&posterEdgeOffset=3&providerAppearance=eyJ0b21hdG9lcyI6eyJzdGFja2VkQWNjZW50TW9kZSI6ImxvZ28ifX0"
-                    val recommendationEntry = CatalogEntry(name = recTitle, id = "tmdb:${media.id}", type = outType, poster = customPosterUrl, background = null, description = media.overview, imdbRating = null, videos = null, genre = null)
-                    provider.newMovieSearchResponse(recTitle, recommendationEntry.toJson(), if (outType == "movie") TvType.Movie else TvType.TvSeries) { this.posterUrl = customPosterUrl }
-                }
-            }
-
-            val fetchedAgeRating = if (isMovie) {
-                detailRes.release_dates?.results?.firstOrNull { it.iso_3166_1 == "KR" }?.release_dates?.firstOrNull { !it.certification.isNullOrEmpty() }?.certification
-            } else {
-                detailRes.content_ratings?.results?.firstOrNull { it.iso_3166_1 == "KR" }?.rating
-            }
-
-            val crewList = detailRes.credits?.crew?.filter { it.job == "Director" || it.job == "Writer" }?.groupBy { it.name ?: it.originalName }?.mapNotNull { (name, roles) ->
-                if (name == null) return@mapNotNull null
-                val sortedJobs = roles.mapNotNull { it.job }.distinct().sortedBy { if (it == "Director") 1 else 2 }.joinToString(", ")
-                val img = roles.firstNotNullOfOrNull { it.profilePath }?.let { provider.getActorUrl(it) } ?: TRANSPARENT_PIXEL
-                ActorData(Actor(name, img), roleString = sortedJobs)
-            }?.sortedBy { if (it.roleString?.contains("Director, Writer") == true) 1 else if (it.roleString?.contains("Director") == true) 2 else 3 } ?: emptyList()
-
-            val castList = detailRes.credits?.cast?.mapNotNull { cast ->
-                val actorName = cast.name ?: cast.originalName ?: return@mapNotNull null
-                val profileImg = cast.profilePath?.let { provider.getActorUrl(it) } ?: TRANSPARENT_PIXEL
-                ActorData(Actor(actorName, profileImg), roleString = cast.character)
-            } ?: emptyList()
-
-            val fetchedTrailers = (detailRes.videos?.results ?: emptyList()).filter { it.type == "Trailer" || it.type == "Teaser" }.sortedWith(compareBy({ if (it.type == "Trailer") 0 else 1 }, { it.publishedAt ?: "9999-12-31" })).mapNotNull { it.key }.map { "https://m.youtube.com/watch?v=$it" }
-
-            val episodeTmdbMeta = mutableMapOf<String, TmdbEpisode>()
-            if ((stremioType == "other" || isAiostreamsError) && !isMovie) {
-                var requiredSeasons = targetVideos?.mapNotNull { it.seasonNumber }?.filter { it > 0 }?.distinct() ?: emptyList()
-                if (requiredSeasons.isEmpty()) {
-                    val totalSeasons = detailRes?.number_of_seasons ?: 1
-                    requiredSeasons = if (totalSeasons > 0) (1..totalSeasons).toList() else listOf(1)
-                }
-                
-                if (requiredSeasons.isNotEmpty()) {
-                    coroutineScope {
-                        requiredSeasons.map { seasonNum ->
-                            async(Dispatchers.IO) {
-                                try {
-                                    val seasonRes = provider.customSession.get(provider.buildTmdbUrl("/tv/$tmdbIdStr/season/$seasonNum")).parsedSafe<TmdbSeasonDetail>()
-                                    seasonRes?.episodes?.forEach { ep -> if (ep.episodeNumber != null) episodeTmdbMeta["${seasonNum}_${ep.episodeNumber}"] = ep }
-                                } catch (e: Exception) {}
+                            val reqName = provider.mainPage.firstOrNull()?.name ?: "Home"
+                            val reqData = provider.mainPage.firstOrNull()?.data ?: ""
+                            val response = provider.getMainPage(1, MainPageRequest(reqName, reqData, false))
+                            if (response != null && response.items.isNotEmpty()) {
+                                val names = response.items.map { it.name }
+                                println("[UltimaEvo-Debug] [Dialog] ${provider.name} 파싱 완료: $names")
+                                prefs.edit().putString("dynamic_catalogs_${provider.name}", names.joinToString("|||")).apply() 
                             }
-                        }.awaitAll()
+                        } catch (e: Exception) { 
+                            println("[UltimaEvo-Debug] [Dialog] ${provider.name} 동기화 예외: ${e.message}")
+                        }
+                    }
+                    withContext(Dispatchers.Main) {
+                        println("[UltimaEvo-Debug] [Dialog] 전체 동기화 완료")
+                        this@apply.text = "✅ 동기화 완료"
+                        this@apply.isEnabled = true
                     }
                 }
             }
+        }
+        mainLayout.addView(syncAllBtn)
 
-            val extractedEnglishTitle = enDetailRes?.title ?: enDetailRes?.name ?: detailRes.original_title ?: detailRes.original_name
-            println("[StremioC v1.154] 영문 공식 타이틀 추출 결과: $extractedEnglishTitle")
+        val countLayout = LinearLayout(pluginCtx).apply { 
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 15, 0, 15)
+        }
+        countLayout.addView(TextView(pluginCtx).apply { text = "생성할 개수: "; textSize = 14f; setTextColor(Color.WHITE) })
+        val instanceCountInput = EditText(pluginCtx).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            val initCount = prefs.getString("evo_instance_count", "1")
+            setText(initCount)
+            println("[UltimaEvo-Debug] [Dialog] UI 표시 카탈로그 수: $initCount")
+            setTextColor(Color.WHITE)
+            setPadding(10, 10, 10, 10)
+            layoutParams = LinearLayout.LayoutParams(120, LinearLayout.LayoutParams.WRAP_CONTENT)
+        }
+        countLayout.addView(instanceCountInput)
+        mainLayout.addView(countLayout)
 
-            return FetchedTmdbData(
-                if (isMovie) detailRes.title ?: detailRes.original_title else detailRes.name ?: detailRes.original_name,
-                detailRes.overview, detailRes.images?.logos?.firstOrNull()?.file_path?.let { "https://image.tmdb.org/t/p/w500$it" },
-                fetchedTrailers, fetchedRecommendations, if (isMovie) detailRes.runtime else null, fetchedAgeRating, crewList + castList,
-                (detailRes.releaseDate ?: detailRes.firstAirDate)?.split("-")?.first()?.toIntOrNull(),
-                if (detailRes.status == "Returning Series") ShowStatus.Ongoing else ShowStatus.Completed, episodeTmdbMeta, detailRes.origin_country,
-                detailRes.original_title ?: detailRes.original_name,
-                extractedEnglishTitle
-            )
+        val currentCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
+
+        for (i in 1..currentCount) {
+            val card = LinearLayout(pluginCtx).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(20, 20, 20, 20)
+                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                    setMargins(0, 10, 0, 10)
+                }
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#1E1E1E"))
+                    setStroke(2, Color.DKGRAY)
+                    cornerRadius = 12f
+                }
+            }
+            
+            val nameInput = EditText(pluginCtx).apply {
+                hint = "통합 카탈로그 $i 이름"
+                setHintTextColor(Color.GRAY)
+                setTextColor(Color.WHITE)
+                textSize = 14f
+                setPadding(10, 10, 10, 10)
+                setText(prefs.getString("evo_name_$i", "Ultima Evo $i"))
+                tag = "evo_name_$i"
+            }
+            card.addView(nameInput)
+
+            val searchSwitch = Switch(pluginCtx).apply {
+                text = "이 카탈로그 검색 허용"
+                setTextColor(Color.WHITE)
+                textSize = 14f
+                setPadding(0, 10, 0, 10)
+                isChecked = prefs.getBoolean("evo_search_enabled_$i", true)
+                setOnCheckedChangeListener { _, isChecked -> 
+                    println("[UltimaEvo-Debug] [Dialog] 인스턴스 $i 검색스위치 조작: $isChecked")
+                    prefs.edit().putBoolean("evo_search_enabled_$i", isChecked).commit()
+                }
+            }
+            card.addView(searchSwitch)
+
+            val configBtn = Button(pluginCtx).apply {
+                text = "내부 카탈로그 구성/정렬 편집 ⚙️"
+                setTextColor(Color.WHITE)
+                setPadding(10, 0, 10, 0)
+                setOnClickListener { 
+                    println("[UltimaEvo-Debug] [Dialog] 팝업 열기 클릭. 인스턴스: $i")
+                    showEditCatalogsDialog(i, pluginCtx) 
+                }
+            }
+            card.addView(configBtn)
+            
+            mainLayout.addView(card)
         }
 
-        private fun processEpisodes(provider: StremioC, finalImdbId: String?, episodeTmdbMeta: Map<String, TmdbEpisode>, targetVideos: List<Video>, type: String?, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, originalTitle: String?, englishTitle: String?): List<Episode> {
-            val sortedVideos = targetVideos.groupBy { Pair(it.seasonNumber ?: 0, it.episode ?: it.number ?: 0) }.flatMap { (_, group) -> group.sortedBy { it.title ?: it.name ?: "" } }
-            val maxRegularSeason = sortedVideos.mapNotNull { it.seasonNumber }.filter { it > 0 }.maxOrNull() ?: 0
-            val targetSeasonForZero = maxRegularSeason + 1
-            val maxEpisodePerSeason = mutableMapOf<Int, Int>()
-            sortedVideos.forEach { video ->
-                val displaySeason = if ((video.seasonNumber ?: 0) == 0) targetSeasonForZero else (video.seasonNumber ?: 0)
-                val originalEpisode = video.episode ?: video.number ?: 0
-                if (originalEpisode > 0) {
-                    val currentMax = maxEpisodePerSeason.getOrDefault(displaySeason, 0)
-                    if (originalEpisode > currentMax) maxEpisodePerSeason[displaySeason] = originalEpisode
+        val saveBtn = Button(pluginCtx).apply {
+            text = "메인 설정 저장 후 닫기"
+            setTextColor(Color.WHITE)
+            setPadding(10, 10, 10, 10)
+            setOnClickListener {
+                println("[UltimaEvo-Debug] [Dialog] 메인 저장 버튼 클릭")
+                val editor = prefs.edit()
+                editor.putString("evo_instance_count", instanceCountInput.text.toString())
+                fun findNames(v: ViewGroup) {
+                    for (idx in 0 until v.childCount) {
+                        val child = v.getChildAt(idx)
+                        if (child is EditText && child.tag?.toString()?.startsWith("evo_name_") == true) {
+                            editor.putString(child.tag.toString(), child.text.toString())
+                            println("[UltimaEvo-Debug] [Dialog] 이름 저장: ${child.tag} -> ${child.text}")
+                        } else if (child is ViewGroup) findNames(child)
+                    }
                 }
-            }
-            val zeroEpCounterPerSeason = mutableMapOf<Int, Int>()
-            val uniqueEpisodeChecker = mutableSetOf<String>()
-
-            return sortedVideos.mapIndexed { _, video ->
-                val displaySeason = if ((video.seasonNumber ?: 0) == 0) targetSeasonForZero else (video.seasonNumber ?: 0)
-                val originalEpisode = video.episode ?: video.number ?: 0
-                var displayEpisode = if (originalEpisode == 0) {
-                    val currentZeroCount = zeroEpCounterPerSeason.getOrDefault(displaySeason, 0) + 1
-                    zeroEpCounterPerSeason[displaySeason] = currentZeroCount
-                    maxEpisodePerSeason.getOrDefault(displaySeason, 0) + currentZeroCount
-                } else originalEpisode
+                findNames(mainLayout)
                 
-                var key = "${displaySeason}_${displayEpisode}"
-                if (uniqueEpisodeChecker.contains(key)) {
-                    displayEpisode = (uniqueEpisodeChecker.filter { it.startsWith("${displaySeason}_") }.maxOfOrNull { it.split("_")[1].toInt() } ?: 0) + 1
-                    key = "${displaySeason}_${displayEpisode}"
-                }
-                uniqueEpisodeChecker.add(key)
-                
-                val imdbSeason = video.seasonNumber ?: 0
-                val imdbEpisode = video.episode ?: video.number ?: 0
-                
-                video.toEpisode(provider, type, finalImdbId, episodeTmdbMeta, displaySeason, displayEpisode, showTitle, tmdbId, isAnime, isBollywood, isAsian, isCartoon, imdbSeason, imdbEpisode, originalTitle, englishTitle)
+                // [핵심] 100% 동기화 보장을 위한 commit
+                val success = editor.commit()
+                println("[UltimaEvo-Debug] [Dialog] 디스크 강제 쓰기 결과(commit): $success")
+                dismiss()
             }
         }
+        mainLayout.addView(saveBtn)
 
-        suspend fun toLoadResponse(
-            provider: StremioC, imdbId: String?, addonDeferred: Deferred<CatalogEntry?>?, 
-            preFetchedDetail: TmdbDetailResponse? = null, preFetchedEnDetail: TmdbDetailResponse? = null, 
-            fetchedKitsuId: String? = null, urlMediaType: String? = null
-        ): LoadResponse = coroutineScope {
-            var finalImdbId = if (this@CatalogEntry.id.startsWith("tt")) this@CatalogEntry.id 
-                              else imdbId?.takeIf { it.startsWith("tt") || it.startsWith("kitsu:") || it.startsWith("mal:") }
-            
-            if (finalImdbId == null && this@CatalogEntry.links.isNotEmpty()) {
-                finalImdbId = this@CatalogEntry.links.firstOrNull { it.category == "imdb" }?.url?.substringAfterLast("/")?.takeIf { it.startsWith("tt") }
-            }
-            if (finalImdbId == null) {
-                finalImdbId = logo?.let { IMDB_ID_REGEX.find(it)?.value } ?: poster?.let { IMDB_ID_REGEX.find(it)?.value } ?: background?.let { IMDB_ID_REGEX.find(it)?.value }
-            }
-
-            val detailedEntry = addonDeferred?.await() ?: this@CatalogEntry
-            val isAiostreamsError = detailedEntry.id.contains("aiostreamserror") || this@CatalogEntry.id.contains("aiostreamserror")
-            var tmdbIdStr: String? = if (this@CatalogEntry.id.startsWith("tmdb:")) this@CatalogEntry.id.removePrefix("tmdb:") else this@CatalogEntry.moviedb_id?.toString() ?: this@CatalogEntry.tmdbIdExt ?: detailedEntry.tmdbIdExt
-            
-            val findApiDeferred = if (tmdbIdStr == null && finalImdbId?.startsWith("tt") == true) {
-                async(Dispatchers.IO) {
-                    try {
-                        val findRes = provider.customSession.get(provider.buildTmdbUrl("/find/$finalImdbId", "external_source" to "imdb_id")).parsedSafe<TmdbFindResponse>()
-                        val movieMatch = findRes?.movie_results?.firstOrNull()
-                        if (movieMatch?.id != null) Pair(movieMatch.id.toString(), "movie") else findRes?.tv_results?.firstOrNull()?.id?.let { Pair(it.toString(), "tv") }
-                    } catch (e: Exception) { null }
-                }
-            } else null
-
-            var finalVideos = detailedEntry.videos ?: this@CatalogEntry.videos
-            val finalTrailersSources = detailedEntry.trailersSources ?: this@CatalogEntry.trailersSources
-            val finalTrailerStreams = detailedEntry.trailerStreams ?: this@CatalogEntry.trailerStreams
-            val finalLinks = detailedEntry.links ?: this@CatalogEntry.links
-            val originalName = detailedEntry.name ?: this@CatalogEntry.name
-            var finalDescription = detailedEntry.description ?: this@CatalogEntry.description
-            val finalGenre = detailedEntry.genre ?: detailedEntry.genres ?: this@CatalogEntry.genre ?: this@CatalogEntry.genres
-            val finalCast = detailedEntry.cast.ifEmpty { this@CatalogEntry.cast }
-            val finalPoster = detailedEntry.poster ?: this@CatalogEntry.poster
-            val finalBackground = detailedEntry.background ?: this@CatalogEntry.background
-            val finalImdbRating = detailedEntry.imdbRating ?: this@CatalogEntry.imdbRating
-            val finalType = detailedEntry.type ?: this@CatalogEntry.type
-            val fallbackMovieId = fetchedKitsuId ?: this@CatalogEntry.kitsuIdExt?.let { "kitsu:$it" } ?: this@CatalogEntry.id
-
-            var foundMediaType: String? = null
-            if (findApiDeferred != null) {
-                val findResult = findApiDeferred.await()
-                if (findResult != null) { tmdbIdStr = findResult.first; foundMediaType = findResult.second }
-            }
-
-            var tmdbData: FetchedTmdbData? = null
-            var resolvedMediaType = "movie"
-            if (tmdbIdStr != null) {
-                try {
-                    resolvedMediaType = urlMediaType ?: foundMediaType ?: if (isSingleMovie(finalType, finalVideos) || finalType == "movie" || finalVideos.isNullOrEmpty()) "movie" else "tv"
-                    tmdbData = fetchTmdbDetails(provider, resolvedMediaType, tmdbIdStr, resolvedMediaType == "movie", finalImdbId, finalType, finalVideos, preFetchedDetail, preFetchedEnDetail, isAiostreamsError)
-                } catch (e: Exception) {}
-            }
-
-            if (isAiostreamsError && tmdbData != null && resolvedMediaType == "tv" && finalVideos.isNullOrEmpty()) {
-                val generatedVideos = tmdbData.episodeTmdbMeta.mapNotNull { (key, tmdbEp) ->
-                    val parts = key.split("_")
-                    if (parts.size == 2) {
-                        val s = parts[0].toIntOrNull() ?: return@mapNotNull null
-                        val e = parts[1].toIntOrNull() ?: return@mapNotNull null
-                        Video(
-                            id = fallbackMovieId, 
-                            title = tmdbEp.name,
-                            seasonNumber = s,
-                            episode = e,
-                            overview = tmdbEp.overview,
-                            released = tmdbEp.airDate
-                        )
-                    } else null
-                }
-                if (generatedVideos.isNotEmpty()) {
-                    finalVideos = generatedVideos
-                }
-            }
-
-            var finalName = originalName ?: this@CatalogEntry.name
-            if (tmdbData != null) {
-                if (!tmdbData.fetchedTitle.isNullOrBlank()) finalName = tmdbData.fetchedTitle
-                finalDescription = provider.mergeOverview(finalDescription, tmdbData.fetchedOverview)
-                if (finalType == "other") finalDescription = if (finalDescription.isNullOrBlank()) originalName else "$finalDescription | $originalName" 
-            }
-
-            val fallbackTrailers = finalTrailerStreams?.mapNotNull { it.ytId }?.ifEmpty { finalTrailersSources?.mapNotNull { it.source } }?.distinct()?.map { if (it.startsWith("http")) it else "https://m.youtube.com/watch?v=$it" } ?: emptyList()
-            val finalTrailers = tmdbData?.fetchedTrailers?.ifEmpty { fallbackTrailers } ?: fallbackTrailers
-
-            val movieId = if (!finalVideos.isNullOrEmpty() && !finalVideos[0].id.isNullOrBlank()) finalVideos[0].id else fallbackMovieId
-
-            val finalActors = if (tmdbData?.fetchedActors?.isNotEmpty() == true) tmdbData.fetchedActors else null
-
-            val countries = tmdbData?.fetchedOriginCountry ?: emptyList()
-            val isBollywood = countries.any { it.contains("IN", true) || it.contains("India", true) }
-            val isAsian = countries.any { it.contains("KR", true) || it.contains("JP", true) || it.contains("CN", true) || it.contains("TH", true) || it.contains("TW", true) }
-            val isCartoon = finalGenre?.any { it.contains("Animation", true) } == true
-            val isAnimeMedia = fetchedKitsuId != null || finalImdbId?.startsWith("mal:") == true || finalImdbId?.startsWith("kitsu:") == true || finalGenre?.contains("Anime") == true || (countries.any { it.contains("JP", true) } && isCartoon)
-            
-            var fetchedAniListId: Int? = null
-            var fetchedMalId: Int? = null
-            if (isAnimeMedia && finalImdbId != null) {
-                try {
-                    val rawIdForAnizip = finalImdbId.substringAfter("kitsu:").substringAfter("mal:")
-                    val anizipType = if (finalImdbId.startsWith("kitsu:")) "kitsu_id" else if (finalImdbId.startsWith("mal:")) "mal_id" else "imdb_id"
-                    val anizipRes = provider.customSession.get("https://api.ani.zip/mappings?$anizipType=$rawIdForAnizip").text
-                    val anizipJson = JSONObject(anizipRes)
-                    fetchedAniListId = anizipJson.getJSONObject("mappings").optInt("anilist_id").takeIf { it != 0 }
-                    fetchedMalId = anizipJson.getJSONObject("mappings").optInt("mal_id").takeIf { it != 0 }
-                } catch (e: Exception) {}
-            }
-
-            if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
-                return@coroutineScope provider.newMovieLoadResponse(
-                    finalName, "${provider.mainUrl}/meta/${finalType}/${this@CatalogEntry.id}.json", TvType.Movie, 
-                    LoadData(
-                        type = finalType, 
-                        id = movieId, 
-                        imdbId = finalImdbId, 
-                        year = tmdbData?.fetchedYear, 
-                        title = finalName, 
-                        tmdbId = tmdbIdStr?.toIntOrNull(), 
-                        isAnime = isAnimeMedia,
-                        isBollywood = isBollywood,
-                        isAsian = isAsian,
-                        isCartoon = isCartoon,
-                        anilistId = fetchedAniListId,
-                        malId = fetchedMalId,
-                        kitsuId = fetchedKitsuId ?: this@CatalogEntry.kitsuIdExt,
-                        originalTitle = tmdbData?.fetchedOriginalTitle,
-                        englishTitle = tmdbData?.fetchedEnglishTitle
-                    )
-                ) {
-                    posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); plot = finalDescription; year = tmdbData?.fetchedYear; tags = finalGenre
-                    if (finalActors != null) this.actors = finalActors else addActors(finalCast)
-                    addTrailer(finalTrailers); this.recommendations = tmdbData?.fetchedRecommendations; this.duration = tmdbData?.fetchedRuntime; this.contentRating = tmdbData?.fetchedAgeRating
-                    tmdbData?.fetchedLogo?.let { this.logoUrl = it }; tmdbIdStr?.let { addTMDbId(it) }; finalImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }
-                }
-            } else {
-                val episodesList = processEpisodes(provider, finalImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, tmdbIdStr?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle)
-                
-                val finalEpisodes = episodesList.map { ep ->
-                    val oldData = parseJson<LoadData>(ep.data)
-                    val newData = oldData.copy(anilistId = fetchedAniListId, malId = fetchedMalId, kitsuId = fetchedKitsuId ?: this@CatalogEntry.kitsuIdExt)
-                    ep.apply { data = newData.toJson() }
-                }
-
-                return@coroutineScope provider.newTvSeriesLoadResponse(
-                    finalName, "${provider.mainUrl}/meta/${finalType}/${this@CatalogEntry.id}.json", TvType.TvSeries, finalEpisodes
-                ) {
-                    posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); plot = finalDescription; year = tmdbData?.fetchedYear; tags = finalGenre
-                    this.showStatus = tmdbData?.fetchedStatus 
-                    if (finalActors != null) this.actors = finalActors else addActors(finalCast)
-                    addTrailer(finalTrailers.firstOrNull()); this.recommendations = tmdbData?.fetchedRecommendations; this.contentRating = tmdbData?.fetchedAgeRating
-                    tmdbData?.fetchedLogo?.let { this.logoUrl = it }; tmdbIdStr?.let { addTMDbId(it) }; finalImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }
-                }
-            }
-        }
+        scrollView.addView(mainLayout)
+        return scrollView
     }
 
-    private data class Video(
-        @JsonProperty("id") val id: String? = null,
-        @JsonProperty("title") val title: String? = null,
-        @JsonProperty("name") val name: String? = null,
-        @JsonProperty("season") val seasonNumber: Int? = null,
-        @JsonProperty("number") val number: Int? = null,
-        @JsonProperty("episode") val episode: Int? = null,
-        @JsonProperty("thumbnail") val thumbnail: String? = null,
-        @JsonProperty("overview") val overview: String? = null,
-        @JsonProperty("description") val description: String? = null,
-        @JsonProperty("firstAired") val firstAired: String? = null,
-        @JsonProperty("released") val released: String? = null,
-        @JsonProperty("tvdb_id") val tvdb_id: Int? = null
-    ) {
-        fun toEpisode(provider: StremioC, type: String?, imdbId: String?, tmdbMetaMap: Map<String, TmdbEpisode>, displaySeason: Int, displayEpisode: Int, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, imdbSeason: Int?, imdbEpisode: Int?, originalTitle: String?, englishTitle: String?): Episode {
-            val tmdbEp = tmdbMetaMap["${displaySeason}_${displayEpisode}"] ?: tmdbMetaMap["${seasonNumber ?: 0}_${episode ?: number ?: 0}"]
-            val finalAirDate = tmdbEp?.airDate?.takeIf { it.isNotBlank() } ?: this@Video.firstAired ?: this@Video.released
-            val airedYearInt = finalAirDate?.split("-")?.first()?.toIntOrNull()
-            
-            return provider.newEpisode(LoadData(
-                type = type, 
-                id = id, 
-                season = displaySeason, 
-                episode = displayEpisode, 
-                imdbId = imdbId, 
-                title = showTitle, 
-                tmdbId = tmdbId, 
-                isAnime = isAnime,
-                isBollywood = isBollywood,
-                isAsian = isAsian,
-                isCartoon = isCartoon,
-                firstAired = finalAirDate, 
-                airedYear = airedYearInt, 
-                imdbSeason = imdbSeason, 
-                imdbEpisode = imdbEpisode,
-                originalTitle = originalTitle,
-                englishTitle = englishTitle 
-            )) {
-                val rawTitle = this@Video.name ?: this@Video.title ?: "Episode $displayEpisode"
-                val cleanOriginalTitle = if (rawTitle.contains("📄")) rawTitle.substringAfter("📄").replace("\n", "").trim() else rawTitle.replace("\n", "").trim()
-                
-                this.name = if (tmdbEp?.name != null) tmdbEp.name else cleanOriginalTitle
-                this.posterUrl = thumbnail ?: TRANSPARENT_PIXEL
-                var finalEpDesc = provider.mergeOverview(this@Video.overview ?: this@Video.description, tmdbEp?.overview)
-                if (type == "other") finalEpDesc = if (finalEpDesc.isNullOrBlank()) cleanOriginalTitle else "$finalEpDesc | $cleanOriginalTitle"
-                
-                this.description = finalEpDesc
-                this.season = displaySeason
-                this.episode = displayEpisode
-
-                finalAirDate?.takeIf { it.isNotBlank() }?.let { this.addDate(it) }
-            }
+    private fun showEditCatalogsDialog(instanceId: Int, ctx: Context) {
+        val prefs = ctx.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
+        
+        val mainContainer = LinearLayout(ctx).apply { 
+            orientation = LinearLayout.VERTICAL
+            setPadding(15, 15, 15, 15)
+            background = getDarkThemeBg()
         }
-    }
-
-    private data class StreamsResponse(@JsonProperty("streams") val streams: List<Stream>)
-    private data class Subtitle(@JsonProperty("url") val url: String?, @JsonProperty("lang") val lang: String?, @JsonProperty("lang_code") val lang_code: String?, @JsonProperty("id") val id: String?)
-    private data class ProxyHeaders(@JsonProperty("request") val request: Map<String, String>?)
-    private data class BehaviorHints(@JsonProperty("proxyHeaders") val proxyHeaders: ProxyHeaders?, @JsonProperty("headers") val headers: Map<String, String>?)
-
-    private data class Stream(
-        @JsonProperty("name") val name: String?,
-        @JsonProperty("title") val title: String?,
-        @JsonProperty("url") val url: String?,
-        @JsonProperty("description") val description: String?,
-        @JsonProperty("ytId") val ytId: String?,
-        @JsonProperty("externalUrl") val externalUrl: String?,
-        @JsonProperty("behaviorHints") val behaviorHints: BehaviorHints?,
-        @JsonProperty("infoHash") val infoHash: String?,
-        @JsonProperty("sources") val sources: List<String> = emptyList(),
-        @JsonProperty("subtitles") val subtitles: List<Subtitle> = emptyList()
-    ) {
-        suspend fun runCallback(provider: StremioC, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
-            if (url != null) {
-                val lowerUrl = url.lowercase()
-                val linkType = when {
-                    lowerUrl.contains(".m3u8") || name?.contains("m3u8", true) == true || title?.contains("m3u8", true) == true -> ExtractorLinkType.M3U8
-                    lowerUrl.contains(".mpd") -> ExtractorLinkType.DASH
-                    lowerUrl.contains(".torrent") -> ExtractorLinkType.TORRENT
-                    else -> ExtractorLinkType.VIDEO 
-                }
-
-                callback.invoke(newExtractorLink(name ?: "", fixSourceName(name, title), url, linkType) {
-                    this.quality = getQuality(listOf(description, title, name))
-                    this.headers = behaviorHints?.proxyHeaders?.request ?: behaviorHints?.headers ?: mapOf()
-                })
-                subtitles.map { sub -> val lang = sub.lang ?: sub.lang_code ?: "Unknown"; subtitleCallback.invoke(newSubtitleFile(SubtitleHelper.fromTagToEnglishLanguageName(lang) ?: lang, sub.url ?: return@map)) }
-            }
-            if (ytId != null) loadExtractor("https://m.youtube.com/watch?v=$ytId", subtitleCallback, callback)
-            if (externalUrl != null) loadExtractor(externalUrl, subtitleCallback, callback)
-            if (infoHash != null) callback.invoke(newExtractorLink(name ?: "", title ?: name ?: "", "magnet:?xt=urn:btih:${infoHash}") { this.quality = Qualities.Unknown.value })
+        
+        val headerTitle = TextView(ctx).apply {
+            text = "카탈로그 $instanceId 구성 편집"
+            textSize = 18f
+            setTextColor(Color.WHITE)
+            setPadding(0, 10, 0, 10)
+            gravity = Gravity.CENTER
         }
-    }
-}
+        mainContainer.addView(headerTitle)
 
-private data class KitsuMetaResponse(@JsonProperty("meta") val meta: KitsuMeta?)
-private data class KitsuMeta(@JsonProperty("imdb_id") val imdb_id: String?, @JsonProperty("id") val id: String?)
-private data class TraktRelatedIds(@JsonProperty("tmdb") val tmdb: Int?)
-private data class TraktRelatedItem(@JsonProperty("ids") val ids: TraktRelatedIds?)
-private data class SimklIds(@JsonProperty("tmdb") val tmdb: Int?, @JsonProperty("simkl") val simkl: Int?)
-private data class SimklRecItem(@JsonProperty("type") val type: String?, @JsonProperty("ids") val ids: SimklIds?)
-private data class SimklRecResponse(@JsonProperty("users_recommendations") val users_recommendations: List<SimklRecItem>?)
-private data class SimklDetailResponse(@JsonProperty("ids") val ids: SimklIds?)
+        val warningText = TextView(ctx).apply {
+            text = "※ 맨 아래 '적용' 버튼을 누르면 정렬 번호가 자동으로 재정리됩니다."
+            textSize = 12f
+            setTextColor(Color.YELLOW)
+            setPadding(0, 0, 0, 20)
+            gravity = Gravity.CENTER
+        }
+        mainContainer.addView(warningText)
 
-private data class TmdbFindResponse(
-    @JsonProperty("movie_results") val movie_results: List<TmdbFindResult>? = null,
-    @JsonProperty("tv_results") val tv_results: List<TmdbFindResult>? = null
-)
-
-private data class TmdbFindResult(
-    @JsonProperty("id") val id: Int? = null,
-    @JsonProperty("media_type") val media_type: String? = null
-)
-
-private data class TmdbCollection(
-    @JsonProperty("id") val id: Int? = null,
-    @JsonProperty("name") val name: String? = null,
-    @JsonProperty("poster_path") val poster_path: String? = null,
-    @JsonProperty("backdrop_path") val backdrop_path: String? = null
-)
-
-private data class TmdbCollectionDetail(
-    @JsonProperty("id") val id: Int? = null,
-    @JsonProperty("name") val name: String? = null,
-    @JsonProperty("parts") val parts: List<TmdbMedia>? = null
-)
-
-private data class TmdbDetailResponse(
-    @JsonProperty("id") val id: Int? = null,
-    @JsonProperty("number_of_seasons") val number_of_seasons: Int? = null,
-    @JsonProperty("title") val title: String? = null, 
-    @JsonProperty("name") val name: String? = null, 
-    @JsonProperty("original_title") val original_title: String? = null, 
-    @JsonProperty("original_name") val original_name: String? = null, 
-    @JsonProperty("overview") val overview: String? = null, 
-    @JsonProperty("release_date") val releaseDate: String? = null, 
-    @JsonProperty("first_air_date") val firstAirDate: String? = null, 
-    @JsonProperty("status") val status: String? = null, 
-    @JsonProperty("poster_path") val posterPath: String? = null,
-    @JsonProperty("origin_country") val origin_country: List<String>? = null,
-    @JsonProperty("original_language") val original_language: String? = null,
-    @JsonProperty("belongs_to_collection") val belongs_to_collection: TmdbCollection? = null,
-    @JsonProperty("recommendations") val recommendations: TmdbRecommendations? = null,
-    @JsonProperty("runtime") val runtime: Int? = null,
-    @JsonProperty("release_dates") val release_dates: TmdbReleaseDates? = null,
-    @JsonProperty("content_ratings") val content_ratings: TmdbContentRatings? = null,
-    @JsonProperty("credits") val credits: TmdbCredits? = null,
-    @JsonProperty("images") val images: TmdbImages? = null,
-    @JsonProperty("videos") val videos: ResultsTrailer? = null,
-    @JsonProperty("external_ids") val external_ids: ExternalIds? = null
-) {
-    fun toTmdbMedia(mediaType: String): TmdbMedia {
-        return TmdbMedia(
-            id = this.id,
-            name = this.name ?: this.title,
-            title = this.title ?: this.name,
-            originalTitle = this.original_title ?: this.original_name,
-            mediaType = mediaType,
-            posterPath = this.posterPath,
-            overview = this.overview,
-            origin_country = this.origin_country,
-            original_language = this.original_language,
-            releaseDate = this.releaseDate,
-            firstAirDate = this.firstAirDate
+        val scroll = ScrollView(ctx)
+        val listLayout = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
+        
+        class CatalogRow(
+            val providerName: String, val catalogName: String,
+            val checkBox: CheckBox, val orderEdit: EditText, val renameEdit: EditText, val view: View
         )
+        val rows = mutableListOf<CatalogRow>()
+
+        val allProviders = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
+        val allCatalogs = mutableListOf<Pair<String, String>>() 
+
+        for (provider in allProviders) {
+            val staticCats = provider.mainPage.map { it.name }
+            val dynamicCats = prefs.getString("dynamic_catalogs_${provider.name}", "")?.split("|||") ?: emptyList()
+            val combined = (staticCats + dynamicCats).filter { it.isNotBlank() }.distinct()
+            combined.forEach { allCatalogs.add(provider.name to it) }
+        }
+
+        fun triggerSort() {
+            val focusedView = listLayout.findFocus() as? EditText
+            val selStart = focusedView?.selectionStart ?: 0
+            val selEnd = focusedView?.selectionEnd ?: 0
+
+            val sorted = rows.sortedWith(compareBy({ it.orderEdit.text.toString().toIntOrNull() ?: 99 }, { it.catalogName }))
+            
+            for (i in sorted.indices) {
+                val rowView = sorted[i].view
+                if (listLayout.getChildAt(i) != rowView) {
+                    listLayout.removeView(rowView)
+                    listLayout.addView(rowView, i)
+                }
+            }
+
+            focusedView?.requestFocus()
+            if (selStart in 0..(focusedView?.text?.length ?: 0) && selEnd in 0..(focusedView?.text?.length ?: 0)) {
+                focusedView?.setSelection(selStart, selEnd)
+            }
+        }
+
+        val preSortedCatalogs = allCatalogs.map {
+            val order = prefs.getString("cat_order_${instanceId}_${it.first}_${it.second}", "99")?.toIntOrNull() ?: 99
+            Triple(it.first, it.second, order)
+        }.sortedBy { it.third }
+
+        for (cat in preSortedCatalogs) {
+            val pName = cat.first
+            val cName = cat.second
+
+            val row = LinearLayout(ctx).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, 0, 0, 0)
+                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                    setMargins(0, 4, 0, 4)
+                }
+            }
+
+            val cb = CheckBox(ctx).apply {
+                isChecked = prefs.getBoolean("cat_toggle_${instanceId}_${pName}_$cName", false)
+                setPadding(0, 0, 0, 0)
+            }
+            row.addView(cb)
+
+            val etOrder = EditText(ctx).apply {
+                inputType = InputType.TYPE_CLASS_NUMBER
+                setText(prefs.getString("cat_order_${instanceId}_${pName}_$cName", "99"))
+                layoutParams = LinearLayout.LayoutParams(80, LinearLayout.LayoutParams.WRAP_CONTENT)
+                gravity = Gravity.CENTER
+                setTextColor(Color.WHITE)
+                textSize = 12f
+                setPadding(5, 5, 5, 5)
+            }
+            row.addView(etOrder)
+
+            val etSource = EditText(ctx).apply {
+                setText(pName)
+                isFocusable = false
+                isClickable = false
+                isCursorVisible = false
+                setTextColor(Color.LTGRAY)
+                textSize = 11f
+                setPadding(10, 5, 10, 5)
+                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#2A2A2A"))
+                    setStroke(1, Color.DKGRAY)
+                    cornerRadius = 8f
+                }
+            }
+            val sourceParams = etSource.layoutParams as LinearLayout.LayoutParams
+            sourceParams.setMargins(10, 0, 10, 0)
+            row.addView(etSource)
+
+            val etRename = EditText(ctx).apply {
+                hint = cName
+                setText(prefs.getString("cat_rename_${instanceId}_${pName}_$cName", cName))
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                isEnabled = cb.isChecked
+                setTextColor(Color.WHITE)
+                setHintTextColor(Color.DKGRAY)
+                textSize = 13f
+                setPadding(5, 5, 5, 5)
+            }
+            row.addView(etRename)
+
+            val up = TextView(ctx).apply { 
+                text = "▲"
+                textSize = 16f
+                setTextColor(Color.WHITE)
+                setPadding(15, 5, 15, 5) 
+            }
+            val down = TextView(ctx).apply { 
+                text = "▼"
+                textSize = 16f
+                setTextColor(Color.WHITE)
+                setPadding(15, 5, 15, 5) 
+            }
+            
+            row.addView(up)
+            row.addView(down)
+
+            cb.setOnCheckedChangeListener { _, isChecked -> etRename.isEnabled = isChecked }
+
+            val catalogRow = CatalogRow(pName, cName, cb, etOrder, etRename, row)
+            rows.add(catalogRow)
+
+            up.setOnClickListener {
+                val cur = etOrder.text.toString().toIntOrNull() ?: 99
+                if (cur > 1) {
+                    etOrder.setText((cur - 1).toString())
+                    triggerSort()
+                }
+            }
+            down.setOnClickListener {
+                val cur = etOrder.text.toString().toIntOrNull() ?: 99
+                etOrder.setText((cur + 1).toString())
+                triggerSort()
+            }
+            
+            etOrder.setOnFocusChangeListener { _, hasFocus ->
+                if (!hasFocus) triggerSort()
+            }
+            
+            listLayout.addView(row)
+        }
+
+        scroll.addView(listLayout)
+        mainContainer.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        val footer = LinearLayout(ctx).apply { 
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 20, 0, 0)
+        }
+        val applyBtn = Button(ctx).apply { text = "적용"; setTextColor(Color.WHITE); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
+        val closeBtn = Button(ctx).apply { text = "취소"; setTextColor(Color.WHITE); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
+        footer.addView(applyBtn); footer.addView(closeBtn)
+        mainContainer.addView(footer)
+
+        val builder = AlertDialog.Builder(ctx)
+        val dialog = builder.setView(mainContainer).create()
+        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+
+        applyBtn.setOnClickListener {
+            println("[UltimaEvo-Debug] [Popup] 팝업 적용 버튼 클릭됨 (베이킹 없음, 순수 값 저장)")
+            val editor = prefs.edit()
+            val allOrders = mutableListOf<Triple<CatalogRow, Int, Int>>()
+
+            for (row in rows) {
+                val tKey = "cat_toggle_${instanceId}_${row.providerName}_${row.catalogName}"
+                val rKey = "cat_rename_${instanceId}_${row.providerName}_${row.catalogName}"
+                
+                editor.putBoolean(tKey, row.checkBox.isChecked)
+                editor.putString(rKey, row.renameEdit.text.toString())
+
+                // 해당 카탈로그가 켜지면 상위 Provider도 활성화
+                val pKey = "ext_toggle_${instanceId}_${row.providerName}"
+                if (row.checkBox.isChecked) {
+                    editor.putBoolean(pKey, true)
+                }
+
+                val currentVal = row.orderEdit.text.toString().toIntOrNull() ?: 99
+                val originalVal = prefs.getString("cat_order_${instanceId}_${row.providerName}_${row.catalogName}", "99")?.toIntOrNull() ?: 99
+                allOrders.add(Triple(row, currentVal, originalVal))
+            }
+
+            val sorted = allOrders.sortedWith(compareBy({ it.second }, { if (it.second == it.third) 1 else 0 }))
+            var last = -1
+            for (item in sorted) {
+                var target = item.second
+                if (target <= last) target = last + 1
+                val key = "cat_order_${instanceId}_${item.first.providerName}_${item.first.catalogName}"
+                editor.putString(key, target.toString())
+                println("[UltimaEvo-Debug] [Popup] 저장된 정렬: $key -> $target")
+                last = target
+            }
+            
+            // [핵심] 100% 동기화 보장을 위한 commit
+            val success = editor.commit()
+            println("[UltimaEvo-Debug] [Popup] 디스크 강제 쓰기 결과(commit): $success")
+            dialog.dismiss()
+        }
+
+        closeBtn.setOnClickListener { dialog.dismiss() }
+        dialog.show()
     }
 }
-
-private data class TmdbImages(@JsonProperty("logos") val logos: List<TmdbLogo>? = null)
-private data class TmdbLogo(@JsonProperty("file_path") val file_path: String? = null)
-private data class TmdbRecommendations(@JsonProperty("results") val results: List<TmdbMedia>? = null)
-
-private data class TmdbMedia(
-    @JsonProperty("id") val id: Int? = null,
-    @JsonProperty("name") val name: String? = null,
-    @JsonProperty("title") val title: String? = null,
-    @JsonProperty("original_title") val originalTitle: String? = null,
-    @JsonProperty("media_type") val mediaType: String? = null,
-    @JsonProperty("poster_path") val posterPath: String? = null,
-    @JsonProperty("overview") val overview: String? = null,
-    @JsonProperty("origin_country") val origin_country: List<String>? = null,
-    @JsonProperty("original_language") val original_language: String? = null,
-    @JsonProperty("release_date") val releaseDate: String? = null,
-    @JsonProperty("first_air_date") val firstAirDate: String? = null
-)
-
-private data class TmdbReleaseDates(@JsonProperty("results") val results: List<TmdbReleaseDateResult>?)
-private data class TmdbReleaseDateResult(@JsonProperty("iso_3166_1") val iso_3166_1: String?, @JsonProperty("release_dates") val release_dates: List<TmdbReleaseDate>?)
-private data class TmdbReleaseDate(@JsonProperty("certification") val certification: String?)
-private data class TmdbContentRatings(@JsonProperty("results") val results: List<TmdbContentRatingResult>?)
-private data class TmdbContentRatingResult(@JsonProperty("iso_3166_1") val iso_3166_1: String?, @JsonProperty("rating") val rating: String?)
-
-private data class TmdbCredits(@JsonProperty("cast") val cast: List<TmdbCast>? = null, @JsonProperty("crew") val crew: List<TmdbCrew>? = null)
-private data class TmdbCast(@JsonProperty("name") val name: String?, @JsonProperty("original_name") val originalName: String?, @JsonProperty("character") val character: String?, @JsonProperty("profile_path") val profilePath: String?)
-private data class TmdbCrew(@JsonProperty("name") val name: String?, @JsonProperty("original_name") val originalName: String?, @JsonProperty("job") val job: String?, @JsonProperty("profile_path") val profilePath: String?)
-
-private data class TmdbSeasonDetail(@JsonProperty("episodes") val episodes: List<TmdbEpisode>? = null)
-private data class TmdbEpisode(@JsonProperty("name") val name: String?, @JsonProperty("overview") val overview: String?, @JsonProperty("episode_number") val episodeNumber: Int?, @JsonProperty("air_date") val airDate: String?, @JsonProperty("vote_average") val voteAverage: Double?, @JsonProperty("runtime") val runtime: Int?)
-
-data class Trailers(@JsonProperty("key") val key: String? = null, @JsonProperty("type") val type: String? = null, @JsonProperty("published_at") val publishedAt: String? = null)
-data class ResultsTrailer(@JsonProperty("results") val results: ArrayList<Trailers>? = arrayListOf())
-data class ExternalIds(@JsonProperty("imdb_id") val imdb_id: String? = null, @JsonProperty("tvdb_id") val tvdb_id: String? = null)
