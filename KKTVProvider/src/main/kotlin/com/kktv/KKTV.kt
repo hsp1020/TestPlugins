@@ -257,3 +257,13 @@ class KingkongTv : MainAPI() {
                     this.headers = headers
                 }
             )
+            return true
+        }
+        return false
+    }
+
+    private fun fixUrl(baseUrl: String, relativeUrl: String): String {
+        if (relativeUrl.startsWith("http")) return relativeUrl
+        return try { java.net.URI(baseUrl).resolve(relativeUrl).toString() } catch (e: Exception) { relativeUrl }
+    }
+}
