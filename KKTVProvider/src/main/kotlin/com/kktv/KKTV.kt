@@ -1,8 +1,10 @@
-// v8.6 - 안드로이드 순정 쌩웹뷰(Raw WebView) 네트워크 스니핑 및 자동 클릭 도입
+// v8.7 - 화면이 없는 쌩웹뷰(Headless WebView)의 렌더링 중단 방지, 메인 루퍼 타임아웃 적용 및 전면 네트워크 스니핑
 package com.KingkongTv
 
 import android.annotation.SuppressLint
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -33,18 +35,18 @@ class KingkongTv : MainAPI() {
 
     private suspend fun updateMainUrlIfNeeded() {
         try {
-            println("DEBUG [KingkongTv] v8.6: 포털 사이트 접속 시도 중...")
+            println("DEBUG [KingkongTv] v8.7: 포털 사이트 접속 시도 중...")
             val doc = app.get(portalUrl).document
             val latestUrl = doc.selectFirst("a.nav-cta")?.attr("href")
             if (!latestUrl.isNullOrBlank()) {
                 val cleanedUrl = latestUrl.trimEnd('/')
                 if (mainUrl != cleanedUrl) {
-                    println("DEBUG [KingkongTv] v8.6: 도메인 변경 감지 -> $cleanedUrl")
+                    println("DEBUG [KingkongTv] v8.7: 도메인 변경 감지 -> $cleanedUrl")
                     mainUrl = cleanedUrl
                 }
             }
         } catch (e: Exception) {
-            println("DEBUG [KingkongTv] v8.6: 도메인 업데이트 에러 - ${e.message}")
+            println("DEBUG [KingkongTv] v8.7: 도메인 업데이트 에러 - ${e.message}")
         }
     }
 
@@ -72,7 +74,7 @@ class KingkongTv : MainAPI() {
 
             return newHomePageResponse(HomePageList(request.name, home, true), false)
         } catch (e: Exception) {
-            println("DEBUG [KingkongTv] v8.6: 메인 페이지 로드 실패 - ${e.message}")
+            println("DEBUG [KingkongTv] v8.7: 메인 페이지 로드 실패 - ${e.message}")
             return newHomePageResponse(request.name, emptyList())
         }
     }
@@ -140,14 +142,14 @@ class KingkongTv : MainAPI() {
         val refererUrl = URLDecoder.decode(uri.getQueryParameter("ref") ?: "", "UTF-8")
         
         val playerPageUrl = "https://wdbroad.com/broadcast/view.php?stream=$streamId"
-        println("DEBUG [KingkongTv] v8.6: 쌩웹뷰 스니핑 시작 - $playerPageUrl")
+        println("DEBUG [KingkongTv] v8.7: 쌩웹뷰 스니핑 시작 - $playerPageUrl")
 
-        // 1. 순정 WebView 기반 네트워크 스니핑 실행
+        // 1. 메인 루퍼가 안정적으로 확보된 쌩웹뷰 스니핑 실행
         var m3u8Url = getM3u8FromRawWebView(playerPageUrl, refererUrl)
 
-        // 2. 스니핑 실패 시 최후의 백업 정규식 처리
+        // 2. 스니핑 실패 시 최후의 구형 정규식 백업 (보존)
         if (m3u8Url == null) {
-            println("DEBUG [KingkongTv] v8.6: WebView 스니핑 실패. 정규식 백업 시도")
+            println("DEBUG [KingkongTv] v8.7: WebView 스니핑 실패. 정규식 백업 시도")
             try {
                 val response = app.get(playerPageUrl, referer = refererUrl).text
                 m3u8Url = Regex("""https?://wdbroadcast\.com:8443/[^"']+\.m3u8[^"']*""").find(response)?.value
@@ -156,7 +158,7 @@ class KingkongTv : MainAPI() {
         }
 
         if (m3u8Url != null) {
-            println("DEBUG [KingkongTv] v8.6: 최종 추출된 영상 주소 - $m3u8Url")
+            println("DEBUG [KingkongTv] v8.7: 최종 추출된 영상 주소 - $m3u8Url")
             callback.invoke(
                 newExtractorLink(
                     source = name,
@@ -185,80 +187,90 @@ class KingkongTv : MainAPI() {
                 try {
                     val context = KingkongTvPlugin.pluginContext
                     if (context == null) {
-                        println("DEBUG [KingkongTv] v8.6: Context가 Null입니다. KKTVPlugin.kt 업데이트 여부를 확인하세요.")
+                        println("DEBUG [KingkongTv] v8.7: Context가 Null입니다. KKTVPlugin.kt가 업데이트되었는지 확인하세요.")
                         if (cont.isActive) cont.resume(null)
                         return@suspendCancellableCoroutine
                     }
 
                     val webView = WebView(context)
+                    
+                    // [수정 포인트 v8.7] 쌩웹뷰가 백그라운드에서도 크기를 갖도록 강제하여 렌더링 중단(Pause) 방지
+                    webView.layout(0, 0, 1920, 1080)
+                    
                     webView.settings.apply {
                         javaScriptEnabled = true
                         domStorageEnabled = true
-                        mediaPlaybackRequiresUserGesture = false // 동영상 자동 재생 허용
+                        mediaPlaybackRequiresUserGesture = false // 동영상 강제 자동 재생 허용
                         userAgentString = userAgent
                     }
 
                     var isFound = false
 
                     webView.webViewClient = object : WebViewClient() {
-                        // 크롬 개발자 도구의 '네트워크(Network)' 탭 역할
+                        // 크롬 개발자 도구의 '네트워크(Network)' 탭을 완벽하게 모사
                         override fun shouldInterceptRequest(
                             view: WebView?,
                             request: WebResourceRequest?
                         ): WebResourceResponse? {
                             val reqUrl = request?.url?.toString() ?: ""
                             
-                            // 요청되는 모든 주소 중 m3u8이나 스트리밍 관련 키워드가 포함된 것을 로그캣에 출력
-                            if (reqUrl.contains("m3u8") || reqUrl.contains("wdbroadcast") || reqUrl.contains("playlist")) {
+                            // [수정 포인트 v8.7] 사이트가 영상을 어떻게 숨겼는지 파악하기 위해 모든 네트워크 트래픽 무조건 출력
+                            if (reqUrl.startsWith("http")) {
                                 println("DEBUG [KingkongTv] 🌐 [네트워크 포착]: $reqUrl")
                             }
 
+                            // .m3u8 확장자가 발견되면 즉시 탈출
                             if (!isFound && reqUrl.contains(".m3u8")) {
                                 isFound = true
                                 println("DEBUG [KingkongTv] 🎯 [M3U8 스니핑 성공!]: $reqUrl")
-                                view?.post {
-                                    if (cont.isActive) cont.resume(reqUrl)
-                                    view.destroy()
+                                if (cont.isActive) {
+                                    cont.resume(reqUrl)
+                                }
+                                
+                                // 안전한 웹뷰 파괴를 위해 메인 루퍼로 넘김
+                                Handler(Looper.getMainLooper()).post {
+                                    try { view?.destroy() } catch (e: Exception) {}
                                 }
                             }
                             return super.shouldInterceptRequest(view, request)
                         }
 
-                        // 페이지 로딩 완료 시 재생 버튼을 누르도록 JS 강제 주입
                         override fun onPageFinished(view: WebView?, url: String?) {
                             super.onPageFinished(view, url)
+                            println("DEBUG [KingkongTv] v8.7: 페이지 로딩 완료, 영상 강제 재생을 위한 자바스크립트 주입")
+                            
                             view?.evaluateJavascript("""
                                 (function() {
                                     var attemptClick = function() {
-                                        var buttons = document.querySelectorAll('button, .play-btn, .vjs-play-control, .jw-icon-display, div[class*="play"]');
+                                        var buttons = document.querySelectorAll('button, .play-btn, .vjs-play-control, .jw-icon-display, div[class*="play"], .vjs-big-play-button');
                                         for (var i = 0; i < buttons.length; i++) {
                                             buttons[i].click();
                                         }
                                         var video = document.querySelector('video');
                                         if(video) { video.play(); }
                                     };
-                                    attemptClick(); // 즉시 클릭
-                                    setTimeout(attemptClick, 1000); // 1초 뒤 재시도
-                                    setTimeout(attemptClick, 3000); // 3초 뒤 재시도
+                                    attemptClick(); 
+                                    setTimeout(attemptClick, 1000); 
+                                    setTimeout(attemptClick, 3000); 
                                 })();
                             """.trimIndent(), null)
-
-                            // 10초 내에 패킷이 안 잡히면 타임아웃
-                            view?.postDelayed({
-                                if (!isFound && cont.isActive) {
-                                    println("DEBUG [KingkongTv] ⏳ [WebView 타임아웃] 10초간 M3U8 요청이 감지되지 않았습니다.")
-                                    cont.resume(null)
-                                    view.destroy()
-                                }
-                            }, 10000)
                         }
                     }
+
+                    // [수정 포인트 v8.7] 화면에 붙어있지 않은 뷰의 view.postDelayed는 작동하지 않으므로 순정 메인 루퍼 Handler 사용
+                    Handler(Looper.getMainLooper()).postDelayed({
+                        if (!isFound && cont.isActive) {
+                            println("DEBUG [KingkongTv] ⏳ [WebView 타임아웃] 15초간 M3U8 요청이 감지되지 않았습니다. 로그캣의 [네트워크 포착] 내역을 확인해주세요.")
+                            cont.resume(null)
+                            try { webView.destroy() } catch (e: Exception) {}
+                        }
+                    }, 15000)
 
                     val headers = mutableMapOf("Referer" to referer)
                     webView.loadUrl(url, headers)
 
                 } catch (e: Exception) {
-                    println("DEBUG [KingkongTv] v8.6: WebView 생성 중 에러 - ${e.message}")
+                    println("DEBUG [KingkongTv] v8.7: WebView 엔진 가동 중 에러 - ${e.message}")
                     if (cont.isActive) cont.resume(null)
                 }
             }
