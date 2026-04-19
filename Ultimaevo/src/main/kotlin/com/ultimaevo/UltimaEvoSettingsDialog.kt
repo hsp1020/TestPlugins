@@ -1,4 +1,4 @@
-// v1.47
+// v1.48
 package com.ultimaevo
 
 import android.app.AlertDialog
@@ -54,10 +54,12 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+        println("[UltimaEvo-Debug] [Dialog] onViewCreated 호출")
         (view.parent as? View)?.setBackgroundColor(Color.TRANSPARENT)
     }
 
     private fun saveCurrentNamesToPrefs(editor: SharedPreferences.Editor, rootLayout: ViewGroup) {
+        println("[UltimaEvo-Debug] [Dialog] saveCurrentNamesToPrefs 실행됨")
         fun findAndSave(v: ViewGroup) {
             for (idx in 0 until v.childCount) {
                 val child = v.getChildAt(idx)
@@ -70,6 +72,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
     }
 
     private fun shiftAndDeleteInstance(prefs: SharedPreferences, startIndex: Int, latestCount: Int) {
+        println("[UltimaEvo-Debug] [Dialog] shiftAndDeleteInstance 실행됨 - 삭제 시작 인덱스: $startIndex, 현재 개수: $latestCount")
         val editor = prefs.edit()
         for (j in startIndex until latestCount) {
             val curr = j
@@ -238,9 +241,11 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 val newCount = instanceCountInput.text.toString().toIntOrNull() ?: oldCount
 
                 if (newCount < oldCount) {
+                    println("[UltimaEvo-Debug] [Dialog] 텍스트 박스로 인스턴스 축소 시도됨: $oldCount -> $newCount")
                     AlertDialog.Builder(requireContext())
                         .setTitle("Delete Instances")
-                        .setMessage("Reducing instances from $oldCount to $newCount will delete the last ${oldCount - newCount} catalog(s).\nAre you sure?")
+                        // [수정] 재시작 안내 문구 추가
+                        .setMessage("Reducing instances from $oldCount to $newCount will delete the last ${oldCount - newCount} catalog(s).\nAre you sure?\n\nPlease restart the app for the changes to take effect.")
                         .setPositiveButton("Yes") { _, _ ->
                             val editor = prefs.edit()
                             saveCurrentNamesToPrefs(editor, mainLayout)
@@ -381,7 +386,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     
                     AlertDialog.Builder(requireContext())
                         .setTitle("Delete Catalog")
-                        .setMessage("Are you sure you want to delete this catalog?")
+                        // [수정] 재시작 안내 문구 추가
+                        .setMessage("Are you sure you want to delete this catalog?\n\nPlease restart the app for the changes to take effect.")
                         .setPositiveButton("Yes") { _, _ ->
                             val latestCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
                             shiftAndDeleteInstance(prefs, i, latestCount)
@@ -414,13 +420,16 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 if (SystemClock.elapsedRealtime() - lastClickTime < 1000) return@setOnClickListener
                 lastClickTime = SystemClock.elapsedRealtime()
 
+                // 포커스가 아직 텍스트박스에 머물러 있을 때의 삭제 인터셉트 로직
                 val oldCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
                 val newCount = instanceCountInput.text.toString().toIntOrNull() ?: oldCount
 
                 if (newCount < oldCount) {
+                    println("[UltimaEvo-Debug] [Dialog] Save & Close 인터셉트 됨: 인스턴스 수 축소 감지 ($oldCount -> $newCount)")
                     AlertDialog.Builder(requireContext())
                         .setTitle("Delete Instances")
-                        .setMessage("Reducing instances from $oldCount to $newCount will delete the last ${oldCount - newCount} catalog(s).\nAre you sure?")
+                        // [수정] 재시작 안내 문구 추가
+                        .setMessage("Reducing instances from $oldCount to $newCount will delete the last ${oldCount - newCount} catalog(s).\nAre you sure?\n\nPlease restart the app for the changes to take effect.")
                         .setPositiveButton("Yes") { _, _ ->
                             val editor = prefs.edit()
                             saveCurrentNamesToPrefs(editor, mainLayout)
@@ -447,11 +456,19 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     return@setOnClickListener
                 }
 
-                val editor = prefs.edit()
-                editor.putString("evo_instance_count", newCount.toString())
-                saveCurrentNamesToPrefs(editor, mainLayout)
-                editor.commit()
-                dismiss()
+                // [신규] 일반 저장 시 재시작 안내 팝업 출력
+                println("[UltimaEvo-Debug] [Dialog] 일반 저장 완료 전 재시작 안내 팝업 호출")
+                AlertDialog.Builder(requireContext())
+                    .setTitle("Restart Required")
+                    .setMessage("Please restart the app for the changes to take effect.")
+                    .setPositiveButton("OK") { _, _ ->
+                        val editor = prefs.edit()
+                        editor.putString("evo_instance_count", newCount.toString())
+                        saveCurrentNamesToPrefs(editor, mainLayout)
+                        editor.commit()
+                        dismiss()
+                    }
+                    .show()
             }
         }
         mainLayout.addView(saveBtn)
@@ -722,7 +739,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     val origProvider = APIHolder.allProviders.find { it.name == row.providerName }
                     val origData = origProvider?.mainPage?.find { it.name == row.catalogName }?.data ?: ""
                     
-                    // [핵심 픽스] 충돌하지 않는 안전한 구분자(;;;, %%%)를 사용해 구워냅니다.
                     val safeConfigStr = "${row.providerName};;;${row.catalogName};;;${customName};;;${finalOrder};;;${origData}"
                     activeCatalogs.add(safeConfigStr)
                 }
