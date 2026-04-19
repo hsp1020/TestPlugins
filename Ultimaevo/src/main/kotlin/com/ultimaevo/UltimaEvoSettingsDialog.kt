@@ -1,4 +1,4 @@
-// v1.39
+// v1.40
 package com.ultimaevo
 
 import android.app.AlertDialog
@@ -7,6 +7,7 @@ import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
+import android.os.SystemClock
 import android.text.InputType
 import android.view.Gravity
 import android.view.LayoutInflater
@@ -26,18 +27,20 @@ import kotlinx.coroutines.withContext
 
 class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
-    // [수정] 완벽한 AMOLED 블랙 테마
+    // [신규] 중복 클릭 방지용 타이머 변수
+    private var lastClickTime: Long = 0
+
     private fun getDarkThemeBg(): GradientDrawable {
         return GradientDrawable().apply {
-            setColor(Color.parseColor("#000000")) // Pure Black
+            setColor(Color.parseColor("#000000"))
             cornerRadius = 40f
         }
     }
 
     private fun getCardBg(): GradientDrawable {
         return GradientDrawable().apply {
-            setColor(Color.parseColor("#0C0C0C")) // 극저명도 다크 블랙
-            setStroke(2, Color.parseColor("#1A1A1A")) // 아주 얇고 어두운 테두리
+            setColor(Color.parseColor("#0C0C0C"))
+            setStroke(2, Color.parseColor("#1A1A1A"))
             cornerRadius = 30f
         }
     }
@@ -87,6 +90,10 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 setMargins(0, 0, 0, 30)
             }
             setOnClickListener {
+                // 동기화 버튼 중복 터치 방지
+                if (SystemClock.elapsedRealtime() - lastClickTime < 1000) return@setOnClickListener
+                lastClickTime = SystemClock.elapsedRealtime()
+
                 this.text = "Syncing..."
                 this.isEnabled = false
                 CoroutineScope(Dispatchers.IO).launch {
@@ -164,7 +171,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 setText(savedName)
                 tag = "evo_name_$i"
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                setSingleLine(true) // 1줄 강제 고정
+                setSingleLine(true) 
             }
             nameRow.addView(nameLabel)
             nameRow.addView(nameInput)
@@ -206,7 +213,11 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 setTextColor(Color.WHITE)
                 isAllCaps = false
                 background = getButtonBg()
-                setOnClickListener { 
+                setOnClickListener {
+                    // [핵심 픽스] 중복 클릭 방지 (1초 쿨타임)
+                    if (SystemClock.elapsedRealtime() - lastClickTime < 1000) return@setOnClickListener
+                    lastClickTime = SystemClock.elapsedRealtime()
+                    
                     showEditCatalogsDialog(i, pluginCtx) 
                 }
             }
@@ -224,6 +235,9 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 setMargins(0, 30, 0, 0)
             }
             setOnClickListener {
+                if (SystemClock.elapsedRealtime() - lastClickTime < 1000) return@setOnClickListener
+                lastClickTime = SystemClock.elapsedRealtime()
+
                 val editor = prefs.edit()
                 editor.putString("evo_instance_count", instanceCountInput.text.toString())
                 
@@ -251,7 +265,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         
         val mainContainer = LinearLayout(ctx).apply { 
             orientation = LinearLayout.VERTICAL
-            setPadding(25, 40, 25, 30) // 좌우 패딩 줄여서 여유 공간 확보
+            setPadding(25, 40, 25, 30) 
             background = getDarkThemeBg()
         }
         
@@ -333,7 +347,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             val pName = cat.first
             val cName = cat.second
 
-            // [수정] 여백을 극단적으로 줄인 초밀착 행(Row) 레이아웃
             val row = LinearLayout(ctx).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -382,7 +395,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             }
             row.addView(etSource)
 
-            // [수정] setSingleLine(true)를 선언하여 텍스트박스가 위아래로 늘어나는 것을 원천 차단 (가로 스크롤 허용)
             val etRename = EditText(ctx).apply {
                 hint = cName
                 setText(prefs.getString("cat_rename_${instanceId}_${pName}_$cName", cName))
@@ -393,12 +405,11 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 textSize = 13f
                 setPadding(15, 10, 15, 10)
                 background = getButtonBg()
-                setSingleLine(true) // 핵심 추가
+                setSingleLine(true)
                 ellipsize = android.text.TextUtils.TruncateAt.END
             }
             row.addView(etRename)
 
-            // 화살표 텍스트 사이즈와 여백 줄여 컴팩트하게 구성
             val up = TextView(ctx).apply { 
                 text = "▲"
                 textSize = 14f
@@ -487,6 +498,10 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
 
         applyBtn.setOnClickListener {
+            // 적용 버튼 중복 클릭 방지
+            if (SystemClock.elapsedRealtime() - lastClickTime < 1000) return@setOnClickListener
+            lastClickTime = SystemClock.elapsedRealtime()
+
             val editor = prefs.edit()
             val activeCatalogs = mutableListOf<String>()
 
