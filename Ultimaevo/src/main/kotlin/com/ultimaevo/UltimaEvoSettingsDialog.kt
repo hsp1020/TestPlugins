@@ -1,3 +1,4 @@
+// v1.46
 package com.ultimaevo
 
 import android.app.AlertDialog
@@ -56,7 +57,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         (view.parent as? View)?.setBackgroundColor(Color.TRANSPARENT)
     }
 
-    // [전문가 피드백 적용 - DRY 원칙] 중복되는 이름 저장 로직을 헬퍼 함수로 분리
     private fun saveCurrentNamesToPrefs(editor: SharedPreferences.Editor, rootLayout: ViewGroup) {
         fun findAndSave(v: ViewGroup) {
             for (idx in 0 until v.childCount) {
@@ -69,7 +69,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         findAndSave(rootLayout)
     }
 
-    // [전문가 피드백 적용 - DRY 원칙] 인스턴스 삭제 및 쉬프트(당겨오기) 로직 분리
     private fun shiftAndDeleteInstance(prefs: SharedPreferences, startIndex: Int, latestCount: Int) {
         val editor = prefs.edit()
         for (j in startIndex until latestCount) {
@@ -93,7 +92,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             }
         }
         
-        // 마지막 꼬리 청소
         editor.remove("evo_name_$latestCount")
         editor.remove("evo_visibility_enabled_$latestCount")
         editor.remove("evo_search_enabled_$latestCount")
@@ -115,7 +113,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         container: ViewGroup?,
         savedInstanceState: Bundle?
     ): View {
-        val ctx = requireContext() // [전문가 피드백 적용] 다이얼로그에서는 무조건 안전한 Fragment Context 사용
+        val ctx = requireContext()
         val prefs = ctx.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
 
         val scrollView = ScrollView(ctx).apply { background = getDarkThemeBg() }
@@ -148,7 +146,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
                 this.isEnabled = false
                 
-                // [전문가 피드백 적용] 창이 닫히면 자동으로 멈추는 lifecycleScope 사용 (크래시 완전 방지)
                 viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
                     val providers = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
                     val total = providers.size
@@ -214,7 +211,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 val newCount = current + 1
                 
                 val editor = prefs.edit()
-                saveCurrentNamesToPrefs(editor, mainLayout) // 헬퍼 함수 적용
+                saveCurrentNamesToPrefs(editor, mainLayout)
                 editor.putString("evo_instance_count", newCount.toString())
                 editor.commit()
                 
@@ -246,7 +243,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         .setMessage("Reducing instances from $oldCount to $newCount will delete the last ${oldCount - newCount} catalog(s).\nAre you sure?")
                         .setPositiveButton("Yes") { _, _ ->
                             val editor = prefs.edit()
-                            saveCurrentNamesToPrefs(editor, mainLayout) // 헬퍼 함수 적용
+                            saveCurrentNamesToPrefs(editor, mainLayout)
                             editor.putString("evo_instance_count", newCount.toString())
                             for (i in (newCount + 1)..oldCount) {
                                 editor.remove("evo_name_$i")
@@ -271,7 +268,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         .show()
                 } else if (newCount > oldCount) {
                     val editor = prefs.edit()
-                    saveCurrentNamesToPrefs(editor, mainLayout) // 헬퍼 함수 적용
+                    saveCurrentNamesToPrefs(editor, mainLayout)
                     editor.putString("evo_instance_count", newCount.toString())
                     editor.commit()
                     val act = activity
@@ -387,7 +384,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         .setMessage("Are you sure you want to delete this catalog?")
                         .setPositiveButton("Yes") { _, _ ->
                             val latestCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
-                            shiftAndDeleteInstance(prefs, i, latestCount) // 헬퍼 함수 적용
+                            shiftAndDeleteInstance(prefs, i, latestCount)
                             
                             val act = activity
                             dismiss()
@@ -426,7 +423,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         .setMessage("Reducing instances from $oldCount to $newCount will delete the last ${oldCount - newCount} catalog(s).\nAre you sure?")
                         .setPositiveButton("Yes") { _, _ ->
                             val editor = prefs.edit()
-                            saveCurrentNamesToPrefs(editor, mainLayout) // 헬퍼 함수 적용
+                            saveCurrentNamesToPrefs(editor, mainLayout)
                             editor.putString("evo_instance_count", newCount.toString())
                             for (i in (newCount + 1)..oldCount) {
                                 editor.remove("evo_name_$i")
@@ -452,7 +449,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
                 val editor = prefs.edit()
                 editor.putString("evo_instance_count", newCount.toString())
-                saveCurrentNamesToPrefs(editor, mainLayout) // 헬퍼 함수 적용
+                saveCurrentNamesToPrefs(editor, mainLayout)
                 editor.commit()
                 dismiss()
             }
@@ -707,6 +704,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             val editor = prefs.edit()
             val activeCatalogs = mutableListOf<String>()
 
+            println("[UltimaEvo-Debug] [Popup] 설정 저장 시도. 체크된 항목들을 구워냅니다.")
             for ((index, row) in activeRows.withIndex()) {
                 val finalOrder = index + 1
                 val tKey = "cat_toggle_${instanceId}_${row.providerName}_${row.catalogName}"
@@ -725,12 +723,15 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     val origProvider = APIHolder.allProviders.find { it.name == row.providerName }
                     val origData = origProvider?.mainPage?.find { it.name == row.catalogName }?.data ?: ""
                     
+                    println("[UltimaEvo-Debug] [Popup] 활성화 카탈로그 데이터 수집 -> Provider: ${row.providerName}, Catalog: ${row.catalogName}, OrigData: '$origData'")
                     val safeConfigStr = "${row.providerName}|~|${row.catalogName}|~|${customName}|~|${finalOrder}|~|${origData}"
                     activeCatalogs.add(safeConfigStr)
                 }
             }
             
-            editor.putString("evo_active_cats_$instanceId", activeCatalogs.joinToString("|||"))
+            val joinedStr = activeCatalogs.joinToString("|||")
+            println("[UltimaEvo-Debug] [Popup] 디스크에 기록될 최종 문자열: $joinedStr")
+            editor.putString("evo_active_cats_$instanceId", joinedStr)
             editor.commit()
             dialog.dismiss()
         }
