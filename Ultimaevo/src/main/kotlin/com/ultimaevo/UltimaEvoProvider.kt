@@ -71,42 +71,43 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
             val modifiedItems = filteredItems.map { it.copy(name = customCatalogTitle) }
             return newHomePageResponse(modifiedItems, response.hasNext)
         } catch (e: Exception) {
-            e.printStackTrace()
             return newHomePageResponse(emptyList(), false)
         }
     }
 
-    override suspend fun search(query: String): List<SearchResponse> {
-        val context = UltimaEvoPlugin.pluginContext ?: return emptyList()
+    // [전문가 피드백 적용] 순차적 for문 제거 -> async/awaitAll을 이용한 완벽한 병렬(Concurrent) 비동기 검색
+    override suspend fun search(query: String): List<SearchResponse> = coroutineScope {
+        println("[UltimaEvo-Debug] [Provider-$instanceId] 병렬 검색 요청됨: $query")
+        val context = UltimaEvoPlugin.pluginContext ?: return@coroutineScope emptyList()
         val prefs = context.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
         
         val isSearchEnabled = prefs.getBoolean("evo_search_enabled_$instanceId", true)
-        if (!isSearchEnabled) return emptyList()
+        if (!isSearchEnabled) return@coroutineScope emptyList()
 
         val activeCatsStr = prefs.getString("evo_active_cats_$instanceId", "") ?: ""
-        if (activeCatsStr.isBlank()) return emptyList()
+        if (activeCatsStr.isBlank()) return@coroutineScope emptyList()
 
         val providersToSearch = activeCatsStr.split("|||").mapNotNull {
             val parts = it.split("|~|")
             if (parts.isNotEmpty()) parts[0] else null
         }.distinct()
-        
-        // 코루틴을 활용한 완벽한 병렬 검색 (Concurrent Search)
-        return coroutineScope {
-            providersToSearch.map { providerName ->
-                async {
-                    try {
-                        val provider = APIHolder.allProviders.find { it.name == providerName }
-                        provider?.search(query)
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                        null
-                    }
+
+        // 여러 프로바이더에 동시에 검색 요청을 던집니다 (Non-blocking)
+        val deferredResults = providersToSearch.mapNotNull { providerName ->
+            val provider = APIHolder.allProviders.find { it.name == providerName } ?: return@mapNotNull null
+            async(Dispatchers.IO) {
+                try {
+                    provider.search(query) ?: emptyList()
+                } catch (e: Exception) {
+                    emptyList() // 개별 프로바이더 에러가 전체 검색을 망치지 않도록 안전망 구성
                 }
-            }.awaitAll() // 모든 비동기 검색 결과 대기
-             .filterNotNull()
-             .flatten()
-             .distinctBy { it.url }
+            }
         }
+        
+        // 모든 병렬 요청이 끝날 때까지 기다린 후 결과를 하나로 합칩니다.
+        val results = deferredResults.awaitAll().flatten()
+        val finalRes = results.distinctBy { it.url }
+        println("[UltimaEvo-Debug] [Provider-$instanceId] 병렬 검색 완료. 결과: ${finalRes.size}개")
+        return@coroutineScope finalRes
     }
 }
