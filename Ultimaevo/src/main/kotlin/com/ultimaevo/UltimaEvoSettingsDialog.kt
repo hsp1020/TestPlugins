@@ -1,3 +1,4 @@
+// v1.39
 package com.ultimaevo
 
 import android.app.AlertDialog
@@ -25,24 +26,25 @@ import kotlinx.coroutines.withContext
 
 class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
-    // Ultima 고유의 깔끔한 다크 테마 배경들
+    // [수정] 완벽한 AMOLED 블랙 테마
     private fun getDarkThemeBg(): GradientDrawable {
         return GradientDrawable().apply {
-            setColor(Color.parseColor("#151515"))
+            setColor(Color.parseColor("#000000")) // Pure Black
             cornerRadius = 40f
         }
     }
 
     private fun getCardBg(): GradientDrawable {
         return GradientDrawable().apply {
-            setColor(Color.parseColor("#202020"))
+            setColor(Color.parseColor("#0C0C0C")) // 극저명도 다크 블랙
+            setStroke(2, Color.parseColor("#1A1A1A")) // 아주 얇고 어두운 테두리
             cornerRadius = 30f
         }
     }
 
     private fun getButtonBg(): GradientDrawable {
         return GradientDrawable().apply {
-            setColor(Color.parseColor("#2B2B2B"))
+            setColor(Color.parseColor("#151515"))
             cornerRadius = 20f
         }
     }
@@ -162,16 +164,16 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 setText(savedName)
                 tag = "evo_name_$i"
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                setSingleLine(true) // 1줄 강제 고정
             }
             nameRow.addView(nameLabel)
             nameRow.addView(nameInput)
             card.addView(nameRow)
 
-            // 토글과 라벨 초밀착 가로 배치 (WRAP_CONTENT 사용)
             val toggleRow = LinearLayout(pluginCtx).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, 0, 0, 20)
+                setPadding(0, 10, 0, 10)
             }
             val visibilitySwitch = Switch(pluginCtx).apply {
                 text = "Show Catalog"
@@ -189,7 +191,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 textSize = 14f
                 isChecked = prefs.getBoolean("evo_search_enabled_$i", true)
                 val params = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-                params.setMargins(50, 0, 0, 0) // 스위치 사이의 적당한 간격
+                params.setMargins(50, 0, 0, 0) 
                 layoutParams = params
                 setOnCheckedChangeListener { _, isChecked -> 
                     prefs.edit().putBoolean("evo_search_enabled_$i", isChecked).commit() 
@@ -249,7 +251,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         
         val mainContainer = LinearLayout(ctx).apply { 
             orientation = LinearLayout.VERTICAL
-            setPadding(30, 40, 30, 30)
+            setPadding(25, 40, 25, 30) // 좌우 패딩 줄여서 여유 공간 확보
             background = getDarkThemeBg()
         }
         
@@ -262,8 +264,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             gravity = Gravity.CENTER
         }
         mainContainer.addView(headerTitle)
-
-        // 노란색 텍스트 경고문 삭제 완료
 
         val scroll = ScrollView(ctx)
         val listLayout = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
@@ -333,12 +333,13 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             val pName = cat.first
             val cName = cat.second
 
+            // [수정] 여백을 극단적으로 줄인 초밀착 행(Row) 레이아웃
             val row = LinearLayout(ctx).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(20, 15, 20, 15)
+                setPadding(10, 8, 10, 8) 
                 layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                    setMargins(0, 10, 0, 10)
+                    setMargins(0, 5, 0, 5) 
                 }
                 background = getCardBg()
             }
@@ -346,17 +347,22 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             val cb = CheckBox(ctx).apply {
                 isChecked = prefs.getBoolean("cat_toggle_${instanceId}_${pName}_$cName", false)
                 setPadding(0, 0, 0, 0)
+                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                    setMargins(0, 0, 5, 0)
+                }
             }
             row.addView(cb)
 
             val etOrder = EditText(ctx).apply {
                 inputType = InputType.TYPE_CLASS_NUMBER
                 imeOptions = EditorInfo.IME_ACTION_DONE
-                layoutParams = LinearLayout.LayoutParams(90, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(10,0,10,0) }
+                layoutParams = LinearLayout.LayoutParams(70, LinearLayout.LayoutParams.WRAP_CONTENT).apply { 
+                    setMargins(0, 0, 5, 0) 
+                }
                 gravity = Gravity.CENTER
                 setTextColor(Color.WHITE)
-                textSize = 13f
-                setPadding(0, 15, 0, 15)
+                textSize = 12f
+                setPadding(0, 10, 0, 10)
                 background = getButtonBg()
             }
             row.addView(etOrder)
@@ -364,18 +370,19 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             val etSource = TextView(ctx).apply {
                 text = pName
                 setTextColor(Color.parseColor("#AAAAAA"))
-                textSize = 12f
-                setPadding(20, 10, 20, 10)
+                textSize = 11f
+                setPadding(15, 8, 15, 8)
                 background = GradientDrawable().apply {
-                    setColor(Color.parseColor("#333333"))
+                    setColor(Color.parseColor("#222222"))
                     cornerRadius = 15f
                 }
                 val sourceParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-                sourceParams.setMargins(15, 0, 15, 0)
+                sourceParams.setMargins(5, 0, 10, 0)
                 layoutParams = sourceParams
             }
             row.addView(etSource)
 
+            // [수정] setSingleLine(true)를 선언하여 텍스트박스가 위아래로 늘어나는 것을 원천 차단 (가로 스크롤 허용)
             val etRename = EditText(ctx).apply {
                 hint = cName
                 setText(prefs.getString("cat_rename_${instanceId}_${pName}_$cName", cName))
@@ -383,23 +390,26 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 isEnabled = cb.isChecked
                 setTextColor(Color.WHITE)
                 setHintTextColor(Color.DKGRAY)
-                textSize = 14f
-                setPadding(20, 15, 20, 15)
+                textSize = 13f
+                setPadding(15, 10, 15, 10)
                 background = getButtonBg()
+                setSingleLine(true) // 핵심 추가
+                ellipsize = android.text.TextUtils.TruncateAt.END
             }
             row.addView(etRename)
 
+            // 화살표 텍스트 사이즈와 여백 줄여 컴팩트하게 구성
             val up = TextView(ctx).apply { 
                 text = "▲"
-                textSize = 16f
+                textSize = 14f
                 setTextColor(Color.WHITE)
-                setPadding(20, 10, 20, 10) 
+                setPadding(10, 5, 10, 5) 
             }
             val down = TextView(ctx).apply { 
                 text = "▼"
-                textSize = 16f
+                textSize = 14f
                 setTextColor(Color.WHITE)
-                setPadding(20, 10, 20, 10) 
+                setPadding(10, 5, 10, 5) 
             }
             
             row.addView(up)
