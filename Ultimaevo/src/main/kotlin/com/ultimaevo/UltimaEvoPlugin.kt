@@ -1,3 +1,4 @@
+// v1.46
 package com.ultimaevo
 
 import android.content.Context
@@ -23,7 +24,6 @@ class UltimaEvoPlugin : Plugin() {
 
     override fun load(context: Context) {
         println("[UltimaEvo-Debug] [Plugin] load() 함수 진입.")
-        // [전문가 피드백 적용] 메모리 릭(Leak) 방지를 위해 Application Context만 유지
         pluginContext = context.applicationContext
         
         val prefs = pluginContext!!.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
