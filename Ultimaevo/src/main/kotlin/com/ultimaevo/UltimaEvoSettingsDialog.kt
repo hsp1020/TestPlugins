@@ -25,11 +25,25 @@ import kotlinx.coroutines.withContext
 
 class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
+    // Ultima 고유의 깔끔한 다크 테마 배경들
     private fun getDarkThemeBg(): GradientDrawable {
         return GradientDrawable().apply {
-            setColor(Color.parseColor("#121212"))
-            setStroke(3, Color.WHITE)
-            cornerRadius = 16f
+            setColor(Color.parseColor("#151515"))
+            cornerRadius = 40f
+        }
+    }
+
+    private fun getCardBg(): GradientDrawable {
+        return GradientDrawable().apply {
+            setColor(Color.parseColor("#202020"))
+            cornerRadius = 30f
+        }
+    }
+
+    private fun getButtonBg(): GradientDrawable {
+        return GradientDrawable().apply {
+            setColor(Color.parseColor("#2B2B2B"))
+            cornerRadius = 20f
         }
     }
 
@@ -49,22 +63,27 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val scrollView = ScrollView(pluginCtx).apply { background = getDarkThemeBg() }
         val mainLayout = LinearLayout(pluginCtx).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(30, 30, 30, 30)
+            setPadding(40, 40, 40, 40)
         }
 
         val title = TextView(pluginCtx).apply {
-            text = "Ultima Evo Master Manager"
-            textSize = 20f
+            text = "Ultima Evo Settings"
+            textSize = 22f
             setTextColor(Color.WHITE)
-            setPadding(0, 0, 0, 20)
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            setPadding(0, 0, 0, 30)
             gravity = Gravity.CENTER
         }
         mainLayout.addView(title)
 
         val syncAllBtn = Button(pluginCtx).apply {
-            text = "🔄 Sync All Provider Data"
+            text = "Sync Provider Data"
             setTextColor(Color.WHITE)
-            setPadding(10, 0, 10, 0)
+            isAllCaps = false
+            background = getButtonBg()
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                setMargins(0, 0, 0, 30)
+            }
             setOnClickListener {
                 this.text = "Syncing..."
                 this.isEnabled = false
@@ -82,7 +101,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         } catch (e: Exception) { }
                     }
                     withContext(Dispatchers.Main) {
-                        this@apply.text = "✅ Sync Complete"
+                        this@apply.text = "Sync Complete"
                         this@apply.isEnabled = true
                     }
                 }
@@ -93,16 +112,18 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val countLayout = LinearLayout(pluginCtx).apply { 
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 15, 0, 15)
+            setPadding(0, 0, 0, 20)
         }
-        countLayout.addView(TextView(pluginCtx).apply { text = "Instances: "; textSize = 14f; setTextColor(Color.WHITE) })
+        countLayout.addView(TextView(pluginCtx).apply { text = "Instances:"; textSize = 15f; setTextColor(Color.LTGRAY); setPadding(0,0,20,0) })
         val instanceCountInput = EditText(pluginCtx).apply {
             inputType = InputType.TYPE_CLASS_NUMBER
             val initCount = prefs.getString("evo_instance_count", "1")
             setText(initCount)
             setTextColor(Color.WHITE)
-            setPadding(10, 10, 10, 10)
-            layoutParams = LinearLayout.LayoutParams(120, LinearLayout.LayoutParams.WRAP_CONTENT)
+            background = getButtonBg()
+            setPadding(30, 20, 30, 20)
+            layoutParams = LinearLayout.LayoutParams(150, LinearLayout.LayoutParams.WRAP_CONTENT)
+            gravity = Gravity.CENTER
         }
         countLayout.addView(instanceCountInput)
         mainLayout.addView(countLayout)
@@ -112,27 +133,23 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         for (i in 1..currentCount) {
             val card = LinearLayout(pluginCtx).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(20, 20, 20, 20)
+                setPadding(30, 30, 30, 30)
                 layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                    setMargins(0, 10, 0, 10)
+                    setMargins(0, 15, 0, 15)
                 }
-                background = GradientDrawable().apply {
-                    setColor(Color.parseColor("#1E1E1E"))
-                    setStroke(2, Color.DKGRAY)
-                    cornerRadius = 12f
-                }
+                background = getCardBg()
             }
             
-            // [UI 변경] 라벨과 입력칸을 가로로 배치
             val nameRow = LinearLayout(pluginCtx).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, 0, 0, 10)
+                setPadding(0, 0, 0, 20)
             }
             val nameLabel = TextView(pluginCtx).apply {
-                text = "Catalog Name: "
-                setTextColor(Color.LTGRAY)
+                text = "Catalog Name:"
+                setTextColor(Color.parseColor("#CCCCCC"))
                 textSize = 14f
+                setPadding(0, 0, 20, 0)
             }
             val savedName = prefs.getString("evo_name_$i", "Ultima Evo $i")
             val nameInput = EditText(pluginCtx).apply {
@@ -140,7 +157,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 setHintTextColor(Color.GRAY)
                 setTextColor(Color.WHITE)
                 textSize = 14f
-                setPadding(10, 10, 10, 10)
+                setPadding(20, 20, 20, 20)
+                background = getButtonBg()
                 setText(savedName)
                 tag = "evo_name_$i"
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
@@ -149,18 +167,18 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             nameRow.addView(nameInput)
             card.addView(nameRow)
 
-            // [UI 변경] 두 개의 스위치를 가로로 나란히 배치
+            // 토글과 라벨 초밀착 가로 배치 (WRAP_CONTENT 사용)
             val toggleRow = LinearLayout(pluginCtx).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, 10, 0, 10)
+                setPadding(0, 0, 0, 20)
             }
             val visibilitySwitch = Switch(pluginCtx).apply {
                 text = "Show Catalog"
                 setTextColor(Color.WHITE)
-                textSize = 13f
+                textSize = 14f
                 isChecked = prefs.getBoolean("evo_visibility_enabled_$i", true)
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
                 setOnCheckedChangeListener { _, isChecked -> 
                     prefs.edit().putBoolean("evo_visibility_enabled_$i", isChecked).commit() 
                 }
@@ -168,9 +186,11 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             val searchSwitch = Switch(pluginCtx).apply {
                 text = "Enable Search"
                 setTextColor(Color.WHITE)
-                textSize = 13f
+                textSize = 14f
                 isChecked = prefs.getBoolean("evo_search_enabled_$i", true)
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                val params = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                params.setMargins(50, 0, 0, 0) // 스위치 사이의 적당한 간격
+                layoutParams = params
                 setOnCheckedChangeListener { _, isChecked -> 
                     prefs.edit().putBoolean("evo_search_enabled_$i", isChecked).commit() 
                 }
@@ -180,9 +200,10 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             card.addView(toggleRow)
 
             val configBtn = Button(pluginCtx).apply {
-                text = "Edit Providers & Sorting ⚙️"
+                text = "Configure Providers"
                 setTextColor(Color.WHITE)
-                setPadding(10, 0, 10, 0)
+                isAllCaps = false
+                background = getButtonBg()
                 setOnClickListener { 
                     showEditCatalogsDialog(i, pluginCtx) 
                 }
@@ -195,7 +216,11 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val saveBtn = Button(pluginCtx).apply {
             text = "Save & Close"
             setTextColor(Color.WHITE)
-            setPadding(10, 10, 10, 10)
+            isAllCaps = false
+            background = getButtonBg()
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                setMargins(0, 30, 0, 0)
+            }
             setOnClickListener {
                 val editor = prefs.edit()
                 editor.putString("evo_instance_count", instanceCountInput.text.toString())
@@ -224,27 +249,21 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         
         val mainContainer = LinearLayout(ctx).apply { 
             orientation = LinearLayout.VERTICAL
-            setPadding(15, 15, 15, 15)
+            setPadding(30, 40, 30, 30)
             background = getDarkThemeBg()
         }
         
         val headerTitle = TextView(ctx).apply {
-            text = "Edit Catalog $instanceId"
-            textSize = 18f
+            text = "Configure Providers"
+            textSize = 20f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
             setTextColor(Color.WHITE)
-            setPadding(0, 10, 0, 10)
+            setPadding(0, 0, 0, 30)
             gravity = Gravity.CENTER
         }
         mainContainer.addView(headerTitle)
 
-        val warningText = TextView(ctx).apply {
-            text = "※ Numbers auto-shift when edited or arrows are clicked."
-            textSize = 12f
-            setTextColor(Color.YELLOW)
-            setPadding(0, 0, 0, 20)
-            gravity = Gravity.CENTER
-        }
-        mainContainer.addView(warningText)
+        // 노란색 텍스트 경고문 삭제 완료
 
         val scroll = ScrollView(ctx)
         val listLayout = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
@@ -317,10 +336,11 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             val row = LinearLayout(ctx).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, 0, 0, 0)
+                setPadding(20, 15, 20, 15)
                 layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                    setMargins(0, 4, 0, 4)
+                    setMargins(0, 10, 0, 10)
                 }
+                background = getCardBg()
             }
 
             val cb = CheckBox(ctx).apply {
@@ -332,31 +352,28 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             val etOrder = EditText(ctx).apply {
                 inputType = InputType.TYPE_CLASS_NUMBER
                 imeOptions = EditorInfo.IME_ACTION_DONE
-                layoutParams = LinearLayout.LayoutParams(80, LinearLayout.LayoutParams.WRAP_CONTENT)
+                layoutParams = LinearLayout.LayoutParams(90, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(10,0,10,0) }
                 gravity = Gravity.CENTER
                 setTextColor(Color.WHITE)
-                textSize = 12f
-                setPadding(5, 5, 5, 5)
+                textSize = 13f
+                setPadding(0, 15, 0, 15)
+                background = getButtonBg()
             }
             row.addView(etOrder)
 
-            val etSource = EditText(ctx).apply {
-                setText(pName)
-                isFocusable = false
-                isClickable = false
-                isCursorVisible = false
-                setTextColor(Color.LTGRAY)
-                textSize = 11f
-                setPadding(10, 5, 10, 5)
-                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            val etSource = TextView(ctx).apply {
+                text = pName
+                setTextColor(Color.parseColor("#AAAAAA"))
+                textSize = 12f
+                setPadding(20, 10, 20, 10)
                 background = GradientDrawable().apply {
-                    setColor(Color.parseColor("#2A2A2A"))
-                    setStroke(1, Color.DKGRAY)
-                    cornerRadius = 8f
+                    setColor(Color.parseColor("#333333"))
+                    cornerRadius = 15f
                 }
+                val sourceParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                sourceParams.setMargins(15, 0, 15, 0)
+                layoutParams = sourceParams
             }
-            val sourceParams = etSource.layoutParams as LinearLayout.LayoutParams
-            sourceParams.setMargins(10, 0, 10, 0)
             row.addView(etSource)
 
             val etRename = EditText(ctx).apply {
@@ -366,8 +383,9 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 isEnabled = cb.isChecked
                 setTextColor(Color.WHITE)
                 setHintTextColor(Color.DKGRAY)
-                textSize = 13f
-                setPadding(5, 5, 5, 5)
+                textSize = 14f
+                setPadding(20, 15, 20, 15)
+                background = getButtonBg()
             }
             row.addView(etRename)
 
@@ -375,13 +393,13 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 text = "▲"
                 textSize = 16f
                 setTextColor(Color.WHITE)
-                setPadding(15, 5, 15, 5) 
+                setPadding(20, 10, 20, 10) 
             }
             val down = TextView(ctx).apply { 
                 text = "▼"
                 textSize = 16f
                 setTextColor(Color.WHITE)
-                setPadding(15, 5, 15, 5) 
+                setPadding(20, 10, 20, 10) 
             }
             
             row.addView(up)
@@ -434,10 +452,22 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
         val footer = LinearLayout(ctx).apply { 
             orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 20, 0, 0)
+            setPadding(0, 30, 0, 0)
         }
-        val applyBtn = Button(ctx).apply { text = "Save & Close"; setTextColor(Color.WHITE); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
-        val closeBtn = Button(ctx).apply { text = "Cancel"; setTextColor(Color.WHITE); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
+        val applyBtn = Button(ctx).apply { 
+            text = "Save"
+            setTextColor(Color.WHITE)
+            isAllCaps = false
+            background = getButtonBg()
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0,0,15,0) }
+        }
+        val closeBtn = Button(ctx).apply { 
+            text = "Cancel"
+            setTextColor(Color.WHITE)
+            isAllCaps = false
+            background = getButtonBg()
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15,0,0,0) }
+        }
         footer.addView(applyBtn); footer.addView(closeBtn)
         mainContainer.addView(footer)
 
@@ -464,10 +494,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 if (row.checkBox.isChecked) {
                     editor.putBoolean(pKey, true)
                     
-                    // Provider.kt 에서 필요한 정보를 구워둡니다 (Baking).
                     val customName = row.renameEdit.text.toString().ifBlank { row.catalogName }
                     
-                    // APIHolder.allProviders 에 직접 접근해서 해당 provider의 originalData(url 경로) 추출
                     val origProvider = APIHolder.allProviders.find { it.name == row.providerName }
                     val origData = origProvider?.mainPage?.find { it.name == row.catalogName }?.data ?: ""
                     
