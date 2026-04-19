@@ -1,4 +1,4 @@
-// v1.49
+// v1.50
 package com.ultimaevo
 
 import android.content.Context
@@ -11,17 +11,23 @@ import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.newHomePageResponse
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
 
 class UltimaEvoProvider(private val instanceId: Int, private val customName: String) : MainAPI() {
     override var mainUrl = "ultima_evo_$instanceId"
     override var name = customName
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.Live)
+
+    // 🌟 최적화: 캐싱 변수 도입 (Getter 메모리 낭비 방지)
+    private var cachedActiveCatsStr: String? = null
+    private var cachedMainPageList: List<MainPageData> = emptyList()
 
     override val hasMainPage: Boolean
         get() {
@@ -45,6 +51,11 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
             val activeCatsStr = prefs.getString("evo_active_cats_$instanceId", "") ?: ""
             if (activeCatsStr.isBlank()) return emptyList()
 
+            // 🌟 최적화: 원본 문자열이 이전과 똑같다면 무거운 파싱 로직을 건너뛰고 캐시된 리스트 반환
+            if (activeCatsStr == cachedActiveCatsStr) {
+                return cachedMainPageList
+            }
+
             val chunkSeparator = if (activeCatsStr.contains("%%%")) "%%%" else "|||"
             val fieldSeparator = if (activeCatsStr.contains("%%%")) ";;;" else "|~|"
 
@@ -64,60 +75,74 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
                 } else null
             }
             
-            return pages.sortedBy { it.second }.map { it.first }
+            // 파싱 결과 캐싱
+            cachedMainPageList = pages.sortedBy { it.second }.map { it.first }
+            cachedActiveCatsStr = activeCatsStr
+            
+            return cachedMainPageList
         }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
-        try {
-            val parts = request.data.split("|||")
-            if (parts.size < 3) return newHomePageResponse(emptyList(), false)
+        // 🌟 최적화: 네트워크 호출은 명시적으로 IO 스레드로 분리
+        return withContext(Dispatchers.IO) {
+            try {
+                val parts = request.data.split("|||")
+                if (parts.size < 3) return@withContext newHomePageResponse(emptyList(), false)
 
-            val targetProviderName = parts[0]
-            val originalData = parts[1]
-            val customCatalogTitle = parts[2]
-            val originalCatalogName = parts.getOrNull(3) ?: ""
+                val targetProviderName = parts[0]
+                val originalData = parts[1]
+                val customCatalogTitle = parts[2]
+                val originalCatalogName = parts.getOrNull(3) ?: ""
 
-            val targetProvider = APIHolder.allProviders.find { it.name == targetProviderName } ?: return newHomePageResponse(emptyList(), false)
+                val targetProvider = APIHolder.allProviders.find { it.name == targetProviderName } ?: return@withContext newHomePageResponse(emptyList(), false)
 
-            val originalRequest = MainPageRequest(request.name, originalData, request.horizontalImages)
-            val response = targetProvider.getMainPage(page, originalRequest) ?: return newHomePageResponse(emptyList(), false)
-            
-            val filteredItems = if (originalCatalogName.isNotEmpty() && response.items.size > 1) {
-                response.items.filter { it.name == originalCatalogName }
-            } else {
-                response.items
+                val originalRequest = MainPageRequest(request.name, originalData, request.horizontalImages)
+                val response = targetProvider.getMainPage(page, originalRequest) ?: return@withContext newHomePageResponse(emptyList(), false)
+                
+                val filteredItems = if (originalCatalogName.isNotEmpty() && response.items.size > 1) {
+                    response.items.filter { it.name == originalCatalogName }
+                } else {
+                    response.items
+                }
+
+                val modifiedItems = filteredItems.map { it.copy(name = customCatalogTitle) }
+                newHomePageResponse(modifiedItems, response.hasNext)
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e // 최적화
+                newHomePageResponse(emptyList(), false)
             }
-
-            val modifiedItems = filteredItems.map { it.copy(name = customCatalogTitle) }
-            return newHomePageResponse(modifiedItems, response.hasNext)
-        } catch (e: Exception) {
-            return newHomePageResponse(emptyList(), false)
         }
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val allProviders = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
-        
-        val exactProvider = allProviders.find { url.startsWith(it.mainUrl) }
-        if (exactProvider != null) {
-            try {
-                val res = exactProvider.load(url)
-                if (res != null) return res
-            } catch (e: Exception) { }
+        return withContext(Dispatchers.IO) {
+            val allProviders = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
+            
+            val exactProvider = allProviders.find { url.startsWith(it.mainUrl) }
+            if (exactProvider != null) {
+                try {
+                    val res = exactProvider.load(url)
+                    if (res != null) return@withContext res
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                }
+            }
+            
+            val domainMatchProviders = allProviders.filter { p -> 
+                val domain = p.mainUrl.replace("https://", "").replace("http://", "").substringBefore("/")
+                domain.isNotBlank() && url.contains(domain) 
+            }
+            for (p in domainMatchProviders) {
+                if (p == exactProvider) continue
+                try {
+                    val res = p.load(url)
+                    if (res != null) return@withContext res
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                }
+            }
+            null
         }
-        
-        val domainMatchProviders = allProviders.filter { p -> 
-            val domain = p.mainUrl.replace("https://", "").replace("http://", "").substringBefore("/")
-            domain.isNotBlank() && url.contains(domain) 
-        }
-        for (p in domainMatchProviders) {
-            if (p == exactProvider) continue
-            try {
-                val res = p.load(url)
-                if (res != null) return res
-            } catch (e: Exception) { }
-        }
-        return null
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -138,8 +163,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
             if (parts.isNotEmpty()) parts[0] else null
         }.distinct()
 
-        // [신규] 검색 시에도 타겟 사이트 방어막 우회 및 OOM 방지를 위한 동시 접속 제한
-        val semaphore = Semaphore(5) // 빠른 응답을 위해 5개로 여유있게 세팅
+        val semaphore = Semaphore(5)
 
         return coroutineScope {
             val deferredResults = providersToSearch.mapNotNull { providerName ->
@@ -148,9 +172,9 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
                     semaphore.withPermit {
                         try {
                             println("[UltimaEvo-Debug] [Provider-$instanceId] ${provider.name} 검색 시도")
-                            val res = provider.search(query)
-                            res ?: emptyList()
+                            provider.search(query) ?: emptyList()
                         } catch (e: Exception) {
+                            if (e is CancellationException) throw e // 최적화: 좀비 코루틴 방지
                             println("[UltimaEvo-Debug] [Provider-$instanceId] ${provider.name} 에러 무시: ${e.message}")
                             emptyList()
                         }
