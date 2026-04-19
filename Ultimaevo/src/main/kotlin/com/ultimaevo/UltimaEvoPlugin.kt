@@ -22,8 +22,9 @@ class UltimaEvoPlugin : Plugin() {
     }
 
     override fun load(context: Context) {
-        pluginContext = context
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        // Activity Context 대신 Application Context를 사용하여 메모리 누수 원천 차단
+        pluginContext = context.applicationContext
+        val prefs = pluginContext!!.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         
         val instanceCountStr = prefs.getString("evo_instance_count", "1") ?: "1"
         val instanceCount = instanceCountStr.toIntOrNull() ?: 1
