@@ -1,4 +1,4 @@
-// v1.43
+// v1.44 (Optimized)
 package com.ultimaevo
 
 import android.app.AlertDialog
@@ -17,11 +17,13 @@ import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.*
+import androidx.lifecycle.lifecycleScope
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.MainPageRequest
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -61,16 +63,16 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         container: ViewGroup?,
         savedInstanceState: Bundle?
     ): View {
-        val pluginCtx = UltimaEvoPlugin.pluginContext ?: requireContext()
-        val prefs = pluginCtx.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
+        val uiContext = requireContext()
+        val prefs = uiContext.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
 
-        val scrollView = ScrollView(pluginCtx).apply { background = getDarkThemeBg() }
-        val mainLayout = LinearLayout(pluginCtx).apply {
+        val scrollView = ScrollView(uiContext).apply { background = getDarkThemeBg() }
+        val mainLayout = LinearLayout(uiContext).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(40, 40, 40, 40)
         }
 
-        val title = TextView(pluginCtx).apply {
+        val title = TextView(uiContext).apply {
             text = "Ultima Evo Settings"
             textSize = 22f
             setTextColor(Color.WHITE)
@@ -80,7 +82,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         }
         mainLayout.addView(title)
 
-        val syncAllBtn = Button(pluginCtx).apply {
+        val syncAllBtn = Button(uiContext).apply {
             text = "Sync Provider Data"
             setTextColor(Color.WHITE)
             isAllCaps = false
@@ -93,43 +95,94 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 lastClickTime = SystemClock.elapsedRealtime()
 
                 this.isEnabled = false
-                CoroutineScope(Dispatchers.IO).launch {
+                // lifecycleScope 적용: 다이얼로그 닫히면 안전하게 취소됨
+                viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
                     val providers = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
                     val total = providers.size
                     var current = 0
 
-                    for (provider in providers) {
-                        current++
-                        withContext(Dispatchers.Main) {
-                            this@apply.text = "Syncing... $current / $total"
-                        }
-                        try {
-                            val reqName = provider.mainPage.firstOrNull()?.name ?: "Home"
-                            val reqData = provider.mainPage.firstOrNull()?.data ?: ""
-                            val response = provider.getMainPage(1, MainPageRequest(reqName, reqData, false))
-                            if (response != null && response.items.isNotEmpty()) {
-                                val names = response.items.map { it.name }
-                                prefs.edit().putString("dynamic_catalogs_${provider.name}", names.joinToString("|||")).apply() 
+                    // 3개씩 묶어서 병렬 실행 (네트워크 및 메모리 보호 + 속도 최적화)
+                    providers.chunked(3).forEach { chunk ->
+                        chunk.map { provider ->
+                            async {
+                                try {
+                                    val reqName = provider.mainPage.firstOrNull()?.name ?: "Home"
+                                    val reqData = provider.mainPage.firstOrNull()?.data ?: ""
+                                    val response = provider.getMainPage(1, MainPageRequest(reqName, reqData, false))
+                                    if (response != null && response.items.isNotEmpty()) {
+                                        val names = response.items.map { it.name }
+                                        prefs.edit().putString("dynamic_catalogs_${provider.name}", names.joinToString("|||")).apply()
+                                    }
+                                } catch (e: Exception) {
+                                    e.printStackTrace()
+                                } finally {
+                                    withContext(Dispatchers.Main) {
+                                        current++
+                                        if (isAdded) this@apply.text = "Syncing... $current / $total"
+                                    }
+                                }
                             }
-                        } catch (e: Exception) { }
+                        }.awaitAll()
                     }
+
                     withContext(Dispatchers.Main) {
-                        this@apply.text = "✅ Sync Complete"
-                        this@apply.isEnabled = true
+                        if (isAdded) {
+                            this@apply.text = "✅ Sync Complete"
+                            this@apply.isEnabled = true
+                        }
                     }
                 }
             }
         }
         mainLayout.addView(syncAllBtn)
 
-        val countLayout = LinearLayout(pluginCtx).apply { 
+        // 중복 로직 방지를 위한 인스턴스 갯수 저장 및 재시작 헬퍼 함수
+        fun processInstanceChange(newCount: Int, oldCount: Int, shouldClose: Boolean = false) {
+            val editor = prefs.edit()
+            
+            fun findNames(v: ViewGroup) {
+                for (idx in 0 until v.childCount) {
+                    val child = v.getChildAt(idx)
+                    if (child is EditText && child.tag?.toString()?.startsWith("evo_name_") == true) {
+                        val id = child.tag.toString().removePrefix("evo_name_").toIntOrNull() ?: 0
+                        if (id <= newCount) editor.putString(child.tag.toString(), child.text.toString())
+                    } else if (child is ViewGroup) findNames(child)
+                }
+            }
+            findNames(mainLayout)
+
+            editor.putString("evo_instance_count", newCount.toString())
+
+            if (newCount < oldCount) {
+                for (i in (newCount + 1)..oldCount) {
+                    editor.remove("evo_name_$i")
+                    editor.remove("evo_visibility_enabled_$i")
+                    editor.remove("evo_search_enabled_$i")
+                    editor.remove("evo_active_cats_$i")
+                    prefs.all.keys.forEach { key ->
+                        if (key.startsWith("cat_toggle_${i}_") || key.startsWith("cat_rename_${i}_") || 
+                            key.startsWith("cat_order_${i}_") || key.startsWith("ext_toggle_${i}_")) {
+                            editor.remove(key)
+                        }
+                    }
+                }
+            }
+            editor.commit()
+            
+            dismiss()
+            if (!shouldClose) {
+                UltimaEvoSettingsDialog().show(requireActivity().supportFragmentManager, "UltimaEvoSettingsDialog")
+            }
+        }
+
+        val countLayout = LinearLayout(uiContext).apply { 
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, 0, 0, 20)
         }
-        countLayout.addView(TextView(pluginCtx).apply { text = "Instances:"; textSize = 15f; setTextColor(Color.LTGRAY); setPadding(0,0,20,0) })
+        countLayout.addView(TextView(uiContext).apply { text = "Instances:"; textSize = 15f; setTextColor(Color.LTGRAY); setPadding(0,0,20,0) })
         
-        val instanceCountInput = EditText(pluginCtx).apply {
+        val instanceCountInput = EditText(uiContext).apply {
             inputType = InputType.TYPE_CLASS_NUMBER
             imeOptions = EditorInfo.IME_ACTION_DONE
             val initCount = prefs.getString("evo_instance_count", "1")
@@ -142,7 +195,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         }
         countLayout.addView(instanceCountInput)
 
-        val addInstanceBtn = Button(pluginCtx).apply {
+        val addInstanceBtn = Button(uiContext).apply {
             text = "+"
             textSize = 20f
             setTextColor(Color.WHITE)
@@ -155,25 +208,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 lastClickTime = SystemClock.elapsedRealtime()
                 
                 val current = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
-                val newCount = current + 1
-                
-                val editor = prefs.edit()
-                fun findNames(v: ViewGroup) {
-                    for (idx in 0 until v.childCount) {
-                        val child = v.getChildAt(idx)
-                        if (child is EditText && child.tag?.toString()?.startsWith("evo_name_") == true) {
-                            editor.putString(child.tag.toString(), child.text.toString())
-                        } else if (child is ViewGroup) findNames(child)
-                    }
-                }
-                findNames(mainLayout)
-                
-                editor.putString("evo_instance_count", newCount.toString())
-                editor.commit()
-                
-                val act = activity
-                dismiss()
-                UltimaEvoSettingsDialog().show(act!!.supportFragmentManager, "UltimaEvoSettingsDialog")
+                processInstanceChange(current + 1, current)
             }
         }
         countLayout.addView(addInstanceBtn)
@@ -182,7 +217,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         instanceCountInput.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == EditorInfo.IME_ACTION_DONE || actionId == EditorInfo.IME_ACTION_NEXT) {
                 instanceCountInput.clearFocus()
-                val imm = pluginCtx.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                val imm = uiContext.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
                 imm.hideSoftInputFromWindow(instanceCountInput.windowToken, 0)
                 true
             } else false
@@ -194,60 +229,14 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 val newCount = instanceCountInput.text.toString().toIntOrNull() ?: oldCount
 
                 if (newCount < oldCount) {
-                    AlertDialog.Builder(requireContext())
+                    AlertDialog.Builder(uiContext)
                         .setTitle("Delete Instances")
                         .setMessage("Reducing instances from $oldCount to $newCount will delete the last ${oldCount - newCount} catalog(s).\nAre you sure?")
-                        .setPositiveButton("Yes") { _, _ ->
-                            val editor = prefs.edit()
-                            fun findNames(v: ViewGroup) {
-                                for (idx in 0 until v.childCount) {
-                                    val child = v.getChildAt(idx)
-                                    if (child is EditText && child.tag?.toString()?.startsWith("evo_name_") == true) {
-                                        val id = child.tag.toString().removePrefix("evo_name_").toIntOrNull() ?: 0
-                                        if (id <= newCount) editor.putString(child.tag.toString(), child.text.toString())
-                                    } else if (child is ViewGroup) findNames(child)
-                                }
-                            }
-                            findNames(mainLayout)
-
-                            editor.putString("evo_instance_count", newCount.toString())
-                            for (i in (newCount + 1)..oldCount) {
-                                editor.remove("evo_name_$i")
-                                editor.remove("evo_visibility_enabled_$i")
-                                editor.remove("evo_search_enabled_$i")
-                                editor.remove("evo_active_cats_$i")
-                                prefs.all.keys.forEach { key ->
-                                    if (key.startsWith("cat_toggle_${i}_") || key.startsWith("cat_rename_${i}_") || 
-                                        key.startsWith("cat_order_${i}_") || key.startsWith("ext_toggle_${i}_")) {
-                                        editor.remove(key)
-                                    }
-                                }
-                            }
-                            editor.commit()
-                            val act = activity
-                            dismiss()
-                            UltimaEvoSettingsDialog().show(act!!.supportFragmentManager, "UltimaEvoSettingsDialog")
-                        }
-                        .setNegativeButton("No") { _, _ ->
-                            instanceCountInput.setText(oldCount.toString())
-                        }
+                        .setPositiveButton("Yes") { _, _ -> processInstanceChange(newCount, oldCount) }
+                        .setNegativeButton("No") { _, _ -> instanceCountInput.setText(oldCount.toString()) }
                         .show()
                 } else if (newCount > oldCount) {
-                    val editor = prefs.edit()
-                    fun findNames(v: ViewGroup) {
-                        for (idx in 0 until v.childCount) {
-                            val child = v.getChildAt(idx)
-                            if (child is EditText && child.tag?.toString()?.startsWith("evo_name_") == true) {
-                                editor.putString(child.tag.toString(), child.text.toString())
-                            } else if (child is ViewGroup) findNames(child)
-                        }
-                    }
-                    findNames(mainLayout)
-                    editor.putString("evo_instance_count", newCount.toString())
-                    editor.commit()
-                    val act = activity
-                    dismiss()
-                    UltimaEvoSettingsDialog().show(act!!.supportFragmentManager, "UltimaEvoSettingsDialog")
+                    processInstanceChange(newCount, oldCount)
                 }
             }
         }
@@ -255,7 +244,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val currentCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
 
         for (i in 1..currentCount) {
-            val card = LinearLayout(pluginCtx).apply {
+            val card = LinearLayout(uiContext).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(30, 30, 30, 30)
                 layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
@@ -264,19 +253,19 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 background = getCardBg()
             }
             
-            val nameRow = LinearLayout(pluginCtx).apply {
+            val nameRow = LinearLayout(uiContext).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(0, 0, 0, 20)
             }
-            val nameLabel = TextView(pluginCtx).apply {
+            val nameLabel = TextView(uiContext).apply {
                 text = "Catalog Name:"
                 setTextColor(Color.parseColor("#CCCCCC"))
                 textSize = 14f
                 setPadding(0, 0, 20, 0)
             }
             val savedName = prefs.getString("evo_name_$i", "Ultima Evo $i")
-            val nameInput = EditText(pluginCtx).apply {
+            val nameInput = EditText(uiContext).apply {
                 hint = "Ultima Evo $i"
                 setHintTextColor(Color.GRAY)
                 setTextColor(Color.WHITE)
@@ -292,12 +281,12 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             nameRow.addView(nameInput)
             card.addView(nameRow)
 
-            val toggleRow = LinearLayout(pluginCtx).apply {
+            val toggleRow = LinearLayout(uiContext).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(0, 10, 0, 10)
             }
-            val visibilitySwitch = Switch(pluginCtx).apply {
+            val visibilitySwitch = Switch(uiContext).apply {
                 text = "Show Catalog"
                 setTextColor(Color.WHITE)
                 textSize = 14f
@@ -307,7 +296,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     prefs.edit().putBoolean("evo_visibility_enabled_$i", isChecked).commit() 
                 }
             }
-            val searchSwitch = Switch(pluginCtx).apply {
+            val searchSwitch = Switch(uiContext).apply {
                 text = "Enable Search"
                 setTextColor(Color.WHITE)
                 textSize = 14f
@@ -323,12 +312,12 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             toggleRow.addView(searchSwitch)
             card.addView(toggleRow)
 
-            val actionBtnRow = LinearLayout(pluginCtx).apply {
+            val actionBtnRow = LinearLayout(uiContext).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
             }
             
-            val configBtn = Button(pluginCtx).apply {
+            val configBtn = Button(uiContext).apply {
                 text = "Configure Providers"
                 setTextColor(Color.WHITE)
                 isAllCaps = false
@@ -339,11 +328,11 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 setOnClickListener {
                     if (SystemClock.elapsedRealtime() - lastClickTime < 1000) return@setOnClickListener
                     lastClickTime = SystemClock.elapsedRealtime()
-                    showEditCatalogsDialog(i, pluginCtx) 
+                    showEditCatalogsDialog(i, uiContext) 
                 }
             }
 
-            val deleteBtn = Button(pluginCtx).apply {
+            val deleteBtn = Button(uiContext).apply {
                 text = "Delete"
                 setTextColor(Color.parseColor("#FF5555"))
                 isAllCaps = false
@@ -353,13 +342,14 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     if (SystemClock.elapsedRealtime() - lastClickTime < 1000) return@setOnClickListener
                     lastClickTime = SystemClock.elapsedRealtime()
                     
-                    AlertDialog.Builder(requireContext())
+                    AlertDialog.Builder(uiContext)
                         .setTitle("Delete Catalog")
                         .setMessage("Are you sure you want to delete this catalog?")
                         .setPositiveButton("Yes") { _, _ ->
                             val editor = prefs.edit()
                             val latestCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
                             
+                            // 중간 인스턴스 삭제 시 데이터를 앞으로 당기는 로직
                             for (j in i until latestCount) {
                                 val curr = j
                                 val next = j + 1
@@ -382,6 +372,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                                 }
                             }
                             
+                            // 마지막 꼬리 데이터 지우기
                             editor.remove("evo_name_$latestCount")
                             editor.remove("evo_visibility_enabled_$latestCount")
                             editor.remove("evo_search_enabled_$latestCount")
@@ -397,9 +388,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                             editor.putString("evo_instance_count", newCount.toString())
                             editor.commit()
                             
-                            val act = activity
                             dismiss()
-                            UltimaEvoSettingsDialog().show(act!!.supportFragmentManager, "UltimaEvoSettingsDialog")
+                            UltimaEvoSettingsDialog().show(requireActivity().supportFragmentManager, "UltimaEvoSettingsDialog")
                         }
                         .setNegativeButton("No", null)
                         .show()
@@ -413,7 +403,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             mainLayout.addView(card)
         }
 
-        val saveBtn = Button(pluginCtx).apply {
+        val saveBtn = Button(uiContext).apply {
             text = "Save & Close"
             setTextColor(Color.WHITE)
             isAllCaps = false
@@ -425,65 +415,19 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 if (SystemClock.elapsedRealtime() - lastClickTime < 1000) return@setOnClickListener
                 lastClickTime = SystemClock.elapsedRealtime()
 
-                // [핵심 픽스] 저장 버튼 안쪽에서도 숫자가 줄었는지 먼저 체크
                 val oldCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
                 val newCount = instanceCountInput.text.toString().toIntOrNull() ?: oldCount
 
                 if (newCount < oldCount) {
-                    AlertDialog.Builder(requireContext())
+                    AlertDialog.Builder(uiContext)
                         .setTitle("Delete Instances")
                         .setMessage("Reducing instances from $oldCount to $newCount will delete the last ${oldCount - newCount} catalog(s).\nAre you sure?")
-                        .setPositiveButton("Yes") { _, _ ->
-                            val editor = prefs.edit()
-                            fun findNames(v: ViewGroup) {
-                                for (idx in 0 until v.childCount) {
-                                    val child = v.getChildAt(idx)
-                                    if (child is EditText && child.tag?.toString()?.startsWith("evo_name_") == true) {
-                                        val id = child.tag.toString().removePrefix("evo_name_").toIntOrNull() ?: 0
-                                        if (id <= newCount) editor.putString(child.tag.toString(), child.text.toString())
-                                    } else if (child is ViewGroup) findNames(child)
-                                }
-                            }
-                            findNames(mainLayout)
-
-                            editor.putString("evo_instance_count", newCount.toString())
-                            for (i in (newCount + 1)..oldCount) {
-                                editor.remove("evo_name_$i")
-                                editor.remove("evo_visibility_enabled_$i")
-                                editor.remove("evo_search_enabled_$i")
-                                editor.remove("evo_active_cats_$i")
-                                prefs.all.keys.forEach { key ->
-                                    if (key.startsWith("cat_toggle_${i}_") || key.startsWith("cat_rename_${i}_") || 
-                                        key.startsWith("cat_order_${i}_") || key.startsWith("ext_toggle_${i}_")) {
-                                        editor.remove(key)
-                                    }
-                                }
-                            }
-                            editor.commit()
-                            dismiss()
-                        }
-                        .setNegativeButton("No") { _, _ ->
-                            instanceCountInput.setText(oldCount.toString())
-                        }
+                        .setPositiveButton("Yes") { _, _ -> processInstanceChange(newCount, oldCount, true) }
+                        .setNegativeButton("No") { _, _ -> instanceCountInput.setText(oldCount.toString()) }
                         .show()
-                    return@setOnClickListener
+                } else {
+                    processInstanceChange(newCount, oldCount, true)
                 }
-
-                // 숫자가 그대로거나 늘어났을 때는 정상 저장 후 닫기
-                val editor = prefs.edit()
-                editor.putString("evo_instance_count", newCount.toString())
-                
-                fun findNames(v: ViewGroup) {
-                    for (idx in 0 until v.childCount) {
-                        val child = v.getChildAt(idx)
-                        if (child is EditText && child.tag?.toString()?.startsWith("evo_name_") == true) {
-                            editor.putString(child.tag.toString(), child.text.toString())
-                        } else if (child is ViewGroup) findNames(child)
-                    }
-                }
-                findNames(mainLayout)
-                editor.commit()
-                dismiss()
             }
         }
         mainLayout.addView(saveBtn)
