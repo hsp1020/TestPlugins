@@ -1,4 +1,4 @@
-// v1.46
+// v1.47
 package com.ultimaevo
 
 import android.app.AlertDialog
@@ -704,7 +704,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             val editor = prefs.edit()
             val activeCatalogs = mutableListOf<String>()
 
-            println("[UltimaEvo-Debug] [Popup] 설정 저장 시도. 체크된 항목들을 구워냅니다.")
             for ((index, row) in activeRows.withIndex()) {
                 val finalOrder = index + 1
                 val tKey = "cat_toggle_${instanceId}_${row.providerName}_${row.catalogName}"
@@ -723,15 +722,13 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     val origProvider = APIHolder.allProviders.find { it.name == row.providerName }
                     val origData = origProvider?.mainPage?.find { it.name == row.catalogName }?.data ?: ""
                     
-                    println("[UltimaEvo-Debug] [Popup] 활성화 카탈로그 데이터 수집 -> Provider: ${row.providerName}, Catalog: ${row.catalogName}, OrigData: '$origData'")
-                    val safeConfigStr = "${row.providerName}|~|${row.catalogName}|~|${customName}|~|${finalOrder}|~|${origData}"
+                    // [핵심 픽스] 충돌하지 않는 안전한 구분자(;;;, %%%)를 사용해 구워냅니다.
+                    val safeConfigStr = "${row.providerName};;;${row.catalogName};;;${customName};;;${finalOrder};;;${origData}"
                     activeCatalogs.add(safeConfigStr)
                 }
             }
             
-            val joinedStr = activeCatalogs.joinToString("|||")
-            println("[UltimaEvo-Debug] [Popup] 디스크에 기록될 최종 문자열: $joinedStr")
-            editor.putString("evo_active_cats_$instanceId", joinedStr)
+            editor.putString("evo_active_cats_$instanceId", activeCatalogs.joinToString("%%%"))
             editor.commit()
             dialog.dismiss()
         }
