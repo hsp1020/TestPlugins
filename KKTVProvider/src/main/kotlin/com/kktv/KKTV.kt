@@ -1,4 +1,4 @@
-// v14.5 - Ghost WebView 완벽 제거 (오디오 겹침 및 백그라운드 재생 버그 해결)
+// v14.6 - Ghost WebView 완벽 제거 (오디오 겹침 및 백그라운드 재생 버그 해결) & 종목별 커스텀 썸네일 아이콘 적용
 package com.KingkongTv
 
 import android.content.Context
@@ -96,8 +96,40 @@ class KingkongTv : MainAPI() {
         if (title.isNullOrBlank() || streamId.isNullOrBlank()) return null
         if (this.selectFirst("td.subject")?.hasClass("bold") == true) title = "🔥 $title"
 
-        val thumbUrl = if (thumbUrlRaw != null) {
-            val fixed = fixUrl(refererUrl, thumbUrlRaw)
+        // [v14.6 추가] 종목별 커스텀 썸네일 아이콘 매핑 로직
+        val sportCategories = listOf("soccer", "baseball", "basketball", "volleyball", "hockey", "tennis", "lol", "football", "mma", "tv")
+        var customCategoryIcon: String? = null
+        
+        // 1. onclick 속성에서 카테고리명(첫 번째 인자) 추출 시도
+        if (onClickAttr != null) {
+            val cateMatch = Regex("""load_video\('([^']+)'""").find(onClickAttr)
+            if (cateMatch != null) {
+                val category = cateMatch.groupValues[1].lowercase()
+                if (sportCategories.contains(category)) {
+                    customCategoryIcon = "/TV/kktv/img/${category}_icon.png"
+                    println("DEBUG [KKTV v14.6] onclick 1번째 인자에서 카테고리 추출 성공: ${category}")
+                }
+            }
+        }
+        
+        // 2. 기존 thumbUrlRaw 문자열에서 종목 키워드 유추 (대비책)
+        if (customCategoryIcon == null && thumbUrlRaw != null) {
+            val lowerThumb = thumbUrlRaw!!.lowercase()
+            for (sport in sportCategories) {
+                if (lowerThumb.contains(sport)) {
+                    customCategoryIcon = "/TV/kktv/img/${sport}_icon.png"
+                    println("DEBUG [KKTV v14.6] 기존 썸네일 URL에서 카테고리 추출 성공: ${sport}")
+                    break
+                }
+            }
+        }
+        
+        // 사용자가 요청한 커스텀 아이콘 경로가 식별되었다면 최우선으로 교체 (기존 로직 제거 방지 원칙 준수)
+        val finalThumbUrlRaw = customCategoryIcon ?: thumbUrlRaw
+        println("DEBUG [KKTV v14.6] 최종 썸네일 적용 전 Raw Data: $finalThumbUrlRaw")
+
+        val thumbUrl = if (finalThumbUrlRaw != null) {
+            val fixed = fixUrl(refererUrl, finalThumbUrlRaw)
             "$fixed${if (fixed.contains("?")) "&" else "?"}t=${System.currentTimeMillis()}"
         } else ""
 
@@ -140,7 +172,7 @@ class KingkongTv : MainAPI() {
         val parentReferer = URLDecoder.decode(parts[3], "UTF-8")
         
         val playerIframeUrl = "https://wdbroad.com/broadcast/$streamId/kktv"
-        println("DEBUG [KKTV v14.5] 웹뷰 스니핑 시작 - 대상 URL: $playerIframeUrl")
+        println("DEBUG [KKTV v14.6] 웹뷰 스니핑 시작 - 대상 URL: $playerIframeUrl")
 
         val hookResult = suspendCancellableCoroutine<Pair<String, Map<String, String>>?> { cont ->
             val handler = Handler(Looper.getMainLooper())
@@ -156,14 +188,14 @@ class KingkongTv : MainAPI() {
                         webView?.removeAllViews()
                         webView?.destroy()
                         webView = null
-                        println("DEBUG [KKTV v14.5] 웹뷰 메모리 클린업 완료 (오디오 겹침 방지)")
+                        println("DEBUG [KKTV v14.6] 웹뷰 메모리 클린업 완료 (오디오 겹침 방지)")
                     } catch (e: Exception) {}
                 }
             }
 
             val timeout = Runnable {
                 if (cont.isActive) {
-                    println("DEBUG[KKTV v14.5] 15초 타임아웃 발생 - m3u8 포착 실패")
+                    println("DEBUG [KKTV v14.6] 15초 타임아웃 발생 - m3u8 포착 실패")
                     cont.resume(null)
                 }
                 cleanup.run()
@@ -197,7 +229,7 @@ class KingkongTv : MainAPI() {
                             
                             if (!isFound && (reqUrl.contains("wdbroadcast.com") || reqUrl.contains(".m3u8") || reqUrl.contains("chunklist"))) {
                                 isFound = true
-                                println("DEBUG[KKTV v14.5] 🎯 M3U8 포착: $reqUrl")
+                                println("DEBUG [KKTV v14.6] 🎯 M3U8 포착: $reqUrl")
                                 handler.removeCallbacks(timeout)
                                 
                                 if (cont.isActive) {
