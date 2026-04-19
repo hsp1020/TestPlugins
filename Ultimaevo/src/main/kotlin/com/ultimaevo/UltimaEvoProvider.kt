@@ -9,6 +9,9 @@ import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.TvType
 import com.lagradost.cloudstream3.newHomePageResponse
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 
 class UltimaEvoProvider(private val instanceId: Int, private val customName: String) : MainAPI() {
     override var mainUrl = "ultima_evo_$instanceId"
@@ -68,6 +71,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
             val modifiedItems = filteredItems.map { it.copy(name = customCatalogTitle) }
             return newHomePageResponse(modifiedItems, response.hasNext)
         } catch (e: Exception) {
+            e.printStackTrace()
             return newHomePageResponse(emptyList(), false)
         }
     }
@@ -87,17 +91,22 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
             if (parts.isNotEmpty()) parts[0] else null
         }.distinct()
         
-        val results = mutableListOf<SearchResponse>()
-
-        for (providerName in providersToSearch) {
-            val provider = APIHolder.allProviders.find { it.name == providerName } ?: continue
-            try {
-                val searchRes = provider.search(query)
-                if (searchRes != null) {
-                    results.addAll(searchRes)
+        // 코루틴을 활용한 완벽한 병렬 검색 (Concurrent Search)
+        return coroutineScope {
+            providersToSearch.map { providerName ->
+                async {
+                    try {
+                        val provider = APIHolder.allProviders.find { it.name == providerName }
+                        provider?.search(query)
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        null
+                    }
                 }
-            } catch (e: Exception) { }
+            }.awaitAll() // 모든 비동기 검색 결과 대기
+             .filterNotNull()
+             .flatten()
+             .distinctBy { it.url }
         }
-        return results.distinctBy { it.url }
     }
 }
