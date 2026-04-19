@@ -1,4 +1,4 @@
-// v1.42
+// v1.43
 package com.ultimaevo
 
 import android.app.AlertDialog
@@ -122,7 +122,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         }
         mainLayout.addView(syncAllBtn)
 
-        // 인스턴스 조작 레이아웃
         val countLayout = LinearLayout(pluginCtx).apply { 
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -132,7 +131,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         
         val instanceCountInput = EditText(pluginCtx).apply {
             inputType = InputType.TYPE_CLASS_NUMBER
-            imeOptions = EditorInfo.IME_ACTION_DONE // 엔터 키 처리
+            imeOptions = EditorInfo.IME_ACTION_DONE
             val initCount = prefs.getString("evo_instance_count", "1")
             setText(initCount)
             setTextColor(Color.WHITE)
@@ -143,7 +142,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         }
         countLayout.addView(instanceCountInput)
 
-        // [신규] 퀵 추가 (+) 버튼 
         val addInstanceBtn = Button(pluginCtx).apply {
             text = "+"
             textSize = 20f
@@ -181,7 +179,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         countLayout.addView(addInstanceBtn)
         mainLayout.addView(countLayout)
 
-        // [신규] 텍스트 박스 입력/수정 완료 이벤트 처리 (삭제 확인 팝업 연동)
         instanceCountInput.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == EditorInfo.IME_ACTION_DONE || actionId == EditorInfo.IME_ACTION_NEXT) {
                 instanceCountInput.clearFocus()
@@ -428,8 +425,53 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 if (SystemClock.elapsedRealtime() - lastClickTime < 1000) return@setOnClickListener
                 lastClickTime = SystemClock.elapsedRealtime()
 
+                // [핵심 픽스] 저장 버튼 안쪽에서도 숫자가 줄었는지 먼저 체크
+                val oldCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
+                val newCount = instanceCountInput.text.toString().toIntOrNull() ?: oldCount
+
+                if (newCount < oldCount) {
+                    AlertDialog.Builder(requireContext())
+                        .setTitle("Delete Instances")
+                        .setMessage("Reducing instances from $oldCount to $newCount will delete the last ${oldCount - newCount} catalog(s).\nAre you sure?")
+                        .setPositiveButton("Yes") { _, _ ->
+                            val editor = prefs.edit()
+                            fun findNames(v: ViewGroup) {
+                                for (idx in 0 until v.childCount) {
+                                    val child = v.getChildAt(idx)
+                                    if (child is EditText && child.tag?.toString()?.startsWith("evo_name_") == true) {
+                                        val id = child.tag.toString().removePrefix("evo_name_").toIntOrNull() ?: 0
+                                        if (id <= newCount) editor.putString(child.tag.toString(), child.text.toString())
+                                    } else if (child is ViewGroup) findNames(child)
+                                }
+                            }
+                            findNames(mainLayout)
+
+                            editor.putString("evo_instance_count", newCount.toString())
+                            for (i in (newCount + 1)..oldCount) {
+                                editor.remove("evo_name_$i")
+                                editor.remove("evo_visibility_enabled_$i")
+                                editor.remove("evo_search_enabled_$i")
+                                editor.remove("evo_active_cats_$i")
+                                prefs.all.keys.forEach { key ->
+                                    if (key.startsWith("cat_toggle_${i}_") || key.startsWith("cat_rename_${i}_") || 
+                                        key.startsWith("cat_order_${i}_") || key.startsWith("ext_toggle_${i}_")) {
+                                        editor.remove(key)
+                                    }
+                                }
+                            }
+                            editor.commit()
+                            dismiss()
+                        }
+                        .setNegativeButton("No") { _, _ ->
+                            instanceCountInput.setText(oldCount.toString())
+                        }
+                        .show()
+                    return@setOnClickListener
+                }
+
+                // 숫자가 그대로거나 늘어났을 때는 정상 저장 후 닫기
                 val editor = prefs.edit()
-                editor.putString("evo_instance_count", instanceCountInput.text.toString())
+                editor.putString("evo_instance_count", newCount.toString())
                 
                 fun findNames(v: ViewGroup) {
                     for (idx in 0 until v.childCount) {
