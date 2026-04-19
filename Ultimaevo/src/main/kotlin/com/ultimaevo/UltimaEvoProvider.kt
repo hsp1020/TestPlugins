@@ -1,9 +1,10 @@
-// v1.46
+// v1.47
 package com.ultimaevo
 
 import android.content.Context
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.HomePageResponse
+import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.MainPageData
 import com.lagradost.cloudstream3.MainPageRequest
@@ -20,14 +21,11 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
     override var name = customName
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.Live)
 
-    // [핵심 픽스] 고정값(true)이었던 hasMainPage를 실시간 토글 값으로 연동(Dynamic Getter)
     override val hasMainPage: Boolean
         get() {
             val context = UltimaEvoPlugin.pluginContext ?: return true
             val prefs = context.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
-            val isVisible = prefs.getBoolean("evo_visibility_enabled_$instanceId", true)
-            println("[UltimaEvo-Debug] [Provider-$instanceId] hasMainPage 호출됨. 표시 여부: $isVisible")
-            return isVisible
+            return prefs.getBoolean("evo_visibility_enabled_$instanceId", true)
         }
 
     init {
@@ -36,54 +34,42 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
 
     override val mainPage: List<MainPageData>
         get() {
-            println("[UltimaEvo-Debug] [Provider-$instanceId] mainPage(홈 탭 렌더링) 접근됨")
             val context = UltimaEvoPlugin.pluginContext ?: return emptyList()
             val prefs = context.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
             
             val isVisible = prefs.getBoolean("evo_visibility_enabled_$instanceId", true)
-            if (!isVisible) {
-                println("[UltimaEvo-Debug] [Provider-$instanceId] 인스턴스 표시(Show Catalog)가 OFF 상태입니다. 홈에 그리지 않습니다.")
-                return emptyList()
-            }
+            if (!isVisible) return emptyList()
 
             val activeCatsStr = prefs.getString("evo_active_cats_$instanceId", "") ?: ""
-            println("[UltimaEvo-Debug] [Provider-$instanceId] 저장소에서 읽어온 카탈로그 Raw Text: $activeCatsStr")
-            if (activeCatsStr.isBlank()) {
-                println("[UltimaEvo-Debug] [Provider-$instanceId] 활성화된 카탈로그가 없습니다.")
-                return emptyList()
-            }
+            if (activeCatsStr.isBlank()) return emptyList()
 
-            val rawList = activeCatsStr.split("|||")
-            println("[UltimaEvo-Debug] [Provider-$instanceId] 파싱할 카탈로그 청크 총 개수: ${rawList.size}")
+            // [핵심 픽스] 충돌하지 않는 안전한 구분자로 데이터 추출 (구버전 호환성 포함)
+            val chunkSeparator = if (activeCatsStr.contains("%%%")) "%%%" else "|||"
+            val fieldSeparator = if (activeCatsStr.contains("%%%")) ";;;" else "|~|"
 
+            val rawList = activeCatsStr.split(chunkSeparator)
             val pages = rawList.mapNotNull { chunk ->
-                // [핵심 픽스] limit = 5 옵션을 부여하여 마지막 항목(Data)이 비어있어도 무시하고 살려냅니다.
-                val parts = chunk.split("|~|", limit = 5)
-                println("[UltimaEvo-Debug] [Provider-$instanceId] 데이터 파싱 중... 쪼개진 파트 개수: ${parts.size}, 원본 텍스트: $chunk")
+                val parts = chunk.split(fieldSeparator, limit = 5)
                 
                 if (parts.size >= 5) {
                     val pName = parts[0]
                     val cName = parts[1]
                     val customCatalogName = parts[2]
                     val orderIndex = parts[3].toIntOrNull() ?: 99
-                    val originalData = parts[4] // 여기가 빈칸("")일 경우 기존에는 크래시가 났음
+                    val originalData = parts[4]
                     
                     val combinedData = "$pName|||$originalData|||$customCatalogName|||$cName"
-                    println("[UltimaEvo-Debug] [Provider-$instanceId] ✔ 매핑 성공 -> 순서: $orderIndex | 이름: $customCatalogName | Provider: $pName | URL/Data: '$originalData'")
                     Pair(MainPageData(customCatalogName, combinedData), orderIndex)
                 } else {
-                    println("[UltimaEvo-Debug] [Provider-$instanceId] ❌ 매핑 실패! (파트 개수 부족: ${parts.size} < 5) -> $chunk")
+                    println("[UltimaEvo-Debug] [Provider-$instanceId] ❌ 매핑 실패! (파트 개수 부족: ${parts.size}) -> $chunk")
                     null
                 }
             }
             
-            val sortedPages = pages.sortedBy { it.second }.map { it.first }
-            println("[UltimaEvo-Debug] [Provider-$instanceId] mainPage 반환 완료. 렌더링될 탭 개수: ${sortedPages.size}")
-            return sortedPages
+            return pages.sortedBy { it.second }.map { it.first }
         }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
-        println("[UltimaEvo-Debug] [Provider-$instanceId] getMainPage() 통신 요청됨 - Page: $page, Name: ${request.name}")
         try {
             val parts = request.data.split("|||")
             if (parts.size < 3) return newHomePageResponse(emptyList(), false)
@@ -111,8 +97,36 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
         }
     }
 
+    // [핵심 픽스] NotImplementedError 크래시 방지를 위한 미리보기(load) 우회 라우터
+    override suspend fun load(url: String): LoadResponse? {
+        println("[UltimaEvo-Debug] [Provider-$instanceId] load() 우회 라우팅 요청됨: $url")
+        val allProviders = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
+        
+        // 1순위: URL이 정확히 일치하는 프로바이더 탐색
+        val exactProvider = allProviders.find { url.startsWith(it.mainUrl) }
+        if (exactProvider != null) {
+            try {
+                val res = exactProvider.load(url)
+                if (res != null) return res
+            } catch (e: Exception) { }
+        }
+        
+        // 2순위: 도메인이 포함된 프로바이더 탐색 (정확도 높음)
+        val domainMatchProviders = allProviders.filter { p -> 
+            val domain = p.mainUrl.replace("https://", "").replace("http://", "").substringBefore("/")
+            domain.isNotBlank() && url.contains(domain) 
+        }
+        for (p in domainMatchProviders) {
+            if (p == exactProvider) continue
+            try {
+                val res = p.load(url)
+                if (res != null) return res
+            } catch (e: Exception) { }
+        }
+        return null
+    }
+
     override suspend fun search(query: String): List<SearchResponse> {
-        println("[UltimaEvo-Debug] [Provider-$instanceId] 병렬 검색 요청됨: $query")
         val context = UltimaEvoPlugin.pluginContext ?: return emptyList()
         val prefs = context.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
         
@@ -122,16 +136,17 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
         val activeCatsStr = prefs.getString("evo_active_cats_$instanceId", "") ?: ""
         if (activeCatsStr.isBlank()) return emptyList()
 
-        val providersToSearch = activeCatsStr.split("|||").mapNotNull { chunk ->
-            // 여기도 limit = 5 추가 적용
-            val parts = chunk.split("|~|", limit = 5)
+        val chunkSeparator = if (activeCatsStr.contains("%%%")) "%%%" else "|||"
+        val fieldSeparator = if (activeCatsStr.contains("%%%")) ";;;" else "|~|"
+
+        val providersToSearch = activeCatsStr.split(chunkSeparator).mapNotNull { chunk ->
+            val parts = chunk.split(fieldSeparator, limit = 5)
             if (parts.isNotEmpty()) parts[0] else null
         }.distinct()
 
         return coroutineScope {
             val deferredResults = providersToSearch.mapNotNull { providerName ->
                 val provider = APIHolder.allProviders.find { it.name == providerName } ?: return@mapNotNull null
-                
                 async<List<SearchResponse>>(Dispatchers.IO) {
                     try {
                         val res = provider.search(query)
@@ -144,7 +159,6 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
             
             val results: List<SearchResponse> = deferredResults.awaitAll().flatten()
             val finalRes: List<SearchResponse> = results.distinctBy { it.url }
-            println("[UltimaEvo-Debug] [Provider-$instanceId] 병렬 검색 완료. 결과: ${finalRes.size}개")
             finalRes
         }
     }
