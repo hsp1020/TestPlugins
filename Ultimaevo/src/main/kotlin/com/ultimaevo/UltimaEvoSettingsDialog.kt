@@ -1,4 +1,4 @@
-// v1.48
+// v1.49
 package com.ultimaevo
 
 import android.app.AlertDialog
@@ -23,7 +23,11 @@ import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.MainPageRequest
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 
 class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
@@ -59,7 +63,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
     }
 
     private fun saveCurrentNamesToPrefs(editor: SharedPreferences.Editor, rootLayout: ViewGroup) {
-        println("[UltimaEvo-Debug] [Dialog] saveCurrentNamesToPrefs 실행됨")
         fun findAndSave(v: ViewGroup) {
             for (idx in 0 until v.childCount) {
                 val child = v.getChildAt(idx)
@@ -72,7 +75,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
     }
 
     private fun shiftAndDeleteInstance(prefs: SharedPreferences, startIndex: Int, latestCount: Int) {
-        println("[UltimaEvo-Debug] [Dialog] shiftAndDeleteInstance 실행됨 - 삭제 시작 인덱스: $startIndex, 현재 개수: $latestCount")
+        println("[UltimaEvo-Debug] [Dialog] 인스턴스 당겨오기 시작 (Index: $startIndex)")
         val editor = prefs.edit()
         for (j in startIndex until latestCount) {
             val curr = j
@@ -153,23 +156,41 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     val providers = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
                     val total = providers.size
                     var current = 0
+                    
+                    // [핵심 픽스] IP 밴 및 OOM 방지를 위한 세마포어(최대 3개 동시 병렬 통신)
+                    val semaphore = Semaphore(3)
 
-                    for (provider in providers) {
-                        current++
-                        withContext(Dispatchers.Main) {
-                            this@apply.text = "Syncing... $current / $total"
-                        }
-                        try {
-                            val reqName = provider.mainPage.firstOrNull()?.name ?: "Home"
-                            val reqData = provider.mainPage.firstOrNull()?.data ?: ""
-                            val response = provider.getMainPage(1, MainPageRequest(reqName, reqData, false))
-                            if (response != null && response.items.isNotEmpty()) {
-                                val names = response.items.map { it.name }
-                                prefs.edit().putString("dynamic_catalogs_${provider.name}", names.joinToString("|||")).apply() 
+                    println("[UltimaEvo-Debug] [Dialog] 동기화 작업을 병렬로 생성합니다. (최대 3개 제한)")
+                    val syncJobs = providers.map { provider ->
+                        async {
+                            semaphore.withPermit {
+                                try {
+                                    val reqName = provider.mainPage.firstOrNull()?.name ?: "Home"
+                                    val reqData = provider.mainPage.firstOrNull()?.data ?: ""
+                                    println("[UltimaEvo-Debug] [Dialog] -> 통신 진입: ${provider.name}")
+                                    val response = provider.getMainPage(1, MainPageRequest(reqName, reqData, false))
+                                    if (response != null && response.items.isNotEmpty()) {
+                                        val names = response.items.map { it.name }
+                                        prefs.edit().putString("dynamic_catalogs_${provider.name}", names.joinToString("|||")).apply() 
+                                        println("[UltimaEvo-Debug] [Dialog] -> 파싱 완료: ${provider.name}")
+                                    }
+                                } catch (e: Exception) { 
+                                    println("[UltimaEvo-Debug] [Dialog] -> 통신 실패 (${provider.name}): ${e.message}")
+                                }
+                                
+                                // UI 스레드에서 진행률 안전 업데이트
+                                withContext(Dispatchers.Main) {
+                                    current++
+                                    this@apply.text = "Syncing... $current / $total"
+                                }
                             }
-                        } catch (e: Exception) { }
+                        }
                     }
+                    
+                    syncJobs.awaitAll() // 모든 통신이 끝날 때까지 비동기 대기
+                    
                     withContext(Dispatchers.Main) {
+                        println("[UltimaEvo-Debug] [Dialog] 모든 동기화 통신 종료")
                         this@apply.text = "✅ Sync Complete"
                         this@apply.isEnabled = true
                     }
@@ -241,10 +262,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 val newCount = instanceCountInput.text.toString().toIntOrNull() ?: oldCount
 
                 if (newCount < oldCount) {
-                    println("[UltimaEvo-Debug] [Dialog] 텍스트 박스로 인스턴스 축소 시도됨: $oldCount -> $newCount")
                     AlertDialog.Builder(requireContext())
                         .setTitle("Delete Instances")
-                        // [수정] 재시작 안내 문구 추가
                         .setMessage("Reducing instances from $oldCount to $newCount will delete the last ${oldCount - newCount} catalog(s).\nAre you sure?\n\nPlease restart the app for the changes to take effect.")
                         .setPositiveButton("Yes") { _, _ ->
                             val editor = prefs.edit()
@@ -386,7 +405,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     
                     AlertDialog.Builder(requireContext())
                         .setTitle("Delete Catalog")
-                        // [수정] 재시작 안내 문구 추가
                         .setMessage("Are you sure you want to delete this catalog?\n\nPlease restart the app for the changes to take effect.")
                         .setPositiveButton("Yes") { _, _ ->
                             val latestCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
@@ -420,15 +438,12 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 if (SystemClock.elapsedRealtime() - lastClickTime < 1000) return@setOnClickListener
                 lastClickTime = SystemClock.elapsedRealtime()
 
-                // 포커스가 아직 텍스트박스에 머물러 있을 때의 삭제 인터셉트 로직
                 val oldCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
                 val newCount = instanceCountInput.text.toString().toIntOrNull() ?: oldCount
 
                 if (newCount < oldCount) {
-                    println("[UltimaEvo-Debug] [Dialog] Save & Close 인터셉트 됨: 인스턴스 수 축소 감지 ($oldCount -> $newCount)")
                     AlertDialog.Builder(requireContext())
                         .setTitle("Delete Instances")
-                        // [수정] 재시작 안내 문구 추가
                         .setMessage("Reducing instances from $oldCount to $newCount will delete the last ${oldCount - newCount} catalog(s).\nAre you sure?\n\nPlease restart the app for the changes to take effect.")
                         .setPositiveButton("Yes") { _, _ ->
                             val editor = prefs.edit()
@@ -456,8 +471,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     return@setOnClickListener
                 }
 
-                // [신규] 일반 저장 시 재시작 안내 팝업 출력
-                println("[UltimaEvo-Debug] [Dialog] 일반 저장 완료 전 재시작 안내 팝업 호출")
+                println("[UltimaEvo-Debug] [Dialog] 저장 완료 후 앱 재시작 안내 팝업 호출")
                 AlertDialog.Builder(requireContext())
                     .setTitle("Restart Required")
                     .setMessage("Please restart the app for the changes to take effect.")
