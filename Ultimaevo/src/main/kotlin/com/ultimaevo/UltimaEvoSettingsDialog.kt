@@ -1,4 +1,4 @@
-// v1.49
+// v1.50
 package com.ultimaevo
 
 import android.app.AlertDialog
@@ -22,6 +22,7 @@ import androidx.lifecycle.lifecycleScope
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.MainPageRequest
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -111,7 +112,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         
         val newCount = if (latestCount > 0) latestCount - 1 else 0
         editor.putString("evo_instance_count", newCount.toString())
-        editor.commit()
+        editor.apply() // 최적화: UI 스레드 블로킹 방지
     }
 
     override fun onCreateView(
@@ -157,7 +158,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     val total = providers.size
                     var current = 0
                     
-                    // [핵심 픽스] IP 밴 및 OOM 방지를 위한 세마포어(최대 3개 동시 병렬 통신)
                     val semaphore = Semaphore(3)
 
                     println("[UltimaEvo-Debug] [Dialog] 동기화 작업을 병렬로 생성합니다. (최대 3개 제한)")
@@ -167,32 +167,32 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                                 try {
                                     val reqName = provider.mainPage.firstOrNull()?.name ?: "Home"
                                     val reqData = provider.mainPage.firstOrNull()?.data ?: ""
-                                    println("[UltimaEvo-Debug] [Dialog] -> 통신 진입: ${provider.name}")
                                     val response = provider.getMainPage(1, MainPageRequest(reqName, reqData, false))
                                     if (response != null && response.items.isNotEmpty()) {
                                         val names = response.items.map { it.name }
                                         prefs.edit().putString("dynamic_catalogs_${provider.name}", names.joinToString("|||")).apply() 
-                                        println("[UltimaEvo-Debug] [Dialog] -> 파싱 완료: ${provider.name}")
                                     }
                                 } catch (e: Exception) { 
+                                    if (e is CancellationException) throw e // 최적화: 코루틴 캔슬 무시 방지
                                     println("[UltimaEvo-Debug] [Dialog] -> 통신 실패 (${provider.name}): ${e.message}")
                                 }
                                 
-                                // UI 스레드에서 진행률 안전 업데이트
                                 withContext(Dispatchers.Main) {
                                     current++
-                                    this@apply.text = "Syncing... $current / $total"
+                                    if (isAdded) this@apply.text = "Syncing... $current / $total"
                                 }
                             }
                         }
                     }
                     
-                    syncJobs.awaitAll() // 모든 통신이 끝날 때까지 비동기 대기
+                    syncJobs.awaitAll()
                     
                     withContext(Dispatchers.Main) {
                         println("[UltimaEvo-Debug] [Dialog] 모든 동기화 통신 종료")
-                        this@apply.text = "✅ Sync Complete"
-                        this@apply.isEnabled = true
+                        if (isAdded) {
+                            this@apply.text = "✅ Sync Complete"
+                            this@apply.isEnabled = true
+                        }
                     }
                 }
             }
@@ -237,7 +237,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 val editor = prefs.edit()
                 saveCurrentNamesToPrefs(editor, mainLayout)
                 editor.putString("evo_instance_count", newCount.toString())
-                editor.commit()
+                editor.apply() // 최적화
                 
                 val act = activity
                 dismiss()
@@ -281,7 +281,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                                     }
                                 }
                             }
-                            editor.commit()
+                            editor.apply() // 최적화
                             val act = activity
                             dismiss()
                             UltimaEvoSettingsDialog().show(act!!.supportFragmentManager, "UltimaEvoSettingsDialog")
@@ -294,7 +294,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     val editor = prefs.edit()
                     saveCurrentNamesToPrefs(editor, mainLayout)
                     editor.putString("evo_instance_count", newCount.toString())
-                    editor.commit()
+                    editor.apply() // 최적화
                     val act = activity
                     dismiss()
                     UltimaEvoSettingsDialog().show(act!!.supportFragmentManager, "UltimaEvoSettingsDialog")
@@ -354,7 +354,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 isChecked = prefs.getBoolean("evo_visibility_enabled_$i", true)
                 layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
                 setOnCheckedChangeListener { _, isChecked -> 
-                    prefs.edit().putBoolean("evo_visibility_enabled_$i", isChecked).commit() 
+                    prefs.edit().putBoolean("evo_visibility_enabled_$i", isChecked).apply() // 최적화
                 }
             }
             val searchSwitch = Switch(ctx).apply {
@@ -366,7 +366,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 params.setMargins(50, 0, 0, 0) 
                 layoutParams = params
                 setOnCheckedChangeListener { _, isChecked -> 
-                    prefs.edit().putBoolean("evo_search_enabled_$i", isChecked).commit() 
+                    prefs.edit().putBoolean("evo_search_enabled_$i", isChecked).apply() // 최적화
                 }
             }
             toggleRow.addView(visibilitySwitch)
@@ -461,7 +461,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                                     }
                                 }
                             }
-                            editor.commit()
+                            editor.apply() // 최적화
                             dismiss()
                         }
                         .setNegativeButton("No") { _, _ ->
@@ -471,7 +471,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     return@setOnClickListener
                 }
 
-                println("[UltimaEvo-Debug] [Dialog] 저장 완료 후 앱 재시작 안내 팝업 호출")
                 AlertDialog.Builder(requireContext())
                     .setTitle("Restart Required")
                     .setMessage("Please restart the app for the changes to take effect.")
@@ -479,7 +478,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         val editor = prefs.edit()
                         editor.putString("evo_instance_count", newCount.toString())
                         saveCurrentNamesToPrefs(editor, mainLayout)
-                        editor.commit()
+                        editor.apply() // 최적화
                         dismiss()
                     }
                     .show()
@@ -733,20 +732,33 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             lastClickTime = SystemClock.elapsedRealtime()
 
             val editor = prefs.edit()
+            
+            // 🌟 최적화: 쓰레기 데이터 정리(Garbage Collection). 
+            // 새 데이터를 덮어쓰기 전에, 현재 instanceId에 해당하는 예전 cat_ 키들을 모두 날립니다.
+            prefs.all.keys.forEach { key ->
+                if (key.startsWith("cat_toggle_${instanceId}_") || 
+                    key.startsWith("cat_rename_${instanceId}_") || 
+                    key.startsWith("cat_order_${instanceId}_") || 
+                    key.startsWith("ext_toggle_${instanceId}_")) {
+                    editor.remove(key)
+                }
+            }
+
             val activeCatalogs = mutableListOf<String>()
 
             for ((index, row) in activeRows.withIndex()) {
                 val finalOrder = index + 1
-                val tKey = "cat_toggle_${instanceId}_${row.providerName}_${row.catalogName}"
-                val rKey = "cat_rename_${instanceId}_${row.providerName}_${row.catalogName}"
-                val oKey = "cat_order_${instanceId}_${row.providerName}_${row.catalogName}"
                 
-                editor.putBoolean(tKey, row.checkBox.isChecked)
-                editor.putString(rKey, row.renameEdit.text.toString())
-                editor.putString(oKey, finalOrder.toString())
-                
-                val pKey = "ext_toggle_${instanceId}_${row.providerName}"
+                // 체크된 항목만 저장하도록 변경하여 메모리 절약
                 if (row.checkBox.isChecked) {
+                    val tKey = "cat_toggle_${instanceId}_${row.providerName}_${row.catalogName}"
+                    val rKey = "cat_rename_${instanceId}_${row.providerName}_${row.catalogName}"
+                    val oKey = "cat_order_${instanceId}_${row.providerName}_${row.catalogName}"
+                    val pKey = "ext_toggle_${instanceId}_${row.providerName}"
+
+                    editor.putBoolean(tKey, true)
+                    editor.putString(rKey, row.renameEdit.text.toString())
+                    editor.putString(oKey, finalOrder.toString())
                     editor.putBoolean(pKey, true)
                     
                     val customName = row.renameEdit.text.toString().ifBlank { row.catalogName }
@@ -759,7 +771,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             }
             
             editor.putString("evo_active_cats_$instanceId", activeCatalogs.joinToString("%%%"))
-            editor.commit()
+            editor.apply() // 최적화: UI 스레드 블로킹 방지
             dialog.dismiss()
         }
 
