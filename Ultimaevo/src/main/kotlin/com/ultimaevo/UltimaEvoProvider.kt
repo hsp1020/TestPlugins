@@ -21,7 +21,6 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
             val context = UltimaEvoPlugin.pluginContext ?: return emptyList()
             val prefs = context.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
             
-            // [신규] 카탈로그 표시 토글 확인
             val isVisible = prefs.getBoolean("evo_visibility_enabled_$instanceId", true)
             if (!isVisible) return emptyList()
 
