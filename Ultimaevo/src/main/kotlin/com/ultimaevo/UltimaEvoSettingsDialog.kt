@@ -1,4 +1,4 @@
-// v1.41
+// v1.42
 package com.ultimaevo
 
 import android.app.AlertDialog
@@ -98,7 +98,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     val total = providers.size
                     var current = 0
 
-                    // [신규] 동기화 진행률 실시간 반영 로직
                     for (provider in providers) {
                         current++
                         withContext(Dispatchers.Main) {
@@ -123,14 +122,17 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         }
         mainLayout.addView(syncAllBtn)
 
+        // 인스턴스 조작 레이아웃
         val countLayout = LinearLayout(pluginCtx).apply { 
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, 0, 0, 20)
         }
         countLayout.addView(TextView(pluginCtx).apply { text = "Instances:"; textSize = 15f; setTextColor(Color.LTGRAY); setPadding(0,0,20,0) })
+        
         val instanceCountInput = EditText(pluginCtx).apply {
             inputType = InputType.TYPE_CLASS_NUMBER
+            imeOptions = EditorInfo.IME_ACTION_DONE // 엔터 키 처리
             val initCount = prefs.getString("evo_instance_count", "1")
             setText(initCount)
             setTextColor(Color.WHITE)
@@ -140,7 +142,118 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             gravity = Gravity.CENTER
         }
         countLayout.addView(instanceCountInput)
+
+        // [신규] 퀵 추가 (+) 버튼 
+        val addInstanceBtn = Button(pluginCtx).apply {
+            text = "+"
+            textSize = 20f
+            setTextColor(Color.WHITE)
+            background = getButtonBg()
+            layoutParams = LinearLayout.LayoutParams(120, LinearLayout.LayoutParams.MATCH_PARENT).apply {
+                setMargins(20, 0, 0, 0)
+            }
+            setOnClickListener {
+                if (SystemClock.elapsedRealtime() - lastClickTime < 500) return@setOnClickListener
+                lastClickTime = SystemClock.elapsedRealtime()
+                
+                val current = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
+                val newCount = current + 1
+                
+                val editor = prefs.edit()
+                fun findNames(v: ViewGroup) {
+                    for (idx in 0 until v.childCount) {
+                        val child = v.getChildAt(idx)
+                        if (child is EditText && child.tag?.toString()?.startsWith("evo_name_") == true) {
+                            editor.putString(child.tag.toString(), child.text.toString())
+                        } else if (child is ViewGroup) findNames(child)
+                    }
+                }
+                findNames(mainLayout)
+                
+                editor.putString("evo_instance_count", newCount.toString())
+                editor.commit()
+                
+                val act = activity
+                dismiss()
+                UltimaEvoSettingsDialog().show(act!!.supportFragmentManager, "UltimaEvoSettingsDialog")
+            }
+        }
+        countLayout.addView(addInstanceBtn)
         mainLayout.addView(countLayout)
+
+        // [신규] 텍스트 박스 입력/수정 완료 이벤트 처리 (삭제 확인 팝업 연동)
+        instanceCountInput.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_DONE || actionId == EditorInfo.IME_ACTION_NEXT) {
+                instanceCountInput.clearFocus()
+                val imm = pluginCtx.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                imm.hideSoftInputFromWindow(instanceCountInput.windowToken, 0)
+                true
+            } else false
+        }
+
+        instanceCountInput.setOnFocusChangeListener { _, hasFocus ->
+            if (!hasFocus) {
+                val oldCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
+                val newCount = instanceCountInput.text.toString().toIntOrNull() ?: oldCount
+
+                if (newCount < oldCount) {
+                    AlertDialog.Builder(requireContext())
+                        .setTitle("Delete Instances")
+                        .setMessage("Reducing instances from $oldCount to $newCount will delete the last ${oldCount - newCount} catalog(s).\nAre you sure?")
+                        .setPositiveButton("Yes") { _, _ ->
+                            val editor = prefs.edit()
+                            fun findNames(v: ViewGroup) {
+                                for (idx in 0 until v.childCount) {
+                                    val child = v.getChildAt(idx)
+                                    if (child is EditText && child.tag?.toString()?.startsWith("evo_name_") == true) {
+                                        val id = child.tag.toString().removePrefix("evo_name_").toIntOrNull() ?: 0
+                                        if (id <= newCount) editor.putString(child.tag.toString(), child.text.toString())
+                                    } else if (child is ViewGroup) findNames(child)
+                                }
+                            }
+                            findNames(mainLayout)
+
+                            editor.putString("evo_instance_count", newCount.toString())
+                            for (i in (newCount + 1)..oldCount) {
+                                editor.remove("evo_name_$i")
+                                editor.remove("evo_visibility_enabled_$i")
+                                editor.remove("evo_search_enabled_$i")
+                                editor.remove("evo_active_cats_$i")
+                                prefs.all.keys.forEach { key ->
+                                    if (key.startsWith("cat_toggle_${i}_") || key.startsWith("cat_rename_${i}_") || 
+                                        key.startsWith("cat_order_${i}_") || key.startsWith("ext_toggle_${i}_")) {
+                                        editor.remove(key)
+                                    }
+                                }
+                            }
+                            editor.commit()
+                            val act = activity
+                            dismiss()
+                            UltimaEvoSettingsDialog().show(act!!.supportFragmentManager, "UltimaEvoSettingsDialog")
+                        }
+                        .setNegativeButton("No") { _, _ ->
+                            instanceCountInput.setText(oldCount.toString())
+                        }
+                        .show()
+                } else if (newCount > oldCount) {
+                    val editor = prefs.edit()
+                    fun findNames(v: ViewGroup) {
+                        for (idx in 0 until v.childCount) {
+                            val child = v.getChildAt(idx)
+                            if (child is EditText && child.tag?.toString()?.startsWith("evo_name_") == true) {
+                                editor.putString(child.tag.toString(), child.text.toString())
+                            } else if (child is ViewGroup) findNames(child)
+                        }
+                    }
+                    findNames(mainLayout)
+                    editor.putString("evo_instance_count", newCount.toString())
+                    editor.commit()
+                    val act = activity
+                    dismiss()
+                    UltimaEvoSettingsDialog().show(act!!.supportFragmentManager, "UltimaEvoSettingsDialog")
+                }
+            }
+        }
 
         val currentCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
 
@@ -213,7 +326,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             toggleRow.addView(searchSwitch)
             card.addView(toggleRow)
 
-            // [신규] Configure 버튼과 Delete 버튼을 가로로 나란히 배치
             val actionBtnRow = LinearLayout(pluginCtx).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -225,7 +337,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 isAllCaps = false
                 background = getButtonBg()
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                    setMargins(0, 0, 15, 0) // Delete 버튼과의 간격
+                    setMargins(0, 0, 15, 0)
                 }
                 setOnClickListener {
                     if (SystemClock.elapsedRealtime() - lastClickTime < 1000) return@setOnClickListener
@@ -236,7 +348,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
             val deleteBtn = Button(pluginCtx).apply {
                 text = "Delete"
-                setTextColor(Color.parseColor("#FF5555")) // 경고를 의미하는 옅은 빨간색
+                setTextColor(Color.parseColor("#FF5555"))
                 isAllCaps = false
                 background = getButtonBg()
                 layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
@@ -244,7 +356,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     if (SystemClock.elapsedRealtime() - lastClickTime < 1000) return@setOnClickListener
                     lastClickTime = SystemClock.elapsedRealtime()
                     
-                    // [신규] 삭제 재확인 팝업 및 데이터 밀어내기(Shift) 로직
                     AlertDialog.Builder(requireContext())
                         .setTitle("Delete Catalog")
                         .setMessage("Are you sure you want to delete this catalog?")
@@ -252,7 +363,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                             val editor = prefs.edit()
                             val latestCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
                             
-                            // 삭제된 인스턴스 뒤에 있는 모든 설정 데이터를 한 칸씩 앞으로 당겨옵니다.
                             for (j in i until latestCount) {
                                 val curr = j
                                 val next = j + 1
@@ -275,7 +385,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                                 }
                             }
                             
-                            // 맨 마지막에 남아있는 중복된 꼬리(가장 끝 번호) 데이터를 깔끔하게 청소합니다.
                             editor.remove("evo_name_$latestCount")
                             editor.remove("evo_visibility_enabled_$latestCount")
                             editor.remove("evo_search_enabled_$latestCount")
@@ -291,7 +400,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                             editor.putString("evo_instance_count", newCount.toString())
                             editor.commit()
                             
-                            // UI 즉시 새로고침을 위해 팝업을 닫고 다시 엽니다.
                             val act = activity
                             dismiss()
                             UltimaEvoSettingsDialog().show(act!!.supportFragmentManager, "UltimaEvoSettingsDialog")
