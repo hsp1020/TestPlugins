@@ -1,4 +1,3 @@
-// v1.36
 package com.ultimaevo
 
 import android.app.AlertDialog
@@ -54,7 +53,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         }
 
         val title = TextView(pluginCtx).apply {
-            text = "Ultima Evo 마스터 관리자"
+            text = "Ultima Evo Master Manager"
             textSize = 20f
             setTextColor(Color.WHITE)
             setPadding(0, 0, 0, 20)
@@ -63,11 +62,11 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         mainLayout.addView(title)
 
         val syncAllBtn = Button(pluginCtx).apply {
-            text = "🔄 모든 카탈로그 데이터 최초 동기화"
+            text = "🔄 Sync All Provider Data"
             setTextColor(Color.WHITE)
             setPadding(10, 0, 10, 0)
             setOnClickListener {
-                this.text = "통신 중..."
+                this.text = "Syncing..."
                 this.isEnabled = false
                 CoroutineScope(Dispatchers.IO).launch {
                     val providers = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
@@ -83,7 +82,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         } catch (e: Exception) { }
                     }
                     withContext(Dispatchers.Main) {
-                        this@apply.text = "✅ 동기화 완료"
+                        this@apply.text = "✅ Sync Complete"
                         this@apply.isEnabled = true
                     }
                 }
@@ -96,7 +95,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, 15, 0, 15)
         }
-        countLayout.addView(TextView(pluginCtx).apply { text = "생성할 개수: "; textSize = 14f; setTextColor(Color.WHITE) })
+        countLayout.addView(TextView(pluginCtx).apply { text = "Instances: "; textSize = 14f; setTextColor(Color.WHITE) })
         val instanceCountInput = EditText(pluginCtx).apply {
             inputType = InputType.TYPE_CLASS_NUMBER
             val initCount = prefs.getString("evo_instance_count", "1")
@@ -124,32 +123,64 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 }
             }
             
+            // [UI 변경] 라벨과 입력칸을 가로로 배치
+            val nameRow = LinearLayout(pluginCtx).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, 0, 0, 10)
+            }
+            val nameLabel = TextView(pluginCtx).apply {
+                text = "Catalog Name: "
+                setTextColor(Color.LTGRAY)
+                textSize = 14f
+            }
             val savedName = prefs.getString("evo_name_$i", "Ultima Evo $i")
             val nameInput = EditText(pluginCtx).apply {
-                hint = "통합 카탈로그 $i 이름"
+                hint = "Ultima Evo $i"
                 setHintTextColor(Color.GRAY)
                 setTextColor(Color.WHITE)
                 textSize = 14f
                 setPadding(10, 10, 10, 10)
                 setText(savedName)
                 tag = "evo_name_$i"
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             }
-            card.addView(nameInput)
+            nameRow.addView(nameLabel)
+            nameRow.addView(nameInput)
+            card.addView(nameRow)
 
-            val searchSwitch = Switch(pluginCtx).apply {
-                text = "이 카탈로그 검색 허용"
-                setTextColor(Color.WHITE)
-                textSize = 14f
+            // [UI 변경] 두 개의 스위치를 가로로 나란히 배치
+            val toggleRow = LinearLayout(pluginCtx).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
                 setPadding(0, 10, 0, 10)
+            }
+            val visibilitySwitch = Switch(pluginCtx).apply {
+                text = "Show Catalog"
+                setTextColor(Color.WHITE)
+                textSize = 13f
+                isChecked = prefs.getBoolean("evo_visibility_enabled_$i", true)
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                setOnCheckedChangeListener { _, isChecked -> 
+                    prefs.edit().putBoolean("evo_visibility_enabled_$i", isChecked).commit() 
+                }
+            }
+            val searchSwitch = Switch(pluginCtx).apply {
+                text = "Enable Search"
+                setTextColor(Color.WHITE)
+                textSize = 13f
                 isChecked = prefs.getBoolean("evo_search_enabled_$i", true)
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
                 setOnCheckedChangeListener { _, isChecked -> 
                     prefs.edit().putBoolean("evo_search_enabled_$i", isChecked).commit() 
                 }
             }
-            card.addView(searchSwitch)
+            toggleRow.addView(visibilitySwitch)
+            toggleRow.addView(searchSwitch)
+            card.addView(toggleRow)
 
             val configBtn = Button(pluginCtx).apply {
-                text = "내부 카탈로그 구성/정렬 편집 ⚙️"
+                text = "Edit Providers & Sorting ⚙️"
                 setTextColor(Color.WHITE)
                 setPadding(10, 0, 10, 0)
                 setOnClickListener { 
@@ -162,7 +193,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         }
 
         val saveBtn = Button(pluginCtx).apply {
-            text = "메인 설정 저장 후 닫기"
+            text = "Save & Close"
             setTextColor(Color.WHITE)
             setPadding(10, 10, 10, 10)
             setOnClickListener {
@@ -198,7 +229,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         }
         
         val headerTitle = TextView(ctx).apply {
-            text = "카탈로그 $instanceId 구성 편집"
+            text = "Edit Catalog $instanceId"
             textSize = 18f
             setTextColor(Color.WHITE)
             setPadding(0, 10, 0, 10)
@@ -206,9 +237,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         }
         mainContainer.addView(headerTitle)
 
-        // 안내 텍스트 수정
         val warningText = TextView(ctx).apply {
-            text = "※ 숫자를 입력하거나 화살표를 누르면 즉시 번호가 밀려나며 재정렬됩니다."
+            text = "※ Numbers auto-shift when edited or arrows are clicked."
             textSize = 12f
             setTextColor(Color.YELLOW)
             setPadding(0, 0, 0, 20)
@@ -223,7 +253,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             val providerName: String, val catalogName: String, val originalData: String,
             val checkBox: CheckBox, val orderEdit: EditText, val renameEdit: EditText, val view: View
         )
-        // [핵심] 현재 UI의 순서를 물리적으로 보관하는 스택 리스트
         val activeRows = mutableListOf<CatalogRow>()
 
         val allProviders = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
@@ -236,10 +265,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             combined.forEach { allCatalogs.add(provider.name to it) }
         }
         
-        // 최대 순서값은 항상 총 카탈로그의 개수로 고정됩니다.
         val maxOrder = allCatalogs.size
 
-        // [핵심] 포커스 유지 및 UI 점핑 방지 정렬 로직
         fun triggerSort() {
             val focusedView = listLayout.findFocus() as? EditText
             val selStart = focusedView?.selectionStart ?: 0
@@ -259,7 +286,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             }
         }
 
-        // [핵심] 실시간 스택 밀어내기 (Insert & Shift) 알고리즘
         fun shiftItem(row: CatalogRow, newOrder: Int) {
             val clampedOrder = newOrder.coerceIn(1, maxOrder)
             val oldIndex = activeRows.indexOf(row)
@@ -267,13 +293,11 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
             if (oldIndex == -1) return
             
-            // 번호가 실제로 변경되었을 때만 이동
             if (oldIndex != newIndex) {
                 activeRows.removeAt(oldIndex)
-                activeRows.add(newIndex, row) // 기존 항목들은 자동으로 뒤로 밀려남
+                activeRows.add(newIndex, row)
             }
 
-            // 배열 순서대로 텍스트 박스에 1부터 N까지 강제 재할당
             for (i in activeRows.indices) {
                 activeRows[i].orderEdit.setText((i + 1).toString())
             }
@@ -286,7 +310,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             Triple(it.first, it.second, order)
         }.sortedBy { it.third }
 
-        // UI 생성
         for (cat in preSortedCatalogs) {
             val pName = cat.first
             val cName = cat.second
@@ -308,7 +331,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
             val etOrder = EditText(ctx).apply {
                 inputType = InputType.TYPE_CLASS_NUMBER
-                // 엔터키 완료 옵션 지정
                 imeOptions = EditorInfo.IME_ACTION_DONE
                 layoutParams = LinearLayout.LayoutParams(80, LinearLayout.LayoutParams.WRAP_CONTENT)
                 gravity = Gravity.CENTER
@@ -370,7 +392,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             val catalogRow = CatalogRow(pName, cName, "", cb, etOrder, etRename, row)
             activeRows.add(catalogRow)
 
-            // 리스너 연결: 키보드 엔터 버튼 누를 때
             etOrder.setOnEditorActionListener { _, actionId, _ ->
                 if (actionId == EditorInfo.IME_ACTION_DONE || actionId == EditorInfo.IME_ACTION_NEXT) {
                     etOrder.clearFocus()
@@ -380,7 +401,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 } else false
             }
 
-            // 리스너 연결: 텍스트 박스 바깥을 터치하여 포커스를 잃었을 때 (실시간 입력 반영)
             etOrder.setOnFocusChangeListener { _, hasFocus ->
                 if (!hasFocus) {
                     val inputVal = etOrder.text.toString().toIntOrNull() ?: (activeRows.indexOf(catalogRow) + 1)
@@ -388,7 +408,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 }
             }
 
-            // 위 화살표 누르면 순위 -1 (위로)
             up.setOnClickListener {
                 etOrder.clearFocus()
                 val cur = activeRows.indexOf(catalogRow) + 1
@@ -396,7 +415,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     shiftItem(catalogRow, cur - 1)
                 }
             }
-            // 아래 화살표 누르면 순위 +1 (아래로)
             down.setOnClickListener {
                 etOrder.clearFocus()
                 val cur = activeRows.indexOf(catalogRow) + 1
@@ -406,7 +424,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             }
         }
 
-        // [초기화] UI가 처음 뜰 때 1부터 N까지 빈틈없이 번호를 강제 배정하고 화면에 그립니다.
         for (i in activeRows.indices) {
             activeRows[i].orderEdit.setText((i + 1).toString())
         }
@@ -419,8 +436,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, 20, 0, 0)
         }
-        val applyBtn = Button(ctx).apply { text = "저장 후 닫기"; setTextColor(Color.WHITE); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
-        val closeBtn = Button(ctx).apply { text = "취소"; setTextColor(Color.WHITE); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
+        val applyBtn = Button(ctx).apply { text = "Save & Close"; setTextColor(Color.WHITE); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
+        val closeBtn = Button(ctx).apply { text = "Cancel"; setTextColor(Color.WHITE); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
         footer.addView(applyBtn); footer.addView(closeBtn)
         mainContainer.addView(footer)
 
@@ -431,8 +448,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
         applyBtn.setOnClickListener {
             val editor = prefs.edit()
+            val activeCatalogs = mutableListOf<String>()
 
-            // 이미 activeRows는 1부터 N까지 완벽하게 정렬된 상태이므로 단순히 배열 순서대로 저장합니다.
             for ((index, row) in activeRows.withIndex()) {
                 val finalOrder = index + 1
                 val tKey = "cat_toggle_${instanceId}_${row.providerName}_${row.catalogName}"
@@ -441,14 +458,25 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 
                 editor.putBoolean(tKey, row.checkBox.isChecked)
                 editor.putString(rKey, row.renameEdit.text.toString())
-                editor.putString(oKey, finalOrder.toString()) // 교정된 순서 저장
+                editor.putString(oKey, finalOrder.toString())
                 
                 val pKey = "ext_toggle_${instanceId}_${row.providerName}"
                 if (row.checkBox.isChecked) {
                     editor.putBoolean(pKey, true)
+                    
+                    // Provider.kt 에서 필요한 정보를 구워둡니다 (Baking).
+                    val customName = row.renameEdit.text.toString().ifBlank { row.catalogName }
+                    
+                    // APIHolder.allProviders 에 직접 접근해서 해당 provider의 originalData(url 경로) 추출
+                    val origProvider = APIHolder.allProviders.find { it.name == row.providerName }
+                    val origData = origProvider?.mainPage?.find { it.name == row.catalogName }?.data ?: ""
+                    
+                    val safeConfigStr = "${row.providerName}|~|${row.catalogName}|~|${customName}|~|${finalOrder}|~|${origData}"
+                    activeCatalogs.add(safeConfigStr)
                 }
             }
             
+            editor.putString("evo_active_cats_$instanceId", activeCatalogs.joinToString("|||"))
             editor.commit()
             dialog.dismiss()
         }
