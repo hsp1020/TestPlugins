@@ -1,4 +1,4 @@
-// v1.47
+// v1.49
 package com.ultimaevo
 
 import android.content.Context
@@ -15,6 +15,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 
 class UltimaEvoProvider(private val instanceId: Int, private val customName: String) : MainAPI() {
     override var mainUrl = "ultima_evo_$instanceId"
@@ -29,7 +31,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
         }
 
     init {
-        println("[UltimaEvo-Debug] [Provider-$instanceId] 메모리 할당 완료: $customName")
+        println("[UltimaEvo-Debug] [Provider-$instanceId] 인스턴스 할당됨: $customName")
     }
 
     override val mainPage: List<MainPageData>
@@ -43,7 +45,6 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
             val activeCatsStr = prefs.getString("evo_active_cats_$instanceId", "") ?: ""
             if (activeCatsStr.isBlank()) return emptyList()
 
-            // [핵심 픽스] 충돌하지 않는 안전한 구분자로 데이터 추출 (구버전 호환성 포함)
             val chunkSeparator = if (activeCatsStr.contains("%%%")) "%%%" else "|||"
             val fieldSeparator = if (activeCatsStr.contains("%%%")) ";;;" else "|~|"
 
@@ -60,10 +61,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
                     
                     val combinedData = "$pName|||$originalData|||$customCatalogName|||$cName"
                     Pair(MainPageData(customCatalogName, combinedData), orderIndex)
-                } else {
-                    println("[UltimaEvo-Debug] [Provider-$instanceId] ❌ 매핑 실패! (파트 개수 부족: ${parts.size}) -> $chunk")
-                    null
-                }
+                } else null
             }
             
             return pages.sortedBy { it.second }.map { it.first }
@@ -97,12 +95,9 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
         }
     }
 
-    // [핵심 픽스] NotImplementedError 크래시 방지를 위한 미리보기(load) 우회 라우터
     override suspend fun load(url: String): LoadResponse? {
-        println("[UltimaEvo-Debug] [Provider-$instanceId] load() 우회 라우팅 요청됨: $url")
         val allProviders = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
         
-        // 1순위: URL이 정확히 일치하는 프로바이더 탐색
         val exactProvider = allProviders.find { url.startsWith(it.mainUrl) }
         if (exactProvider != null) {
             try {
@@ -111,7 +106,6 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
             } catch (e: Exception) { }
         }
         
-        // 2순위: 도메인이 포함된 프로바이더 탐색 (정확도 높음)
         val domainMatchProviders = allProviders.filter { p -> 
             val domain = p.mainUrl.replace("https://", "").replace("http://", "").substringBefore("/")
             domain.isNotBlank() && url.contains(domain) 
@@ -144,21 +138,29 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
             if (parts.isNotEmpty()) parts[0] else null
         }.distinct()
 
+        // [신규] 검색 시에도 타겟 사이트 방어막 우회 및 OOM 방지를 위한 동시 접속 제한
+        val semaphore = Semaphore(5) // 빠른 응답을 위해 5개로 여유있게 세팅
+
         return coroutineScope {
             val deferredResults = providersToSearch.mapNotNull { providerName ->
                 val provider = APIHolder.allProviders.find { it.name == providerName } ?: return@mapNotNull null
                 async<List<SearchResponse>>(Dispatchers.IO) {
-                    try {
-                        val res = provider.search(query)
-                        res ?: emptyList()
-                    } catch (e: Exception) {
-                        emptyList()
+                    semaphore.withPermit {
+                        try {
+                            println("[UltimaEvo-Debug] [Provider-$instanceId] ${provider.name} 검색 시도")
+                            val res = provider.search(query)
+                            res ?: emptyList()
+                        } catch (e: Exception) {
+                            println("[UltimaEvo-Debug] [Provider-$instanceId] ${provider.name} 에러 무시: ${e.message}")
+                            emptyList()
+                        }
                     }
                 }
             }
             
             val results: List<SearchResponse> = deferredResults.awaitAll().flatten()
             val finalRes: List<SearchResponse> = results.distinctBy { it.url }
+            println("[UltimaEvo-Debug] [Provider-$instanceId] 병렬 검색 최종 결과: ${finalRes.size}개")
             finalRes
         }
     }
