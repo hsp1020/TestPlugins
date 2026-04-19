@@ -1,4 +1,4 @@
-// v1.40
+// v1.41
 package com.ultimaevo
 
 import android.app.AlertDialog
@@ -27,7 +27,6 @@ import kotlinx.coroutines.withContext
 
 class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
-    // [신규] 중복 클릭 방지용 타이머 변수
     private var lastClickTime: Long = 0
 
     private fun getDarkThemeBg(): GradientDrawable {
@@ -90,15 +89,21 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 setMargins(0, 0, 0, 30)
             }
             setOnClickListener {
-                // 동기화 버튼 중복 터치 방지
                 if (SystemClock.elapsedRealtime() - lastClickTime < 1000) return@setOnClickListener
                 lastClickTime = SystemClock.elapsedRealtime()
 
-                this.text = "Syncing..."
                 this.isEnabled = false
                 CoroutineScope(Dispatchers.IO).launch {
                     val providers = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
+                    val total = providers.size
+                    var current = 0
+
+                    // [신규] 동기화 진행률 실시간 반영 로직
                     for (provider in providers) {
+                        current++
+                        withContext(Dispatchers.Main) {
+                            this@apply.text = "Syncing... $current / $total"
+                        }
                         try {
                             val reqName = provider.mainPage.firstOrNull()?.name ?: "Home"
                             val reqData = provider.mainPage.firstOrNull()?.data ?: ""
@@ -110,7 +115,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         } catch (e: Exception) { }
                     }
                     withContext(Dispatchers.Main) {
-                        this@apply.text = "Sync Complete"
+                        this@apply.text = "✅ Sync Complete"
                         this@apply.isEnabled = true
                     }
                 }
@@ -208,20 +213,97 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             toggleRow.addView(searchSwitch)
             card.addView(toggleRow)
 
+            // [신규] Configure 버튼과 Delete 버튼을 가로로 나란히 배치
+            val actionBtnRow = LinearLayout(pluginCtx).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            
             val configBtn = Button(pluginCtx).apply {
                 text = "Configure Providers"
                 setTextColor(Color.WHITE)
                 isAllCaps = false
                 background = getButtonBg()
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                    setMargins(0, 0, 15, 0) // Delete 버튼과의 간격
+                }
                 setOnClickListener {
-                    // [핵심 픽스] 중복 클릭 방지 (1초 쿨타임)
                     if (SystemClock.elapsedRealtime() - lastClickTime < 1000) return@setOnClickListener
                     lastClickTime = SystemClock.elapsedRealtime()
-                    
                     showEditCatalogsDialog(i, pluginCtx) 
                 }
             }
-            card.addView(configBtn)
+
+            val deleteBtn = Button(pluginCtx).apply {
+                text = "Delete"
+                setTextColor(Color.parseColor("#FF5555")) // 경고를 의미하는 옅은 빨간색
+                isAllCaps = false
+                background = getButtonBg()
+                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                setOnClickListener {
+                    if (SystemClock.elapsedRealtime() - lastClickTime < 1000) return@setOnClickListener
+                    lastClickTime = SystemClock.elapsedRealtime()
+                    
+                    // [신규] 삭제 재확인 팝업 및 데이터 밀어내기(Shift) 로직
+                    AlertDialog.Builder(requireContext())
+                        .setTitle("Delete Catalog")
+                        .setMessage("Are you sure you want to delete this catalog?")
+                        .setPositiveButton("Yes") { _, _ ->
+                            val editor = prefs.edit()
+                            val latestCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
+                            
+                            // 삭제된 인스턴스 뒤에 있는 모든 설정 데이터를 한 칸씩 앞으로 당겨옵니다.
+                            for (j in i until latestCount) {
+                                val curr = j
+                                val next = j + 1
+                                editor.putString("evo_name_$curr", prefs.getString("evo_name_$next", "Ultima Evo $next"))
+                                editor.putBoolean("evo_visibility_enabled_$curr", prefs.getBoolean("evo_visibility_enabled_$next", true))
+                                editor.putBoolean("evo_search_enabled_$curr", prefs.getBoolean("evo_search_enabled_$next", true))
+                                editor.putString("evo_active_cats_$curr", prefs.getString("evo_active_cats_$next", ""))
+                                
+                                prefs.all.keys.forEach { key ->
+                                    if (key.startsWith("cat_toggle_${next}_") || key.startsWith("cat_rename_${next}_") || 
+                                        key.startsWith("cat_order_${next}_") || key.startsWith("ext_toggle_${next}_")) {
+                                        
+                                        val newKey = key.replaceFirst("_${next}_", "_${curr}_")
+                                        when (val value = prefs.all[key]) {
+                                            is Boolean -> editor.putBoolean(newKey, value)
+                                            is String -> editor.putString(newKey, value)
+                                            is Int -> editor.putInt(newKey, value)
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // 맨 마지막에 남아있는 중복된 꼬리(가장 끝 번호) 데이터를 깔끔하게 청소합니다.
+                            editor.remove("evo_name_$latestCount")
+                            editor.remove("evo_visibility_enabled_$latestCount")
+                            editor.remove("evo_search_enabled_$latestCount")
+                            editor.remove("evo_active_cats_$latestCount")
+                            prefs.all.keys.forEach { key ->
+                                if (key.startsWith("cat_toggle_${latestCount}_") || key.startsWith("cat_rename_${latestCount}_") || 
+                                    key.startsWith("cat_order_${latestCount}_") || key.startsWith("ext_toggle_${latestCount}_")) {
+                                    editor.remove(key)
+                                }
+                            }
+                            
+                            val newCount = if (latestCount > 0) latestCount - 1 else 0
+                            editor.putString("evo_instance_count", newCount.toString())
+                            editor.commit()
+                            
+                            // UI 즉시 새로고침을 위해 팝업을 닫고 다시 엽니다.
+                            val act = activity
+                            dismiss()
+                            UltimaEvoSettingsDialog().show(act!!.supportFragmentManager, "UltimaEvoSettingsDialog")
+                        }
+                        .setNegativeButton("No", null)
+                        .show()
+                }
+            }
+
+            actionBtnRow.addView(configBtn)
+            actionBtnRow.addView(deleteBtn)
+            card.addView(actionBtnRow)
             
             mainLayout.addView(card)
         }
@@ -498,7 +580,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
 
         applyBtn.setOnClickListener {
-            // 적용 버튼 중복 클릭 방지
             if (SystemClock.elapsedRealtime() - lastClickTime < 1000) return@setOnClickListener
             lastClickTime = SystemClock.elapsedRealtime()
 
@@ -520,7 +601,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     editor.putBoolean(pKey, true)
                     
                     val customName = row.renameEdit.text.toString().ifBlank { row.catalogName }
-                    
                     val origProvider = APIHolder.allProviders.find { it.name == row.providerName }
                     val origData = origProvider?.mainPage?.find { it.name == row.catalogName }?.data ?: ""
                     
