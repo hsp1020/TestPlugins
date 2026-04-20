@@ -1,4 +1,5 @@
 // v1.159 (Bugfix: 오지랖 최적화 제거 - include_image_language 파라미터 삭제 및 원본의 한국어 로고 우선순위 복구)
+// + (Bugfix: CineStream Provider 강제 검색 및 로깅 추가 적용본)
 package com.hsp1020
 
 import android.content.Context
@@ -143,21 +144,43 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
         }
 
-        fun getCineStreamProvider(): MainAPI? {
-            if (cachedCineStreamProvider != null) return cachedCineStreamProvider
-            if (hasSearchedCineStream) return null
+        fun getCineStreamProvider(forceSearch: Boolean = false): MainAPI? {
+            println("[CineStream_DEBUG] getCineStreamProvider 호출됨. forceSearch=$forceSearch, cached=${cachedCineStreamProvider?.name}, hasSearched=$hasSearchedCineStream")
+
+            if (cachedCineStreamProvider != null) {
+                println("[CineStream_DEBUG] 이미 캐싱된 Provider 반환")
+                return cachedCineStreamProvider
+            }
+
+            if (!forceSearch && hasSearchedCineStream) {
+                println("[CineStream_DEBUG] 이전 검색에서 실패했었고 forceSearch가 false이므로 그냥 null 반환")
+                return null
+            }
 
             hasSearchedCineStream = true
-            
-            var provider = APIHolder.allProviders.find { it.name.equals("CineStream", ignoreCase = true) }
+
+            println("[CineStream_DEBUG] 1단계: APIHolder.allProviders 검색 시작 (총 갯수: ${APIHolder.allProviders.size})")
+            var provider = APIHolder.allProviders.find {
+                it.name.equals("CineStream", ignoreCase = true)
+            }
+
+            if (provider != null) {
+                println("[CineStream_DEBUG] 🎉 APIHolder에서 CineStream 찾음!")
+                cachedCineStreamProvider = provider
+                return provider
+            }
+
+            println("[CineStream_DEBUG] 1단계 실패: APIHolder에 CineStream이 없음. 2단계 리플렉션 시작...")
 
             if (provider == null) {
                 try {
                     val targetClassLoader = cachedCineClassLoader ?: run {
+                        println("[CineStream_DEBUG] PluginManager 클래스 찾는 중...")
                         val pmClass = Class.forName("com.lagradost.cloudstream3.plugins.PluginManager")
                         val pmInstance = pmClass.getField("INSTANCE").get(null)
-                        
+
                         var foundLoader: ClassLoader? = null
+                        println("[CineStream_DEBUG] PluginManager의 선언된 필드들을 순회합니다.")
                         for (field in pmClass.declaredFields) {
                             field.isAccessible = true
                             val obj = runSuspendCatching { field.get(pmInstance) }.getOrNull()
@@ -167,11 +190,12 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                                 is Array<*> -> obj.toList()
                                 else -> null
                             }
-                            
+
                             items?.forEach { plugin ->
                                 if (plugin != null) {
                                     val pName = plugin.javaClass.name
                                     if (pName.contains("megix", true) || pName.contains("CineStream", true)) {
+                                        println("[CineStream_DEBUG] 💡 CineStream/megix 관련 플러그인 클래스 매칭 성공!: $pName")
                                         foundLoader = plugin.javaClass.classLoader
                                     }
                                 }
@@ -180,19 +204,24 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         }
                         foundLoader
                     }
-                    
+
                     if (targetClassLoader != null) {
+                        println("[CineStream_DEBUG] ClassLoader 획득 성공. com.megix.CineStreamProvider 로드 시도...")
                         cachedCineClassLoader = targetClassLoader
                         val clazz = targetClassLoader.loadClass("com.megix.CineStreamProvider")
                         provider = clazz.newInstance() as? MainAPI
-                        println("[StremioC v1.159] CineStream Ghost Provider 강제 생성 완료")
+                        println("[StremioC v1.159] 🎉 CineStream Ghost Provider 강제 생성 완료")
+                    } else {
+                        println("[CineStream_DEBUG] ❌ 타겟 ClassLoader를 찾지 못했습니다. 플러그인이 안깔려있거나 난독화로 구조가 변경됨.")
                     }
                 } catch (e: Exception) {
-                    println("[StremioC v1.159] 리플렉션 무시 (난독화 혹은 플러그인 부재): ${e.message}")
+                    println("[CineStream_DEBUG] 🚨 리플렉션 에러 발생: ${e.javaClass.simpleName} - ${e.message}")
+                    e.printStackTrace()
                 }
             }
-            
+
             cachedCineStreamProvider = provider
+            println("[CineStream_DEBUG] 최종 결과: provider = ${provider?.name ?: "NULL"}")
             return provider
         }
         
@@ -419,7 +448,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 parseJson<CatalogResponse>(responseText).meta ?: throw Exception()
             } catch (e: Exception) {
                 JSONObject(responseText).optJSONObject("meta")?.toString()?.let { parseJson(it) }
-                    ?: throw IllegalStateException("유효한 메타데이터를 찾을 수 없습니다: $url")
+                    ?: throw IllegalStateException("유효한 메타데이터를 찾을 수 무 없습니다: $url")
             }
         }
         
@@ -1374,7 +1403,7 @@ private data class TmdbDetailResponse(
     @JsonProperty("credits") val credits: TmdbCredits? = null,
     @JsonProperty("images") val images: TmdbImages? = null,
     @JsonProperty("videos") val videos: ResultsTrailer? = null,
-    @JsonProperty("external_ids") val external_ids: ExternalIds? = null,
+    @JsonProperty("external_ids") val external_ids: external_ids? = null,
     @JsonProperty("translations") val translations: TmdbTranslations? = null
 ) {
     fun toTmdbMedia(mediaType: String): TmdbMedia {
