@@ -1,5 +1,5 @@
 // v1.159 (Bugfix: 오지랖 최적화 제거 - include_image_language 파라미터 삭제 및 원본의 한국어 로고 우선순위 복구)
-// + (Bugfix: CineStream Provider 강제 검색 및 로깅 추가 적용본)
+// + (Bugfix: CineStream Provider 강제 검색 및 로깅 추가 적용본 - 빌드에러 수정)
 package com.hsp1020
 
 import android.content.Context
@@ -448,7 +448,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 parseJson<CatalogResponse>(responseText).meta ?: throw Exception()
             } catch (e: Exception) {
                 JSONObject(responseText).optJSONObject("meta")?.toString()?.let { parseJson(it) }
-                    ?: throw IllegalStateException("유효한 메타데이터를 찾을 수 무 없습니다: $url")
+                    ?: throw IllegalStateException("유효한 메타데이터를 찾을 수 없습니다: $url")
             }
         }
         
@@ -1403,7 +1403,8 @@ private data class TmdbDetailResponse(
     @JsonProperty("credits") val credits: TmdbCredits? = null,
     @JsonProperty("images") val images: TmdbImages? = null,
     @JsonProperty("videos") val videos: ResultsTrailer? = null,
-    @JsonProperty("external_ids") val external_id: ExternalIds? = null,
+    // [버그 수정 완료]: external_ids 를 정상적인 ExternalIds 타입으로 교체
+    @JsonProperty("external_ids") val external_ids: ExternalIds? = null,
     @JsonProperty("translations") val translations: TmdbTranslations? = null
 ) {
     fun toTmdbMedia(mediaType: String): TmdbMedia {
