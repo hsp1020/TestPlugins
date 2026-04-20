@@ -1,4 +1,4 @@
-// v1.3 (Fix: addlinks.xml 수정에 따른 라디오 버튼 참조 제거 및 StremioC 타입 고정)
+// v1.3 (Fix: addlinks.xml 수정에 따른 라디오 버튼 참조 제거 및 StremioC 타입 고정 + CineStream 설치 체크 버그 수정 및 로깅)
 package com.hsp1020
 
 import android.annotation.SuppressLint
@@ -59,7 +59,9 @@ class SettingsBottomFragment(
     }
 
     private fun isCineStreamInstalled(): Boolean {
-        return StremioC.getCineStreamProvider() != null
+        println("[CineStream_UI_DEBUG] isCineStreamInstalled() 호출됨 - 강제 재검색 요청")
+        // 화면을 열 때는 플러그인 늦게 로딩되었을 경우를 대비해 forceSearch = true 로 호출
+        return StremioC.getCineStreamProvider(forceSearch = true) != null
     }
 
     @SuppressLint("DiscouragedApi")
@@ -95,16 +97,21 @@ class SettingsBottomFragment(
 
         try {
             val switchCineStream: CompoundButton = view.findView("switchCineStream")
+            
+            println("[CineStream_UI_DEBUG] CineStream 설치 여부 검사 시작...")
             val isInstalled = isCineStreamInstalled()
+            println("[CineStream_UI_DEBUG] CineStream 설치 검사 결과: $isInstalled")
 
             switchCineStream.isEnabled = isInstalled
             if (!isInstalled) {
                 switchCineStream.isChecked = false
                 switchCineStream.text = "CineStream (Not Installed)"
                 sharedPref.edit { putBoolean(PREF_KEY_CINESTREAM_ENABLED, false) } 
+                println("[CineStream_UI_DEBUG] 토글 비활성화 처리 완료")
             } else {
                 switchCineStream.text = "CineStream Integration"
                 switchCineStream.isChecked = sharedPref.getBoolean(PREF_KEY_CINESTREAM_ENABLED, true)
+                println("[CineStream_UI_DEBUG] 토글 활성화 처리 완료 (현재상태: ${switchCineStream.isChecked})")
             }
 
             switchCineStream.setOnCheckedChangeListener { _, isChecked ->
@@ -279,7 +286,7 @@ class SettingsBottomFragment(
             btnUpdate.setOnClickListener {
                 val name = etName.text.toString().trim()
                 val link = etLink.text.toString().trim()
-                // [v1.3 수정] 데이터 갱신 시에도 무조건 StremioC로 고정
+                //[v1.3 수정] 데이터 갱신 시에도 무조건 StremioC로 고정
                 val type = "StremioC"
                 println("[SettingsBottomFragment v1.3] Edit dialog: 링크 타입 $type 로 고정 업데이트")
 
