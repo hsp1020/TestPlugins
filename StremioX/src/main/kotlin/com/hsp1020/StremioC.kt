@@ -1403,7 +1403,7 @@ private data class TmdbDetailResponse(
     @JsonProperty("credits") val credits: TmdbCredits? = null,
     @JsonProperty("images") val images: TmdbImages? = null,
     @JsonProperty("videos") val videos: ResultsTrailer? = null,
-    @JsonProperty("external_ids") val ExternalIds: external_ids? = null,
+    @JsonProperty("external_ids") val external_id: ExternalIds? = null,
     @JsonProperty("translations") val translations: TmdbTranslations? = null
 ) {
     fun toTmdbMedia(mediaType: String): TmdbMedia {
