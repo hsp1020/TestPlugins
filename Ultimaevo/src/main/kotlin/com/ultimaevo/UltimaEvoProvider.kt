@@ -1,4 +1,4 @@
-// v1.53 (Fix: PreferenceManager 의존성 에러 해결을 위해 네이티브 방식으로 글로벌 설정 로드)
+// v1.50
 package com.ultimaevo
 
 import android.content.Context
@@ -25,28 +25,25 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
     override var name = customName
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.Live)
 
+    // 🌟 최적화: 캐싱 변수 도입 (Getter 메모리 낭비 방지)
     private var cachedActiveCatsStr: String? = null
     private var cachedMainPageList: List<MainPageData> = emptyList()
 
     override val hasMainPage: Boolean
         get() {
-            println("[UltimaEvo-Debug v1.53] [Provider-$instanceId] hasMainPage 호출됨")
             val context = UltimaEvoPlugin.pluginContext ?: return true
-            // [v1.53 수정] 네이티브 SharedPreferences 패키지명 직접 참조
-            val prefs = context.getSharedPreferences("${context.packageName}_preferences", Context.MODE_PRIVATE)
+            val prefs = context.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
             return prefs.getBoolean("evo_visibility_enabled_$instanceId", true)
         }
 
     init {
-        println("[UltimaEvo-Debug v1.53] [Provider-$instanceId] 인스턴스 할당됨: $customName")
+        println("[UltimaEvo-Debug] [Provider-$instanceId] 인스턴스 할당됨: $customName")
     }
 
     override val mainPage: List<MainPageData>
         get() {
-            println("[UltimaEvo-Debug v1.53] [Provider-$instanceId] mainPage 호출됨")
             val context = UltimaEvoPlugin.pluginContext ?: return emptyList()
-            // [v1.53 수정] 네이티브 SharedPreferences 패키지명 직접 참조
-            val prefs = context.getSharedPreferences("${context.packageName}_preferences", Context.MODE_PRIVATE)
+            val prefs = context.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
             
             val isVisible = prefs.getBoolean("evo_visibility_enabled_$instanceId", true)
             if (!isVisible) return emptyList()
@@ -54,6 +51,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
             val activeCatsStr = prefs.getString("evo_active_cats_$instanceId", "") ?: ""
             if (activeCatsStr.isBlank()) return emptyList()
 
+            // 🌟 최적화: 원본 문자열이 이전과 똑같다면 무거운 파싱 로직을 건너뛰고 캐시된 리스트 반환
             if (activeCatsStr == cachedActiveCatsStr) {
                 return cachedMainPageList
             }
@@ -77,14 +75,15 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
                 } else null
             }
             
+            // 파싱 결과 캐싱
             cachedMainPageList = pages.sortedBy { it.second }.map { it.first }
             cachedActiveCatsStr = activeCatsStr
             
-            println("[UltimaEvo-Debug v1.53] [Provider-$instanceId] 메인 카탈로그 파싱 완료")
             return cachedMainPageList
         }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
+        // 🌟 최적화: 네트워크 호출은 명시적으로 IO 스레드로 분리
         return withContext(Dispatchers.IO) {
             try {
                 val parts = request.data.split("|||")
@@ -109,7 +108,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
                 val modifiedItems = filteredItems.map { it.copy(name = customCatalogTitle) }
                 newHomePageResponse(modifiedItems, response.hasNext)
             } catch (e: Exception) {
-                if (e is CancellationException) throw e
+                if (e is CancellationException) throw e // 최적화
                 newHomePageResponse(emptyList(), false)
             }
         }
@@ -148,8 +147,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
 
     override suspend fun search(query: String): List<SearchResponse> {
         val context = UltimaEvoPlugin.pluginContext ?: return emptyList()
-        // [v1.53 수정] 네이티브 SharedPreferences 패키지명 직접 참조
-        val prefs = context.getSharedPreferences("${context.packageName}_preferences", Context.MODE_PRIVATE)
+        val prefs = context.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
         
         val isSearchEnabled = prefs.getBoolean("evo_search_enabled_$instanceId", true)
         if (!isSearchEnabled) return emptyList()
@@ -173,10 +171,11 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
                 async<List<SearchResponse>>(Dispatchers.IO) {
                     semaphore.withPermit {
                         try {
-                            println("[UltimaEvo-Debug v1.53] [Provider-$instanceId] ${provider.name} 검색 시도")
+                            println("[UltimaEvo-Debug] [Provider-$instanceId] ${provider.name} 검색 시도")
                             provider.search(query) ?: emptyList()
                         } catch (e: Exception) {
-                            if (e is CancellationException) throw e 
+                            if (e is CancellationException) throw e // 최적화: 좀비 코루틴 방지
+                            println("[UltimaEvo-Debug] [Provider-$instanceId] ${provider.name} 에러 무시: ${e.message}")
                             emptyList()
                         }
                     }
@@ -185,7 +184,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
             
             val results: List<SearchResponse> = deferredResults.awaitAll().flatten()
             val finalRes: List<SearchResponse> = results.distinctBy { it.url }
-            println("[UltimaEvo-Debug v1.53] [Provider-$instanceId] 병렬 검색 최종 결과: ${finalRes.size}개")
+            println("[UltimaEvo-Debug] [Provider-$instanceId] 병렬 검색 최종 결과: ${finalRes.size}개")
             finalRes
         }
     }
