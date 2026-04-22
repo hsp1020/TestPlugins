@@ -1,8 +1,7 @@
-// v1.52 (Feature: Cloudstream 메인 SharedPreferences 연동으로 인한 설정 백업 지원)
+// v1.53 (Fix: PreferenceManager 의존성 에러 해결을 위해 네이티브 방식으로 글로벌 설정 로드)
 package com.ultimaevo
 
 import android.content.Context
-import androidx.preference.PreferenceManager
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
@@ -31,23 +30,23 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
 
     override val hasMainPage: Boolean
         get() {
-            println("[UltimaEvo-Debug v1.52] [Provider-$instanceId] hasMainPage 호출됨")
+            println("[UltimaEvo-Debug v1.53] [Provider-$instanceId] hasMainPage 호출됨")
             val context = UltimaEvoPlugin.pluginContext ?: return true
-            // [v1.52 수정] 글로벌 메인 DB 조회
-            val prefs = PreferenceManager.getDefaultSharedPreferences(context)
+            // [v1.53 수정] 네이티브 SharedPreferences 패키지명 직접 참조
+            val prefs = context.getSharedPreferences("${context.packageName}_preferences", Context.MODE_PRIVATE)
             return prefs.getBoolean("evo_visibility_enabled_$instanceId", true)
         }
 
     init {
-        println("[UltimaEvo-Debug v1.52] [Provider-$instanceId] 인스턴스 할당됨: $customName")
+        println("[UltimaEvo-Debug v1.53] [Provider-$instanceId] 인스턴스 할당됨: $customName")
     }
 
     override val mainPage: List<MainPageData>
         get() {
-            println("[UltimaEvo-Debug v1.52] [Provider-$instanceId] mainPage 호출됨")
+            println("[UltimaEvo-Debug v1.53] [Provider-$instanceId] mainPage 호출됨")
             val context = UltimaEvoPlugin.pluginContext ?: return emptyList()
-            // [v1.52 수정] 글로벌 메인 DB 조회
-            val prefs = PreferenceManager.getDefaultSharedPreferences(context)
+            // [v1.53 수정] 네이티브 SharedPreferences 패키지명 직접 참조
+            val prefs = context.getSharedPreferences("${context.packageName}_preferences", Context.MODE_PRIVATE)
             
             val isVisible = prefs.getBoolean("evo_visibility_enabled_$instanceId", true)
             if (!isVisible) return emptyList()
@@ -81,7 +80,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
             cachedMainPageList = pages.sortedBy { it.second }.map { it.first }
             cachedActiveCatsStr = activeCatsStr
             
-            println("[UltimaEvo-Debug v1.52] [Provider-$instanceId] 메인 카탈로그 파싱 완료")
+            println("[UltimaEvo-Debug v1.53] [Provider-$instanceId] 메인 카탈로그 파싱 완료")
             return cachedMainPageList
         }
 
@@ -149,8 +148,8 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
 
     override suspend fun search(query: String): List<SearchResponse> {
         val context = UltimaEvoPlugin.pluginContext ?: return emptyList()
-        // [v1.52 수정] 글로벌 메인 DB 조회
-        val prefs = PreferenceManager.getDefaultSharedPreferences(context)
+        // [v1.53 수정] 네이티브 SharedPreferences 패키지명 직접 참조
+        val prefs = context.getSharedPreferences("${context.packageName}_preferences", Context.MODE_PRIVATE)
         
         val isSearchEnabled = prefs.getBoolean("evo_search_enabled_$instanceId", true)
         if (!isSearchEnabled) return emptyList()
@@ -174,7 +173,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
                 async<List<SearchResponse>>(Dispatchers.IO) {
                     semaphore.withPermit {
                         try {
-                            println("[UltimaEvo-Debug v1.52] [Provider-$instanceId] ${provider.name} 검색 시도")
+                            println("[UltimaEvo-Debug v1.53] [Provider-$instanceId] ${provider.name} 검색 시도")
                             provider.search(query) ?: emptyList()
                         } catch (e: Exception) {
                             if (e is CancellationException) throw e 
@@ -186,7 +185,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
             
             val results: List<SearchResponse> = deferredResults.awaitAll().flatten()
             val finalRes: List<SearchResponse> = results.distinctBy { it.url }
-            println("[UltimaEvo-Debug v1.52] [Provider-$instanceId] 병렬 검색 최종 결과: ${finalRes.size}개")
+            println("[UltimaEvo-Debug v1.53] [Provider-$instanceId] 병렬 검색 최종 결과: ${finalRes.size}개")
             finalRes
         }
     }
