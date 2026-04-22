@@ -1,11 +1,11 @@
-// 버전 정보: v1.3 (AGP 최신화에 따른 res.apk 누락 우회 로직 추가 및 디버깅 로그 유지)
+// 버전 정보: v1.4 (res.apk 누락 에러 원인 설명 정정 및 우회 로직 유지)
 import com.android.build.gradle.BaseExtension
 import com.lagradost.cloudstream3.gradle.CloudstreamExtension
 import org.gradle.kotlin.dsl.register
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
 
-println("[Debug] build.gradle.kts 스크립트 실행 - v1.3")
+println("[Debug] build.gradle.kts 스크립트 실행 - v1.4")
 
 buildscript {
     println("[Debug] buildscript 저장소 설정 시작")
@@ -18,11 +18,11 @@ buildscript {
 
     dependencies {
         println("[Debug] buildscript 의존성 설정 시작")
-        // v1.2 수정 유지: 최신 Kotlin 지원 및 R8 버그 수정을 위해 AGP 상향
+        // 기존부터 사용하던 AGP 8.x 환경 유지 (R8 버그 방지를 위해 8.8.2로 상향한 상태 유지)
         classpath("com.android.tools.build:gradle:8.8.2")
         classpath("com.github.recloudstream:gradle:master-SNAPSHOT")
         
-        // v1.2 수정 유지: cloudstream.jar(2.3.0) 및 기타 의존성의 메타데이터 버전에 맞춰 Kotlin 상향
+        // 메타데이터 컴파일 에러 해결을 위해 맞춘 Kotlin 2.3.0 유지
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.3.0")
     }
 }
@@ -105,19 +105,22 @@ subprojects {
         implementation("com.github.teamnewpipe:NewPipeExtractor:v0.25.2") // NewPipe Extractor
     }
 
-    // v1.3 수정: AGP 8.0 이상에서 res.apk가 생성되지 않아 발생하는 압축 해제 오류 우회 로직 추가
+    // v1.4 우회 로직: 컴파일이 정상적으로 뚫린 후 Cloudstream make 태스크에서 발생하는 AGP 8.x 종특(res.apk 누락) 에러 방지
     tasks.configureEach {
         if (name.contains("make")) {
             doFirst {
                 val resApk = file("build/intermediates/res.apk")
                 if (!resApk.exists()) {
-                    println("[Debug] ${project.name} - res.apk 누락 우회: 빈 Zip 파일 임시 생성 (${resApk.absolutePath})")
+                    println("[Debug] ${project.name} - make 태스크 진입 전 res.apk 존재 여부 확인: 없음")
+                    println("[Debug] ${project.name} - Cloudstream 압축 해제 에러 우회를 위한 빈 Zip 파일 임시 생성 (${resApk.absolutePath})")
                     resApk.parentFile.mkdirs()
                     java.util.zip.ZipOutputStream(java.io.FileOutputStream(resApk)).use { zout ->
                         zout.putNextEntry(java.util.zip.ZipEntry("dummy.txt"))
                         zout.write("dummy".toByteArray())
                         zout.closeEntry()
                     }
+                } else {
+                    println("[Debug] ${project.name} - make 태스크 진입 전 res.apk 존재 여부 확인: 정상 존재함")
                 }
             }
         }
