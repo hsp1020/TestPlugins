@@ -1,11 +1,11 @@
-// 버전 정보: v1.1 (Kotlin 버전 호환성 수정 및 디버깅 로그 추가)
+// 버전 정보: v1.2 (AGP 8.8.2 및 Kotlin 2.3.0 상향, 디버깅 로그 유지)
 import com.android.build.gradle.BaseExtension
 import com.lagradost.cloudstream3.gradle.CloudstreamExtension
 import org.gradle.kotlin.dsl.register
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
 
-println("[Debug] build.gradle.kts 스크립트 실행 - v1.1")
+println("[Debug] build.gradle.kts 스크립트 실행 - v1.2")
 
 buildscript {
     println("[Debug] buildscript 저장소 설정 시작")
@@ -18,11 +18,12 @@ buildscript {
 
     dependencies {
         println("[Debug] buildscript 의존성 설정 시작")
-        classpath("com.android.tools.build:gradle:8.7.3")
+        // v1.2 수정: 최신 Kotlin 지원 및 R8 버그 수정을 위해 AGP 상향
+        classpath("com.android.tools.build:gradle:8.8.2")
         classpath("com.github.recloudstream:gradle:master-SNAPSHOT")
         
-        // v1.1 수정: AGP 8.7.3의 내장 R8 컴파일러와 호환되는 Kotlin 2.0.21로 다운그레이드
-        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.0.21")
+        // v1.2 수정: cloudstream.jar(2.3.0) 및 기타 의존성의 메타데이터 버전에 맞춰 Kotlin 상향
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.3.0")
     }
 }
 
