@@ -1,4 +1,4 @@
-// v1.3 (Fix: addlinks.xml 수정에 따른 라디오 버튼 참조 제거 및 StremioC 타입 고정 + CineStream 설치 체크 버그 수정 및 로깅)
+// v1.4 (Feature: 플러그인 메인 코드가 전달한 글로벌 SharedPreferences를 그대로 사용하여 백업 호환성 확보 및 로그 추가)
 package com.hsp1020
 
 import android.annotation.SuppressLint
@@ -31,7 +31,7 @@ class SettingsBottomFragment(
     private val sharedPref: SharedPreferences
 ) : BottomSheetDialogFragment() {
     private val PREF_KEY_LINKS = "stremio_saved_links"
-    val PREF_KEY_CINESTREAM_ENABLED = "cinestream_integration_enabled" // CineStream 설정 키
+    val PREF_KEY_CINESTREAM_ENABLED = "cinestream_integration_enabled" 
 
     private val res = plugin.resources ?: throw Exception("Unable to access plugin resources")
 
@@ -59,8 +59,7 @@ class SettingsBottomFragment(
     }
 
     private fun isCineStreamInstalled(): Boolean {
-        println("[CineStream_UI_DEBUG] isCineStreamInstalled() 호출됨 - 강제 재검색 요청")
-        // 화면을 열 때는 플러그인 늦게 로딩되었을 경우를 대비해 forceSearch = true 로 호출
+        println("[SettingsBottomFragment v1.4] isCineStreamInstalled() 호출됨 - 강제 재검색 요청")
         return StremioC.getCineStreamProvider(forceSearch = true) != null
     }
 
@@ -69,6 +68,7 @@ class SettingsBottomFragment(
         inflater: LayoutInflater, container: ViewGroup?,
         savedInstanceState: Bundle?
     ): View {
+        println("[SettingsBottomFragment v1.4] 뷰 생성됨. 전달받은 글로벌 SharedPreferences 사용 중")
         val view = getLayout("bottom_sheet_layout", inflater, container)
 
         listOf("addlinks", "showlinks", "saveIcon").forEach { name ->
@@ -98,20 +98,20 @@ class SettingsBottomFragment(
         try {
             val switchCineStream: CompoundButton = view.findView("switchCineStream")
             
-            println("[CineStream_UI_DEBUG] CineStream 설치 여부 검사 시작...")
+            println("[SettingsBottomFragment v1.4] CineStream 설치 여부 검사 시작...")
             val isInstalled = isCineStreamInstalled()
-            println("[CineStream_UI_DEBUG] CineStream 설치 검사 결과: $isInstalled")
+            println("[SettingsBottomFragment v1.4] CineStream 설치 검사 결과: $isInstalled")
 
             switchCineStream.isEnabled = isInstalled
             if (!isInstalled) {
                 switchCineStream.isChecked = false
                 switchCineStream.text = "CineStream (Not Installed)"
                 sharedPref.edit { putBoolean(PREF_KEY_CINESTREAM_ENABLED, false) } 
-                println("[CineStream_UI_DEBUG] 토글 비활성화 처리 완료")
+                println("[SettingsBottomFragment v1.4] 토글 비활성화 처리 완료")
             } else {
                 switchCineStream.text = "CineStream Integration"
                 switchCineStream.isChecked = sharedPref.getBoolean(PREF_KEY_CINESTREAM_ENABLED, true)
-                println("[CineStream_UI_DEBUG] 토글 활성화 처리 완료 (현재상태: ${switchCineStream.isChecked})")
+                println("[SettingsBottomFragment v1.4] 토글 활성화 처리 완료 (현재상태: ${switchCineStream.isChecked})")
             }
 
             switchCineStream.setOnCheckedChangeListener { _, isChecked ->
@@ -123,7 +123,6 @@ class SettingsBottomFragment(
             Log.w("SettingsBottomFragment", "switchCineStream view not found in XML. Skipping toggle setup.")
         }
 
-        // ---------- ADD dialog ----------
         addlinks.setOnClickListener {
             val dialogView = getLayout("addlinks", inflater, container)
             val etName: EditText
@@ -132,7 +131,7 @@ class SettingsBottomFragment(
             try {
                 etName = dialogView.findView("etName")
                 etLink = dialogView.findView("etLink")
-                println("[SettingsBottomFragment v1.3] Add dialog 뷰 로드 성공")
+                println("[SettingsBottomFragment v1.4] Add dialog 뷰 로드 성공")
             } catch (t: Throwable) {
                 Toast.makeText(requireContext(), "Dialog fields not found", Toast.LENGTH_SHORT).show()
                 Log.e("SettingsBottomFragment", "Missing dialog views $t")
@@ -150,9 +149,8 @@ class SettingsBottomFragment(
                 btnSave.setOnClickListener {
                     val name = etName.text.toString().trim()
                     val link = etLink.text.toString().trim()
-                    // [v1.3 수정] XML에서 라디오버튼이 제거되었으므로 무조건 StremioC 타입으로 고정
                     val type = "StremioC"
-                    println("[SettingsBottomFragment v1.3] Add dialog: 새로운 링크 타입 $type 로 고정 저장")
+                    println("[SettingsBottomFragment v1.4] Add dialog: 새로운 링크 저장 시도")
 
                     if (link.isEmpty()) {
                         showToast("Please enter a link")
@@ -189,7 +187,6 @@ class SettingsBottomFragment(
             dlg.show()
         }
 
-        // ---------- SHOW list dialog ----------
         showlinks.setOnClickListener {
             val dialogView = getLayout("dialog_list_links", inflater, container)
             val dlg = AlertDialog.Builder(requireContext())
@@ -237,8 +234,6 @@ class SettingsBottomFragment(
             dlg.show()
         }
 
-
-        // ---------- SAVE & RESTART ----------
         saveIcon.setOnClickListener {
             val context = this.context ?: return@setOnClickListener
 
@@ -264,7 +259,7 @@ class SettingsBottomFragment(
         try {
             etName = dialogView.findView("etName")
             etLink = dialogView.findView("etLink")
-            println("[SettingsBottomFragment v1.3] Edit dialog 뷰 로드 성공")
+            println("[SettingsBottomFragment v1.4] Edit dialog 뷰 로드 성공")
         } catch (t: Throwable) {
             Toast.makeText(requireContext(), "Dialog fields not found", Toast.LENGTH_SHORT).show()
             return
@@ -272,7 +267,6 @@ class SettingsBottomFragment(
 
         etName.setText(itemToEdit.name)
         etLink.setText(itemToEdit.link)
-        // 기존에 있던 라디오 버튼 체크 상태 복구 로직 삭제
 
         val dlg = AlertDialog.Builder(requireContext())
             .setTitle("Edit Link")
@@ -286,9 +280,8 @@ class SettingsBottomFragment(
             btnUpdate.setOnClickListener {
                 val name = etName.text.toString().trim()
                 val link = etLink.text.toString().trim()
-                //[v1.3 수정] 데이터 갱신 시에도 무조건 StremioC로 고정
                 val type = "StremioC"
-                println("[SettingsBottomFragment v1.3] Edit dialog: 링크 타입 $type 로 고정 업데이트")
+                println("[SettingsBottomFragment v1.4] Edit dialog: 업데이트 시도")
 
                 if (link.isEmpty() || !(link.startsWith("http://") || link.startsWith("https://"))) {
                     showToast("Enter a valid URL (http/https)")
@@ -349,7 +342,7 @@ class SettingsBottomFragment(
                         id   = obj.optLong("id", System.currentTimeMillis()),
                         name = obj.optString("name", ""),
                         link = obj.optString("link", ""),
-                        type = obj.optString("type", "StremioC") // 파싱 시에도 기본값을 StremioC로 통일
+                        type = obj.optString("type", "StremioC") 
                     )
                 )
             }
