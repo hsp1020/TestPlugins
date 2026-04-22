@@ -1,4 +1,4 @@
-// v1.52 (Feature: Cloudstream 메인 SharedPreferences 연동으로 인한 설정 백업 지원)
+// v1.53 (Fix: PreferenceManager 의존성 에러 해결을 위해 네이티브 방식으로 글로벌 설정 로드)
 package com.ultimaevo
 
 import android.app.AlertDialog
@@ -19,7 +19,6 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.*
 import androidx.lifecycle.lifecycleScope
-import androidx.preference.PreferenceManager
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.MainPageRequest
@@ -60,7 +59,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
-        println("[UltimaEvo-Debug v1.52] [Dialog] onViewCreated 호출")
+        println("[UltimaEvo-Debug v1.53] [Dialog] onViewCreated 호출")
         (view.parent as? View)?.setBackgroundColor(Color.TRANSPARENT)
     }
 
@@ -77,7 +76,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
     }
 
     private fun shiftAndDeleteInstance(prefs: SharedPreferences, startIndex: Int, latestCount: Int) {
-        println("[UltimaEvo-Debug v1.52] [Dialog] 인스턴스 당겨오기 시작 (Index: $startIndex)")
+        println("[UltimaEvo-Debug v1.53] [Dialog] 인스턴스 당겨오기 시작 (Index: $startIndex)")
         val editor = prefs.edit()
         for (j in startIndex until latestCount) {
             val curr = j
@@ -122,8 +121,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         savedInstanceState: Bundle?
     ): View {
         val ctx = requireContext()
-        // [v1.52 수정] 백업 호환성을 위해 글로벌 메인 SharedPreferences 참조
-        val prefs = PreferenceManager.getDefaultSharedPreferences(ctx)
+        // [v1.53 수정] 네이티브 SharedPreferences 패키지명 직접 참조
+        val prefs = ctx.getSharedPreferences("${ctx.packageName}_preferences", Context.MODE_PRIVATE)
 
         val scrollView = ScrollView(ctx).apply { background = getDarkThemeBg() }
         val mainLayout = LinearLayout(ctx).apply {
@@ -162,7 +161,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     
                     val semaphore = Semaphore(3)
 
-                    println("[UltimaEvo-Debug v1.52] [Dialog] 동기화 작업을 병렬로 생성합니다. (최대 3개 제한)")
+                    println("[UltimaEvo-Debug v1.53] [Dialog] 동기화 작업을 병렬로 생성합니다. (최대 3개 제한)")
                     val syncJobs = providers.map { provider ->
                         async {
                             semaphore.withPermit {
@@ -176,7 +175,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                                     }
                                 } catch (e: Exception) { 
                                     if (e is CancellationException) throw e 
-                                    println("[UltimaEvo-Debug v1.52] [Dialog] -> 통신 실패 (${provider.name}): ${e.message}")
+                                    println("[UltimaEvo-Debug v1.53] [Dialog] -> 통신 실패 (${provider.name}): ${e.message}")
                                 }
                                 
                                 withContext(Dispatchers.Main) {
@@ -190,7 +189,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     syncJobs.awaitAll()
                     
                     withContext(Dispatchers.Main) {
-                        println("[UltimaEvo-Debug v1.52] [Dialog] 모든 동기화 통신 종료")
+                        println("[UltimaEvo-Debug v1.53] [Dialog] 모든 동기화 통신 종료")
                         if (isAdded) {
                             this@apply.text = "✅ Sync Complete"
                             this@apply.isEnabled = true
@@ -493,8 +492,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
     }
 
     private fun showEditCatalogsDialog(instanceId: Int, ctx: Context) {
-        // [v1.52 수정] 글로벌 메인 SharedPreferences 참조
-        val prefs = PreferenceManager.getDefaultSharedPreferences(ctx)
+        // [v1.53 수정] 네이티브 SharedPreferences 패키지명 직접 참조
+        val prefs = ctx.getSharedPreferences("${ctx.packageName}_preferences", Context.MODE_PRIVATE)
         
         val mainContainer = LinearLayout(ctx).apply { 
             orientation = LinearLayout.VERTICAL
