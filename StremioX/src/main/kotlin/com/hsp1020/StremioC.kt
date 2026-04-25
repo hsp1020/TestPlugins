@@ -488,8 +488,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val mdbRatings = mdbDeferred?.await() ?: emptyList()
         if (mdbRatings.isNotEmpty()) {
             val ratingStr = mdbRatings.joinToString("  ")
-            val originalPlot = loadRes.plot?.trim()
-            loadRes.plot = if (originalPlot.isNullOrEmpty()) ratingStr else "$ratingStr | $originalPlot"
+            loadRes.plot = "$ratingStr | ${loadRes.plot?.trim() ?: ""}"
         }
         
         return@coroutineScope loadRes
