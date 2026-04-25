@@ -1,14 +1,11 @@
-// v1.6 (Feature: MDBList 평점 10점 만점 정규화, 0점 필터링 및 "Site Score" 텍스트 포맷 적용)
 package com.hsp1020
 
 import com.google.gson.annotations.SerializedName
+import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.APIHolder.unixTimeMS
-import com.lagradost.cloudstream3.TvType
-import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import org.json.JSONObject
-
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.text.SimpleDateFormat
@@ -18,10 +15,7 @@ import kotlin.sequences.forEach
 const val MDBLIST_API_KEY = "d2tmbmhnrgdz7ft9re7j2gjr3"
 
 suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false): List<String> {
-    if (id.isNullOrBlank() || MDBLIST_API_KEY.isBlank()) {
-        println("[Utils.kt v1.6-MDBList] API 키/ID 누락 조회 스킵 ID: $id")
-        return emptyList()
-    }
+    if (id.isNullOrBlank() || MDBLIST_API_KEY.isBlank()) return emptyList()
     return try {
         val idParam = if (isTmdb) "tm" else "i"
         val url = "https://mdblist.com/api/?apikey=$MDBLIST_API_KEY&$idParam=$id"
@@ -33,55 +27,40 @@ suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false): List<Stri
             for (i in 0 until ratingsArray.length()) {
                 val ratingObj = ratingsArray.optJSONObject(i) ?: continue
                 val source = ratingObj.optString("source", "").lowercase()
+                val value = if (ratingObj.has("value")) ratingObj.optDouble("value") else ratingObj.optDouble("score")
+                if (value.isNaN()) continue
                 
-                // MDBList의 'score'는 모든 평점을 0~100 기준으로 환산해둔 값입니다.
-                // 이를 10.0으로 나누면 어떤 사이트든 10점 만점 척도로 깔끔하게 변환됩니다.
-                val scoreInt = ratingObj.optInt("score", 0)
+                var scaledValue = value
+                // 10점 만점 스케일링 정규화
+                when (source) {
+                    "letterboxd", "lb" -> scaledValue *= 2.0
+                    "tmdb", "trakt", "metacritic", "mc", "tomatoes", "rottentomatoes", "rt", "tomatoesaudience", "audiencescore", "popcorn" -> scaledValue /= 10.0
+                }
                 
-                // 데이터가 없는 0.0점 처리 제외
-                if (scoreInt <= 0) continue
-                
-                val formattedScore = (scoreInt / 10.0).toString()
+                scaledValue = kotlin.math.round(scaledValue * 10.0) / 10.0
+                if (scaledValue <= 0.0) continue // 0.0은 데이터 없는 것으로 간주하여 제외
                 
                 val key = when (source) {
-                    "myanimelist", "mal" -> "mal"
-                    "imdb" -> "imdb"
-                    "audiencescore" -> "popcorn"
-                    "metacriticuser" -> "mcu"
-                    "letterboxd" -> "lb"
-                    "trakt" -> "trakt"
-                    "tmdb" -> "tmdb"
-                    "metacritic" -> "mc"
-                    "rottentomatoes" -> "rt"
-                    "rogerebert" -> "re"
-                    else -> source
-                }
-                
-                val siteName = when (key) {
-                    "rt" -> "RT"
-                    "popcorn" -> "Popcorn"
-                    "mc" -> "MC"
-                    "mcu" -> "MCU"
-                    "lb" -> "LB"
-                    "re" -> "RE"
+                    "myanimelist", "mal" -> "MAL"
                     "imdb" -> "IMDb"
+                    "audiencescore", "tomatoesaudience" -> "Popcorn"
+                    "metacriticuser" -> "MCU"
+                    "letterboxd" -> "LB"
                     "trakt" -> "Trakt"
                     "tmdb" -> "TMDB"
-                    "mal" -> "MAL"
-                    else -> key.uppercase()
+                    "metacritic" -> "MC"
+                    "rottentomatoes", "tomatoes" -> "RT"
+                    "rogerebert" -> "RE"
+                    else -> source.uppercase()
                 }
-                
-                // 지정된 "[Site] [Score]" 형식으로 저장 (예: "IMDb 8.4")
-                fetchedMap[key] = "$siteName $formattedScore"
+                // 요청하신 '✨ 사이트명 점수' 포맷으로 데이터 생성
+                fetchedMap[key] = "✨ $key $scaledValue"
             }
         }
-        
-        val orderedKeys = listOf("mal", "imdb", "popcorn", "mcu", "lb", "trakt", "tmdb", "mc", "rt", "re")
+        val orderedKeys = listOf("MAL", "IMDb", "Popcorn", "MCU", "LB", "Trakt", "TMDB", "MC", "RT", "RE")
         val finalRatings = mutableListOf<String>()
-        
         for (key in orderedKeys) fetchedMap[key]?.let { finalRatings.add(it) }
         for ((key, formattedStr) in fetchedMap) if (!orderedKeys.contains(key)) finalRatings.add(formattedStr)
-        
         finalRatings
     } catch (e: Exception) { emptyList() }
 }
@@ -120,26 +99,13 @@ suspend fun fetchTmdbLogoUrl(tmdbAPI: String, apiKey: String, type: TvType, tmdb
     val json = runCatching { JSONObject(app.get(url).text) }.getOrNull() ?: return null
     val logos = json.optJSONArray("logos") ?: return null; if (logos.length() == 0) return null
     val lang = appLangCode?.trim()?.lowercase()?.substringBefore("-")
-    fun path(o: JSONObject) = o.optString("file_path")
-    fun isSvg(o: JSONObject) = path(o).endsWith(".svg", true)
-    fun urlOf(o: JSONObject) = "https://image.tmdb.org/t/p/w500${path(o)}"
+    fun path(o: JSONObject) = o.optString("file_path"); fun isSvg(o: JSONObject) = path(o).endsWith(".svg", true); fun urlOf(o: JSONObject) = "https://image.tmdb.org/t/p/w500${path(o)}"
     var svgFallback: JSONObject? = null
-    for (i in 0 until logos.length()) {
-        val logo = logos.optJSONObject(i) ?: continue; val p = path(logo); if (p.isBlank()) continue
-        val l = logo.optString("iso_639_1").trim().lowercase()
-        if (l == lang) { if (!isSvg(logo)) return urlOf(logo); if (svgFallback == null) svgFallback = logo }
-    }
-    svgFallback?.let { return urlOf(it) }
-    var best: JSONObject? = null; var bestSvg: JSONObject? = null
+    for (i in 0 until logos.length()) { val logo = logos.optJSONObject(i) ?: continue; val p = path(logo); if (p.isBlank()) continue; val l = logo.optString("iso_639_1").trim().lowercase(); if (l == lang) { if (!isSvg(logo)) return urlOf(logo); if (svgFallback == null) svgFallback = logo } }
+    svgFallback?.let { return urlOf(it) }; var best: JSONObject? = null; var bestSvg: JSONObject? = null
     fun voted(o: JSONObject) = o.optDouble("vote_average", 0.0) > 0 && o.optInt("vote_count", 0) > 0
-    fun better(a: JSONObject?, b: JSONObject): Boolean {
-        if (a == null) return true; val aAvg = a.optDouble("vote_average", 0.0); val aCnt = a.optInt("vote_count", 0); val bAvg = b.optDouble("vote_average", 0.0); val bCnt = b.optInt("vote_count", 0)
-        return bAvg > aAvg || (bAvg == aAvg && bCnt > aCnt)
-    }
-    for (i in 0 until logos.length()) {
-        val logo = logos.optJSONObject(i) ?: continue; if (!voted(logo)) continue
-        if (isSvg(logo)) { if (better(bestSvg, logo)) bestSvg = logo } else { if (better(best, logo)) best = logo }
-    }
+    fun better(a: JSONObject?, b: JSONObject): Boolean { if (a == null) return true; val aAvg = a.optDouble("vote_average", 0.0); val aCnt = a.optInt("vote_count", 0); val bAvg = b.optDouble("vote_average", 0.0); val bCnt = b.optInt("vote_count", 0); return bAvg > aAvg || (bAvg == aAvg && bCnt > aCnt) }
+    for (i in 0 until logos.length()) { val logo = logos.optJSONObject(i) ?: continue; if (!voted(logo)) continue; if (isSvg(logo)) { if (better(bestSvg, logo)) bestSvg = logo } else { if (better(best, logo)) best = logo } }
     best?.let { return urlOf(it) }; bestSvg?.let { return urlOf(it) }; return null
 }
 fun normalizeId(id: String?): String {
