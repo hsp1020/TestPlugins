@@ -1,3 +1,4 @@
+// v1.168 (Bugfix: MDBList 중복 선언 에러 해결 및 타입 추론 명시)
 // v1.167 (Feature: MDBList 평점 10점 정규화, lb/팝콘 순서 스왑, Tomatoes 약자, 병렬 호출, 플롯 1줄 적용)
 // v1.159 (Bugfix: 오지랖 최적화 제거 - include_image_language 파라미터 삭제 및 원본의 한국어 로고 우선순위 복구)
 // + (Bugfix: CineStream Provider 강제 검색 및 로깅 추가 적용본 - 빌드에러 수정)
@@ -78,70 +79,6 @@ inline fun <T> runSuspendCatching(block: () -> T): Result<T> {
     }
 }
 
-// [v1.167 추가됨: MDBList 평점 수집 병렬 로직]
-private const val MDBLIST_API_KEY = "d2tmbmhnrgdz7ft9re7j2gjr3"
-
-suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false): List<String> {
-    if (id.isNullOrBlank()) return emptyList()
-    return try {
-        val idParam = if (isTmdb) "tm" else "i"
-        val url = "https://mdblist.com/api/?apikey=$MDBLIST_API_KEY&$idParam=$id"
-        val json = JSONObject(app.get(url, timeout = 15L).text)
-        val ratingsArray = json.optJSONArray("ratings") ?: return emptyList()
-        val fetchedMap = mutableMapOf<String, String>()
-
-        for (i in 0 until ratingsArray.length()) {
-            val ratingObj = ratingsArray.optJSONObject(i) ?: continue
-            val source = ratingObj.optString("source", "").lowercase()
-            val value = if (ratingObj.has("value")) ratingObj.optDouble("value") else ratingObj.optDouble("score")
-            if (value.isNaN()) continue
-
-            var scaledValue = value
-            
-            // 10점 만점 스케일링 정규화
-            when (source) {
-                "letterboxd", "lb" -> scaledValue *= 2.0
-                "tmdb", "trakt", "metacritic", "mc", "tomatoes", "rottentomatoes", "rt", "tomatoesaudience", "audiencescore", "popcorn" -> scaledValue /= 10.0
-            }
-            
-            scaledValue = kotlin.math.round(scaledValue * 10.0) / 10.0
-            
-            // 0.0 인 경우 데이터가 없는 것으로 간주하여 제외
-            if (scaledValue <= 0.0) continue
-
-            val key = when (source) {
-                "myanimelist", "mal" -> "MAL"
-                "imdb" -> "IMDb"
-                "audiencescore", "tomatoesaudience" -> "Popcorn"
-                "metacriticuser" -> "MCU"
-                "letterboxd" -> "LB"
-                "trakt" -> "Trakt"
-                "tmdb" -> "TMDB"
-                "metacritic" -> "MC"
-                "rottentomatoes", "tomatoes" -> "RT"
-                "rogerebert" -> "RE"
-                else -> source.uppercase()
-            }
-            
-            fetchedMap[key] = "✨ $key $scaledValue"
-        }
-
-        // lb와 팝콘 순서 스왑 적용
-        val orderedKeys = listOf("MAL", "IMDb", "LB", "MCU", "Popcorn", "Trakt", "TMDB", "MC", "RT", "RE")
-        val finalRatings = mutableListOf<String>()
-        for (key in orderedKeys) {
-            fetchedMap[key]?.let { finalRatings.add(it) }
-        }
-        for ((key, formattedStr) in fetchedMap) {
-            if (!orderedKeys.contains(key)) finalRatings.add(formattedStr)
-        }
-        finalRatings
-    } catch (e: Exception) {
-        emptyList()
-    }
-}
-// [v1.167 추가 완료]
-
 private fun String.urlEncode(): String = try { URLEncoder.encode(this, "UTF-8").replace("+", "%20") } catch (e: Exception) { this }
 
 private fun String.cleanBaseUrl(): String {
@@ -193,7 +130,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val networkSemaphore = Semaphore(20)
 
         val customSession by lazy {
-            println("[StremioC v1.159] 커스텀 OkHttp 세션 초기화 (메모리 릭 방지 싱글톤)")
+            println("[StremioC v1.168] 커스텀 OkHttp 세션 초기화 (메모리 릭 방지 싱글톤)")
             val newClient = app.baseClient.newBuilder()
                 .protocols(listOf(Protocol.HTTP_1_1))
                 .dispatcher(Dispatcher().apply {
@@ -275,7 +212,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         cachedCineClassLoader = targetClassLoader
                         val clazz = targetClassLoader.loadClass("com.megix.CineStreamProvider")
                         provider = clazz.newInstance() as? MainAPI
-                        println("[StremioC v1.159] 🎉 CineStream Ghost Provider 강제 생성 완료")
+                        println("[StremioC v1.168] 🎉 CineStream Ghost Provider 강제 생성 완료")
                     } else {
                         println("[CineStream_DEBUG] ❌ 타겟 ClassLoader를 찾지 못했습니다. 플러그인이 안깔려있거나 난독화로 구조가 변경됨.")
                     }
@@ -418,7 +355,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val now = System.currentTimeMillis()
                 val removedCount = globalPageCache.entries.removeIf { now - it.value.third > CACHE_TTL_MS }
                 if (removedCount) {
-                    println("[StremioC v1.159] 🧹 홈 카탈로그 캐시 정리 완료")
+                    println("[StremioC v1.168] 🧹 홈 카탈로그 캐시 정리 완료")
                 }
                 catalogSkipState.clear()
             }
@@ -432,7 +369,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         return@coroutineScope try {
             val response = deferred.await()
             if (!isNewRequest && page > 1) {
-                println("[StremioC v1.159] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
+                println("[StremioC v1.168] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
                 newHomePageResponse(emptyList(), hasNext = true)
             } else {
                 response
@@ -520,7 +457,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val normalizedId = try { normalizeId(res.id) } catch (e: Exception) { res.id }
         val encodedId = normalizedId.urlEncode()
 
-        // [v1.167 추가됨: MDBList 병렬 호출]
+        // [v1.168 수정됨: MDBList 병렬 호출 및 명시적 타입 선언]
         var mdbEarlyId: String? = null
         var isMdbEarlyTmdb = false
         if (res.id.startsWith("tt")) {
@@ -536,7 +473,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             isMdbEarlyTmdb = true
         }
 
-        val mdbDeferred = mdbEarlyId?.let { id ->
+        // 컴파일러 추론을 돕기 위한 명시적 타입 선언
+        val mdbDeferred: Deferred<List<String>>? = mdbEarlyId?.let { id ->
             async(Dispatchers.IO) { fetchMdbListRatings(id, isMdbEarlyTmdb) }
         }
 
@@ -589,7 +527,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
         val loadRes = res.toLoadResponse(this@StremioC, finalProcessedId, addonDeferred, preFetchedTmdbDetail, kitsuMeta?.id)
         
-        // [v1.167 수정됨: 평점 플롯 병합 처리]
+        // [v1.168 수정됨: 평점 플롯 병합 처리]
         val mdbRatings = mdbDeferred?.await() ?: emptyList()
         if (mdbRatings.isNotEmpty()) {
             val ratingStr = mdbRatings.joinToString("  ")
@@ -621,7 +559,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     val url = buildUrl("/stream/$targetType/$encodedPrimaryId.json")
                     val res = customSession.get(url, timeout = 120L).parsedSafe<StreamsResponse>()
                     res?.streams?.forEach { stream -> stream.runCallback(this@StremioC, subtitleCallback, callback) }
-                }.onFailure { println("[StremioC v1.159] 로컬 스트림 에러: ${it.message}") }
+                }.onFailure { println("[StremioC v1.168] 로컬 스트림 에러: ${it.message}") }
             },
             { invokeStremioX(targetType, globalId, loadData.season, loadData.episode, subtitleCallback, callback) },
             { invokeWatchsomuch(loadData.imdbId, loadData.season, loadData.episode, subtitleCallback) },
@@ -666,7 +604,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 } catch (e: Exception) {}
             }
             hasSyncedCineStreamSettings = true
-            println("[StremioC v1.159] CineStream 설정 동기화 완료 (Disk I/O 격리)")
+            println("[StremioC v1.168] CineStream 설정 동기화 완료 (Disk I/O 격리)")
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -694,7 +632,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
 
         if (!isEnabled) {
-            println("[StremioC v1.159] 사용자가 설정에서 CineStream 연동을 비활성화하여 스킵합니다.")
+            println("[StremioC v1.168] 사용자가 설정에서 CineStream 연동을 비활성화하여 스킵합니다.")
             return
         }
 
@@ -769,7 +707,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "isCartoon" to loadData.isCartoon
             )
 
-            println("[StremioC v1.159] CineStream 데이터 전달: $cineData")
+            println("[StremioC v1.168] CineStream 데이터 전달: $cineData")
             cineStreamProvider.loadLinks(cineData.toJson(), isCasting, subtitleInterceptor, callback)
         } catch (e: Exception) {
             e.printStackTrace()
@@ -806,7 +744,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 async(Dispatchers.IO) {
                     runSuspendCatching {
                         val url = "$api/subtitles/$type/$stremioId.json"
-                        println("[StremioC v1.159] 📥 자막 스트림 파싱 시도: $url")
+                        println("[StremioC v1.168] 📥 자막 스트림 파싱 시도: $url")
                         val subtitleResponse = customSession.get(url, timeout = 120L).parsedSafe<StremioSubtitleResponse>()
 
                         subtitleResponse?.subtitles?.forEach { sub ->
@@ -817,7 +755,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                                 subtitleCallback.invoke(newSubtitleFile("$baseLangName (Stremio)", fileUrl))
                             }
                         }
-                    }.onFailure { println("[StremioC v1.159] 자막 로드 실패: ${it.message}") }
+                    }.onFailure { println("[StremioC v1.168] 자막 로드 실패: ${it.message}") }
                 }
             }.awaitAll()
         }
@@ -1129,7 +1067,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                                     runSuspendCatching {
                                         val seasonRes = StremioC.customSession.get(provider.buildTmdbUrl("/tv/$tmdbIdStr/season/$seasonNum")).parsedSafe<TmdbSeasonDetail>()
                                         seasonRes?.episodes?.forEach { ep -> if (ep.episodeNumber != null) episodeTmdbMeta["${seasonNum}_${ep.episodeNumber}"] = ep }
-                                    }.onFailure { println("[StremioC v1.159] 시즌 $seasonNum 로드 실패: ${it.message}") }
+                                    }.onFailure { println("[StremioC v1.168] 시즌 $seasonNum 로드 실패: ${it.message}") }
                                 }
                             }
                         }.awaitAll()
@@ -1141,7 +1079,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 it.iso_3166_1 == "US" || it.iso_639_1 == "en" 
             }?.data?.let { it.title ?: it.name } ?: detailRes.original_title ?: detailRes.original_name
 
-            println("[StremioC v1.159] 영문 공식 타이틀 추출 결과: $extractedEnglishTitle")
+            println("[StremioC v1.168] 영문 공식 타이틀 추출 결과: $extractedEnglishTitle")
 
             return FetchedTmdbData(
                 if (isMovie) detailRes.title ?: detailRes.original_title else detailRes.name ?: detailRes.original_name,
@@ -1497,7 +1435,6 @@ private data class TmdbDetailResponse(
     @JsonProperty("credits") val credits: TmdbCredits? = null,
     @JsonProperty("images") val images: TmdbImages? = null,
     @JsonProperty("videos") val videos: ResultsTrailer? = null,
-    // [버그 수정 완료]: external_ids 를 정상적인 ExternalIds 타입으로 교체
     @JsonProperty("external_ids") val external_ids: ExternalIds? = null,
     @JsonProperty("translations") val translations: TmdbTranslations? = null
 ) {
