@@ -1,4 +1,4 @@
-// v1.9 (Feature: MDBList 평점 로직 유지 및 중복 선언 방지를 위한 단일화)
+// v1.11 (Bugfix: 소수점 1자리 강제 문자열 포맷팅 적용 - 부동소수점 표기 오차 완벽 차단)
 package com.hsp1020
 
 import com.google.gson.annotations.SerializedName
@@ -16,10 +16,15 @@ import kotlin.sequences.forEach
 const val MDBLIST_API_KEY = "d2tmbmhnrgdz7ft9re7j2gjr3"
 
 suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false): List<String> {
-    if (id.isNullOrBlank() || MDBLIST_API_KEY.isBlank()) return emptyList()
+    if (id.isNullOrBlank() || MDBLIST_API_KEY.isBlank()) {
+        println("[Utils.kt v1.11-MDBList] API 키/ID 누락 조회 스킵 ID: $id")
+        return emptyList()
+    }
     return try {
         val idParam = if (isTmdb) "tm" else "i"
         val url = "https://mdblist.com/api/?apikey=$MDBLIST_API_KEY&$idParam=$id"
+        println("[Utils.kt v1.11-MDBList] API 호출 시작 - URL: $url")
+        
         val json = JSONObject(app.get(url, timeout = 15L).text)
         val ratingsArray = json.optJSONArray("ratings")
         val fetchedMap = mutableMapOf<String, String>()
@@ -35,9 +40,11 @@ suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false): List<Stri
                 // 10점 만점 스케일링 정규화
                 when (source) {
                     "letterboxd", "lb" -> scaledValue *= 2.0
+                    "rogerebert", "re" -> scaledValue *= 2.5 // 4점 만점이므로 2.5를 곱해 10점 만점으로 변환
                     "tmdb", "trakt", "metacritic", "mc", "tomatoes", "rottentomatoes", "rt", "tomatoesaudience", "audiencescore", "popcorn" -> scaledValue /= 10.0
                 }
                 
+                // 수학적 반올림 처리
                 scaledValue = kotlin.math.round(scaledValue * 10.0) / 10.0
                 if (scaledValue <= 0.0) continue // 0.0은 데이터 없는 것으로 간주하여 제외
                 
@@ -54,10 +61,15 @@ suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false): List<Stri
                     "rogerebert" -> "RE"
                     else -> source.uppercase()
                 }
-                // 요청하신 '✨ 사이트명 점수' 포맷으로 데이터 생성
-                fetchedMap[key] = "✨ $key $scaledValue"
+                
+                // UI 노출을 위해 무조건 소수점 1자리 텍스트로 고정 (부동소수점 오차 방지)
+                val displayValue = String.format(Locale.US, "%.1f", scaledValue)
+                fetchedMap[key] = "✨ $key $displayValue"
+                
+                println("[Utils.kt v1.11-MDBList] 파싱 성공 - Source: $source, 원본: $value, 스케일링 후 표기: $displayValue")
             }
         }
+        
         // lb와 팝콘 순서 스왑 적용
         val orderedKeys = listOf("MAL", "IMDb", "LB", "MCU", "Popcorn", "Trakt", "TMDB", "MC", "RT", "RE")
         val finalRatings = mutableListOf<String>()
@@ -67,8 +79,11 @@ suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false): List<Stri
         for ((key, formattedStr) in fetchedMap) {
             if (!orderedKeys.contains(key)) finalRatings.add(formattedStr)
         }
+        
+        println("[Utils.kt v1.11-MDBList] 최종 주입 리스트: $finalRatings")
         finalRatings
     } catch (e: Exception) { 
+        println("[Utils.kt v1.11-MDBList] 🚨 API 호출 실패: ${e.message}")
         emptyList() 
     }
 }
