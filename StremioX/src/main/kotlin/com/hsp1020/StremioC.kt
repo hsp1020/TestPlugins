@@ -1,65 +1,22 @@
-// v1.163 (Bugfix: 코드 압축으로 인한 Kotlin Elvis 연산자 및 Smart Cast 빌드 에러 수정)
-// v1.162 (Feature: MDBList 병렬 호출 최적화 - TMDB ID 즉시 사용 및 구분자 ' ✨ ' 변경)
 package com.hsp1020
 
 import android.content.Context
 import com.fasterxml.jackson.annotation.JsonProperty
-import com.lagradost.cloudstream3.APIHolder
-import com.lagradost.cloudstream3.CloudStreamApp
-import com.lagradost.cloudstream3.Actor
-import com.lagradost.cloudstream3.ActorData
-import com.lagradost.cloudstream3.Episode
-import com.lagradost.cloudstream3.HomePageList
-import com.lagradost.cloudstream3.HomePageResponse
-import com.lagradost.cloudstream3.LoadResponse
+import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addImdbId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTMDbId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
-import com.lagradost.cloudstream3.MainAPI
-import com.lagradost.cloudstream3.MainPageRequest
-import com.lagradost.cloudstream3.Score
-import com.lagradost.cloudstream3.SearchResponse
-import com.lagradost.cloudstream3.ShowStatus
-import com.lagradost.cloudstream3.SubtitleFile
-import com.lagradost.cloudstream3.TvType
-import com.lagradost.cloudstream3.addDate
-import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.imdbUrlToIdNullable
-import com.lagradost.cloudstream3.newEpisode
-import com.lagradost.cloudstream3.newHomePageResponse
-import com.lagradost.cloudstream3.newMovieLoadResponse
-import com.lagradost.cloudstream3.newMovieSearchResponse
-import com.lagradost.cloudstream3.newSubtitleFile
-import com.lagradost.cloudstream3.newTvSeriesLoadResponse
-import com.lagradost.cloudstream3.runAllAsync
+import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
-import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.ExtractorLinkType
-import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.SubtitleHelper
-import com.lagradost.cloudstream3.utils.USER_PROVIDER_API
-import com.lagradost.cloudstream3.utils.loadExtractor
-import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.hsp1020.SubsExtractors.invokeOpenSubs
 import com.hsp1020.SubsExtractors.invokeWatchsomuch
 import com.lagradost.nicehttp.Requests
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Deferred
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.sync.withPermit
-import kotlinx.coroutines.withContext
-import okhttp3.ConnectionPool
-import okhttp3.Dispatcher
+import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.*
+import okhttp3.*
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-import okhttp3.Protocol
 import org.json.JSONObject
 import java.net.URLEncoder
 import java.util.Collections
@@ -85,8 +42,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         private const val SIMKL_CLIENT_ID = "f392628a1235f474859905f5453239c57715d9a197a89bd71cac975ddd9c4d39" 
         private val IMDB_ID_REGEX = "tt[0-9]+".toRegex(); private val JSON_ID_EXTRACT_REGEX = "\"id\":\"([^\"]+)\"".toRegex()
         private val globalPageCache = ConcurrentHashMap<String, Triple<List<SearchResponse>, Int, Long>>()
-        private val cacheMutexes = ConcurrentHashMap<String, Mutex>()
-        private val CACHE_TTL_MS = TimeUnit.HOURS.toMillis(1)
+        private val cacheMutexes = ConcurrentHashMap<String, Mutex>(); private val CACHE_TTL_MS = TimeUnit.HOURS.toMillis(1)
         private var cachedCineStreamProvider: MainAPI? = null; private var hasSearchedCineStream = false; private var hasSyncedCineStreamSettings = false
         @Volatile private var cachedCineClassLoader: ClassLoader? = null
         val networkSemaphore = Semaphore(20)
@@ -104,8 +60,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             if (provider != null) { cachedCineStreamProvider = provider; return provider }
             try {
                 val targetClassLoader = cachedCineClassLoader ?: run {
-                    val pmClass = Class.forName("com.lagradost.cloudstream3.plugins.PluginManager")
-                    val pmInstance = pmClass.getField("INSTANCE").get(null)
+                    val pmClass = Class.forName("com.lagradost.cloudstream3.plugins.PluginManager"); val pmInstance = pmClass.getField("INSTANCE").get(null)
                     var foundLoader: ClassLoader? = null
                     for (field in pmClass.declaredFields) {
                         field.isAccessible = true; val obj = runSuspendCatching { field.get(pmInstance) }.getOrNull()
@@ -131,19 +86,14 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     }
 
     private fun SearchResponse.extractPureId(): String = try { JSON_ID_EXTRACT_REGEX.find(this.url)?.groupValues?.get(1) ?: this.url } catch (e: Exception) { this.url }
-    private fun buildTmdbUrl(endpoint: String, vararg params: Pair<String, String>): String {
-        val builder = "$tmdbAPI$endpoint".toHttpUrlOrNull()?.newBuilder() ?: return ""
-        builder.addQueryParameter("api_key", apiKey).addQueryParameter("language", "ko-KR")
-        params.forEach { (key, value) -> builder.addQueryParameter(key, value) }; return builder.build().toString()
-    }
+    private fun buildTmdbUrl(endpoint: String, vararg params: Pair<String, String>): String { val builder = "$tmdbAPI$endpoint".toHttpUrlOrNull()?.newBuilder() ?: return ""; builder.addQueryParameter("api_key", apiKey).addQueryParameter("language", "ko-KR"); params.forEach { (key, value) -> builder.addQueryParameter(key, value) }; return builder.build().toString() }
     private fun getValidStremioAddons(): List<CustomSite> = (CloudStreamApp.getKey<Array<CustomSite>>(USER_PROVIDER_API)?.toList() ?: emptyList()).filter { it.parentJavaClass == "StremioX" || it.parentJavaClass == "StremioC" }
     private fun extractImdbId(url: String?): String? { if (url.isNullOrBlank() || !url.contains("tt")) return null; return runSuspendCatching { IMDB_ID_REGEX.find(url)?.value }.getOrNull() }
     private fun buildStremioId(type: String?, id: String?, season: Int?, episode: Int?, isSubtitle: Boolean = false): String? {
         if (type == "series" && season != null && episode != null) {
             return when {
                 id?.startsWith("kitsu:") == true || id?.startsWith("mal:") == true -> { val parts = id.split(":"); val baseId = if (parts.size >= 2) "${parts[0]}:${parts[1]}" else id; if (isSubtitle) "$baseId:$season:$episode" else "$baseId:$episode" }
-                id?.endsWith(":$season:$episode") == true -> id
-                else -> "$id:$season:$episode"
+                id?.endsWith(":$season:$episode") == true -> id; else -> "$id:$season:$episode"
             }
         }
         return id
@@ -173,7 +123,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
     private suspend fun fetchMainPageData(page: Int, request: MainPageRequest): HomePageResponse {
         mainUrl = mainUrl.fixSourceUrl(); val manifest = getManifest(); val targetCatalogs = manifest?.catalogs?.filter { !it.isSearchRequired() } ?: emptyList()
-        val lists = mutableListOf<HomePageList>()
         val chunkResults = coroutineScope {
             targetCatalogs.map { catalog ->
                 async(Dispatchers.IO) {
@@ -190,7 +139,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
             }.awaitAll()
         }.filterNotNull().filter { it.list.isNotEmpty() }
-        lists.addAll(chunkResults); return newHomePageResponse(lists, hasNext = true)
+        return newHomePageResponse(mutableListOf<HomePageList>().apply { addAll(chunkResults) }, hasNext = true)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -218,31 +167,27 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val preFetchedTmdbDetail = tmdbDeferred?.await()
         val kitsuMeta = kitsuDeferred?.await()
         
-        var finalProcessedId = res.id
-        var imdbId = preFetchedTmdbDetail?.external_ids?.imdb_id
-        
-        // [v1.163] Elvis + if 문법 오류 및 스마트 캐스트 캡처 오류 수정 블록
-        if (imdbId.isNullOrBlank()) { 
-            val kId = kitsuMeta?.imdb_id
-            if (!kId.isNullOrBlank() && kId.startsWith("tt")) {
-                imdbId = kId
-            } else if (res.id.startsWith("mal:") && !kitsuMeta?.id.isNullOrBlank()) {
-                imdbId = kitsuMeta?.id
-            }
+        var finalImdbId: String? = null
+        if (res.id.startsWith("tt")) {
+            finalImdbId = res.id
+        } else {
+            val fetchedImdb = preFetchedTmdbDetail?.external_ids?.imdb_id ?: kitsuMeta?.imdb_id ?: if (res.id.startsWith("mal:")) kitsuMeta?.id else null
+            if (!fetchedImdb.isNullOrBlank() && (fetchedImdb.startsWith("tt") || fetchedImdb.startsWith("kitsu:") || fetchedImdb.startsWith("mal:"))) finalImdbId = fetchedImdb
         }
         
-        val safeImdbId = imdbId // 스마트 캐스트를 위해 val 선언
-        if (!safeImdbId.isNullOrBlank() && (safeImdbId.startsWith("tt") || safeImdbId.startsWith("kitsu:"))) {
-            finalProcessedId = safeImdbId
+        if (finalImdbId == null && res.links.isNotEmpty()) {
+            val foundLink = res.links.firstOrNull { it.category == "imdb" }?.url?.substringAfterLast("/")
+            if (!foundLink.isNullOrBlank() && foundLink.startsWith("tt")) finalImdbId = foundLink
         }
+        if (finalImdbId == null) finalImdbId = provider.extractImdbId(res.logo) ?: provider.extractImdbId(res.poster) ?: provider.extractImdbId(res.background)
 
-        val loadRes = res.toLoadResponse(this@StremioC, finalProcessedId, addonDeferred, preFetchedTmdbDetail, kitsuMeta?.id)
+        val loadRes = res.toLoadResponse(this@StremioC, finalImdbId ?: res.id, addonDeferred, preFetchedTmdbDetail, kitsuMeta?.id)
         val mdbRatings = mdbDeferred?.await() ?: emptyList()
         
         if (mdbRatings.isNotEmpty()) {
-            println("[StremioC v1.163] MDBList 병렬 적용 (구분자 ✨)")
-            val ratingStr = mdbRatings.joinToString(" ✨ ")
-            loadRes.plot = "$ratingStr\n\n${loadRes.plot ?: ""}"
+            println("[StremioC v1.165] MDBList 줄바꿈 없이 | 기호 삽입 처리")
+            val ratingStr = mdbRatings.joinToString("  ") // 두 칸 공백 띄움 (✨는 이미 Utils에서 각각 적용됨)
+            loadRes.plot = "$ratingStr | ${loadRes.plot?.trim() ?: ""}"
         }
         return@coroutineScope loadRes
     }
@@ -351,26 +296,12 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
         }
         suspend fun toLoadResponse(provider: StremioC, imdbId: String?, addonDeferred: Deferred<CatalogEntry?>?, preFetchedDetail: TmdbDetailResponse? = null, fetchedKitsuId: String? = null): LoadResponse = coroutineScope {
-            // [v1.163] Elvis + if 문법 오류 수정 블록
             var finalImdbId: String? = null
-            if (id.startsWith("tt")) {
-                finalImdbId = id
-            } else if (!imdbId.isNullOrBlank() && (imdbId.startsWith("tt") || imdbId.startsWith("kitsu:") || imdbId.startsWith("mal:"))) {
-                finalImdbId = imdbId
-            }
+            if (id.startsWith("tt")) { finalImdbId = id } else if (!imdbId.isNullOrBlank() && (imdbId.startsWith("tt") || imdbId.startsWith("kitsu:") || imdbId.startsWith("mal:"))) { finalImdbId = imdbId }
+            if (finalImdbId == null && links.isNotEmpty()) { val foundLink = links.firstOrNull { it.category == "imdb" }?.url?.substringAfterLast("/"); if (!foundLink.isNullOrBlank() && foundLink.startsWith("tt")) { finalImdbId = foundLink } }
+            if (finalImdbId == null) { finalImdbId = provider.extractImdbId(logo) ?: provider.extractImdbId(poster) ?: provider.extractImdbId(background) }
             
-            if (finalImdbId == null && links.isNotEmpty()) {
-                val foundLink = links.firstOrNull { it.category == "imdb" }?.url?.substringAfterLast("/")
-                if (!foundLink.isNullOrBlank() && foundLink.startsWith("tt")) {
-                    finalImdbId = foundLink
-                }
-            }
-            if (finalImdbId == null) {
-                finalImdbId = provider.extractImdbId(logo) ?: provider.extractImdbId(poster) ?: provider.extractImdbId(background)
-            }
-            
-            val detailedEntry = addonDeferred?.await() ?: this@CatalogEntry
-            var tmdbIdStr: String? = if (id.startsWith("tmdb:")) id.removePrefix("tmdb:") else moviedb_id?.toString() ?: tmdbIdExt ?: detailedEntry.tmdbIdExt
+            val detailedEntry = addonDeferred?.await() ?: this@CatalogEntry; var tmdbIdStr: String? = if (id.startsWith("tmdb:")) id.removePrefix("tmdb:") else moviedb_id?.toString() ?: tmdbIdExt ?: detailedEntry.tmdbIdExt
             val findApiDeferred = if (tmdbIdStr == null && finalImdbId?.startsWith("tt") == true) { async(Dispatchers.IO) { runSuspendCatching { val findRes = StremioC.customSession.get(provider.buildTmdbUrl("/find/$finalImdbId", "external_source" to "imdb_id")).parsedSafe<TmdbFindResponse>(); val movieMatch = findRes?.movie_results?.firstOrNull(); if (movieMatch?.id != null) Pair(movieMatch.id.toString(), "movie") else findRes?.tv_results?.firstOrNull()?.id?.let { Pair(it.toString(), "tv") } }.getOrNull() } } else null
             var finalVideos = detailedEntry.videos ?: videos; val finalTrailersSources = detailedEntry.trailersSources ?: trailersSources; val finalTrailerStreams = detailedEntry.trailerStreams ?: trailerStreams; val originalName = detailedEntry.name ?: name; var finalDescription = detailedEntry.description ?: description; val finalGenre = detailedEntry.genre ?: detailedEntry.genres ?: genre ?: genres; val finalCast = detailedEntry.cast.ifEmpty { cast }; val finalPoster = detailedEntry.poster ?: poster; val finalBackground = detailedEntry.background ?: background; val finalImdbRating = detailedEntry.imdbRating ?: imdbRating; val finalType = detailedEntry.type ?: type
             var foundMediaType: String? = null; if (findApiDeferred != null) { val findResult = findApiDeferred.await(); if (findResult != null) { tmdbIdStr = findResult.first; foundMediaType = findResult.second } }
