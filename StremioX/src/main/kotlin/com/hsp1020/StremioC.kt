@@ -1,7 +1,4 @@
-// v1.168 (Bugfix: MDBList 중복 선언 에러 해결 및 타입 추론 명시)
-// v1.167 (Feature: MDBList 평점 10점 정규화, lb/팝콘 순서 스왑, Tomatoes 약자, 병렬 호출, 플롯 1줄 적용)
-// v1.159 (Bugfix: 오지랖 최적화 제거 - include_image_language 파라미터 삭제 및 원본의 한국어 로고 우선순위 복구)
-// + (Bugfix: CineStream Provider 강제 검색 및 로깅 추가 적용본 - 빌드에러 수정)
+// v1.169 (Performance & Thread-Safety Refactored: 모든 println I/O 블로킹 제거, CineStream 리플렉션 락/루프 최적화, 보일러플레이트 압축)
 package com.hsp1020
 
 import android.content.Context
@@ -68,7 +65,6 @@ import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
-// 안전한 코루틴 예외 처리 유틸리티 (구조적 동시성 보장)
 inline fun <T> runSuspendCatching(block: () -> T): Result<T> {
     return try {
         Result.success(block())
@@ -130,7 +126,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val networkSemaphore = Semaphore(20)
 
         val customSession by lazy {
-            println("[StremioC v1.168] 커스텀 OkHttp 세션 초기화 (메모리 릭 방지 싱글톤)")
             val newClient = app.baseClient.newBuilder()
                 .protocols(listOf(Protocol.HTTP_1_1))
                 .dispatcher(Dispatcher().apply {
@@ -146,84 +141,62 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
         }
 
+        @Synchronized
         fun getCineStreamProvider(forceSearch: Boolean = false): MainAPI? {
-            println("[CineStream_DEBUG] getCineStreamProvider 호출됨. forceSearch=$forceSearch, cached=${cachedCineStreamProvider?.name}, hasSearched=$hasSearchedCineStream")
-
-            if (cachedCineStreamProvider != null) {
-                println("[CineStream_DEBUG] 이미 캐싱된 Provider 반환")
-                return cachedCineStreamProvider
-            }
-
-            if (!forceSearch && hasSearchedCineStream) {
-                println("[CineStream_DEBUG] 이전 검색에서 실패했었고 forceSearch가 false이므로 그냥 null 반환")
-                return null
-            }
+            if (cachedCineStreamProvider != null) return cachedCineStreamProvider
+            if (!forceSearch && hasSearchedCineStream) return null
 
             hasSearchedCineStream = true
 
-            println("[CineStream_DEBUG] 1단계: APIHolder.allProviders 검색 시작 (총 갯수: ${APIHolder.allProviders.size})")
             var provider = APIHolder.allProviders.find {
                 it.name.equals("CineStream", ignoreCase = true)
             }
 
             if (provider != null) {
-                println("[CineStream_DEBUG] 🎉 APIHolder에서 CineStream 찾음!")
                 cachedCineStreamProvider = provider
                 return provider
             }
 
-            println("[CineStream_DEBUG] 1단계 실패: APIHolder에 CineStream이 없음. 2단계 리플렉션 시작...")
+            try {
+                val targetClassLoader = cachedCineClassLoader ?: run {
+                    val pmClass = Class.forName("com.lagradost.cloudstream3.plugins.PluginManager")
+                    val pmInstance = pmClass.getField("INSTANCE").get(null)
 
-            if (provider == null) {
-                try {
-                    val targetClassLoader = cachedCineClassLoader ?: run {
-                        println("[CineStream_DEBUG] PluginManager 클래스 찾는 중...")
-                        val pmClass = Class.forName("com.lagradost.cloudstream3.plugins.PluginManager")
-                        val pmInstance = pmClass.getField("INSTANCE").get(null)
+                    var foundLoader: ClassLoader? = null
+                    for (field in pmClass.declaredFields) {
+                        field.isAccessible = true
+                        val obj = runSuspendCatching { field.get(pmInstance) }.getOrNull()
+                        val items = when (obj) {
+                            is Map<*, *> -> obj.values
+                            is Collection<*> -> obj
+                            is Array<*> -> obj.toList()
+                            else -> null
+                        }
 
-                        var foundLoader: ClassLoader? = null
-                        println("[CineStream_DEBUG] PluginManager의 선언된 필드들을 순회합니다.")
-                        for (field in pmClass.declaredFields) {
-                            field.isAccessible = true
-                            val obj = runSuspendCatching { field.get(pmInstance) }.getOrNull()
-                            val items = when (obj) {
-                                is Map<*, *> -> obj.values
-                                is Collection<*> -> obj
-                                is Array<*> -> obj.toList()
-                                else -> null
-                            }
-
-                            items?.forEach { plugin ->
-                                if (plugin != null) {
-                                    val pName = plugin.javaClass.name
-                                    if (pName.contains("megix", true) || pName.contains("CineStream", true)) {
-                                        println("[CineStream_DEBUG] 💡 CineStream/megix 관련 플러그인 클래스 매칭 성공!: $pName")
-                                        foundLoader = plugin.javaClass.classLoader
-                                    }
+                        if (items != null) {
+                            for (plugin in items) {
+                                val pName = plugin?.javaClass?.name ?: ""
+                                if (pName.contains("megix", true) || pName.contains("CineStream", true)) {
+                                    foundLoader = plugin!!.javaClass.classLoader
+                                    break
                                 }
                             }
-                            if (foundLoader != null) break
                         }
-                        foundLoader
+                        if (foundLoader != null) break
                     }
-
-                    if (targetClassLoader != null) {
-                        println("[CineStream_DEBUG] ClassLoader 획득 성공. com.megix.CineStreamProvider 로드 시도...")
-                        cachedCineClassLoader = targetClassLoader
-                        val clazz = targetClassLoader.loadClass("com.megix.CineStreamProvider")
-                        provider = clazz.newInstance() as? MainAPI
-                        println("[StremioC v1.168] 🎉 CineStream Ghost Provider 강제 생성 완료")
-                    } else {
-                        println("[CineStream_DEBUG] ❌ 타겟 ClassLoader를 찾지 못했습니다. 플러그인이 안깔려있거나 난독화로 구조가 변경됨.")
-                    }
-                } catch (e: Exception) {
-                    println("[CineStream_DEBUG] 🚨 리플렉션 에러 발생: ${e.javaClass.simpleName} - ${e.message}")
-                    e.printStackTrace()
+                    foundLoader
                 }
+
+                if (targetClassLoader != null) {
+                    cachedCineClassLoader = targetClassLoader
+                    val clazz = targetClassLoader.loadClass("com.megix.CineStreamProvider")
+                    provider = clazz.newInstance() as? MainAPI
+                }
+            } catch (e: Exception) {
+                cachedCineClassLoader = null
             }
 
             cachedCineStreamProvider = provider
-            println("[CineStream_DEBUG] 최종 결과: provider = ${provider?.name ?: "NULL"}")
             return provider
         }
         
@@ -265,7 +238,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private fun buildTmdbUrl(endpoint: String, vararg params: Pair<String, String>): String {
         val builder = "$tmdbAPI$endpoint".toHttpUrlOrNull()?.newBuilder() ?: return ""
         builder.addQueryParameter("api_key", apiKey)
-        builder.addQueryParameter("language", "ko-KR") // 원본 로직: 여기에서만 ko-KR 강제
+        builder.addQueryParameter("language", "ko-KR")
         params.forEach { (key, value) ->
             builder.addQueryParameter(key, value)
         }
@@ -351,12 +324,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             if (page <= 1) {
                 catalogSentIds.clear()
                 activePageRequests.clear()
-                
                 val now = System.currentTimeMillis()
-                val removedCount = globalPageCache.entries.removeIf { now - it.value.third > CACHE_TTL_MS }
-                if (removedCount) {
-                    println("[StremioC v1.168] 🧹 홈 카탈로그 캐시 정리 완료")
-                }
+                globalPageCache.entries.removeIf { now - it.value.third > CACHE_TTL_MS }
                 catalogSkipState.clear()
             }
             
@@ -369,7 +338,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         return@coroutineScope try {
             val response = deferred.await()
             if (!isNewRequest && page > 1) {
-                println("[StremioC v1.168] 🚫 다발성 중복 페이지 요청 감지 (page=$page) - 무임승차 차단")
                 newHomePageResponse(emptyList(), hasNext = true)
             } else {
                 response
@@ -457,23 +425,13 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val normalizedId = try { normalizeId(res.id) } catch (e: Exception) { res.id }
         val encodedId = normalizedId.urlEncode()
 
-        // [v1.168 수정됨: MDBList 병렬 호출 및 명시적 타입 선언]
-        var mdbEarlyId: String? = null
-        var isMdbEarlyTmdb = false
-        if (res.id.startsWith("tt")) {
-            mdbEarlyId = res.id
-        } else if (res.id.startsWith("tmdb:")) {
-            mdbEarlyId = res.id.removePrefix("tmdb:")
-            isMdbEarlyTmdb = true
-        } else if (res.moviedb_id != null) {
-            mdbEarlyId = res.moviedb_id.toString()
-            isMdbEarlyTmdb = true
-        } else if (res.tmdbIdExt != null) {
-            mdbEarlyId = res.tmdbIdExt
-            isMdbEarlyTmdb = true
+        val isMdbEarlyTmdb = res.id.startsWith("tmdb:") || res.moviedb_id != null || res.tmdbIdExt != null
+        val mdbEarlyId = when {
+            res.id.startsWith("tt") -> res.id
+            res.id.startsWith("tmdb:") -> res.id.removePrefix("tmdb:")
+            else -> res.moviedb_id?.toString() ?: res.tmdbIdExt
         }
 
-        // 컴파일러 추론을 돕기 위한 명시적 타입 선언
         val mdbDeferred: Deferred<List<String>>? = mdbEarlyId?.let { id ->
             async(Dispatchers.IO) { fetchMdbListRatings(id, isMdbEarlyTmdb) }
         }
@@ -527,11 +485,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
         val loadRes = res.toLoadResponse(this@StremioC, finalProcessedId, addonDeferred, preFetchedTmdbDetail, kitsuMeta?.id)
         
-        // [v1.168 수정됨: 평점 플롯 병합 처리]
         val mdbRatings = mdbDeferred?.await() ?: emptyList()
         if (mdbRatings.isNotEmpty()) {
             val ratingStr = mdbRatings.joinToString("  ")
-            loadRes.plot = "$ratingStr | ${loadRes.plot?.trim() ?: ""}"
+            val originalPlot = loadRes.plot?.trim()
+            loadRes.plot = if (originalPlot.isNullOrEmpty()) ratingStr else "$ratingStr | $originalPlot"
         }
         
         return@coroutineScope loadRes
@@ -559,7 +517,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     val url = buildUrl("/stream/$targetType/$encodedPrimaryId.json")
                     val res = customSession.get(url, timeout = 120L).parsedSafe<StreamsResponse>()
                     res?.streams?.forEach { stream -> stream.runCallback(this@StremioC, subtitleCallback, callback) }
-                }.onFailure { println("[StremioC v1.168] 로컬 스트림 에러: ${it.message}") }
+                }
             },
             { invokeStremioX(targetType, globalId, loadData.season, loadData.episode, subtitleCallback, callback) },
             { invokeWatchsomuch(loadData.imdbId, loadData.season, loadData.episode, subtitleCallback) },
@@ -604,7 +562,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 } catch (e: Exception) {}
             }
             hasSyncedCineStreamSettings = true
-            println("[StremioC v1.168] CineStream 설정 동기화 완료 (Disk I/O 격리)")
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -632,7 +589,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
 
         if (!isEnabled) {
-            println("[StremioC v1.168] 사용자가 설정에서 CineStream 연동을 비활성화하여 스킵합니다.")
             return
         }
 
@@ -707,7 +663,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "isCartoon" to loadData.isCartoon
             )
 
-            println("[StremioC v1.168] CineStream 데이터 전달: $cineData")
             cineStreamProvider.loadLinks(cineData.toJson(), isCasting, subtitleInterceptor, callback)
         } catch (e: Exception) {
             e.printStackTrace()
@@ -744,7 +699,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 async(Dispatchers.IO) {
                     runSuspendCatching {
                         val url = "$api/subtitles/$type/$stremioId.json"
-                        println("[StremioC v1.168] 📥 자막 스트림 파싱 시도: $url")
                         val subtitleResponse = customSession.get(url, timeout = 120L).parsedSafe<StremioSubtitleResponse>()
 
                         subtitleResponse?.subtitles?.forEach { sub ->
@@ -755,7 +709,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                                 subtitleCallback.invoke(newSubtitleFile("$baseLangName (Stremio)", fileUrl))
                             }
                         }
-                    }.onFailure { println("[StremioC v1.168] 자막 로드 실패: ${it.message}") }
+                    }
                 }
             }.awaitAll()
         }
@@ -887,7 +841,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             var fetchedRecommendations: List<SearchResponse>? = null
             
             val detailRes = preFetchedDetail ?: run {
-                // v1.159: 임의로 끼워넣은 include_image_language 삭제 (원본 로직 복구)
                 val detailAppend = if (isMovie) "release_dates,credits,images,videos,external_ids,recommendations,translations" else "content_ratings,credits,images,videos,external_ids,recommendations,translations"
                 val detailUrl = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr", "append_to_response" to detailAppend)
                 StremioC.customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>()
@@ -1067,7 +1020,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                                     runSuspendCatching {
                                         val seasonRes = StremioC.customSession.get(provider.buildTmdbUrl("/tv/$tmdbIdStr/season/$seasonNum")).parsedSafe<TmdbSeasonDetail>()
                                         seasonRes?.episodes?.forEach { ep -> if (ep.episodeNumber != null) episodeTmdbMeta["${seasonNum}_${ep.episodeNumber}"] = ep }
-                                    }.onFailure { println("[StremioC v1.168] 시즌 $seasonNum 로드 실패: ${it.message}") }
+                                    }
                                 }
                             }
                         }.awaitAll()
@@ -1078,8 +1031,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val extractedEnglishTitle = detailRes.translations?.translations?.find { 
                 it.iso_3166_1 == "US" || it.iso_639_1 == "en" 
             }?.data?.let { it.title ?: it.name } ?: detailRes.original_title ?: detailRes.original_name
-
-            println("[StremioC v1.168] 영문 공식 타이틀 추출 결과: $extractedEnglishTitle")
 
             return FetchedTmdbData(
                 if (isMovie) detailRes.title ?: detailRes.original_title else detailRes.name ?: detailRes.original_name,
