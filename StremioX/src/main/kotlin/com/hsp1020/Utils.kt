@@ -1,3 +1,4 @@
+// v1.9 (Feature: MDBList 평점 로직 유지 및 중복 선언 방지를 위한 단일화)
 package com.hsp1020
 
 import com.google.gson.annotations.SerializedName
@@ -38,7 +39,7 @@ suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false): List<Stri
                 }
                 
                 scaledValue = kotlin.math.round(scaledValue * 10.0) / 10.0
-                if (scaledValue <= 0.0) continue
+                if (scaledValue <= 0.0) continue // 0.0은 데이터 없는 것으로 간주하여 제외
                 
                 val key = when (source) {
                     "myanimelist", "mal" -> "MAL"
@@ -53,10 +54,12 @@ suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false): List<Stri
                     "rogerebert" -> "RE"
                     else -> source.uppercase()
                 }
+                // 요청하신 '✨ 사이트명 점수' 포맷으로 데이터 생성
                 fetchedMap[key] = "✨ $key $scaledValue"
             }
         }
-        val orderedKeys = listOf("MAL", "IMDb", "Popcorn", "MCU", "LB", "Trakt", "TMDB", "MC", "RT", "RE")
+        // lb와 팝콘 순서 스왑 적용
+        val orderedKeys = listOf("MAL", "IMDb", "LB", "MCU", "Popcorn", "Trakt", "TMDB", "MC", "RT", "RE")
         val finalRatings = mutableListOf<String>()
         for (key in orderedKeys) {
             fetchedMap[key]?.let { finalRatings.add(it) }
