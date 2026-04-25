@@ -425,15 +425,20 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val normalizedId = try { normalizeId(res.id) } catch (e: Exception) { res.id }
         val encodedId = normalizedId.urlEncode()
 
-        val isMdbEarlyTmdb = res.id.startsWith("tmdb:") || res.moviedb_id != null || res.tmdbIdExt != null
-        val mdbEarlyId = when {
-            res.id.startsWith("tt") -> res.id
-            res.id.startsWith("tmdb:") -> res.id.removePrefix("tmdb:")
-            else -> res.moviedb_id?.toString() ?: res.tmdbIdExt
+        // ✨ 시니어 로직 수정: 우선순위를 완벽히 보장하는 튜플(Pair) 방식의 다중 할당
+        val (mdbEarlyId, isMdbEarlyTmdb) = when {
+            res.id.startsWith("tt") -> res.id to false
+            res.id.startsWith("tmdb:") -> res.id.removePrefix("tmdb:") to true
+            res.moviedb_id != null -> res.moviedb_id.toString() to true
+            res.tmdbIdExt != null -> res.tmdbIdExt to true
+            else -> null to false
         }
 
+        // ✨ 안전성 추가: fetchMdbListRatings 내부에서 크래시가 나더라도 load() 전체가 죽지 않도록 방어
         val mdbDeferred: Deferred<List<String>>? = mdbEarlyId?.let { id ->
-            async(Dispatchers.IO) { fetchMdbListRatings(id, isMdbEarlyTmdb) }
+            async(Dispatchers.IO) { 
+                runSuspendCatching { fetchMdbListRatings(id, isMdbEarlyTmdb) }.getOrDefault(emptyList()) 
+            }
         }
 
         val addonDeferred = async(Dispatchers.IO) {
@@ -485,10 +490,12 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
         val loadRes = res.toLoadResponse(this@StremioC, finalProcessedId, addonDeferred, preFetchedTmdbDetail, kitsuMeta?.id)
         
+        // 플롯에 평점 병합 (정상 복구)
         val mdbRatings = mdbDeferred?.await() ?: emptyList()
         if (mdbRatings.isNotEmpty()) {
             val ratingStr = mdbRatings.joinToString("  ")
-            loadRes.plot = "$ratingStr | ${loadRes.plot?.trim() ?: ""}"
+            val originalPlot = loadRes.plot?.trim()
+            loadRes.plot = if (originalPlot.isNullOrEmpty()) ratingStr else "$ratingStr | $originalPlot"
         }
         
         return@coroutineScope loadRes
