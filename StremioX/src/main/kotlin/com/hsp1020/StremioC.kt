@@ -1,3 +1,5 @@
+// v1.163 (Bugfix: 코드 압축으로 인한 Kotlin Elvis 연산자 및 Smart Cast 빌드 에러 수정)
+// v1.162 (Feature: MDBList 병렬 호출 최적화 - TMDB ID 즉시 사용 및 구분자 ' ✨ ' 변경)
 package com.hsp1020
 
 import android.content.Context
@@ -213,15 +215,34 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val tmdbDeferred = targetTmdbId?.let { id -> async(Dispatchers.IO) { val mediaType = if (res.type == "movie") "movie" else "tv"; val detailAppend = if (mediaType == "movie") "release_dates,credits,images,videos,external_ids,recommendations,translations" else "content_ratings,credits,images,videos,external_ids,recommendations,translations"; runSuspendCatching { customSession.get(buildTmdbUrl("/$mediaType/$id", "append_to_response" to detailAppend)).parsedSafe<TmdbDetailResponse>() }.getOrNull() } }
         val kitsuDeferred = if (res.id.startsWith("kitsu:") || res.id.startsWith("mal:")) { async(Dispatchers.IO) { runSuspendCatching { customSession.get("https://anime-kitsu.strem.fun/meta/${res.type}/${res.id}.json", timeout = 15L).parsedSafe<KitsuMetaResponse>()?.meta }.getOrNull() } } else null
 
-        val preFetchedTmdbDetail = tmdbDeferred?.await(); val kitsuMeta = kitsuDeferred?.await(); var finalProcessedId = res.id; var imdbId = preFetchedTmdbDetail?.external_ids?.imdb_id
-        if (imdbId.isNullOrBlank()) { kitsuMeta?.imdb_id?.takeIf { it.startsWith("tt") }?.let { imdbId = it } ?: if (res.id.startsWith("mal:") && !kitsuMeta?.id.isNullOrBlank()) imdbId = kitsuMeta?.id }
-        if (!imdbId.isNullOrBlank() && (imdbId.startsWith("tt") || imdbId.startsWith("kitsu:"))) finalProcessedId = imdbId
+        val preFetchedTmdbDetail = tmdbDeferred?.await()
+        val kitsuMeta = kitsuDeferred?.await()
+        
+        var finalProcessedId = res.id
+        var imdbId = preFetchedTmdbDetail?.external_ids?.imdb_id
+        
+        // [v1.163] Elvis + if 문법 오류 및 스마트 캐스트 캡처 오류 수정 블록
+        if (imdbId.isNullOrBlank()) { 
+            val kId = kitsuMeta?.imdb_id
+            if (!kId.isNullOrBlank() && kId.startsWith("tt")) {
+                imdbId = kId
+            } else if (res.id.startsWith("mal:") && !kitsuMeta?.id.isNullOrBlank()) {
+                imdbId = kitsuMeta?.id
+            }
+        }
+        
+        val safeImdbId = imdbId // 스마트 캐스트를 위해 val 선언
+        if (!safeImdbId.isNullOrBlank() && (safeImdbId.startsWith("tt") || safeImdbId.startsWith("kitsu:"))) {
+            finalProcessedId = safeImdbId
+        }
 
         val loadRes = res.toLoadResponse(this@StremioC, finalProcessedId, addonDeferred, preFetchedTmdbDetail, kitsuMeta?.id)
         val mdbRatings = mdbDeferred?.await() ?: emptyList()
+        
         if (mdbRatings.isNotEmpty()) {
-            println("[StremioC v1.162] MDBList 병렬 적용 (구분자 ✨)")
-            val ratingStr = mdbRatings.joinToString(" ✨ "); loadRes.plot = "$ratingStr\n\n${loadRes.plot ?: ""}"
+            println("[StremioC v1.163] MDBList 병렬 적용 (구분자 ✨)")
+            val ratingStr = mdbRatings.joinToString(" ✨ ")
+            loadRes.plot = "$ratingStr\n\n${loadRes.plot ?: ""}"
         }
         return@coroutineScope loadRes
     }
@@ -330,8 +351,26 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
         }
         suspend fun toLoadResponse(provider: StremioC, imdbId: String?, addonDeferred: Deferred<CatalogEntry?>?, preFetchedDetail: TmdbDetailResponse? = null, fetchedKitsuId: String? = null): LoadResponse = coroutineScope {
-            var finalImdbId = if (id.startsWith("tt")) id else imdbId?.takeIf { it.startsWith("tt") || it.startsWith("kitsu:") || it.startsWith("mal:") }; if (finalImdbId == null && links.isNotEmpty()) finalImdbId = links.firstOrNull { it.category == "imdb" }?.url?.substringAfterLast("/")?.takeIf { it.startsWith("tt") }; if (finalImdbId == null) finalImdbId = provider.extractImdbId(logo) ?: provider.extractImdbId(poster) ?: provider.extractImdbId(background)
-            val detailedEntry = addonDeferred?.await() ?: this@CatalogEntry; var tmdbIdStr: String? = if (id.startsWith("tmdb:")) id.removePrefix("tmdb:") else moviedb_id?.toString() ?: tmdbIdExt ?: detailedEntry.tmdbIdExt
+            // [v1.163] Elvis + if 문법 오류 수정 블록
+            var finalImdbId: String? = null
+            if (id.startsWith("tt")) {
+                finalImdbId = id
+            } else if (!imdbId.isNullOrBlank() && (imdbId.startsWith("tt") || imdbId.startsWith("kitsu:") || imdbId.startsWith("mal:"))) {
+                finalImdbId = imdbId
+            }
+            
+            if (finalImdbId == null && links.isNotEmpty()) {
+                val foundLink = links.firstOrNull { it.category == "imdb" }?.url?.substringAfterLast("/")
+                if (!foundLink.isNullOrBlank() && foundLink.startsWith("tt")) {
+                    finalImdbId = foundLink
+                }
+            }
+            if (finalImdbId == null) {
+                finalImdbId = provider.extractImdbId(logo) ?: provider.extractImdbId(poster) ?: provider.extractImdbId(background)
+            }
+            
+            val detailedEntry = addonDeferred?.await() ?: this@CatalogEntry
+            var tmdbIdStr: String? = if (id.startsWith("tmdb:")) id.removePrefix("tmdb:") else moviedb_id?.toString() ?: tmdbIdExt ?: detailedEntry.tmdbIdExt
             val findApiDeferred = if (tmdbIdStr == null && finalImdbId?.startsWith("tt") == true) { async(Dispatchers.IO) { runSuspendCatching { val findRes = StremioC.customSession.get(provider.buildTmdbUrl("/find/$finalImdbId", "external_source" to "imdb_id")).parsedSafe<TmdbFindResponse>(); val movieMatch = findRes?.movie_results?.firstOrNull(); if (movieMatch?.id != null) Pair(movieMatch.id.toString(), "movie") else findRes?.tv_results?.firstOrNull()?.id?.let { Pair(it.toString(), "tv") } }.getOrNull() } } else null
             var finalVideos = detailedEntry.videos ?: videos; val finalTrailersSources = detailedEntry.trailersSources ?: trailersSources; val finalTrailerStreams = detailedEntry.trailerStreams ?: trailerStreams; val originalName = detailedEntry.name ?: name; var finalDescription = detailedEntry.description ?: description; val finalGenre = detailedEntry.genre ?: detailedEntry.genres ?: genre ?: genres; val finalCast = detailedEntry.cast.ifEmpty { cast }; val finalPoster = detailedEntry.poster ?: poster; val finalBackground = detailedEntry.background ?: background; val finalImdbRating = detailedEntry.imdbRating ?: imdbRating; val finalType = detailedEntry.type ?: type
             var foundMediaType: String? = null; if (findApiDeferred != null) { val findResult = findApiDeferred.await(); if (findResult != null) { tmdbIdStr = findResult.first; foundMediaType = findResult.second } }
@@ -341,6 +380,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val fallbackTrailers = finalTrailerStreams?.mapNotNull { it.ytId }?.ifEmpty { finalTrailersSources?.mapNotNull { it.source } }?.distinct()?.map { if (it.startsWith("http")) it else "https://m.youtube.com/watch?v=$it" } ?: emptyList(); val finalTrailers = tmdbData?.fetchedTrailers?.ifEmpty { fallbackTrailers } ?: fallbackTrailers; val movieId = if (!finalVideos.isNullOrEmpty() && !finalVideos[0].id.isNullOrBlank()) finalVideos[0].id else fallbackMovieId; val finalActors = if (tmdbData?.fetchedActors?.isNotEmpty() == true) tmdbData.fetchedActors else null
             val countries = tmdbData?.fetchedOriginCountry ?: emptyList(); val isBollywood = countries.any { it.contains("IN", true) || it.contains("India", true) }; val isAsian = countries.any { it.contains("KR", true) || it.contains("JP", true) || it.contains("CN", true) || it.contains("TH", true) || it.contains("TW", true) }; val isCartoon = finalGenre?.any { it.contains("Animation", true) } == true; val isAnimeMedia = fetchedKitsuId != null || finalImdbId?.startsWith("mal:") == true || finalImdbId?.startsWith("kitsu:") == true || finalGenre?.contains("Anime") == true || (countries.any { it.contains("JP", true) } && isCartoon)
             var fetchedAniListId: Int? = null; var fetchedMalId: Int? = null; if (isAnimeMedia && finalImdbId != null) { try { val rawIdForAnizip = finalImdbId.substringAfter("kitsu:").substringAfter("mal:"); val anizipType = if (finalImdbId.startsWith("kitsu:")) "kitsu_id" else if (finalImdbId.startsWith("mal:")) "mal_id" else "imdb_id"; val anizipJson = JSONObject(StremioC.customSession.get("https://api.ani.zip/mappings?$anizipType=$rawIdForAnizip").text); fetchedAniListId = anizipJson.getJSONObject("mappings").optInt("anilist_id").takeIf { it != 0 }; fetchedMalId = anizipJson.getJSONObject("mappings").optInt("mal_id").takeIf { it != 0 } } catch (e: Exception) {} }
+            
             if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
                 return@coroutineScope provider.newMovieLoadResponse(finalName, "${provider.mainUrl}/meta/$finalType/$id.json", TvType.Movie, LoadData(type = finalType, id = movieId, imdbId = finalImdbId, year = tmdbData?.fetchedYear, title = finalName, tmdbId = tmdbIdStr?.toIntOrNull(), isAnime = isAnimeMedia, isBollywood = isBollywood, isAsian = isAsian, isCartoon = isCartoon, anilistId = fetchedAniListId, malId = fetchedMalId, kitsuId = fetchedKitsuId ?: kitsuIdExt, originalTitle = tmdbData?.fetchedOriginalTitle, englishTitle = tmdbData?.fetchedEnglishTitle)) { posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); plot = finalDescription; year = tmdbData?.fetchedYear; tags = finalGenre; if (finalActors != null) this.actors = finalActors else addActors(finalCast); addTrailer(finalTrailers); this.recommendations = tmdbData?.fetchedRecommendations; this.duration = tmdbData?.fetchedRuntime; this.contentRating = tmdbData?.fetchedAgeRating; tmdbData?.fetchedLogo?.let { this.logoUrl = it }; tmdbIdStr?.let { addTMDbId(it) }; finalImdbId?.let { if (it.startsWith("tt")) addImdbId(it) } }
             } else {
