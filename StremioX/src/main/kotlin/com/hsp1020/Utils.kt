@@ -1,3 +1,4 @@
+// v1.6 (Feature: MDBList 평점 10점 만점 정규화, 0점 필터링 및 "Site Score" 텍스트 포맷 적용)
 package com.hsp1020
 
 import com.google.gson.annotations.SerializedName
@@ -7,6 +8,7 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import org.json.JSONObject
+
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 import java.text.SimpleDateFormat
@@ -17,7 +19,7 @@ const val MDBLIST_API_KEY = "d2tmbmhnrgdz7ft9re7j2gjr3"
 
 suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false): List<String> {
     if (id.isNullOrBlank() || MDBLIST_API_KEY.isBlank()) {
-        println("[Utils.kt v1.5-MDBList] API 키/ID 누락 조회 스킵 ID: $id")
+        println("[Utils.kt v1.6-MDBList] API 키/ID 누락 조회 스킵 ID: $id")
         return emptyList()
     }
     return try {
@@ -31,8 +33,15 @@ suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false): List<Stri
             for (i in 0 until ratingsArray.length()) {
                 val ratingObj = ratingsArray.optJSONObject(i) ?: continue
                 val source = ratingObj.optString("source", "").lowercase()
-                val value = if (ratingObj.has("value")) ratingObj.optDouble("value") else ratingObj.optDouble("score")
-                if (value.isNaN()) continue
+                
+                // MDBList의 'score'는 모든 평점을 0~100 기준으로 환산해둔 값입니다.
+                // 이를 10.0으로 나누면 어떤 사이트든 10점 만점 척도로 깔끔하게 변환됩니다.
+                val scoreInt = ratingObj.optInt("score", 0)
+                
+                // 데이터가 없는 0.0점 처리 제외
+                if (scoreInt <= 0) continue
+                
+                val formattedScore = (scoreInt / 10.0).toString()
                 
                 val key = when (source) {
                     "myanimelist", "mal" -> "mal"
@@ -47,25 +56,32 @@ suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false): List<Stri
                     "rogerebert" -> "re"
                     else -> source
                 }
-                fetchedMap[key] = when (key) {
-                    "rt" -> "${value.toInt()}% RT"
-                    "popcorn" -> "${value.toInt()}% Popcorn"
-                    "mc" -> "${value.toInt()} MC"
-                    "mcu" -> "$value MCU"
-                    "lb" -> "$value LB"
-                    "re" -> "$value RE"
-                    "imdb" -> "$value IMDb"
-                    "trakt" -> "$value Trakt"
-                    "tmdb" -> "$value TMDB"
-                    "mal" -> "$value MAL"
-                    else -> "$value ${key.uppercase()}"
+                
+                val siteName = when (key) {
+                    "rt" -> "RT"
+                    "popcorn" -> "Popcorn"
+                    "mc" -> "MC"
+                    "mcu" -> "MCU"
+                    "lb" -> "LB"
+                    "re" -> "RE"
+                    "imdb" -> "IMDb"
+                    "trakt" -> "Trakt"
+                    "tmdb" -> "TMDB"
+                    "mal" -> "MAL"
+                    else -> key.uppercase()
                 }
+                
+                // 지정된 "[Site] [Score]" 형식으로 저장 (예: "IMDb 8.4")
+                fetchedMap[key] = "$siteName $formattedScore"
             }
         }
+        
         val orderedKeys = listOf("mal", "imdb", "popcorn", "mcu", "lb", "trakt", "tmdb", "mc", "rt", "re")
         val finalRatings = mutableListOf<String>()
+        
         for (key in orderedKeys) fetchedMap[key]?.let { finalRatings.add(it) }
         for ((key, formattedStr) in fetchedMap) if (!orderedKeys.contains(key)) finalRatings.add(formattedStr)
+        
         finalRatings
     } catch (e: Exception) { emptyList() }
 }
