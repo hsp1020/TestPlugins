@@ -1,4 +1,4 @@
-// v1.11 (Bugfix: 소수점 1자리 강제 문자열 포맷팅 적용 - 부동소수점 표기 오차 완벽 차단)
+// v1.12 (Bugfix: 6.25 등 중간값 반올림 시 짝수로 내림되는 코틀린 기본 로직을 정확한 사사오입(Half-Up)으로 수정)
 package com.hsp1020
 
 import com.google.gson.annotations.SerializedName
@@ -17,13 +17,13 @@ const val MDBLIST_API_KEY = "d2tmbmhnrgdz7ft9re7j2gjr3"
 
 suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false): List<String> {
     if (id.isNullOrBlank() || MDBLIST_API_KEY.isBlank()) {
-        println("[Utils.kt v1.11-MDBList] API 키/ID 누락 조회 스킵 ID: $id")
+        println("[Utils.kt v1.12-MDBList] API 키/ID 누락 조회 스킵 ID: $id")
         return emptyList()
     }
     return try {
         val idParam = if (isTmdb) "tm" else "i"
         val url = "https://mdblist.com/api/?apikey=$MDBLIST_API_KEY&$idParam=$id"
-        println("[Utils.kt v1.11-MDBList] API 호출 시작 - URL: $url")
+        println("[Utils.kt v1.12-MDBList] API 호출 시작 - URL: $url")
         
         val json = JSONObject(app.get(url, timeout = 15L).text)
         val ratingsArray = json.optJSONArray("ratings")
@@ -44,8 +44,11 @@ suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false): List<Stri
                     "tmdb", "trakt", "metacritic", "mc", "tomatoes", "rottentomatoes", "rt", "tomatoesaudience", "audiencescore", "popcorn" -> scaledValue /= 10.0
                 }
                 
-                // 수학적 반올림 처리
-                scaledValue = kotlin.math.round(scaledValue * 10.0) / 10.0
+                // [수정됨] 은행원 반올림(짝수 반올림) 오차를 막기 위해 명시적인 사사오입(HALF_UP) 적용
+                scaledValue = java.math.BigDecimal(scaledValue.toString())
+                    .setScale(1, java.math.RoundingMode.HALF_UP)
+                    .toDouble()
+                
                 if (scaledValue <= 0.0) continue // 0.0은 데이터 없는 것으로 간주하여 제외
                 
                 val key = when (source) {
@@ -66,7 +69,7 @@ suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false): List<Stri
                 val displayValue = String.format(Locale.US, "%.1f", scaledValue)
                 fetchedMap[key] = "✨ $key $displayValue"
                 
-                println("[Utils.kt v1.11-MDBList] 파싱 성공 - Source: $source, 원본: $value, 스케일링 후 표기: $displayValue")
+                println("[Utils.kt v1.12-MDBList] 파싱 성공 - Source: $source, 원본: $value, 사사오입 적용 후: $displayValue")
             }
         }
         
@@ -80,10 +83,10 @@ suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false): List<Stri
             if (!orderedKeys.contains(key)) finalRatings.add(formattedStr)
         }
         
-        println("[Utils.kt v1.11-MDBList] 최종 주입 리스트: $finalRatings")
+        println("[Utils.kt v1.12-MDBList] 최종 주입 리스트: $finalRatings")
         finalRatings
     } catch (e: Exception) { 
-        println("[Utils.kt v1.11-MDBList] 🚨 API 호출 실패: ${e.message}")
+        println("[Utils.kt v1.12-MDBList] 🚨 API 호출 실패: ${e.message}")
         emptyList() 
     }
 }
