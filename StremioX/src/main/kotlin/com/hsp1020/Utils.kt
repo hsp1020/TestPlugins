@@ -27,8 +27,8 @@ private val TT_REGEX = Regex("^tt\\d+$")
 // O(1) 조회를 위한 소스 메타데이터 룩업 테이블 (메모리 재활용)
 private data class RatingMeta(val name: String, val icon: String, val sortOrder: Int)
 private val RATING_SOURCES = mapOf(
-    "myanimelist" to RatingMeta("MAL", "🐱", 1),
-    "mal" to RatingMeta("MAL", "🐱", 1),
+    "myanimelist" to RatingMeta("MAL", " 🎎", 1),
+    "mal" to RatingMeta("MAL", " 🎎", 1),
     "imdb" to RatingMeta("IMDb", "⭐", 2),
     "letterboxd" to RatingMeta("LB", "🎞️", 3),
     "lb" to RatingMeta("LB", "🎞️", 3),
