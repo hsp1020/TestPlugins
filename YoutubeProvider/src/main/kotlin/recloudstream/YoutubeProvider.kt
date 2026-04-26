@@ -1,4 +1,4 @@
-// [v1.4]
+// [v1.6]
 package recloudstream
 
 import com.lagradost.cloudstream3.*
@@ -317,7 +317,7 @@ class YoutubeProvider : MainAPI() {
         }
     }
 
-    // [v1.4] 수정: 오디오 메커니즘 추적을 위한 추출기 반환값 전면 디버깅(println) 적용
+    // [v1.6] 수정: 오디오 스트림 분리 및 itag 그룹핑을 통한 더빙 트랙(1,3) 자동 폐기 로직 추가
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -325,36 +325,49 @@ class YoutubeProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val url = if (data.startsWith("http")) data else "https://youtube.com/watch?v=$data"
-        println("[v1.4] ===================================================")
-        println("[v1.4] loadLinks 실행됨 - 입력 데이터: $data")
-        println("[v1.4] loadLinks 대상 URL: $url")
-        println("[v1.4] ===================================================")
+        println("[v1.6] ===================================================")
+        println("[v1.6] loadLinks 실행됨 - 입력 데이터: $data")
         
-        return loadExtractor(
+        val audioLinks = mutableListOf<ExtractorLink>()
+
+        val result = loadExtractor(
             url,
-            subtitleCallback,
-            { link ->
-                // 사용자의 요청에 따라 모든 오디오/비디오 관련 링크 메타데이터를 무자비하게 출력
-                println("[v1.4] ---------------------------------------------------")
-                println("[v1.4] [추출된 ExtractorLink 캡처됨]")
-                println("[v1.4] Name(이름): ${link.name}")
-                println("[v1.4] Quality(화질): ${link.quality}")
-                println("[v1.4] URL(주소): ${link.url}")
-                println("[v1.4] isM3u8(M3u8여부): ${link.isM3u8}")
-                println("[v1.4] Referer: ${link.referer}")
-                
-                // 매니페스트 식별 및 원인 분석
-                if (link.isM3u8 || link.url.contains(".m3u8") || link.url.contains("manifest") || link.url.contains(".mpd") || link.url.contains("dash")) {
-                    println("[v1.4] [핵심 경고] 이 링크는 개별 오디오 스트림이 아닌 M3U8 또는 DASH 매니페스트입니다!")
-                    println("[v1.4] 즉, und aac / eng aac 트랙 4개는 이 플러그인 단계를 무사히 거친 후, 앱 내장 플레이어(ExoPlayer)가 저 주소를 열어 자체적으로 파싱해 생성하는 것일 확률이 사실상 100%입니다.")
-                } else {
-                    println("[v1.4] [정보] 일반 다이렉트 스트림 링크입니다.")
-                }
-                println("[v1.4] ---------------------------------------------------")
-                
-                // 원본 콜백으로 그대로 전달하여 영상 재생이 차단되지 않도록 복구
+            subtitleCallback
+        ) { link ->
+            // ExoPlayer로 넘어가기 전 URL의 mime 속성으로 오디오 트랙 식별 및 가로채기
+            if (link.url.contains("mime=audio")) {
+                audioLinks.add(link)
+            } else {
+                // 비디오 트랙은 즉시 플레이어로 무사 통과
                 callback.invoke(link)
             }
-        )
+        }
+
+        // 수집된 오디오 링크들을 URL 내부의 itag(코덱/음질 고유 식별번호) 기준으로 그룹화
+        val groupedAudio = audioLinks.groupBy { audioLink ->
+            val itagMatch = Regex("itag=(\\d+)").find(audioLink.url)
+            itagMatch?.groupValues?.get(1) ?: audioLink.url
+        }
+
+        println("[v1.6] 오디오 트랙 필터링 시작 - 총 그룹 수: ${groupedAudio.size}")
+
+        // 1, 3 더빙 / 2, 4 원본 패턴에 따라 각 그룹의 마지막 트랙(2, 4번)만 살리고 앞의 더빙 찌꺼기는 전부 폐기
+        groupedAudio.forEach { (itag, links) ->
+            println("[v1.6] ---------------------------------------------------")
+            println("[v1.6] itag=$itag 그룹 발견 (총 ${links.size}개 트랙)")
+            links.forEachIndexed { index, link ->
+                println("[v1.6]   [인덱스 $index] url=${link.url}")
+            }
+            
+            // 그룹의 마지막 요소(원본 트랙)를 추출
+            val originalAudioLink = links.last()
+            println("[v1.6] ---> itag=$itag 그룹에서 최종 선택된 트랙: [인덱스 ${links.lastIndex}]")
+            
+            // 걸러낸 진짜 원본 오디오 트랙만 ExoPlayer로 넘김
+            callback.invoke(originalAudioLink)
+        }
+        
+        println("[v1.6] ===================================================")
+        return result
     }
 }
