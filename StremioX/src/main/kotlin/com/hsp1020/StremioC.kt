@@ -1,4 +1,4 @@
-// v1.169 (Performance & Thread-Safety Refactored: 모든 println I/O 블로킹 제거, CineStream 리플렉션 락/루프 최적화, 보일러플레이트 압축)
+// v1.170 (Ultimate Performance Refactored: Subtitle Interceptor I/O 제거, Episode JSON 직렬화 폭주 제거, SharedPrefs IO 격리)
 package com.hsp1020
 
 import android.content.Context
@@ -60,6 +60,7 @@ import okhttp3.Dispatcher
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Protocol
 import org.json.JSONObject
+import java.net.URI
 import java.net.URLEncoder
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
@@ -425,25 +426,18 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val normalizedId = try { normalizeId(res.id) } catch (e: Exception) { res.id }
         val encodedId = normalizedId.urlEncode()
 
-        // [MDBList 병렬 호출 및 명시적 타입 선언]
-        var mdbEarlyId: String? = null
-        var isMdbEarlyTmdb = false
-        if (res.id.startsWith("tt")) {
-            mdbEarlyId = res.id
-        } else if (res.id.startsWith("tmdb:")) {
-            mdbEarlyId = res.id.removePrefix("tmdb:")
-            isMdbEarlyTmdb = true
-        } else if (res.moviedb_id != null) {
-            mdbEarlyId = res.moviedb_id.toString()
-            isMdbEarlyTmdb = true
-        } else if (res.tmdbIdExt != null) {
-            mdbEarlyId = res.tmdbIdExt
-            isMdbEarlyTmdb = true
+        val (mdbEarlyId, isMdbEarlyTmdb) = when {
+            res.id.startsWith("tt") -> res.id to false
+            res.id.startsWith("tmdb:") -> res.id.removePrefix("tmdb:") to true
+            res.moviedb_id != null -> res.moviedb_id.toString() to true
+            res.tmdbIdExt != null -> res.tmdbIdExt to true
+            else -> null to false
         }
 
-        // 컴파일러 추론을 돕기 위한 명시적 타입 선언 (Deferred<List<String>>?)
         val mdbDeferred: Deferred<List<String>>? = mdbEarlyId?.let { id ->
-            async(Dispatchers.IO) { fetchMdbListRatings(id, isMdbEarlyTmdb) }
+            async(Dispatchers.IO) { 
+                runSuspendCatching { fetchMdbListRatings(id, isMdbEarlyTmdb) }.getOrDefault(emptyList()) 
+            }
         }
 
         val addonDeferred = async(Dispatchers.IO) {
@@ -493,21 +487,18 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             finalProcessedId = imdbId
         }
 
-        // provider 참조 에러를 발생시키던 로직 원상복구 처리됨
         val loadRes = res.toLoadResponse(this@StremioC, finalProcessedId, addonDeferred, preFetchedTmdbDetail, kitsuMeta?.id)
-
-        // [평점 플롯 병합 처리]
+        
         val mdbRatings = mdbDeferred?.await() ?: emptyList()
         if (mdbRatings.isNotEmpty()) {
-            // 두 칸 공백 띄움으로 아이콘 사이 여백 확보
             val ratingStr = mdbRatings.joinToString("  ")
-            loadRes.plot = "$ratingStr | ${loadRes.plot?.trim() ?: ""}"
+            val originalPlot = loadRes.plot?.trim()
+            loadRes.plot = if (originalPlot.isNullOrEmpty()) ratingStr else "$ratingStr | $originalPlot"
         }
-
+        
         return@coroutineScope loadRes
     }
 
-    
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val loadData = try { parseJson<LoadData>(data) } catch (e: Exception) { null } ?: return false
         
@@ -524,6 +515,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val encodedPrimaryId = primaryStremioId.urlEncode()
         val globalStremioId = buildStremioId(targetType, globalId, loadData.season, loadData.episode) ?: globalId
 
+        // ✨ 최적화: SharedPrefs(JSON 파싱) 중복 I/O 방지를 위해 단 1회만 할당 후 파라미터 전달
+        val validAddons = withContext(Dispatchers.IO) { getValidStremioAddons() }
+
         runAllAsync(
             {
                 runSuspendCatching {
@@ -532,10 +526,10 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     res?.streams?.forEach { stream -> stream.runCallback(this@StremioC, subtitleCallback, callback) }
                 }
             },
-            { invokeStremioX(targetType, globalId, loadData.season, loadData.episode, subtitleCallback, callback) },
+            { invokeStremioX(targetType, globalId, loadData.season, loadData.episode, validAddons, subtitleCallback, callback) },
             { invokeWatchsomuch(loadData.imdbId, loadData.season, loadData.episode, subtitleCallback) },
             { invokeOpenSubs(loadData.imdbId, loadData.season, loadData.episode, subtitleCallback) },
-            { invokeStremioSubtitles(targetType, globalId, loadData.season, loadData.episode, subtitleCallback) },
+            { invokeStremioSubtitles(targetType, globalId, loadData.season, loadData.episode, validAddons, subtitleCallback) },
             { invokeCineStream(loadData, targetType, globalId, isCasting, subtitleCallback, callback) }
         )
         return true
@@ -588,39 +582,36 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val context = CloudStreamApp.context
-        var isEnabled = true
-        if (context != null) {
+        // ✨ 최적화: 설정 I/O 읽기를 백그라운드 스레드로 격리하여 UI 블로킹 방지
+        val isEnabled = withContext(Dispatchers.IO) {
+            val context = CloudStreamApp.context ?: return@withContext true
             val possiblePrefNames = listOf("StremioX", "StremioX_preferences", "stremio_preferences", "com.hsp1020_preferences", context.packageName + "_preferences")
             for (name in possiblePrefNames) {
                 val prefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
                 if (prefs.contains("cinestream_integration_enabled")) {
-                    isEnabled = prefs.getBoolean("cinestream_integration_enabled", true)
-                    break
+                    return@withContext prefs.getBoolean("cinestream_integration_enabled", true)
                 }
             }
+            true
         }
 
-        if (!isEnabled) {
-            return
-        }
+        if (!isEnabled) return
 
         try {
             val cineStreamProvider = getCineStreamProvider() ?: return
             syncCineStreamSettings()
 
+            // ✨ 최적화: 콜백 내부에서 폭주하던 디스크 I/O와 객체 생성을 바깥으로 끌어올림
+            val customAddonsRaw = withContext(Dispatchers.IO) { CloudStreamApp.getKey<String>("stremio_addons") ?: "" }
+            val customHosts = customAddonsRaw.lines()
+                .filter { it.isNotBlank() }
+                .mapNotNull { runCatching { URI(it.split("|").getOrElse(1) { "" }).host }.getOrNull() }
+                .toSet() // O(1) 조회를 위한 Set 사용
+            val builtInHosts = setOf("opensubtitles.stremio.homes", "subsense.nepiraw.com", "opensubtitles-v3.strem.io")
+
             val subtitleInterceptor: (SubtitleFile) -> Unit = { sub ->
                 try {
-                    val host = java.net.URI(sub.url).host ?: ""
-                    val customAddonsRaw = CloudStreamApp.getKey<String>("stremio_addons") ?: ""
-                    val customHosts = customAddonsRaw.lines()
-                        .filter { it.isNotBlank() }
-                        .mapNotNull { 
-                            val parts = it.split("|")
-                            if (parts.size >= 2) java.net.URI(parts[1]).host else null
-                        }
-                        
-                    val builtInHosts = listOf("opensubtitles.stremio.homes", "subsense.nepiraw.com", "opensubtitles-v3.strem.io")
+                    val host = URI(sub.url).host ?: ""
                     val isStremio = customHosts.contains(host) || builtInHosts.contains(host) || host.contains("strem", ignoreCase = true)
                     
                     if (isStremio && !sub.lang.contains("(Stremio)", ignoreCase = true)) {
@@ -682,8 +673,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
     }
 
-    private suspend fun invokeStremioX(type: String?, id: String?, season: Int?, episode: Int?, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
-        val filteredSites = getValidStremioAddons()
+    private suspend fun invokeStremioX(type: String?, id: String?, season: Int?, episode: Int?, filteredSites: List<CustomSite>, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
         val stremioId = buildStremioId(type, id, season, episode) ?: return
 
         coroutineScope {
@@ -701,9 +691,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
     private data class StremioSubtitleResponse(@JsonProperty("subtitles") val subtitles: List<Subtitle>?)
     
-    private suspend fun invokeStremioSubtitles(type: String?, id: String?, season: Int?, episode: Int?, subtitleCallback: (SubtitleFile) -> Unit) {
+    private suspend fun invokeStremioSubtitles(type: String?, id: String?, season: Int?, episode: Int?, filteredSites: List<CustomSite>, subtitleCallback: (SubtitleFile) -> Unit) {
         val addonUrls = mutableSetOf(baseUrl())
-        getValidStremioAddons().forEach { addonUrls.add(it.url.cleanBaseUrl()) }
+        filteredSites.forEach { addonUrls.add(it.url.cleanBaseUrl()) }
 
         val stremioId = buildStremioId(type, id, season, episode, isSubtitle = true) ?: return
 
@@ -1056,7 +1046,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             )
         }
 
-        private fun processEpisodes(provider: StremioC, finalImdbId: String?, episodeTmdbMeta: Map<String, TmdbEpisode>, targetVideos: List<Video>, type: String?, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, originalTitle: String?, englishTitle: String?): List<Episode> {
+        // ✨ 최적화: processEpisodes 파라미터에 aniListId 등을 추가하여 하위에서 한 방에 생성
+        private fun processEpisodes(provider: StremioC, finalImdbId: String?, episodeTmdbMeta: Map<String, TmdbEpisode>, targetVideos: List<Video>, type: String?, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, originalTitle: String?, englishTitle: String?, aniListId: Int?, malId: Int?, kitsuId: String?): List<Episode> {
             val sortedVideos = targetVideos.groupBy { Pair(it.seasonNumber ?: 0, it.episode ?: it.number ?: 0) }.flatMap { (_, group) -> group.sortedBy { it.title ?: it.name ?: "" } }
             val maxRegularSeason = sortedVideos.mapNotNull { it.seasonNumber }.filter { it > 0 }.maxOrNull() ?: 0
             val targetSeasonForZero = maxRegularSeason + 1
@@ -1089,7 +1080,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val imdbSeason = video.seasonNumber ?: 0
                 val imdbEpisode = video.episode ?: video.number ?: 0
                 
-                video.toEpisode(provider, type, finalImdbId, episodeTmdbMeta, displaySeason, displayEpisode, showTitle, tmdbId, isAnime, isBollywood, isAsian, isCartoon, imdbSeason, imdbEpisode, originalTitle, englishTitle)
+                // ✨ 여기서 AniListId 등을 곧바로 주입
+                video.toEpisode(provider, type, finalImdbId, episodeTmdbMeta, displaySeason, displayEpisode, showTitle, tmdbId, isAnime, isBollywood, isAsian, isCartoon, imdbSeason, imdbEpisode, originalTitle, englishTitle, aniListId, malId, kitsuId)
             }
         }
 
@@ -1187,6 +1179,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             
             var fetchedAniListId: Int? = null
             var fetchedMalId: Int? = null
+
+            // ✨ 최적화: processEpisodes 호출 전에 미리 ID들을 준비해 둠
             if (isAnimeMedia && finalImdbId != null) {
                 try {
                     val rawIdForAnizip = finalImdbId.substringAfter("kitsu:").substringAfter("mal:")
@@ -1225,13 +1219,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     tmdbData?.fetchedLogo?.let { this.logoUrl = it }; tmdbIdStr?.let { addTMDbId(it) }; finalImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }
                 }
             } else {
-                val episodesList = processEpisodes(provider, finalImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, tmdbIdStr?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle)
-                
-                val finalEpisodes = episodesList.map { ep ->
-                    val oldData = parseJson<LoadData>(ep.data)
-                    val newData = oldData.copy(anilistId = fetchedAniListId, malId = fetchedMalId, kitsuId = fetchedKitsuId ?: this@CatalogEntry.kitsuIdExt)
-                    ep.apply { data = newData.toJson() }
-                }
+                // ✨ 최적화: `.map { ep.apply { parseJson... } }` 를 완전히 제거. processEpisodes 안에서 다 끝남!
+                val finalEpisodes = processEpisodes(provider, finalImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, tmdbIdStr?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, fetchedAniListId, fetchedMalId, fetchedKitsuId ?: this@CatalogEntry.kitsuIdExt)
 
                 return@coroutineScope provider.newTvSeriesLoadResponse(
                     finalName, "${provider.mainUrl}/meta/${finalType}/${this@CatalogEntry.id}.json", TvType.TvSeries, finalEpisodes
@@ -1260,7 +1249,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         @JsonProperty("released") val released: String? = null,
         @JsonProperty("tvdb_id") val tvdb_id: Int? = null
     ) {
-        fun toEpisode(provider: StremioC, type: String?, imdbId: String?, tmdbMetaMap: Map<String, TmdbEpisode>, displaySeason: Int, displayEpisode: Int, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, imdbSeason: Int?, imdbEpisode: Int?, originalTitle: String?, englishTitle: String?): Episode {
+        // ✨ 최적화: 파라미터에 aniListId 등을 받아서 LoadData 객체 생성 시 한 번에 주입
+        fun toEpisode(provider: StremioC, type: String?, imdbId: String?, tmdbMetaMap: Map<String, TmdbEpisode>, displaySeason: Int, displayEpisode: Int, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, imdbSeason: Int?, imdbEpisode: Int?, originalTitle: String?, englishTitle: String?, aniListId: Int?, malId: Int?, kitsuId: String?): Episode {
             val tmdbEp = tmdbMetaMap["${displaySeason}_${displayEpisode}"] ?: tmdbMetaMap["${seasonNumber ?: 0}_${episode ?: number ?: 0}"]
             val finalAirDate = tmdbEp?.airDate?.takeIf { it.isNotBlank() } ?: this@Video.firstAired ?: this@Video.released
             val airedYearInt = finalAirDate?.split("-")?.first()?.toIntOrNull()
@@ -1282,7 +1272,10 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 imdbSeason = imdbSeason, 
                 imdbEpisode = imdbEpisode,
                 originalTitle = originalTitle,
-                englishTitle = englishTitle 
+                englishTitle = englishTitle,
+                anilistId = aniListId,     // JSON 역/직렬화 없이 직접 세팅
+                malId = malId,             // JSON 역/직렬화 없이 직접 세팅
+                kitsuId = kitsuId          // JSON 역/직렬화 없이 직접 세팅
             )) {
                 val rawTitle = this@Video.name ?: this@Video.title ?: "Episode $displayEpisode"
                 val cleanOriginalTitle = if (rawTitle.contains("📄")) rawTitle.substringAfter("📄").replace("\n", "").trim() else rawTitle.replace("\n", "").trim()
