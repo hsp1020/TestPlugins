@@ -1,3 +1,4 @@
+// [v1.3]
 package recloudstream
 
 import com.lagradost.cloudstream3.*
@@ -316,16 +317,54 @@ class YoutubeProvider : MainAPI() {
         }
     }
 
+    // [v1.3] 수정: 사용자의 정확한 단서(1,3 더빙 / 2,4 원본)를 기반으로 중복 트랙 폐기 및 원본 추출 로직 적용
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        return loadExtractor(
-            "https://youtube.com/watch?v=$data",
+        // 기형적 URL 방지 (기존 v1.2 로직 유지)
+        val url = if (data.startsWith("http")) data else "https://youtube.com/watch?v=$data"
+        println("[v1.3] loadLinks called with URL: $url")
+        
+        val allLinks = mutableListOf<ExtractorLink>()
+        
+        // 1. 추출기가 반환하는 모든 링크를 일단 allLinks에 싹 다 긁어모음
+        val result = loadExtractor(
+            url,
             subtitleCallback,
-            callback
+            { link ->
+                allLinks.add(link)
+                println("[v1.3] Captured Raw Link: name=${link.name}, quality=${link.quality}, url=${link.url}")
+            }
         )
+
+        // 2. 트랙 이름(예: und aac)과 화질을 기준으로 그룹화
+        val groupedLinks = allLinks.groupBy { "${it.name}_${it.quality}" }
+        
+        groupedLinks.forEach { (_, links) ->
+            // 가설 검증: URL 내부에 더빙 찌꺼기 파라미터가 없는 녀석들을 우선 색출
+            val likelyOriginals = links.filterNot { 
+                it.url.contains("audio_track_id=") || 
+                it.url.contains("translated_audio") ||
+                it.url.contains("dubbed")
+            }
+            
+            // 필터링에 성공했다면 그 중 마지막 녀석을, 
+            // URL 필터링으로도 못 걸러냈다면 사용자가 짚어준 규칙대로 무조건 쌍의 마지막 녀석(2, 4번)을 원본으로 취급
+            val finalLink = if (likelyOriginals.isNotEmpty()) {
+                likelyOriginals.last()
+            } else {
+                links.last()
+            }
+            
+            println("[v1.3] Selected Link for playback: name=${finalLink.name}, quality=${finalLink.quality}")
+            
+            // 3. 살아남은 진짜 원본 트랙만 실제 화면(플레이어)으로 넘겨줌
+            callback.invoke(finalLink)
+        }
+
+        return result
     }
 }
