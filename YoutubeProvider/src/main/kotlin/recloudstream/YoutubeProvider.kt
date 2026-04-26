@@ -1,4 +1,3 @@
-// [v1.6]
 package recloudstream
 
 import com.lagradost.cloudstream3.*
@@ -317,57 +316,16 @@ class YoutubeProvider : MainAPI() {
         }
     }
 
-    // [v1.6] 수정: 오디오 스트림 분리 및 itag 그룹핑을 통한 더빙 트랙(1,3) 자동 폐기 로직 추가
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val url = if (data.startsWith("http")) data else "https://youtube.com/watch?v=$data"
-        println("[v1.6] ===================================================")
-        println("[v1.6] loadLinks 실행됨 - 입력 데이터: $data")
-        
-        val audioLinks = mutableListOf<ExtractorLink>()
-
-        val result = loadExtractor(
-            url,
-            subtitleCallback
-        ) { link ->
-            // ExoPlayer로 넘어가기 전 URL의 mime 속성으로 오디오 트랙 식별 및 가로채기
-            if (link.url.contains("mime=audio")) {
-                audioLinks.add(link)
-            } else {
-                // 비디오 트랙은 즉시 플레이어로 무사 통과
-                callback.invoke(link)
-            }
-        }
-
-        // 수집된 오디오 링크들을 URL 내부의 itag(코덱/음질 고유 식별번호) 기준으로 그룹화
-        val groupedAudio = audioLinks.groupBy { audioLink ->
-            val itagMatch = Regex("itag=(\\d+)").find(audioLink.url)
-            itagMatch?.groupValues?.get(1) ?: audioLink.url
-        }
-
-        println("[v1.6] 오디오 트랙 필터링 시작 - 총 그룹 수: ${groupedAudio.size}")
-
-        // 1, 3 더빙 / 2, 4 원본 패턴에 따라 각 그룹의 마지막 트랙(2, 4번)만 살리고 앞의 더빙 찌꺼기는 전부 폐기
-        groupedAudio.forEach { (itag, links) ->
-            println("[v1.6] ---------------------------------------------------")
-            println("[v1.6] itag=$itag 그룹 발견 (총 ${links.size}개 트랙)")
-            links.forEachIndexed { index, link ->
-                println("[v1.6]   [인덱스 $index] url=${link.url}")
-            }
-            
-            // 그룹의 마지막 요소(원본 트랙)를 추출
-            val originalAudioLink = links.last()
-            println("[v1.6] ---> itag=$itag 그룹에서 최종 선택된 트랙: [인덱스 ${links.lastIndex}]")
-            
-            // 걸러낸 진짜 원본 오디오 트랙만 ExoPlayer로 넘김
-            callback.invoke(originalAudioLink)
-        }
-        
-        println("[v1.6] ===================================================")
-        return result
+        return loadExtractor(
+            "https://youtube.com/watch?v=$data",
+            subtitleCallback,
+            callback
+        )
     }
 }
