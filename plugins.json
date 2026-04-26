@@ -218,11 +218,11 @@
     },
     {
         "iconUrl": "https://upload.wikimedia.org/wikipedia/commons/thumb/0/09/YouTube_full-color_icon_%282017%29.svg/3840px-YouTube_full-color_icon_%282017%29.svg.png",
-        "jarFileSize": 51647,
-        "fileHash": "sha256-8d31a08e80ce48c7d8096a02f3949d4e67318295ae852db7970ce319620aebc9",
+        "jarFileSize": 57528,
+        "fileHash": "sha256-3bf47e5d56f234149225b93621295b0c8a6c74dc698eb142e1b1f53ecd9cdd14",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 15566,
+        "fileSize": 17295,
         "status": 1,
         "authors": [
             "hsp1020"
@@ -238,6 +238,6 @@
         "description": "Watch Youtube in Cloudstream",
         "url": "https://raw.githubusercontent.com/hsp1020/TestPlugins/builds/YoutubeProvider.cs3",
         "name": "YoutubeProvider",
-        "jarHash": "sha256-544bc0422a4b479b713b7ebbb97580d56e4a21b504c5e825f8c9f56748e68050"
+        "jarHash": "sha256-ef2034c9e8422a041dc42fd4596599b2c19e22a023a478e9df61a07b5c03632d"
     }
 ]
