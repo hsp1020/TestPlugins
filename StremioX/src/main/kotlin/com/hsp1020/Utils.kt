@@ -1,4 +1,4 @@
-// v1.14 (Feature: 사이트명 약자 텍스트 제거. 오직 아이콘과 점수만 표기)
+// v1.15 (Bugfix: 하단 함수들의 1줄 압축(Minification)으로 인한 세미콜론(;) Syntax Error 해결 및 정규 포맷 복원)
 package com.hsp1020
 
 import com.google.gson.annotations.SerializedName
@@ -33,12 +33,14 @@ suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false): List<Stri
                 if (value.isNaN()) continue
                 
                 var scaledValue = value
+                // 10점 만점 스케일링 정규화
                 when (source) {
                     "letterboxd", "lb" -> scaledValue *= 2.0
-                    "rogerebert", "re" -> scaledValue *= 2.5
+                    "rogerebert", "re" -> scaledValue *= 2.5 // 4점 만점을 10점 만점으로 스케일링
                     "tmdb", "trakt", "metacritic", "mc", "tomatoes", "rottentomatoes", "rt", "tomatoesaudience", "audiencescore", "popcorn" -> scaledValue /= 10.0
                 }
                 
+                // 사사오입 (Half-Up) 적용
                 scaledValue = java.math.BigDecimal(scaledValue.toString())
                     .setScale(1, java.math.RoundingMode.HALF_UP)
                     .toDouble()
@@ -73,12 +75,13 @@ suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false): List<Stri
                     else -> "🏷️"
                 }
                 
+                // 약자를 제외하고 아이콘 + 1자리 소수점만 표기
                 val displayValue = String.format(Locale.US, "%.1f", scaledValue)
-                // [수정됨] 약자(key) 제거 후 오직 "아이콘 + 점수"만 할당
                 fetchedMap[key] = "$icon $displayValue"
             }
         }
         
+        // 정렬 순서 보장
         val orderedKeys = listOf("MAL", "IMDb", "LB", "MCU", "Popcorn", "Trakt", "TMDB", "MC", "RT", "RE")
         val finalRatings = mutableListOf<String>()
         for (key in orderedKeys) {
@@ -93,50 +96,187 @@ suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false): List<Stri
     }
 }
 
-fun String.fixSourceUrl(): String = this.replace("/manifest.json", "").replace("stremio://", "https://")
-fun fixSourceName(name: String?, title: String?): String = when {
-    name?.contains("[RD+]", true) == true -> "[RD+] $title"
-    name?.contains("[RD download]", true) == true -> "[RD download] $title"
-    !name.isNullOrEmpty() && !title.isNullOrEmpty() -> "$name $title"
-    else -> title ?: name ?: ""
+fun String.fixSourceUrl(): String {
+    return this.replace("/manifest.json", "").replace("stremio://", "https://")
 }
-fun getQuality(qualities: List<String?>): Int {
-    fun String.getQuality(): String? = Regex("(\\d{3,4}[pP])").find(this)?.groupValues?.getOrNull(1)
-    return getQualityFromName(qualities.firstNotNullOfOrNull { it?.getQuality() })
-}
-fun getEpisodeSlug(season: Int? = null, episode: Int? = null): Pair<String, String> = if (season == null && episode == null) "" to "" else (if (season!! < 10) "0$season" else "$season") to (if (episode!! < 10) "0$episode" else "$episode")
-fun isUpcoming(dateString: String?): Boolean = try { val format = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()); val dateTime = dateString?.let { format.parse(it)?.time } ?: return false; unixTimeMS < dateTime } catch (t: Throwable) { logError(t); false }
-fun fixUrl(url: String, domain: String): String {
-    if (url.startsWith("http")) return url; if (url.isEmpty()) return ""
-    return if (url.startsWith("//")) "https:$url" else if (url.startsWith('/')) domain + url else "$domain/$url"
-}
-data class TorrentioResponse(@SerializedName("streams") val streams: List<TorrentioStream> = emptyList())
-data class TorrentioStream(@SerializedName("name") val name: String? = null, @SerializedName("title") val title: String? = null, @SerializedName("infoHash") val infoHash: String? = null, @SerializedName("fileIdx") val fileIdx: Int? = null)
-suspend fun generateMagnetLink(trackerUrls: List<String>, hash: String?): String {
-    require(hash?.isNotBlank() == true); val trackers = mutableSetOf<String>()
-    trackerUrls.forEach { url -> try { app.get(url).text.lineSequence().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }.forEach { trackers.add(it) } } catch (_: Exception) {} }
-    return buildString {
-        append("magnet:?xt=urn:btih:").append(hash)
-        if (hash.isNotBlank()) append("&dn=").append(URLEncoder.encode(hash, StandardCharsets.UTF_8.name()))
-        trackers.take(10).forEach { tracker -> append("&tr=").append(URLEncoder.encode(tracker, StandardCharsets.UTF_8.name())) }
+
+fun fixSourceName(name: String?, title: String?): String {
+    return when {
+        name?.contains("[RD+]", true) == true -> "[RD+] $title"
+        name?.contains("[RD download]", true) == true -> "[RD download] $title"
+        !name.isNullOrEmpty() && !title.isNullOrEmpty() -> "$name $title"
+        else -> title ?: name ?: ""
     }
 }
-suspend fun fetchTmdbLogoUrl(tmdbAPI: String, apiKey: String, type: TvType, tmdbId: Int?, appLangCode: String?): String? {
-    if (tmdbId == null) return null
-    val url = if (type == TvType.Movie) "$tmdbAPI/movie/$tmdbId/images?api_key=$apiKey" else "$tmdbAPI/tv/$tmdbId/images?api_key=$apiKey"
-    val json = runCatching { JSONObject(app.get(url).text) }.getOrNull() ?: return null
-    val logos = json.optJSONArray("logos") ?: return null; if (logos.length() == 0) return null
-    val lang = appLangCode?.trim()?.lowercase()?.substringBefore("-")
-    fun path(o: JSONObject) = o.optString("file_path"); fun isSvg(o: JSONObject) = path(o).endsWith(".svg", true); fun urlOf(o: JSONObject) = "https://image.tmdb.org/t/p/w500${path(o)}"
-    var svgFallback: JSONObject? = null
-    for (i in 0 until logos.length()) { val logo = logos.optJSONObject(i) ?: continue; val p = path(logo); if (p.isBlank()) continue; val l = logo.optString("iso_639_1").trim().lowercase(); if (l == lang) { if (!isSvg(logo)) return urlOf(logo); if (svgFallback == null) svgFallback = logo } }
-    svgFallback?.let { return urlOf(it) }; var best: JSONObject? = null; var bestSvg: JSONObject? = null
-    fun voted(o: JSONObject) = o.optDouble("vote_average", 0.0) > 0 && o.optInt("vote_count", 0) > 0
-    fun better(a: JSONObject?, b: JSONObject): Boolean { if (a == null) return true; val aAvg = a.optDouble("vote_average", 0.0); val aCnt = a.optInt("vote_count", 0); val bAvg = b.optDouble("vote_average", 0.0); val bCnt = b.optInt("vote_count", 0); return bAvg > aAvg || (bAvg == aAvg && bCnt > aCnt) }
-    for (i in 0 until logos.length()) { val logo = logos.optJSONObject(i) ?: continue; if (!voted(logo)) continue; if (isSvg(logo)) { if (better(bestSvg, logo)) bestSvg = logo } else { if (better(best, logo)) best = logo } }
-    best?.let { return urlOf(it) }; bestSvg?.let { return urlOf(it) }; return null
+
+fun getQuality(qualities: List<String?>): Int {
+    fun String.getQuality(): String? {
+        return Regex("(\\d{3,4}[pP])").find(this)?.groupValues?.getOrNull(1)
+    }
+    val quality = qualities.firstNotNullOfOrNull { it?.getQuality() }
+    return getQualityFromName(quality)
 }
+
+fun getEpisodeSlug(season: Int? = null, episode: Int? = null): Pair<String, String> {
+    return if (season == null && episode == null) {
+        "" to ""
+    } else {
+        (if (season!! < 10) "0$season" else "$season") to (if (episode!! < 10) "0$episode" else "$episode")
+    }
+}
+
+fun isUpcoming(dateString: String?): Boolean {
+    return try {
+        val format = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+        val dateTime = dateString?.let { format.parse(it)?.time } ?: return false
+        unixTimeMS < dateTime
+    } catch (t: Throwable) {
+        logError(t)
+        false
+    }
+}
+
+fun fixUrl(url: String, domain: String): String {
+    if (url.startsWith("http")) {
+        return url
+    }
+    if (url.isEmpty()) {
+        return ""
+    }
+
+    val startsWithNoHttp = url.startsWith("//")
+    if (startsWithNoHttp) {
+        return "https:$url"
+    } else {
+        if (url.startsWith('/')) {
+            return domain + url
+        }
+        return "$domain/$url"
+    }
+}
+
+data class TorrentioResponse(
+    @SerializedName("streams") val streams: List<TorrentioStream> = emptyList()
+)
+
+data class TorrentioStream(
+    @SerializedName("name") val name: String? = null, 
+    @SerializedName("title") val title: String? = null, 
+    @SerializedName("infoHash") val infoHash: String? = null, 
+    @SerializedName("fileIdx") val fileIdx: Int? = null
+)
+
+suspend fun generateMagnetLink(trackerUrls: List<String>, hash: String?): String {
+    require(hash?.isNotBlank() == true)
+
+    val trackers = mutableSetOf<String>()
+
+    trackerUrls.forEach { url ->
+        try {
+            val response = app.get(url)
+            response.text
+                .lineSequence()
+                .map { it.trim() }
+                .filter { it.isNotEmpty() && !it.startsWith("#") }
+                .forEach { trackers.add(it) }
+        } catch (_: Exception) {
+            // ignore bad sources
+        }
+    }
+
+    return buildString {
+        append("magnet:?xt=urn:btih:").append(hash)
+
+        if (hash.isNotBlank()) {
+            append("&dn=")
+            append(URLEncoder.encode(hash, StandardCharsets.UTF_8.name()))
+        }
+
+        trackers
+            .take(10) // practical limit
+            .forEach { tracker ->
+                append("&tr=")
+                append(URLEncoder.encode(tracker, StandardCharsets.UTF_8.name()))
+            }
+    }
+}
+
+suspend fun fetchTmdbLogoUrl(
+    tmdbAPI: String, 
+    apiKey: String, 
+    type: TvType, 
+    tmdbId: Int?, 
+    appLangCode: String?
+): String? {
+    if (tmdbId == null) return null
+
+    val url = if (type == TvType.Movie)
+        "$tmdbAPI/movie/$tmdbId/images?api_key=$apiKey"
+    else
+        "$tmdbAPI/tv/$tmdbId/images?api_key=$apiKey"
+
+    val json = runCatching { JSONObject(app.get(url).text) }.getOrNull() ?: return null
+    val logos = json.optJSONArray("logos") ?: return null
+    if (logos.length() == 0) return null
+
+    val lang = appLangCode?.trim()?.lowercase()?.substringBefore("-")
+
+    fun path(o: JSONObject): String = o.optString("file_path")
+    fun isSvg(o: JSONObject): Boolean = path(o).endsWith(".svg", true)
+    fun urlOf(o: JSONObject): String = "https://image.tmdb.org/t/p/w500${path(o)}"
+
+    var svgFallback: JSONObject? = null
+
+    for (i in 0 until logos.length()) {
+        val logo = logos.optJSONObject(i) ?: continue
+        val p = path(logo)
+        if (p.isBlank()) continue
+
+        val l = logo.optString("iso_639_1").trim().lowercase()
+        if (l == lang) {
+            if (!isSvg(logo)) return urlOf(logo)
+            if (svgFallback == null) svgFallback = logo
+        }
+    }
+    
+    svgFallback?.let { return urlOf(it) }
+
+    var best: JSONObject? = null
+    var bestSvg: JSONObject? = null
+
+    fun voted(o: JSONObject): Boolean = o.optDouble("vote_average", 0.0) > 0 && o.optInt("vote_count", 0) > 0
+
+    fun better(a: JSONObject?, b: JSONObject): Boolean {
+        if (a == null) return true
+        val aAvg = a.optDouble("vote_average", 0.0)
+        val aCnt = a.optInt("vote_count", 0)
+        val bAvg = b.optDouble("vote_average", 0.0)
+        val bCnt = b.optInt("vote_count", 0)
+        return bAvg > aAvg || (bAvg == aAvg && bCnt > aCnt)
+    }
+
+    for (i in 0 until logos.length()) {
+        val logo = logos.optJSONObject(i) ?: continue
+        if (!voted(logo)) continue
+
+        if (isSvg(logo)) {
+            if (better(bestSvg, logo)) bestSvg = logo
+        } else {
+            if (better(best, logo)) best = logo
+        }
+    }
+
+    best?.let { return urlOf(it) }
+    bestSvg?.let { return urlOf(it) }
+
+    return null
+}
+
 fun normalizeId(id: String?): String {
     val clean = id?.trim() ?: ""
-    return when { clean.matches(Regex("^tt\\d+$")) -> clean; clean.all { it.isDigit() } -> "tmdb:$clean"; else -> clean }
+    return when {
+        clean.matches(Regex("^tt\\d+$")) -> clean
+        clean.all { it.isDigit() } -> "tmdb:$clean"
+        else -> clean
+    }
 }
