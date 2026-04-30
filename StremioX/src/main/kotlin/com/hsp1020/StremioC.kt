@@ -1,4 +1,4 @@
-// v1.172 (Stream I/O In-Memory Caching)
+// v1.173 (Metadata Cache Optimization - Diet Version)
 package com.hsp1020
 
 import android.content.Context
@@ -1019,7 +1019,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     val outType = if (rawMediaType == "tv") "series" else "movie"
                     
                     val customPosterUrl = "https://xrdb.ibbylabs.dev/poster/tmdb:$posterType:$recTmdbId.jpg?idSource=tmdb&tmdbKey=cc9982c4801545a1481d167137ea7b53&mdblistKey=d2tmbmhnrgdz7ft9re7j2gjr3&posterRatings=myanimelist%2Cimdb%2Cletterboxd%2Cmetacriticuser%2Ctomatoesaudience%2Ctrakt%2Ctmdb%2Cmetacritic%2Ctomatoes%2Crogerebert&lang=ko&ratingValueMode=normalized&posterGenreBadgeStyle=plain&posterGenreBadgePosition=bottomLeft&posterStreamBadges=on&ageRatingBadgePosition=left-top&posterQualityBadges=&posterRatingStyle=plain&posterRatingBadgeScale=115&imageText=original&posterRatingsLayout=right&posterNoBackgroundBadgeOutlineColor=%23ff0000&posterEdgeOffset=3&providerAppearance=eyJ0b21hdG9lcyI6eyJzdGFja2VkQWNjZW50TW9kZSI6ImxvZ28ifX0"
-                    val recommendationEntry = CatalogEntry(name = recTitle, id = "tmdb:${media.id}", type = outType, poster = customPosterUrl, background = null, description = media.overview, imdbRating = null, videos = null, genre = null)
+                    
+                    // 핵심 수정: 추천 항목의 상세 줄거리를 null로 처리하여 캐시 비대화 방지
+                    val recommendationEntry = CatalogEntry(name = recTitle, id = "tmdb:${media.id}", type = outType, poster = customPosterUrl, background = null, description = null, imdbRating = null, videos = null, genre = null)
                     provider.newMovieSearchResponse(recTitle, recommendationEntry.toJson(), if (outType == "movie") TvType.Movie else TvType.TvSeries) { this.posterUrl = customPosterUrl }
                 }
             }
@@ -1248,6 +1250,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     if (finalActors != null) this.actors = finalActors else addActors(finalCast)
                     addTrailer(finalTrailers); this.recommendations = tmdbData?.fetchedRecommendations; this.duration = tmdbData?.fetchedRuntime; this.contentRating = tmdbData?.fetchedAgeRating
                     tmdbData?.fetchedLogo?.let { this.logoUrl = it }; tmdbIdStr?.let { addTMDbId(it) }; finalImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }
+                    println("Metadata Cached (Optimized): $finalName")
                 }
             } else {
                 val finalEpisodes = processEpisodes(provider, finalImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, tmdbIdStr?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, fetchedAniListId, fetchedMalId, this@CatalogEntry.kitsuIdExt)
@@ -1260,6 +1263,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     if (finalActors != null) this.actors = finalActors else addActors(finalCast)
                     addTrailer(finalTrailers.firstOrNull()); this.recommendations = tmdbData?.fetchedRecommendations; this.contentRating = tmdbData?.fetchedAgeRating
                     tmdbData?.fetchedLogo?.let { this.logoUrl = it }; tmdbIdStr?.let { addTMDbId(it) }; finalImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }
+                    println("Metadata Cached (Optimized): $finalName with ${finalEpisodes.size} episodes")
                 }
             }
         }
@@ -1311,10 +1315,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 
                 this.name = if (tmdbEp?.name != null) tmdbEp.name else cleanOriginalTitle
                 this.posterUrl = thumbnail ?: TRANSPARENT_PIXEL
-                var finalEpDesc = provider.mergeOverview(this@Video.overview ?: this@Video.description, tmdbEp?.overview)
-                if (type == "other") finalEpDesc = if (finalEpDesc.isNullOrBlank()) cleanOriginalTitle else "$finalEpDesc | $cleanOriginalTitle"
                 
-                this.description = finalEpDesc
+                // 에피소드 줄거리 최적화: 용량을 위해 null 처리 (상세 클릭 시 로드되도록 유도)
+                this.description = null 
                 this.season = displaySeason
                 this.episode = displayEpisode
 
@@ -1408,18 +1411,18 @@ private data class TmdbDetailResponse(
     @JsonProperty("release_date") val releaseDate: String? = null, 
     @JsonProperty("first_air_date") val firstAirDate: String? = null, 
     @JsonProperty("status") val status: String? = null, 
-    @JsonProperty("poster_path") val posterPath: String? = null,
-    @JsonProperty("origin_country") val origin_country: List<String>? = null,
-    @JsonProperty("original_language") val original_language: String? = null,
-    @JsonProperty("belongs_to_collection") val belongs_to_collection: TmdbCollection? = null,
-    @JsonProperty("recommendations") val recommendations: TmdbRecommendations? = null,
-    @JsonProperty("runtime") val runtime: Int? = null,
-    @JsonProperty("release_dates") val release_dates: TmdbReleaseDates? = null,
-    @JsonProperty("content_ratings") val content_ratings: TmdbContentRatings? = null,
-    @JsonProperty("credits") val credits: TmdbCredits? = null,
-    @JsonProperty("images") val images: TmdbImages? = null,
-    @JsonProperty("videos") val videos: ResultsTrailer? = null,
-    @JsonProperty("external_ids") val external_ids: ExternalIds? = null,
+    @JsonProperty("poster_path") val posterPath: String? = null, 
+    @JsonProperty("origin_country") val origin_country: List<String>? = null, 
+    @JsonProperty("original_language") val original_language: String? = null, 
+    @JsonProperty("belongs_to_collection") val belongs_to_collection: TmdbCollection? = null, 
+    @JsonProperty("recommendations") val recommendations: TmdbRecommendations? = null, 
+    @JsonProperty("runtime") val runtime: Int? = null, 
+    @JsonProperty("release_dates") val release_dates: TmdbReleaseDates? = null, 
+    @JsonProperty("content_ratings") val content_ratings: TmdbContentRatings? = null, 
+    @JsonProperty("credits") val credits: TmdbCredits? = null, 
+    @JsonProperty("images") val images: TmdbImages? = null, 
+    @JsonProperty("videos") val videos: ResultsTrailer? = null, 
+    @JsonProperty("external_ids") val external_ids: ExternalIds? = null, 
     @JsonProperty("translations") val translations: TmdbTranslations? = null
 ) {
     fun toTmdbMedia(mediaType: String): TmdbMedia {
