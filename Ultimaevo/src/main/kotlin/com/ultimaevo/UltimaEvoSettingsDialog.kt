@@ -1,7 +1,9 @@
-// v1.50
+// v1.53
 package com.ultimaevo
 
 import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.SharedPreferences
 import android.graphics.Color
@@ -10,6 +12,7 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.SystemClock
 import android.text.InputType
+import android.util.Base64
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
@@ -30,6 +33,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
 
 class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
@@ -59,7 +63,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
-        println("[UltimaEvo-Debug] [Dialog] onViewCreated 호출")
         (view.parent as? View)?.setBackgroundColor(Color.TRANSPARENT)
     }
 
@@ -76,7 +79,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
     }
 
     private fun shiftAndDeleteInstance(prefs: SharedPreferences, startIndex: Int, latestCount: Int) {
-        println("[UltimaEvo-Debug] [Dialog] 인스턴스 당겨오기 시작 (Index: $startIndex)")
         val editor = prefs.edit()
         for (j in startIndex until latestCount) {
             val curr = j
@@ -112,7 +114,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         
         val newCount = if (latestCount > 0) latestCount - 1 else 0
         editor.putString("evo_instance_count", newCount.toString())
-        editor.apply() // 최적화: UI 스레드 블로킹 방지
+        editor.apply()
     }
 
     override fun onCreateView(
@@ -139,6 +141,139 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         }
         mainLayout.addView(title)
 
+        val backupRow = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, 30)
+        }
+
+        val exportBtn = Button(ctx).apply {
+            text = "Export Settings"
+            setTextColor(Color.WHITE)
+            isAllCaps = false
+            background = getButtonBg()
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0,0,15,0) }
+            setOnClickListener {
+                if (SystemClock.elapsedRealtime() - lastClickTime < 1000) return@setOnClickListener
+                lastClickTime = SystemClock.elapsedRealtime()
+
+                try {
+                    val json = JSONObject()
+                    prefs.all.forEach { (key, value) -> json.put(key, value) }
+                    val backupStr = Base64.encodeToString(json.toString().toByteArray(), Base64.NO_WRAP)
+
+                    val et = EditText(ctx).apply {
+                        setText(backupStr)
+                        setTextColor(Color.WHITE)
+                        background = getCardBg()
+                        setPadding(30, 30, 30, 30)
+                        setTextIsSelectable(true)
+                        isFocusable = false
+                        isFocusableInTouchMode = false
+                    }
+                    
+                    AlertDialog.Builder(ctx)
+                        .setTitle("Export Backup Data")
+                        .setView(et)
+                        .setPositiveButton("Copy") { _, _ ->
+                            val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            val clip = ClipData.newPlainText("Ultima Backup", backupStr)
+                            clipboard.setPrimaryClip(clip)
+                            Toast.makeText(ctx, "Copied to clipboard", Toast.LENGTH_SHORT).show()
+                        }
+                        .setNegativeButton("Close", null)
+                        .show()
+                } catch (e: Exception) {
+                    println("[UltimaEvo-Debug] [Export] 백업 인코딩 중 에러: ${e.message}")
+                }
+            }
+        }
+
+        val importBtn = Button(ctx).apply {
+            text = "Import Settings"
+            setTextColor(Color.WHITE)
+            isAllCaps = false
+            background = getButtonBg()
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15,0,0,0) }
+            setOnClickListener {
+                if (SystemClock.elapsedRealtime() - lastClickTime < 1000) return@setOnClickListener
+                lastClickTime = SystemClock.elapsedRealtime()
+
+                val et = EditText(ctx).apply {
+                    hint = "Paste backup string here..."
+                    setHintTextColor(Color.GRAY)
+                    setTextColor(Color.WHITE)
+                    background = getCardBg()
+                    setPadding(30, 30, 30, 30)
+                }
+
+                AlertDialog.Builder(ctx)
+                    .setTitle("Import Backup Data")
+                    .setMessage("Warning: This will permanently overwrite all current settings.\nThe app must be restarted after import.")
+                    .setView(et)
+                    .setPositiveButton("Restore") { _, _ ->
+                        try {
+                            val decodedBytes = Base64.decode(et.text.toString().trim(), Base64.NO_WRAP)
+                            val json = JSONObject(String(decodedBytes))
+                            
+                            val editor = prefs.edit()
+                            editor.clear() 
+                            
+                            val keys = json.keys()
+                            val importedProviders = mutableSetOf<String>()
+                            
+                            while (keys.hasNext()) {
+                                val key = keys.next()
+                                when (val value = json.get(key)) {
+                                    is Boolean -> editor.putBoolean(key, value)
+                                    is String -> {
+                                        editor.putString(key, value)
+                                        if (key.startsWith("evo_active_cats_")) {
+                                            val chunkSeparator = if (value.contains("%%%")) "%%%" else "|||"
+                                            val fieldSeparator = if (value.contains("%%%")) ";;;" else "|~|"
+                                            value.split(chunkSeparator).forEach { chunk ->
+                                                val parts = chunk.split(fieldSeparator, limit = 5)
+                                                if (parts.isNotEmpty() && parts[0].isNotBlank()) {
+                                                    importedProviders.add(parts[0])
+                                                }
+                                            }
+                                        }
+                                    }
+                                    is Int -> editor.putInt(key, value)
+                                }
+                            }
+                            editor.apply()
+                            
+                            val currentlyInstalled = APIHolder.allProviders.map { it.name }.toSet()
+                            val missingProviders = importedProviders.subtract(currentlyInstalled)
+                            
+                            // [핵심 픽스] 누락된 플러그인이 있을 경우 정확한 리스트를 불릿(•) 형태로 명시하여 안내
+                            var successMessage = "Import successful. Please restart the app."
+                            if (missingProviders.isNotEmpty()) {
+                                val missingList = missingProviders.joinToString("\n") { "• $it" }
+                                successMessage = "Import successful, but the following plugins are missing:\n\n$missingList\n\nTheir catalogs will be hidden until installed.\nPlease restart the app."
+                            }
+                            
+                            AlertDialog.Builder(ctx)
+                                .setTitle("Import Result")
+                                .setMessage(successMessage)
+                                .setPositiveButton("OK") { _, _ -> dismiss() }
+                                .show()
+
+                        } catch (e: Exception) {
+                            Toast.makeText(ctx, "Invalid backup string format.", Toast.LENGTH_SHORT).show()
+                            println("[UltimaEvo-Debug] [Import] 백업 복원 중 에러: ${e.message}")
+                        }
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+            }
+        }
+        
+        backupRow.addView(exportBtn)
+        backupRow.addView(importBtn)
+        mainLayout.addView(backupRow)
+
         val syncAllBtn = Button(ctx).apply {
             text = "Sync Provider Data"
             setTextColor(Color.WHITE)
@@ -160,7 +295,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     
                     val semaphore = Semaphore(3)
 
-                    println("[UltimaEvo-Debug] [Dialog] 동기화 작업을 병렬로 생성합니다. (최대 3개 제한)")
                     val syncJobs = providers.map { provider ->
                         async {
                             semaphore.withPermit {
@@ -173,13 +307,12 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                                         prefs.edit().putString("dynamic_catalogs_${provider.name}", names.joinToString("|||")).apply() 
                                     }
                                 } catch (e: Exception) { 
-                                    if (e is CancellationException) throw e // 최적화: 코루틴 캔슬 무시 방지
-                                    println("[UltimaEvo-Debug] [Dialog] -> 통신 실패 (${provider.name}): ${e.message}")
+                                    if (e is CancellationException) throw e
                                 }
                                 
                                 withContext(Dispatchers.Main) {
                                     current++
-                                    if (isAdded) this@apply.text = "Syncing... $current / $total"
+                                    this@apply.text = "Syncing... $current / $total"
                                 }
                             }
                         }
@@ -188,11 +321,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     syncJobs.awaitAll()
                     
                     withContext(Dispatchers.Main) {
-                        println("[UltimaEvo-Debug] [Dialog] 모든 동기화 통신 종료")
-                        if (isAdded) {
-                            this@apply.text = "✅ Sync Complete"
-                            this@apply.isEnabled = true
-                        }
+                        this@apply.text = "✅ Sync Complete"
+                        this@apply.isEnabled = true
                     }
                 }
             }
@@ -237,7 +367,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 val editor = prefs.edit()
                 saveCurrentNamesToPrefs(editor, mainLayout)
                 editor.putString("evo_instance_count", newCount.toString())
-                editor.apply() // 최적화
+                editor.apply()
                 
                 val act = activity
                 dismiss()
@@ -281,7 +411,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                                     }
                                 }
                             }
-                            editor.apply() // 최적화
+                            editor.apply()
                             val act = activity
                             dismiss()
                             UltimaEvoSettingsDialog().show(act!!.supportFragmentManager, "UltimaEvoSettingsDialog")
@@ -294,7 +424,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     val editor = prefs.edit()
                     saveCurrentNamesToPrefs(editor, mainLayout)
                     editor.putString("evo_instance_count", newCount.toString())
-                    editor.apply() // 최적화
+                    editor.apply()
                     val act = activity
                     dismiss()
                     UltimaEvoSettingsDialog().show(act!!.supportFragmentManager, "UltimaEvoSettingsDialog")
@@ -354,7 +484,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 isChecked = prefs.getBoolean("evo_visibility_enabled_$i", true)
                 layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
                 setOnCheckedChangeListener { _, isChecked -> 
-                    prefs.edit().putBoolean("evo_visibility_enabled_$i", isChecked).apply() // 최적화
+                    prefs.edit().putBoolean("evo_visibility_enabled_$i", isChecked).apply()
                 }
             }
             val searchSwitch = Switch(ctx).apply {
@@ -366,7 +496,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 params.setMargins(50, 0, 0, 0) 
                 layoutParams = params
                 setOnCheckedChangeListener { _, isChecked -> 
-                    prefs.edit().putBoolean("evo_search_enabled_$i", isChecked).apply() // 최적화
+                    prefs.edit().putBoolean("evo_search_enabled_$i", isChecked).apply()
                 }
             }
             toggleRow.addView(visibilitySwitch)
@@ -461,7 +591,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                                     }
                                 }
                             }
-                            editor.apply() // 최적화
+                            editor.apply()
                             dismiss()
                         }
                         .setNegativeButton("No") { _, _ ->
@@ -478,7 +608,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         val editor = prefs.edit()
                         editor.putString("evo_instance_count", newCount.toString())
                         saveCurrentNamesToPrefs(editor, mainLayout)
-                        editor.apply() // 최적화
+                        editor.apply()
                         dismiss()
                     }
                     .show()
@@ -733,32 +863,30 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
             val editor = prefs.edit()
             
-            // 🌟 최적화: 쓰레기 데이터 정리(Garbage Collection). 
-            // 새 데이터를 덮어쓰기 전에, 현재 instanceId에 해당하는 예전 cat_ 키들을 모두 날립니다.
-            prefs.all.keys.forEach { key ->
-                if (key.startsWith("cat_toggle_${instanceId}_") || 
-                    key.startsWith("cat_rename_${instanceId}_") || 
-                    key.startsWith("cat_order_${instanceId}_") || 
-                    key.startsWith("ext_toggle_${instanceId}_")) {
-                    editor.remove(key)
-                }
+            val keysToRemove = prefs.all.keys.filter {
+                it.startsWith("cat_toggle_${instanceId}_") ||
+                it.startsWith("cat_rename_${instanceId}_") ||
+                it.startsWith("cat_order_${instanceId}_") ||
+                it.startsWith("ext_toggle_${instanceId}_")
+            }
+            for (k in keysToRemove) {
+                editor.remove(k)
             }
 
             val activeCatalogs = mutableListOf<String>()
 
             for ((index, row) in activeRows.withIndex()) {
                 val finalOrder = index + 1
+                val tKey = "cat_toggle_${instanceId}_${row.providerName}_${row.catalogName}"
+                val rKey = "cat_rename_${instanceId}_${row.providerName}_${row.catalogName}"
+                val oKey = "cat_order_${instanceId}_${row.providerName}_${row.catalogName}"
                 
-                // 체크된 항목만 저장하도록 변경하여 메모리 절약
+                editor.putBoolean(tKey, row.checkBox.isChecked)
+                editor.putString(rKey, row.renameEdit.text.toString())
+                editor.putString(oKey, finalOrder.toString())
+                
+                val pKey = "ext_toggle_${instanceId}_${row.providerName}"
                 if (row.checkBox.isChecked) {
-                    val tKey = "cat_toggle_${instanceId}_${row.providerName}_${row.catalogName}"
-                    val rKey = "cat_rename_${instanceId}_${row.providerName}_${row.catalogName}"
-                    val oKey = "cat_order_${instanceId}_${row.providerName}_${row.catalogName}"
-                    val pKey = "ext_toggle_${instanceId}_${row.providerName}"
-
-                    editor.putBoolean(tKey, true)
-                    editor.putString(rKey, row.renameEdit.text.toString())
-                    editor.putString(oKey, finalOrder.toString())
                     editor.putBoolean(pKey, true)
                     
                     val customName = row.renameEdit.text.toString().ifBlank { row.catalogName }
@@ -771,7 +899,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             }
             
             editor.putString("evo_active_cats_$instanceId", activeCatalogs.joinToString("%%%"))
-            editor.apply() // 최적화: UI 스레드 블로킹 방지
+            editor.apply() 
             dialog.dismiss()
         }
 
