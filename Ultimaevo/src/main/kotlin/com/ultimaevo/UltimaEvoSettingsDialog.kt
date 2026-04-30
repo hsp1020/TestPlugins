@@ -1,4 +1,4 @@
-// v1.53
+// v1.52
 package com.ultimaevo
 
 import android.app.AlertDialog
@@ -147,6 +147,9 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             setPadding(0, 0, 0, 30)
         }
 
+        // [수정] EditText 높이 고정을 위한 변수 (250dp 변환)
+        val pxHeight = (250 * ctx.resources.displayMetrics.density).toInt()
+
         val exportBtn = Button(ctx).apply {
             text = "Export Settings"
             setTextColor(Color.WHITE)
@@ -162,6 +165,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     prefs.all.forEach { (key, value) -> json.put(key, value) }
                     val backupStr = Base64.encodeToString(json.toString().toByteArray(), Base64.NO_WRAP)
 
+                    // [수정] 텍스트 박스 UI 넘침 방지 설계
                     val et = EditText(ctx).apply {
                         setText(backupStr)
                         setTextColor(Color.WHITE)
@@ -170,11 +174,19 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         setTextIsSelectable(true)
                         isFocusable = false
                         isFocusableInTouchMode = false
+                        gravity = Gravity.TOP or Gravity.START
+                        inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                        isVerticalScrollBarEnabled = true
+                        layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, pxHeight)
+                    }
+                    val wrapper = FrameLayout(ctx).apply {
+                        setPadding(40, 20, 40, 20)
+                        addView(et)
                     }
                     
                     AlertDialog.Builder(ctx)
                         .setTitle("Export Backup Data")
-                        .setView(et)
+                        .setView(wrapper)
                         .setPositiveButton("Copy") { _, _ ->
                             val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                             val clip = ClipData.newPlainText("Ultima Backup", backupStr)
@@ -199,18 +211,28 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 if (SystemClock.elapsedRealtime() - lastClickTime < 1000) return@setOnClickListener
                 lastClickTime = SystemClock.elapsedRealtime()
 
+                // [수정] 텍스트 박스 UI 넘침 방지 설계
                 val et = EditText(ctx).apply {
                     hint = "Paste backup string here..."
                     setHintTextColor(Color.GRAY)
                     setTextColor(Color.WHITE)
                     background = getCardBg()
                     setPadding(30, 30, 30, 30)
+                    gravity = Gravity.TOP or Gravity.START
+                    inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                    isVerticalScrollBarEnabled = true
+                    setHorizontallyScrolling(false)
+                    layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, pxHeight)
+                }
+                val wrapper = FrameLayout(ctx).apply {
+                    setPadding(40, 20, 40, 20)
+                    addView(et)
                 }
 
                 AlertDialog.Builder(ctx)
                     .setTitle("Import Backup Data")
                     .setMessage("Warning: This will permanently overwrite all current settings.\nThe app must be restarted after import.")
-                    .setView(et)
+                    .setView(wrapper)
                     .setPositiveButton("Restore") { _, _ ->
                         try {
                             val decodedBytes = Base64.decode(et.text.toString().trim(), Base64.NO_WRAP)
@@ -247,7 +269,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                             val currentlyInstalled = APIHolder.allProviders.map { it.name }.toSet()
                             val missingProviders = importedProviders.subtract(currentlyInstalled)
                             
-                            // [핵심 픽스] 누락된 플러그인이 있을 경우 정확한 리스트를 불릿(•) 형태로 명시하여 안내
                             var successMessage = "Import successful. Please restart the app."
                             if (missingProviders.isNotEmpty()) {
                                 val missingList = missingProviders.joinToString("\n") { "• $it" }
