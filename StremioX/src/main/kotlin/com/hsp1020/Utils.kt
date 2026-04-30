@@ -25,11 +25,11 @@ private val TT_REGEX = Regex("^tt\\d+$")
 
 private data class RatingMeta(val name: String, val icon: String, val sortOrder: Int)
 private val RATING_SOURCES = mapOf(
-    "myanimelist" to RatingMeta("MAL", " 🎎", 1),
-    "mal" to RatingMeta("MAL", " 🎎", 1),
+    "myanimelist" to RatingMeta("MAL", " Ⓜ️", 1),
+    "mal" to RatingMeta("MAL", " Ⓜ️", 1),
     "imdb" to RatingMeta("IMDb", "⭐", 2),
-    "letterboxd" to RatingMeta("LB", "🎞️", 3),
-    "lb" to RatingMeta("LB", "🎞️", 3),
+    "letterboxd" to RatingMeta("LB", "🟢", 3),
+    "lb" to RatingMeta("LB", "🟢", 3),
     "metacriticuser" to RatingMeta("MCU", "👥", 4),
     "audiencescore" to RatingMeta("Popcorn", "🍿", 5),
     "tomatoesaudience" to RatingMeta("Popcorn", "🍿", 5),
