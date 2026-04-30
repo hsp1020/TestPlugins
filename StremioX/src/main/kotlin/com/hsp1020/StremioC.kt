@@ -1,4 +1,4 @@
-// v1.173 (Metadata Cache Optimization - Diet Version)
+// v1.174 (Metadata Cache Optimization: search/recommendation data diet)
 package com.hsp1020
 
 import android.content.Context
@@ -869,7 +869,31 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         @JsonProperty("links") val links: List<Link> = emptyList()
     ) {
         fun toSearchResponse(provider: StremioC): SearchResponse {
-            return provider.newMovieSearchResponse(name, this.toJson(), TvType.Others) { posterUrl = poster }
+            // 🔹 캐시 최적화 (v1.174): 들여쓰기 12 spaces 준수
+            val minimalEntry = CatalogEntry(
+                name = this.name,
+                id = this.id,
+                type = this.type,
+                poster = this.poster,
+                videos = null,              // 상세 페이지에서 새로 가져오므로 검색 목록에선 제거
+                background = this.background,
+                logo = this.logo,
+                description = null,         // 줄거리 제거 (용량 주범)
+                imdbRating = null,
+                genre = null,
+                genres = emptyList(),
+                cast = emptyList(),         // 출연진 제거 (용량 주범)
+                trailersSources = emptyList(),
+                trailerStreams = emptyList(),
+                links = emptyList(),
+                moviedb_id = this.moviedb_id,
+                tmdbIdExt = this.tmdbIdExt,
+                malIdExt = this.malIdExt,
+                kitsuIdExt = this.kitsuIdExt
+            )
+            return provider.newMovieSearchResponse(name, minimalEntry.toJson(), TvType.Others) { 
+                posterUrl = poster 
+            }
         }
 
         private fun isSingleMovie(finalType: String?, finalVideos: List<Video>?): Boolean {
@@ -1020,7 +1044,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     
                     val customPosterUrl = "https://xrdb.ibbylabs.dev/poster/tmdb:$posterType:$recTmdbId.jpg?idSource=tmdb&tmdbKey=cc9982c4801545a1481d167137ea7b53&mdblistKey=d2tmbmhnrgdz7ft9re7j2gjr3&posterRatings=myanimelist%2Cimdb%2Cletterboxd%2Cmetacriticuser%2Ctomatoesaudience%2Ctrakt%2Ctmdb%2Cmetacritic%2Ctomatoes%2Crogerebert&lang=ko&ratingValueMode=normalized&posterGenreBadgeStyle=plain&posterGenreBadgePosition=bottomLeft&posterStreamBadges=on&ageRatingBadgePosition=left-top&posterQualityBadges=&posterRatingStyle=plain&posterRatingBadgeScale=115&imageText=original&posterRatingsLayout=right&posterNoBackgroundBadgeOutlineColor=%23ff0000&posterEdgeOffset=3&providerAppearance=eyJ0b21hdG9lcyI6eyJzdGFja2VkQWNjZW50TW9kZSI6ImxvZ28ifX0"
                     
-                    // 핵심 수정: 추천 항목의 상세 줄거리를 null로 처리하여 캐시 비대화 방지
+                    // 🔹 추천 항목 최적화 (v1.174): description을 null로 주입하여 재귀적 JSON 폭증 방지
                     val recommendationEntry = CatalogEntry(name = recTitle, id = "tmdb:${media.id}", type = outType, poster = customPosterUrl, background = null, description = null, imdbRating = null, videos = null, genre = null)
                     provider.newMovieSearchResponse(recTitle, recommendationEntry.toJson(), if (outType == "movie") TvType.Movie else TvType.TvSeries) { this.posterUrl = customPosterUrl }
                 }
@@ -1250,7 +1274,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     if (finalActors != null) this.actors = finalActors else addActors(finalCast)
                     addTrailer(finalTrailers); this.recommendations = tmdbData?.fetchedRecommendations; this.duration = tmdbData?.fetchedRuntime; this.contentRating = tmdbData?.fetchedAgeRating
                     tmdbData?.fetchedLogo?.let { this.logoUrl = it }; tmdbIdStr?.let { addTMDbId(it) }; finalImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }
-                    println("Metadata Cached (Optimized): $finalName")
                 }
             } else {
                 val finalEpisodes = processEpisodes(provider, finalImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, tmdbIdStr?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, fetchedAniListId, fetchedMalId, this@CatalogEntry.kitsuIdExt)
@@ -1263,7 +1286,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     if (finalActors != null) this.actors = finalActors else addActors(finalCast)
                     addTrailer(finalTrailers.firstOrNull()); this.recommendations = tmdbData?.fetchedRecommendations; this.contentRating = tmdbData?.fetchedAgeRating
                     tmdbData?.fetchedLogo?.let { this.logoUrl = it }; tmdbIdStr?.let { addTMDbId(it) }; finalImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }
-                    println("Metadata Cached (Optimized): $finalName with ${finalEpisodes.size} episodes")
                 }
             }
         }
@@ -1316,7 +1338,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 this.name = if (tmdbEp?.name != null) tmdbEp.name else cleanOriginalTitle
                 this.posterUrl = thumbnail ?: TRANSPARENT_PIXEL
                 
-                // 에피소드 줄거리 최적화: 용량을 위해 null 처리 (상세 클릭 시 로드되도록 유도)
+                // 🔹 에피소드 줄거리 최적화 (v1.174): 용량 절감을 위해 null 처리
                 this.description = null 
                 this.season = displaySeason
                 this.episode = displayEpisode
