@@ -1,4 +1,4 @@
-// v1.171 (MDBList ID Mapping Patch & Kitsu API Purge: AniZip Parallel Processing)
+// v1.172 (Stream I/O In-Memory Caching)
 package com.hsp1020
 
 import android.content.Context
@@ -124,6 +124,14 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         
         @Volatile private var cachedCineClassLoader: ClassLoader? = null
 
+        private var cachedValidAddons: List<CustomSite>? = null
+        private var cachedValidAddonsTime: Long = 0
+        private var cachedCineStreamEnabled: Boolean? = null
+        private var cachedCineStreamEnabledTime: Long = 0
+        private var cachedCustomHosts: Set<String>? = null
+        private var cachedCustomHostsTime: Long = 0
+        private const val SETTINGS_CACHE_TTL = 60_000L
+
         val networkSemaphore = Semaphore(20)
 
         val customSession by lazy {
@@ -247,8 +255,15 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     }
 
     private fun getValidStremioAddons(): List<CustomSite> {
+        val now = System.currentTimeMillis()
+        if (cachedValidAddons != null && now - cachedValidAddonsTime < SETTINGS_CACHE_TTL) {
+            return cachedValidAddons!!
+        }
         val sites = CloudStreamApp.getKey<Array<CustomSite>>(USER_PROVIDER_API)?.toList() ?: emptyList()
-        return sites.filter { it.parentJavaClass == "StremioX" || it.parentJavaClass == "StremioC" }
+        val filtered = sites.filter { it.parentJavaClass == "StremioX" || it.parentJavaClass == "StremioC" }
+        cachedValidAddons = filtered
+        cachedValidAddonsTime = now
+        return filtered
     }
 
     private fun extractImdbId(url: String?): String? {
@@ -426,7 +441,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val normalizedId = try { normalizeId(res.id) } catch (e: Exception) { res.id }
         val encodedId = normalizedId.urlEncode()
 
-        // ✨ 최적화: AniZip 단일 게이트웨이 파이프라인
         val isKitsuOrMal = res.id.startsWith("kitsu:") || res.id.startsWith("mal:")
         var fetchedAniListId: Int? = null
         var fetchedMalId: Int? = null
@@ -594,15 +608,23 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         callback: (ExtractorLink) -> Unit
     ) {
         val isEnabled = withContext(Dispatchers.IO) {
+            val now = System.currentTimeMillis()
+            if (cachedCineStreamEnabled != null && now - cachedCineStreamEnabledTime < SETTINGS_CACHE_TTL) {
+                return@withContext cachedCineStreamEnabled!!
+            }
             val context = CloudStreamApp.context ?: return@withContext true
             val possiblePrefNames = listOf("StremioX", "StremioX_preferences", "stremio_preferences", "com.hsp1020_preferences", context.packageName + "_preferences")
+            var enabled = true
             for (name in possiblePrefNames) {
                 val prefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
                 if (prefs.contains("cinestream_integration_enabled")) {
-                    return@withContext prefs.getBoolean("cinestream_integration_enabled", true)
+                    enabled = prefs.getBoolean("cinestream_integration_enabled", true)
+                    break
                 }
             }
-            true
+            cachedCineStreamEnabled = enabled
+            cachedCineStreamEnabledTime = now
+            enabled
         }
 
         if (!isEnabled) return
@@ -611,11 +633,20 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val cineStreamProvider = getCineStreamProvider() ?: return
             syncCineStreamSettings()
 
-            val customAddonsRaw = withContext(Dispatchers.IO) { CloudStreamApp.getKey<String>("stremio_addons") ?: "" }
-            val customHosts = customAddonsRaw.lines()
-                .filter { it.isNotBlank() }
-                .mapNotNull { runCatching { URI(it.split("|").getOrElse(1) { "" }).host }.getOrNull() }
-                .toSet() 
+            val customHosts = withContext(Dispatchers.IO) {
+                val now = System.currentTimeMillis()
+                if (cachedCustomHosts != null && now - cachedCustomHostsTime < SETTINGS_CACHE_TTL) {
+                    return@withContext cachedCustomHosts!!
+                }
+                val raw = CloudStreamApp.getKey<String>("stremio_addons") ?: ""
+                val hosts = raw.lines()
+                    .filter { it.isNotBlank() }
+                    .mapNotNull { runCatching { URI(it.split("|").getOrElse(1) { "" }).host }.getOrNull() }
+                    .toSet() 
+                cachedCustomHosts = hosts
+                cachedCustomHostsTime = now
+                hosts
+            }
             val builtInHosts = setOf("opensubtitles.stremio.homes", "subsense.nepiraw.com", "opensubtitles-v3.strem.io")
 
             val subtitleInterceptor: (SubtitleFile) -> Unit = { sub ->
