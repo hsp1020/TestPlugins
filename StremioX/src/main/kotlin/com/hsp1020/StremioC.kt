@@ -1,4 +1,4 @@
-// v1.201 (Strict v1.188 Base + Kitsu/MAL Dynamic Conversion & Request Override Fix + EOF Dump)
+// v1.202 (Strict v1.188 Base + LoadData KitsuId Injection Fix + EOF Dump)
 package com.hsp1020
 
 import android.content.Context
