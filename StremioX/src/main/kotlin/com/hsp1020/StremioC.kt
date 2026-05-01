@@ -1,4 +1,4 @@
-// v1.182 (Fix JSON Instantiation & Full Class Definitions: CineStream Thin-URL)
+// v1.185 (CineStream Clone: Eliminate Metadata Storage for Minimal Cache Size)
 package com.hsp1020
 
 import android.content.Context
@@ -426,6 +426,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     }
 
     override suspend fun load(url: String): LoadResponse = coroutineScope {
+        println("StremioC: Starting load for $url")
         val res: CatalogEntry = if (url.startsWith("{")) {
             parseJson(url)
         } else {
@@ -434,7 +435,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 parseJson<CatalogResponse>(responseText).meta ?: throw Exception()
             } catch (e: Exception) {
                 JSONObject(responseText).optJSONObject("meta")?.toString()?.let { parseJson(it) }
-                    ?: throw IllegalStateException("유효한 메타데이터를 찾을 수 없습니다: $url")
+                    ?: throw IllegalStateException("Metadata not found: $url")
             }
         }
         
@@ -518,10 +519,13 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val mdbRatings = mdbDeferred?.await() ?: emptyList()
         if (mdbRatings.isNotEmpty()) {
             val ratingStr = mdbRatings.joinToString("  ")
-            val originalPlot = loadRes.plot?.trim()
-            loadRes.plot = if (originalPlot.isNullOrEmpty()) ratingStr else "$ratingStr | $originalPlot"
+            // v1.185: plot = null 로직이 toLoadResponse에 있지만, 
+            // 평점 표시를 원할 경우 여기서 다시 null이 아닌 값을 설정하게 되므로 주의 필요
+            // 여기서는 사용자 요청에 따라 plot을 비워둡니다.
+            loadRes.plot = null 
         }
         
+        println("StremioC: Load completed for ${loadRes.name}")
         return@coroutineScope loadRes
     }
 
@@ -848,7 +852,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     )
 
     private data class CatalogEntry(
-        @JsonProperty("name") val name: String? = null, // 🔹 Nullable로 변경하여 Thin-URL 파싱 지원
+        @JsonProperty("name") val name: String? = null, 
         @JsonProperty("id") val id: String, 
         @JsonProperty("moviedb_id") val moviedb_id: Int? = null,
         @JsonProperty("_tmdbId") val tmdbIdExt: String? = null, 
@@ -869,7 +873,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         @JsonProperty("links") val links: List<Link> = emptyList()
     ) {
         fun toSearchResponse(provider: StremioC): SearchResponse {
-            // 🔹 CineStream 방식 최적화: ID만 담은 가벼운 URL 생성
             val thinUrl = mapOf(
                 "id" to this.id,
                 "type" to (this.type ?: "movie"),
@@ -1032,7 +1035,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     
                     val customPosterUrl = "https://xrdb.ibbylabs.dev/poster/tmdb:$posterType:$recTmdbId.jpg?idSource=tmdb&tmdbKey=cc9982c4801545a1481d167137ea7b53&mdblistKey=d2tmbmhnrgdz7ft9re7j2gjr3&posterRatings=myanimelist%2Cimdb%2Cletterboxd%2Cmetacriticuser%2Ctomatoesaudience%2Ctrakt%2Ctmdb%2Cmetacritic%2Ctomatoes%2Crogerebert&lang=ko&ratingValueMode=normalized&posterGenreBadgeStyle=plain&posterGenreBadgePosition=bottomLeft&posterStreamBadges=on&ageRatingBadgePosition=left-top&posterQualityBadges=&posterRatingStyle=plain&posterRatingBadgeScale=115&imageText=original&posterRatingsLayout=right&posterNoBackgroundBadgeOutlineColor=%23ff0000&posterEdgeOffset=3&providerAppearance=eyJ0b21hdG9lcyI6eyJzdGFja2VkQWNjZW50TW9kZSI6ImxvZ28ifX0"
                     
-                    // 🔹 추천 항목용 Thin-URL 생성
                     val thinRecUrl = mapOf("id" to "tmdb:${media.id}", "type" to outType).toJson()
                     provider.newMovieSearchResponse(recTitle, thinRecUrl, if (outType == "movie") TvType.Movie else TvType.TvSeries) { this.posterUrl = customPosterUrl }
                 }
@@ -1174,9 +1176,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val finalTrailersSources = detailedEntry.trailersSources ?: this@CatalogEntry.trailersSources
             val finalTrailerStreams = detailedEntry.trailerStreams ?: this@CatalogEntry.trailerStreams
             val originalName = detailedEntry.name ?: this@CatalogEntry.name
-            var finalDescription = detailedEntry.description ?: this@CatalogEntry.description
             val finalGenre = detailedEntry.genre ?: detailedEntry.genres ?: this@CatalogEntry.genre ?: this@CatalogEntry.genres
-            val finalCast = detailedEntry.cast.ifEmpty { this@CatalogEntry.cast }
             val finalPoster = detailedEntry.poster ?: this@CatalogEntry.poster
             val finalBackground = detailedEntry.background ?: this@CatalogEntry.background
             val finalImdbRating = detailedEntry.imdbRating ?: this@CatalogEntry.imdbRating
@@ -1199,8 +1199,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             var finalName = originalName ?: this@CatalogEntry.name ?: "Unknown Content"
             if (tmdbData != null) {
                 if (!tmdbData.fetchedTitle.isNullOrBlank()) finalName = tmdbData.fetchedTitle
-                finalDescription = provider.mergeOverview(finalDescription, tmdbData.fetchedOverview)
-                if (finalType == "other") finalDescription = if (finalDescription.isNullOrBlank()) originalName else "$finalDescription | $originalName" 
             }
 
             val fallbackMovieId = this@CatalogEntry.kitsuIdExt?.let { "kitsu:$it" } ?: this@CatalogEntry.id
@@ -1230,8 +1228,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
             val movieId = if (!finalVideos.isNullOrEmpty() && !finalVideos[0].id.isNullOrBlank()) finalVideos[0].id else fallbackMovieId
 
-            val finalActors = if (tmdbData?.fetchedActors?.isNotEmpty() == true) tmdbData.fetchedActors else null
-
             val countries = tmdbData?.fetchedOriginCountry ?: emptyList()
             val isBollywood = countries.any { it.contains("IN", true) || it.contains("India", true) }
             val isAsian = countries.any { it.contains("KR", true) || it.contains("JP", true) || it.contains("CN", true) || it.contains("TH", true) || it.contains("TW", true) }
@@ -1259,9 +1255,15 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         englishTitle = tmdbData?.fetchedEnglishTitle
                     )
                 ) {
-                    posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); plot = finalDescription; year = tmdbData?.fetchedYear; tags = finalGenre
-                    if (finalActors != null) this.actors = finalActors else addActors(finalCast)
-                    addTrailer(finalTrailers); this.recommendations = tmdbData?.fetchedRecommendations; this.duration = tmdbData?.fetchedRuntime; this.contentRating = tmdbData?.fetchedAgeRating
+                    posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
+                    
+                    // 🔹 v1.185: 플러그인 레벨의 메타데이터 저장 완전 중단 (CineStream 방식)
+                    this.plot = null
+                    this.actors = null
+                    this.tags = null
+                    this.recommendations = null 
+                    
+                    addTrailer(finalTrailers); this.duration = tmdbData?.fetchedRuntime; this.contentRating = tmdbData?.fetchedAgeRating
                     tmdbData?.fetchedLogo?.let { this.logoUrl = it }; tmdbIdStr?.let { addTMDbId(it) }; finalImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }
                 }
             } else {
@@ -1270,10 +1272,16 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 return@coroutineScope provider.newTvSeriesLoadResponse(
                     finalName, "${provider.mainUrl}/meta/${finalType ?: "series"}/${this@CatalogEntry.id}.json", TvType.TvSeries, finalEpisodes
                 ) {
-                    posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); plot = finalDescription; year = tmdbData?.fetchedYear; tags = finalGenre
+                    posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
                     this.showStatus = tmdbData?.fetchedStatus 
-                    if (finalActors != null) this.actors = finalActors else addActors(finalCast)
-                    addTrailer(finalTrailers.firstOrNull()); this.recommendations = tmdbData?.fetchedRecommendations; this.contentRating = tmdbData?.fetchedAgeRating
+                    
+                    // 🔹 v1.185: TV 시리즈에서도 불필요한 메타데이터 제거
+                    this.plot = null
+                    this.actors = null
+                    this.tags = null
+                    this.recommendations = null
+                    
+                    addTrailer(finalTrailers.firstOrNull()); this.contentRating = tmdbData?.fetchedAgeRating
                     tmdbData?.fetchedLogo?.let { this.logoUrl = it }; tmdbIdStr?.let { addTMDbId(it) }; finalImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }
                 }
             }
@@ -1327,6 +1335,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 this.name = if (tmdbEp?.name != null) tmdbEp.name else cleanOriginalTitle
                 this.posterUrl = thumbnail ?: TRANSPARENT_PIXEL
                 
+                // 에피소드 상세 설명은 사용자 편의를 위해 유지 (용량 영향 미비)
                 this.description = tmdbEp?.overview ?: this@Video.overview ?: this@Video.description
                 this.season = displaySeason
                 this.episode = displayEpisode
