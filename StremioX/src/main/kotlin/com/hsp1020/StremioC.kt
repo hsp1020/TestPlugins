@@ -1,4 +1,4 @@
-// v1.202 (Strict v1.188 Base + LoadData KitsuId Injection Fix + EOF Dump)
+// v1.205 (Strict v1.188 Base + LoadData KitsuId REAL Fix + Rollback Invalid "anime" Type + CineStream isKitsu/ID Fix + EOF Dump)
 package com.hsp1020
 
 import android.content.Context
@@ -545,10 +545,14 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val loadData = try { parseJson<LoadData>(data) } catch (e: Exception) { null } ?: return false
         
-        val primaryId = if (loadData.id?.startsWith("tmdb:") == true && !loadData.imdbId.isNullOrBlank()) {
+        var primaryId = if (loadData.id?.startsWith("tmdb:") == true && !loadData.imdbId.isNullOrBlank()) {
             loadData.imdbId
         } else {
             loadData.id ?: ""
+        }
+
+        if (!loadData.kitsuId.isNullOrBlank() && (primaryId?.startsWith("mal:") == true || primaryId?.startsWith("kitsu:") == true)) {
+            primaryId = "kitsu:${loadData.kitsuId}"
         }
 
         var globalId = if (!loadData.imdbId.isNullOrBlank()) loadData.imdbId else primaryId
@@ -698,7 +702,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val isKitsuMedia = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
             val kitsuIdExt = if (isKitsuMedia) globalId?.substringAfter("kitsu:")?.substringAfter("mal:") else loadData.kitsuId
             
-            val rawIdForCineStream = loadData.imdbId ?: globalId?.takeIf { it.startsWith("tt") || it.startsWith("tmdb:") } ?: ""
+            val rawIdForCineStream = loadData.imdbId ?: globalId?.takeIf { it.startsWith("tt") || it.startsWith("tmdb:") || it.startsWith("kitsu:") } ?: ""
             val correctImdbIdForCineStream = if (rawIdForCineStream.startsWith("tmdb:")) {
                 val parts = rawIdForCineStream.split(":")
                 if (parts.size >= 2) "${parts[0]}:${parts[1]}" else rawIdForCineStream
@@ -731,7 +735,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "anilistId" to loadData.anilistId,
                 "malId" to loadData.malId,
                 "isAnime" to isAnimeMedia,
-                "isKitsu" to false, 
+                "isKitsu" to isKitsuMedia, 
                 "kitsuId" to kitsuIdExt,
                 "isBollywood" to loadData.isBollywood,
                 "isAsian" to loadData.isAsian,
