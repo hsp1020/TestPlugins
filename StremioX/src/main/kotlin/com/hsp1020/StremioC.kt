@@ -1,4 +1,4 @@
-// v1.199 (Strict v1.198 Base + LoadData Serialization Fix & StremioX Season Sync)
+// v1.199 (Strict v1.188 Base + StremioX/CineStream IMDB Season Force Mapping & EOF Dump)
 package com.hsp1020
 
 import android.content.Context
@@ -538,7 +538,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
-        println("StremioC Debug: loadLinks invoked with data=$data")
         val loadData = try { parseJson<LoadData>(data) } catch (e: Exception) { null } ?: return false
         
         val primaryId = if (loadData.id?.startsWith("tmdb:") == true && !loadData.imdbId.isNullOrBlank()) {
@@ -550,16 +549,14 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val globalId = if (!loadData.imdbId.isNullOrBlank()) loadData.imdbId else primaryId
         val targetType = loadData.type ?: if ((loadData.season ?: 0) > 0 || (loadData.episode ?: 0) > 0) "series" else "movie"
         
-        // Fix: Ensure globalSeason strictly uses parsed IMDB Season and never falls back to 0.
-        val globalSeason = loadData.imdbSeason?.takeIf { it > 0 } ?: loadData.season?.takeIf { it > 0 } ?: 1
-        val globalEpisode = loadData.imdbEpisode?.takeIf { it > 0 } ?: loadData.episode?.takeIf { it > 0 } ?: 1
-        
-        println("StremioC Debug: Computed globalId=$globalId, globalSeason=$globalSeason, globalEpisode=$globalEpisode")
-
         val primaryStremioId = buildStremioId(targetType, primaryId, loadData.season, loadData.episode) ?: primaryId
         val encodedPrimaryId = primaryStremioId.urlEncode()
         
+        val globalSeason = loadData.imdbSeason ?: loadData.season
+        val globalEpisode = loadData.imdbEpisode ?: loadData.episode
         val globalStremioId = buildStremioId(targetType, globalId, globalSeason, globalEpisode) ?: globalId
+
+        println("StremioC: loadLinks resolved - globalId=$globalId, globalSeason=$globalSeason, globalEpisode=$globalEpisode")
 
         val validAddons = withContext(Dispatchers.IO) { getValidStremioAddons() }
 
@@ -686,7 +683,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
             }
 
-            println("StremioC: CineStream Global Mapping - Season: $globalSeason, Episode: $globalEpisode")
+            println("StremioC: CineStream Force Mapping -> globalSeason=$globalSeason, globalEpisode=$globalEpisode")
 
             val isKitsuMedia = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
             val kitsuIdExt = if (isKitsuMedia) globalId?.substringAfter("kitsu:")?.substringAfter("mal:") else loadData.kitsuId
@@ -739,7 +736,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
     private suspend fun invokeStremioX(type: String?, id: String?, season: Int?, episode: Int?, filteredSites: List<CustomSite>, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
         val stremioId = buildStremioId(type, id, season, episode) ?: return
-        println("StremioX Debug: Generating URL Request with id=$id, season=$season, episode=$episode -> Compiled Stremio ID: $stremioId")
+        println("StremioC: invokeStremioX Addon Target -> stream/$type/$stremioId.json")
 
         coroutineScope {
             filteredSites.map { site ->
@@ -784,27 +781,27 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     }
 
     data class LoadData(
-        @JsonProperty("type") val type: String? = null, 
-        @JsonProperty("id") val id: String? = null, 
-        @JsonProperty("season") val season: Int? = null, 
-        @JsonProperty("episode") val episode: Int? = null, 
-        @JsonProperty("imdbId") val imdbId: String? = null, 
-        @JsonProperty("year") val year: Int? = null, 
-        @JsonProperty("title") val title: String? = null, 
-        @JsonProperty("tmdbId") val tmdbId: Int? = null, 
-        @JsonProperty("isAnime") val isAnime: Boolean = false,
-        @JsonProperty("isBollywood") val isBollywood: Boolean = false,
-        @JsonProperty("isAsian") val isAsian: Boolean = false,
-        @JsonProperty("isCartoon") val isCartoon: Boolean = false,
-        @JsonProperty("firstAired") val firstAired: String? = null,
-        @JsonProperty("airedYear") val airedYear: Int? = null, 
-        @JsonProperty("originalTitle") val originalTitle: String? = null, 
-        @JsonProperty("englishTitle") val englishTitle: String? = null, 
-        @JsonProperty("imdbSeason") val imdbSeason: Int? = null,
-        @JsonProperty("imdbEpisode") val imdbEpisode: Int? = null,
-        @JsonProperty("anilistId") val anilistId: Int? = null,
-        @JsonProperty("malId") val malId: Int? = null,
-        @JsonProperty("kitsuId") val kitsuId: String? = null
+        val type: String? = null, 
+        val id: String? = null, 
+        val season: Int? = null, 
+        val episode: Int? = null, 
+        val imdbId: String? = null, 
+        val year: Int? = null, 
+        val title: String? = null, 
+        val tmdbId: Int? = null, 
+        val isAnime: Boolean = false,
+        val isBollywood: Boolean = false,
+        val isAsian: Boolean = false,
+        val isCartoon: Boolean = false,
+        val firstAired: String? = null,
+        val airedYear: Int? = null, 
+        val originalTitle: String? = null, 
+        val englishTitle: String? = null, 
+        val imdbSeason: Int? = null,
+        val imdbEpisode: Int? = null,
+        val anilistId: Int? = null,
+        val malId: Int? = null,
+        val kitsuId: String? = null
     )
     
     data class CustomSite(@JsonProperty("parentJavaClass") val parentJavaClass: String, @JsonProperty("name") val name: String, @JsonProperty("url") val url: String, @JsonProperty("lang") val lang: String)
