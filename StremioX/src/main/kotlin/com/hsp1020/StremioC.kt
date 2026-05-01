@@ -1,4 +1,4 @@
-// v1.181 (Fix Truncated Classes & Build Errors: Full Thin-URL Implementation)
+// v1.182 (Fix JSON Instantiation & Full Class Definitions: CineStream Thin-URL)
 package com.hsp1020
 
 import android.content.Context
@@ -848,20 +848,20 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     )
 
     private data class CatalogEntry(
-        @JsonProperty("name") val name: String, 
+        @JsonProperty("name") val name: String? = null, // 🔹 Nullable로 변경하여 Thin-URL 파싱 지원
         @JsonProperty("id") val id: String, 
         @JsonProperty("moviedb_id") val moviedb_id: Int? = null,
         @JsonProperty("_tmdbId") val tmdbIdExt: String? = null, 
         @JsonProperty("_malId") val malIdExt: String? = null,
         @JsonProperty("_kitsuId") val kitsuIdExt: String? = null,
-        @JsonProperty("poster") val poster: String?, 
-        @JsonProperty("background") val background: String?, 
+        @JsonProperty("poster") val poster: String? = null, 
+        @JsonProperty("background") val background: String? = null, 
         @JsonProperty("logo") val logo: String? = null,
-        @JsonProperty("description") val description: String?, 
-        @JsonProperty("imdbRating") val imdbRating: String?, 
-        @JsonProperty("type") val type: String?,
-        @JsonProperty("videos") val videos: List<Video>?, 
-        @JsonProperty("genre") val genre: List<String>?, 
+        @JsonProperty("description") val description: String? = null, 
+        @JsonProperty("imdbRating") val imdbRating: String? = null, 
+        @JsonProperty("type") val type: String? = null,
+        @JsonProperty("videos") val videos: List<Video>? = null, 
+        @JsonProperty("genre") val genre: List<String>? = null, 
         @JsonProperty("genres") val genres: List<String> = emptyList(),
         @JsonProperty("cast") val cast: List<String> = emptyList(), 
         @JsonProperty("trailers") val trailersSources: List<Trailer> = emptyList(),
@@ -869,7 +869,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         @JsonProperty("links") val links: List<Link> = emptyList()
     ) {
         fun toSearchResponse(provider: StremioC): SearchResponse {
-            // 🔹 CineStream 방식 (v1.181): url 필드에 최소 ID 정보만 담아 캐시 용량 최소화
+            // 🔹 CineStream 방식 최적화: ID만 담은 가벼운 URL 생성
             val thinUrl = mapOf(
                 "id" to this.id,
                 "type" to (this.type ?: "movie"),
@@ -879,7 +879,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "kitsuId" to this.kitsuIdExt
             ).toJson()
 
-            return provider.newMovieSearchResponse(name, thinUrl, TvType.Others) { 
+            return provider.newMovieSearchResponse(name ?: "Unknown", thinUrl, TvType.Others) { 
                 posterUrl = poster 
             }
         }
@@ -1032,7 +1032,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     
                     val customPosterUrl = "https://xrdb.ibbylabs.dev/poster/tmdb:$posterType:$recTmdbId.jpg?idSource=tmdb&tmdbKey=cc9982c4801545a1481d167137ea7b53&mdblistKey=d2tmbmhnrgdz7ft9re7j2gjr3&posterRatings=myanimelist%2Cimdb%2Cletterboxd%2Cmetacriticuser%2Ctomatoesaudience%2Ctrakt%2Ctmdb%2Cmetacritic%2Ctomatoes%2Crogerebert&lang=ko&ratingValueMode=normalized&posterGenreBadgeStyle=plain&posterGenreBadgePosition=bottomLeft&posterStreamBadges=on&ageRatingBadgePosition=left-top&posterQualityBadges=&posterRatingStyle=plain&posterRatingBadgeScale=115&imageText=original&posterRatingsLayout=right&posterNoBackgroundBadgeOutlineColor=%23ff0000&posterEdgeOffset=3&providerAppearance=eyJ0b21hdG9lcyI6eyJzdGFja2VkQWNjZW50TW9kZSI6ImxvZ28ifX0"
                     
-                    // 🔹 추천 목록 최적화 (v1.181): url에 최소 정보만 담아 50개 중복 데이터 방지
+                    // 🔹 추천 항목용 Thin-URL 생성
                     val thinRecUrl = mapOf("id" to "tmdb:${media.id}", "type" to outType).toJson()
                     provider.newMovieSearchResponse(recTitle, thinRecUrl, if (outType == "movie") TvType.Movie else TvType.TvSeries) { this.posterUrl = customPosterUrl }
                 }
@@ -1100,8 +1100,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             )
         }
 
-        private fun processEpisodes(provider: StremioC, finalImdbId: String?, episodeTmdbMeta: Map<String, TmdbEpisode>, targetVideos: List<Video>, type: String?, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, originalTitle: String?, englishTitle: String?, aniListId: Int?, malId: Int?, kitsuId: String?): List<Episode> {
-            val sortedVideos = targetVideos.groupBy { Pair(it.seasonNumber ?: 0, it.episode ?: it.number ?: 0) }.flatMap { (_, group) -> group.sortedBy { it.title ?: it.name ?: "" } }
+        private fun processEpisodes(provider: StremioC, finalImdbId: String?, episodeTmdbMeta: Map<String, TmdbEpisode>, targetVideos: List<Video>?, type: String?, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, originalTitle: String?, englishTitle: String?, aniListId: Int?, malId: Int?, kitsuId: String?): List<Episode> {
+            val videos = targetVideos ?: emptyList()
+            val sortedVideos = videos.groupBy { Pair(it.seasonNumber ?: 0, it.episode ?: it.number ?: 0) }.flatMap { (_, group) -> group.sortedBy { it.title ?: it.name ?: "" } }
             val maxRegularSeason = sortedVideos.mapNotNull { it.seasonNumber }.filter { it > 0 }.maxOrNull() ?: 0
             val targetSeasonForZero = maxRegularSeason + 1
             
@@ -1195,7 +1196,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 } catch (e: Exception) {}
             }
 
-            var finalName = originalName ?: this@CatalogEntry.name
+            var finalName = originalName ?: this@CatalogEntry.name ?: "Unknown Content"
             if (tmdbData != null) {
                 if (!tmdbData.fetchedTitle.isNullOrBlank()) finalName = tmdbData.fetchedTitle
                 finalDescription = provider.mergeOverview(finalDescription, tmdbData.fetchedOverview)
@@ -1239,7 +1240,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
             if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
                 return@coroutineScope provider.newMovieLoadResponse(
-                    finalName, "${provider.mainUrl}/meta/${finalType}/${this@CatalogEntry.id}.json", TvType.Movie, 
+                    finalName, "${provider.mainUrl}/meta/${finalType ?: "movie"}/${this@CatalogEntry.id}.json", TvType.Movie, 
                     LoadData(
                         type = finalType, 
                         id = movieId, 
@@ -1267,7 +1268,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val finalEpisodes = processEpisodes(provider, finalImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, tmdbIdStr?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, fetchedAniListId, fetchedMalId, this@CatalogEntry.kitsuIdExt)
 
                 return@coroutineScope provider.newTvSeriesLoadResponse(
-                    finalName, "${provider.mainUrl}/meta/${finalType}/${this@CatalogEntry.id}.json", TvType.TvSeries, finalEpisodes
+                    finalName, "${provider.mainUrl}/meta/${finalType ?: "series"}/${this@CatalogEntry.id}.json", TvType.TvSeries, finalEpisodes
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); plot = finalDescription; year = tmdbData?.fetchedYear; tags = finalGenre
                     this.showStatus = tmdbData?.fetchedStatus 
@@ -1326,7 +1327,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 this.name = if (tmdbEp?.name != null) tmdbEp.name else cleanOriginalTitle
                 this.posterUrl = thumbnail ?: TRANSPARENT_PIXEL
                 
-                // 🔹 에피소드 줄거리: 화면 표시를 위해 TMDB에서 가져온 설명 사용 (v1.181)
                 this.description = tmdbEp?.overview ?: this@Video.overview ?: this@Video.description
                 this.season = displaySeason
                 this.episode = displayEpisode
