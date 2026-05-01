@@ -1,4 +1,4 @@
-// v1.200 (Strict v1.188 Base + Kitsu/MAL Dynamic Conversion Fix & EOF Dump)
+// v1.201 (Strict v1.188 Base + Kitsu/MAL Dynamic Conversion & Request Override Fix + EOF Dump)
 package com.hsp1020
 
 import android.content.Context
@@ -551,7 +551,12 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             loadData.id ?: ""
         }
 
-        val globalId = if (!loadData.imdbId.isNullOrBlank()) loadData.imdbId else primaryId
+        var globalId = if (!loadData.imdbId.isNullOrBlank()) loadData.imdbId else primaryId
+        
+        if (!loadData.kitsuId.isNullOrBlank() && (globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true)) {
+            globalId = "kitsu:${loadData.kitsuId}"
+        }
+
         val targetType = loadData.type ?: if ((loadData.season ?: 0) > 0 || (loadData.episode ?: 0) > 0) "series" else "movie"
         
         val primaryStremioId = buildStremioId(targetType, primaryId, loadData.season, loadData.episode) ?: primaryId
