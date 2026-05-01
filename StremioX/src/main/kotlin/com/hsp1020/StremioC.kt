@@ -1,4 +1,4 @@
-// v1.199 (Strict v1.188 Base + StremioX/CineStream IMDB Season Force Mapping & EOF Dump)
+// v1.200 (Strict v1.188 Base + Kitsu/MAL Dynamic Conversion Fix & EOF Dump)
 package com.hsp1020
 
 import android.content.Context
@@ -441,6 +441,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val isKitsuOrMal = res.id.startsWith("kitsu:") || res.id.startsWith("mal:")
         var fetchedAniListId: Int? = null
         var fetchedMalId: Int? = null
+        var fetchedKitsuId: String? = null
         var resolvedImdbId: String? = null
         var resolvedTmdbId: String? = null
         var kitsuVideos: List<Video>? = null
@@ -457,6 +458,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 
                 fetchedAniListId = metaObj?.optInt("anilist_id")?.takeIf { it != 0 }
                 fetchedMalId = metaObj?.optInt("mal_id")?.takeIf { it != 0 }
+                fetchedKitsuId = metaObj?.optString("kitsu_id")?.takeIf { it.isNotBlank() }
+                
+                println("StremioC: Kitsu/MAL Dynamic Conversion -> Extracted Kitsu ID: $fetchedKitsuId from ${res.id}")
 
                 metaObj?.optJSONArray("videos")?.let { arr ->
                     val vids = mutableListOf<Video>()
@@ -523,6 +527,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             fetchedAniListId = fetchedAniListId, 
             fetchedMalId = fetchedMalId, 
             resolvedTmdbId = resolvedTmdbId,
+            fetchedKitsuId = fetchedKitsuId,
             kitsuVideos = kitsuVideos
         )
         
@@ -1163,6 +1168,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             fetchedAniListId: Int? = null, 
             fetchedMalId: Int? = null, 
             resolvedTmdbId: String? = null,
+            fetchedKitsuId: String? = null,
             kitsuVideos: List<Video>? = null
         ): LoadResponse = coroutineScope {
             var finalImdbId = if (this@CatalogEntry.id.startsWith("tt")) this@CatalogEntry.id 
@@ -1217,7 +1223,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 if (!tmdbData.fetchedTitle.isNullOrBlank()) finalName = tmdbData.fetchedTitle
             }
 
-            val fallbackMovieId = this@CatalogEntry.kitsuIdExt?.let { "kitsu:$it" } ?: this@CatalogEntry.id
+            val finalKitsuId = fetchedKitsuId ?: this@CatalogEntry.kitsuIdExt
+            val fallbackMovieId = finalKitsuId?.let { "kitsu:$it" } ?: this@CatalogEntry.id
+
             if (tmdbData != null && finalVideos.isNullOrEmpty() && tmdbData.episodeTmdbMeta.isNotEmpty()) {
                 val generatedVideos = tmdbData.episodeTmdbMeta.mapNotNull { (key, tmdbEp) ->
                     val parts = key.split("_")
@@ -1266,7 +1274,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         isCartoon = isCartoon,
                         anilistId = fetchedAniListId,
                         malId = fetchedMalId,
-                        kitsuId = this@CatalogEntry.kitsuIdExt,
+                        kitsuId = finalKitsuId,
                         originalTitle = tmdbData?.fetchedOriginalTitle,
                         englishTitle = tmdbData?.fetchedEnglishTitle
                     )
@@ -1282,7 +1290,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     tmdbData?.fetchedLogo?.let { this.logoUrl = it }; tmdbIdStr?.let { addTMDbId(it) }; finalImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }
                 }
             } else {
-                val finalEpisodes = processEpisodes(provider, finalImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, tmdbIdStr?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, fetchedAniListId, fetchedMalId, this@CatalogEntry.kitsuIdExt)
+                val finalEpisodes = processEpisodes(provider, finalImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, tmdbIdStr?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, fetchedAniListId, fetchedMalId, finalKitsuId)
 
                 return@coroutineScope provider.newTvSeriesLoadResponse(
                     finalName, "${provider.mainUrl}/meta/${finalType ?: "series"}/${this@CatalogEntry.id}.json", TvType.TvSeries, finalEpisodes
