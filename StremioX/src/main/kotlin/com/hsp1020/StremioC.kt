@@ -1,4 +1,4 @@
-// v1.187 (Final Correction: CineTmdb Parity, Fixed 404 Bug & Restored UI)
+// v1.188 (Build Fix: Removed out-of-scope mdbDeferred references in Builder blocks)
 package com.hsp1020
 
 import android.content.Context
@@ -515,7 +515,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val mdbRatings = mdbDeferred?.await() ?: emptyList()
         if (mdbRatings.isNotEmpty()) {
             val ratingStr = mdbRatings.joinToString("  ")
-            loadRes.plot = if (!loadRes.plot.isNullOrBlank()) "$ratingStr | ${loadRes.plot}" else ratingStr
+            val currentPlot = loadRes.plot 
+            loadRes.plot = if (!currentPlot.isNullOrBlank()) "$ratingStr | $currentPlot" else ratingStr
         }
         
         println("StremioC: Load completed for ${loadRes.name}")
@@ -889,7 +890,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             
             val detailRes = preFetchedDetail ?: run {
                 val detailAppend = if (isMovie) "release_dates,credits,images,videos,external_ids,recommendations,translations" else "content_ratings,credits,images,videos,external_ids,recommendations,translations"
-                // 🚨 FATAL BUG FIXED: $id(IMDb ID) -> $tmdbIdStr(TMDB Number ID)로 수정하여 404 에러 방지
                 val detailUrl = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr", "append_to_response" to detailAppend)
                 StremioC.customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>()
             }
@@ -1025,11 +1025,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     
                     val customPosterUrl = "https://xrdb.ibbylabs.dev/poster/tmdb:$posterType:$recTmdbId.jpg?idSource=tmdb&tmdbKey=cc9982c4801545a1481d167137ea7b53&mdblistKey=d2tmbmhnrgdz7ft9re7j2gjr3&posterRatings=myanimelist%2Cimdb%2Cletterboxd%2Cmetacriticuser%2Ctomatoesaudience%2Ctrakt%2Ctmdb%2Cmetacritic%2Ctomatoes%2Crogerebert&lang=ko&ratingValueMode=normalized&posterGenreBadgeStyle=plain&posterGenreBadgePosition=bottomLeft&posterStreamBadges=on&ageRatingBadgePosition=left-top&posterQualityBadges=&posterRatingStyle=plain&posterRatingBadgeScale=115&imageText=original&posterRatingsLayout=right&posterNoBackgroundBadgeOutlineColor=%23ff0000&posterEdgeOffset=3&providerAppearance=eyJ0b21hdG9lcyI6eyJzdGFja2VkQWNjZW50TW9kZSI6ImxvZ28ifX0"
                     
-                    // 🔹 CineTmdb의 추천목록 방식(Thin ID) 완벽 복제
                     val thinRecUrl = mapOf("id" to "tmdb:${media.id}", "type" to outType).toJson()
-                    provider.newMovieSearchResponse(recTitle, thinRecUrl, if (outType == "movie") TvType.Movie else TvType.TvSeries) { 
-                        this.posterUrl = customPosterUrl 
-                    }
+                    provider.newMovieSearchResponse(recTitle, thinRecUrl, if (outType == "movie") TvType.Movie else TvType.TvSeries) { this.posterUrl = customPosterUrl }
                 }
             }
 
@@ -1250,22 +1247,13 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
                     
-                    // 🔹 UI 정상화: 404 버그 해결 후 TMDB 원본 데이터 직접 주입
                     this.plot = tmdbData?.fetchedOverview ?: this@CatalogEntry.description
                     this.actors = tmdbData?.fetchedActors
                     this.tags = finalGenre
-                    
-                    // 🔹 CineTmdb의 완벽 복제: 가벼운 Thin ID 추천 목록 주입
                     this.recommendations = tmdbData?.fetchedRecommendations 
                     
                     addTrailer(finalTrailers); this.duration = tmdbData?.fetchedRuntime; this.contentRating = tmdbData?.fetchedAgeRating
                     tmdbData?.fetchedLogo?.let { this.logoUrl = it }; tmdbIdStr?.let { addTMDbId(it) }; finalImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }
-                }.apply {
-                    val mdbRatings = mdbDeferred?.await() ?: emptyList()
-                    if (mdbRatings.isNotEmpty()) {
-                        val ratingStr = mdbRatings.joinToString("  ")
-                        this.plot = if (!this.plot.isNullOrBlank()) "$ratingStr | ${this.plot}" else ratingStr
-                    }
                 }
             } else {
                 val finalEpisodes = processEpisodes(provider, finalImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, tmdbIdStr?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, fetchedAniListId, fetchedMalId, this@CatalogEntry.kitsuIdExt)
@@ -1276,7 +1264,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
                     this.showStatus = tmdbData?.fetchedStatus 
                     
-                    // 🔹 UI 정상화
                     this.plot = tmdbData?.fetchedOverview ?: this@CatalogEntry.description
                     this.actors = tmdbData?.fetchedActors
                     this.tags = finalGenre
@@ -1284,12 +1271,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     
                     addTrailer(finalTrailers.firstOrNull()); this.contentRating = tmdbData?.fetchedAgeRating
                     tmdbData?.fetchedLogo?.let { this.logoUrl = it }; tmdbIdStr?.let { addTMDbId(it) }; finalImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }
-                }.apply {
-                    val mdbRatings = mdbDeferred?.await() ?: emptyList()
-                    if (mdbRatings.isNotEmpty()) {
-                        val ratingStr = mdbRatings.joinToString("  ")
-                        this.plot = if (!this.plot.isNullOrBlank()) "$ratingStr | ${this.plot}" else ratingStr
-                    }
                 }
             }
         }
