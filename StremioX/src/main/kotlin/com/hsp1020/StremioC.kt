@@ -1,4 +1,4 @@
-// v1.174 (Metadata Cache Optimization: search/recommendation data diet)
+// v1.180 (Thin-URL Architecture: CineStream Style Optimization)
 package com.hsp1020
 
 import android.content.Context
@@ -869,29 +869,17 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         @JsonProperty("links") val links: List<Link> = emptyList()
     ) {
         fun toSearchResponse(provider: StremioC): SearchResponse {
-            // 🔹 캐시 최적화 (v1.174): 들여쓰기 12 spaces 준수
-            val minimalEntry = CatalogEntry(
-                name = this.name,
-                id = this.id,
-                type = this.type,
-                poster = this.poster,
-                videos = null,              // 상세 페이지에서 새로 가져오므로 검색 목록에선 제거
-                background = this.background,
-                logo = this.logo,
-                description = null,         // 줄거리 제거 (용량 주범)
-                imdbRating = null,
-                genre = null,
-                genres = emptyList(),
-                cast = emptyList(),         // 출연진 제거 (용량 주범)
-                trailersSources = emptyList(),
-                trailerStreams = emptyList(),
-                links = emptyList(),
-                moviedb_id = this.moviedb_id,
-                tmdbIdExt = this.tmdbIdExt,
-                malIdExt = this.malIdExt,
-                kitsuIdExt = this.kitsuIdExt
-            )
-            return provider.newMovieSearchResponse(name, minimalEntry.toJson(), TvType.Others) { 
+            // 🔹 CineStream 방식 (v1.180): url 필드에 오직 ID와 Type만 담아 캐시 용량 최소화
+            val thinUrl = mapOf(
+                "id" to this.id,
+                "type" to (this.type ?: "movie"),
+                "moviedb_id" to this.moviedb_id,
+                "tmdbId" to this.tmdbIdExt,
+                "malId" to this.malIdExt,
+                "kitsuId" to this.kitsuIdExt
+            ).toJson()
+
+            return provider.newMovieSearchResponse(name, thinUrl, TvType.Others) { 
                 posterUrl = poster 
             }
         }
@@ -1044,9 +1032,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     
                     val customPosterUrl = "https://xrdb.ibbylabs.dev/poster/tmdb:$posterType:$recTmdbId.jpg?idSource=tmdb&tmdbKey=cc9982c4801545a1481d167137ea7b53&mdblistKey=d2tmbmhnrgdz7ft9re7j2gjr3&posterRatings=myanimelist%2Cimdb%2Cletterboxd%2Cmetacriticuser%2Ctomatoesaudience%2Ctrakt%2Ctmdb%2Cmetacritic%2Ctomatoes%2Crogerebert&lang=ko&ratingValueMode=normalized&posterGenreBadgeStyle=plain&posterGenreBadgePosition=bottomLeft&posterStreamBadges=on&ageRatingBadgePosition=left-top&posterQualityBadges=&posterRatingStyle=plain&posterRatingBadgeScale=115&imageText=original&posterRatingsLayout=right&posterNoBackgroundBadgeOutlineColor=%23ff0000&posterEdgeOffset=3&providerAppearance=eyJ0b21hdG9lcyI6eyJzdGFja2VkQWNjZW50TW9kZSI6ImxvZ28ifX0"
                     
-                    // 🔹 추천 항목 최적화 (v1.174): description을 null로 주입하여 재귀적 JSON 폭증 방지
-                    val recommendationEntry = CatalogEntry(name = recTitle, id = "tmdb:${media.id}", type = outType, poster = customPosterUrl, background = null, description = null, imdbRating = null, videos = null, genre = null)
-                    provider.newMovieSearchResponse(recTitle, recommendationEntry.toJson(), if (outType == "movie") TvType.Movie else TvType.TvSeries) { this.posterUrl = customPosterUrl }
+                    // 🔹 추천 목록 최 최적화 (v1.180): url에 최소 정보만 담아 50개 중복 데이터 방지 (기능은 유지됨)
+                    val thinRecUrl = mapOf("id" to "tmdb:${media.id}", "type" to outType).toJson()
+                    provider.newMovieSearchResponse(recTitle, thinRecUrl, if (outType == "movie") TvType.Movie else TvType.TvSeries) { this.posterUrl = customPosterUrl }
                 }
             }
 
@@ -1128,6 +1116,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 var displayEpisode = if (originalEpisode == 0) {
                     val currentZeroCount = zeroEpCounterPerSeason.getOrDefault(displaySeason, 0) + 1
                     zeroEpCounterPerSeason[displaySeason] = currentZeroCount
+                    maxEpisodePerSeason.getOrDefault(displaySeason, 0) + currentZeroCount
                     maxEpisodePerSeason.getOrDefault(displaySeason, 0) + currentZeroCount
                 } else {
                     val currentMax = maxEpisodePerSeason.getOrDefault(displaySeason, 0)
@@ -1338,8 +1327,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 this.name = if (tmdbEp?.name != null) tmdbEp.name else cleanOriginalTitle
                 this.posterUrl = thumbnail ?: TRANSPARENT_PIXEL
                 
-                // 🔹 에피소드 줄거리 최적화 (v1.174): 용량 절감을 위해 null 처리
-                this.description = null 
+                // 🔹 에피소드 줄거리 (v1.180): 화면 표시를 위해 다시 복구 (백업 용량과 편의성 사이의 절충안)
+                this.description = tmdbEp?.overview ?: this@Video.overview ?: this@Video.description
                 this.season = displaySeason
                 this.episode = displayEpisode
 
@@ -1387,114 +1376,3 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
     }
 }
-
-private data class TraktRelatedIds(@JsonProperty("tmdb") val tmdb: Int?)
-private data class TraktRelatedItem(@JsonProperty("ids") val ids: TraktRelatedIds?)
-private data class SimklIds(@JsonProperty("tmdb") val tmdb: Int?, @JsonProperty("simkl") val simkl: Int?)
-private data class SimklRecItem(@JsonProperty("type") val type: String?, @JsonProperty("ids") val ids: SimklIds?)
-private data class SimklRecResponse(@JsonProperty("users_recommendations") val users_recommendations: List<SimklRecItem>?)
-private data class SimklDetailResponse(@JsonProperty("ids") val ids: SimklIds?)
-
-private data class TmdbFindResponse(
-    @JsonProperty("movie_results") val movie_results: List<TmdbFindResult>? = null,
-    @JsonProperty("tv_results") val tv_results: List<TmdbFindResult>? = null
-)
-
-private data class TmdbFindResult(
-    @JsonProperty("id") val id: Int? = null,
-    @JsonProperty("media_type") val media_type: String? = null
-)
-
-private data class TmdbCollection(
-    @JsonProperty("id") val id: Int? = null,
-    @JsonProperty("name") val name: String? = null,
-    @JsonProperty("poster_path") val poster_path: String? = null,
-    @JsonProperty("backdrop_path") val backdrop_path: String? = null
-)
-
-private data class TmdbCollectionDetail(
-    @JsonProperty("id") val id: Int? = null,
-    @JsonProperty("name") val name: String? = null,
-    @JsonProperty("parts") val parts: List<TmdbMedia>? = null
-)
-
-private data class TmdbTranslations(@JsonProperty("translations") val translations: List<TmdbTranslationItem>?)
-private data class TmdbTranslationItem(@JsonProperty("iso_3166_1") val iso_3166_1: String?, @JsonProperty("iso_639_1") val iso_639_1: String?, @JsonProperty("data") val data: TmdbTranslationData?)
-private data class TmdbTranslationData(@JsonProperty("title") val title: String?, @JsonProperty("name") val name: String?, @JsonProperty("overview") val overview: String?)
-
-private data class TmdbDetailResponse(
-    @JsonProperty("id") val id: Int? = null,
-    @JsonProperty("number_of_seasons") val number_of_seasons: Int? = null,
-    @JsonProperty("title") val title: String? = null, 
-    @JsonProperty("name") val name: String? = null, 
-    @JsonProperty("original_title") val original_title: String? = null, 
-    @JsonProperty("original_name") val original_name: String? = null, 
-    @JsonProperty("overview") val overview: String? = null, 
-    @JsonProperty("release_date") val releaseDate: String? = null, 
-    @JsonProperty("first_air_date") val firstAirDate: String? = null, 
-    @JsonProperty("status") val status: String? = null, 
-    @JsonProperty("poster_path") val posterPath: String? = null, 
-    @JsonProperty("origin_country") val origin_country: List<String>? = null, 
-    @JsonProperty("original_language") val original_language: String? = null, 
-    @JsonProperty("belongs_to_collection") val belongs_to_collection: TmdbCollection? = null, 
-    @JsonProperty("recommendations") val recommendations: TmdbRecommendations? = null, 
-    @JsonProperty("runtime") val runtime: Int? = null, 
-    @JsonProperty("release_dates") val release_dates: TmdbReleaseDates? = null, 
-    @JsonProperty("content_ratings") val content_ratings: TmdbContentRatings? = null, 
-    @JsonProperty("credits") val credits: TmdbCredits? = null, 
-    @JsonProperty("images") val images: TmdbImages? = null, 
-    @JsonProperty("videos") val videos: ResultsTrailer? = null, 
-    @JsonProperty("external_ids") val external_ids: ExternalIds? = null, 
-    @JsonProperty("translations") val translations: TmdbTranslations? = null
-) {
-    fun toTmdbMedia(mediaType: String): TmdbMedia {
-        return TmdbMedia(
-            id = this.id,
-            name = this.name ?: this.title,
-            title = this.title ?: this.name,
-            originalTitle = this.original_title ?: this.original_name,
-            mediaType = mediaType,
-            posterPath = this.posterPath,
-            overview = this.overview,
-            origin_country = this.origin_country,
-            original_language = this.original_language,
-            releaseDate = this.releaseDate,
-            firstAirDate = this.firstAirDate
-        )
-    }
-}
-
-private data class TmdbImages(@JsonProperty("logos") val logos: List<TmdbLogo>? = null)
-private data class TmdbLogo(@JsonProperty("file_path") val file_path: String? = null)
-private data class TmdbRecommendations(@JsonProperty("results") val results: List<TmdbMedia>? = null)
-
-private data class TmdbMedia(
-    @JsonProperty("id") val id: Int? = null,
-    @JsonProperty("name") val name: String? = null,
-    @JsonProperty("title") val title: String? = null,
-    @JsonProperty("original_title") val originalTitle: String? = null,
-    @JsonProperty("media_type") val mediaType: String? = null,
-    @JsonProperty("poster_path") val posterPath: String? = null,
-    @JsonProperty("overview") val overview: String? = null,
-    @JsonProperty("origin_country") val origin_country: List<String>? = null,
-    @JsonProperty("original_language") val original_language: String? = null,
-    @JsonProperty("release_date") val releaseDate: String? = null,
-    @JsonProperty("first_air_date") val firstAirDate: String? = null
-)
-
-private data class TmdbReleaseDates(@JsonProperty("results") val results: List<TmdbReleaseDateResult>?)
-private data class TmdbReleaseDateResult(@JsonProperty("iso_3166_1") val iso_3166_1: String?, @JsonProperty("release_dates") val release_dates: List<TmdbReleaseDate>?)
-private data class TmdbReleaseDate(@JsonProperty("certification") val certification: String?)
-private data class TmdbContentRatings(@JsonProperty("results") val results: List<TmdbContentRatingResult>?)
-private data class TmdbContentRatingResult(@JsonProperty("iso_3166_1") val iso_3166_1: String?, @JsonProperty("rating") val rating: String?)
-
-private data class TmdbCredits(@JsonProperty("cast") val cast: List<TmdbCast>? = null, @JsonProperty("crew") val crew: List<TmdbCrew>? = null)
-private data class TmdbCast(@JsonProperty("name") val name: String?, @JsonProperty("original_name") val originalName: String?, @JsonProperty("character") val character: String?, @JsonProperty("profile_path") val profilePath: String?)
-private data class TmdbCrew(@JsonProperty("name") val name: String?, @JsonProperty("original_name") val originalName: String?, @JsonProperty("job") val job: String?, @JsonProperty("profile_path") val profilePath: String?)
-
-private data class TmdbSeasonDetail(@JsonProperty("episodes") val episodes: List<TmdbEpisode>? = null)
-private data class TmdbEpisode(@JsonProperty("name") val name: String?, @JsonProperty("overview") val overview: String?, @JsonProperty("episode_number") val episodeNumber: Int?, @JsonProperty("air_date") val airDate: String?, @JsonProperty("vote_average") val voteAverage: Double?, @JsonProperty("runtime") val runtime: Int?)
-
-data class Trailers(@JsonProperty("key") val key: String? = null, @JsonProperty("type") val type: String? = null, @JsonProperty("published_at") val publishedAt: String? = null)
-data class ResultsTrailer(@JsonProperty("results") val results: ArrayList<Trailers>? = arrayListOf())
-data class ExternalIds(@JsonProperty("imdb_id") val imdb_id: String? = null, @JsonProperty("tvdb_id") val tvdb_id: String? = null)
