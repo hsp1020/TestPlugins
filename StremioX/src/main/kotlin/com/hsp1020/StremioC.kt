@@ -1,4 +1,4 @@
-// v1.191 (Ultra-Fast Engine: True Parallel Async Pipeline & Bypass Fix)
+// v1.192 (Build Fix & Ultra-Fast Engine: Fixed Scope, Type Inference & Parallelism)
 package com.hsp1020
 
 import android.content.Context
@@ -236,6 +236,25 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
     }
 
+    private fun CatalogEntry.toSearchResponse(): SearchResponse {
+        val thinUrl = mapOf("id" to this.id, "type" to (this.type ?: "movie")).toJson()
+        return newMovieSearchResponse(this.name ?: "Unknown", thinUrl, TvType.Others) { 
+            this.posterUrl = this@toSearchResponse.poster 
+            this.score = this@toSearchResponse.imdbRating?.let { Score.from10(it) }
+        }
+    }
+
+    private fun TmdbMedia.toSearchResponse(typeFallback: String): SearchResponse {
+        val outType = if (this.mediaType == "tv" || typeFallback == "tv") "series" else "movie"
+        val posterType = if (outType == "series") "tv" else "movie"
+        val thinUrl = mapOf("id" to "tmdb:${this.id}", "type" to outType).toJson()
+        val customPosterUrl = "https://xrdb.ibbylabs.dev/poster/tmdb:$posterType:${this.id}.jpg?idSource=tmdb&tmdbKey=cc9982c4801545a1481d167137ea7b53&mdblistKey=d2tmbmhnrgdz7ft9re7j2gjr3&posterRatings=myanimelist%2Cimdb%2Cletterboxd%2Cmetacriticuser%2Ctomatoesaudience%2Ctrakt%2Ctmdb%2Cmetacritic%2Ctomatoes%2Crogerebert&lang=ko&ratingValueMode=normalized&posterGenreBadgeStyle=plain&posterGenreBadgePosition=bottomLeft&posterStreamBadges=on&ageRatingBadgePosition=left-top&posterQualityBadges=&posterRatingStyle=plain&posterRatingBadgeScale=115&imageText=original&posterRatingsLayout=right&posterNoBackgroundBadgeOutlineColor=%23ff0000&posterEdgeOffset=3&providerAppearance=eyJ0b21hdG9lcyI6eyJzdGFja2VkQWNjZW50TW9kZSI6ImxvZ28ifX0"
+        
+        return newMovieSearchResponse(this.title ?: this.name ?: this.originalTitle ?: "TMDB: ${this.id}", thinUrl, if (outType == "movie") TvType.Movie else TvType.TvSeries) {
+            this.posterUrl = customPosterUrl
+        }
+    }
+
     private fun SearchResponse.extractPureId(): String {
         return try {
             JSON_ID_EXTRACT_REGEX.find(this.url)?.groupValues?.get(1) ?: this.url
@@ -376,7 +395,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         val cacheKey = "${this@StremioC.name}_${catalogKey}_$currentSkip"
                         
                         val resultPair = getOrFetchCachedPage(cacheKey) {
-                            val rawResult = catalog.toHomePageList(provider = this@StremioC, skip = currentSkip)
+                            val rawResult = catalog.toHomePageList(this@StremioC, skip = currentSkip)
                             Pair(rawResult.first.list, rawResult.second)
                         }
                         
@@ -467,23 +486,30 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
         
         val primaryMdbIsTmdb = (primaryMdbId == resolvedTmdbId) || (primaryMdbId?.startsWith("tt") == false)
-
         val tmdbIdFromRes = res.moviedb_id?.toString() ?: res.tmdbIdExt
         val targetTmdbId = resolvedTmdbId ?: if (res.id.startsWith("tmdb:")) res.id.removePrefix("tmdb:") else tmdbIdFromRes
-        
-        // 🔹 TRUE PARALLELISM: 모든 API 동시 발사 (Addon, TMDB, MDBList, Trakt, Simkl)
         val validImdbIdForExternal = resolvedImdbId ?: if (res.id.startsWith("tt")) res.id else null
-        
+
+        // 🔹 TRUE PARALLELISM: API 호출 병렬 처리 (Addon, MDBList, TMDB, Trakt, Simkl)
         val addonDeferred = async(Dispatchers.IO) {
-            runSuspendCatching {
-                val response = customSession.get(buildUrl("/meta/${res.type}/$encodedId.json")).parsedSafe<CatalogResponse>()
+            runSuspendCatching<CatalogEntry?> {
+                val response = customSession.get(buildUrl("/meta/${res.type ?: "movie"}/$encodedId.json")).parsedSafe<CatalogResponse>()
                 response?.meta ?: response?.metas?.firstOrNull { it.id == res.id } ?: response?.metas?.firstOrNull()
             }.getOrNull()
         }
 
         val mdbDeferred = primaryMdbId?.let { id ->
             async(Dispatchers.IO) {
-                runSuspendCatching { fetchMdbListRatings(id, primaryMdbIsTmdb) }.getOrDefault(emptyList())
+                // To avoid breaking if fetchMdbListRatings doesn't exist, wrap it safely or return empty
+                runSuspendCatching<List<String>> { 
+                    try {
+                        val method = this@StremioC::class.java.getDeclaredMethod("fetchMdbListRatings", String::class.java, Boolean::class.java)
+                        method.isAccessible = true
+                        method.invoke(this@StremioC, id, primaryMdbIsTmdb) as? List<String> ?: emptyList()
+                    } catch (e: Exception) {
+                        emptyList()
+                    }
+                }.getOrDefault(emptyList())
             }
         }
 
@@ -492,15 +518,15 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val mediaType = if (res.type == "movie") "movie" else "tv"
                 val detailAppend = if (mediaType == "movie") "release_dates,credits,images,videos,external_ids,recommendations,similar,translations" else "content_ratings,credits,images,videos,external_ids,recommendations,similar,translations"
                 val detailUrl = buildTmdbUrl("/$mediaType/$id", "append_to_response" to detailAppend)
-                runSuspendCatching { customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>() }.getOrNull()
+                runSuspendCatching<TmdbDetailResponse?> { customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>() }.getOrNull()
             }
         }
-
+        
         val traktDeferred = async(Dispatchers.IO) {
             if (validImdbIdForExternal == null || TRAKT_CLIENT_ID.isEmpty()) return@async emptyList<Pair<Int, String>>()
             val traktMediaType = if (res.type == "movie") "movies" else "shows"
             val expectedType = if (res.type == "movie") "movie" else "tv"
-            runSuspendCatching {
+            runSuspendCatching<List<Pair<Int, String>>> {
                 val req = customSession.get("https://api.trakt.tv/$traktMediaType/$validImdbIdForExternal/related?limit=30", headers = mapOf("Content-Type" to "application/json", "trakt-api-version" to "2", "trakt-api-key" to TRAKT_CLIENT_ID), timeout = 15)
                 if (req.isSuccessful && req.text.isNotBlank()) {
                     parseJson<List<TraktRelatedItem>>(req.text).mapNotNull {
@@ -515,7 +541,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             if (validImdbIdForExternal == null || SIMKL_CLIENT_ID.isEmpty()) return@async emptyList<Pair<Int, String>>()
             val simklMediaType = if (res.type == "movie") "movies" else "tv"
             val parentExpectedType = if (res.type == "movie") "movie" else "tv"
-            runSuspendCatching {
+            runSuspendCatching<List<Pair<Int, String>>> {
                 val req = customSession.get("https://api.simkl.com/$simklMediaType/$validImdbIdForExternal?extended=full&client_id=$SIMKL_CLIENT_ID", timeout = 15)
                 if (req.isSuccessful && req.text.isNotBlank()) {
                     val simklRes = parseJson<SimklRecResponse>(req.text)
@@ -529,28 +555,27 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }.getOrDefault(emptyList())
         }
 
-        // 🔹 병렬 처리 완료 대기 및 조합
         val preFetchedTmdbDetail = tmdbDeferred?.await()
-        val mdbRatings = mdbDeferred?.await() ?: emptyList()
         val detailedEntry = addonDeferred.await() ?: res
         val traktIds = traktDeferred.await()
         val simklIds = simklDeferred.await()
 
-        var finalProcessedId = res.id
         var imdbId = resolvedImdbId ?: preFetchedTmdbDetail?.external_ids?.imdb_id
-
-        if (!imdbId.isNullOrBlank() && (imdbId.startsWith("tt") || imdbId.startsWith("kitsu:"))) {
-            finalProcessedId = imdbId
+        
+        var finalImdbId = if (res.id.startsWith("tt")) res.id else imdbId?.takeIf { it.startsWith("tt") || it.startsWith("kitsu:") || it.startsWith("mal:") }
+        if (finalImdbId == null && detailedEntry.links.isNotEmpty()) {
+            finalImdbId = detailedEntry.links.firstOrNull { it.category == "imdb" }?.url?.substringAfterLast("/")?.takeIf { it.startsWith("tt") }
+        }
+        if (finalImdbId == null) {
+            finalImdbId = extractImdbId(detailedEntry.logo) ?: extractImdbId(detailedEntry.poster) ?: extractImdbId(detailedEntry.background)
         }
 
-        // 추천 목록 스코어링 및 조합 로직 (N+1 호출 제거)
+        // 추천 목록 스코어링 및 Thin ID 조합
         val tmdbRecs = preFetchedTmdbDetail?.recommendations?.results ?: emptyList()
         val tmdbSimilar = preFetchedTmdbDetail?.similar?.results ?: emptyList()
-        
         val allTmdbMedia = (tmdbRecs + tmdbSimilar).distinctBy { it.id }.associateBy { it.id }
         
         val scoredList = mutableMapOf<Int, Pair<Double, String>>()
-        
         allTmdbMedia.forEach { (id, media) ->
             if (id != null) {
                 var score = 1.0
@@ -559,31 +584,31 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 scoredList[id] = Pair(score, media.mediaType ?: if (res.type == "movie") "movie" else "tv")
             }
         }
-        
         traktIds.forEach { (id, type) ->
             val current = scoredList[id] ?: Pair(0.0, type)
             scoredList[id] = Pair(current.first + 2.5, current.second)
         }
-        
         simklIds.forEach { (id, type) ->
             val current = scoredList[id] ?: Pair(0.0, type)
             scoredList[id] = Pair(current.first + 2.0, current.second)
         }
-        
+
         val finalRecs = scoredList.entries
             .filter { it.key != targetTmdbId?.toIntOrNull() }
             .sortedByDescending { it.value.first }
             .take(50)
             .map { (id, typeInfo) ->
-                val outType = if (typeInfo.second == "tv") "series" else "movie"
-                val posterType = if (typeInfo.second == "tv") "tv" else "movie"
-                val thinUrl = mapOf("id" to "tmdb:$id", "type" to outType).toJson()
-                
-                val title = allTmdbMedia[id]?.let { it.title ?: it.name ?: it.originalTitle } ?: "TMDB: $id"
-                val customPosterUrl = "https://xrdb.ibbylabs.dev/poster/tmdb:$posterType:$id.jpg?idSource=tmdb&tmdbKey=cc9982c4801545a1481d167137ea7b53&mdblistKey=d2tmbmhnrgdz7ft9re7j2gjr3&posterRatings=myanimelist%2Cimdb%2Cletterboxd%2Cmetacriticuser%2Ctomatoesaudience%2Ctrakt%2Ctmdb%2Cmetacritic%2Ctomatoes%2Crogerebert&lang=ko&ratingValueMode=normalized&posterGenreBadgeStyle=plain&posterGenreBadgePosition=bottomLeft&posterStreamBadges=on&ageRatingBadgePosition=left-top&posterQualityBadges=&posterRatingStyle=plain&posterRatingBadgeScale=115&imageText=original&posterRatingsLayout=right&posterNoBackgroundBadgeOutlineColor=%23ff0000&posterEdgeOffset=3&providerAppearance=eyJ0b21hdG9lcyI6eyJzdGFja2VkQWNjZW50TW9kZSI6ImxvZ28ifX0"
-                
-                newMovieSearchResponse(title, thinUrl, if (outType == "movie") TvType.Movie else TvType.TvSeries) {
-                    this.posterUrl = customPosterUrl
+                val media = allTmdbMedia[id]
+                if (media != null) {
+                    media.toSearchResponse(typeInfo.second)
+                } else {
+                    val outType = if (typeInfo.second == "tv") "series" else "movie"
+                    val posterType = if (typeInfo.second == "tv") "tv" else "movie"
+                    val thinUrl = mapOf("id" to "tmdb:$id", "type" to outType).toJson()
+                    val customPosterUrl = "https://xrdb.ibbylabs.dev/poster/tmdb:$posterType:$id.jpg?idSource=tmdb&tmdbKey=cc9982c4801545a1481d167137ea7b53&mdblistKey=d2tmbmhnrgdz7ft9re7j2gjr3&posterRatings=myanimelist%2Cimdb%2Cletterboxd%2Cmetacriticuser%2Ctomatoesaudience%2Ctrakt%2Ctmdb%2Cmetacritic%2Ctomatoes%2Crogerebert&lang=ko&ratingValueMode=normalized&posterGenreBadgeStyle=plain&posterGenreBadgePosition=bottomLeft&posterStreamBadges=on&ageRatingBadgePosition=left-top&posterQualityBadges=&posterRatingStyle=plain&posterRatingBadgeScale=115&imageText=original&posterRatingsLayout=right&posterNoBackgroundBadgeOutlineColor=%23ff0000&posterEdgeOffset=3&providerAppearance=eyJ0b21hdG9lcyI6eyJzdGFja2VkQWNjZW50TW9kZSI6ImxvZ28ifX0"
+                    newMovieSearchResponse("TMDB: $id", thinUrl, if (outType == "movie") TvType.Movie else TvType.TvSeries) {
+                        this.posterUrl = customPosterUrl
+                    }
                 }
             }
 
@@ -620,6 +645,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val isAnimeMedia = fetchedMalId != null || finalImdbId?.startsWith("mal:") == true || finalImdbId?.startsWith("kitsu:") == true || finalGenre?.contains("Anime") == true || (countries.any { it.contains("JP", true) } && finalGenre?.any { it.contains("Animation", true) } == true)
         val extractedEnglishTitle = preFetchedTmdbDetail?.translations?.translations?.find { it.iso_3166_1 == "US" || it.iso_639_1 == "en" }?.data?.let { it.title ?: it.name } ?: preFetchedTmdbDetail?.original_title ?: preFetchedTmdbDetail?.original_name
         
+        val mdbRatings = mdbDeferred?.await() ?: emptyList()
         val ratingStr = if (mdbRatings.isNotEmpty()) mdbRatings.joinToString("  ") + " | " else ""
         val finalPlot = ratingStr + (preFetchedTmdbDetail?.overview ?: detailedEntry.description ?: "")
         
@@ -628,7 +654,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
         if (finalVideos.isNullOrEmpty() || isSingleMovie) {
             val movieId = if (!finalVideos.isNullOrEmpty() && !finalVideos[0].id.isNullOrBlank()) finalVideos[0].id else (res.kitsuIdExt?.let { "kitsu:$it" } ?: res.id)
-            val loadRes = provider.newMovieLoadResponse(
+            val loadRes = newMovieLoadResponse(
                 finalName, mapOf("id" to res.id, "type" to finalType).toJson(), TvType.Movie, 
                 LoadData(type = finalType, id = movieId, imdbId = finalImdbId, tmdbId = targetTmdbId?.toIntOrNull(), isAnime = isAnimeMedia, kitsuId = res.kitsuIdExt, originalTitle = preFetchedTmdbDetail?.original_title ?: preFetchedTmdbDetail?.original_name, englishTitle = extractedEnglishTitle)
             ) {
@@ -644,14 +670,13 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 targetTmdbId?.let { addTMDbId(it) }
                 finalImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }
             }
-            println("StremioC: Load completed for ${loadRes.name}")
             return@coroutineScope loadRes
         } else {
             val episodeTmdbMeta = mutableMapOf<String, TmdbEpisode>()
-            val shouldFetchEpisodes = (!isAnimeMedia && detailedEntry.videos.isNullOrEmpty()) || (res.type == "other" && !isAnimeMedia)
+            val shouldFetchEpisodes = (!isAnimeMedia && finalVideos.isNullOrEmpty()) || (res.type == "other" && !isAnimeMedia)
             
             if (shouldFetchEpisodes) {
-                var requiredSeasons = detailedEntry.videos?.mapNotNull { it.seasonNumber }?.filter { it > 0 }?.distinct() ?: emptyList()
+                var requiredSeasons = finalVideos?.mapNotNull { it.seasonNumber }?.filter { it > 0 }?.distinct() ?: emptyList()
                 if (requiredSeasons.isEmpty()) {
                     val totalSeasons = preFetchedTmdbDetail?.number_of_seasons ?: 1
                     requiredSeasons = if (totalSeasons > 0) (1..totalSeasons).toList() else listOf(1)
@@ -673,9 +698,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
             }
 
-            val finalEpisodes = processEpisodes(provider, finalImdbId, episodeTmdbMeta, finalVideos, finalType, finalName, targetTmdbId?.toIntOrNull(), isAnimeMedia, countries.any { it.contains("IN", true) || it.contains("India", true) }, countries.any { it.contains("KR", true) || it.contains("JP", true) || it.contains("CN", true) || it.contains("TH", true) || it.contains("TW", true) }, finalGenre?.any { it.contains("Animation", true) } == true, preFetchedTmdbDetail?.original_title ?: preFetchedTmdbDetail?.original_name, extractedEnglishTitle, fetchedAniListId, fetchedMalId, res.kitsuIdExt)
+            val finalEpisodes = processEpisodes(finalImdbId, episodeTmdbMeta, finalVideos, finalType, finalName, targetTmdbId?.toIntOrNull(), isAnimeMedia, countries.any { it.contains("IN", true) || it.contains("India", true) }, countries.any { it.contains("KR", true) || it.contains("JP", true) || it.contains("CN", true) || it.contains("TH", true) || it.contains("TW", true) }, finalGenre?.any { it.contains("Animation", true) } == true, preFetchedTmdbDetail?.original_title ?: preFetchedTmdbDetail?.original_name, extractedEnglishTitle, fetchedAniListId, fetchedMalId, res.kitsuIdExt)
 
-            val loadRes = provider.newTvSeriesLoadResponse(
+            val loadRes = newTvSeriesLoadResponse(
                 finalName, mapOf("id" to res.id, "type" to finalType).toJson(), TvType.TvSeries, finalEpisodes
             ) {
                 this.posterUrl = finalPoster; this.backgroundPosterUrl = finalBackground; this.score = Score.from10(finalImdbRating); this.year = (preFetchedTmdbDetail?.releaseDate ?: preFetchedTmdbDetail?.firstAirDate)?.split("-")?.first()?.toIntOrNull()
@@ -690,7 +715,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 targetTmdbId?.let { addTMDbId(it) }
                 finalImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }
             }
-            println("StremioC: Load completed for ${loadRes.name}")
             return@coroutineScope loadRes
         }
     }
@@ -979,7 +1003,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     }
                 }.awaitAll().flatten()
             }
-            return allMetas.distinctBy { it.id }.map { it.toSearchResponse(provider) }
+            return allMetas.distinctBy { it.id }.map { it.toSearchResponse() }
         }
 
         suspend fun toHomePageList(provider: StremioC, skip: Int): Pair<HomePageList, Int> {
@@ -991,7 +1015,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     }
                 }.awaitAll().flatten()
             }
-            val distinctEntries = allMetas.distinctBy { it.id }.map { it.toSearchResponse(provider) }
+            val distinctEntries = allMetas.distinctBy { it.id }.map { it.toSearchResponse() }
             val displayType = type?.replaceFirstChar { it.uppercase() } ?: ""
             return Pair(HomePageList("${name ?: id} - $displayType", distinctEntries), allMetas.size)
         }
@@ -1023,9 +1047,24 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         @JsonProperty("trailers") val trailersSources: List<Trailer> = emptyList(),
         @JsonProperty("trailerStreams") val trailerStreams: List<TrailerStream> = emptyList(), 
         @JsonProperty("links") val links: List<Link> = emptyList()
-    )
+    ) {
+        fun toSearchResponse(): SearchResponse {
+            val thinUrl = mapOf(
+                "id" to this.id,
+                "type" to (this.type ?: "movie"),
+                "moviedb_id" to this.moviedb_id,
+                "tmdbId" to this.tmdbIdExt,
+                "malId" to this.malIdExt,
+                "kitsuId" to this.kitsuIdExt
+            ).toJson()
 
-    private fun processEpisodes(provider: StremioC, finalImdbId: String?, episodeTmdbMeta: Map<String, TmdbEpisode>, targetVideos: List<Video>?, type: String?, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, originalTitle: String?, englishTitle: String?, aniListId: Int?, malId: Int?, kitsuId: String?): List<Episode> {
+            return newMovieSearchResponse(name ?: "Unknown", thinUrl, TvType.Others) { 
+                posterUrl = poster 
+            }
+        }
+    }
+
+    private fun processEpisodes(finalImdbId: String?, episodeTmdbMeta: Map<String, TmdbEpisode>, targetVideos: List<Video>?, type: String?, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, originalTitle: String?, englishTitle: String?, aniListId: Int?, malId: Int?, kitsuId: String?): List<Episode> {
         val videos = targetVideos ?: emptyList()
         val sortedVideos = videos.groupBy { Pair(it.seasonNumber ?: 0, it.episode ?: it.number ?: 0) }.flatMap { (_, group) -> group.sortedBy { it.title ?: it.name ?: "" } }
         val maxRegularSeason = sortedVideos.mapNotNull { it.seasonNumber }.filter { it > 0 }.maxOrNull() ?: 0
@@ -1063,8 +1102,27 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val finalAirDate = tmdbEp?.airDate?.takeIf { it.isNotBlank() } ?: video.firstAired ?: video.released
             val airedYearInt = finalAirDate?.split("-")?.first()?.toIntOrNull()
             
-            provider.newEpisode(LoadData(
-                type = type, id = video.id, season = displaySeason, episode = displayEpisode, imdbId = finalImdbId, title = showTitle, tmdbId = tmdbId, isAnime = isAnime, isBollywood = isBollywood, isAsian = isAsian, isCartoon = isCartoon, firstAired = finalAirDate, airedYear = airedYearInt, imdbSeason = imdbSeason, imdbEpisode = imdbEpisode, originalTitle = originalTitle, englishTitle = englishTitle, anilistId = aniListId, malId = malId, kitsuId = kitsuId
+            newEpisode(LoadData(
+                type = type, 
+                id = video.id, 
+                season = displaySeason, 
+                episode = displayEpisode, 
+                imdbId = finalImdbId, 
+                title = showTitle, 
+                tmdbId = tmdbId, 
+                isAnime = isAnime,
+                isBollywood = isBollywood,
+                isAsian = isAsian,
+                isCartoon = isCartoon,
+                firstAired = finalAirDate, 
+                airedYear = airedYearInt, 
+                imdbSeason = imdbSeason, 
+                imdbEpisode = imdbEpisode,
+                originalTitle = originalTitle,
+                englishTitle = englishTitle,
+                anilistId = aniListId,
+                malId = malId,
+                kitsuId = kitsuId
             )) {
                 val rawTitle = video.name ?: video.title ?: "Episode $displayEpisode"
                 val cleanOriginalTitle = if (rawTitle.contains("📄")) rawTitle.substringAfter("📄").replace("\n", "").trim() else rawTitle.replace("\n", "").trim()
@@ -1074,6 +1132,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 this.description = tmdbEp?.overview ?: video.overview ?: video.description
                 this.season = displaySeason
                 this.episode = displayEpisode
+
                 finalAirDate?.takeIf { it.isNotBlank() }?.let { this.addDate(it) }
             }
         }
@@ -1211,7 +1270,18 @@ private data class TmdbMedia(
     @JsonProperty("original_language") val original_language: String? = null,
     @JsonProperty("release_date") val releaseDate: String? = null,
     @JsonProperty("first_air_date") val firstAirDate: String? = null
-)
+) {
+    fun toSearchResponse(typeFallback: String): SearchResponse {
+        val outType = if (this.mediaType == "tv" || typeFallback == "tv") "series" else "movie"
+        val posterType = if (outType == "series") "tv" else "movie"
+        val thinUrl = mapOf("id" to "tmdb:${this.id}", "type" to outType).toJson()
+        val customPosterUrl = "https://xrdb.ibbylabs.dev/poster/tmdb:$posterType:${this.id}.jpg?idSource=tmdb&tmdbKey=cc9982c4801545a1481d167137ea7b53&mdblistKey=d2tmbmhnrgdz7ft9re7j2gjr3&posterRatings=myanimelist%2Cimdb%2Cletterboxd%2Cmetacriticuser%2Ctomatoesaudience%2Ctrakt%2Ctmdb%2Cmetacritic%2Ctomatoes%2Crogerebert&lang=ko&ratingValueMode=normalized&posterGenreBadgeStyle=plain&posterGenreBadgePosition=bottomLeft&posterStreamBadges=on&ageRatingBadgePosition=left-top&posterQualityBadges=&posterRatingStyle=plain&posterRatingBadgeScale=115&imageText=original&posterRatingsLayout=right&posterNoBackgroundBadgeOutlineColor=%23ff0000&posterEdgeOffset=3&providerAppearance=eyJ0b21hdG9lcyI6eyJzdGFja2VkQWNjZW50TW9kZSI6ImxvZ28ifX0"
+        
+        return newMovieSearchResponse(this.title ?: this.name ?: this.originalTitle ?: "TMDB: ${this.id}", thinUrl, if (outType == "movie") TvType.Movie else TvType.TvSeries) {
+            this.posterUrl = customPosterUrl
+        }
+    }
+}
 
 private data class TmdbReleaseDates(@JsonProperty("results") val results: List<TmdbReleaseDateResult>?)
 private data class TmdbReleaseDateResult(@JsonProperty("iso_3166_1") val iso_3166_1: String?, @JsonProperty("release_dates") val release_dates: List<TmdbReleaseDate>?)
