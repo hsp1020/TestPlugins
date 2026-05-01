@@ -1,4 +1,4 @@
-// v1.186 (CineTmdb Replica: Rich UI Display with Ultra-Light Cache)
+// v1.187 (Final Correction: CineTmdb Parity, Fixed 404 Bug & Restored UI)
 package com.hsp1020
 
 import android.content.Context
@@ -515,7 +515,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val mdbRatings = mdbDeferred?.await() ?: emptyList()
         if (mdbRatings.isNotEmpty()) {
             val ratingStr = mdbRatings.joinToString("  ")
-            loadRes.plot = if (loadRes.plot != null) "$ratingStr | ${loadRes.plot}" else ratingStr
+            loadRes.plot = if (!loadRes.plot.isNullOrBlank()) "$ratingStr | ${loadRes.plot}" else ratingStr
         }
         
         println("StremioC: Load completed for ${loadRes.name}")
@@ -889,7 +889,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             
             val detailRes = preFetchedDetail ?: run {
                 val detailAppend = if (isMovie) "release_dates,credits,images,videos,external_ids,recommendations,translations" else "content_ratings,credits,images,videos,external_ids,recommendations,translations"
-                val detailUrl = provider.buildTmdbUrl("/$tmdbMediaType/$id", "append_to_response" to detailAppend)
+                // 🚨 FATAL BUG FIXED: $id(IMDb ID) -> $tmdbIdStr(TMDB Number ID)로 수정하여 404 에러 방지
+                val detailUrl = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr", "append_to_response" to detailAppend)
                 StremioC.customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>()
             }
             
@@ -1024,8 +1025,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     
                     val customPosterUrl = "https://xrdb.ibbylabs.dev/poster/tmdb:$posterType:$recTmdbId.jpg?idSource=tmdb&tmdbKey=cc9982c4801545a1481d167137ea7b53&mdblistKey=d2tmbmhnrgdz7ft9re7j2gjr3&posterRatings=myanimelist%2Cimdb%2Cletterboxd%2Cmetacriticuser%2Ctomatoesaudience%2Ctrakt%2Ctmdb%2Cmetacritic%2Ctomatoes%2Crogerebert&lang=ko&ratingValueMode=normalized&posterGenreBadgeStyle=plain&posterGenreBadgePosition=bottomLeft&posterStreamBadges=on&ageRatingBadgePosition=left-top&posterQualityBadges=&posterRatingStyle=plain&posterRatingBadgeScale=115&imageText=original&posterRatingsLayout=right&posterNoBackgroundBadgeOutlineColor=%23ff0000&posterEdgeOffset=3&providerAppearance=eyJ0b21hdG9lcyI6eyJzdGFja2VkQWNjZW50TW9kZSI6ImxvZ28ifX0"
                     
+                    // 🔹 CineTmdb의 추천목록 방식(Thin ID) 완벽 복제
                     val thinRecUrl = mapOf("id" to "tmdb:${media.id}", "type" to outType).toJson()
-                    provider.newMovieSearchResponse(recTitle, thinRecUrl, if (outType == "movie") TvType.Movie else TvType.TvSeries) { this.posterUrl = customPosterUrl }
+                    provider.newMovieSearchResponse(recTitle, thinRecUrl, if (outType == "movie") TvType.Movie else TvType.TvSeries) { 
+                        this.posterUrl = customPosterUrl 
+                    }
                 }
             }
 
@@ -1246,16 +1250,22 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
                     
-                    // 🔹 v1.186: CineTmdb 클론 로직 - 화면 표시용 데이터 전송 (캐시에는 저장되지만 CineTmdb와 동일 사양)
+                    // 🔹 UI 정상화: 404 버그 해결 후 TMDB 원본 데이터 직접 주입
                     this.plot = tmdbData?.fetchedOverview ?: this@CatalogEntry.description
                     this.actors = tmdbData?.fetchedActors
                     this.tags = finalGenre
                     
-                    // 🔹 v1.186: 캐시 용량 폭증의 주범인 추천 목록은 null 처리 (앱의 실시간 주입에 맡김)
-                    this.recommendations = null 
+                    // 🔹 CineTmdb의 완벽 복제: 가벼운 Thin ID 추천 목록 주입
+                    this.recommendations = tmdbData?.fetchedRecommendations 
                     
                     addTrailer(finalTrailers); this.duration = tmdbData?.fetchedRuntime; this.contentRating = tmdbData?.fetchedAgeRating
                     tmdbData?.fetchedLogo?.let { this.logoUrl = it }; tmdbIdStr?.let { addTMDbId(it) }; finalImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }
+                }.apply {
+                    val mdbRatings = mdbDeferred?.await() ?: emptyList()
+                    if (mdbRatings.isNotEmpty()) {
+                        val ratingStr = mdbRatings.joinToString("  ")
+                        this.plot = if (!this.plot.isNullOrBlank()) "$ratingStr | ${this.plot}" else ratingStr
+                    }
                 }
             } else {
                 val finalEpisodes = processEpisodes(provider, finalImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, tmdbIdStr?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, fetchedAniListId, fetchedMalId, this@CatalogEntry.kitsuIdExt)
@@ -1266,14 +1276,20 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
                     this.showStatus = tmdbData?.fetchedStatus 
                     
-                    // 🔹 v1.186: TV 시리즈 UI 데이터 전송
+                    // 🔹 UI 정상화
                     this.plot = tmdbData?.fetchedOverview ?: this@CatalogEntry.description
                     this.actors = tmdbData?.fetchedActors
                     this.tags = finalGenre
-                    this.recommendations = null
+                    this.recommendations = tmdbData?.fetchedRecommendations
                     
                     addTrailer(finalTrailers.firstOrNull()); this.contentRating = tmdbData?.fetchedAgeRating
                     tmdbData?.fetchedLogo?.let { this.logoUrl = it }; tmdbIdStr?.let { addTMDbId(it) }; finalImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }
+                }.apply {
+                    val mdbRatings = mdbDeferred?.await() ?: emptyList()
+                    if (mdbRatings.isNotEmpty()) {
+                        val ratingStr = mdbRatings.joinToString("  ")
+                        this.plot = if (!this.plot.isNullOrBlank()) "$ratingStr | ${this.plot}" else ratingStr
+                    }
                 }
             }
         }
