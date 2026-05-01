@@ -1,4 +1,4 @@
-// v1.198 (Strict v1.188 Base + ONLY Kitsu/MAL API Fix & Stream Matching Fix)
+// v1.198 (Build Fix: Corrected property references on tmdbData object)
 package com.hsp1020
 
 import android.content.Context
@@ -443,7 +443,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         var fetchedMalId: Int? = null
         var resolvedImdbId: String? = null
         var resolvedTmdbId: String? = null
-        var kitsuVideos: List<Video>? = null
         
         if (isKitsuOrMal) {
             runSuspendCatching {
@@ -457,17 +456,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 
                 fetchedAniListId = metaObj?.optInt("anilist_id")?.takeIf { it != 0 }
                 fetchedMalId = metaObj?.optInt("mal_id")?.takeIf { it != 0 }
-
-                metaObj?.optJSONArray("videos")?.let { arr ->
-                    val vids = mutableListOf<Video>()
-                    for (i in 0 until arr.length()) {
-                        val v = arr.optJSONObject(i)
-                        if (v != null) {
-                            runSuspendCatching { vids.add(parseJson<Video>(v.toString())) }
-                        }
-                    }
-                    if (vids.isNotEmpty()) kitsuVideos = vids
-                }
             }
         }
 
@@ -500,7 +488,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val tmdbDeferred = targetTmdbId?.let { id ->
             async(Dispatchers.IO) {
                 val mediaType = if (res.type == "movie") "movie" else "tv"
-                val detailAppend = if (mediaType == "movie") "release_dates,credits,images,videos,external_ids,recommendations,translations" else "content_ratings,credits,images,videos,external_ids,recommendations,translations"
+                val detailAppend = if (mediaType == "movie") "release_dates,credits,images,videos,external_ids,recommendations,similar,translations" else "content_ratings,credits,images,videos,external_ids,recommendations,similar,translations"
                 val detailUrl = buildTmdbUrl("/$mediaType/$id", "append_to_response" to detailAppend)
                 runSuspendCatching { customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>() }.getOrNull()
             }
@@ -522,8 +510,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             preFetchedDetail = preFetchedTmdbDetail, 
             fetchedAniListId = fetchedAniListId, 
             fetchedMalId = fetchedMalId, 
-            resolvedTmdbId = resolvedTmdbId,
-            kitsuVideos = kitsuVideos
+            resolvedTmdbId = resolvedTmdbId
         )
         
         val mdbRatings = mdbDeferred?.await() ?: emptyList()
@@ -848,6 +835,16 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private data class TrailerStream(@JsonProperty("ytId") val ytId: String?, @JsonProperty("title") val title: String? = null)
     private data class Link(@JsonProperty("name") val name: String? = null, @JsonProperty("category") val category: String? = null, @JsonProperty("url") val url: String? = null)
 
+    private data class FetchedTmdbData(
+        val fetchedTitle: String?, val fetchedOverview: String?, val fetchedLogo: String?,
+        val fetchedTrailers: List<String>, val fetchedRecommendations: List<SearchResponse>?,
+        val fetchedRuntime: Int?, val fetchedAgeRating: String?, val fetchedActors: List<ActorData>?,
+        val fetchedYear: Int?, val fetchedStatus: ShowStatus?, val episodeTmdbMeta: Map<String, TmdbEpisode>,
+        val fetchedOriginCountry: List<String>?,
+        val fetchedOriginalTitle: String?,
+        val fetchedEnglishTitle: String?
+    )
+
     private data class CatalogEntry(
         @JsonProperty("name") val name: String? = null, 
         @JsonProperty("id") val id: String, 
@@ -896,7 +893,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             var fetchedRecommendations: List<SearchResponse>? = null
             
             val detailRes = preFetchedDetail ?: run {
-                val detailAppend = if (isMovie) "release_dates,credits,images,videos,external_ids,recommendations,translations" else "content_ratings,credits,images,videos,external_ids,recommendations,translations"
+                val detailAppend = if (isMovie) "release_dates,credits,images,videos,external_ids,recommendations,similar,translations" else "content_ratings,credits,images,videos,external_ids,recommendations,similar,translations"
                 val detailUrl = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr", "append_to_response" to detailAppend)
                 StremioC.customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>()
             }
@@ -980,6 +977,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val simklResults = simklDeferred.await()
                 
                 val tmdbRecs = detailRes.recommendations?.results ?: emptyList()
+                val tmdbSimilar = detailRes.similar?.results ?: emptyList()
                 val tmdbRecsIds = tmdbRecs.mapNotNull { it.id }.toSet()
 
                 val existingTmdbIds = collectionParts.mapNotNull { it.id }.toSet() + tmdbRecsIds
@@ -1000,7 +998,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
                 val fetchedMissingMedia = missingMediaDeferred.awaitAll().filterNotNull()
 
-                val allCandidates = (collectionParts + tmdbRecs + fetchedMissingMedia).distinctBy { it.id }.filter { it.id != null && it.id != tmdbIdStr.toIntOrNull() }
+                val allCandidates = (collectionParts + tmdbRecs + tmdbSimilar + fetchedMissingMedia).distinctBy { it.id }.filter { it.id != null && it.id != tmdbIdStr.toIntOrNull() }
                 
                 val traktIds = traktResults.map { it.first }.toSet()
                 val simklIds = simklResults.map { it.first }.toSet()
@@ -1145,8 +1143,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             preFetchedDetail: TmdbDetailResponse? = null, 
             fetchedAniListId: Int? = null, 
             fetchedMalId: Int? = null, 
-            resolvedTmdbId: String? = null,
-            kitsuVideos: List<Video>? = null
+            resolvedTmdbId: String? = null
         ): LoadResponse = coroutineScope {
             var finalImdbId = if (this@CatalogEntry.id.startsWith("tt")) this@CatalogEntry.id 
                               else imdbId?.takeIf { it.startsWith("tt") || it.startsWith("kitsu:") || it.startsWith("mal:") }
@@ -1171,7 +1168,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
             } else null
 
-            var finalVideos = kitsuVideos ?: detailedEntry.videos ?: this@CatalogEntry.videos
+            var finalVideos = detailedEntry.videos ?: this@CatalogEntry.videos
             val finalTrailersSources = detailedEntry.trailersSources ?: this@CatalogEntry.trailersSources
             val finalTrailerStreams = detailedEntry.trailerStreams ?: this@CatalogEntry.trailerStreams
             val originalName = detailedEntry.name ?: this@CatalogEntry.name
@@ -1433,6 +1430,7 @@ private data class TmdbDetailResponse(
     @JsonProperty("original_language") val original_language: String? = null, 
     @JsonProperty("belongs_to_collection") val belongs_to_collection: TmdbCollection? = null, 
     @JsonProperty("recommendations") val recommendations: TmdbRecommendations? = null,
+    @JsonProperty("similar") val similar: TmdbRecommendations? = null, 
     @JsonProperty("runtime") val runtime: Int? = null, 
     @JsonProperty("release_dates") val release_dates: TmdbReleaseDates? = null, 
     @JsonProperty("content_ratings") val content_ratings: TmdbContentRatings? = null, 
