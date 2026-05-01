@@ -1,4 +1,4 @@
-// v1.192 (Build Fix & Ultra-Fast Engine: Fixed Scope, Type Inference & Parallelism)
+// v1.193 (Build Fix & Ultra-Fast Engine: Fixed Receiver Scope & Parallelism)
 package com.hsp1020
 
 import android.content.Context
@@ -233,25 +233,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
                 result
             }
-        }
-    }
-
-    private fun CatalogEntry.toSearchResponse(): SearchResponse {
-        val thinUrl = mapOf("id" to this.id, "type" to (this.type ?: "movie")).toJson()
-        return newMovieSearchResponse(this.name ?: "Unknown", thinUrl, TvType.Others) { 
-            this.posterUrl = this@toSearchResponse.poster 
-            this.score = this@toSearchResponse.imdbRating?.let { Score.from10(it) }
-        }
-    }
-
-    private fun TmdbMedia.toSearchResponse(typeFallback: String): SearchResponse {
-        val outType = if (this.mediaType == "tv" || typeFallback == "tv") "series" else "movie"
-        val posterType = if (outType == "series") "tv" else "movie"
-        val thinUrl = mapOf("id" to "tmdb:${this.id}", "type" to outType).toJson()
-        val customPosterUrl = "https://xrdb.ibbylabs.dev/poster/tmdb:$posterType:${this.id}.jpg?idSource=tmdb&tmdbKey=cc9982c4801545a1481d167137ea7b53&mdblistKey=d2tmbmhnrgdz7ft9re7j2gjr3&posterRatings=myanimelist%2Cimdb%2Cletterboxd%2Cmetacriticuser%2Ctomatoesaudience%2Ctrakt%2Ctmdb%2Cmetacritic%2Ctomatoes%2Crogerebert&lang=ko&ratingValueMode=normalized&posterGenreBadgeStyle=plain&posterGenreBadgePosition=bottomLeft&posterStreamBadges=on&ageRatingBadgePosition=left-top&posterQualityBadges=&posterRatingStyle=plain&posterRatingBadgeScale=115&imageText=original&posterRatingsLayout=right&posterNoBackgroundBadgeOutlineColor=%23ff0000&posterEdgeOffset=3&providerAppearance=eyJ0b21hdG9lcyI6eyJzdGFja2VkQWNjZW50TW9kZSI6ImxvZ28ifX0"
-        
-        return newMovieSearchResponse(this.title ?: this.name ?: this.originalTitle ?: "TMDB: ${this.id}", thinUrl, if (outType == "movie") TvType.Movie else TvType.TvSeries) {
-            this.posterUrl = customPosterUrl
         }
     }
 
@@ -500,7 +481,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
         val mdbDeferred = primaryMdbId?.let { id ->
             async(Dispatchers.IO) {
-                // To avoid breaking if fetchMdbListRatings doesn't exist, wrap it safely or return empty
                 runSuspendCatching<List<String>> { 
                     try {
                         val method = this@StremioC::class.java.getDeclaredMethod("fetchMdbListRatings", String::class.java, Boolean::class.java)
@@ -556,6 +536,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
 
         val preFetchedTmdbDetail = tmdbDeferred?.await()
+        val mdbRatings = mdbDeferred?.await() ?: emptyList()
         val detailedEntry = addonDeferred.await() ?: res
         val traktIds = traktDeferred.await()
         val simklIds = simklDeferred.await()
@@ -600,7 +581,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             .map { (id, typeInfo) ->
                 val media = allTmdbMedia[id]
                 if (media != null) {
-                    media.toSearchResponse(typeInfo.second)
+                    media.toSearchResponse(this@StremioC, typeInfo.second)
                 } else {
                     val outType = if (typeInfo.second == "tv") "series" else "movie"
                     val posterType = if (typeInfo.second == "tv") "tv" else "movie"
@@ -645,7 +626,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val isAnimeMedia = fetchedMalId != null || finalImdbId?.startsWith("mal:") == true || finalImdbId?.startsWith("kitsu:") == true || finalGenre?.contains("Anime") == true || (countries.any { it.contains("JP", true) } && finalGenre?.any { it.contains("Animation", true) } == true)
         val extractedEnglishTitle = preFetchedTmdbDetail?.translations?.translations?.find { it.iso_3166_1 == "US" || it.iso_639_1 == "en" }?.data?.let { it.title ?: it.name } ?: preFetchedTmdbDetail?.original_title ?: preFetchedTmdbDetail?.original_name
         
-        val mdbRatings = mdbDeferred?.await() ?: emptyList()
         val ratingStr = if (mdbRatings.isNotEmpty()) mdbRatings.joinToString("  ") + " | " else ""
         val finalPlot = ratingStr + (preFetchedTmdbDetail?.overview ?: detailedEntry.description ?: "")
         
@@ -1003,7 +983,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     }
                 }.awaitAll().flatten()
             }
-            return allMetas.distinctBy { it.id }.map { it.toSearchResponse() }
+            return allMetas.distinctBy { it.id }.map { it.toSearchResponse(provider) }
         }
 
         suspend fun toHomePageList(provider: StremioC, skip: Int): Pair<HomePageList, Int> {
@@ -1015,7 +995,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     }
                 }.awaitAll().flatten()
             }
-            val distinctEntries = allMetas.distinctBy { it.id }.map { it.toSearchResponse() }
+            val distinctEntries = allMetas.distinctBy { it.id }.map { it.toSearchResponse(provider) }
             val displayType = type?.replaceFirstChar { it.uppercase() } ?: ""
             return Pair(HomePageList("${name ?: id} - $displayType", distinctEntries), allMetas.size)
         }
@@ -1048,7 +1028,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         @JsonProperty("trailerStreams") val trailerStreams: List<TrailerStream> = emptyList(), 
         @JsonProperty("links") val links: List<Link> = emptyList()
     ) {
-        fun toSearchResponse(): SearchResponse {
+        fun toSearchResponse(provider: StremioC): SearchResponse {
             val thinUrl = mapOf(
                 "id" to this.id,
                 "type" to (this.type ?: "movie"),
@@ -1058,7 +1038,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "kitsuId" to this.kitsuIdExt
             ).toJson()
 
-            return newMovieSearchResponse(name ?: "Unknown", thinUrl, TvType.Others) { 
+            return provider.newMovieSearchResponse(name ?: "Unknown", thinUrl, TvType.Others) { 
                 posterUrl = poster 
             }
         }
@@ -1271,13 +1251,13 @@ private data class TmdbMedia(
     @JsonProperty("release_date") val releaseDate: String? = null,
     @JsonProperty("first_air_date") val firstAirDate: String? = null
 ) {
-    fun toSearchResponse(typeFallback: String): SearchResponse {
+    fun toSearchResponse(provider: StremioC, typeFallback: String): SearchResponse {
         val outType = if (this.mediaType == "tv" || typeFallback == "tv") "series" else "movie"
         val posterType = if (outType == "series") "tv" else "movie"
         val thinUrl = mapOf("id" to "tmdb:${this.id}", "type" to outType).toJson()
         val customPosterUrl = "https://xrdb.ibbylabs.dev/poster/tmdb:$posterType:${this.id}.jpg?idSource=tmdb&tmdbKey=cc9982c4801545a1481d167137ea7b53&mdblistKey=d2tmbmhnrgdz7ft9re7j2gjr3&posterRatings=myanimelist%2Cimdb%2Cletterboxd%2Cmetacriticuser%2Ctomatoesaudience%2Ctrakt%2Ctmdb%2Cmetacritic%2Ctomatoes%2Crogerebert&lang=ko&ratingValueMode=normalized&posterGenreBadgeStyle=plain&posterGenreBadgePosition=bottomLeft&posterStreamBadges=on&ageRatingBadgePosition=left-top&posterQualityBadges=&posterRatingStyle=plain&posterRatingBadgeScale=115&imageText=original&posterRatingsLayout=right&posterNoBackgroundBadgeOutlineColor=%23ff0000&posterEdgeOffset=3&providerAppearance=eyJ0b21hdG9lcyI6eyJzdGFja2VkQWNjZW50TW9kZSI6ImxvZ28ifX0"
         
-        return newMovieSearchResponse(this.title ?: this.name ?: this.originalTitle ?: "TMDB: ${this.id}", thinUrl, if (outType == "movie") TvType.Movie else TvType.TvSeries) {
+        return provider.newMovieSearchResponse(this.title ?: this.name ?: this.originalTitle ?: "TMDB: ${this.id}", thinUrl, if (outType == "movie") TvType.Movie else TvType.TvSeries) {
             this.posterUrl = customPosterUrl
         }
     }
