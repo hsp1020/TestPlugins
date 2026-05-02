@@ -1178,8 +1178,17 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
 
             var finalName = originalName ?: this@CatalogEntry.name ?: "Unknown Content"
+            // v1.170의 description 병합 로직 복구
+            var finalDescription = detailedEntry.description ?: this@CatalogEntry.description
+            
             if (tmdbData != null) {
                 if (!tmdbData.fetchedTitle.isNullOrBlank()) finalName = tmdbData.fetchedTitle
+                finalDescription = tmdbData.fetchedOverview?.takeIf { it.isNotBlank() } ?: finalDescription
+            }
+            
+            // other 타입일 경우 원본 파일명(originalName)을 플롯에 추가
+            if (finalType == "other") {
+                finalDescription = if (finalDescription.isNullOrBlank()) originalName else "$finalDescription | $originalName"
             }
 
             val fallbackMovieId = this@CatalogEntry.kitsuIdExt?.let { "kitsu:$it" } ?: this@CatalogEntry.id
@@ -1237,8 +1246,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     )
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
-                    
-                    this.plot = tmdbData?.fetchedOverview ?: this@CatalogEntry.description
+
+                    // 복구한 finalDescription 적용
+                    this.plot = finalDescription
                     this.actors = tmdbData?.fetchedActors
                     this.tags = finalGenre
                     this.recommendations = tmdbData?.fetchedRecommendations 
@@ -1255,7 +1265,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
                     this.showStatus = tmdbData?.fetchedStatus 
                     
-                    this.plot = tmdbData?.fetchedOverview ?: this@CatalogEntry.description
+                    // 복구한 finalDescription 적용
+                    this.plot = finalDescription
                     this.actors = tmdbData?.fetchedActors
                     this.tags = finalGenre
                     this.recommendations = tmdbData?.fetchedRecommendations
@@ -1313,10 +1324,16 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             )) {
                 val rawTitle = this@Video.name ?: this@Video.title ?: "Episode $displayEpisode"
                 val cleanOriginalTitle = if (rawTitle.contains("📄")) rawTitle.substringAfter("📄").replace("\n", "").trim() else rawTitle.replace("\n", "").trim()
-                
+
                 this.name = if (tmdbEp?.name != null) tmdbEp.name else cleanOriginalTitle
                 this.posterUrl = thumbnail ?: TRANSPARENT_PIXEL
-                this.description = tmdbEp?.overview ?: this@Video.overview ?: this@Video.description
+                
+                // 파일명(cleanOriginalTitle)을 플롯에 병합하는 v1.170 로직 복구
+                var finalEpDesc = tmdbEp?.overview ?: this@Video.overview ?: this@Video.description
+                if (type == "other") {
+                    finalEpDesc = if (finalEpDesc.isNullOrBlank()) cleanOriginalTitle else "$finalEpDesc | $cleanOriginalTitle"
+                }
+                this.description = finalEpDesc                
                 this.season = displaySeason
                 this.episode = displayEpisode
 
