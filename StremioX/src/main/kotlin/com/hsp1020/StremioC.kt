@@ -442,8 +442,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 
                 resolvedImdbId = metaObj?.optString("imdb_id")?.takeIf { it.startsWith("tt") }
                 resolvedTmdbId = metaObj?.optString("tmdb_id")?.takeIf { it.isNotBlank() } ?: metaObj?.optInt("moviedb_id")?.takeIf { it > 0 }?.toString()
-                val kId = metaObj?.optString("kitsu_id")?.takeIf { it.isNotBlank() } ?: metaObj?.optInt("kitsu_id")?.takeIf { it > 0 }?.toString()
-                resolvedKitsuId = if (kId != null) "kitsu:$kId" else metaObj?.optString("id")?.takeIf { it.startsWith("kitsu:") }
                 
                 fetchedAniListId = metaObj?.optInt("anilist_id")?.takeIf { it != 0 }
                 fetchedMalId = metaObj?.optInt("mal_id")?.takeIf { it != 0 }
@@ -478,7 +476,20 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     if (vids.isNotEmpty()) {
                         kitsuVideos = vids
                         println("StremioC v1.205 Debug: Kitsu Manual JSON mapping completed for ${vids.size} videos")
+                        
+                        val firstVidId = vids.firstOrNull()?.id
+                        if (firstVidId != null && firstVidId.startsWith("kitsu:")) {
+                            val parts = firstVidId.split(":")
+                            if (parts.size >= 2) {
+                                resolvedKitsuId = "${parts[0]}:${parts[1]}"
+                            }
+                        }
                     }
+                }
+                
+                if (resolvedKitsuId == null) {
+                    val kId = metaObj?.optString("kitsu_id")?.takeIf { it.isNotBlank() } ?: metaObj?.optInt("kitsu_id")?.takeIf { it > 0 }?.toString()
+                    resolvedKitsuId = if (kId != null) "kitsu:$kId" else metaObj?.optString("id")?.takeIf { it.startsWith("kitsu:") }
                 }
             }
         }
