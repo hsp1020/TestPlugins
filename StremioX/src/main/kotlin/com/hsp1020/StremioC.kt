@@ -1131,6 +1131,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             fetchedMalId: Int? = null, 
             resolvedTmdbId: String? = null,
             kitsuVideos: List<Video>? = null
+            resolvedKitsuId: String? = null // ⬅️ 파라미터 복구
         ): LoadResponse = coroutineScope {
             // 1. 네트워크에서 상세 JSON(links, logo 등 포함)을 먼저 가져옵니다.
             val detailedEntry = addonDeferred?.await() ?: this@CatalogEntry
@@ -1197,7 +1198,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 finalDescription = if (finalDescription.isNullOrBlank()) originalName else "$finalDescription | $originalName"
             }
 
-            val fallbackMovieId = this@CatalogEntry.kitsuIdExt?.let { "kitsu:$it" } ?: this@CatalogEntry.id
+            val fallbackMovieId = resolvedKitsuId ?: this@CatalogEntry.kitsuIdExt?.let { "kitsu:$it" } ?: this@CatalogEntry.id
             if (tmdbData != null && finalVideos.isNullOrEmpty() && tmdbData.episodeTmdbMeta.isNotEmpty()) {
                 val generatedVideos = tmdbData.episodeTmdbMeta.mapNotNull { (key, tmdbEp) ->
                     val parts = key.split("_")
