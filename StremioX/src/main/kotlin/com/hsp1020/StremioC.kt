@@ -1126,19 +1126,23 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             resolvedTmdbId: String? = null,
             kitsuVideos: List<Video>? = null
         ): LoadResponse = coroutineScope {
+            // 1. 네트워크에서 상세 JSON(links, logo 등 포함)을 먼저 가져옵니다.
+            val detailedEntry = addonDeferred?.await() ?: this@CatalogEntry
+
             var finalImdbId = if (this@CatalogEntry.id.startsWith("tt")) this@CatalogEntry.id 
                               else imdbId?.takeIf { it.startsWith("tt") || it.startsWith("kitsu:") || it.startsWith("mal:") }
             
-            if (finalImdbId == null && this@CatalogEntry.links.isNotEmpty()) {
-                finalImdbId = this@CatalogEntry.links.firstOrNull { it.category == "imdb" }?.url?.substringAfterLast("/")?.takeIf { it.startsWith("tt") }
+            // 2. this@CatalogEntry(빈 껍데기)가 아닌 detailedEntry(전체 데이터)에서 links를 찾습니다.
+            if (finalImdbId == null && detailedEntry.links.isNotEmpty()) {
+                finalImdbId = detailedEntry.links.firstOrNull { it.category == "imdb" }?.url?.substringAfterLast("/")?.takeIf { it.startsWith("tt") }
             }
+            // 3. 마찬가지로 detailedEntry의 이미지 URL들에서 IMDb ID를 추출합니다.
             if (finalImdbId == null) {
-                finalImdbId = provider.extractImdbId(logo) ?: provider.extractImdbId(poster) ?: provider.extractImdbId(background)
+                finalImdbId = provider.extractImdbId(detailedEntry.logo) ?: provider.extractImdbId(detailedEntry.poster) ?: provider.extractImdbId(detailedEntry.background)
             }
 
-            val detailedEntry = addonDeferred?.await() ?: this@CatalogEntry
             var tmdbIdStr: String? = resolvedTmdbId ?: if (this@CatalogEntry.id.startsWith("tmdb:")) this@CatalogEntry.id.removePrefix("tmdb:") else this@CatalogEntry.moviedb_id?.toString() ?: this@CatalogEntry.tmdbIdExt ?: detailedEntry.tmdbIdExt
-            
+
             val findApiDeferred = if (tmdbIdStr == null && finalImdbId?.startsWith("tt") == true) {
                 async(Dispatchers.IO) {
                     runSuspendCatching {
