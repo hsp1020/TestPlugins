@@ -538,7 +538,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             fetchedAniListId = fetchedAniListId, 
             fetchedMalId = fetchedMalId, 
             resolvedTmdbId = resolvedTmdbId,
-            kitsuVideos = kitsuVideos
+            kitsuVideos = kitsuVideos,
+            resolvedKitsuId = resolvedKitsuId // ⬅️ 파라미터 추가 전달!
         )
         
         val mdbRatings = mdbDeferred?.await() ?: emptyList()
@@ -1130,7 +1131,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             fetchedAniListId: Int? = null, 
             fetchedMalId: Int? = null, 
             resolvedTmdbId: String? = null,
-            kitsuVideos: List<Video>? = null
+            kitsuVideos: List<Video>? = null,
             resolvedKitsuId: String? = null // ⬅️ 파라미터 복구
         ): LoadResponse = coroutineScope {
             // 1. 네트워크에서 상세 JSON(links, logo 등 포함)을 먼저 가져옵니다.
