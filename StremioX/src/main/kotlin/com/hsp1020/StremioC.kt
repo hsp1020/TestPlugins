@@ -1,4 +1,8 @@
 // v1.205 (StremioX and Stremio Subtitles pipelines cleanly removed, Unified to CineStream)
+// + other 타입 메타데이터 누락 픽스 (detailedEntry 위치 변경)
+// + other 타입 파일명 플롯 병합 로직 복구
+// + Kitsu/Mal ID 강제 덮어쓰기 픽스 (loadLinks)
+
 package com.hsp1020
 
 import android.content.Context
@@ -431,7 +435,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         var resolvedImdbId: String? = null
         var resolvedTmdbId: String? = null
         var kitsuVideos: List<Video>? = null
-        var resolvedKitsuId: String? = null // ⬅️ Kitsu ID를 담을 변수 추가
         
         if (isKitsuOrMal) {
             runSuspendCatching {
@@ -476,20 +479,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     if (vids.isNotEmpty()) {
                         kitsuVideos = vids
                         println("StremioC v1.205 Debug: Kitsu Manual JSON mapping completed for ${vids.size} videos")
-                        
-                        val firstVidId = vids.firstOrNull()?.id
-                        if (firstVidId != null && firstVidId.startsWith("kitsu:")) {
-                            val parts = firstVidId.split(":")
-                            if (parts.size >= 2) {
-                                resolvedKitsuId = "${parts[0]}:${parts[1]}"
-                            }
-                        }
                     }
-                }
-                
-                if (resolvedKitsuId == null) {
-                    val kId = metaObj?.optString("kitsu_id")?.takeIf { it.isNotBlank() } ?: metaObj?.optInt("kitsu_id")?.takeIf { it > 0 }?.toString()
-                    resolvedKitsuId = if (kId != null) "kitsu:$kId" else metaObj?.optString("id")?.takeIf { it.startsWith("kitsu:") }
                 }
             }
         }
@@ -534,10 +524,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         var finalProcessedId = res.id
         var imdbId = resolvedImdbId ?: preFetchedTmdbDetail?.external_ids?.imdb_id
 
-        if (imdbId.isNullOrBlank() && res.id.startsWith("mal:") && !resolvedKitsuId.isNullOrBlank()) {
-            imdbId = resolvedKitsuId
-        }
-                
         if (!imdbId.isNullOrBlank() && (imdbId.startsWith("tt") || imdbId.startsWith("kitsu:"))) {
             finalProcessedId = imdbId
         }
@@ -550,8 +536,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             fetchedAniListId = fetchedAniListId, 
             fetchedMalId = fetchedMalId, 
             resolvedTmdbId = resolvedTmdbId,
-            kitsuVideos = kitsuVideos,
-            resolvedKitsuId = resolvedKitsuId // ⬅️ 파라미터 추가 전달!
+            kitsuVideos = kitsuVideos
         )
         
         val mdbRatings = mdbDeferred?.await() ?: emptyList()
@@ -567,9 +552,17 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         println("StremioC v1.205 Debug: loadLinks invoked with data=$data")
-        val loadData = try { parseJson<LoadData>(data) } catch (e: Exception) { null } ?: return false
+        val rawLoadData = try { parseJson<LoadData>(data) } catch (e: Exception) { null } ?: return false
+        
+        val loadData = if (rawLoadData.id?.startsWith("kitsu:") == true || rawLoadData.id?.startsWith("mal:") == true) {
+            val parts = rawLoadData.id.split(":")
+            val baseId = if (parts.size >= 2) "${parts[0]}:${parts[1]}" else rawLoadData.id
+            rawLoadData.copy(imdbId = baseId)
+        } else {
+            rawLoadData
+        }
 
-        val primaryId = if ((loadData.id?.startsWith("tmdb:") == true || loadData.id?.startsWith("mal:") == true) && !loadData.imdbId.isNullOrBlank()) {
+        val primaryId = if (loadData.id?.startsWith("tmdb:") == true && !loadData.imdbId.isNullOrBlank()) {
             loadData.imdbId
         } else {
             loadData.id ?: ""
@@ -1143,26 +1136,22 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             fetchedAniListId: Int? = null, 
             fetchedMalId: Int? = null, 
             resolvedTmdbId: String? = null,
-            kitsuVideos: List<Video>? = null,
-            resolvedKitsuId: String? = null // ⬅️ 파라미터 복구
+            kitsuVideos: List<Video>? = null
         ): LoadResponse = coroutineScope {
-            // 1. 네트워크에서 상세 JSON(links, logo 등 포함)을 먼저 가져옵니다.
             val detailedEntry = addonDeferred?.await() ?: this@CatalogEntry
 
             var finalImdbId = if (this@CatalogEntry.id.startsWith("tt")) this@CatalogEntry.id 
                               else imdbId?.takeIf { it.startsWith("tt") || it.startsWith("kitsu:") || it.startsWith("mal:") }
             
-            // 2. this@CatalogEntry(빈 껍데기)가 아닌 detailedEntry(전체 데이터)에서 links를 찾습니다.
             if (finalImdbId == null && detailedEntry.links.isNotEmpty()) {
                 finalImdbId = detailedEntry.links.firstOrNull { it.category == "imdb" }?.url?.substringAfterLast("/")?.takeIf { it.startsWith("tt") }
             }
-            // 3. 마찬가지로 detailedEntry의 이미지 URL들에서 IMDb ID를 추출합니다.
             if (finalImdbId == null) {
                 finalImdbId = provider.extractImdbId(detailedEntry.logo) ?: provider.extractImdbId(detailedEntry.poster) ?: provider.extractImdbId(detailedEntry.background)
             }
 
             var tmdbIdStr: String? = resolvedTmdbId ?: if (this@CatalogEntry.id.startsWith("tmdb:")) this@CatalogEntry.id.removePrefix("tmdb:") else this@CatalogEntry.moviedb_id?.toString() ?: this@CatalogEntry.tmdbIdExt ?: detailedEntry.tmdbIdExt
-
+            
             val findApiDeferred = if (tmdbIdStr == null && finalImdbId?.startsWith("tt") == true) {
                 async(Dispatchers.IO) {
                     runSuspendCatching {
@@ -1198,7 +1187,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
 
             var finalName = originalName ?: this@CatalogEntry.name ?: "Unknown Content"
-            // v1.170의 description 병합 로직 복구
             var finalDescription = detailedEntry.description ?: this@CatalogEntry.description
             
             if (tmdbData != null) {
@@ -1206,12 +1194,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 finalDescription = tmdbData.fetchedOverview?.takeIf { it.isNotBlank() } ?: finalDescription
             }
             
-            // other 타입일 경우 원본 파일명(originalName)을 플롯에 추가
             if (finalType == "other") {
                 finalDescription = if (finalDescription.isNullOrBlank()) originalName else "$finalDescription | $originalName"
             }
 
-            val fallbackMovieId = resolvedKitsuId ?: this@CatalogEntry.kitsuIdExt?.let { "kitsu:$it" } ?: this@CatalogEntry.id
+            val fallbackMovieId = this@CatalogEntry.kitsuIdExt?.let { "kitsu:$it" } ?: this@CatalogEntry.id
             if (tmdbData != null && finalVideos.isNullOrEmpty() && tmdbData.episodeTmdbMeta.isNotEmpty()) {
                 val generatedVideos = tmdbData.episodeTmdbMeta.mapNotNull { (key, tmdbEp) ->
                     val parts = key.split("_")
@@ -1266,8 +1253,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     )
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
-
-                    // 복구한 finalDescription 적용
+                    
                     this.plot = finalDescription
                     this.actors = tmdbData?.fetchedActors
                     this.tags = finalGenre
@@ -1285,7 +1271,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
                     this.showStatus = tmdbData?.fetchedStatus 
                     
-                    // 복구한 finalDescription 적용
                     this.plot = finalDescription
                     this.actors = tmdbData?.fetchedActors
                     this.tags = finalGenre
@@ -1344,16 +1329,16 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             )) {
                 val rawTitle = this@Video.name ?: this@Video.title ?: "Episode $displayEpisode"
                 val cleanOriginalTitle = if (rawTitle.contains("📄")) rawTitle.substringAfter("📄").replace("\n", "").trim() else rawTitle.replace("\n", "").trim()
-
+                
                 this.name = if (tmdbEp?.name != null) tmdbEp.name else cleanOriginalTitle
                 this.posterUrl = thumbnail ?: TRANSPARENT_PIXEL
                 
-                // 파일명(cleanOriginalTitle)을 플롯에 병합하는 v1.170 로직 복구
                 var finalEpDesc = tmdbEp?.overview ?: this@Video.overview ?: this@Video.description
                 if (type == "other") {
                     finalEpDesc = if (finalEpDesc.isNullOrBlank()) cleanOriginalTitle else "$finalEpDesc | $cleanOriginalTitle"
                 }
-                this.description = finalEpDesc                
+                this.description = finalEpDesc
+                
                 this.season = displaySeason
                 this.episode = displayEpisode
 
