@@ -431,6 +431,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         var resolvedImdbId: String? = null
         var resolvedTmdbId: String? = null
         var kitsuVideos: List<Video>? = null
+        var resolvedKitsuId: String? = null // ⬅️ Kitsu ID를 담을 변수 추가
         
         if (isKitsuOrMal) {
             runSuspendCatching {
@@ -441,6 +442,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 
                 resolvedImdbId = metaObj?.optString("imdb_id")?.takeIf { it.startsWith("tt") }
                 resolvedTmdbId = metaObj?.optString("tmdb_id")?.takeIf { it.isNotBlank() } ?: metaObj?.optInt("moviedb_id")?.takeIf { it > 0 }?.toString()
+                resolvedKitsuId = metaObj?.optString("id")?.takeIf { it.startsWith("kitsu:") } // ⬅️ JSON에서 "kitsu:48410" 추출 복구
                 
                 fetchedAniListId = metaObj?.optInt("anilist_id")?.takeIf { it != 0 }
                 fetchedMalId = metaObj?.optInt("mal_id")?.takeIf { it != 0 }
@@ -520,6 +522,10 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         var finalProcessedId = res.id
         var imdbId = resolvedImdbId ?: preFetchedTmdbDetail?.external_ids?.imdb_id
 
+        if (imdbId.isNullOrBlank() && res.id.startsWith("mal:") && !resolvedKitsuId.isNullOrBlank()) {
+            imdbId = resolvedKitsuId
+        }
+                
         if (!imdbId.isNullOrBlank() && (imdbId.startsWith("tt") || imdbId.startsWith("kitsu:"))) {
             finalProcessedId = imdbId
         }
