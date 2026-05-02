@@ -556,8 +556,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         println("StremioC v1.205 Debug: loadLinks invoked with data=$data")
         val loadData = try { parseJson<LoadData>(data) } catch (e: Exception) { null } ?: return false
-        
-        val primaryId = if (loadData.id?.startsWith("tmdb:") == true && !loadData.imdbId.isNullOrBlank()) {
+
+        val primaryId = if ((loadData.id?.startsWith("tmdb:") == true || loadData.id?.startsWith("mal:") == true) && !loadData.imdbId.isNullOrBlank()) {
             loadData.imdbId
         } else {
             loadData.id ?: ""
