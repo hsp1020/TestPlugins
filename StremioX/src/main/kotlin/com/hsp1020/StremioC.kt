@@ -442,7 +442,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 
                 resolvedImdbId = metaObj?.optString("imdb_id")?.takeIf { it.startsWith("tt") }
                 resolvedTmdbId = metaObj?.optString("tmdb_id")?.takeIf { it.isNotBlank() } ?: metaObj?.optInt("moviedb_id")?.takeIf { it > 0 }?.toString()
-                resolvedKitsuId = metaObj?.optString("id")?.takeIf { it.startsWith("kitsu:") } // ⬅️ JSON에서 "kitsu:48410" 추출 복구
+                val kId = metaObj?.optString("kitsu_id")?.takeIf { it.isNotBlank() } ?: metaObj?.optInt("kitsu_id")?.takeIf { it > 0 }?.toString()
+                resolvedKitsuId = if (kId != null) "kitsu:$kId" else metaObj?.optString("id")?.takeIf { it.startsWith("kitsu:") }
                 
                 fetchedAniListId = metaObj?.optInt("anilist_id")?.takeIf { it != 0 }
                 fetchedMalId = metaObj?.optInt("mal_id")?.takeIf { it != 0 }
