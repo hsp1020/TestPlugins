@@ -1,4 +1,4 @@
-// v1.217 (Final Clean Architecture: Spaghetti code removed, ani.zip and Anime mapping purged, Strict English Title Priority Enforced)
+// v1.213 (Diagnostic Build: Added extensive logging for StreamPlay payload and execution tracking)
 package com.hsp1020
 
 import android.content.Context
@@ -29,8 +29,8 @@ import com.lagradost.cloudstream3.newEpisode
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieLoadResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
-import com.lagradost.cloudstream3.newTvSeriesLoadResponse
 import com.lagradost.cloudstream3.newSubtitleFile
+import com.lagradost.cloudstream3.newTvSeriesLoadResponse
 import com.lagradost.cloudstream3.runAllAsync
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
@@ -183,7 +183,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     return clazz.newInstance() as? MainAPI
                 }
             } catch (e: Exception) {
-                // Quiet fail
+                println("[StremioC_DEBUG] Failed to load provider $className: ${e.message}")
             }
             return null
         }
@@ -273,11 +273,10 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private fun buildTmdbUrl(endpoint: String, vararg params: Pair<String, String>): String {
         val builder = "$tmdbAPI$endpoint".toHttpUrlOrNull()?.newBuilder() ?: return ""
         builder.addQueryParameter("api_key", apiKey)
-        val pKeys = params.map { it.first }
-        if (!pKeys.contains("language")) {
-            builder.addQueryParameter("language", "ko-KR")
+        builder.addQueryParameter("language", "ko-KR")
+        params.forEach { (key, value) ->
+            builder.addQueryParameter(key, value)
         }
-        params.forEach { (key, value) -> builder.addQueryParameter(key, value) }
         return builder.build().toString()
     }
 
@@ -454,6 +453,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val encodedId = normalizedId.urlEncode()
 
         val isKitsuOrMal = res.id.startsWith("kitsu:") || res.id.startsWith("mal:")
+        var fetchedAniListId: Int? = null
+        var fetchedMalId: Int? = null
         var resolvedImdbId: String? = null
         var resolvedTmdbId: String? = null
         var kitsuVideos: List<Video>? = null
@@ -467,6 +468,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 
                 resolvedImdbId = metaObj?.optString("imdb_id")?.takeIf { it.startsWith("tt") }
                 resolvedTmdbId = metaObj?.optString("tmdb_id")?.takeIf { it.isNotBlank() } ?: metaObj?.optInt("moviedb_id")?.takeIf { it > 0 }?.toString()
+                
+                fetchedAniListId = metaObj?.optInt("anilist_id")?.takeIf { it != 0 }
+                fetchedMalId = metaObj?.optInt("mal_id")?.takeIf { it != 0 }
 
                 metaObj?.optJSONArray("videos")?.let { arr ->
                     val vids = mutableListOf<Video>()
@@ -529,22 +533,13 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val tmdbDeferred = targetTmdbId?.let { id ->
             async(Dispatchers.IO) {
                 val mediaType = if (res.type == "movie") "movie" else "tv"
-                val detailAppend = if (mediaType == "movie") "release_dates,credits,images,videos,external_ids,recommendations" else "content_ratings,credits,images,videos,external_ids,recommendations"
+                val detailAppend = if (mediaType == "movie") "release_dates,credits,images,videos,external_ids,recommendations,translations" else "content_ratings,credits,images,videos,external_ids,recommendations,translations"
                 val detailUrl = buildTmdbUrl("/$mediaType/$id", "append_to_response" to detailAppend)
                 runSuspendCatching { customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>() }.getOrNull()
             }
         }
 
-        val enTmdbDeferred = targetTmdbId?.let { id ->
-            async(Dispatchers.IO) {
-                val mediaType = if (res.type == "movie") "movie" else "tv"
-                val enUrl = provider.buildTmdbUrl("/$mediaType/$id", "language" to "en-US")
-                runSuspendCatching { customSession.get(enUrl).parsedSafe<TmdbDetailResponse>() }.getOrNull()
-            }
-        }
-
         val preFetchedTmdbDetail = tmdbDeferred?.await()
-        val enTmdbData = enTmdbDeferred?.await()
         
         var finalProcessedId = res.id
         var imdbId = resolvedImdbId ?: preFetchedTmdbDetail?.external_ids?.imdb_id
@@ -558,7 +553,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             imdbId = finalProcessedId, 
             addonDeferred = addonDeferred, 
             preFetchedDetail = preFetchedTmdbDetail, 
-            enTmdbData = enTmdbData,
+            fetchedAniListId = fetchedAniListId, 
+            fetchedMalId = fetchedMalId, 
             resolvedTmdbId = resolvedTmdbId,
             kitsuVideos = kitsuVideos
         )
@@ -575,6 +571,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val loadData = try { parseJson<LoadData>(data) } catch (e: Exception) { null } ?: return false
+        println("[StreamPlay_DEBUG] Incoming LoadData into loadLinks: $loadData")
         
         val primaryId = if (loadData.id?.startsWith("tmdb:") == true && !loadData.imdbId.isNullOrBlank()) {
             loadData.imdbId
@@ -649,7 +646,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
             hasSyncedCineStreamSettings = true
         } catch (e: Exception) {
-            // Quiet fail
+            e.printStackTrace()
         }
     }
 
@@ -668,25 +665,24 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             rawId
         }
 
-        val rawEnglishTitle = loadData.englishTitle?.takeIf { it.isNotBlank() } 
-            ?: loadData.originalTitle?.takeIf { it.isNotBlank() } 
-            ?: loadData.title 
-            ?: "Unknown"
-
-        val isAnimeMedia = loadData.isAnime || globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
+        val scrapingTitle = loadData.englishTitle ?: loadData.originalTitle ?: loadData.title ?: "Unknown"
+        val isAnimeMedia = loadData.isAnime || globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true || loadData.anilistId != null || loadData.malId != null
         val isSeason2Plus = isAnimeMedia && (globalSeason ?: 0) > 1
 
-        val finalTitle = if (isSeason2Plus) "$rawEnglishTitle Season $globalSeason" else rawEnglishTitle
+        val finalTitle = if (isSeason2Plus) "$scrapingTitle Season $globalSeason" else scrapingTitle
+        
+        val mappedYear = loadData.year
+        val mappedAiredYear = loadData.airedYear ?: loadData.year
         val streamPlayType = if (targetType == "movie") "movie" else "tv" 
 
         return mutableMapOf(
             "title" to finalTitle, 
             "orgTitle" to loadData.originalTitle,
             "jpTitle" to loadData.originalTitle,
-            "alttitle" to loadData.originalTitle,
+            "alttitle" to loadData.englishTitle,
             "nametitle" to loadData.originalTitle,
-            "year" to loadData.year,
-            "airedYear" to (loadData.airedYear ?: loadData.year),
+            "year" to mappedYear, 
+            "airedYear" to mappedAiredYear,
             "date" to loadData.firstAired,
             "airedDate" to loadData.firstAired,
             "firstAired" to loadData.firstAired,
@@ -704,6 +700,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             "isBollywood" to loadData.isBollywood,
             "isAsian" to loadData.isAsian,
             "isCartoon" to loadData.isCartoon,
+            "malId" to loadData.malId,
+            "aniId" to loadData.anilistId?.toString(),
             "lastSeason" to 1
         )
     }
@@ -766,7 +764,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 cineStreamProvider.loadLinks(payload.toJson(), isCasting, subtitleInterceptor, callback)
             }
         } catch (e: Exception) {
-            // Quiet fail
+            e.printStackTrace()
         }
     }
 
@@ -780,18 +778,33 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        if (!isIntegrationEnabled("streamplay_integration_enabled")) return
+        if (!isIntegrationEnabled("streamplay_integration_enabled")) {
+            println("[StreamPlay_DEBUG] StreamPlay integration is disabled in settings.")
+            return
+        }
 
         try {
-            val streamPlayProvider = getStreamPlayProvider() ?: return
+            val streamPlayProvider = getStreamPlayProvider()
+            if (streamPlayProvider == null) {
+                println("[StreamPlay_DEBUG] getStreamPlayProvider() returned null. Plugin might not be installed or loaded.")
+                return
+            }
+
+            println("[StreamPlay_DEBUG] Building payload for StreamPlay...")
             val payload = buildBasePayload(loadData, targetType, globalId, globalSeason, globalEpisode)
+            
             payload["id"] = loadData.tmdbId
 
+            println("[StreamPlay_DEBUG] Final Payload Map: $payload")
+            val jsonString = payload.toJson()
+            println("[StreamPlay_DEBUG] JSON String to loadLinks: $jsonString")
+
             kotlinx.coroutines.withTimeoutOrNull(25000L) {
-                streamPlayProvider.loadLinks(payload.toJson(), isCasting, subtitleCallback, callback)
+                streamPlayProvider.loadLinks(jsonString, isCasting, subtitleCallback, callback)
             }
+            println("[StreamPlay_DEBUG] StreamPlay loadLinks execution completed (or timed out).")
         } catch (e: Exception) {
-            // Quiet fail
+            println("[StreamPlay_DEBUG] Exception in invokeStreamPlay: ${e.stackTraceToString()}")
         }
     }
 
@@ -905,6 +918,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 id = this.id,
                 type = this.type ?: "movie",
                 tmdbId = this.moviedb_id ?: this.tmdbIdExt?.toIntOrNull(),
+                malId = this.malIdExt?.toIntOrNull(),
                 kitsuId = this.kitsuIdExt
             )
 
@@ -920,12 +934,12 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
         private suspend fun fetchTmdbDetails(
             provider: StremioC, tmdbMediaType: String, tmdbIdStr: String, isMovie: Boolean, finalImdbId: String?,
-            stremioType: String?, targetVideos: List<Video>?, preFetchedDetail: TmdbDetailResponse?, enTmdbData: TmdbDetailResponse?
+            stremioType: String?, targetVideos: List<Video>?, preFetchedDetail: TmdbDetailResponse? = null
         ): FetchedTmdbData {
             var fetchedRecommendations: List<SearchResponse>? = null
             
             val detailRes = preFetchedDetail ?: run {
-                val detailAppend = if (isMovie) "release_dates,credits,images,videos,external_ids,recommendations" else "content_ratings,credits,images,videos,external_ids,recommendations"
+                val detailAppend = if (isMovie) "release_dates,credits,images,videos,external_ids,recommendations,translations" else "content_ratings,credits,images,videos,external_ids,recommendations,translations"
                 val detailUrl = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr", "append_to_response" to detailAppend)
                 StremioC.customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>()
             }
@@ -1113,14 +1127,10 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
             }
 
-            // FIX: Enforce Strict English Title priority without Korean fallback (detailRes.title is completely removed)
-            val extractedEnglishTitle = enTmdbData?.title?.takeIf { it.isNotBlank() } 
-                ?: enTmdbData?.name?.takeIf { it.isNotBlank() }
-                ?: detailRes.translations?.translations?.firstOrNull { 
-                    it.iso_3166_1 == "US" || it.iso_639_1 == "en" 
-                }?.data?.let { it.title?.takeIf { t -> t.isNotBlank() } ?: it.name?.takeIf { n -> n.isNotBlank() } } 
-                ?: detailRes.original_title?.takeIf { it.isNotBlank() }
-                ?: detailRes.original_name
+            val extractedEnglishTitle = detailRes.translations?.translations?.firstOrNull { 
+                it.iso_3166_1 == "US" || it.iso_639_1 == "en" 
+            }?.data?.let { it.title?.takeIf { t -> t.isNotBlank() } ?: it.name?.takeIf { n -> n.isNotBlank() } } 
+            ?: detailRes.title?.takeIf { it.isNotBlank() } ?: detailRes.name?.takeIf { it.isNotBlank() } ?: detailRes.original_title ?: detailRes.original_name
 
             return FetchedTmdbData(
                 if (isMovie) detailRes.title ?: detailRes.original_title else detailRes.name ?: detailRes.original_name,
@@ -1133,7 +1143,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             )
         }
 
-        private fun processEpisodes(provider: StremioC, finalImdbId: String?, episodeTmdbMeta: Map<String, TmdbEpisode>, targetVideos: List<Video>?, type: String?, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, originalTitle: String?, englishTitle: String?, kitsuId: String?, showYear: Int?): List<Episode> {
+        private fun processEpisodes(provider: StremioC, finalImdbId: String?, episodeTmdbMeta: Map<String, TmdbEpisode>, targetVideos: List<Video>?, type: String?, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, originalTitle: String?, englishTitle: String?, aniListId: Int?, malId: Int?, kitsuId: String?, showYear: Int?): List<Episode> {
             val videos = targetVideos ?: emptyList()
             val sortedVideos = videos.groupBy { Pair(it.seasonNumber ?: 0, it.episode ?: it.number ?: 0) }.flatMap { (_, group) -> group.sortedBy { it.title ?: it.name ?: "" } }
             val maxRegularSeason = sortedVideos.mapNotNull { it.seasonNumber }.filter { it > 0 }.maxOrNull() ?: 0
@@ -1170,7 +1180,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val imdbEpisode = video.imdbEpisode ?: video.episode ?: video.number ?: 0
                 val epImdbId = video.imdb_id ?: finalImdbId
                 
-                video.toEpisode(provider, type, epImdbId, episodeTmdbMeta, displaySeason, displayEpisode, showTitle, tmdbId, isAnime, isBollywood, isAsian, isCartoon, imdbSeason, imdbEpisode, originalTitle, englishTitle, kitsuId, showYear)
+                video.toEpisode(provider, type, epImdbId, episodeTmdbMeta, displaySeason, displayEpisode, showTitle, tmdbId, isAnime, isBollywood, isAsian, isCartoon, imdbSeason, imdbEpisode, originalTitle, englishTitle, aniListId, malId, kitsuId, showYear)
             }
         }
 
@@ -1179,7 +1189,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             imdbId: String?, 
             addonDeferred: Deferred<CatalogEntry?>?, 
             preFetchedDetail: TmdbDetailResponse? = null, 
-            enTmdbData: TmdbDetailResponse? = null,
+            fetchedAniListId: Int? = null, 
+            fetchedMalId: Int? = null, 
             resolvedTmdbId: String? = null,
             kitsuVideos: List<Video>? = null
         ): LoadResponse = coroutineScope {
@@ -1227,7 +1238,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             if (tmdbIdStr != null) {
                 try {
                     val refinedMediaType = foundMediaType ?: if (finalType == "series" || finalType == "tv") "tv" else if (isSingleMovie(finalType, finalVideos) || finalType == "movie" || finalVideos.isNullOrEmpty()) "movie" else "tv"
-                    tmdbData = fetchTmdbDetails(provider, refinedMediaType, tmdbIdStr!!, refinedMediaType == "movie", finalImdbId, finalType, finalVideos, preFetchedDetail, enTmdbData)
+                    tmdbData = fetchTmdbDetails(provider, refinedMediaType, tmdbIdStr!!, refinedMediaType == "movie", finalImdbId, finalType, finalVideos, preFetchedDetail)
                 } catch (e: Exception) {}
             }
 
@@ -1274,7 +1285,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val isBollywood = countries.any { it.contains("IN", true) || it.contains("India", true) }
             val isAsian = countries.any { it.contains("KR", true) || it.contains("JP", true) || it.contains("CN", true) || it.contains("TH", true) || it.contains("TW", true) }
             val isCartoon = finalGenre?.any { it.contains("Animation", true) } == true
-            val isAnimeMedia = finalImdbId?.startsWith("mal:") == true || finalImdbId?.startsWith("kitsu:") == true || finalGenre?.contains("Anime") == true || (countries.any { it.contains("JP", true) } && isCartoon)
+            val isAnimeMedia = fetchedMalId != null || finalImdbId?.startsWith("mal:") == true || finalImdbId?.startsWith("kitsu:") == true || finalGenre?.contains("Anime") == true || (countries.any { it.contains("JP", true) } && isCartoon)
 
             val showYear = tmdbData?.fetchedYear ?: detailedEntry.year?.substringBefore("-")?.toIntOrNull() ?: this@CatalogEntry.year?.substringBefore("-")?.toIntOrNull()
 
@@ -1292,6 +1303,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         isBollywood = isBollywood,
                         isAsian = isAsian,
                         isCartoon = isCartoon,
+                        anilistId = fetchedAniListId,
+                        malId = fetchedMalId,
                         kitsuId = this@CatalogEntry.kitsuIdExt,
                         originalTitle = tmdbData?.fetchedOriginalTitle,
                         englishTitle = tmdbData?.fetchedEnglishTitle,
@@ -1307,7 +1320,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     tmdbData?.fetchedLogo?.let { this.logoUrl = it }; tmdbIdStr?.let { addTMDbId(it) }; finalImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }
                 }
             } else {
-                val finalEpisodes = processEpisodes(provider, finalImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, tmdbIdStr?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, this@CatalogEntry.kitsuIdExt, showYear)
+                val finalEpisodes = processEpisodes(provider, finalImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, tmdbIdStr?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, fetchedAniListId, fetchedMalId, this@CatalogEntry.kitsuIdExt, showYear)
 
                 return@coroutineScope provider.newTvSeriesLoadResponse(
                     finalName, "${provider.mainUrl}/meta/${finalType ?: "series"}/${this@CatalogEntry.id}.json", TvType.TvSeries, finalEpisodes
@@ -1342,7 +1355,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         @JsonProperty("imdbEpisode") val imdbEpisode: Int? = null,
         @JsonProperty("imdb_id") val imdb_id: String? = null
     ) {
-        fun toEpisode(provider: StremioC, type: String?, imdbId: String?, tmdbMetaMap: Map<String, TmdbEpisode>, displaySeason: Int, displayEpisode: Int, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, imdbSeason: Int?, imdbEpisode: Int?, originalTitle: String?, englishTitle: String?, kitsuId: String?, showYear: Int?): Episode {
+        fun toEpisode(provider: StremioC, type: String?, imdbId: String?, tmdbMetaMap: Map<String, TmdbEpisode>, displaySeason: Int, displayEpisode: Int, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, imdbSeason: Int?, imdbEpisode: Int?, originalTitle: String?, englishTitle: String?, aniListId: Int?, malId: Int?, kitsuId: String?, showYear: Int?): Episode {
             val tmdbEp = tmdbMetaMap["${displaySeason}_${displayEpisode}"] ?: tmdbMetaMap["${seasonNumber ?: 0}_${episode ?: number ?: 0}"]
             val finalAirDate = tmdbEp?.airDate?.takeIf { it.isNotBlank() } ?: this@Video.firstAired ?: this@Video.released
             val airedYearInt = finalAirDate?.split("-")?.first()?.toIntOrNull()
@@ -1366,6 +1379,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 imdbEpisode = imdbEpisode,
                 originalTitle = originalTitle,
                 englishTitle = englishTitle,
+                anilistId = aniListId,
+                malId = malId,
                 kitsuId = kitsuId
             )) {
                 val rawTitle = this@Video.name ?: this@Video.title ?: "Episode $displayEpisode"
