@@ -15,35 +15,30 @@
         android:paddingBottom="20dp"
         tools:background="@color/cardview_dark_background">
 
+        <!-- Stremio Settings Header -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal">
 
             <TextView
-                android:layout_width="wrap_content"
+                android:layout_width="0dp"
+                android:layout_weight="1"
                 android:layout_height="wrap_content"
-                android:layout_rowWeight="1"
                 android:layout_marginTop="20dp"
                 android:layout_marginBottom="5dp"
                 android:text="Stremio Settings"
                 android:textSize="20sp"
                 android:textStyle="bold" />
 
-            <LinearLayout
-                android:layout_width="match_parent"
+            <ImageView
+                android:id="@+id/saveIcon"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:gravity="right">
-
-                <ImageView
-                    android:id="@+id/saveIcon"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="20dp"
-                    android:layout_marginBottom="5dp"
-                    android:padding="5dp"
-                    android:focusable="true" />
-            </LinearLayout>
+                android:layout_marginTop="20dp"
+                android:layout_marginBottom="5dp"
+                android:padding="5dp"
+                android:focusable="true" />
         </LinearLayout>
 
         <ImageView
@@ -56,6 +51,7 @@
             android:layout_marginBottom="10dp"
             android:layout_marginTop="10dp" />
 
+        <!-- All Link -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -64,27 +60,22 @@
             android:gravity="center_vertical">
 
             <TextView
-                android:layout_width="wrap_content"
+                android:layout_width="0dp"
+                android:layout_weight="1"
                 android:layout_height="wrap_content"
-                android:layout_rowWeight="1"
                 android:text="All Link"
                 android:textSize="18sp"
                 android:textStyle="bold" />
 
-            <LinearLayout
-                android:layout_width="match_parent"
+            <ImageView
+                android:id="@+id/addlinks"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:gravity="right">
-
-                <ImageView
-                    android:id="@+id/addlinks"
-                    android:layout_width="wrap_content"
-                    android:layout_height="match_parent"
-                    android:focusable="true"
-                    android:padding="5dp" />
-            </LinearLayout>
+                android:focusable="true"
+                android:padding="5dp" />
         </LinearLayout>
 
+        <!-- List Link -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -93,29 +84,23 @@
             android:gravity="center_vertical">
 
             <TextView
-                android:layout_width="wrap_content"
+                android:layout_width="0dp"
+                android:layout_weight="1"
                 android:layout_height="wrap_content"
-                android:layout_rowWeight="1"
                 android:text="List Link"
                 android:textSize="18sp"
                 android:textStyle="bold" />
 
-            <LinearLayout
-                android:layout_width="match_parent"
+            <ImageView
+                android:id="@+id/showlinks"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:gravity="right">
-
-                <ImageView
-                    android:id="@+id/showlinks"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:padding="5dp"
-                    android:focusable="true"
-                    android:nextFocusUp="@id/addlinks" />
-            </LinearLayout>
+                android:padding="5dp"
+                android:focusable="true"
+                android:nextFocusUp="@id/addlinks" />
         </LinearLayout>
 
-        <!-- CineStream 토글 버튼 -->
+        <!-- CineStream Toggle -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -124,28 +109,22 @@
             android:gravity="center_vertical">
 
             <TextView
-                android:layout_width="wrap_content"
+                android:layout_width="0dp"
+                android:layout_weight="1"
                 android:layout_height="wrap_content"
-                android:layout_rowWeight="1"
                 android:text="CineStream"
                 android:textSize="18sp"
                 android:textStyle="bold" />
 
-            <LinearLayout
-                android:layout_width="match_parent"
+            <Switch
+                android:id="@+id/switchCineStream"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:gravity="right">
-
-                <Switch
-                    android:id="@+id/switchCineStream"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:focusable="true"
-                    android:padding="5dp" />
-            </LinearLayout>
+                android:focusable="true"
+                android:padding="5dp" />
         </LinearLayout>
 
-        <!-- StreamPlay 토글 버튼 -->
+        <!-- StreamPlay Toggle -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -154,28 +133,22 @@
             android:gravity="center_vertical">
 
             <TextView
-                android:layout_width="wrap_content"
+                android:layout_width="0dp"
+                android:layout_weight="1"
                 android:layout_height="wrap_content"
-                android:layout_rowWeight="1"
                 android:text="StreamPlay"
                 android:textSize="18sp"
                 android:textStyle="bold" />
 
-            <LinearLayout
-                android:layout_width="match_parent"
+            <Switch
+                android:id="@+id/switchStreamPlay"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:gravity="right">
-
-                <Switch
-                    android:id="@+id/switchStreamPlay"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:focusable="true"
-                    android:padding="5dp" />
-            </LinearLayout>
+                android:focusable="true"
+                android:padding="5dp" />
         </LinearLayout>
 
-        <!-- StreamPlay Anime 토글 버튼 -->
+        <!-- StreamPlay Anime Toggle -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -184,25 +157,19 @@
             android:gravity="center_vertical">
 
             <TextView
-                android:layout_width="wrap_content"
+                android:layout_width="0dp"
+                android:layout_weight="1"
                 android:layout_height="wrap_content"
-                android:layout_rowWeight="1"
                 android:text="StreamPlay Anime"
                 android:textSize="18sp"
                 android:textStyle="bold" />
 
-            <LinearLayout
-                android:layout_width="match_parent"
+            <Switch
+                android:id="@+id/switchStreamPlayAnime"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:gravity="right">
-
-                <Switch
-                    android:id="@+id/switchStreamPlayAnime"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:focusable="true"
-                    android:padding="5dp" />
-            </LinearLayout>
+                android:focusable="true"
+                android:padding="5dp" />
         </LinearLayout>
 
     </LinearLayout>
