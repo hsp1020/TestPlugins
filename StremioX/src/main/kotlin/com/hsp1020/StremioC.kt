@@ -1,4 +1,4 @@
-// v1.206 (Fix: Data Mapping Mismatch for Kisskh, Xpass, Vaplayer, HexaSU & MAL/Ani ID Fetching for StreamPlayAnime)
+// v1.207 (Fix: JIT malId & anilistId Resolution via Malsync & ani.zip for Cached Null Data)
 package com.hsp1020
 
 import android.content.Context
@@ -650,7 +650,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val primaryStremioId = buildStremioId(targetType, primaryId, loadData.season, loadData.episode) ?: primaryId
         val encodedPrimaryId = primaryStremioId.urlEncode()
 
-        // 중복 링크 방지
         val seenLinks = Collections.synchronizedSet(mutableSetOf<String>())
         val wrappedCallback: (ExtractorLink) -> Unit = { link ->
             if (seenLinks.add(link.url)) {
@@ -876,9 +875,33 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
             val isAnimeMedia = loadData.isAnime || globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true || loadData.anilistId != null || loadData.malId != null
 
-            // 핵심: StreamPlay의 LinkData 모델과 완벽하게 타입을 매칭합니다.
+            // JIT Resolution for malId if null (StreamPlay uses it too for MALSync)
+            var resolvedMalId = loadData.malId
+            var resolvedAniId = loadData.anilistId
+            if (resolvedMalId == null) {
+                if (loadData.tmdbId != null) {
+                    runSuspendCatching {
+                        val mType = if (targetType == "movie") "movie" else "tv"
+                        val res = customSession.get("https://api.malsync.moe/tmdb/$mType/${loadData.tmdbId}", timeout = 5L).text
+                        if (res.contains("\"id\"")) {
+                            resolvedMalId = JSONObject(res).optInt("id").takeIf { it > 0 } ?: resolvedMalId
+                        }
+                    }
+                }
+                if (resolvedMalId == null && !correctImdbId.isNullOrBlank()) {
+                    runSuspendCatching {
+                        val res = customSession.get("https://api.ani.zip/mappings?imdb_id=$correctImdbId", timeout = 5L).text
+                        if (res.contains("mal_id")) {
+                            val json = JSONObject(res)
+                            resolvedMalId = json.optInt("mal_id").takeIf { it > 0 } ?: resolvedMalId
+                            resolvedAniId = json.optInt("anilist_id").takeIf { it > 0 } ?: resolvedAniId
+                        }
+                    }
+                }
+            }
+
             val spData = mapOf(
-                "id" to loadData.tmdbId, // StreamPlay는 id를 TMDB ID(Int)로 사용
+                "id" to loadData.tmdbId, 
                 "tmdbId" to loadData.tmdbId,
                 "imdbId" to correctImdbId,
                 "type" to targetType,
@@ -896,9 +919,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "isBollywood" to loadData.isBollywood,
                 "isCartoon" to loadData.isCartoon,
                 "isMovie" to (targetType == "movie"),
-                "lastSeason" to 1, // Kisskh의 완화된 검색(Season X 생략)을 위한 필수값
-                "aniId" to loadData.anilistId?.toString(), // StreamPlay는 aniId를 String으로 기대함
-                "malId" to loadData.malId
+                "lastSeason" to 1, 
+                "aniId" to resolvedAniId?.toString(), 
+                "malId" to resolvedMalId
             )
 
             kotlinx.coroutines.withTimeoutOrNull(25000L) {
@@ -955,7 +978,31 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 rawId
             }
 
-            // StreamPlayAnime의 LinkData 모델 매핑
+            // JIT Resolution for malId if null (critical for MALSync in StreamPlayAnime)
+            var resolvedMalId = loadData.malId
+            var resolvedAniId = loadData.anilistId
+            if (resolvedMalId == null) {
+                if (loadData.tmdbId != null) {
+                    runSuspendCatching {
+                        val mType = if (targetType == "movie") "movie" else "tv"
+                        val res = customSession.get("https://api.malsync.moe/tmdb/$mType/${loadData.tmdbId}", timeout = 5L).text
+                        if (res.contains("\"id\"")) {
+                            resolvedMalId = JSONObject(res).optInt("id").takeIf { it > 0 } ?: resolvedMalId
+                        }
+                    }
+                }
+                if (resolvedMalId == null && !correctImdbId.isNullOrBlank()) {
+                    runSuspendCatching {
+                        val res = customSession.get("https://api.ani.zip/mappings?imdb_id=$correctImdbId", timeout = 5L).text
+                        if (res.contains("mal_id")) {
+                            val json = JSONObject(res)
+                            resolvedMalId = json.optInt("mal_id").takeIf { it > 0 } ?: resolvedMalId
+                            resolvedAniId = json.optInt("anilist_id").takeIf { it > 0 } ?: resolvedAniId
+                        }
+                    }
+                }
+            }
+
             val spaData = mapOf(
                 "id" to loadData.tmdbId,
                 "tmdbId" to loadData.tmdbId,
@@ -976,8 +1023,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "isCartoon" to loadData.isCartoon,
                 "isMovie" to (targetType == "movie"),
                 "lastSeason" to 1,
-                "aniId" to loadData.anilistId, // StreamPlayAnime는 aniId를 Int로 기대함
-                "malId" to loadData.malId
+                "aniId" to resolvedAniId, 
+                "malId" to resolvedMalId
             )
 
             kotlinx.coroutines.withTimeoutOrNull(25000L) {
@@ -1468,7 +1515,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             var finalMalId = fetchedMalId
             var finalAniId = fetchedAniListId
 
-            // StreamPlayAnime의 malsyncAPI 호출을 위해 TMDB 기반 진입 시에도 malId/anilistId를 강제 수급합니다.
             if (isAnimeMedia && finalMalId == null && finalImdbId != null) {
                 runSuspendCatching {
                     val mappingRes = StremioC.customSession.get("https://api.ani.zip/mappings?imdb_id=$finalImdbId", timeout = 5L).text
