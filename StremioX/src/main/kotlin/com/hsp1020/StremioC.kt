@@ -883,8 +883,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
 
             val isAnimeMedia = loadData.isAnime || globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
-
+            
             val spData = mapOf(
+                "id" to loadData.tmdbId, // 핵심 수정: StreamPlay는 'id' 키를 TMDB ID로 받습니다.
                 "imdbId" to correctImdbId,
                 "tmdbId" to loadData.tmdbId,
                 "type" to targetType,
@@ -902,7 +903,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "isBollywood" to loadData.isBollywood,
                 "isCartoon" to loadData.isCartoon,
                 "isMovie" to (targetType == "movie"),
-                "aniId" to loadData.anilistId?.toString(),
+                "aniId" to loadData.anilistId?.toString(), // StreamPlay는 aniId를 String으로 받음
                 "malId" to loadData.malId
             )
 
@@ -978,7 +979,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "isBollywood" to loadData.isBollywood,
                 "isCartoon" to loadData.isCartoon,
                 "isMovie" to (targetType == "movie"),
-                "aniId" to loadData.anilistId?.toString(),
+                "aniId" to loadData.anilistId, // StreamPlayAnime는 aniId를 Int로 받음
                 "malId" to loadData.malId
             )
 
