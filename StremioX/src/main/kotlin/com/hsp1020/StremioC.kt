@@ -1,4 +1,4 @@
-// v1.216 (Ultimate Master: StremioX Removed, StreamPlay Added, Type-Safe Payload DataClass, No I/O Bottlenecks)
+// v1.217 (Build Fixed Master: Suspend Catching Fix, Explicit Types, Semaphore Acquire/Release, KitsuResult Scope Fix)
 package com.hsp1020
 
 import android.content.Context
@@ -64,7 +64,8 @@ import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
-inline fun <T> runSuspendCatching(block: () -> T): Result<T> {
+// ✨ Fix 1: suspend 키워드를 추가하여 내부에서 네트워크 통신이 가능하도록 수정
+suspend inline fun <T> runSuspendCatching(crossinline block: suspend () -> T): Result<T> {
     return try {
         Result.success(block())
     } catch (c: CancellationException) {
@@ -88,7 +89,6 @@ private inline fun <T> lruSet(maxSize: Int): MutableSet<T> {
     })
 }
 
-// ✨ 타입 세이프티와 고속 직렬화를 보장하는 불변 페이로드 데이터 클래스
 data class ProviderPayload(
     @JsonProperty("title") val title: String?,
     @JsonProperty("orgTitle") val orgTitle: String?,
@@ -122,14 +122,6 @@ data class ProviderPayload(
     @JsonProperty("kitsuId") val kitsuId: String? = null
 )
 
-private data class KitsuResult(
-    val imdbId: String?,
-    val tmdbId: String?,
-    val anilistId: Int?,
-    val malId: Int?,
-    val videos: List<StremioC.Video>?
-)
-
 class StremioC(override var mainUrl: String, override var name: String) : MainAPI() {
     override val supportedTypes = setOf(TvType.Others)
     override val hasMainPage = true
@@ -143,6 +135,15 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     
     private val pageMutex = Mutex()
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
+
+    // ✨ Fix 3: KitsuResult를 클래스 내부로 이동하여 접근 제어자 충돌 해결
+    private data class KitsuResult(
+        val imdbId: String?,
+        val tmdbId: String?,
+        val anilistId: Int?,
+        val malId: Int?,
+        val videos: List<Video>?
+    )
 
     companion object {
         private const val tmdbAPI = "https://api.themoviedb.org/3"
@@ -197,7 +198,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 var foundLoader: ClassLoader? = null
                 for (field in pmClass.declaredFields) {
                     field.isAccessible = true
-                    val obj = runSuspendCatching { field.get(pmInstance) }.getOrNull()
+                    val obj = runCatching { field.get(pmInstance) }.getOrNull()
                     val items = when (obj) {
                         is Map<*, *> -> obj.values
                         is Collection<*> -> obj
@@ -221,9 +222,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     val clazz = foundLoader.loadClass(className)
                     return clazz.newInstance() as? MainAPI
                 }
-            } catch (e: Exception) {
-                // I/O 병목 방지를 위해 로깅 제거
-            }
+            } catch (e: Exception) {}
             return null
         }
 
@@ -321,7 +320,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
     private fun extractImdbId(url: String?): String? {
         if (url.isNullOrBlank() || !url.contains("tt")) return null
-        return runSuspendCatching { IMDB_ID_REGEX.find(url)?.value }.getOrNull()
+        return runCatching { IMDB_ID_REGEX.find(url)?.value }.getOrNull()
     }
 
     private fun buildStremioId(type: String?, id: String?, season: Int?, episode: Int?, isSubtitle: Boolean = false): String? {
@@ -397,7 +396,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             
             activePageRequests.getOrPut(page) {
                 isNewRequest = true
-                async { fetchMainPageData(page, request) }
+                // ✨ Fix 2: 명시적 타입 선언
+                async<HomePageResponse> { fetchMainPageData(page, request) }
             }
         }
         
@@ -423,7 +423,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         
         val chunkResults = coroutineScope {
             targetCatalogs.map { catalog ->
-                async(Dispatchers.IO) {
+                // ✨ Fix 2: 명시적 타입 선언
+                async<HomePageList?>(Dispatchers.IO) {
                     try {
                         val catalogKey = "${catalog.id}-${catalog.type}"
                         val currentSkip = catalogSkipState[catalogKey] ?: 0
@@ -462,7 +463,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         
         val searchResults = coroutineScope {
             supportedCatalogs.map { catalog ->
-                async(Dispatchers.IO) {
+                // ✨ Fix 2: 명시적 타입 선언
+                async<List<SearchResponse>>(Dispatchers.IO) {
                     try { catalog.search(query, this@StremioC) } catch (e: CancellationException) { throw e } catch (e: Exception) { emptyList() }
                 }
             }.awaitAll().flatten()
@@ -493,8 +495,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
         val isKitsuOrMal = res.id.startsWith("kitsu:") || res.id.startsWith("mal:")
         
+        // ✨ Fix 2: 명시적 타입 선언
         val kitsuDeferred = if (isKitsuOrMal) {
-            async(Dispatchers.IO) {
+            async<KitsuResult?>(Dispatchers.IO) {
                 runSuspendCatching {
                     val targetType = if (res.type == "movie") "movie" else "series"
                     val kitsuUrl = "https://anime-kitsu.strem.fun/meta/$targetType/${res.id}.json"
@@ -535,7 +538,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
         } else null
 
-        val addonDeferred = async(Dispatchers.IO) {
+        // ✨ Fix 2: 명시적 타입 선언
+        val addonDeferred = async<CatalogEntry?>(Dispatchers.IO) {
             runSuspendCatching {
                 val response = customSession.get(buildUrl("/meta/${res.type}/$encodedId.json")).parsedSafe<CatalogResponse>()
                 response?.meta ?: response?.metas?.firstOrNull { it.id == res.id } ?: response?.metas?.firstOrNull()
@@ -559,8 +563,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             else -> null to false
         }
 
+        // ✨ Fix 2: 명시적 타입 선언
         val mdbDeferred: Deferred<List<String>>? = mdbEarlyId?.let { id ->
-            async(Dispatchers.IO) { 
+            async<List<String>>(Dispatchers.IO) { 
                 runSuspendCatching { fetchMdbListRatings(id, isMdbEarlyTmdb) }.getOrDefault(emptyList()) 
             }
         }
@@ -568,8 +573,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val tmdbIdFromRes = res.moviedb_id?.toString() ?: res.tmdbIdExt
         val targetTmdbId = resolvedTmdbId ?: if (res.id.startsWith("tmdb:")) res.id.removePrefix("tmdb:") else tmdbIdFromRes
         
+        // ✨ Fix 2: 명시적 타입 선언
         val tmdbDeferred = targetTmdbId?.let { id ->
-            async(Dispatchers.IO) {
+            async<TmdbDetailResponse?>(Dispatchers.IO) {
                 val mediaType = if (res.type == "movie") "movie" else "tv"
                 val detailAppend = if (mediaType == "movie") "release_dates,credits,images,videos,external_ids,recommendations,translations" else "content_ratings,credits,images,videos,external_ids,recommendations,translations"
                 val detailUrl = buildTmdbUrl("/$mediaType/$id", "append_to_response" to detailAppend)
@@ -688,7 +694,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
         }
 
-        // ✨ 최적화: 자막 인터셉터와 디스크 I/O를 부모 함수로 호이스팅하여 중복 실행 방지
         val customHosts = withContext(Dispatchers.IO) {
             val now = System.currentTimeMillis()
             if (cachedCustomHosts != null && now - cachedCustomHostsTime < SETTINGS_CACHE_TTL) {
@@ -753,7 +758,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             
             val isKitsuMedia = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
             
-            // ✨ CineStream 전용으로 안전하게 복사 (원본 훼손 없음)
             val cinePayload = basePayload.copy(
                 id = basePayload.imdbId,
                 isKitsu = false,
@@ -781,7 +785,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
             val streamPlayType = if (targetType == "movie") "movie" else "tv"
             
-            // ✨ StreamPlay 전용으로 안전하게 복사 (원본 훼손 없음)
             val spPayload = basePayload.copy(
                 id = tmdbId?.toString(),
                 type = streamPlayType,
@@ -837,7 +840,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         suspend fun search(query: String, provider: StremioC): List<SearchResponse> {
             val allMetas = coroutineScope {
                 types.map { type ->
-                    async(Dispatchers.IO) {
+                    // ✨ Fix 2: 명시적 타입 선언
+                    async<List<CatalogEntry>>(Dispatchers.IO) {
                         val path = "/catalog/${type}/${id}/search=${query.urlEncode()}.json"
                         fetchMetas(provider, path)
                     }
@@ -849,7 +853,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         suspend fun toHomePageList(provider: StremioC, skip: Int): Pair<HomePageList, Int> {
             val allMetas = coroutineScope {
                 types.map { type ->
-                    async(Dispatchers.IO) {
+                    // ✨ Fix 2: 명시적 타입 선언
+                    async<List<CatalogEntry>>(Dispatchers.IO) {
                         val path = if (skip > 0) "/catalog/$type/$id/skip=$skip.json" else "/catalog/$type/$id.json"
                         fetchMetas(provider, path)
                     }
@@ -940,8 +945,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
 
             coroutineScope {
-                val traktDeferred = async(Dispatchers.IO) {
-                    if (validImdbId == null || TRAKT_CLIENT_ID.isEmpty()) return@async emptyList<Pair<Int, String>>()
+                // ✨ Fix 2: 명시적 타입 선언
+                val traktDeferred = async<List<Pair<Int, String>>>(Dispatchers.IO) {
+                    if (validImdbId == null || TRAKT_CLIENT_ID.isEmpty()) return@async emptyList()
                     val traktMediaType = if (tmdbMediaType == "movie") "movies" else "shows"
                     val expectedType = if (tmdbMediaType == "movie") "movie" else "tv"
                     runSuspendCatching {
@@ -955,8 +961,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     }.getOrDefault(emptyList())
                 }
 
-                val simklDeferred = async(Dispatchers.IO) {
-                    if (validImdbId == null || SIMKL_CLIENT_ID.isEmpty()) return@async emptyList<Pair<Int, String>>()
+                // ✨ Fix 2: 명시적 타입 선언
+                val simklDeferred = async<List<Pair<Int, String>>>(Dispatchers.IO) {
+                    if (validImdbId == null || SIMKL_CLIENT_ID.isEmpty()) return@async emptyList()
                     val simklMediaType = if (tmdbMediaType == "movie") "movies" else "tv"
                     val parentExpectedType = if (tmdbMediaType == "movie") "movie" else "tv"
                     
@@ -976,8 +983,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                             
                             coroutineScope {
                                 rawSimklRecs.map { (tmdbId, simklId, itemTmdbType) ->
-                                    async(Dispatchers.IO) {
-                                        StremioC.networkSemaphore.withPermit {
+                                    // ✨ Fix 2: 명시적 타입 선언
+                                    async<Pair<Int, String>?>(Dispatchers.IO) {
+                                        // ✨ Fix 4: withPermit 대신 acquire/release 사용
+                                        StremioC.networkSemaphore.acquire()
+                                        try {
                                             if (tmdbId > 0) Pair(tmdbId, itemTmdbType) 
                                             else if (simklId > 0) {
                                                 try {
@@ -989,6 +999,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                                                     } else null
                                                 } catch(e: Exception) { null }
                                             } else null
+                                        } finally {
+                                            StremioC.networkSemaphore.release()
                                         }
                                     }
                                 }.awaitAll().filterNotNull()
@@ -1019,12 +1031,17 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     .toList()
 
                 val missingMediaDeferred = missingPairs.map { pair ->
-                    async(Dispatchers.IO) {
-                        StremioC.networkSemaphore.withPermit {
+                    // ✨ Fix 2: 명시적 타입 선언
+                    async<TmdbMedia?>(Dispatchers.IO) {
+                        // ✨ Fix 4: withPermit 대신 acquire/release 사용
+                        StremioC.networkSemaphore.acquire()
+                        try {
                             runSuspendCatching {
                                 val res = StremioC.customSession.get(provider.buildTmdbUrl("/${pair.second}/${pair.first}"), timeout = 10).parsedSafe<TmdbDetailResponse>()
                                 res?.toTmdbMedia(pair.second)
                             }.getOrNull()
+                        } finally {
+                            StremioC.networkSemaphore.release()
                         }
                     }
                 }
@@ -1101,12 +1118,17 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 if (requiredSeasons.isNotEmpty()) {
                     coroutineScope {
                         requiredSeasons.map { seasonNum ->
-                            async(Dispatchers.IO) {
-                                StremioC.networkSemaphore.withPermit {
+                            // ✨ Fix 2: 명시적 타입 선언
+                            async<Unit>(Dispatchers.IO) {
+                                // ✨ Fix 4: withPermit 대신 acquire/release 사용
+                                StremioC.networkSemaphore.acquire()
+                                try {
                                     runSuspendCatching {
                                         val seasonRes = StremioC.customSession.get(provider.buildTmdbUrl("/tv/$tmdbIdStr/season/$seasonNum")).parsedSafe<TmdbSeasonDetail>()
                                         seasonRes?.episodes?.forEach { ep -> if (ep.episodeNumber != null) episodeTmdbMeta["${seasonNum}_${ep.episodeNumber}"] = ep }
                                     }
+                                } finally {
+                                    StremioC.networkSemaphore.release()
                                 }
                             }
                         }.awaitAll()
@@ -1207,8 +1229,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val detailedEntry = addonDeferred?.await() ?: this@CatalogEntry
             var tmdbIdStr: String? = resolvedTmdbId ?: if (this@CatalogEntry.id.startsWith("tmdb:")) this@CatalogEntry.id.removePrefix("tmdb:") else this@CatalogEntry.moviedb_id?.toString() ?: this@CatalogEntry.tmdbIdExt ?: detailedEntry.tmdbIdExt
             
+            // ✨ Fix 2: 명시적 타입 선언
             val findApiDeferred = if (tmdbIdStr == null && finalImdbId?.startsWith("tt") == true) {
-                async(Dispatchers.IO) {
+                async<Pair<String, String>?>(Dispatchers.IO) {
                     runSuspendCatching {
                         val findRes = StremioC.customSession.get(provider.buildTmdbUrl("/find/$finalImdbId", "external_source" to "imdb_id")).parsedSafe<TmdbFindResponse>()
                         val movieMatch = findRes?.movie_results?.firstOrNull()
