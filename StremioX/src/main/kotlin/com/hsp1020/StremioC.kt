@@ -1,4 +1,4 @@
-// v1.208 (Removed StreamPlayAnime integration, kept CineStream and StreamPlay)
+// v1.208 (Refactored: Clean Code, DRY Principle Applied, Removed Spaghetti Reflection & Mapping)
 package com.hsp1020
 
 import android.content.Context
@@ -118,6 +118,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         private val cacheMutexes = ConcurrentHashMap<String, Mutex>()
         private val CACHE_TTL_MS = TimeUnit.HOURS.toMillis(1)
         
+        // Cache Instances
         @Volatile private var cachedCineStreamProvider: MainAPI? = null
         @Volatile private var cachedStreamPlayProvider: MainAPI? = null
 
@@ -125,12 +126,10 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         @Volatile private var hasSearchedStreamPlay = false
         
         @Volatile private var hasSyncedCineStreamSettings = false
-        @Volatile private var cachedCineClassLoader: ClassLoader? = null
 
-        @Volatile private var cachedCineStreamEnabled: Boolean? = null
-        @Volatile private var cachedStreamPlayEnabled: Boolean? = null
+        // Settings Cache
+        private val settingsCache = ConcurrentHashMap<String, Pair<Boolean, Long>>()
         
-        @Volatile private var cachedCineStreamEnabledTime: Long = 0
         @Volatile private var cachedCustomHosts: Set<String>? = null
         @Volatile private var cachedCustomHostsTime: Long = 0
         private const val SETTINGS_CACHE_TTL = 60_000L
@@ -153,107 +152,97 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
         }
 
+        // ==========================================
+        // REFACTORED: Generic Reflection Loader
+        // ==========================================
+        private fun loadProviderDynamically(pluginKeyword: String, className: String): MainAPI? {
+            try {
+                val pmClass = Class.forName("com.lagradost.cloudstream3.plugins.PluginManager")
+                val pmInstance = pmClass.getField("INSTANCE").get(null)
+
+                var foundLoader: ClassLoader? = null
+                for (field in pmClass.declaredFields) {
+                    field.isAccessible = true
+                    val obj = runSuspendCatching { field.get(pmInstance) }.getOrNull()
+                    val items = when (obj) {
+                        is Map<*, *> -> obj.values
+                        is Collection<*> -> obj
+                        is Array<*> -> obj.toList()
+                        else -> null
+                    }
+
+                    if (items != null) {
+                        for (plugin in items) {
+                            val pName = plugin?.javaClass?.name ?: ""
+                            if (pName.contains(pluginKeyword, true)) {
+                                foundLoader = plugin!!.javaClass.classLoader
+                                break
+                            }
+                        }
+                    }
+                    if (foundLoader != null) break
+                }
+                
+                if (foundLoader != null) {
+                    val clazz = foundLoader.loadClass(className)
+                    return clazz.newInstance() as? MainAPI
+                }
+            } catch (e: Exception) {
+                // Ignore gracefully
+            }
+            return null
+        }
+
         @Synchronized
         fun getCineStreamProvider(forceSearch: Boolean = false): MainAPI? {
             if (cachedCineStreamProvider != null) return cachedCineStreamProvider
             if (!forceSearch && hasSearchedCineStream) return null
-
             hasSearchedCineStream = true
 
-            var provider = APIHolder.allProviders.find {
-                it.name.equals("CineStream", ignoreCase = true)
-            }
-
-            if (provider != null) {
-                cachedCineStreamProvider = provider
-                return provider
-            }
-
-            try {
-                val targetClassLoader = cachedCineClassLoader ?: run {
-                    val pmClass = Class.forName("com.lagradost.cloudstream3.plugins.PluginManager")
-                    val pmInstance = pmClass.getField("INSTANCE").get(null)
-
-                    var foundLoader: ClassLoader? = null
-                    for (field in pmClass.declaredFields) {
-                        field.isAccessible = true
-                        val obj = runSuspendCatching { field.get(pmInstance) }.getOrNull()
-                        val items = when (obj) {
-                            is Map<*, *> -> obj.values
-                            is Collection<*> -> obj
-                            is Array<*> -> obj.toList()
-                            else -> null
-                        }
-
-                        if (items != null) {
-                            for (plugin in items) {
-                                val pName = plugin?.javaClass?.name ?: ""
-                                if (pName.contains("megix", true) || pName.contains("CineStream", true)) {
-                                    foundLoader = plugin!!.javaClass.classLoader
-                                    break
-                                }
-                            }
-                        }
-                        if (foundLoader != null) break
-                    }
-                    foundLoader
-                }
-
-                if (targetClassLoader != null) {
-                    cachedCineClassLoader = targetClassLoader
-                    val clazz = targetClassLoader.loadClass("com.megix.CineStreamProvider")
-                    provider = clazz.newInstance() as? MainAPI
-                }
-            } catch (e: Exception) {
-                cachedCineClassLoader = null
-            }
-
-            cachedCineStreamProvider = provider
-            return provider
+            cachedCineStreamProvider = APIHolder.allProviders.find { it.name.equals("CineStream", true) }
+                ?: loadProviderDynamically("megix", "com.megix.CineStreamProvider")
+            
+            return cachedCineStreamProvider
         }
 
         @Synchronized
         fun getStreamPlayProvider(forceSearch: Boolean = false): MainAPI? {
             if (cachedStreamPlayProvider != null) return cachedStreamPlayProvider
             if (!forceSearch && hasSearchedStreamPlay) return null
-
-            var provider = APIHolder.allProviders.find { it.name.equals("StreamPlay", ignoreCase = true) }
-            if (provider == null) {
-                try {
-                    val pmClass = Class.forName("com.lagradost.cloudstream3.plugins.PluginManager")
-                    val pmInstance = pmClass.getField("INSTANCE").get(null)
-                    var foundLoader: ClassLoader? = null
-                    for (field in pmClass.declaredFields) {
-                        field.isAccessible = true
-                        val obj = runSuspendCatching { field.get(pmInstance) }.getOrNull()
-                        val items = when (obj) {
-                            is Map<*, *> -> obj.values
-                            is Collection<*> -> obj
-                            is Array<*> -> obj.toList()
-                            else -> null
-                        }
-                        if (items != null) {
-                            for (plugin in items) {
-                                val pName = plugin?.javaClass?.name ?: ""
-                                if (pName.contains("phisher", true) || pName.contains("StreamPlay", true)) {
-                                    foundLoader = plugin!!.javaClass.classLoader
-                                    break
-                                }
-                            }
-                        }
-                        if (foundLoader != null) break
-                    }
-                    if (foundLoader != null) {
-                        val clazz = foundLoader.loadClass("com.phisher98.StreamPlay")
-                        provider = clazz.newInstance() as? MainAPI
-                    }
-                } catch (e: Exception) {}
-            }
-            cachedStreamPlayProvider = provider
             hasSearchedStreamPlay = true
-            return provider
+
+            cachedStreamPlayProvider = APIHolder.allProviders.find { it.name.equals("StreamPlay", true) }
+                ?: loadProviderDynamically("phisher", "com.phisher98.StreamPlay")
+            
+            return cachedStreamPlayProvider
         }
         
+        // ==========================================
+        // REFACTORED: Generic Preference Checker
+        // ==========================================
+        private fun isIntegrationEnabled(prefKey: String): Boolean {
+            val now = System.currentTimeMillis()
+            val cached = settingsCache[prefKey]
+            if (cached != null && (now - cached.second) < SETTINGS_CACHE_TTL) {
+                return cached.first
+            }
+
+            val context = CloudStreamApp.context ?: return true
+            val possibleNames = listOf("StremioX", "StremioX_preferences", "stremio_preferences", "com.hsp1020_preferences", context.packageName + "_preferences")
+            
+            var isEnabled = true
+            for (name in possibleNames) {
+                val prefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
+                if (prefs.contains(prefKey)) {
+                    isEnabled = prefs.getBoolean(prefKey, true)
+                    break
+                }
+            }
+            
+            settingsCache[prefKey] = Pair(isEnabled, now)
+            return isEnabled
+        }
+
         suspend fun getOrFetchCachedPage(
             key: String, 
             fetchBlock: suspend () -> Pair<List<SearchResponse>, Int>?
@@ -606,6 +595,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val primaryStremioId = buildStremioId(targetType, primaryId, loadData.season, loadData.episode) ?: primaryId
         val encodedPrimaryId = primaryStremioId.urlEncode()
 
+        // ----------------------------------------------------
+        // REFACTORED: Deduplication Set to prevent double links
+        // ----------------------------------------------------
         val seenLinks = Collections.synchronizedSet(mutableSetOf<String>())
         val wrappedCallback: (ExtractorLink) -> Unit = { link ->
             if (seenLinks.add(link.url)) {
@@ -668,6 +660,58 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
     }
 
+    // ==========================================
+    // REFACTORED: Base Payload Builder
+    // ==========================================
+    private fun buildBasePayload(
+        loadData: LoadData,
+        targetType: String,
+        globalId: String?,
+        globalSeason: Int?,
+        globalEpisode: Int?
+    ): MutableMap<String, Any?> {
+        val rawId = loadData.imdbId ?: globalId?.takeIf { it.startsWith("tt") || it.startsWith("tmdb:") } ?: ""
+        val correctImdbId = if (rawId.startsWith("tmdb:")) {
+            val parts = rawId.split(":")
+            if (parts.size >= 2) "${parts[0]}:${parts[1]}" else rawId
+        } else {
+            rawId
+        }
+
+        val scrapingTitle = loadData.englishTitle ?: loadData.originalTitle ?: loadData.title ?: "Unknown"
+        val isAnimeMedia = loadData.isAnime || globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true || loadData.anilistId != null || loadData.malId != null
+        val isSeason2Plus = isAnimeMedia && (globalSeason ?: 0) > 1
+
+        val finalTitle = if (isSeason2Plus) "$scrapingTitle Season $globalSeason" else scrapingTitle
+        val finalYear = if (isSeason2Plus) loadData.airedYear?.toString() ?: loadData.year?.toString() else loadData.year?.toString()
+
+        return mutableMapOf(
+            "title" to finalTitle,
+            "orgTitle" to loadData.originalTitle,
+            "jpTitle" to loadData.originalTitle,
+            "year" to finalYear,
+            "airedYear" to loadData.airedYear,
+            "date" to loadData.firstAired,
+            "airedDate" to loadData.firstAired,
+            "firstAired" to loadData.firstAired,
+            "season" to globalSeason,
+            "episode" to globalEpisode,
+            "imdbSeason" to globalSeason,
+            "imdbEpisode" to globalEpisode,
+            "imdb_id" to loadData.imdbId,
+            "imdbId" to correctImdbId,
+            "tmdbId" to loadData.tmdbId,
+            "type" to targetType,
+            "tvtype" to targetType,
+            "isMovie" to (targetType == "movie"),
+            "isAnime" to isAnimeMedia,
+            "isBollywood" to loadData.isBollywood,
+            "isAsian" to loadData.isAsian,
+            "isCartoon" to loadData.isCartoon,
+            "malId" to loadData.malId
+        )
+    }
+
     private suspend fun invokeCineStream(
         loadData: LoadData,
         targetType: String,
@@ -678,27 +722,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val isEnabled = withContext(Dispatchers.IO) {
-            val now = System.currentTimeMillis()
-            if (cachedCineStreamEnabled != null && now - cachedCineStreamEnabledTime < SETTINGS_CACHE_TTL) {
-                return@withContext cachedCineStreamEnabled!!
-            }
-            val context = CloudStreamApp.context ?: return@withContext true
-            val possiblePrefNames = listOf("StremioX", "StremioX_preferences", "stremio_preferences", "com.hsp1020_preferences", context.packageName + "_preferences")
-            var enabled = true
-            for (name in possiblePrefNames) {
-                val prefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
-                if (prefs.contains("cinestream_integration_enabled")) {
-                    enabled = prefs.getBoolean("cinestream_integration_enabled", true)
-                    break
-                }
-            }
-            cachedCineStreamEnabled = enabled
-            cachedCineStreamEnabledTime = now
-            enabled
-        }
-
-        if (!isEnabled) return
+        if (!isIntegrationEnabled("cinestream_integration_enabled")) return
 
         try {
             val cineStreamProvider = getCineStreamProvider() ?: return
@@ -735,51 +759,17 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
             }
 
-            val isKitsuMedia = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
-            val kitsuIdExt = if (isKitsuMedia) globalId?.substringAfter("kitsu:")?.substringAfter("mal:") else loadData.kitsuId
+            val payload = buildBasePayload(loadData, targetType, globalId, globalSeason, globalEpisode)
             
-            val rawIdForCineStream = loadData.imdbId ?: globalId?.takeIf { it.startsWith("tt") || it.startsWith("tmdb:") } ?: ""
-            val correctImdbIdForCineStream = if (rawIdForCineStream.startsWith("tmdb:")) {
-                val parts = rawIdForCineStream.split(":")
-                if (parts.size >= 2) "${parts[0]}:${parts[1]}" else rawIdForCineStream
-            } else {
-                rawIdForCineStream
-            }
-
-            val scrapingTitle = loadData.englishTitle ?: loadData.originalTitle ?: loadData.title ?: "Unknown"
-
-            val isAnimeMedia = (loadData.isAnime || isKitsuMedia)
-            val isSeason2Plus = isAnimeMedia && (globalSeason ?: 0) > 1
-
-            val finalTitleForCineStream = if (isSeason2Plus) "$scrapingTitle Season $globalSeason" else scrapingTitle
-            val finalYearForCineStream = if (isSeason2Plus) loadData.airedYear?.toString() ?: loadData.year?.toString() else loadData.year?.toString()
-
-            val cineData = mapOf(
-                "title" to finalTitleForCineStream, 
-                "id" to correctImdbIdForCineStream,
-                "tmdbId" to loadData.tmdbId,
-                "tvtype" to targetType,
-                "year" to finalYearForCineStream,
-                "season" to globalSeason,
-                "episode" to globalEpisode,
-                "imdb_id" to loadData.imdbId,
-                "original_title" to loadData.originalTitle,
-                "airedYear" to loadData.airedYear,
-                "firstAired" to loadData.firstAired,
-                "imdbSeason" to globalSeason,
-                "imdbEpisode" to globalEpisode,
-                "anilistId" to loadData.anilistId,
-                "malId" to loadData.malId,
-                "isAnime" to isAnimeMedia,
-                "isKitsu" to false, 
-                "kitsuId" to kitsuIdExt,
-                "isBollywood" to loadData.isBollywood,
-                "isAsian" to loadData.isAsian,
-                "isCartoon" to loadData.isCartoon
-            )
+            // CineStream specific overrides
+            val isKitsuMedia = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
+            payload["id"] = payload["imdbId"] ?: ""
+            payload["anilistId"] = loadData.anilistId
+            payload["isKitsu"] = false
+            payload["kitsuId"] = if (isKitsuMedia) globalId?.substringAfter("kitsu:")?.substringAfter("mal:") else loadData.kitsuId
 
             kotlinx.coroutines.withTimeoutOrNull(25000L) {
-                cineStreamProvider.loadLinks(cineData.toJson(), isCasting, subtitleInterceptor, callback)
+                cineStreamProvider.loadLinks(payload.toJson(), isCasting, subtitleInterceptor, callback)
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -796,90 +786,21 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val isEnabled = withContext(Dispatchers.IO) {
-            val now = System.currentTimeMillis()
-            if (cachedStreamPlayEnabled != null && now - cachedCineStreamEnabledTime < SETTINGS_CACHE_TTL) {
-                return@withContext cachedStreamPlayEnabled!!
-            }
-            val context = CloudStreamApp.context ?: return@withContext true
-            val possiblePrefNames = listOf("StremioX", "StremioX_preferences", "stremio_preferences", "com.hsp1020_preferences", context.packageName + "_preferences")
-            var enabled = true
-            for (name in possiblePrefNames) {
-                val prefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
-                if (prefs.contains("streamplay_integration_enabled")) {
-                    enabled = prefs.getBoolean("streamplay_integration_enabled", true)
-                    break
-                }
-            }
-            cachedStreamPlayEnabled = enabled
-            enabled
-        }
-
-        if (!isEnabled) return
+        if (!isIntegrationEnabled("streamplay_integration_enabled")) return
 
         try {
             val streamPlayProvider = getStreamPlayProvider() ?: return
 
-            val rawId = loadData.imdbId ?: globalId?.takeIf { it.startsWith("tt") || it.startsWith("tmdb:") } ?: ""
-            val correctImdbId = if (rawId.startsWith("tmdb:")) {
-                val parts = rawId.split(":")
-                if (parts.size >= 2) "${parts[0]}:${parts[1]}" else rawId
-            } else {
-                rawId
-            }
-
-            val isAnimeMedia = loadData.isAnime || globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true || loadData.anilistId != null || loadData.malId != null
-
-            var resolvedMalId = loadData.malId
-            var resolvedAniId = loadData.anilistId
-            if (resolvedMalId == null) {
-                if (loadData.tmdbId != null) {
-                    runSuspendCatching {
-                        val mType = if (targetType == "movie") "movie" else "tv"
-                        val res = customSession.get("https://api.malsync.moe/tmdb/$mType/${loadData.tmdbId}", timeout = 5L).text
-                        if (res.contains("\"id\"")) {
-                            resolvedMalId = JSONObject(res).optInt("id").takeIf { it > 0 } ?: resolvedMalId
-                        }
-                    }
-                }
-                if (resolvedMalId == null && !correctImdbId.isNullOrBlank()) {
-                    runSuspendCatching {
-                        val res = customSession.get("https://api.ani.zip/mappings?imdb_id=$correctImdbId", timeout = 5L).text
-                        if (res.contains("mal_id")) {
-                            val json = JSONObject(res)
-                            resolvedMalId = json.optInt("mal_id").takeIf { it > 0 } ?: resolvedMalId
-                            resolvedAniId = json.optInt("anilist_id").takeIf { it > 0 } ?: resolvedAniId
-                        }
-                    }
-                }
-            }
-
-            val spData = mapOf(
-                "id" to loadData.tmdbId, 
-                "tmdbId" to loadData.tmdbId,
-                "imdbId" to correctImdbId,
-                "type" to targetType,
-                "season" to globalSeason,
-                "episode" to globalEpisode,
-                "title" to (loadData.englishTitle ?: loadData.originalTitle ?: loadData.title ?: "Unknown"),
-                "year" to loadData.year,
-                "orgTitle" to loadData.originalTitle,
-                "isAnime" to isAnimeMedia,
-                "airedYear" to loadData.airedYear,
-                "jpTitle" to loadData.originalTitle,
-                "date" to loadData.firstAired,
-                "airedDate" to loadData.firstAired,
-                "isAsian" to loadData.isAsian,
-                "isBollywood" to loadData.isBollywood,
-                "isCartoon" to loadData.isCartoon,
-                "isMovie" to (targetType == "movie"),
-                "lastSeason" to 1, 
-                "aniId" to resolvedAniId?.toString(), 
-                "malId" to resolvedMalId
-            )
+            val payload = buildBasePayload(loadData, targetType, globalId, globalSeason, globalEpisode)
+            
+            // StreamPlay specific overrides
+            payload["id"] = loadData.tmdbId // StreamPlay treats "id" as tmdbId
+            payload["year"] = loadData.year
+            payload["lastSeason"] = 1 // Required for Kisskh relaxed search
+            payload["aniId"] = loadData.anilistId?.toString()
 
             kotlinx.coroutines.withTimeoutOrNull(25000L) {
-                streamPlayProvider.loadLinks(spData.toJson(), isCasting, subtitleCallback, callback)
+                streamPlayProvider.loadLinks(payload.toJson(), isCasting, subtitleCallback, callback)
             }
         } catch (e: Exception) {
             e.printStackTrace()
