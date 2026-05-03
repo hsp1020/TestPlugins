@@ -266,7 +266,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 id?.startsWith("kitsu:") == true || id?.startsWith("mal:") == true -> {
                     val parts = id.split(":")
                     val baseId = if (parts.size >= 2) "${parts[0]}:${parts[1]}" else id
-                    if (isSubtitle) "$baseId:$season:$episode" else "$baseId:$episode"
+                    // 🔥 Kitsu는 시즌 개념이 없으므로 자막/스트림 상관없이 무조건 baseId:episode 로 통일
+                    "$baseId:$episode"
                 }
                 id?.endsWith(":$season:$episode") == true -> id
                 else -> "$id:$season:$episode"
@@ -741,7 +742,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "anilistId" to loadData.anilistId,
                 "malId" to loadData.malId,
                 "isAnime" to isAnimeMedia,
-                "isKitsu" to false, 
+                "isKitsu" to isKitsuMedia,
                 "kitsuId" to kitsuIdExt,
                 "isBollywood" to loadData.isBollywood,
                 "isAsian" to loadData.isAsian,
