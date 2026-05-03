@@ -261,16 +261,18 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     }
 
     private fun buildStremioId(type: String?, id: String?, season: Int?, episode: Int?, isSubtitle: Boolean = false): String? {
-        if (type == "series" && season != null && episode != null) {
+        if (type == "series" && episode != null) { // 🔥 season != null 조건 제거 (Kitsu를 위해)
             return when {
                 id?.startsWith("kitsu:") == true || id?.startsWith("mal:") == true -> {
                     val parts = id.split(":")
                     val baseId = if (parts.size >= 2) "${parts[0]}:${parts[1]}" else id
-                    // 🔥 Kitsu는 시즌 개념이 없으므로 자막/스트림 상관없이 무조건 baseId:episode 로 통일
-                    "$baseId:$episode"
+                    "$baseId:$episode" // 🔥 Kitsu는 무조건 baseId:episode 로 깔끔하게 통일
                 }
-                id?.endsWith(":$season:$episode") == true -> id
-                else -> "$id:$season:$episode"
+                season != null -> {
+                    if (id?.endsWith(":$season:$episode") == true) id
+                    else "$id:$season:$episode"
+                }
+                else -> "$id:$episode"
             }
         }
         return id
@@ -573,7 +575,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val globalId = if (!loadData.imdbId.isNullOrBlank()) loadData.imdbId else primaryId
         val targetType = loadData.type ?: if ((loadData.season ?: 0) > 0 || (loadData.episode ?: 0) > 0) "series" else "movie"
         
-        val globalSeason = if (targetType == "movie") null else loadData.imdbSeason?.takeIf { it > 0 } ?: loadData.season?.takeIf { it > 0 } ?: 1
+        // 🔥 Kitsu 여부 판별
+        val isKitsuMedia = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true || loadData.id?.startsWith("kitsu:") == true || loadData.id?.startsWith("mal:") == true
+        
+        // 🔥 질문자님 아이디어: Kitsu면 애초에 globalSeason 자체를 null로 날려버림!
+        val globalSeason = if (targetType == "movie" || isKitsuMedia) null else loadData.imdbSeason?.takeIf { it > 0 } ?: loadData.season?.takeIf { it > 0 } ?: 1
         val globalEpisode = if (targetType == "movie") null else loadData.imdbEpisode?.takeIf { it > 0 } ?: loadData.episode?.takeIf { it > 0 } ?: 1
         
         println("StremioC v1.205 Debug: Computed globalId=$globalId, globalSeason=$globalSeason, globalEpisode=$globalEpisode")
@@ -742,7 +748,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "anilistId" to loadData.anilistId,
                 "malId" to loadData.malId,
                 "isAnime" to isAnimeMedia,
-                "isKitsu" to isKitsuMedia,
+                "isKitsu" to false, 
                 "kitsuId" to kitsuIdExt,
                 "isBollywood" to loadData.isBollywood,
                 "isAsian" to loadData.isAsian,
