@@ -1,4 +1,4 @@
-// v1.205 (StremioX and Stremio Subtitles pipelines cleanly removed, Unified to CineStream, StreamPlay, StreamPlayAnime)
+// v1.206 (Fix: Data Mapping Mismatch for Kisskh, Xpass, Vaplayer, HexaSU & MAL/Ani ID Fetching for StreamPlayAnime)
 package com.hsp1020
 
 import android.content.Context
@@ -416,7 +416,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val now = System.currentTimeMillis()
                 globalPageCache.entries.removeIf { now - it.value.third > CACHE_TTL_MS }
                 cacheMutexes.clear() 
-                println("StremioC v1.205 Debug: Cleared cacheMutexes to prevent memory leak")
                 catalogSkipState.clear()
             }
             
@@ -501,7 +500,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     }
 
     override suspend fun load(url: String): LoadResponse = coroutineScope {
-        println("StremioC v1.205 Debug: Starting load for $url")
         val res: CatalogEntry = if (url.startsWith("{")) {
             parseJson(url)
         } else {
@@ -564,10 +562,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                             }
                         }
                     }
-                    if (vids.isNotEmpty()) {
-                        kitsuVideos = vids
-                        println("StremioC v1.205 Debug: Kitsu Manual JSON mapping completed for ${vids.size} videos")
-                    }
+                    if (vids.isNotEmpty()) kitsuVideos = vids
                 }
             }
         }
@@ -634,12 +629,10 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             loadRes.plot = if (!currentPlot.isNullOrBlank()) "$ratingStr | $currentPlot" else ratingStr
         }
         
-        println("StremioC v1.205 Debug: Load completed for ${loadRes.name}")
         return@coroutineScope loadRes
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
-        println("StremioC v1.205 Debug: loadLinks invoked with data=$data")
         val loadData = try { parseJson<LoadData>(data) } catch (e: Exception) { null } ?: return false
         
         val primaryId = if (loadData.id?.startsWith("tmdb:") == true && !loadData.imdbId.isNullOrBlank()) {
@@ -653,12 +646,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         
         val globalSeason = if (targetType == "movie") null else loadData.imdbSeason?.takeIf { it > 0 } ?: loadData.season?.takeIf { it > 0 } ?: 1
         val globalEpisode = if (targetType == "movie") null else loadData.imdbEpisode?.takeIf { it > 0 } ?: loadData.episode?.takeIf { it > 0 } ?: 1
-        
-        println("StremioC v1.205 Debug: Computed globalId=$globalId, globalSeason=$globalSeason, globalEpisode=$globalEpisode")
 
         val primaryStremioId = buildStremioId(targetType, primaryId, loadData.season, loadData.episode) ?: primaryId
         val encodedPrimaryId = primaryStremioId.urlEncode()
 
+        // 중복 링크 방지
         val seenLinks = Collections.synchronizedSet(mutableSetOf<String>())
         val wrappedCallback: (ExtractorLink) -> Unit = { link ->
             if (seenLinks.add(link.url)) {
@@ -789,8 +781,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
             }
 
-            println("StremioC v1.205: CineStream Global Mapping - Season: $globalSeason, Episode: $globalEpisode")
-
             val isKitsuMedia = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
             val kitsuIdExt = if (isKitsuMedia) globalId?.substringAfter("kitsu:")?.substringAfter("mal:") else loadData.kitsuId
             
@@ -834,7 +824,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "isCartoon" to loadData.isCartoon
             )
 
-            cineStreamProvider.loadLinks(cineData.toJson(), isCasting, subtitleInterceptor, callback)
+            kotlinx.coroutines.withTimeoutOrNull(25000L) {
+                cineStreamProvider.loadLinks(cineData.toJson(), isCasting, subtitleInterceptor, callback)
+            }
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -882,12 +874,13 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 rawId
             }
 
-            val isAnimeMedia = loadData.isAnime || globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
-            
+            val isAnimeMedia = loadData.isAnime || globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true || loadData.anilistId != null || loadData.malId != null
+
+            // 핵심: StreamPlay의 LinkData 모델과 완벽하게 타입을 매칭합니다.
             val spData = mapOf(
-                "id" to loadData.tmdbId, // 핵심 수정: StreamPlay는 'id' 키를 TMDB ID로 받습니다.
-                "imdbId" to correctImdbId,
+                "id" to loadData.tmdbId, // StreamPlay는 id를 TMDB ID(Int)로 사용
                 "tmdbId" to loadData.tmdbId,
+                "imdbId" to correctImdbId,
                 "type" to targetType,
                 "season" to globalSeason,
                 "episode" to globalEpisode,
@@ -903,7 +896,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "isBollywood" to loadData.isBollywood,
                 "isCartoon" to loadData.isCartoon,
                 "isMovie" to (targetType == "movie"),
-                "aniId" to loadData.anilistId?.toString(), // StreamPlay는 aniId를 String으로 받음
+                "lastSeason" to 1, // Kisskh의 완화된 검색(Season X 생략)을 위한 필수값
+                "aniId" to loadData.anilistId?.toString(), // StreamPlay는 aniId를 String으로 기대함
                 "malId" to loadData.malId
             )
 
@@ -961,9 +955,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 rawId
             }
 
+            // StreamPlayAnime의 LinkData 모델 매핑
             val spaData = mapOf(
-                "imdbId" to correctImdbId,
+                "id" to loadData.tmdbId,
                 "tmdbId" to loadData.tmdbId,
+                "imdbId" to correctImdbId,
                 "type" to targetType,
                 "season" to globalSeason,
                 "episode" to globalEpisode,
@@ -979,7 +975,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 "isBollywood" to loadData.isBollywood,
                 "isCartoon" to loadData.isCartoon,
                 "isMovie" to (targetType == "movie"),
-                "aniId" to loadData.anilistId, // StreamPlayAnime는 aniId를 Int로 받음
+                "lastSeason" to 1,
+                "aniId" to loadData.anilistId, // StreamPlayAnime는 aniId를 Int로 기대함
                 "malId" to loadData.malId
             )
 
@@ -1353,7 +1350,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     val currentMax = maxEpisodePerSeason.getOrDefault(displaySeason, displayEpisode)
                     displayEpisode = maxOf(currentMax, displayEpisode) + 1
                     key = "${displaySeason}_${displayEpisode}"
-                    println("StremioC v1.205 Debug: Resolved episode collision with O(1) lookup. New key: $key")
                 }
                 uniqueEpisodeChecker.add(key)
                 maxEpisodePerSeason[displaySeason] = maxOf(maxEpisodePerSeason.getOrDefault(displaySeason, 0), displayEpisode)
@@ -1376,17 +1372,14 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             resolvedTmdbId: String? = null,
             kitsuVideos: List<Video>? = null
         ): LoadResponse = coroutineScope {
-            // 1. 네트워크에서 상세 JSON(links, logo 등 포함)을 먼저 가져옵니다.
             val detailedEntry = addonDeferred?.await() ?: this@CatalogEntry
 
             var finalImdbId = if (this@CatalogEntry.id.startsWith("tt")) this@CatalogEntry.id 
                               else imdbId?.takeIf { it.startsWith("tt") || it.startsWith("kitsu:") || it.startsWith("mal:") }
             
-            // 2. this@CatalogEntry(빈 껍데기)가 아닌 detailedEntry(전체 데이터)에서 links를 찾습니다.
             if (finalImdbId == null && detailedEntry.links.isNotEmpty()) {
                 finalImdbId = detailedEntry.links.firstOrNull { it.category == "imdb" }?.url?.substringAfterLast("/")?.takeIf { it.startsWith("tt") }
             }
-            // 3. 마찬가지로 detailedEntry의 이미지 URL들에서 IMDb ID를 추출합니다.
             if (finalImdbId == null) {
                 finalImdbId = provider.extractImdbId(detailedEntry.logo) ?: provider.extractImdbId(detailedEntry.poster) ?: provider.extractImdbId(detailedEntry.background)
             }
@@ -1428,7 +1421,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
 
             var finalName = originalName ?: this@CatalogEntry.name ?: "Unknown Content"
-            // v1.170의 description 병합 로직 복구
             var finalDescription = detailedEntry.description ?: this@CatalogEntry.description
             
             if (tmdbData != null) {
@@ -1436,7 +1428,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 finalDescription = tmdbData.fetchedOverview?.takeIf { it.isNotBlank() } ?: finalDescription
             }
             
-            // other 타입일 경우 원본 파일명(originalName)을 플롯에 추가
             if (finalType == "other") {
                 finalDescription = if (finalDescription.isNullOrBlank()) originalName else "$finalDescription | $originalName"
             }
@@ -1474,6 +1465,21 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val isCartoon = finalGenre?.any { it.contains("Animation", true) } == true
             val isAnimeMedia = fetchedMalId != null || finalImdbId?.startsWith("mal:") == true || finalImdbId?.startsWith("kitsu:") == true || finalGenre?.contains("Anime") == true || (countries.any { it.contains("JP", true) } && isCartoon)
 
+            var finalMalId = fetchedMalId
+            var finalAniId = fetchedAniListId
+
+            // StreamPlayAnime의 malsyncAPI 호출을 위해 TMDB 기반 진입 시에도 malId/anilistId를 강제 수급합니다.
+            if (isAnimeMedia && finalMalId == null && finalImdbId != null) {
+                runSuspendCatching {
+                    val mappingRes = StremioC.customSession.get("https://api.ani.zip/mappings?imdb_id=$finalImdbId", timeout = 5L).text
+                    if (mappingRes.contains("mal_id")) {
+                        val mappingJson = JSONObject(mappingRes)
+                        finalMalId = mappingJson.optInt("mal_id").takeIf { it > 0 } ?: finalMalId
+                        finalAniId = mappingJson.optInt("anilist_id").takeIf { it > 0 } ?: finalAniId
+                    }
+                }
+            }
+
             if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
                 return@coroutineScope provider.newMovieLoadResponse(
                     finalName, "${provider.mainUrl}/meta/${finalType ?: "movie"}/${this@CatalogEntry.id}.json", TvType.Movie, 
@@ -1488,39 +1494,33 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         isBollywood = isBollywood,
                         isAsian = isAsian,
                         isCartoon = isCartoon,
-                        anilistId = fetchedAniListId,
-                        malId = fetchedMalId,
+                        anilistId = finalAniId,
+                        malId = finalMalId,
                         kitsuId = this@CatalogEntry.kitsuIdExt,
                         originalTitle = tmdbData?.fetchedOriginalTitle,
                         englishTitle = tmdbData?.fetchedEnglishTitle
                     )
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
-
-                    // 복구한 finalDescription 적용
                     this.plot = finalDescription
                     this.actors = tmdbData?.fetchedActors
                     this.tags = finalGenre
                     this.recommendations = tmdbData?.fetchedRecommendations 
-                    
                     addTrailer(finalTrailers); this.duration = tmdbData?.fetchedRuntime; this.contentRating = tmdbData?.fetchedAgeRating
                     tmdbData?.fetchedLogo?.let { this.logoUrl = it }; tmdbIdStr?.let { addTMDbId(it) }; finalImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }
                 }
             } else {
-                val finalEpisodes = processEpisodes(provider, finalImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, tmdbIdStr?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, fetchedAniListId, fetchedMalId, this@CatalogEntry.kitsuIdExt)
+                val finalEpisodes = processEpisodes(provider, finalImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, tmdbIdStr?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, finalAniId, finalMalId, this@CatalogEntry.kitsuIdExt)
 
                 return@coroutineScope provider.newTvSeriesLoadResponse(
                     finalName, "${provider.mainUrl}/meta/${finalType ?: "series"}/${this@CatalogEntry.id}.json", TvType.TvSeries, finalEpisodes
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
                     this.showStatus = tmdbData?.fetchedStatus 
-                    
-                    // 복구한 finalDescription 적용
                     this.plot = finalDescription
                     this.actors = tmdbData?.fetchedActors
                     this.tags = finalGenre
                     this.recommendations = tmdbData?.fetchedRecommendations
-                    
                     addTrailer(finalTrailers.firstOrNull()); this.contentRating = tmdbData?.fetchedAgeRating
                     tmdbData?.fetchedLogo?.let { this.logoUrl = it }; tmdbIdStr?.let { addTMDbId(it) }; finalImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }
                 }
@@ -1578,10 +1578,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 this.name = if (tmdbEp?.name != null) tmdbEp.name else cleanOriginalTitle
                 this.posterUrl = thumbnail ?: TRANSPARENT_PIXEL
                 
-                // 파일명(cleanOriginalTitle)을 플롯에 병합하는 v1.170 로직 복구
-                // 🔥 "null" 문자열이 들어오면 진짜 null로 취급하도록 방어
                 var finalEpDesc = (tmdbEp?.overview ?: this@Video.overview ?: this@Video.description)?.takeIf { it != "null" }
-                
                 if (type == "other") {
                     finalEpDesc = if (finalEpDesc.isNullOrBlank()) cleanOriginalTitle else "$finalEpDesc | $cleanOriginalTitle"
                 }
