@@ -1,8 +1,4 @@
 // v1.205 (StremioX and Stremio Subtitles pipelines cleanly removed, Unified to CineStream)
-// + other 타입 메타데이터 누락 픽스 (detailedEntry 위치 변경)
-// + other 타입 파일명 플롯 병합 로직 복구
-// + Kitsu/Mal ID 강제 덮어쓰기 픽스 (loadLinks)
-
 package com.hsp1020
 
 import android.content.Context
@@ -261,24 +257,20 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     }
 
     private fun buildStremioId(type: String?, id: String?, season: Int?, episode: Int?, isSubtitle: Boolean = false): String? {
-        if (type == "series" && episode != null) { // 🔥 season != null 조건 제거
+        if (type == "series" && season != null && episode != null) {
             return when {
                 id?.startsWith("kitsu:") == true || id?.startsWith("mal:") == true -> {
                     val parts = id.split(":")
                     val baseId = if (parts.size >= 2) "${parts[0]}:${parts[1]}" else id
-                    // 🔥 자막이든 스트림이든 Kitsu는 무조건 baseId:episode 로 깔끔하게 통일!
-                    "$baseId:$episode" 
+                    if (isSubtitle) "$baseId:$season:$episode" else "$baseId:$episode"
                 }
-                season != null -> {
-                    if (id?.endsWith(":$season:$episode") == true) id
-                    else "$id:$season:$episode"
-                }
-                else -> "$id:$episode"
+                id?.endsWith(":$season:$episode") == true -> id
+                else -> "$id:$season:$episode"
             }
         }
         return id
     }
-    
+
     private fun baseUrl(): String {
         return mainUrl.fixSourceUrl().cleanBaseUrl()
     }
@@ -556,18 +548,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         println("StremioC v1.205 Debug: loadLinks invoked with data=$data")
-        val rawLoadData = try { parseJson<LoadData>(data) } catch (e: Exception) { null } ?: return false
+        val loadData = try { parseJson<LoadData>(data) } catch (e: Exception) { null } ?: return false
         
-        val loadData = if (rawLoadData.id?.startsWith("kitsu:") == true || rawLoadData.id?.startsWith("mal:") == true) {
-            val parts = rawLoadData.id.split(":")
-            val baseId = if (parts.size >= 2) "${parts[0]}:${parts[1]}" else rawLoadData.id
-            rawLoadData.copy(imdbId = baseId)
-        } else {
-            rawLoadData
-        }
-
-        // 🔥 tmdb: 뿐만 아니라 kitsu: 와 mal: 일 때도 덮어씌운 imdbId를 최우선으로 사용하도록 조건 추가!
-        val primaryId = if ((loadData.id?.startsWith("tmdb:") == true || loadData.id?.startsWith("kitsu:") == true || loadData.id?.startsWith("mal:") == true) && !loadData.imdbId.isNullOrBlank()) {
+        val primaryId = if (loadData.id?.startsWith("tmdb:") == true && !loadData.imdbId.isNullOrBlank()) {
             loadData.imdbId
         } else {
             loadData.id ?: ""
@@ -575,8 +558,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
         val globalId = if (!loadData.imdbId.isNullOrBlank()) loadData.imdbId else primaryId
         val targetType = loadData.type ?: if ((loadData.season ?: 0) > 0 || (loadData.episode ?: 0) > 0) "series" else "movie"
-
-        // 🔥 Kitsu라도 시즌을 null로 날리면 CineStreamProvider가 영화로 착각하므로 정상적으로 1을 넘겨줍니다.
+        
         val globalSeason = if (targetType == "movie") null else loadData.imdbSeason?.takeIf { it > 0 } ?: loadData.season?.takeIf { it > 0 } ?: 1
         val globalEpisode = if (targetType == "movie") null else loadData.imdbEpisode?.takeIf { it > 0 } ?: loadData.episode?.takeIf { it > 0 } ?: 1
         
@@ -1144,20 +1126,23 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             resolvedTmdbId: String? = null,
             kitsuVideos: List<Video>? = null
         ): LoadResponse = coroutineScope {
+            // 1. 네트워크에서 상세 JSON(links, logo 등 포함)을 먼저 가져옵니다.
             val detailedEntry = addonDeferred?.await() ?: this@CatalogEntry
 
             var finalImdbId = if (this@CatalogEntry.id.startsWith("tt")) this@CatalogEntry.id 
                               else imdbId?.takeIf { it.startsWith("tt") || it.startsWith("kitsu:") || it.startsWith("mal:") }
             
+            // 2. this@CatalogEntry(빈 껍데기)가 아닌 detailedEntry(전체 데이터)에서 links를 찾습니다.
             if (finalImdbId == null && detailedEntry.links.isNotEmpty()) {
                 finalImdbId = detailedEntry.links.firstOrNull { it.category == "imdb" }?.url?.substringAfterLast("/")?.takeIf { it.startsWith("tt") }
             }
+            // 3. 마찬가지로 detailedEntry의 이미지 URL들에서 IMDb ID를 추출합니다.
             if (finalImdbId == null) {
                 finalImdbId = provider.extractImdbId(detailedEntry.logo) ?: provider.extractImdbId(detailedEntry.poster) ?: provider.extractImdbId(detailedEntry.background)
             }
 
             var tmdbIdStr: String? = resolvedTmdbId ?: if (this@CatalogEntry.id.startsWith("tmdb:")) this@CatalogEntry.id.removePrefix("tmdb:") else this@CatalogEntry.moviedb_id?.toString() ?: this@CatalogEntry.tmdbIdExt ?: detailedEntry.tmdbIdExt
-            
+
             val findApiDeferred = if (tmdbIdStr == null && finalImdbId?.startsWith("tt") == true) {
                 async(Dispatchers.IO) {
                     runSuspendCatching {
@@ -1193,6 +1178,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
 
             var finalName = originalName ?: this@CatalogEntry.name ?: "Unknown Content"
+            // v1.170의 description 병합 로직 복구
             var finalDescription = detailedEntry.description ?: this@CatalogEntry.description
             
             if (tmdbData != null) {
@@ -1200,6 +1186,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 finalDescription = tmdbData.fetchedOverview?.takeIf { it.isNotBlank() } ?: finalDescription
             }
             
+            // other 타입일 경우 원본 파일명(originalName)을 플롯에 추가
             if (finalType == "other") {
                 finalDescription = if (finalDescription.isNullOrBlank()) originalName else "$finalDescription | $originalName"
             }
@@ -1259,7 +1246,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     )
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
-                    
+
+                    // 복구한 finalDescription 적용
                     this.plot = finalDescription
                     this.actors = tmdbData?.fetchedActors
                     this.tags = finalGenre
@@ -1277,6 +1265,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
                     this.showStatus = tmdbData?.fetchedStatus 
                     
+                    // 복구한 finalDescription 적용
                     this.plot = finalDescription
                     this.actors = tmdbData?.fetchedActors
                     this.tags = finalGenre
@@ -1335,16 +1324,16 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             )) {
                 val rawTitle = this@Video.name ?: this@Video.title ?: "Episode $displayEpisode"
                 val cleanOriginalTitle = if (rawTitle.contains("📄")) rawTitle.substringAfter("📄").replace("\n", "").trim() else rawTitle.replace("\n", "").trim()
-                
+
                 this.name = if (tmdbEp?.name != null) tmdbEp.name else cleanOriginalTitle
                 this.posterUrl = thumbnail ?: TRANSPARENT_PIXEL
                 
+                // 파일명(cleanOriginalTitle)을 플롯에 병합하는 v1.170 로직 복구
                 var finalEpDesc = tmdbEp?.overview ?: this@Video.overview ?: this@Video.description
                 if (type == "other") {
                     finalEpDesc = if (finalEpDesc.isNullOrBlank()) cleanOriginalTitle else "$finalEpDesc | $cleanOriginalTitle"
                 }
-                this.description = finalEpDesc
-                
+                this.description = finalEpDesc                
                 this.season = displaySeason
                 this.episode = displayEpisode
 
