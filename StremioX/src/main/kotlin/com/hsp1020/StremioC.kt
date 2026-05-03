@@ -665,7 +665,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             rawId
         }
 
-        val scrapingTitle = loadData.englishTitle ?: loadData.originalTitle ?: loadData.title ?: "Unknown"
+        val scrapingTitle = loadData.englishTitle?.takeIf { it.isNotBlank() } ?: loadData.originalTitle?.takeIf { it.isNotBlank() } ?: loadData.title ?: "Unknown"
         val isAnimeMedia = loadData.isAnime || globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true || loadData.anilistId != null || loadData.malId != null
         val isSeason2Plus = isAnimeMedia && (globalSeason ?: 0) > 1
 
@@ -676,7 +676,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val streamPlayType = if (targetType == "movie") "movie" else "tv" 
 
         return mutableMapOf(
-            "title" to finalTitle, 
+            "title" to scrapingTitle,
             "orgTitle" to loadData.originalTitle,
             "jpTitle" to loadData.originalTitle,
             "alttitle" to loadData.englishTitle,
@@ -1127,11 +1127,19 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
             }
 
-            val extractedEnglishTitle = detailRes.translations?.translations?.firstOrNull { 
-                it.iso_3166_1 == "US" || it.iso_639_1 == "en" 
-            }?.data?.let { it.title?.takeIf { t -> t.isNotBlank() } ?: it.name?.takeIf { n -> n.isNotBlank() } } 
-            ?: detailRes.title?.takeIf { it.isNotBlank() } ?: detailRes.name?.takeIf { it.isNotBlank() } ?: detailRes.original_title ?: detailRes.original_name
+            // CatalogEntry 클래스 내 fetchTmdbDetails 함수 부분
+            val enTranslation = detailRes.translations?.translations?.firstOrNull { 
+            it.iso_3166_1 == "US" || it.iso_639_1 == "en" 
+            }?.data?.title?.takeIf { it.isNotBlank() }
 
+            val extractedEnglishTitle = if (detailRes.original_language == "en") {
+            // 1. 미국/영국 영화면 원본 제목이 곧 영어 제목임
+            detailRes.original_title ?: detailRes.original_name
+            } else {
+            // 2. 한국/외국 영화면 번역 데이터에 있는 영어 제목을 우선 사용
+            enTranslation ?: detailRes.original_title ?: detailRes.original_name
+            }
+    
             return FetchedTmdbData(
                 if (isMovie) detailRes.title ?: detailRes.original_title else detailRes.name ?: detailRes.original_name,
                 detailRes.overview, detailRes.images?.logos?.firstOrNull()?.file_path?.let { "https://image.tmdb.org/t/p/w500$it" },
