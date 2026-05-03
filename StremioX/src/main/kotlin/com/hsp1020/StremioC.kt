@@ -1,4 +1,4 @@
-// v1.207 (Fix: JIT malId & anilistId Resolution via Malsync & ani.zip for Cached Null Data)
+// v1.208 (Removed StreamPlayAnime integration, kept CineStream and StreamPlay)
 package com.hsp1020
 
 import android.content.Context
@@ -120,7 +120,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         
         @Volatile private var cachedCineStreamProvider: MainAPI? = null
         @Volatile private var cachedStreamPlayProvider: MainAPI? = null
-        @Volatile private var cachedStreamPlayAnimeProvider: MainAPI? = null
 
         @Volatile private var hasSearchedCineStream = false
         @Volatile private var hasSearchedStreamPlay = false
@@ -130,7 +129,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
         @Volatile private var cachedCineStreamEnabled: Boolean? = null
         @Volatile private var cachedStreamPlayEnabled: Boolean? = null
-        @Volatile private var cachedStreamPlayAnimeEnabled: Boolean? = null
         
         @Volatile private var cachedCineStreamEnabledTime: Long = 0
         @Volatile private var cachedCustomHosts: Set<String>? = null
@@ -252,48 +250,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 } catch (e: Exception) {}
             }
             cachedStreamPlayProvider = provider
-            hasSearchedStreamPlay = true
-            return provider
-        }
-
-        @Synchronized
-        fun getStreamPlayAnimeProvider(forceSearch: Boolean = false): MainAPI? {
-            if (cachedStreamPlayAnimeProvider != null) return cachedStreamPlayAnimeProvider
-            if (!forceSearch && hasSearchedStreamPlay) return null
-
-            var provider = APIHolder.allProviders.find { it.name.equals("StreamPlay-Anime", ignoreCase = true) }
-            if (provider == null) {
-                try {
-                    val pmClass = Class.forName("com.lagradost.cloudstream3.plugins.PluginManager")
-                    val pmInstance = pmClass.getField("INSTANCE").get(null)
-                    var foundLoader: ClassLoader? = null
-                    for (field in pmClass.declaredFields) {
-                        field.isAccessible = true
-                        val obj = runSuspendCatching { field.get(pmInstance) }.getOrNull()
-                        val items = when (obj) {
-                            is Map<*, *> -> obj.values
-                            is Collection<*> -> obj
-                            is Array<*> -> obj.toList()
-                            else -> null
-                        }
-                        if (items != null) {
-                            for (plugin in items) {
-                                val pName = plugin?.javaClass?.name ?: ""
-                                if (pName.contains("phisher", true) || pName.contains("StreamPlay", true)) {
-                                    foundLoader = plugin!!.javaClass.classLoader
-                                    break
-                                }
-                            }
-                        }
-                        if (foundLoader != null) break
-                    }
-                    if (foundLoader != null) {
-                        val clazz = foundLoader.loadClass("com.phisher98.StreamPlayAnime")
-                        provider = clazz.newInstance() as? MainAPI
-                    }
-                } catch (e: Exception) {}
-            }
-            cachedStreamPlayAnimeProvider = provider
             hasSearchedStreamPlay = true
             return provider
         }
@@ -668,8 +624,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             { invokeWatchsomuch(loadData.imdbId, globalSeason, globalEpisode, subtitleCallback) },
             { invokeOpenSubs(loadData.imdbId, globalSeason, globalEpisode, subtitleCallback) },
             { invokeCineStream(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleCallback, wrappedCallback) },
-            { invokeStreamPlay(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleCallback, wrappedCallback) },
-            { invokeStreamPlayAnime(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleCallback, wrappedCallback) }
+            { invokeStreamPlay(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleCallback, wrappedCallback) }
         )
         return true
     }
@@ -875,7 +830,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
             val isAnimeMedia = loadData.isAnime || globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true || loadData.anilistId != null || loadData.malId != null
 
-            // JIT Resolution for malId if null (StreamPlay uses it too for MALSync)
             var resolvedMalId = loadData.malId
             var resolvedAniId = loadData.anilistId
             if (resolvedMalId == null) {
@@ -926,109 +880,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
             kotlinx.coroutines.withTimeoutOrNull(25000L) {
                 streamPlayProvider.loadLinks(spData.toJson(), isCasting, subtitleCallback, callback)
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    private suspend fun invokeStreamPlayAnime(
-        loadData: LoadData,
-        targetType: String,
-        globalId: String?,
-        globalSeason: Int?,
-        globalEpisode: Int?,
-        isCasting: Boolean,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ) {
-        val isAnimeMedia = loadData.isAnime || globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true || loadData.anilistId != null || loadData.malId != null
-        if (!isAnimeMedia) return
-
-        val isEnabled = withContext(Dispatchers.IO) {
-            val now = System.currentTimeMillis()
-            if (cachedStreamPlayAnimeEnabled != null && now - cachedCineStreamEnabledTime < SETTINGS_CACHE_TTL) {
-                return@withContext cachedStreamPlayAnimeEnabled!!
-            }
-            val context = CloudStreamApp.context ?: return@withContext true
-            val possiblePrefNames = listOf("StremioX", "StremioX_preferences", "stremio_preferences", "com.hsp1020_preferences", context.packageName + "_preferences")
-            var enabled = true
-            for (name in possiblePrefNames) {
-                val prefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
-                if (prefs.contains("streamplay_anime_integration_enabled")) {
-                    enabled = prefs.getBoolean("streamplay_anime_integration_enabled", true)
-                    break
-                }
-            }
-            cachedStreamPlayAnimeEnabled = enabled
-            cachedCineStreamEnabledTime = now 
-            enabled
-        }
-
-        if (!isEnabled) return
-
-        try {
-            val streamPlayAnimeProvider = getStreamPlayAnimeProvider() ?: return
-
-            val rawId = loadData.imdbId ?: globalId?.takeIf { it.startsWith("tt") || it.startsWith("tmdb:") } ?: ""
-            val correctImdbId = if (rawId.startsWith("tmdb:")) {
-                val parts = rawId.split(":")
-                if (parts.size >= 2) "${parts[0]}:${parts[1]}" else rawId
-            } else {
-                rawId
-            }
-
-            // JIT Resolution for malId if null (critical for MALSync in StreamPlayAnime)
-            var resolvedMalId = loadData.malId
-            var resolvedAniId = loadData.anilistId
-            if (resolvedMalId == null) {
-                if (loadData.tmdbId != null) {
-                    runSuspendCatching {
-                        val mType = if (targetType == "movie") "movie" else "tv"
-                        val res = customSession.get("https://api.malsync.moe/tmdb/$mType/${loadData.tmdbId}", timeout = 5L).text
-                        if (res.contains("\"id\"")) {
-                            resolvedMalId = JSONObject(res).optInt("id").takeIf { it > 0 } ?: resolvedMalId
-                        }
-                    }
-                }
-                if (resolvedMalId == null && !correctImdbId.isNullOrBlank()) {
-                    runSuspendCatching {
-                        val res = customSession.get("https://api.ani.zip/mappings?imdb_id=$correctImdbId", timeout = 5L).text
-                        if (res.contains("mal_id")) {
-                            val json = JSONObject(res)
-                            resolvedMalId = json.optInt("mal_id").takeIf { it > 0 } ?: resolvedMalId
-                            resolvedAniId = json.optInt("anilist_id").takeIf { it > 0 } ?: resolvedAniId
-                        }
-                    }
-                }
-            }
-
-            val spaData = mapOf(
-                "id" to loadData.tmdbId,
-                "tmdbId" to loadData.tmdbId,
-                "imdbId" to correctImdbId,
-                "type" to targetType,
-                "season" to globalSeason,
-                "episode" to globalEpisode,
-                "title" to (loadData.englishTitle ?: loadData.originalTitle ?: loadData.title ?: "Unknown"),
-                "year" to loadData.year,
-                "orgTitle" to loadData.originalTitle,
-                "isAnime" to true,
-                "airedYear" to loadData.airedYear,
-                "jpTitle" to loadData.originalTitle,
-                "date" to loadData.firstAired,
-                "airedDate" to loadData.firstAired,
-                "isAsian" to loadData.isAsian,
-                "isBollywood" to loadData.isBollywood,
-                "isCartoon" to loadData.isCartoon,
-                "isMovie" to (targetType == "movie"),
-                "lastSeason" to 1,
-                "aniId" to resolvedAniId, 
-                "malId" to resolvedMalId
-            )
-
-            kotlinx.coroutines.withTimeoutOrNull(25000L) {
-                streamPlayAnimeProvider.loadLinks(spaData.toJson(), isCasting, subtitleCallback, callback)
             }
         } catch (e: Exception) {
             e.printStackTrace()
