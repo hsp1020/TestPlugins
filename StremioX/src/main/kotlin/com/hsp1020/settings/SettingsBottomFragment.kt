@@ -1,4 +1,4 @@
-// v1.3 (Fix: addlinks.xml 수정에 따른 라디오 버튼 참조 제거 및 StremioC 타입 고정 + CineStream 설치 체크 버그 수정 및 로깅)
+// v1.3 (Fix: addlinks.xml 수정에 따른 라디오 버튼 참조 제거 및 StremioC 타입 고정 + CineStream 설치 체크 버그 수정 및 로깅 + StreamPlay/StreamPlayAnime 토글 추가)
 package com.hsp1020
 
 import android.annotation.SuppressLint
@@ -15,6 +15,8 @@ import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
+import android.widget.Switch
+import android.widget.LinearLayout
 import androidx.appcompat.app.AlertDialog
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import androidx.core.net.toUri
@@ -31,7 +33,9 @@ class SettingsBottomFragment(
     private val sharedPref: SharedPreferences
 ) : BottomSheetDialogFragment() {
     private val PREF_KEY_LINKS = "stremio_saved_links"
-    val PREF_KEY_CINESTREAM_ENABLED = "cinestream_integration_enabled" // CineStream 설정 키
+    val PREF_KEY_CINESTREAM_ENABLED = "cinestream_integration_enabled" 
+    val PREF_KEY_STREAMPLAY_ENABLED = "streamplay_integration_enabled"
+    val PREF_KEY_STREAMPLAY_ANIME_ENABLED = "streamplay_anime_integration_enabled"
 
     private val res = plugin.resources ?: throw Exception("Unable to access plugin resources")
 
@@ -59,9 +63,15 @@ class SettingsBottomFragment(
     }
 
     private fun isCineStreamInstalled(): Boolean {
-        println("[CineStream_UI_DEBUG] isCineStreamInstalled() 호출됨 - 강제 재검색 요청")
-        // 화면을 열 때는 플러그인 늦게 로딩되었을 경우를 대비해 forceSearch = true 로 호출
         return StremioC.getCineStreamProvider(forceSearch = true) != null
+    }
+
+    private fun isStreamPlayInstalled(): Boolean {
+        return StremioC.getStreamPlayProvider(forceSearch = true) != null
+    }
+
+    private fun isStreamPlayAnimeInstalled(): Boolean {
+        return StremioC.getStreamPlayAnimeProvider(forceSearch = true) != null
     }
 
     @SuppressLint("DiscouragedApi")
@@ -119,6 +129,60 @@ class SettingsBottomFragment(
                 if (isChecked) showToast("CineStream Integration Enabled")
                 else showToast("CineStream Integration Disabled")
             }
+
+            // 동적 뷰 추가 로직: XML 접근이 불가하므로 코틀린으로 주입
+            val parentLayout = switchCineStream.parent as? ViewGroup
+            if (parentLayout != null) {
+                // 1. StreamPlay 토글
+                val spInstalled = isStreamPlayInstalled()
+                val spSwitch = Switch(requireContext()).apply {
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply { setMargins(0, 32, 0, 0) }
+                    
+                    isEnabled = spInstalled
+                    if (!spInstalled) {
+                        isChecked = false
+                        text = "StreamPlay (Not Installed)"
+                        sharedPref.edit { putBoolean(PREF_KEY_STREAMPLAY_ENABLED, false) }
+                    } else {
+                        text = "StreamPlay Integration"
+                        isChecked = sharedPref.getBoolean(PREF_KEY_STREAMPLAY_ENABLED, true)
+                    }
+                    setOnCheckedChangeListener { _, isChecked ->
+                        sharedPref.edit { putBoolean(PREF_KEY_STREAMPLAY_ENABLED, isChecked) }
+                        if (isChecked) showToast("StreamPlay Integration Enabled")
+                        else showToast("StreamPlay Integration Disabled")
+                    }
+                }
+                parentLayout.addView(spSwitch)
+
+                // 2. StreamPlay-Anime 토글
+                val spaInstalled = isStreamPlayAnimeInstalled()
+                val spaSwitch = Switch(requireContext()).apply {
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply { setMargins(0, 32, 0, 0) }
+                    
+                    isEnabled = spaInstalled
+                    if (!spaInstalled) {
+                        isChecked = false
+                        text = "StreamPlay Anime (Not Installed)"
+                        sharedPref.edit { putBoolean(PREF_KEY_STREAMPLAY_ANIME_ENABLED, false) }
+                    } else {
+                        text = "StreamPlay Anime Integration"
+                        isChecked = sharedPref.getBoolean(PREF_KEY_STREAMPLAY_ANIME_ENABLED, true)
+                    }
+                    setOnCheckedChangeListener { _, isChecked ->
+                        sharedPref.edit { putBoolean(PREF_KEY_STREAMPLAY_ANIME_ENABLED, isChecked) }
+                        if (isChecked) showToast("StreamPlay Anime Integration Enabled")
+                        else showToast("StreamPlay Anime Integration Disabled")
+                    }
+                }
+                parentLayout.addView(spaSwitch)
+            }
         } catch (e: Throwable) {
             Log.w("SettingsBottomFragment", "switchCineStream view not found in XML. Skipping toggle setup.")
         }
@@ -150,7 +214,6 @@ class SettingsBottomFragment(
                 btnSave.setOnClickListener {
                     val name = etName.text.toString().trim()
                     val link = etLink.text.toString().trim()
-                    // [v1.3 수정] XML에서 라디오버튼이 제거되었으므로 무조건 StremioC 타입으로 고정
                     val type = "StremioC"
                     println("[SettingsBottomFragment v1.3] Add dialog: 새로운 링크 타입 $type 로 고정 저장")
 
@@ -272,7 +335,6 @@ class SettingsBottomFragment(
 
         etName.setText(itemToEdit.name)
         etLink.setText(itemToEdit.link)
-        // 기존에 있던 라디오 버튼 체크 상태 복구 로직 삭제
 
         val dlg = AlertDialog.Builder(requireContext())
             .setTitle("Edit Link")
@@ -286,7 +348,6 @@ class SettingsBottomFragment(
             btnUpdate.setOnClickListener {
                 val name = etName.text.toString().trim()
                 val link = etLink.text.toString().trim()
-                //[v1.3 수정] 데이터 갱신 시에도 무조건 StremioC로 고정
                 val type = "StremioC"
                 println("[SettingsBottomFragment v1.3] Edit dialog: 링크 타입 $type 로 고정 업데이트")
 
@@ -349,7 +410,7 @@ class SettingsBottomFragment(
                         id   = obj.optLong("id", System.currentTimeMillis()),
                         name = obj.optString("name", ""),
                         link = obj.optString("link", ""),
-                        type = obj.optString("type", "StremioC") // 파싱 시에도 기본값을 StremioC로 통일
+                        type = obj.optString("type", "StremioC") 
                     )
                 )
             }
