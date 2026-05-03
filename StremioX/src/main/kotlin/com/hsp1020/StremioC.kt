@@ -452,21 +452,22 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         if (v != null) {
                             runSuspendCatching {
                                 val vid = Video(
-                                    id = v.optString("id").takeIf { it.isNotBlank() },
-                                    title = v.optString("title").takeIf { it.isNotBlank() },
-                                    name = v.optString("name").takeIf { it.isNotBlank() },
+                                    val vid = Video(
+                                    id = v.optString("id").takeIf { it.isNotBlank() && it != "null" },
+                                    title = v.optString("title").takeIf { it.isNotBlank() && it != "null" },
+                                    name = v.optString("name").takeIf { it.isNotBlank() && it != "null" },
                                     seasonNumber = v.optInt("season", 0).takeIf { it > 0 },
                                     number = v.optInt("number", 0).takeIf { it > 0 },
                                     episode = v.optInt("episode", 0).takeIf { it > 0 },
-                                    thumbnail = v.optString("thumbnail").takeIf { it.isNotBlank() },
-                                    overview = v.optString("overview").takeIf { it.isNotBlank() },
-                                    description = v.optString("description").takeIf { it.isNotBlank() },
-                                    firstAired = v.optString("firstAired").takeIf { it.isNotBlank() },
-                                    released = v.optString("released").takeIf { it.isNotBlank() },
+                                    thumbnail = v.optString("thumbnail").takeIf { it.isNotBlank() && it != "null" },
+                                    overview = v.optString("overview").takeIf { it.isNotBlank() && it != "null" },
+                                    description = v.optString("description").takeIf { it.isNotBlank() && it != "null" },
+                                    firstAired = v.optString("firstAired").takeIf { it.isNotBlank() && it != "null" },
+                                    released = v.optString("released").takeIf { it.isNotBlank() && it != "null" },
                                     tvdb_id = v.optInt("tvdb_id", 0).takeIf { it > 0 },
                                     imdbSeason = v.optInt("imdbSeason", 0).takeIf { it > 0 },
                                     imdbEpisode = v.optInt("imdbEpisode", 0).takeIf { it > 0 },
-                                    imdb_id = v.optString("imdb_id").takeIf { it.isNotBlank() }
+                                    imdb_id = v.optString("imdb_id").takeIf { it.isNotBlank() && it != "null" }
                                 )
                                 vids.add(vid)
                             }
@@ -1329,7 +1330,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 this.posterUrl = thumbnail ?: TRANSPARENT_PIXEL
                 
                 // 파일명(cleanOriginalTitle)을 플롯에 병합하는 v1.170 로직 복구
-                var finalEpDesc = tmdbEp?.overview ?: this@Video.overview ?: this@Video.description
+                // 🔥 "null" 문자열이 들어오면 진짜 null로 취급하도록 방어
+                var finalEpDesc = (tmdbEp?.overview ?: this@Video.overview ?: this@Video.description)?.takeIf { it != "null" }
+                
                 if (type == "other") {
                     finalEpDesc = if (finalEpDesc.isNullOrBlank()) cleanOriginalTitle else "$finalEpDesc | $cleanOriginalTitle"
                 }
