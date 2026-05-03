@@ -1,4 +1,4 @@
-// v1.3 (Fix: addlinks.xml 수정에 따른 라디오 버튼 참조 제거 및 StremioC 타입 고정 + CineStream 설치 체크 버그 수정 및 로깅 + StreamPlay/StreamPlayAnime 토글 XML 연동)
+// v1.4 (Fix: Toggle UI Visibility, XML Layout Gravity Fix, Separated Try-Catch Blocks for Fail-Safe)
 package com.hsp1020
 
 import android.annotation.SuppressLint
@@ -15,6 +15,7 @@ import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
+import android.widget.Switch
 import androidx.appcompat.app.AlertDialog
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import androidx.core.net.toUri
@@ -79,12 +80,6 @@ class SettingsBottomFragment(
     ): View {
         val view = getLayout("bottom_sheet_layout", inflater, container)
 
-        listOf("addlinks", "showlinks", "saveIcon").forEach { name ->
-            val id = res.getIdentifier(name, "id", BuildConfig.LIBRARY_PACKAGE_NAME)
-            if (id == 0) Log.w("SettingsBottomFragment", "View id '$name' not found")
-            else Log.d("SettingsBottomFragment", "View id '$name' -> $id")
-        }
-
         val addlinks: ImageView = try { view.findView("addlinks") } catch (e: Throwable) {
             throw Exception("addlinks ImageView not found in bottom_sheet_layout", e)
         }
@@ -103,20 +98,15 @@ class SettingsBottomFragment(
         showlinks.makeTvCompatible()
         saveIcon.makeTvCompatible()
 
+        // 1. CineStream Toggle (독립 블록)
         try {
             val switchCineStream: CompoundButton = view.findView("switchCineStream")
-            val switchStreamPlay: CompoundButton = view.findView("switchStreamPlay")
-            val switchStreamPlayAnime: CompoundButton = view.findView("switchStreamPlayAnime")
-            
-            // 1. CineStream Toggle
             val isCSInstalled = isCineStreamInstalled()
             switchCineStream.isEnabled = isCSInstalled
             if (!isCSInstalled) {
                 switchCineStream.isChecked = false
-                switchCineStream.text = "CineStream (Not Installed)"
                 sharedPref.edit { putBoolean(PREF_KEY_CINESTREAM_ENABLED, false) } 
             } else {
-                switchCineStream.text = "CineStream Integration"
                 switchCineStream.isChecked = sharedPref.getBoolean(PREF_KEY_CINESTREAM_ENABLED, true)
             }
             switchCineStream.setOnCheckedChangeListener { _, isChecked ->
@@ -124,16 +114,19 @@ class SettingsBottomFragment(
                 if (isChecked) showToast("CineStream Integration Enabled")
                 else showToast("CineStream Integration Disabled")
             }
+        } catch (e: Throwable) {
+            Log.e("SettingsBottomFragment", "CineStream Switch not found. Rebuild project required.")
+        }
 
-            // 2. StreamPlay Toggle
+        // 2. StreamPlay Toggle (독립 블록)
+        try {
+            val switchStreamPlay: CompoundButton = view.findView("switchStreamPlay")
             val isSPInstalled = isStreamPlayInstalled()
             switchStreamPlay.isEnabled = isSPInstalled
             if (!isSPInstalled) {
                 switchStreamPlay.isChecked = false
-                switchStreamPlay.text = "StreamPlay (Not Installed)"
                 sharedPref.edit { putBoolean(PREF_KEY_STREAMPLAY_ENABLED, false) } 
             } else {
-                switchStreamPlay.text = "StreamPlay Integration"
                 switchStreamPlay.isChecked = sharedPref.getBoolean(PREF_KEY_STREAMPLAY_ENABLED, true)
             }
             switchStreamPlay.setOnCheckedChangeListener { _, isChecked ->
@@ -141,16 +134,19 @@ class SettingsBottomFragment(
                 if (isChecked) showToast("StreamPlay Integration Enabled")
                 else showToast("StreamPlay Integration Disabled")
             }
+        } catch (e: Throwable) {
+            Log.e("SettingsBottomFragment", "StreamPlay Switch not found. Rebuild project required.")
+        }
 
-            // 3. StreamPlay Anime Toggle
+        // 3. StreamPlay Anime Toggle (독립 블록)
+        try {
+            val switchStreamPlayAnime: CompoundButton = view.findView("switchStreamPlayAnime")
             val isSPAInstalled = isStreamPlayAnimeInstalled()
             switchStreamPlayAnime.isEnabled = isSPAInstalled
             if (!isSPAInstalled) {
                 switchStreamPlayAnime.isChecked = false
-                switchStreamPlayAnime.text = "StreamPlay Anime (Not Installed)"
                 sharedPref.edit { putBoolean(PREF_KEY_STREAMPLAY_ANIME_ENABLED, false) } 
             } else {
-                switchStreamPlayAnime.text = "StreamPlay Anime Integration"
                 switchStreamPlayAnime.isChecked = sharedPref.getBoolean(PREF_KEY_STREAMPLAY_ANIME_ENABLED, true)
             }
             switchStreamPlayAnime.setOnCheckedChangeListener { _, isChecked ->
@@ -158,9 +154,8 @@ class SettingsBottomFragment(
                 if (isChecked) showToast("StreamPlay Anime Integration Enabled")
                 else showToast("StreamPlay Anime Integration Disabled")
             }
-
         } catch (e: Throwable) {
-            Log.w("SettingsBottomFragment", "Toggles view not found in XML. Skipping toggle setup.")
+            Log.e("SettingsBottomFragment", "StreamPlay Anime Switch not found. Rebuild project required.")
         }
 
         // ---------- ADD dialog ----------
@@ -172,10 +167,8 @@ class SettingsBottomFragment(
             try {
                 etName = dialogView.findView("etName")
                 etLink = dialogView.findView("etLink")
-                println("[SettingsBottomFragment v1.3] Add dialog 뷰 로드 성공")
             } catch (t: Throwable) {
                 Toast.makeText(requireContext(), "Dialog fields not found", Toast.LENGTH_SHORT).show()
-                Log.e("SettingsBottomFragment", "Missing dialog views $t")
                 return@setOnClickListener
             }
 
@@ -191,7 +184,6 @@ class SettingsBottomFragment(
                     val name = etName.text.toString().trim()
                     val link = etLink.text.toString().trim()
                     val type = "StremioC"
-                    println("[SettingsBottomFragment v1.3] Add dialog: 새로운 링크 타입 $type 로 고정 저장")
 
                     if (link.isEmpty()) {
                         showToast("Please enter a link")
@@ -219,7 +211,6 @@ class SettingsBottomFragment(
                         Toast.makeText(requireContext(), "Link saved", Toast.LENGTH_SHORT).show()
                         dlg.dismiss()
                     } catch (e: Throwable) {
-                        Log.e("SettingsBottomFragment", "Failed to save link $e")
                         showToast("Failed to save link")
                     }
                 }
@@ -239,7 +230,6 @@ class SettingsBottomFragment(
             val rv: RecyclerView = dialogView.findView("rvLinks")
             val tvNoLinks: TextView = dialogView.findView("tvNoLinks")
             val list = loadLinks().toMutableList()
-            Log.d("SettingsBottomFragment", "Loaded ${list.size} saved links")
 
             if (list.isEmpty()) {
                 tvNoLinks.visibility = View.VISIBLE
@@ -247,7 +237,6 @@ class SettingsBottomFragment(
             } else {
                 tvNoLinks.visibility = View.GONE
                 rv.visibility = View.VISIBLE
-
                 rv.layoutManager = LinearLayoutManager(requireContext())
 
                 val adapter = LinksAdapter(
@@ -270,17 +259,14 @@ class SettingsBottomFragment(
                         showEditDialog(itemToEdit, position, rv)
                     }
                 )
-
                 rv.adapter = adapter
             }
             dlg.show()
         }
 
-
         // ---------- SAVE & RESTART ----------
         saveIcon.setOnClickListener {
             val context = this.context ?: return@setOnClickListener
-
             AlertDialog.Builder(context)
                 .setTitle("Save & Reload")
                 .setMessage("Changes have been saved. Do you want to restart the app to apply them?")
@@ -303,7 +289,6 @@ class SettingsBottomFragment(
         try {
             etName = dialogView.findView("etName")
             etLink = dialogView.findView("etLink")
-            println("[SettingsBottomFragment v1.3] Edit dialog 뷰 로드 성공")
         } catch (t: Throwable) {
             Toast.makeText(requireContext(), "Dialog fields not found", Toast.LENGTH_SHORT).show()
             return
@@ -325,7 +310,6 @@ class SettingsBottomFragment(
                 val name = etName.text.toString().trim()
                 val link = etLink.text.toString().trim()
                 val type = "StremioC"
-                println("[SettingsBottomFragment v1.3] Edit dialog: 링크 타입 $type 로 고정 업데이트")
 
                 if (link.isEmpty() || !(link.startsWith("http://") || link.startsWith("https://"))) {
                     showToast("Enter a valid URL (http/https)")
@@ -377,10 +361,8 @@ class SettingsBottomFragment(
 
         return try {
             val arr = org.json.JSONArray(json)
-
             for (i in 0 until arr.length()) {
                 val obj = arr.getJSONObject(i)
-
                 list.add(
                     LinkItem(
                         id   = obj.optLong("id", System.currentTimeMillis()),
@@ -398,7 +380,6 @@ class SettingsBottomFragment(
 
     private fun saveLinks(list: List<LinkItem>) {
         val arr = org.json.JSONArray()
-
         for (item in list) {
             val obj = org.json.JSONObject().apply {
                 put("id", item.id)
@@ -437,13 +418,8 @@ class SettingsBottomFragment(
             holder.tvLink.text = item.link
             holder.tvType.text = item.type
 
-            holder.btnDelete.setOnClickListener {
-                onDelete(item)
-            }
-
-            holder.itemView.setOnClickListener {
-                onEdit(item, position)
-            }
+            holder.btnDelete.setOnClickListener { onDelete(item) }
+            holder.itemView.setOnClickListener { onEdit(item, position) }
         }
 
         override fun getItemCount(): Int = items.size
