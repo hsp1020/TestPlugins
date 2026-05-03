@@ -765,7 +765,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val isKitsuMedia = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
             payload["id"] = payload["imdbId"] ?: ""
             payload["anilistId"] = loadData.anilistId
-            payload["isKitsu"] = false
+            payload["isKitsu"] = isKitsuMedia
             payload["kitsuId"] = if (isKitsuMedia) globalId?.substringAfter("kitsu:")?.substringAfter("mal:") else loadData.kitsuId
 
             kotlinx.coroutines.withTimeoutOrNull(25000L) {
@@ -1125,10 +1125,10 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
             }
 
-            // CatalogEntry 클래스 내 fetchTmdbDetails 함수 부분
-            val enTranslation = detailRes.translations?.translations?.firstOrNull { 
+            val translationData = detailRes.translations?.translations?.firstOrNull { 
             it.iso_3166_1 == "US" || it.iso_639_1 == "en" 
-            }?.data?.title?.takeIf { it.isNotBlank() }
+            }?.data
+            val enTranslation = (translationData?.title ?: translationData?.name)?.takeIf { it.isNotBlank() }
 
             val extractedEnglishTitle = if (detailRes.original_language == "en") {
             // 1. 미국/영국 영화면 원본 제목이 곧 영어 제목임
