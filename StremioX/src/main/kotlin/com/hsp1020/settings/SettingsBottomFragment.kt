@@ -1,13 +1,11 @@
-// v1.5 (Fix: XML Caching Bypass - Dynamic UI Injection for StreamPlay Toggles)
+// v1.4 (Fix: Toggle UI Visibility, XML Layout Gravity Fix, Separated Try-Catch Blocks for Fail-Safe)
 package com.hsp1020
 
 import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.SharedPreferences
-import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.os.Bundle
-import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -15,16 +13,15 @@ import android.widget.CompoundButton
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.ImageView
-import android.widget.LinearLayout
-import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
+import android.widget.Switch
 import androidx.appcompat.app.AlertDialog
-import androidx.core.content.edit
+import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import androidx.core.net.toUri
+import androidx.core.content.edit
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CloudStreamApp
@@ -101,7 +98,7 @@ class SettingsBottomFragment(
         showlinks.makeTvCompatible()
         saveIcon.makeTvCompatible()
 
-        // 1. CineStream Toggle (기존 XML 참조 - 실패해도 무시)
+        // 1. CineStream Toggle (독립 블록)
         try {
             val switchCineStream: CompoundButton = view.findView("switchCineStream")
             val isCSInstalled = isCineStreamInstalled()
@@ -118,95 +115,47 @@ class SettingsBottomFragment(
                 else showToast("CineStream Integration Disabled")
             }
         } catch (e: Throwable) {
-            Log.e("SettingsBottomFragment", "CineStream Switch not found in XML.")
+            Log.e("SettingsBottomFragment", "CineStream Switch not found. Rebuild project required.")
         }
 
-        // 2. 동적 UI 주입 (XML 캐싱 바이패스)
-        // NestedScrollView의 첫 번째 자식은 메인 LinearLayout (Vertical) 입니다.
-        val rootLayout = (view as? ViewGroup)?.getChildAt(0) as? LinearLayout
-        if (rootLayout != null) {
-            
-            // --- StreamPlay Toggle 생성 ---
-            val spLayout = LinearLayout(requireContext()).apply {
-                orientation = LinearLayout.HORIZONTAL
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply { setMargins(0, 30, 0, 0) }
-                gravity = Gravity.CENTER_VERTICAL
-            }
-
-            val spTextView = TextView(requireContext()).apply {
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                text = "StreamPlay"
-                textSize = 18f
-                setTypeface(null, Typeface.BOLD)
-            }
-
-            val spSwitch = Switch(requireContext()).apply {
-                setPadding(15, 15, 15, 15)
-            }
-
+        // 2. StreamPlay Toggle (독립 블록)
+        try {
+            val switchStreamPlay: CompoundButton = view.findView("switchStreamPlay")
             val isSPInstalled = isStreamPlayInstalled()
-            spSwitch.isEnabled = isSPInstalled
+            switchStreamPlay.isEnabled = isSPInstalled
             if (!isSPInstalled) {
-                spSwitch.isChecked = false
-                spTextView.text = "StreamPlay (Not Installed)"
-                sharedPref.edit { putBoolean(PREF_KEY_STREAMPLAY_ENABLED, false) }
+                switchStreamPlay.isChecked = false
+                sharedPref.edit { putBoolean(PREF_KEY_STREAMPLAY_ENABLED, false) } 
             } else {
-                spSwitch.isChecked = sharedPref.getBoolean(PREF_KEY_STREAMPLAY_ENABLED, true)
+                switchStreamPlay.isChecked = sharedPref.getBoolean(PREF_KEY_STREAMPLAY_ENABLED, true)
             }
-
-            spSwitch.setOnCheckedChangeListener { _, isChecked ->
+            switchStreamPlay.setOnCheckedChangeListener { _, isChecked ->
                 sharedPref.edit { putBoolean(PREF_KEY_STREAMPLAY_ENABLED, isChecked) }
                 if (isChecked) showToast("StreamPlay Integration Enabled")
                 else showToast("StreamPlay Integration Disabled")
             }
+        } catch (e: Throwable) {
+            Log.e("SettingsBottomFragment", "StreamPlay Switch not found. Rebuild project required.")
+        }
 
-            spLayout.addView(spTextView)
-            spLayout.addView(spSwitch)
-            rootLayout.addView(spLayout) // 루트 레이아웃 최하단에 강제 삽입
-
-            // --- StreamPlay Anime Toggle 생성 ---
-            val spaLayout = LinearLayout(requireContext()).apply {
-                orientation = LinearLayout.HORIZONTAL
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply { setMargins(0, 30, 0, 0) }
-                gravity = Gravity.CENTER_VERTICAL
-            }
-
-            val spaTextView = TextView(requireContext()).apply {
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                text = "StreamPlay Anime"
-                textSize = 18f
-                setTypeface(null, Typeface.BOLD)
-            }
-
-            val spaSwitch = Switch(requireContext()).apply {
-                setPadding(15, 15, 15, 15)
-            }
-
+        // 3. StreamPlay Anime Toggle (독립 블록)
+        try {
+            val switchStreamPlayAnime: CompoundButton = view.findView("switchStreamPlayAnime")
             val isSPAInstalled = isStreamPlayAnimeInstalled()
-            spaSwitch.isEnabled = isSPAInstalled
+            switchStreamPlayAnime.isEnabled = isSPAInstalled
             if (!isSPAInstalled) {
-                spaSwitch.isChecked = false
-                spaTextView.text = "StreamPlay Anime (Not Installed)"
-                sharedPref.edit { putBoolean(PREF_KEY_STREAMPLAY_ANIME_ENABLED, false) }
+                switchStreamPlayAnime.isChecked = false
+                sharedPref.edit { putBoolean(PREF_KEY_STREAMPLAY_ANIME_ENABLED, false) } 
             } else {
-                spaSwitch.isChecked = sharedPref.getBoolean(PREF_KEY_STREAMPLAY_ANIME_ENABLED, true)
+                switchStreamPlayAnime.isChecked = sharedPref.getBoolean(PREF_KEY_STREAMPLAY_ANIME_ENABLED, true)
             }
-
-            spaSwitch.setOnCheckedChangeListener { _, isChecked ->
+            switchStreamPlayAnime.setOnCheckedChangeListener { _, isChecked ->
                 sharedPref.edit { putBoolean(PREF_KEY_STREAMPLAY_ANIME_ENABLED, isChecked) }
                 if (isChecked) showToast("StreamPlay Anime Integration Enabled")
                 else showToast("StreamPlay Anime Integration Disabled")
             }
-
-            spaLayout.addView(spaTextView)
-            spaLayout.addView(spaSwitch)
-            rootLayout.addView(spaLayout) // 루트 레이아웃 최하단에 강제 삽입
+        } catch (e: Throwable) {
+            Log.e("SettingsBottomFragment", "StreamPlay Anime Switch not found. Rebuild project required.")
         }
 
         // ---------- ADD dialog ----------
@@ -288,7 +237,6 @@ class SettingsBottomFragment(
             } else {
                 tvNoLinks.visibility = View.GONE
                 rv.visibility = View.VISIBLE
-
                 rv.layoutManager = LinearLayoutManager(requireContext())
 
                 val adapter = LinksAdapter(
@@ -311,7 +259,6 @@ class SettingsBottomFragment(
                         showEditDialog(itemToEdit, position, rv)
                     }
                 )
-
                 rv.adapter = adapter
             }
             dlg.show()
@@ -320,7 +267,6 @@ class SettingsBottomFragment(
         // ---------- SAVE & RESTART ----------
         saveIcon.setOnClickListener {
             val context = this.context ?: return@setOnClickListener
-
             AlertDialog.Builder(context)
                 .setTitle("Save & Reload")
                 .setMessage("Changes have been saved. Do you want to restart the app to apply them?")
