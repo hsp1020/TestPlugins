@@ -706,7 +706,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
             println("StremioC v1.205: CineStream Global Mapping - Season: $globalSeason, Episode: $globalEpisode")
 
-            val isKitsuMedia = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
+            val isKitsuMedia = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true || loadData.id?.startsWith("kitsu:") == true || loadData.id?.startsWith("mal:") == true
             val kitsuIdExt = if (isKitsuMedia) globalId?.substringAfter("kitsu:")?.substringAfter("mal:") else loadData.kitsuId
             
             val rawIdForCineStream = loadData.imdbId ?: globalId?.takeIf { it.startsWith("tt") || it.startsWith("tmdb:") } ?: ""
