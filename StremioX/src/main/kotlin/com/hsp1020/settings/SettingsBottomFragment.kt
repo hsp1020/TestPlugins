@@ -1,4 +1,4 @@
-// v1.3 (Fix: addlinks.xml 수정에 따른 라디오 버튼 참조 제거 및 StremioC 타입 고정 + CineStream 설치 체크 버그 수정 및 로깅 + StreamPlay/StreamPlayAnime 토글 추가)
+// v1.3 (Fix: addlinks.xml 수정에 따른 라디오 버튼 참조 제거 및 StremioC 타입 고정 + CineStream 설치 체크 버그 수정 및 로깅 + StreamPlay/StreamPlayAnime 토글 XML 연동)
 package com.hsp1020
 
 import android.annotation.SuppressLint
@@ -15,8 +15,6 @@ import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
-import android.widget.Switch
-import android.widget.LinearLayout
 import androidx.appcompat.app.AlertDialog
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import androidx.core.net.toUri
@@ -107,84 +105,62 @@ class SettingsBottomFragment(
 
         try {
             val switchCineStream: CompoundButton = view.findView("switchCineStream")
+            val switchStreamPlay: CompoundButton = view.findView("switchStreamPlay")
+            val switchStreamPlayAnime: CompoundButton = view.findView("switchStreamPlayAnime")
             
-            println("[CineStream_UI_DEBUG] CineStream 설치 여부 검사 시작...")
-            val isInstalled = isCineStreamInstalled()
-            println("[CineStream_UI_DEBUG] CineStream 설치 검사 결과: $isInstalled")
-
-            switchCineStream.isEnabled = isInstalled
-            if (!isInstalled) {
+            // 1. CineStream Toggle
+            val isCSInstalled = isCineStreamInstalled()
+            switchCineStream.isEnabled = isCSInstalled
+            if (!isCSInstalled) {
                 switchCineStream.isChecked = false
                 switchCineStream.text = "CineStream (Not Installed)"
                 sharedPref.edit { putBoolean(PREF_KEY_CINESTREAM_ENABLED, false) } 
-                println("[CineStream_UI_DEBUG] 토글 비활성화 처리 완료")
             } else {
                 switchCineStream.text = "CineStream Integration"
                 switchCineStream.isChecked = sharedPref.getBoolean(PREF_KEY_CINESTREAM_ENABLED, true)
-                println("[CineStream_UI_DEBUG] 토글 활성화 처리 완료 (현재상태: ${switchCineStream.isChecked})")
             }
-
             switchCineStream.setOnCheckedChangeListener { _, isChecked ->
                 sharedPref.edit { putBoolean(PREF_KEY_CINESTREAM_ENABLED, isChecked) }
                 if (isChecked) showToast("CineStream Integration Enabled")
                 else showToast("CineStream Integration Disabled")
             }
 
-            // 동적 뷰 추가 로직: XML 접근이 불가하므로 코틀린으로 주입
-            val parentLayout = switchCineStream.parent as? ViewGroup
-            if (parentLayout != null) {
-                // 1. StreamPlay 토글
-                val spInstalled = isStreamPlayInstalled()
-                val spSwitch = Switch(requireContext()).apply {
-                    layoutParams = LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT
-                    ).apply { setMargins(0, 32, 0, 0) }
-                    
-                    isEnabled = spInstalled
-                    if (!spInstalled) {
-                        isChecked = false
-                        text = "StreamPlay (Not Installed)"
-                        sharedPref.edit { putBoolean(PREF_KEY_STREAMPLAY_ENABLED, false) }
-                    } else {
-                        text = "StreamPlay Integration"
-                        isChecked = sharedPref.getBoolean(PREF_KEY_STREAMPLAY_ENABLED, true)
-                    }
-                    setOnCheckedChangeListener { _, isChecked ->
-                        sharedPref.edit { putBoolean(PREF_KEY_STREAMPLAY_ENABLED, isChecked) }
-                        if (isChecked) showToast("StreamPlay Integration Enabled")
-                        else showToast("StreamPlay Integration Disabled")
-                    }
-                }
-                parentLayout.addView(spSwitch)
-
-                // 2. StreamPlay-Anime 토글
-                val spaInstalled = isStreamPlayAnimeInstalled()
-                val spaSwitch = Switch(requireContext()).apply {
-                    layoutParams = LinearLayout.LayoutParams(
-                        LinearLayout.LayoutParams.MATCH_PARENT,
-                        LinearLayout.LayoutParams.WRAP_CONTENT
-                    ).apply { setMargins(0, 32, 0, 0) }
-                    
-                    isEnabled = spaInstalled
-                    if (!spaInstalled) {
-                        isChecked = false
-                        text = "StreamPlay Anime (Not Installed)"
-                        sharedPref.edit { putBoolean(PREF_KEY_STREAMPLAY_ANIME_ENABLED, false) }
-                    } else {
-                        text = "StreamPlay Anime Integration"
-                        isChecked = sharedPref.getBoolean(PREF_KEY_STREAMPLAY_ANIME_ENABLED, true)
-                    }
-                    setOnCheckedChangeListener { _, isChecked ->
-                        sharedPref.edit { putBoolean(PREF_KEY_STREAMPLAY_ANIME_ENABLED, isChecked) }
-                        if (isChecked) showToast("StreamPlay Anime Integration Enabled")
-                        else showToast("StreamPlay Anime Integration Disabled")
-                    }
-                }
-                parentLayout.addView(spaSwitch)
+            // 2. StreamPlay Toggle
+            val isSPInstalled = isStreamPlayInstalled()
+            switchStreamPlay.isEnabled = isSPInstalled
+            if (!isSPInstalled) {
+                switchStreamPlay.isChecked = false
+                switchStreamPlay.text = "StreamPlay (Not Installed)"
+                sharedPref.edit { putBoolean(PREF_KEY_STREAMPLAY_ENABLED, false) } 
+            } else {
+                switchStreamPlay.text = "StreamPlay Integration"
+                switchStreamPlay.isChecked = sharedPref.getBoolean(PREF_KEY_STREAMPLAY_ENABLED, true)
             }
+            switchStreamPlay.setOnCheckedChangeListener { _, isChecked ->
+                sharedPref.edit { putBoolean(PREF_KEY_STREAMPLAY_ENABLED, isChecked) }
+                if (isChecked) showToast("StreamPlay Integration Enabled")
+                else showToast("StreamPlay Integration Disabled")
+            }
+
+            // 3. StreamPlay Anime Toggle
+            val isSPAInstalled = isStreamPlayAnimeInstalled()
+            switchStreamPlayAnime.isEnabled = isSPAInstalled
+            if (!isSPAInstalled) {
+                switchStreamPlayAnime.isChecked = false
+                switchStreamPlayAnime.text = "StreamPlay Anime (Not Installed)"
+                sharedPref.edit { putBoolean(PREF_KEY_STREAMPLAY_ANIME_ENABLED, false) } 
+            } else {
+                switchStreamPlayAnime.text = "StreamPlay Anime Integration"
+                switchStreamPlayAnime.isChecked = sharedPref.getBoolean(PREF_KEY_STREAMPLAY_ANIME_ENABLED, true)
+            }
+            switchStreamPlayAnime.setOnCheckedChangeListener { _, isChecked ->
+                sharedPref.edit { putBoolean(PREF_KEY_STREAMPLAY_ANIME_ENABLED, isChecked) }
+                if (isChecked) showToast("StreamPlay Anime Integration Enabled")
+                else showToast("StreamPlay Anime Integration Disabled")
+            }
+
         } catch (e: Throwable) {
-            Log.w("SettingsBottomFragment", "switchCineStream view not found in XML. Skipping toggle setup.")
+            Log.w("SettingsBottomFragment", "Toggles view not found in XML. Skipping toggle setup.")
         }
 
         // ---------- ADD dialog ----------
