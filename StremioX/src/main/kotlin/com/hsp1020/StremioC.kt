@@ -452,7 +452,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         if (v != null) {
                             runSuspendCatching {
                                 val vid = Video(
-                                    val vid = Video(
                                     id = v.optString("id").takeIf { it.isNotBlank() && it != "null" },
                                     title = v.optString("title").takeIf { it.isNotBlank() && it != "null" },
                                     name = v.optString("name").takeIf { it.isNotBlank() && it != "null" },
