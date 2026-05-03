@@ -261,20 +261,24 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     }
 
     private fun buildStremioId(type: String?, id: String?, season: Int?, episode: Int?, isSubtitle: Boolean = false): String? {
-        if (type == "series" && season != null && episode != null) {
+        if (type == "series" && episode != null) { // 🔥 season != null 조건 제거
             return when {
                 id?.startsWith("kitsu:") == true || id?.startsWith("mal:") == true -> {
                     val parts = id.split(":")
                     val baseId = if (parts.size >= 2) "${parts[0]}:${parts[1]}" else id
-                    if (isSubtitle) "$baseId:$season:$episode" else "$baseId:$episode"
+                    // 🔥 자막이든 스트림이든 Kitsu는 무조건 baseId:episode 로 깔끔하게 통일!
+                    "$baseId:$episode" 
                 }
-                id?.endsWith(":$season:$episode") == true -> id
-                else -> "$id:$season:$episode"
+                season != null -> {
+                    if (id?.endsWith(":$season:$episode") == true) id
+                    else "$id:$season:$episode"
+                }
+                else -> "$id:$episode"
             }
         }
         return id
     }
-
+    
     private fun baseUrl(): String {
         return mainUrl.fixSourceUrl().cleanBaseUrl()
     }
