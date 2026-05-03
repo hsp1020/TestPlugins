@@ -575,7 +575,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
         val globalId = if (!loadData.imdbId.isNullOrBlank()) loadData.imdbId else primaryId
         val targetType = loadData.type ?: if ((loadData.season ?: 0) > 0 || (loadData.episode ?: 0) > 0) "series" else "movie"
-        
+
+        // 🔥 Kitsu라도 시즌을 null로 날리면 CineStreamProvider가 영화로 착각하므로 정상적으로 1을 넘겨줍니다.
         val globalSeason = if (targetType == "movie") null else loadData.imdbSeason?.takeIf { it > 0 } ?: loadData.season?.takeIf { it > 0 } ?: 1
         val globalEpisode = if (targetType == "movie") null else loadData.imdbEpisode?.takeIf { it > 0 } ?: loadData.episode?.takeIf { it > 0 } ?: 1
         
