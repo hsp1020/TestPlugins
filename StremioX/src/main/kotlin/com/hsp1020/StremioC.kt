@@ -1,4 +1,4 @@
-// v1.205 (StremioX and Stremio Subtitles pipelines cleanly removed, Unified to CineStream)
+// v1.205 (StremioX and Stremio Subtitles pipelines cleanly removed, Unified to CineStream, StreamPlay, StreamPlayAnime)
 package com.hsp1020
 
 import android.content.Context
@@ -119,11 +119,19 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         private val CACHE_TTL_MS = TimeUnit.HOURS.toMillis(1)
         
         @Volatile private var cachedCineStreamProvider: MainAPI? = null
+        @Volatile private var cachedStreamPlayProvider: MainAPI? = null
+        @Volatile private var cachedStreamPlayAnimeProvider: MainAPI? = null
+
         @Volatile private var hasSearchedCineStream = false
+        @Volatile private var hasSearchedStreamPlay = false
+        
         @Volatile private var hasSyncedCineStreamSettings = false
         @Volatile private var cachedCineClassLoader: ClassLoader? = null
 
         @Volatile private var cachedCineStreamEnabled: Boolean? = null
+        @Volatile private var cachedStreamPlayEnabled: Boolean? = null
+        @Volatile private var cachedStreamPlayAnimeEnabled: Boolean? = null
+        
         @Volatile private var cachedCineStreamEnabledTime: Long = 0
         @Volatile private var cachedCustomHosts: Set<String>? = null
         @Volatile private var cachedCustomHostsTime: Long = 0
@@ -203,6 +211,90 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
 
             cachedCineStreamProvider = provider
+            return provider
+        }
+
+        @Synchronized
+        fun getStreamPlayProvider(forceSearch: Boolean = false): MainAPI? {
+            if (cachedStreamPlayProvider != null) return cachedStreamPlayProvider
+            if (!forceSearch && hasSearchedStreamPlay) return null
+
+            var provider = APIHolder.allProviders.find { it.name.equals("StreamPlay", ignoreCase = true) }
+            if (provider == null) {
+                try {
+                    val pmClass = Class.forName("com.lagradost.cloudstream3.plugins.PluginManager")
+                    val pmInstance = pmClass.getField("INSTANCE").get(null)
+                    var foundLoader: ClassLoader? = null
+                    for (field in pmClass.declaredFields) {
+                        field.isAccessible = true
+                        val obj = runSuspendCatching { field.get(pmInstance) }.getOrNull()
+                        val items = when (obj) {
+                            is Map<*, *> -> obj.values
+                            is Collection<*> -> obj
+                            is Array<*> -> obj.toList()
+                            else -> null
+                        }
+                        if (items != null) {
+                            for (plugin in items) {
+                                val pName = plugin?.javaClass?.name ?: ""
+                                if (pName.contains("phisher", true) || pName.contains("StreamPlay", true)) {
+                                    foundLoader = plugin!!.javaClass.classLoader
+                                    break
+                                }
+                            }
+                        }
+                        if (foundLoader != null) break
+                    }
+                    if (foundLoader != null) {
+                        val clazz = foundLoader.loadClass("com.phisher98.StreamPlay")
+                        provider = clazz.newInstance() as? MainAPI
+                    }
+                } catch (e: Exception) {}
+            }
+            cachedStreamPlayProvider = provider
+            hasSearchedStreamPlay = true
+            return provider
+        }
+
+        @Synchronized
+        fun getStreamPlayAnimeProvider(forceSearch: Boolean = false): MainAPI? {
+            if (cachedStreamPlayAnimeProvider != null) return cachedStreamPlayAnimeProvider
+            if (!forceSearch && hasSearchedStreamPlay) return null
+
+            var provider = APIHolder.allProviders.find { it.name.equals("StreamPlay-Anime", ignoreCase = true) }
+            if (provider == null) {
+                try {
+                    val pmClass = Class.forName("com.lagradost.cloudstream3.plugins.PluginManager")
+                    val pmInstance = pmClass.getField("INSTANCE").get(null)
+                    var foundLoader: ClassLoader? = null
+                    for (field in pmClass.declaredFields) {
+                        field.isAccessible = true
+                        val obj = runSuspendCatching { field.get(pmInstance) }.getOrNull()
+                        val items = when (obj) {
+                            is Map<*, *> -> obj.values
+                            is Collection<*> -> obj
+                            is Array<*> -> obj.toList()
+                            else -> null
+                        }
+                        if (items != null) {
+                            for (plugin in items) {
+                                val pName = plugin?.javaClass?.name ?: ""
+                                if (pName.contains("phisher", true) || pName.contains("StreamPlay", true)) {
+                                    foundLoader = plugin!!.javaClass.classLoader
+                                    break
+                                }
+                            }
+                        }
+                        if (foundLoader != null) break
+                    }
+                    if (foundLoader != null) {
+                        val clazz = foundLoader.loadClass("com.phisher98.StreamPlayAnime")
+                        provider = clazz.newInstance() as? MainAPI
+                    }
+                } catch (e: Exception) {}
+            }
+            cachedStreamPlayAnimeProvider = provider
+            hasSearchedStreamPlay = true
             return provider
         }
         
@@ -567,19 +659,26 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val primaryStremioId = buildStremioId(targetType, primaryId, loadData.season, loadData.episode) ?: primaryId
         val encodedPrimaryId = primaryStremioId.urlEncode()
 
-        println("StremioC v1.205 Debug: Removed invokeStremioX and invokeStremioSubtitles from loadLinks pipeline")
+        val seenLinks = Collections.synchronizedSet(mutableSetOf<String>())
+        val wrappedCallback: (ExtractorLink) -> Unit = { link ->
+            if (seenLinks.add(link.url)) {
+                callback(link)
+            }
+        }
 
         runAllAsync(
             {
                 runSuspendCatching {
                     val url = buildUrl("/stream/$targetType/$encodedPrimaryId.json")
                     val res = customSession.get(url, timeout = 120L).parsedSafe<StreamsResponse>()
-                    res?.streams?.forEach { stream -> stream.runCallback(this@StremioC, subtitleCallback, callback) }
+                    res?.streams?.forEach { stream -> stream.runCallback(this@StremioC, subtitleCallback, wrappedCallback) }
                 }
             },
             { invokeWatchsomuch(loadData.imdbId, globalSeason, globalEpisode, subtitleCallback) },
             { invokeOpenSubs(loadData.imdbId, globalSeason, globalEpisode, subtitleCallback) },
-            { invokeCineStream(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleCallback, callback) }
+            { invokeCineStream(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleCallback, wrappedCallback) },
+            { invokeStreamPlay(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleCallback, wrappedCallback) },
+            { invokeStreamPlayAnime(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleCallback, wrappedCallback) }
         )
         return true
     }
@@ -736,6 +835,156 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             )
 
             cineStreamProvider.loadLinks(cineData.toJson(), isCasting, subtitleInterceptor, callback)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private suspend fun invokeStreamPlay(
+        loadData: LoadData,
+        targetType: String,
+        globalId: String?,
+        globalSeason: Int?,
+        globalEpisode: Int?,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val isEnabled = withContext(Dispatchers.IO) {
+            val now = System.currentTimeMillis()
+            if (cachedStreamPlayEnabled != null && now - cachedCineStreamEnabledTime < SETTINGS_CACHE_TTL) {
+                return@withContext cachedStreamPlayEnabled!!
+            }
+            val context = CloudStreamApp.context ?: return@withContext true
+            val possiblePrefNames = listOf("StremioX", "StremioX_preferences", "stremio_preferences", "com.hsp1020_preferences", context.packageName + "_preferences")
+            var enabled = true
+            for (name in possiblePrefNames) {
+                val prefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
+                if (prefs.contains("streamplay_integration_enabled")) {
+                    enabled = prefs.getBoolean("streamplay_integration_enabled", true)
+                    break
+                }
+            }
+            cachedStreamPlayEnabled = enabled
+            enabled
+        }
+
+        if (!isEnabled) return
+
+        try {
+            val streamPlayProvider = getStreamPlayProvider() ?: return
+
+            val rawId = loadData.imdbId ?: globalId?.takeIf { it.startsWith("tt") || it.startsWith("tmdb:") } ?: ""
+            val correctImdbId = if (rawId.startsWith("tmdb:")) {
+                val parts = rawId.split(":")
+                if (parts.size >= 2) "${parts[0]}:${parts[1]}" else rawId
+            } else {
+                rawId
+            }
+
+            val isAnimeMedia = loadData.isAnime || globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
+
+            val spData = mapOf(
+                "imdbId" to correctImdbId,
+                "tmdbId" to loadData.tmdbId,
+                "type" to targetType,
+                "season" to globalSeason,
+                "episode" to globalEpisode,
+                "title" to (loadData.englishTitle ?: loadData.originalTitle ?: loadData.title ?: "Unknown"),
+                "year" to loadData.year,
+                "orgTitle" to loadData.originalTitle,
+                "isAnime" to isAnimeMedia,
+                "airedYear" to loadData.airedYear,
+                "jpTitle" to loadData.originalTitle,
+                "date" to loadData.firstAired,
+                "airedDate" to loadData.firstAired,
+                "isAsian" to loadData.isAsian,
+                "isBollywood" to loadData.isBollywood,
+                "isCartoon" to loadData.isCartoon,
+                "isMovie" to (targetType == "movie"),
+                "aniId" to loadData.anilistId?.toString(),
+                "malId" to loadData.malId
+            )
+
+            kotlinx.coroutines.withTimeoutOrNull(25000L) {
+                streamPlayProvider.loadLinks(spData.toJson(), isCasting, subtitleCallback, callback)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private suspend fun invokeStreamPlayAnime(
+        loadData: LoadData,
+        targetType: String,
+        globalId: String?,
+        globalSeason: Int?,
+        globalEpisode: Int?,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val isAnimeMedia = loadData.isAnime || globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true || loadData.anilistId != null || loadData.malId != null
+        if (!isAnimeMedia) return
+
+        val isEnabled = withContext(Dispatchers.IO) {
+            val now = System.currentTimeMillis()
+            if (cachedStreamPlayAnimeEnabled != null && now - cachedCineStreamEnabledTime < SETTINGS_CACHE_TTL) {
+                return@withContext cachedStreamPlayAnimeEnabled!!
+            }
+            val context = CloudStreamApp.context ?: return@withContext true
+            val possiblePrefNames = listOf("StremioX", "StremioX_preferences", "stremio_preferences", "com.hsp1020_preferences", context.packageName + "_preferences")
+            var enabled = true
+            for (name in possiblePrefNames) {
+                val prefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
+                if (prefs.contains("streamplay_anime_integration_enabled")) {
+                    enabled = prefs.getBoolean("streamplay_anime_integration_enabled", true)
+                    break
+                }
+            }
+            cachedStreamPlayAnimeEnabled = enabled
+            cachedCineStreamEnabledTime = now 
+            enabled
+        }
+
+        if (!isEnabled) return
+
+        try {
+            val streamPlayAnimeProvider = getStreamPlayAnimeProvider() ?: return
+
+            val rawId = loadData.imdbId ?: globalId?.takeIf { it.startsWith("tt") || it.startsWith("tmdb:") } ?: ""
+            val correctImdbId = if (rawId.startsWith("tmdb:")) {
+                val parts = rawId.split(":")
+                if (parts.size >= 2) "${parts[0]}:${parts[1]}" else rawId
+            } else {
+                rawId
+            }
+
+            val spaData = mapOf(
+                "imdbId" to correctImdbId,
+                "tmdbId" to loadData.tmdbId,
+                "type" to targetType,
+                "season" to globalSeason,
+                "episode" to globalEpisode,
+                "title" to (loadData.englishTitle ?: loadData.originalTitle ?: loadData.title ?: "Unknown"),
+                "year" to loadData.year,
+                "orgTitle" to loadData.originalTitle,
+                "isAnime" to true,
+                "airedYear" to loadData.airedYear,
+                "jpTitle" to loadData.originalTitle,
+                "date" to loadData.firstAired,
+                "airedDate" to loadData.firstAired,
+                "isAsian" to loadData.isAsian,
+                "isBollywood" to loadData.isBollywood,
+                "isCartoon" to loadData.isCartoon,
+                "isMovie" to (targetType == "movie"),
+                "aniId" to loadData.anilistId?.toString(),
+                "malId" to loadData.malId
+            )
+
+            kotlinx.coroutines.withTimeoutOrNull(25000L) {
+                streamPlayAnimeProvider.loadLinks(spaData.toJson(), isCasting, subtitleCallback, callback)
+            }
         } catch (e: Exception) {
             e.printStackTrace()
         }
