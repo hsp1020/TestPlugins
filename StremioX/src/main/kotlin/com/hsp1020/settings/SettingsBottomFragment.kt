@@ -1,4 +1,4 @@
-// v1.8 (Refactored: Clean Architecture, Decoupled UI/Data Layer, Removed Brittle Dynamic UI Injection)
+// v1.9 (Fix: Build Errors - Resolved Log.e signature & Removed leftover StreamPlayAnime references)
 package com.hsp1020
 
 import android.annotation.SuppressLint
@@ -40,7 +40,6 @@ object SettingsRepository {
     private const val PREF_KEY_LINKS = "stremio_saved_links"
     const val PREF_KEY_CINESTREAM_ENABLED = "cinestream_integration_enabled"
     const val PREF_KEY_STREAMPLAY_ENABLED = "streamplay_integration_enabled"
-    const val PREF_KEY_STREAMPLAY_ANIME_ENABLED = "streamplay_anime_integration_enabled"
 
     fun loadLinks(sharedPref: SharedPreferences): MutableList<LinkItem> {
         val json = sharedPref.getString(PREF_KEY_LINKS, null) ?: return mutableListOf()
@@ -60,7 +59,8 @@ object SettingsRepository {
             }
             list
         } catch (e: Exception) {
-            Log.e("SettingsRepository", "Failed to parse links", e)
+            // FIX: Cloudstream Log.e accepts only 2 arguments (String, String)
+            Log.e("SettingsRepository", "Failed to parse links: ${e.message}")
             mutableListOf()
         }
     }
@@ -123,7 +123,6 @@ class SettingsBottomFragment(
 
     private fun isCineStreamInstalled(): Boolean = StremioC.getCineStreamProvider(forceSearch = true) != null
     private fun isStreamPlayInstalled(): Boolean = StremioC.getStreamPlayProvider(forceSearch = true) != null
-    private fun isStreamPlayAnimeInstalled(): Boolean = StremioC.getStreamPlayAnimeProvider(forceSearch = true) != null
 
     @SuppressLint("DiscouragedApi")
     override fun onCreateView(
@@ -153,7 +152,6 @@ class SettingsBottomFragment(
         // UI Initialization: Toggles
         setupToggle(view, "switchCineStream", SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, isCineStreamInstalled(), "CineStream")
         setupToggle(view, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
-        setupToggle(view, "switchStreamPlayAnime", SettingsRepository.PREF_KEY_STREAMPLAY_ANIME_ENABLED, isStreamPlayAnimeInstalled(), "StreamPlay Anime")
 
         // Action: Add Link
         addlinks.setOnClickListener {
@@ -299,7 +297,7 @@ class SettingsBottomFragment(
                 showToast("$displayName Integration $statusText")
             }
         } catch (e: Throwable) {
-            Log.w("SettingsBottomFragment", "View $viewId not found in XML. Skipping toggle setup.")
+            // Log.w("SettingsBottomFragment", "View $viewId not found in XML. Skipping toggle setup.")
         }
     }
 
