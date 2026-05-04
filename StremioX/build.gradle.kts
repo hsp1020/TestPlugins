@@ -1,3 +1,4 @@
+
 // v2.0
 import java.util.Properties
 
@@ -36,7 +37,7 @@ cloudstream {
    
  // All of these properties are optional, you can safely remove them
 
-     description = "[!] Requires Setup \n- StremioX allows you to use stream addons \n- StremioC allows you to use catalog addons"
+     description = "StremioC allows you to use catalog addons"
      authors = listOf("hsp1020")
 
     /**
