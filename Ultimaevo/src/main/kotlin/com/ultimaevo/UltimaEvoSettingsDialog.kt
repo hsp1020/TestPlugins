@@ -641,15 +641,15 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         return scrollView
     }
 
-    private fun showEditCatalogsDialog(instanceId: Int, ctx: Context) {
+        private fun showEditCatalogsDialog(instanceId: Int, ctx: Context) {
         val prefs = ctx.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
-        
-        val mainContainer = LinearLayout(ctx).apply { 
+
+        val mainContainer = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(25, 40, 25, 30) 
+            setPadding(25, 40, 25, 30)
             background = getDarkThemeBg()
         }
-        
+
         val headerTitle = TextView(ctx).apply {
             text = "Configure Providers"
             textSize = 20f
@@ -662,7 +662,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
         val scroll = ScrollView(ctx)
         val listLayout = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
-        
+
         class CatalogRow(
             val providerName: String, val catalogName: String, val originalData: String,
             val checkBox: CheckBox, val orderEdit: EditText, val renameEdit: EditText, val view: View
@@ -670,7 +670,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val activeRows = mutableListOf<CatalogRow>()
 
         val allProviders = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
-        val allCatalogs = mutableListOf<Pair<String, String>>() 
+        val allCatalogs = mutableListOf<Pair<String, String>>()
 
         for (provider in allProviders) {
             val staticCats = provider.mainPage.map { it.name }
@@ -678,7 +678,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             val combined = (staticCats + dynamicCats).filter { it.isNotBlank() }.distinct()
             combined.forEach { allCatalogs.add(provider.name to it) }
         }
-        
+
         val maxOrder = allCatalogs.size
 
         fun triggerSort() {
@@ -700,13 +700,29 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             }
         }
 
+        fun reorderRowsByCheckState() {
+            val checked = activeRows.filter { it.checkBox.isChecked }
+            val unchecked = activeRows.filter { !it.checkBox.isChecked }
+            activeRows.clear()
+            activeRows.addAll(checked)
+            activeRows.addAll(unchecked)
+            for (i in activeRows.indices) {
+                activeRows[i].orderEdit.setText((i + 1).toString())
+            }
+            triggerSort()
+        }
+
         fun shiftItem(row: CatalogRow, newOrder: Int) {
-            val clampedOrder = newOrder.coerceIn(1, maxOrder)
+            val checkedCount = activeRows.count { it.checkBox.isChecked }
+            val groupMin = if (row.checkBox.isChecked) 1 else checkedCount + 1
+            val groupMax = if (row.checkBox.isChecked) checkedCount else maxOrder
+            val clampedOrder = newOrder.coerceIn(groupMin, groupMax)
+
             val oldIndex = activeRows.indexOf(row)
             val newIndex = clampedOrder - 1
 
             if (oldIndex == -1) return
-            
+
             if (oldIndex != newIndex) {
                 activeRows.removeAt(oldIndex)
                 activeRows.add(newIndex, row)
@@ -731,9 +747,9 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             val row = LinearLayout(ctx).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(10, 8, 10, 8) 
+                setPadding(10, 8, 10, 8)
                 layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                    setMargins(0, 5, 0, 5) 
+                    setMargins(0, 5, 0, 5)
                 }
                 background = getCardBg()
             }
@@ -750,8 +766,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             val etOrder = EditText(ctx).apply {
                 inputType = InputType.TYPE_CLASS_NUMBER
                 imeOptions = EditorInfo.IME_ACTION_DONE
-                layoutParams = LinearLayout.LayoutParams(70, LinearLayout.LayoutParams.WRAP_CONTENT).apply { 
-                    setMargins(0, 0, 5, 0) 
+                layoutParams = LinearLayout.LayoutParams(70, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                    setMargins(0, 0, 5, 0)
                 }
                 gravity = Gravity.CENTER
                 setTextColor(Color.WHITE)
@@ -791,26 +807,28 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             }
             row.addView(etRename)
 
-            val up = TextView(ctx).apply { 
+            val up = TextView(ctx).apply {
                 text = "▲"
                 textSize = 14f
                 setTextColor(Color.WHITE)
-                setPadding(10, 5, 10, 5) 
+                setPadding(10, 5, 10, 5)
             }
-            val down = TextView(ctx).apply { 
+            val down = TextView(ctx).apply {
                 text = "▼"
                 textSize = 14f
                 setTextColor(Color.WHITE)
-                setPadding(10, 5, 10, 5) 
+                setPadding(10, 5, 10, 5)
             }
-            
             row.addView(up)
             row.addView(down)
 
-            cb.setOnCheckedChangeListener { _, isChecked -> etRename.isEnabled = isChecked }
-
             val catalogRow = CatalogRow(pName, cName, "", cb, etOrder, etRename, row)
             activeRows.add(catalogRow)
+
+            cb.setOnCheckedChangeListener { _, isChecked ->
+                etRename.isEnabled = isChecked
+                reorderRowsByCheckState()
+            }
 
             etOrder.setOnEditorActionListener { _, actionId, _ ->
                 if (actionId == EditorInfo.IME_ACTION_DONE || actionId == EditorInfo.IME_ACTION_NEXT) {
@@ -823,7 +841,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
             etOrder.setOnFocusChangeListener { _, hasFocus ->
                 if (!hasFocus) {
-                    val inputVal = etOrder.text.toString().toIntOrNull() ?: (activeRows.indexOf(catalogRow) + 1)
+                    val inputVal = etOrder.text.toString().toIntOrNull()
+                        ?: (activeRows.indexOf(catalogRow) + 1)
                     shiftItem(catalogRow, inputVal)
                 }
             }
@@ -831,46 +850,48 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             up.setOnClickListener {
                 etOrder.clearFocus()
                 val cur = activeRows.indexOf(catalogRow) + 1
-                if (cur > 1) {
+                val checkedCount = activeRows.count { it.checkBox.isChecked }
+                val groupMin = if (catalogRow.checkBox.isChecked) 1 else checkedCount + 1
+                if (cur > groupMin) {
                     shiftItem(catalogRow, cur - 1)
                 }
             }
             down.setOnClickListener {
                 etOrder.clearFocus()
                 val cur = activeRows.indexOf(catalogRow) + 1
-                if (cur < maxOrder) {
+                val checkedCount = activeRows.count { it.checkBox.isChecked }
+                val groupMax = if (catalogRow.checkBox.isChecked) checkedCount else maxOrder
+                if (cur < groupMax) {
                     shiftItem(catalogRow, cur + 1)
                 }
             }
         }
 
-        for (i in activeRows.indices) {
-            activeRows[i].orderEdit.setText((i + 1).toString())
-        }
-        triggerSort()
+        reorderRowsByCheckState()
 
         scroll.addView(listLayout)
         mainContainer.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
-        val footer = LinearLayout(ctx).apply { 
+        val footer = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, 30, 0, 0)
         }
-        val applyBtn = Button(ctx).apply { 
+        val applyBtn = Button(ctx).apply {
             text = "Save"
             setTextColor(Color.WHITE)
             isAllCaps = false
             background = getButtonBg()
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0,0,15,0) }
         }
-        val closeBtn = Button(ctx).apply { 
+        val closeBtn = Button(ctx).apply {
             text = "Cancel"
             setTextColor(Color.WHITE)
             isAllCaps = false
             background = getButtonBg()
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15,0,0,0) }
         }
-        footer.addView(applyBtn); footer.addView(closeBtn)
+        footer.addView(applyBtn)
+        footer.addView(closeBtn)
         mainContainer.addView(footer)
 
         val builder = AlertDialog.Builder(ctx)
@@ -883,16 +904,14 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             lastClickTime = SystemClock.elapsedRealtime()
 
             val editor = prefs.edit()
-            
+
             val keysToRemove = prefs.all.keys.filter {
                 it.startsWith("cat_toggle_${instanceId}_") ||
                 it.startsWith("cat_rename_${instanceId}_") ||
                 it.startsWith("cat_order_${instanceId}_") ||
                 it.startsWith("ext_toggle_${instanceId}_")
             }
-            for (k in keysToRemove) {
-                editor.remove(k)
-            }
+            for (k in keysToRemove) editor.remove(k)
 
             val activeCatalogs = mutableListOf<String>()
 
@@ -901,30 +920,31 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 val tKey = "cat_toggle_${instanceId}_${row.providerName}_${row.catalogName}"
                 val rKey = "cat_rename_${instanceId}_${row.providerName}_${row.catalogName}"
                 val oKey = "cat_order_${instanceId}_${row.providerName}_${row.catalogName}"
-                
+
                 editor.putBoolean(tKey, row.checkBox.isChecked)
                 editor.putString(rKey, row.renameEdit.text.toString())
                 editor.putString(oKey, finalOrder.toString())
-                
+
                 val pKey = "ext_toggle_${instanceId}_${row.providerName}"
                 if (row.checkBox.isChecked) {
                     editor.putBoolean(pKey, true)
-                    
+
                     val customName = row.renameEdit.text.toString().ifBlank { row.catalogName }
                     val origProvider = APIHolder.allProviders.find { it.name == row.providerName }
                     val origData = origProvider?.mainPage?.find { it.name == row.catalogName }?.data ?: ""
-                    
+
                     val safeConfigStr = "${row.providerName};;;${row.catalogName};;;${customName};;;${finalOrder};;;${origData}"
                     activeCatalogs.add(safeConfigStr)
                 }
             }
-            
+
             editor.putString("evo_active_cats_$instanceId", activeCatalogs.joinToString("%%%"))
-            editor.apply() 
+            editor.apply()
             dialog.dismiss()
         }
 
         closeBtn.setOnClickListener { dialog.dismiss() }
         dialog.show()
     }
+    
 }
