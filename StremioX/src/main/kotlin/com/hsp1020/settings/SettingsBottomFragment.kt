@@ -1,4 +1,4 @@
-// v1.9 (Fix: Build Errors - Resolved Log.e signature & Removed leftover StreamPlayAnime references)
+// v1.3 (Fix: addlinks.xml 수정에 따른 라디오 버튼 참조 제거 및 StremioC 타입 고정 + CineStream 설치 체크 버그 수정 및 로깅)
 package com.hsp1020
 
 import android.annotation.SuppressLint
@@ -22,79 +22,16 @@ import androidx.core.content.edit
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.lagradost.api.Log
+import com.lagradost.cloudstream3.APIHolder
+import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.CommonActivity.showToast
-import org.json.JSONArray
-import org.json.JSONObject
 
-// ==========================================
-// Data & Repository Layer
-// ==========================================
-data class LinkItem(
-    val id: Long = System.currentTimeMillis(),
-    val name: String,
-    val link: String,
-    val type: String
-)
-
-object SettingsRepository {
-    private const val PREF_KEY_LINKS = "stremio_saved_links"
-    const val PREF_KEY_CINESTREAM_ENABLED = "cinestream_integration_enabled"
-    const val PREF_KEY_STREAMPLAY_ENABLED = "streamplay_integration_enabled"
-
-    fun loadLinks(sharedPref: SharedPreferences): MutableList<LinkItem> {
-        val json = sharedPref.getString(PREF_KEY_LINKS, null) ?: return mutableListOf()
-        val list = mutableListOf<LinkItem>()
-        return try {
-            val arr = JSONArray(json)
-            for (i in 0 until arr.length()) {
-                val obj = arr.getJSONObject(i)
-                list.add(
-                    LinkItem(
-                        id = obj.optLong("id", System.currentTimeMillis()),
-                        name = obj.optString("name", ""),
-                        link = obj.optString("link", ""),
-                        type = obj.optString("type", "StremioC")
-                    )
-                )
-            }
-            list
-        } catch (e: Exception) {
-            // FIX: Cloudstream Log.e accepts only 2 arguments (String, String)
-            Log.e("SettingsRepository", "Failed to parse links: ${e.message}")
-            mutableListOf()
-        }
-    }
-
-    fun saveLinks(sharedPref: SharedPreferences, list: List<LinkItem>) {
-        val arr = JSONArray()
-        for (item in list) {
-            val obj = JSONObject().apply {
-                put("id", item.id)
-                put("name", item.name)
-                put("link", item.link)
-                put("type", item.type)
-            }
-            arr.put(obj)
-        }
-        sharedPref.edit { putString(PREF_KEY_LINKS, arr.toString()) }
-    }
-
-    fun isIntegrationEnabled(sharedPref: SharedPreferences, key: String, default: Boolean = true): Boolean {
-        return sharedPref.getBoolean(key, default)
-    }
-
-    fun setIntegrationEnabled(sharedPref: SharedPreferences, key: String, state: Boolean) {
-        sharedPref.edit { putBoolean(key, state) }
-    }
-}
-
-// ==========================================
-// UI Layer
-// ==========================================
 class SettingsBottomFragment(
     plugin: StremioXPlugin,
     private val sharedPref: SharedPreferences
 ) : BottomSheetDialogFragment() {
+    private val PREF_KEY_LINKS = "stremio_saved_links"
+    val PREF_KEY_CINESTREAM_ENABLED = "cinestream_integration_enabled" // CineStream 설정 키
 
     private val res = plugin.resources ?: throw Exception("Unable to access plugin resources")
 
@@ -121,8 +58,11 @@ class SettingsBottomFragment(
         return inflater.inflate(layout, container, false)
     }
 
-    private fun isCineStreamInstalled(): Boolean = StremioC.getCineStreamProvider(forceSearch = true) != null
-    //private fun isStreamPlayInstalled(): Boolean = StremioC.getStreamPlayProvider(forceSearch = true) != null
+    private fun isCineStreamInstalled(): Boolean {
+        println("[CineStream_UI_DEBUG] isCineStreamInstalled() 호출됨 - 강제 재검색 요청")
+        // 화면을 열 때는 플러그인 늦게 로딩되었을 경우를 대비해 forceSearch = true 로 호출
+        return StremioC.getCineStreamProvider(forceSearch = true) != null
+    }
 
     @SuppressLint("DiscouragedApi")
     override fun onCreateView(
@@ -130,6 +70,12 @@ class SettingsBottomFragment(
         savedInstanceState: Bundle?
     ): View {
         val view = getLayout("bottom_sheet_layout", inflater, container)
+
+        listOf("addlinks", "showlinks", "saveIcon").forEach { name ->
+            val id = res.getIdentifier(name, "id", BuildConfig.LIBRARY_PACKAGE_NAME)
+            if (id == 0) Log.w("SettingsBottomFragment", "View id '$name' not found")
+            else Log.d("SettingsBottomFragment", "View id '$name' -> $id")
+        }
 
         val addlinks: ImageView = try { view.findView("addlinks") } catch (e: Throwable) {
             throw Exception("addlinks ImageView not found in bottom_sheet_layout", e)
@@ -149,11 +95,35 @@ class SettingsBottomFragment(
         showlinks.makeTvCompatible()
         saveIcon.makeTvCompatible()
 
-        // UI Initialization: Toggles
-        setupToggle(view, "switchCineStream", SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, isCineStreamInstalled(), "CineStream")
-        setupToggle(view, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
+        try {
+            val switchCineStream: CompoundButton = view.findView("switchCineStream")
+            
+            println("[CineStream_UI_DEBUG] CineStream 설치 여부 검사 시작...")
+            val isInstalled = isCineStreamInstalled()
+            println("[CineStream_UI_DEBUG] CineStream 설치 검사 결과: $isInstalled")
 
-        // Action: Add Link
+            switchCineStream.isEnabled = isInstalled
+            if (!isInstalled) {
+                switchCineStream.isChecked = false
+                switchCineStream.text = "CineStream (Not Installed)"
+                sharedPref.edit { putBoolean(PREF_KEY_CINESTREAM_ENABLED, false) } 
+                println("[CineStream_UI_DEBUG] 토글 비활성화 처리 완료")
+            } else {
+                switchCineStream.text = "CineStream Integration"
+                switchCineStream.isChecked = sharedPref.getBoolean(PREF_KEY_CINESTREAM_ENABLED, true)
+                println("[CineStream_UI_DEBUG] 토글 활성화 처리 완료 (현재상태: ${switchCineStream.isChecked})")
+            }
+
+            switchCineStream.setOnCheckedChangeListener { _, isChecked ->
+                sharedPref.edit { putBoolean(PREF_KEY_CINESTREAM_ENABLED, isChecked) }
+                if (isChecked) showToast("CineStream Integration Enabled")
+                else showToast("CineStream Integration Disabled")
+            }
+        } catch (e: Throwable) {
+            Log.w("SettingsBottomFragment", "switchCineStream view not found in XML. Skipping toggle setup.")
+        }
+
+        // ---------- ADD dialog ----------
         addlinks.setOnClickListener {
             val dialogView = getLayout("addlinks", inflater, container)
             val etName: EditText
@@ -162,8 +132,10 @@ class SettingsBottomFragment(
             try {
                 etName = dialogView.findView("etName")
                 etLink = dialogView.findView("etLink")
+                println("[SettingsBottomFragment v1.3] Add dialog 뷰 로드 성공")
             } catch (t: Throwable) {
                 Toast.makeText(requireContext(), "Dialog fields not found", Toast.LENGTH_SHORT).show()
+                Log.e("SettingsBottomFragment", "Missing dialog views $t")
                 return@setOnClickListener
             }
 
@@ -178,7 +150,9 @@ class SettingsBottomFragment(
                 btnSave.setOnClickListener {
                     val name = etName.text.toString().trim()
                     val link = etLink.text.toString().trim()
+                    // [v1.3 수정] XML에서 라디오버튼이 제거되었으므로 무조건 StremioC 타입으로 고정
                     val type = "StremioC"
+                    println("[SettingsBottomFragment v1.3] Add dialog: 새로운 링크 타입 $type 로 고정 저장")
 
                     if (link.isEmpty()) {
                         showToast("Please enter a link")
@@ -200,12 +174,13 @@ class SettingsBottomFragment(
 
                     val item = LinkItem(name = name.ifBlank { link }, link = link, type = type)
                     try {
-                        val list = SettingsRepository.loadLinks(sharedPref)
+                        val list = loadLinks().toMutableList()
                         list.add(0, item)
-                        SettingsRepository.saveLinks(sharedPref, list)
+                        saveLinks(list)
                         Toast.makeText(requireContext(), "Link saved", Toast.LENGTH_SHORT).show()
                         dlg.dismiss()
                     } catch (e: Throwable) {
+                        Log.e("SettingsBottomFragment", "Failed to save link $e")
                         showToast("Failed to save link")
                     }
                 }
@@ -214,7 +189,7 @@ class SettingsBottomFragment(
             dlg.show()
         }
 
-        // Action: Show Links
+        // ---------- SHOW list dialog ----------
         showlinks.setOnClickListener {
             val dialogView = getLayout("dialog_list_links", inflater, container)
             val dlg = AlertDialog.Builder(requireContext())
@@ -224,7 +199,8 @@ class SettingsBottomFragment(
 
             val rv: RecyclerView = dialogView.findView("rvLinks")
             val tvNoLinks: TextView = dialogView.findView("tvNoLinks")
-            val list = SettingsRepository.loadLinks(sharedPref)
+            val list = loadLinks().toMutableList()
+            Log.d("SettingsBottomFragment", "Loaded ${list.size} saved links")
 
             if (list.isEmpty()) {
                 tvNoLinks.visibility = View.VISIBLE
@@ -232,16 +208,17 @@ class SettingsBottomFragment(
             } else {
                 tvNoLinks.visibility = View.GONE
                 rv.visibility = View.VISIBLE
+
                 rv.layoutManager = LinearLayoutManager(requireContext())
 
                 val adapter = LinksAdapter(
                     items = list,
                     onDelete = { itemToDelete ->
-                        val updatedList = SettingsRepository.loadLinks(sharedPref)
+                        val updatedList = loadLinks().toMutableList()
                         val removed = updatedList.removeAll { it.id == itemToDelete.id }
 
                         if (removed) {
-                            SettingsRepository.saveLinks(sharedPref, updatedList)
+                            saveLinks(updatedList)
                             (rv.adapter as? LinksAdapter)?.remove(itemToDelete)
                             showToast("Deleted")
                             if (updatedList.isEmpty()) {
@@ -260,7 +237,8 @@ class SettingsBottomFragment(
             dlg.show()
         }
 
-        // Action: Save & Restart
+
+        // ---------- SAVE & RESTART ----------
         saveIcon.setOnClickListener {
             val context = this.context ?: return@setOnClickListener
 
@@ -278,29 +256,6 @@ class SettingsBottomFragment(
         return view
     }
 
-    private fun setupToggle(view: View, viewId: String, prefKey: String, isInstalled: Boolean, displayName: String) {
-        try {
-            val switchView: CompoundButton = view.findView(viewId)
-            switchView.isEnabled = isInstalled
-            if (!isInstalled) {
-                switchView.isChecked = false
-                switchView.text = "$displayName (Not Installed)"
-                SettingsRepository.setIntegrationEnabled(sharedPref, prefKey, false)
-            } else {
-                switchView.text = "$displayName Integration"
-                switchView.isChecked = SettingsRepository.isIntegrationEnabled(sharedPref, prefKey)
-            }
-
-            switchView.setOnCheckedChangeListener { _, isChecked ->
-                SettingsRepository.setIntegrationEnabled(sharedPref, prefKey, isChecked)
-                val statusText = if (isChecked) "Enabled" else "Disabled"
-                showToast("$displayName Integration $statusText")
-            }
-        } catch (e: Throwable) {
-            // Log.w("SettingsBottomFragment", "View $viewId not found in XML. Skipping toggle setup.")
-        }
-    }
-
     private fun showEditDialog(itemToEdit: LinkItem, position: Int, rv: RecyclerView) {
         val dialogView = getLayout("addlinks", LayoutInflater.from(requireContext()), null)
         val etName: EditText
@@ -309,6 +264,7 @@ class SettingsBottomFragment(
         try {
             etName = dialogView.findView("etName")
             etLink = dialogView.findView("etLink")
+            println("[SettingsBottomFragment v1.3] Edit dialog 뷰 로드 성공")
         } catch (t: Throwable) {
             Toast.makeText(requireContext(), "Dialog fields not found", Toast.LENGTH_SHORT).show()
             return
@@ -316,6 +272,7 @@ class SettingsBottomFragment(
 
         etName.setText(itemToEdit.name)
         etLink.setText(itemToEdit.link)
+        // 기존에 있던 라디오 버튼 체크 상태 복구 로직 삭제
 
         val dlg = AlertDialog.Builder(requireContext())
             .setTitle("Edit Link")
@@ -329,20 +286,22 @@ class SettingsBottomFragment(
             btnUpdate.setOnClickListener {
                 val name = etName.text.toString().trim()
                 val link = etLink.text.toString().trim()
+                //[v1.3 수정] 데이터 갱신 시에도 무조건 StremioC로 고정
                 val type = "StremioC"
+                println("[SettingsBottomFragment v1.3] Edit dialog: 링크 타입 $type 로 고정 업데이트")
 
                 if (link.isEmpty() || !(link.startsWith("http://") || link.startsWith("https://"))) {
                     showToast("Enter a valid URL (http/https)")
                     return@setOnClickListener
                 }
 
-                val updatedList = SettingsRepository.loadLinks(sharedPref)
+                val updatedList = loadLinks().toMutableList()
                 val indexInDb = updatedList.indexOfFirst { it.id == itemToEdit.id }
                 
                 if (indexInDb != -1) {
                     val newItem = itemToEdit.copy(name = name.ifBlank { link }, link = link, type = type)
                     updatedList[indexInDb] = newItem
-                    SettingsRepository.saveLinks(sharedPref, updatedList)
+                    saveLinks(updatedList)
 
                     (rv.adapter as? LinksAdapter)?.updateItem(newItem, position)
                     showToast("Link Updated Successfully")
@@ -368,9 +327,53 @@ class SettingsBottomFragment(
         }
     }
 
-    // ==========================================
-    // RecyclerView Adapter
-    // ==========================================
+    data class LinkItem(
+        val id: Long = System.currentTimeMillis(),
+        val name: String,
+        val link: String,
+        val type: String
+    )
+
+    private fun loadLinks(): MutableList<LinkItem> {
+        val json = sharedPref.getString(PREF_KEY_LINKS, null) ?: return mutableListOf()
+        val list = mutableListOf<LinkItem>()
+
+        return try {
+            val arr = org.json.JSONArray(json)
+
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+
+                list.add(
+                    LinkItem(
+                        id   = obj.optLong("id", System.currentTimeMillis()),
+                        name = obj.optString("name", ""),
+                        link = obj.optString("link", ""),
+                        type = obj.optString("type", "StremioC") // 파싱 시에도 기본값을 StremioC로 통일
+                    )
+                )
+            }
+            list
+        } catch (_: Exception) {
+            mutableListOf()
+        }
+    }
+
+    private fun saveLinks(list: List<LinkItem>) {
+        val arr = org.json.JSONArray()
+
+        for (item in list) {
+            val obj = org.json.JSONObject().apply {
+                put("id", item.id)
+                put("name", item.name)
+                put("link", item.link)
+                put("type", item.type)
+            }
+            arr.put(obj)
+        }
+        sharedPref.edit { putString(PREF_KEY_LINKS, arr.toString()) }
+    }
+
     inner class LinksAdapter(
         private val items: MutableList<LinkItem>,
         private val onDelete: (LinkItem) -> Unit,
@@ -397,8 +400,13 @@ class SettingsBottomFragment(
             holder.tvLink.text = item.link
             holder.tvType.text = item.type
 
-            holder.btnDelete.setOnClickListener { onDelete(item) }
-            holder.itemView.setOnClickListener { onEdit(item, position) }
+            holder.btnDelete.setOnClickListener {
+                onDelete(item)
+            }
+
+            holder.itemView.setOnClickListener {
+                onEdit(item, position)
+            }
         }
 
         override fun getItemCount(): Int = items.size
