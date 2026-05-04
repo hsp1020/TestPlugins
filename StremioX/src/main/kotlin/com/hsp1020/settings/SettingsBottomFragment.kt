@@ -122,7 +122,7 @@ class SettingsBottomFragment(
     }
 
     private fun isCineStreamInstalled(): Boolean = StremioC.getCineStreamProvider(forceSearch = true) != null
-    private fun isStreamPlayInstalled(): Boolean = StremioC.getStreamPlayProvider(forceSearch = true) != null
+    //private fun isStreamPlayInstalled(): Boolean = StremioC.getStreamPlayProvider(forceSearch = true) != null
 
     @SuppressLint("DiscouragedApi")
     override fun onCreateView(
