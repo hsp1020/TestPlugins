@@ -144,7 +144,7 @@
         ],
         "version": 13,
         "internalName": "StremioX",
-        "description": "[!] Requires Setup \n- StremioX allows you to use stream addons \n- StremioC allows you to use catalog addons",
+        "description": "StremioC allows you to use catalog addons",
         "url": "https://raw.githubusercontent.com/hsp1020/TestPlugins/builds/StremioX.cs3",
         "name": "StremioX"
     },
