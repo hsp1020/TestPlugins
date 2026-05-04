@@ -153,9 +153,21 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
 
         // ==========================================
+        // 🔧 StremioC 최적화: 전역 OkHttp Dispatcher의 호스트당 동시 연결 제한 증가
+        //    기본값 5 → 30 으로 상향하여 CineStream/StreamPlay 등 다른 플러그인이
+        //    동일 호스트에 대해 다수의 요청을 병렬로 보낼 수 있도록 함.
+        //    (전역 설정 변경이나 스크래핑 환경에서는 이로운 편)
+        // ==========================================
+        init {
+            app.baseClient.dispatcher.maxRequestsPerHost = 100
+            app.baseClient.dispatcher.maxRequests = 100 // 혹시 모를 전역 최대치도 함께 조절
+        }
+
+        // ==========================================
         // REFACTORED: Generic Reflection Loader
         // ==========================================
         private fun loadProviderDynamically(pluginKeyword: String, className: String): MainAPI? {
+            
             try {
                 val pmClass = Class.forName("com.lagradost.cloudstream3.plugins.PluginManager")
                 val pmInstance = pmClass.getField("INSTANCE").get(null)
