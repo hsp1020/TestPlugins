@@ -105,6 +105,21 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private val pageMutex = Mutex()
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
 
+    private val englishTitleCache = ConcurrentHashMap<Int, String>()
+
+    suspend fun fetchEnglishTitleFromTmdb(tmdbId: Int): String? {
+        englishTitleCache[tmdbId]?.let { return it }
+        return try {
+            val url = buildTmdbUrl("/tv/$tmdbId", "language" to "en-US")
+            val detail = customSession.get(url).parsedSafe<TmdbDetailResponse>()
+            val title = detail?.name ?: detail?.title ?: detail?.original_name ?: detail?.original_title
+            if (title != null) englishTitleCache[tmdbId] = title
+            title
+        } catch (e: Exception) {
+            null
+        }
+    }
+    
     companion object {
         private const val tmdbAPI = "https://api.themoviedb.org/3"
         private const val apiKey = "cc9982c4801545a1481d167137ea7b53"
@@ -933,12 +948,19 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         @JsonProperty("trailerStreams") val trailerStreams: List<TrailerStream> = emptyList(), 
         @JsonProperty("links") val links: List<Link> = emptyList()
     ) {
-        fun toSearchResponse(provider: StremioC): SearchResponse {
+        suspend fun toSearchResponse(provider: StremioC): SearchResponse {
+            val tmdbId = this.moviedb_id ?: this.tmdbIdExt?.toIntOrNull()
+            var englishTitle: String? = null
+            if (tmdbId != null) {
+                englishTitle = provider.fetchEnglishTitleFromTmdb(tmdbId)
+            }
+
             val thinData = LoadData(
                 id = this.id,
                 type = this.type ?: "movie",
-                title = this.name ?: this.id ?: "Empty",
-                tmdbId = this.moviedb_id ?: this.tmdbIdExt?.toIntOrNull(),
+                title = this.name ?: this.id ?: "",
+                englishTitle = englishTitle ?: this.name,
+                tmdbId = tmdbId,
                 malId = this.malIdExt?.toIntOrNull(),
                 kitsuId = this.kitsuIdExt
             )
@@ -946,7 +968,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             return provider.newMovieSearchResponse(name ?: "Unknown", thinData.toJson(), TvType.Others) { 
                 posterUrl = poster 
             }
-        }
+        }                
 
         private fun isSingleMovie(finalType: String?, finalVideos: List<Video>?): Boolean {
             return (finalType == "movie" && finalVideos?.size == 1 && finalVideos[0].seasonNumber == 1 && (finalVideos[0].episode == 1 || finalVideos[0].number == 1)) ||
