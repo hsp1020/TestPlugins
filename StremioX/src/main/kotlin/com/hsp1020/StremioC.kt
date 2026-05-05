@@ -105,30 +105,20 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private val pageMutex = Mutex()
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
 
-    private val tmdbAnimeCache = ConcurrentHashMap<Int, Pair<String?, Boolean>>()
+    private val englishTitleCache = ConcurrentHashMap<Int, String>()
 
-    suspend fun fetchTmdbInfo(tmdbId: Int, mediaType: String): Pair<String?, Boolean>? {
-        tmdbAnimeCache[tmdbId]?.let { return it }
+    suspend fun fetchEnglishTitleFromTmdb(tmdbId: Int): String? {
+        englishTitleCache[tmdbId]?.let { return it }
         return try {
-            val url = buildTmdbUrl("/$mediaType/$tmdbId")
+            val url = buildTmdbUrl("/tv/$tmdbId", "language" to "en-US")
             val detail = customSession.get(url).parsedSafe<TmdbDetailResponse>()
-
-            // 1. 영어 제목 추출 (기존의 안정적인 방식)
             val title = detail?.name ?: detail?.title ?: detail?.original_name ?: detail?.original_title
-
-            // 2. isAnime 판별 (TMDB 장르 + 원어 정보)
-            val genres = detail?.genres?.mapNotNull { it.name } ?: emptyList()
-            val originalLanguage = detail?.original_language
-            val isAnime = genres.contains("Animation") && (originalLanguage == "ja" || originalLanguage == "zh")
-
-            val result = Pair(title, isAnime)
-            tmdbAnimeCache[tmdbId] = result
-            result
+            if (title != null) englishTitleCache[tmdbId] = title
+            title
         } catch (e: Exception) {
             null
         }
     }
-    
     
     companion object {
         private const val tmdbAPI = "https://api.themoviedb.org/3"
@@ -960,14 +950,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     ) {
         suspend fun toSearchResponse(provider: StremioC): SearchResponse {
             val tmdbId = this.moviedb_id ?: this.tmdbIdExt?.toIntOrNull()
-            val mediaType = if (this.type == "movie") "movie" else "tv"
             var englishTitle: String? = null
-            var isAnime = false
-
             if (tmdbId != null) {
-                val tmdbInfo = provider.fetchTmdbInfo(tmdbId, mediaType)
-                englishTitle = tmdbInfo?.first
-                isAnime = tmdbInfo?.second ?: false
+                englishTitle = provider.fetchEnglishTitleFromTmdb(tmdbId)
             }
 
             val thinData = LoadData(
@@ -977,8 +962,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 englishTitle = englishTitle ?: this.name,
                 tmdbId = tmdbId,
                 malId = this.malIdExt?.toIntOrNull(),
-                kitsuId = this.kitsuIdExt,
-                isAnime = isAnime
+                isAnime = true,
+                kitsuId = this.kitsuIdExt
             )
 
             return provider.newMovieSearchResponse(name ?: "Unknown", thinData.toJson(), TvType.Others) { 
@@ -1576,7 +1561,6 @@ private data class TmdbDetailResponse(
     @JsonProperty("images") val images: TmdbImages? = null, 
     @JsonProperty("videos") val videos: ResultsTrailer? = null, 
     @JsonProperty("external_ids") val external_ids: ExternalIds? = null, 
-    @JsonProperty("genres") val genres: List<TmdbGenre>? = null,
     @JsonProperty("translations") val translations: TmdbTranslations? = null
 ) {
     fun toTmdbMedia(mediaType: String): TmdbMedia {
@@ -1595,11 +1579,6 @@ private data class TmdbDetailResponse(
         )
     }
 }
-
-private data class TmdbGenre(
-        @JsonProperty("id") val id: Int?,
-        @JsonProperty("name") val name: String?
-    )
 
 private data class TmdbImages(@JsonProperty("logos") val logos: List<TmdbLogo>? = null)
 private data class TmdbLogo(@JsonProperty("file_path") val file_path: String? = null)
