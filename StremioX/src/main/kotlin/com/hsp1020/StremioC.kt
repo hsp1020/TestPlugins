@@ -937,7 +937,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val thinData = LoadData(
                 id = this.id,
                 type = this.type ?: "movie",
-                title = this.name,   // ★ 제목 정보를 추가
+                title = this.name ?: this.id ?: "Empty",
                 tmdbId = this.moviedb_id ?: this.tmdbIdExt?.toIntOrNull(),
                 malId = this.malIdExt?.toIntOrNull(),
                 kitsuId = this.kitsuIdExt
