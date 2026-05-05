@@ -1,3 +1,4 @@
+
 // v1.208 (Refactored: Clean Code, DRY Principle Applied, Removed Spaghetti Reflection & Mapping)
 package com.hsp1020
 
@@ -806,7 +807,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val payload = buildBasePayload(loadData, targetType, globalId, globalSeason, globalEpisode)
             
             // StreamPlay specific overrides
-            payload["id"] = loadData.tmdbId // StreamPlay treats "id" as tmdbId
+            payload["id"] = loadData.tmdbId
+                ?: loadData.imdbId
+                ?: loadData.id       // "mal:63019" 등의 원본 ID
             payload["year"] = loadData.year
             payload["lastSeason"] = 1 // Required for Kisskh relaxed search
             payload["aniId"] = loadData.anilistId?.toString()
