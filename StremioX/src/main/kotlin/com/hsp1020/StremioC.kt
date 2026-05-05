@@ -1,3 +1,4 @@
+
 // v1.208 (Refactored: Clean Code, DRY Principle Applied, Removed Spaghetti Reflection & Mapping)
 package com.hsp1020
 
@@ -104,29 +105,35 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private val pageMutex = Mutex()
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
 
-    private val tmdbAnimeCache = ConcurrentHashMap<Int, TmdbAnimeInfo>()
+    private data class TmdbGenre(
+        @JsonProperty("id") val id: Int?,
+        @JsonProperty("name") val name: String?
+    )
 
-    private suspend fun fetchTmdbInfo(tmdbId: Int, mediaType: String): TmdbAnimeInfo? {
+    private val tmdbAnimeCache = ConcurrentHashMap<Int, Pair<String?, Boolean>>()
+
+    suspend fun fetchTmdbInfo(tmdbId: Int, mediaType: String): Pair<String?, Boolean>? {
         tmdbAnimeCache[tmdbId]?.let { return it }
         return try {
-            val url = buildTmdbUrl("/$mediaType/$tmdbId", "append_to_response" to "translations")
+            val url = buildTmdbUrl("/$mediaType/$tmdbId")
             val detail = customSession.get(url).parsedSafe<TmdbDetailResponse>()
 
-            val enTitle = detail?.translations?.translations
-                ?.firstOrNull { it.iso_639_1 == "en" || it.iso_3166_1 == "US" }
-                ?.data?.title ?: detail?.name ?: detail?.title
+            // 1. 영어 제목 추출 (기존의 안정적인 방식)
+            val title = detail?.name ?: detail?.title ?: detail?.original_name ?: detail?.original_title
 
+            // 2. isAnime 판별 (TMDB 장르 + 원어 정보)
             val genres = detail?.genres?.mapNotNull { it.name } ?: emptyList()
             val originalLanguage = detail?.original_language
+            val isAnime = genres.contains("Animation") && (originalLanguage == "ja" || originalLanguage == "zh")
 
-            val info = TmdbAnimeInfo(enTitle, genres, originalLanguage)
-            tmdbAnimeCache[tmdbId] = info
-            info
+            val result = Pair(title, isAnime)
+            tmdbAnimeCache[tmdbId] = result
+            result
         } catch (e: Exception) {
             null
         }
     }
-
+    
     
     companion object {
         private const val tmdbAPI = "https://api.themoviedb.org/3"
@@ -830,10 +837,16 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val payload = buildBasePayload(loadData, targetType, globalId, globalSeason, globalEpisode)
             
             // StreamPlay specific overrides
+            // 기존
+
+            // 최소한 아래와 같이 ID에 fallback을 주고,
+            // title도 "Unknown"이 아닌 실제 값을 넣도록 보완
             payload["id"] = loadData.tmdbId ?: loadData.imdbId ?: loadData.id
             payload["year"] = loadData.year ?: loadData.airedYear
+            // title 보강 (기존 loadData.title이 null이면 imdbId로라도 채우는 등)
+            // payload 생성 후 (buildBasePayload 호출 이후)
             if (payload["title"] == null || payload["title"] == "Unknown") {
-                payload["title"] = loadData.id ?: payload["id"]?.toString() ?: "Unknown Title"
+            payload["title"] = loadData.id ?: payload["id"]?.toString() ?: "Unknown Title"
             }
             payload["lastSeason"] = 1 // Required for Kisskh relaxed search
             payload["aniId"] = loadData.anilistId?.toString()
@@ -958,9 +971,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
             if (tmdbId != null) {
                 val tmdbInfo = provider.fetchTmdbInfo(tmdbId, mediaType)
-                englishTitle = tmdbInfo?.englishTitle
-                isAnime = tmdbInfo?.genres?.contains("Animation") == true &&
-                          (tmdbInfo?.originalLanguage == "ja" || tmdbInfo?.originalLanguage == "zh")
+                englishTitle = tmdbInfo?.first
+                isAnime = tmdbInfo?.second ?: false
             }
 
             val thinData = LoadData(
@@ -977,8 +989,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             return provider.newMovieSearchResponse(name ?: "Unknown", thinData.toJson(), TvType.Others) { 
                 posterUrl = poster 
             }
-        }
-
+        }                
 
         private fun isSingleMovie(finalType: String?, finalVideos: List<Video>?): Boolean {
             return (finalType == "movie" && finalVideos?.size == 1 && finalVideos[0].seasonNumber == 1 && (finalVideos[0].episode == 1 || finalVideos[0].number == 1)) ||
@@ -1512,21 +1523,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
     }
 }
-
-// ==========================================
-// 🔧 빌드 에러 수정을 위해 클래스 외부로 이동된 모델들
-// ==========================================
-
-private data class TmdbGenre(
-    @JsonProperty("id") val id: Int?,
-    @JsonProperty("name") val name: String?
-)
-
-private data class TmdbAnimeInfo(
-    val englishTitle: String?,
-    val genres: List<String>,
-    val originalLanguage: String?
-)
 
 private data class TraktRelatedIds(@JsonProperty("tmdb") val tmdb: Int?)
 private data class TraktRelatedItem(@JsonProperty("ids") val ids: TraktRelatedIds?)
