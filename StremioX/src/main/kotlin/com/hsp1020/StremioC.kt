@@ -814,8 +814,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             payload["id"] = loadData.tmdbId ?: loadData.imdbId ?: loadData.id
             payload["year"] = loadData.year ?: loadData.airedYear
             // title 보강 (기존 loadData.title이 null이면 imdbId로라도 채우는 등)
+            // payload 생성 후 (buildBasePayload 호출 이후)
             if (payload["title"] == null || payload["title"] == "Unknown") {
-            payload["title"] = loadData.englishTitle ?: loadData.originalTitle ?: loadData.id
+            payload["title"] = loadData.id ?: payload["id"]?.toString() ?: "Unknown Title"
             }
             payload["lastSeason"] = 1 // Required for Kisskh relaxed search
             payload["aniId"] = loadData.anilistId?.toString()
@@ -936,6 +937,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val thinData = LoadData(
                 id = this.id,
                 type = this.type ?: "movie",
+                title = this.name,   // ★ 제목 정보를 추가
                 tmdbId = this.moviedb_id ?: this.tmdbIdExt?.toIntOrNull(),
                 malId = this.malIdExt?.toIntOrNull(),
                 kitsuId = this.kitsuIdExt
