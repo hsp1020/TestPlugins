@@ -105,11 +105,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private val pageMutex = Mutex()
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
 
-    private data class TmdbGenre(
-        @JsonProperty("id") val id: Int?,
-        @JsonProperty("name") val name: String?
-    )
-
     private val tmdbAnimeCache = ConcurrentHashMap<Int, Pair<String?, Boolean>>()
 
     suspend fun fetchTmdbInfo(tmdbId: Int, mediaType: String): Pair<String?, Boolean>? {
@@ -1600,6 +1595,11 @@ private data class TmdbDetailResponse(
         )
     }
 }
+
+private data class TmdbGenre(
+        @JsonProperty("id") val id: Int?,
+        @JsonProperty("name") val name: String?
+    )
 
 private data class TmdbImages(@JsonProperty("logos") val logos: List<TmdbLogo>? = null)
 private data class TmdbLogo(@JsonProperty("file_path") val file_path: String? = null)
