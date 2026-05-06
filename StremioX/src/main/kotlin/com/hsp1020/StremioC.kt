@@ -50,7 +50,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
@@ -105,21 +104,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private val pageMutex = Mutex()
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
 
-    private val englishTitleCache = ConcurrentHashMap<Int, String>()
-
-    suspend fun fetchEnglishTitleFromTmdb(tmdbId: Int): String? {
-        englishTitleCache[tmdbId]?.let { return it }
-        return try {
-            val url = buildTmdbUrl("/tv/$tmdbId", "language" to "en-US")
-            val detail = customSession.get(url).parsedSafe<TmdbDetailResponse>()
-            val title = detail?.name ?: detail?.title ?: detail?.original_name ?: detail?.original_title
-            if (title != null) englishTitleCache[tmdbId] = title
-            title
-        } catch (e: Exception) {
-            null
-        }
-    }
-    
     companion object {
         private const val tmdbAPI = "https://api.themoviedb.org/3"
         private const val apiKey = "cc9982c4801545a1481d167137ea7b53"
@@ -433,7 +417,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         
                         if (resultPair != null) {
                             val displayType = catalog.type?.replaceFirstChar { it.uppercase() } ?: ""
-                            catalogSkipState[catalogKey] = currentSkip + resultPair.second(resultPair.second)
+                            catalogSkipState[catalogKey] = currentSkip + resultPair.second
                             val rowName = "${catalog.name ?: catalog.id} - $displayType"
                             
                             val seenForThisCatalog = catalogSentIds.getOrPut(catalogKey) { 
@@ -822,22 +806,22 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val payload = buildBasePayload(loadData, targetType, globalId, globalSeason, globalEpisode)
             
             // StreamPlay specific overrides
-            // 핵심 1: id는 무조건 Int 타입으로 전달 (String tt...는 imdbId 필드로 분리)
-            payload["id"] = loadData.tmdbId 
-            payload["imdbId"] = loadData.imdbId ?: (if (loadData.id?.startsWith("tt") == true) loadData.id else null)
-            
-            // 핵심 2: StreamPlay의 애니메이션 ID 해결을 위해 title에 영어 제목을 우선 주입
-            payload["title"] = loadData.englishTitle ?: loadData.title
-            
+            // 기존
+
+            // 최소한 아래와 같이 ID에 fallback을 주고,
+            // title도 "Unknown"이 아닌 실제 값을 넣도록 보완
+            payload["id"] = loadData.tmdbId ?: loadData.imdbId ?: loadData.id
             payload["year"] = loadData.year ?: loadData.airedYear
+            // title 보강 (기존 loadData.title이 null이면 imdbId로라도 채우는 등)
+            // payload 생성 후 (buildBasePayload 호출 이후)
+            if (payload["title"] == null || payload["title"] == "Unknown") {
+            payload["title"] = loadData.id ?: payload["id"]?.toString() ?: "Unknown Title"
+            }
             payload["lastSeason"] = 1 // Required for Kisskh relaxed search
             payload["aniId"] = loadData.anilistId?.toString()
 
-            kotlinx.coroutines.withTimeoutOrNull(35000L) {
+            kotlinx.coroutines.withTimeoutOrNull(25000L) {
                 streamPlayProvider.loadLinks(payload.toJson(), isCasting, subtitleCallback, callback)
-                // 핵심 3: StreamPlay가 내부에서 비동기 작업을 기다리지 않고 즉시 반환하는 버그가 있으므로,
-                // 부모 스코프(StremioC)가 코루틴을 죽이지 못하도록 강제로 지연시킴.
-                delay(30000L)
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -948,28 +932,20 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         @JsonProperty("trailerStreams") val trailerStreams: List<TrailerStream> = emptyList(), 
         @JsonProperty("links") val links: List<Link> = emptyList()
     ) {
-        suspend fun toSearchResponse(provider: StremioC): SearchResponse {
-            val tmdbId = this.moviedb_id ?: this.tmdbIdExt?.toIntOrNull()
-            var englishTitle: String? = null
-            if (tmdbId != null) {
-                englishTitle = provider.fetchEnglishTitleFromTmdb(tmdbId)
-            }
-
+        fun toSearchResponse(provider: StremioC): SearchResponse {
             val thinData = LoadData(
                 id = this.id,
                 type = this.type ?: "movie",
-                title = this.name ?: this.id ?: "",
-                englishTitle = englishTitle ?: this.name,
-                tmdbId = tmdbId,
+                title = this.name ?: this.id ?: "Empty",
+                tmdbId = this.moviedb_id ?: this.tmdbIdExt?.toIntOrNull(),
                 malId = this.malIdExt?.toIntOrNull(),
-                isAnime = true,
                 kitsuId = this.kitsuIdExt
             )
 
             return provider.newMovieSearchResponse(name ?: "Unknown", thinData.toJson(), TvType.Others) { 
                 posterUrl = poster 
             }
-        }                
+        }
 
         private fun isSingleMovie(finalType: String?, finalVideos: List<Video>?): Boolean {
             return (finalType == "movie" && finalVideos?.size == 1 && finalVideos[0].seasonNumber == 1 && (finalVideos[0].episode == 1 || finalVideos[0].number == 1)) ||
