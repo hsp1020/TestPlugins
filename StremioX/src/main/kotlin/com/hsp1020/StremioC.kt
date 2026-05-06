@@ -1,4 +1,3 @@
-
 // v1.208 (Refactored: Clean Code, DRY Principle Applied, Removed Spaghetti Reflection & Mapping)
 package com.hsp1020
 
@@ -51,6 +50,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
@@ -822,22 +822,22 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val payload = buildBasePayload(loadData, targetType, globalId, globalSeason, globalEpisode)
             
             // StreamPlay specific overrides
-            // 기존
-
-            // 최소한 아래와 같이 ID에 fallback을 주고,
-            // title도 "Unknown"이 아닌 실제 값을 넣도록 보완
-            payload["id"] = loadData.tmdbId ?: loadData.imdbId ?: loadData.id
+            // 핵심 1: id는 무조건 Int로 안전하게 전달 (String tt...는 imdbId로 처리됨)
+            payload["id"] = loadData.tmdbId 
+            payload["imdbId"] = loadData.imdbId ?: (if (loadData.id?.startsWith("tt") == true) loadData.id else null)
+            
+            // 핵심 2: StreamPlay의 애니메이션 ID 해결을 위해 title에 영어 제목을 우선 주입
+            payload["title"] = loadData.englishTitle ?: loadData.title
+            
             payload["year"] = loadData.year ?: loadData.airedYear
-            // title 보강 (기존 loadData.title이 null이면 imdbId로라도 채우는 등)
-            // payload 생성 후 (buildBasePayload 호출 이후)
-            if (payload["title"] == null || payload["title"] == "Unknown") {
-            payload["title"] = loadData.id ?: payload["id"]?.toString() ?: "Unknown Title"
-            }
             payload["lastSeason"] = 1 // Required for Kisskh relaxed search
             payload["aniId"] = loadData.anilistId?.toString()
 
-            kotlinx.coroutines.withTimeoutOrNull(25000L) {
+            kotlinx.coroutines.withTimeoutOrNull(35000L) {
                 streamPlayProvider.loadLinks(payload.toJson(), isCasting, subtitleCallback, callback)
+                // 핵심 3: StreamPlay가 내부에서 awaitAll을 하지 않고 즉시 반환하는 버그가 있으므로,
+                // 부모 스코프(StremioC)가 코루틴을 죽이지 못하도록 강제로 지연시킴.
+                delay(30000L)
             }
         } catch (e: Exception) {
             e.printStackTrace()
