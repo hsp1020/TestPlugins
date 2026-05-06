@@ -433,7 +433,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         
                         if (resultPair != null) {
                             val displayType = catalog.type?.replaceFirstChar { it.uppercase() } ?: ""
-                            catalogSkipState[catalogKey] = currentSkip + resultPair.second
+                            catalogSkipState[catalogKey] = currentSkip + resultPair.second(resultPair.second)
                             val rowName = "${catalog.name ?: catalog.id} - $displayType"
                             
                             val seenForThisCatalog = catalogSentIds.getOrPut(catalogKey) { 
@@ -822,7 +822,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val payload = buildBasePayload(loadData, targetType, globalId, globalSeason, globalEpisode)
             
             // StreamPlay specific overrides
-            // 핵심 1: id는 무조건 Int로 안전하게 전달 (String tt...는 imdbId로 처리됨)
+            // 핵심 1: id는 무조건 Int 타입으로 전달 (String tt...는 imdbId 필드로 분리)
             payload["id"] = loadData.tmdbId 
             payload["imdbId"] = loadData.imdbId ?: (if (loadData.id?.startsWith("tt") == true) loadData.id else null)
             
@@ -835,7 +835,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
             kotlinx.coroutines.withTimeoutOrNull(35000L) {
                 streamPlayProvider.loadLinks(payload.toJson(), isCasting, subtitleCallback, callback)
-                // 핵심 3: StreamPlay가 내부에서 awaitAll을 하지 않고 즉시 반환하는 버그가 있으므로,
+                // 핵심 3: StreamPlay가 내부에서 비동기 작업을 기다리지 않고 즉시 반환하는 버그가 있으므로,
                 // 부모 스코프(StremioC)가 코루틴을 죽이지 못하도록 강제로 지연시킴.
                 delay(30000L)
             }
