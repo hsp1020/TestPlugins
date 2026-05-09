@@ -40,6 +40,7 @@ class BcbcRedExtractor : ExtractorApi() {
             val keyMatch = Regex("""#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"(?:,IV=(0x[0-9a-fA-F]+))?""").find(playlistRes)
             val hexIv = keyMatch?.groupValues?.get(2)
             
+            // [고유 개선] 무거운 CPU 연산을 백그라운드 코루틴으로 분리하여 ANR(UI 멈춤) 방지
             val candidates = if (keyMatch != null) withContext(Dispatchers.Default) { solveKeyCandidatesCombinatorial(baseHeaders, keyMatch.groupValues[1]) } else emptyList()
             
             val lines = playlistRes.lines()
@@ -185,9 +186,10 @@ class BcbcRedExtractor : ExtractorApi() {
                 isRunning = true
                 CoroutineScope(Dispatchers.IO).launch { 
                     while (isRunning && serverSocket != null && !serverSocket!!.isClosed) { 
-                        try {
+                        try { 
                             val socket = serverSocket!!.accept()
-                            launch { handleClient(socket) }
+                            // [수정: 블로킹 I/O 코루틴 스레드 풀 강제 할당 및 예외 대기열 추가]
+                            launch(Dispatchers.IO) { handleClient(socket) }
                         } catch (e: Exception) {
                             delay(100L)
                         } 
@@ -198,13 +200,15 @@ class BcbcRedExtractor : ExtractorApi() {
 
         fun stop() { isRunning = false; try { serverSocket?.close(); serverSocket = null } catch (e: Exception) {} }
         
-        private suspend fun handleClient(socket: Socket) {
+        // [수정: 명시적 I/O 분리 컨텍스트 적용]
+        private suspend fun handleClient(socket: Socket) = withContext(Dispatchers.IO) {
             try {
                 socket.soTimeout = 5000
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
-                val path = reader.readLine()?.split(" ")?.get(1) ?: return
+                val path = reader.readLine()?.split(" ")?.getOrNull(1) ?: return@withContext
                 val output = socket.getOutputStream()
 
+                // [공통 개선] Connection: close & Content-Length 헤더 명시적 추가
                 if (path.contains("/playlist.m3u8")) {
                     val payload = finalM3u8.toByteArray(charset("UTF-8"))
                     output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nConnection: close\r\nContent-Length: ${payload.size}\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
