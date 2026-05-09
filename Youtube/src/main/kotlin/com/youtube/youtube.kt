@@ -1199,7 +1199,8 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
             else -> input
         }
     }
-override suspend fun loadLinks(
+
+    override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
@@ -1209,7 +1210,7 @@ override suspend fun loadLinks(
         val fullUrl = "https://www.youtube.com/watch?v=$videoId"
 
         val context = AcraApplication.context
-        var playerType = if (context != null) {
+        val playerType = if (context != null) {
             val prefs = PreferenceManager.getDefaultSharedPreferences(context)
             prefs.getString("youtube_player_type", "advanced")
         } else {
@@ -1244,27 +1245,28 @@ override suspend fun loadLinks(
             logError(e)
         }
 
-        // 라이브 방송 시 고급 모드(DASH XML 생성)에서 NumberFormatException(2000)이 발생하므로 클래식(HLS) 모드로 강제 전환
+        // 라이브 방송은 Cloudstream 내장 추출기(loadExtractor)가 쿠키 종속성 없이 완벽히 지원하므로 강제 우회 라우팅
         if (isLive) {
-            playerType = "classic"
-        }
-
-        var linkFound = false
-
-        if (playerType == "classic") {
-            linkFound = loadLinksClassic(fullUrl, isCasting, subtitleCallback, callback)
+            loadExtractor(fullUrl, subtitleCallback, callback)
         } else {
-            var advancedLinksCount = 0
-            com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback) {
-                advancedLinksCount++
-                callback(it)
+            var handled = false
+            if (playerType == "classic") {
+                handled = loadLinksClassic(fullUrl, isCasting, subtitleCallback, callback)
             }
+            
+            if (!handled) {
+                var advancedLinksCount = 0
+                com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback) {
+                    advancedLinksCount++
+                    callback(it)
+                }
 
-            if (advancedLinksCount == 0) {
-                linkFound = loadLinksClassic(fullUrl, isCasting, subtitleCallback, callback)
-            } else {
-                linkFound = true
-                loadLinksAdvanced(videoId, subtitleCallback) { }
+                if (advancedLinksCount == 0) {
+                    // 고급 추출기 실패 시 폴백
+                    loadExtractor(fullUrl, subtitleCallback, callback)
+                } else {
+                    loadLinksAdvanced(videoId, subtitleCallback) { }
+                }
             }
         }
 
@@ -1340,6 +1342,7 @@ override suspend fun loadLinks(
 
         return true
     }
+
 
 
     private suspend fun loadLinksAdvanced(
