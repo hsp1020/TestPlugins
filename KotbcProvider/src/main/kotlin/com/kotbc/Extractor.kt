@@ -1,3 +1,4 @@
+// 파일명: hsp1020/testplugins/TestPlugins-d1a26fae88cb55c8f1d621560cf4e45bd7fd78f6/KotbcProvider/src/main/kotlin/com/kotbc/Extractor.kt
 package com.kotbc
 
 import android.content.Context
@@ -52,7 +53,6 @@ class KotbcExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // [v4.0] referer가 null이거나 구버전 도메인으로 넘어왔을 경우 최신 도메인으로 강제 교체
         val safeReferer = if (referer.isNullOrEmpty() || referer.contains("m136")) {
             Kotbc.currentMainUrl + "/"
         } else {
@@ -128,13 +128,20 @@ class KotbcExtractor : ExtractorApi() {
     private suspend fun runWebViewHook(url: String, referer: String) = suspendCancellableCoroutine<InterceptResult?> { cont ->
         println("[Kotbc v4.0] WebView 훅 실행: $url")
         val handler = Handler(Looper.getMainLooper())
+        var webView: WebView? = null
         
+        cont.invokeOnCancellation {
+            handler.post {
+                try { webView?.destroy(); webView = null } catch(e: Exception) {}
+            }
+        }
+
         handler.post {
             try {
                 val context: Context = (AcraApplication.context ?: app) as Context
-                val webView = WebView(context)
+                webView = WebView(context)
                 
-                webView.settings.apply {
+                webView?.settings?.apply {
                     javaScriptEnabled = true
                     domStorageEnabled = true
                     userAgentString = DESKTOP_UA
@@ -143,13 +150,13 @@ class KotbcExtractor : ExtractorApi() {
                 val discoveryTimeout = Runnable {
                     if (cont.isActive) {
                         println("[Kotbc v4.0] WebView Timeout")
-                        try { webView.destroy() } catch (e: Exception) {}
+                        try { webView?.destroy(); webView = null } catch (e: Exception) {}
                         cont.resume(null)
                     }
                 }
                 handler.postDelayed(discoveryTimeout, 15000)
 
-                webView.webViewClient = object : WebViewClient() {
+                webView?.webViewClient = object : WebViewClient() {
                     override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                         val reqUrl = request?.url?.toString() ?: ""
                         
@@ -169,7 +176,7 @@ class KotbcExtractor : ExtractorApi() {
                                 val requestHeaders = request?.requestHeaders ?: emptyMap()
                                 println("[Kotbc v4.0] 브라우저 원본 요청 헤더 캡처 성공")
                                 
-                                view?.post { try { webView.destroy() } catch (e: Exception) {} }
+                                handler.post { try { webView?.destroy(); webView = null } catch (e: Exception) {} }
                                 cont.resume(InterceptResult(reqUrl, requestHeaders))
                             }
                             return null
@@ -178,7 +185,7 @@ class KotbcExtractor : ExtractorApi() {
                     }
                 }
 
-                webView.loadUrl(url, mapOf("Referer" to referer))
+                webView?.loadUrl(url, mapOf("Referer" to referer))
 
             } catch (e: Exception) {
                 println("[Kotbc v4.0] WebView Init Error: ${e.message}")
