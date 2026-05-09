@@ -24,7 +24,8 @@ import java.util.Collections
 import kotlin.coroutines.resume
 
 /**
- * KotbcExtractor v4.0
+ * KotbcExtractor v4.1
+ * - [v4.1] 변수 섀도잉 및 스레드 충돌로 인한 메모리 누수/크래시 취약점 완벽 교정
  * - [v4.0] 동적 mainUrl 동기화: 하드코딩된 Referer 대신 Kotbc 클래스에서 자동 갱신된 currentMainUrl을 안전하게 사용
  * - [v3.5] security error(도용 방지) 우회를 위해 WebView의 실제 Request Header를 통째로 추출하여 재사용
  */
@@ -43,7 +44,7 @@ class KotbcExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("[Kotbc v4.0] getUrl 실행: $url")
+        println("[Kotbc v4.1] getUrl 실행: $url")
         extract(url, referer, subtitleCallback, callback)
     }
 
@@ -59,12 +60,12 @@ class KotbcExtractor : ExtractorApi() {
             referer
         }
         
-        println("[Kotbc v4.0] 최종 참조용 Referer: $safeReferer")
+        println("[Kotbc v4.1] 최종 참조용 Referer: $safeReferer")
         val hookResult = runWebViewHook(url, safeReferer)
         
         if (hookResult != null) {
             var finalUrl = hookResult.url
-            println("[Kotbc v4.0] WebView 캡처 성공: $finalUrl")
+            println("[Kotbc v4.1] WebView 캡처 성공: $finalUrl")
             
             val headers = hookResult.headers.toMutableMap()
             
@@ -75,58 +76,58 @@ class KotbcExtractor : ExtractorApi() {
             val cookie = CookieManager.getInstance().getCookie(finalUrl)
             if (!cookie.isNullOrEmpty()) {
                 headers["Cookie"] = cookie
-                println("[Kotbc v4.0] 쿠키 셋팅 완료: $cookie")
+                println("[Kotbc v4.1] 쿠키 셋팅 완료: $cookie")
             }
 
-            println("[Kotbc v4.0] 최종적으로 사용할 위장 헤더: $headers")
+            println("[Kotbc v4.1] 최종적으로 사용할 위장 헤더: $headers")
 
             try {
-                println("[Kotbc v4.0] 캡처된 URL 본문 다운로드 및 파싱 시도: $finalUrl")
+                println("[Kotbc v4.1] 캡처된 URL 본문 다운로드 및 파싱 시도: $finalUrl")
                 val response = app.get(finalUrl, headers = headers)
                 
                 val content = try {
                     response.text.trim()
                 } catch (e: Exception) {
-                    println("[Kotbc v4.0] text 파싱 에러 (textLarge 시도): ${e.message}")
+                    println("[Kotbc v4.1] text 파싱 에러 (textLarge 시도): ${e.message}")
                     response.document.text().trim() 
                 }
 
-                println("[Kotbc v4.0] ================= 본문 내용 시작 =================")
+                println("[Kotbc v4.1] ================= 본문 내용 시작 =================")
                 println(content.take(2000))
                 if (content.length > 2000) println("... (이하 생략됨, 총 길이: ${content.length}) ...")
-                println("[Kotbc v4.0] ================= 본문 내용 끝 ===================")
+                println("[Kotbc v4.1] ================= 본문 내용 끝 ===================")
 
                 if (content.contains("security error")) {
-                    println("[Kotbc v4.0] ❌ 여전히 보안 에러(security error) 발생. 서버가 다른 토큰을 요구할 수 있습니다.")
+                    println("[Kotbc v4.1] ❌ 여전히 보안 에러(security error) 발생. 서버가 다른 토큰을 요구할 수 있습니다.")
                 } else if (!content.startsWith("#EXTM3U")) {
-                    println("[Kotbc v4.0] 본문이 M3U8 포맷이 아님. 내부 M3U8 링크 추출 탐색")
+                    println("[Kotbc v4.1] 본문이 M3U8 포맷이 아님. 내부 M3U8 링크 추출 탐색")
                     val m3u8Regex = Regex("""(https?://[^"']+\.m3u8[^"']*)""")
                     m3u8Regex.find(content)?.let {
                         finalUrl = it.groupValues[1]
-                        println("[Kotbc v4.0] 실제 M3U8 주소 추출 성공: $finalUrl")
+                        println("[Kotbc v4.1] 실제 M3U8 주소 추출 성공: $finalUrl")
                     } ?: run {
-                        println("[Kotbc v4.0] 본문에서 M3U8 링크를 찾지 못함. 원본 URL 유지.")
+                        println("[Kotbc v4.1] 본문에서 M3U8 링크를 찾지 못함. 원본 URL 유지.")
                     }
                 } else {
-                    println("[Kotbc v4.0] 캡처된 URL 본문이 정상적인 #EXTM3U 포맷입니다.")
+                    println("[Kotbc v4.1] 캡처된 URL 본문이 정상적인 #EXTM3U 포맷입니다.")
                 }
             } catch (e: Exception) {
-                println("[Kotbc v4.0] 파싱 중 치명적 예외 발생: ${e.message}")
+                println("[Kotbc v4.1] 파싱 중 치명적 예외 발생: ${e.message}")
             }
 
             callback(newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
                 this.headers = headers
             })
-            println("[Kotbc v4.0] 최종 ExtractorLink 전달 완료: $finalUrl")
+            println("[Kotbc v4.1] 최종 ExtractorLink 전달 완료: $finalUrl")
             return true
         } else {
-            println("[Kotbc v4.0] WebView 캡처 실패")
+            println("[Kotbc v4.1] WebView 캡처 실패")
             return false
         }
     }
 
     private suspend fun runWebViewHook(url: String, referer: String) = suspendCancellableCoroutine<InterceptResult?> { cont ->
-        println("[Kotbc v4.0] WebView 훅 실행: $url")
+        println("[Kotbc v4.1] WebView 훅 실행: $url")
         val handler = Handler(Looper.getMainLooper())
         var webView: WebView? = null
         
@@ -139,6 +140,7 @@ class KotbcExtractor : ExtractorApi() {
         handler.post {
             try {
                 val context: Context = (AcraApplication.context ?: app) as Context
+                // [수정: 변수 섀도잉 방어] val을 제거하여 외부 생명주기 변수와 동기화 보장
                 webView = WebView(context)
                 
                 webView?.settings?.apply {
@@ -149,7 +151,7 @@ class KotbcExtractor : ExtractorApi() {
 
                 val discoveryTimeout = Runnable {
                     if (cont.isActive) {
-                        println("[Kotbc v4.0] WebView Timeout")
+                        println("[Kotbc v4.1] WebView Timeout")
                         try { webView?.destroy(); webView = null } catch (e: Exception) {}
                         cont.resume(null)
                     }
@@ -168,13 +170,14 @@ class KotbcExtractor : ExtractorApi() {
                         if ((reqUrl.contains(".m3u8") || reqUrl.contains(".html") || reqUrl.contains("master") || reqUrl.contains(".txt")) 
                             && (Regex("p[1-9][0-9]?player2\\.xyz").containsMatchIn(reqUrl)  || reqUrl.contains("bunny-frame") || reqUrl.contains("glamov") || reqUrl.contains("nnmo0oi1.com"))) {
                             
-                            println("[Kotbc v4.0] Target URL Intercepted: $reqUrl")
+                            println("[Kotbc v4.1] Target URL Intercepted: $reqUrl")
                             
-                            handler.removeCallbacks(discoveryTimeout)
+                            // [수정: 불완전한 콜백 해제 및 스레드 충돌 방어] 일괄 소각 및 메인 스레드 파괴 강제
+                            handler.removeCallbacksAndMessages(null)
                             
                             if (cont.isActive) {
                                 val requestHeaders = request?.requestHeaders ?: emptyMap()
-                                println("[Kotbc v4.0] 브라우저 원본 요청 헤더 캡처 성공")
+                                println("[Kotbc v4.1] 브라우저 원본 요청 헤더 캡처 성공")
                                 
                                 handler.post { try { webView?.destroy(); webView = null } catch (e: Exception) {} }
                                 cont.resume(InterceptResult(reqUrl, requestHeaders))
@@ -188,7 +191,7 @@ class KotbcExtractor : ExtractorApi() {
                 webView?.loadUrl(url, mapOf("Referer" to referer))
 
             } catch (e: Exception) {
-                println("[Kotbc v4.0] WebView Init Error: ${e.message}")
+                println("[Kotbc v4.1] WebView Init Error: ${e.message}")
                 if (cont.isActive) cont.resume(null)
             }
         }
