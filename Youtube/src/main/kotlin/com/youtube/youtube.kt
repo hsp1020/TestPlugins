@@ -639,17 +639,20 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                         if (requestData == "Home") {
                             val chipBar = safeGet(initialData, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0, "tabRenderer", "content", "richGridRenderer", "header", "feedFilterChipBarRenderer", "contents") as? List<*>
                             if (chipBar != null) {
-                                val chipsToCache = mutableListOf<CachedChip>()
+                                val jsonArray = org.json.JSONArray()
                                 for (chipItem in chipBar) {
                                     val chipMap = (chipItem as? Map<*, *>)?.get("chipCloudChipRenderer") as? Map<*, *> ?: continue
                                     val text = getText(chipMap["text"])
                                     val token = safeGet(chipMap, "navigationEndpoint", "continuationCommand", "token") as? String
                                     if (text.isNotBlank() && !token.isNullOrBlank()) {
-                                        chipsToCache.add(CachedChip(text, token))
+                                        val obj = org.json.JSONObject()
+                                        obj.put("name", text)
+                                        obj.put("token", token)
+                                        jsonArray.put(obj)
                                     }
                                 }
-                                if (chipsToCache.isNotEmpty()) {
-                                    sharedPref?.edit()?.putString("yt_cached_chips", AppUtils.toJson(chipsToCache))?.apply()
+                                if (jsonArray.length() > 0) {
+                                    sharedPref?.edit()?.putString("yt_cached_chips", jsonArray.toString())?.apply()
                                 }
                             }
                         }
@@ -692,8 +695,8 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
 
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
     }
-
     
+       
     fun findContinuationItemsRecursive(obj: Any?): List<*>? {
         when (obj) {
             is Map<*, *> -> {
