@@ -1217,14 +1217,26 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
             "advanced"
         }
 
-        var handled = false
+        var linkFound = false
+
         if (playerType == "classic") {
-            handled = loadLinksClassic(fullUrl, isCasting, subtitleCallback, callback)
-        }
-        
-        if (!handled) {
-            loadLinksAdvanced(videoId, subtitleCallback, callback)
-            loadExtractor(fullUrl, subtitleCallback, callback)
+            // [교정 1]: 클래식 모드 정상 라우팅 (HLS 라이브 완벽 지원)
+            linkFound = loadLinksClassic(fullUrl, isCasting, subtitleCallback, callback)
+        } else {
+            // [교정 2]: 고급 모드 실행 및 라이브 방송 폴백 감지
+            var advancedLinksCount = 0
+            com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback) {
+                advancedLinksCount++
+                callback(it)
+            }
+
+            if (advancedLinksCount == 0) {
+                // 고급 파서가 실패한 경우 (라이브 방송 등), 클래식 파서로 자동 폴백
+                linkFound = loadLinksClassic(fullUrl, isCasting, subtitleCallback, callback)
+            } else {
+                linkFound = true
+                loadLinksAdvanced(videoId, subtitleCallback) { }
+            }
         }
 
         try {
