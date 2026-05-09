@@ -514,6 +514,37 @@ class YoutubeProvider(
     override val mainPage: List<MainPageData>
         get() {
             val list = mutableListOf<MainPageData>()
+            val isKo = lang == "ko"
+
+            if (sharedPref?.getBoolean("show_trending_home", true) == true) {
+                list.add(MainPageData(if (isKo) "인기" else "Home", "Home"))
+                
+                // 비동기 캐싱된 카탈로그 칩 데이터 로드
+                val cachedChipsJson = sharedPref?.getString("yt_cached_chips", "[]") ?: "[]"
+                try {
+                    val chips: List<CachedChip> = AppUtils.parseJson<List<CachedChip>>(cachedChipsJson)
+                    chips.forEach { chip ->
+                        list.add(MainPageData(chip.name, "chip_${chip.token}", horizontalImages = true))
+                    }
+                } catch (e: Exception) {
+                    logError(e)
+                }
+            }
+
+            val customSections = getCustomHomepages()
+
+            customSections.filter { it.isEnabled && it.url != "Home" }.forEach { section ->
+                var title = section.name
+                if (title.isBlank()) title = extractNameFromUrl(section.url)
+                list.add(MainPageData(title, section.url, horizontalImages = true))
+            }
+
+            return list
+        }
+        
+    override val mainPage: List<MainPageData>
+        get() {
+            val list = mutableListOf<MainPageData>()
             val isEn = lang == "en"
 
             if (sharedPref?.getBoolean("show_trending_home", true) == true) {
