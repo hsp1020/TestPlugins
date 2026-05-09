@@ -1247,8 +1247,8 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                     "client" to mapOf(
                         "clientName" to "WEB",
                         "clientVersion" to "2.20240725.01.00",
-                        "hl" to "en",
-                        "gl" to "US"
+                        "hl" to "ko",
+                        "gl" to "KR"
                     )
                 ),
                 "videoId" to videoId
