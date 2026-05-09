@@ -1,521 +1,434 @@
+// 파일명: hsp1020/testplugins/TestPlugins-d1a26fae88cb55c8f1d621560cf4e45bd7fd78f6/TVWikiProvider/src/main/kotlin/com/tvwiki/Extractor.kt
 package com.tvwiki
 
 import android.content.Context
-import com.lagradost.cloudstream3.*
+import android.os.Handler
+import android.os.Looper
+import android.webkit.ConsoleMessage
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.webkit.CookieManager
+import com.lagradost.cloudstream3.SubtitleFile
+import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.AcraApplication
+import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.network.WebViewResolver
-import org.jsoup.nodes.Document
-import org.jsoup.nodes.Element
-import java.net.URLDecoder
-import java.net.URLEncoder
-import com.fasterxml.jackson.annotation.JsonProperty
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.RequestBody.Companion.toRequestBody
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.delay
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.net.ServerSocket
+import java.net.Socket
+import java.net.URI
+import java.util.Collections
+import javax.crypto.Cipher
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.SecretKeySpec
+import kotlin.coroutines.resume
 
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
+class BunnyPoorCdn : ExtractorApi() {
+    override val name = "TVWiki"
+    override val mainUrl = "https://player.bunny-frame.online"
+    override val requiresReferer = true
+    
+    private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
 
-/**
- * TVWiki Provider v2.7
- * - Update [v2.7]: 도메인 탐색 시 5개 단위 병렬 스캔 적용으로 프리징 시간 최소화
- * - Update [v2.7]: 메인 페이지 로드 시 하드코딩된 랜덤 Delay 제거로 로딩 속도 향상
- */
-class TVWiki : MainAPI() {
     companion object {
-        var currentMainUrl = "https://tvwiki7.net" 
-        var isDomainChecked = false 
-        private val domainMutex = Mutex()
-        private const val PREFS_NAME = "TVWiki_Domain_Cache"
-        private const val PREF_KEY = "current_domain"
+        @Volatile private var currentProxyServer: ProxyWebServer? = null
     }
 
-    override var mainUrl = currentMainUrl
-    override var name = "TVWiki"
-    override val hasMainPage = true
-    override var lang = "ko"
-
-    override val supportedTypes = setOf(
-        TvType.TvSeries,
-        TvType.Movie,
-        TvType.AsianDrama,
-        TvType.Anime,
-        TvType.AnimeMovie
-    )
-
-    private val USER_AGENT =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-
-    private val commonHeaders = mapOf(
-        "User-Agent" to USER_AGENT,
-        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Referer" to "$mainUrl/",
-        "Upgrade-Insecure-Requests" to "1"
-    )
-
-    private val tagCleanRegex = Regex("""\s*(한국|해외)?영화\s*\(\d{4}\).*""")
-    private val requestMutex = Mutex()
-
-    data class SessionResponse(
-        @JsonProperty("success") val success: Boolean,
-        @JsonProperty("player_url") val playerUrl: String?,
-        @JsonProperty("t") val t: String?,
-        @JsonProperty("sig") val sig: String?
-    )
-
-    override val mainPage = mainPageOf(
-        "/popular" to "인기순위",
-        "/kor_movie" to "영화",
-        "/drama" to "드라마",
-        "/ent" to "예능",
-        "/sisa" to "시사/다큐",
-        "/movie" to "해외영화",
-        "/world" to "해외드라마",
-        "/ott_ent" to "해외예능/다큐",
-        "/animation" to "일반 애니메이션",
-        "/ani_movie" to "극장판 애니",
-        "/old_ent" to "추억의 예능",
-        "/old_drama" to "추억의 드라마"
-    )
-
-    private suspend fun checkAndUpdateDomain() {
-        if (isDomainChecked) return
-
-        domainMutex.withLock {
-            if (isDomainChecked) return@withLock
-
-            val prefs = AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            val rawCachedDomain = prefs?.getString(PREF_KEY, null)
-            val cachedDomain = rawCachedDomain?.replace("http://", "https://")
-            
-            if (cachedDomain != null && currentMainUrl == "https://tvwiki7.net") {
-                println("[TVWiki v2.7] 디스크 캐시에서 도메인 로드 완료: $cachedDomain")
-                currentMainUrl = cachedDomain
-                mainUrl = currentMainUrl
-            }
-
-            val testPath = "/popular"
-            println("[TVWiki v2.7] 도메인 유효성 검사 시작: $currentMainUrl$testPath")
-            
-            try {
-                val res = app.get("$currentMainUrl$testPath", headers = commonHeaders, timeout = 3L)
-                val extractedUrl = Regex("^https?://[^/]+").find(res.url)?.value ?: currentMainUrl
-                val finalUrl = extractedUrl.replace("http://", "https://")
-                
-                if (res.isSuccessful && res.text.contains("list_type")) {
-                    if (currentMainUrl != finalUrl) {
-                        println("[TVWiki v2.7] 리다이렉트 감지. 도메인 갱신: $currentMainUrl -> $finalUrl")
-                        currentMainUrl = finalUrl
-                        mainUrl = currentMainUrl
-                        prefs?.edit()?.putString(PREF_KEY, currentMainUrl)?.apply()
-                    }
-                    isDomainChecked = true
-                    return@withLock
-                }
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                println("[TVWiki v2.7] 접속 실패, 병렬 스캔 시작. 에러: ${e.message}")
-            }
-
-            val match = Regex("tvwiki(\\d+)").find(currentMainUrl)
-            val startNum = match?.groupValues?.get(1)?.toIntOrNull() ?: 7
-            
-            println("[TVWiki v2.7] 병렬 번호 순차 스캔 시작 (tvwiki$startNum 부터)")
-            
-            var foundDomain: String? = null
-            
-            coroutineScope {
-                val candidates = (startNum..startNum + 100).map { "https://tvwiki$it.net" }
-                val chunks = candidates.chunked(10) // 5개씩 묶어서 병렬 요청 (서버 밴 방지 및 속도 최적화)
-                
-                for (chunk in chunks) {
-                    val deferreds = chunk.map { testDomain ->
-                        async {
-                            val testUrl = "$testDomain$testPath"
-                            try {
-                                val res = app.get(testUrl, headers = commonHeaders, timeout = 3L)
-                                val extractedTestUrl = Regex("^https?://[^/]+").find(res.url)?.value ?: testDomain
-                                val testFinalUrl = extractedTestUrl.replace("http://", "https://")
-                                
-                                if (res.isSuccessful && res.text.contains("list_type")) {
-                                    return@async testFinalUrl
-                                }
-                            } catch (e: Exception) {
-                                if (e is CancellationException) throw e
-                            }
-                            null
-                        }
-                    }
-                    
-                    val results = deferreds.awaitAll()
-                    foundDomain = results.firstOrNull { it != null }
-                    
-                    if (foundDomain != null) break
-                }
-            }
-            
-            if (foundDomain != null) {
-                println("[TVWiki v2.7] 새 도메인 스캔 성공!: $foundDomain")
-                currentMainUrl = foundDomain!!
-                mainUrl = currentMainUrl
-                isDomainChecked = true
-                prefs?.edit()?.putString(PREF_KEY, currentMainUrl)?.apply()
-                return@withLock
-            }
-            
-            println("[TVWiki v2.7] 도메인 탐색을 완료했지만 찾을 수 없습니다.")
-            isDomainChecked = true 
-        }
-    }
-
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        checkAndUpdateDomain()
-        val url = "$mainUrl${request.data}?page=$page"
-        
-        return try {
-            val doc = requestMutex.withLock {
-                app.get(url, headers = commonHeaders).document
-            }
-            
-            val list = doc.select("#list_type ul li").mapNotNull { it.toSearchResponse() }
-            newHomePageResponse(request.name, list, hasNext = list.isNotEmpty())
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            newHomePageResponse(request.name, emptyList(), hasNext = false)
-        }
-    }
-
-    private fun Element.toSearchResponse(): SearchResponse? {
-        val aTag = this.selectFirst("a.img") ?: return null
-        var link = fixUrl(aTag.attr("href"))
-        
-        val title = this.selectFirst("a.title")?.text()?.trim() 
-            ?: this.selectFirst("a.title2")?.text()?.trim() 
-            ?: return null
-
-        val imgTag = aTag.selectFirst("img")
-        var rawPoster = imgTag?.attr("data-original")?.ifEmpty { null }
-            ?: imgTag?.attr("data-src")?.ifEmpty { null }
-            ?: imgTag?.attr("src")
-            ?: ""
-
-        if (rawPoster.startsWith("/")) {
-            rawPoster = "$mainUrl$rawPoster"
-        }
-        val fixedPoster = fixUrl(rawPoster)
-
-        if (fixedPoster.isNotEmpty() && !fixedPoster.contains("no3.png")) {
-            try {
-                val encodedPoster = URLEncoder.encode(fixedPoster, "UTF-8")
-                val separator = if (link.contains("?")) "&" else "?"
-                link = "$link${separator}cw_poster=$encodedPoster"
-            } catch (e: Exception) {}
-        }
-
-        val type = determineTypeFromUrl(link)
-
-        return when (type) {
-            TvType.Movie, TvType.AnimeMovie -> newMovieSearchResponse(
-                title, link, type
-            ) { this.posterUrl = fixedPoster }
-            TvType.Anime -> newAnimeSearchResponse(
-                title, link, TvType.Anime
-            ) { this.posterUrl = fixedPoster }
-            else -> newTvSeriesSearchResponse(
-                title, link, TvType.TvSeries
-            ) { this.posterUrl = fixedPoster }
-        }
-    }
-
-    private fun determineTypeFromUrl(url: String): TvType {
-        return when {
-            url.contains("/movie") || url.contains("/kor_movie") -> TvType.Movie
-            url.contains("/ani_movie") -> TvType.AnimeMovie
-            url.contains("/animation") -> TvType.Anime
-            url.contains("/ent") || url.contains("/old_ent") || url.contains("/ott_ent") -> TvType.TvSeries
-            else -> TvType.TvSeries
-        }
-    }
-
-    override suspend fun search(query: String): List<SearchResponse> {
-        checkAndUpdateDomain() 
-        val searchUrl = "$mainUrl/search?stx=$query"
-        return try {
-            val doc = app.get(searchUrl, headers = commonHeaders).document
-            
-            var items = doc.select("ul#mov_con_list li").mapNotNull { it.toSearchResponse() }
-            if (items.isEmpty()) {
-                 items = doc.select("#list_type ul li").mapNotNull { it.toSearchResponse() }
-            }
-            items
-        } catch (e: Exception) { 
-            if (e is CancellationException) throw e
-            emptyList() 
-        }
-    }
-
-    private fun getEpisodeNumber(name: String): Int {
-        return try {
-            val numberString = name.replace(Regex("[^0-9]"), "")
-            if (numberString.isNotEmpty()) numberString.toInt() else Int.MAX_VALUE
-        } catch (e: Exception) { Int.MAX_VALUE }
-    }
-
-    override suspend fun load(url: String): LoadResponse {
-        checkAndUpdateDomain() 
-        
-        var targetUrl = url
-        if (!targetUrl.startsWith(mainUrl) && targetUrl.contains("tvwiki")) {
-            val path = targetUrl.replace(Regex("https?://[^/]+"), "")
-            targetUrl = mainUrl + path
-        }
-
-        var passedPoster: String? = null
-        var realUrl = targetUrl
-
-        try {
-            val regex = Regex("[?&]cw_poster=([^&]+)")
-            val match = regex.find(targetUrl)
-            if (match != null) {
-                val encoded = match.groupValues[1]
-                passedPoster = URLDecoder.decode(encoded, "UTF-8")
-                realUrl = targetUrl.replace(match.value, "")
-                if (realUrl.endsWith("?") || realUrl.endsWith("&")) {
-                    realUrl = realUrl.dropLast(1)
-                }
-            }
-        } catch (e: Exception) {}
-
-        val doc = app.get(realUrl, headers = commonHeaders).document
-
-        val h3Element = doc.selectFirst("#bo_v_movinfo h3")
-        var title = h3Element?.ownText()?.trim()
-        val oriTitleFull = h3Element?.selectFirst(".ori_title")?.text()?.trim()
-
-        if (title.isNullOrEmpty()) {
-            title = doc.selectFirst("#bo_v_movinfo h3")?.text()?.trim()
-                ?: doc.selectFirst("input[name='con_title']")?.attr("value")?.trim()
-                ?: "Unknown"
-        }
-        
-        title = title!!.replace(Regex("\\s*\\d+[화회부].*"), "").replace(" 다시보기", "").trim()
-
-        if (!oriTitleFull.isNullOrEmpty()) {
-            val pureOriTitle = oriTitleFull.replace("원제 :", "").replace("원제:", "").trim()
-            val hasKorean = pureOriTitle.contains(Regex("[가-힣]"))
-            if (!hasKorean && pureOriTitle.isNotEmpty()) {
-                title = "$title (원제 : $pureOriTitle)"
-            }
-        }
-
-        var poster = doc.selectFirst("#bo_v_poster img")?.attr("src")
-            ?: doc.selectFirst("meta[property='og:image']")?.attr("content")
-            ?: ""
-
-        val tvwikiMainUrlRegex = Regex("""^https?://tvwiki\d*\.net/?$""")
-        val isInvalidPoster = poster.isEmpty() 
-            || poster.contains("no3.png") 
-            || poster.contains("no_image")
-            || tvwikiMainUrlRegex.matches(poster)
-            || poster.endsWith("/")
-
-        if (isInvalidPoster && passedPoster != null) {
-            poster = passedPoster
-        }
-
-        val tagsList = mutableListOf<String>()
-        
-        doc.select(".bo_v_info dd").forEach { dd ->
-            val text = dd.text().trim()
-            if (text.isNotEmpty() && !text.startsWith("제목")) {
-                val renamedText = text.replace("개봉년도:", "공개일:")
-                val cleanedText = renamedText.replace(tagCleanRegex, "").trim()
-                if (cleanedText.isNotEmpty()) tagsList.add(cleanedText)
-            }
-        }
-
-        val genreList = doc.select(".tags dd a").filter {
-            !it.text().contains("트레일러") && !it.hasClass("btn_watch")
-        }.map { it.text().trim().replace(tagCleanRegex, "") }
-
-        if (genreList.isNotEmpty()) tagsList.add("장르: ${genreList.joinToString(", ")}")
-
-        val castList = doc.select(".slider_act .item .name").map { it.text().trim().replace(tagCleanRegex, "") }
-        if (castList.isNotEmpty() && castList.none { it.contains("운영팀") }) {
-            tagsList.add("출연: ${castList.joinToString(", ")}")
-        }
-
-        var story = doc.selectFirst("#bo_v_con")?.text()?.trim()
-            ?: doc.selectFirst(".story")?.text()?.trim()
-            ?: doc.selectFirst("meta[name='description']")?.attr("content")
-            ?: "다시보기"
-
-        if (story.isEmpty() || (story.contains("다시보기") && story.contains("무료"))) {
-            story = "다시보기"
-        }
-        
-        val episodes = doc.select("#other_list ul li").mapNotNull { li ->
-            val aTag = li.selectFirst("a.ep-link") ?: return@mapNotNull null
-            val href = fixUrl(aTag.attr("href"))
-            val epName = li.selectFirst("a.title")?.text()?.trim() ?: "Episode"
-            val thumbImg = li.selectFirst("a.img img")
-            val epThumb = thumbImg?.attr("data-src")?.ifEmpty { null }
-                ?: thumbImg?.attr("data-original")?.ifEmpty { null }
-                ?: thumbImg?.attr("src")?.ifEmpty { null }
-                ?: li.selectFirst("img")?.attr("src")
-
-            newEpisode(href) {
-                this.name = epName
-                this.posterUrl = fixUrl(epThumb ?: "")
-            }
-        }.sortedBy { getEpisodeNumber(it.name ?: "") }
-        
-        val type = determineTypeFromUrl(realUrl)
-
-        return when (type) {
-            TvType.Movie, TvType.AnimeMovie -> {
-                val movieLink = episodes.firstOrNull()?.data ?: realUrl
-                newMovieLoadResponse(title, realUrl, type, movieLink) {
-                    this.posterUrl = fixUrl(poster)
-                    this.plot = story
-                    this.tags = tagsList
-                }
-            }
-            else -> {
-                newTvSeriesLoadResponse(title, realUrl, type, episodes) {
-                    this.posterUrl = fixUrl(poster)
-                    this.plot = story
-                    this.tags = tagsList
-                }
-            }
-        }
-    }
-
-    override suspend fun loadLinks(
-        data: String,
-        isCasting: Boolean,
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
+    ) {
+        extract(url, referer, subtitleCallback, callback)
+    }
+
+    suspend fun extract(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit,
+        thumbnailHint: String? = null,
     ): Boolean {
-        checkAndUpdateDomain()
+        synchronized(this) {
+            if (currentProxyServer != null) {
+                currentProxyServer?.stop()
+                currentProxyServer = null
+            }
+        }
+
+        var cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
+        val cleanReferer = if (referer.isNullOrEmpty() || (referer.contains("tvwiki") && !referer.contains(TVWiki.currentMainUrl))) {
+            TVWiki.currentMainUrl + "/"
+        } else {
+            referer.replace(Regex("[\\r\\n\\s]"), "").trim()
+        }
         
-        var targetData = data
-        if (!targetData.startsWith(mainUrl) && targetData.contains("tvwiki")) {
-            val path = targetData.replace(Regex("https?://[^/]+"), "")
-            targetData = mainUrl + path
-        }
-
-        val doc = try {
-            app.get(targetData, headers = commonHeaders).document
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            return false
-        }
-
-        if (extractFromApi(doc, targetData, subtitleCallback, callback)) {
-            return true
-        }
-
-        val iframe = doc.selectFirst("iframe#view_iframe")
-        if (iframe != null) {
-            val playerUrl = iframe.attr("src")
-            if (playerUrl.contains("player.bunny-frame.online")) {
-                 val extracted = BunnyPoorCdn().extract(fixUrl(playerUrl).replace("&amp;", "&"), targetData, subtitleCallback, callback, null)
-                 if(extracted) return true
-            }
-        }
-
-        try {
-            val webViewInterceptor = WebViewResolver(
-                Regex("bunny-frame|googleapis"), 
-                timeout = 15000L
-            )
-            val response = app.get(targetData, headers = commonHeaders, interceptor = webViewInterceptor)
-            val webViewDoc = response.document
-            
-            val wbIframe = webViewDoc.selectFirst("iframe#view_iframe") ?: webViewDoc.selectFirst("iframe[src*='bunny-frame']")
-            if (wbIframe != null) {
-                val playerUrl = wbIframe.attr("src")
-                if (playerUrl.contains("player.bunny-frame.online")) {
-                     val extracted = BunnyPoorCdn().extract(fixUrl(playerUrl).replace("&amp;", "&"), targetData, subtitleCallback, callback, null)
-                     if(extracted) return true
-                }
-            }
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-        }
-
-        val thumbnailHint = extractThumbnailHint(doc)
-        if (thumbnailHint != null) {
+        if (!cleanUrl.contains("v/f/") && !cleanUrl.contains("v/e/") && !cleanUrl.contains("v/d/")) {
             try {
-                val pathRegex = Regex("""/v/[a-z]/[a-zA-Z0-9]+""")
-                val pathMatch = pathRegex.find(thumbnailHint)
-                if (pathMatch != null) {
-                    val m3u8Url = thumbnailHint.substringBefore(pathMatch.value) + pathMatch.value + "/index.m3u8"
-                    callback(
-                        newExtractorLink(name, name, m3u8Url.replace(Regex("//v/"), "/v/"), ExtractorLinkType.M3U8) {
-                            this.referer = mainUrl
-                            this.headers = commonHeaders
+                val refRes = app.get(cleanReferer, headers = mapOf("User-Agent" to DESKTOP_UA))
+                val iframeMatch = Regex("""src=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
+                    ?: Regex("""data-player\d*=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
+                
+                if (iframeMatch != null) {
+                    cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&").trim()
+                }
+            } catch (e: Exception) { }
+        }
+
+        var capturedUrl: String? = cleanUrl
+        val currentSessionKeys = Collections.synchronizedSet(mutableSetOf<String>())
+
+        if (!cleanUrl.contains("/c.html")) {
+            val webViewResult = runWebViewHook(cleanUrl, cleanReferer, currentSessionKeys)
+            if (webViewResult != null) capturedUrl = webViewResult
+        }
+
+        if (capturedUrl != null) {
+            val cookie = CookieManager.getInstance().getCookie(capturedUrl)
+            val headers = mutableMapOf(
+                "User-Agent" to DESKTOP_UA,
+                "Referer" to "https://player.bunny-frame.online/",
+                "Origin" to "https://player.bunny-frame.online"
+            )
+            if (!cookie.isNullOrEmpty()) headers["Cookie"] = cookie
+
+            try {
+                var requestUrl = capturedUrl!!.substringBefore("#")
+                var response = app.get(requestUrl, headers = headers)
+                var content = response.text.trim()
+
+                if (!content.startsWith("#EXTM3U")) {
+                    Regex("""(https?://[^"']+\.m3u8[^"']*)""").find(content)?.let {
+                        requestUrl = it.groupValues[1]
+                        content = app.get(requestUrl, headers = headers).text.trim()
+                    }
+                }
+
+                if (content.contains("#EXT-X-STREAM-INF")) {
+                    val subUrlLine = content.lines().lastOrNull { it.isNotBlank() && !it.startsWith("#") }
+                    if (subUrlLine != null) {
+                        val originalUri = try { URI(requestUrl) } catch (e: Exception) { null }
+                        requestUrl = resolveUrl(originalUri, requestUrl, subUrlLine)
+                        content = app.get(requestUrl, headers = headers).text.trim()
+                    }
+                }
+
+                val isKey7 = content.lines().any { it.startsWith("#EXT-X-KEY") && it.contains("/v/key7") }
+
+                if (isKey7) {
+                    val newProxy = ProxyWebServer(currentSessionKeys).apply { 
+                        start()
+                        updateSession(headers) 
+                    }
+                    currentProxyServer = newProxy
+
+                    val videoId = Regex("""/v/[ef]/([^/]+)""").find(capturedUrl!!)?.groupValues?.get(1) ?: "video"
+                    val ivMatch = Regex("""IV=("?)(0x[0-9a-fA-F]+)\1""").find(content)
+                    val ivHex = ivMatch?.groupValues?.get(2) ?: "0x00000000000000000000000000000000"
+                    val parsedIv = ivHex.removePrefix("0x").hexToByteArray()
+                    
+                    newProxy.setIv(parsedIv)
+
+                    val baseUri = try { URI(requestUrl) } catch (e: Exception) { null }
+                    val sb = StringBuilder()
+                    
+                    content.lines().forEach { line ->
+                        val trimmed = line.trim()
+                        if (trimmed.isEmpty()) return@forEach
+                        if (trimmed.startsWith("#")) {
+                            if (trimmed.startsWith("#EXT-X-KEY") && trimmed.contains("/v/key7")) {
+                                val match = Regex("""URI="([^"]+)"""").find(trimmed)
+                                if (match != null) {
+                                    val newKeyLine = trimmed.replace(match.groupValues[1], "http://127.0.0.1:${newProxy.port}/key.bin")
+                                    sb.append(newKeyLine).append("\n")
+                                } else sb.append(trimmed).append("\n")
+                            } else sb.append(trimmed).append("\n")
+                        } else {
+                            val absSeg = resolveUrl(baseUri, requestUrl, trimmed)
+                            newProxy.setTestSegment(absSeg)
+                            sb.append(absSeg).append("\n")
                         }
-                    )
+                    }
+                    
+                    newProxy.setPlaylist(sb.toString())
+                    
+                    val finalUrl = "http://127.0.0.1:${newProxy.port}/$videoId/playlist.m3u8"
+                    
+                    callback(newExtractorLink(name, name, finalUrl, ExtractorLinkType.M3U8) {
+                        this.referer = "https://player.bunny-frame.online/"; this.headers = headers
+                    })
+                    return true
+                } else {
+                    callback(newExtractorLink(name, name, requestUrl, ExtractorLinkType.M3U8) {
+                        this.referer = "https://player.bunny-frame.online/"; this.headers = headers
+                    })
                     return true
                 }
-            } catch (e: Exception) { 
-                if (e is CancellationException) throw e
-            }
+            } catch (e: Exception) { }
         }
-
         return false
     }
 
-    private suspend fun extractFromApi(
-        doc: Document,
-        refererUrl: String,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        try {
-            val iframe = doc.selectFirst("iframe#view_iframe") ?: return false
-            val sessionData = iframe.attr("data-session1").ifEmpty { iframe.attr("data-session2") }
+    private suspend fun runWebViewHook(url: String, referer: String, sessionKeys: MutableSet<String>) = suspendCancellableCoroutine<String?> { cont ->
+        val handler = Handler(Looper.getMainLooper())
+        var webView: WebView? = null
+        var detectedCUrl: String? = null
 
-            if (sessionData.isNullOrEmpty()) return false
+        cont.invokeOnCancellation {
+            handler.post {
+                try { webView?.destroy(); webView = null } catch (e: Exception) {}
+            }
+        }
 
-            val apiUrl = "$mainUrl/api/create_session.php"
-            val headers = commonHeaders.toMutableMap()
-            headers["Content-Type"] = "application/json"
-            headers["X-Requested-With"] = "XMLHttpRequest"
-            headers["Referer"] = refererUrl 
-
-            val requestBody = sessionData.toRequestBody("application/json".toMediaTypeOrNull())
-            val response = app.post(apiUrl, headers = headers, requestBody = requestBody)
-            val json = response.parsedSafe<SessionResponse>()
-
-            if (json != null && json.success && !json.playerUrl.isNullOrEmpty()) {
-                val fullUrl = "${json.playerUrl}?t=${json.t}&sig=${json.sig}"
-                if (fullUrl.contains("player.bunny-frame.online")) {
-                    return BunnyPoorCdn().extract(fullUrl, refererUrl, subtitleCallback, callback, null)
+        val hookScript = """
+            (function() {
+                window.G = false;
+                if (window.crypto && window.crypto.subtle) {
+                    const originalImportKey = window.crypto.subtle.importKey;
+                    Object.defineProperty(window.crypto.subtle, 'importKey', {
+                        value: function(format, keyData, algorithm, extractable, keyUsages) {
+                            if (format === 'raw' && (keyData.byteLength === 16 || keyData.length === 16)) {
+                                try {
+                                    let bytes = new Uint8Array(keyData);
+                                    let hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+                                    console.log("CapturedKeyHex:[CRYPTO]" + hex);
+                                } catch(e) {}
+                            }
+                            return originalImportKey.apply(this, arguments);
+                        },
+                        configurable: true,
+                        writable: true
+                    });
                 }
+                const originalSet = Uint8Array.prototype.set;
+                Uint8Array.prototype.set = function(source, offset) {
+                    if (source && source.length === 16) {
+                        try {
+                            let hex = Array.from(source).map(b => b.toString(16).padStart(2, '0')).join('');
+                            console.log("CapturedKeyHex:[SET]" + hex);
+                        } catch(e) {}
+                    }
+                    return originalSet.apply(this, arguments);
+                };
+            })();
+        """.trimIndent()
+
+        handler.post {
+            try {
+                val context: Context = (AcraApplication.context ?: app) as Context
+                webView = WebView(context)
+                
+                webView?.settings?.apply {
+                    javaScriptEnabled = true; domStorageEnabled = true; userAgentString = DESKTOP_UA
+                }
+
+                val discoveryTimeout = Runnable {
+                    if (cont.isActive) {
+                        try { webView?.destroy(); webView = null } catch (e: Exception) {}
+                        cont.resume(null)
+                    }
+                }
+                handler.postDelayed(discoveryTimeout, 15000)
+
+                webView?.webChromeClient = object : WebChromeClient() {
+                    override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+                        val msg = consoleMessage?.message() ?: ""
+                        if (msg.startsWith("CapturedKeyHex:")) {
+                            val key = msg.substringAfter("CapturedKeyHex:").removePrefix("[SET]").removePrefix("[CRYPTO]")
+                            if (sessionKeys.add(key)) { 
+                                if (detectedCUrl != null && cont.isActive) {
+                                    handler.removeCallbacks(discoveryTimeout)
+                                    handler.post {
+                                        try { webView?.destroy(); webView = null } catch (e: Exception) {}
+                                        cont.resume(detectedCUrl)
+                                    }
+                                }
+                            }
+                        }
+                        return true
+                    }
+                }
+
+                webView?.webViewClient = object : WebViewClient() {
+                    override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                        super.onPageStarted(view, url, favicon); view?.evaluateJavascript(hookScript, null)
+                    }
+
+                    override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                        val reqUrl = request?.url?.toString() ?: ""
+                        if (reqUrl.contains("/c.html") && reqUrl.contains("token=")) {
+                            detectedCUrl = reqUrl
+                            view?.post { view.evaluateJavascript(hookScript, null) }
+                            
+                            if (sessionKeys.isNotEmpty() && cont.isActive) {
+                                handler.removeCallbacks(discoveryTimeout)
+                                handler.post {
+                                    try { webView?.destroy(); webView = null } catch (e: Exception) {}
+                                    cont.resume(detectedCUrl)
+                                }
+                            } else {
+                                handler.postDelayed({
+                                    if (cont.isActive) {
+                                        handler.removeCallbacks(discoveryTimeout)
+                                        try { webView?.destroy(); webView = null } catch (e: Exception) {}
+                                        cont.resume(detectedCUrl)
+                                    }
+                                }, 5000)
+                            }
+                        }
+                        return super.shouldInterceptRequest(view, request)
+                    }
+
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        super.onPageFinished(view, url); view?.evaluateJavascript(hookScript, null)
+                    }
+                }
+                webView?.loadUrl(url, mapOf("Referer" to referer))
+            } catch (e: Exception) {
+                if (cont.isActive) cont.resume(null)
             }
-        } catch (e: Exception) { 
-            if (e is CancellationException) throw e
         }
-        return false
     }
 
-    private fun extractThumbnailHint(doc: Document): String? {
-        val videoThumbElements = doc.select("img[src*='/v/'], img[data-src*='/v/']")
-        val priorityRegex = Regex("""/v/[a-z]/""")
-        for (el in videoThumbElements) {
-            val raw = el.attr("src").ifEmpty { el.attr("data-src") }
-            val fixed = fixUrl(raw)
-            if (priorityRegex.containsMatchIn(fixed)) return fixed
+    private fun resolveUrl(baseUri: URI?, baseUrlStr: String, target: String): String {
+        if (target.startsWith("http")) return target
+        return try { baseUri?.resolve(target).toString() } catch (e: Exception) {
+            if (target.startsWith("/")) "${baseUrlStr.substringBefore("/", "https://")}//${baseUrlStr.split("/")[2]}$target"
+            else "${baseUrlStr.substringBeforeLast("/")}/$target"
         }
-        return null
     }
+
+    class ProxyWebServer(private val sessionKeys: MutableSet<String>) {
+        private var serverSocket: ServerSocket? = null
+        private var isRunning = false
+        var port: Int = 0
+        
+        @Volatile private var currentHeaders: Map<String, String> = emptyMap()
+        @Volatile private var currentPlaylist: String = ""
+        @Volatile private var verifiedKey: ByteArray? = null
+        @Volatile private var currentIv: ByteArray? = null
+        @Volatile private var testSegmentUrl: String? = null
+
+        fun start() {
+            try {
+                serverSocket = ServerSocket(0).also { port = it.localPort }
+                isRunning = true
+                
+                CoroutineScope(Dispatchers.IO).launch {
+                    while (isRunning) { 
+                        try { 
+                            val socket = serverSocket?.accept() ?: break
+                            handleClient(socket) 
+                        } catch (e: Exception) {
+                            delay(100L)
+                        } 
+                    } 
+                }
+            } catch (e: Exception) { }
+        }
+
+        fun stop() { 
+            isRunning = false
+            try { serverSocket?.close() } catch(e: Exception) {} 
+        }
+        
+        fun updateSession(h: Map<String, String>) { currentHeaders = h }
+        fun setPlaylist(p: String) { currentPlaylist = p }
+        fun setIv(iv: ByteArray) { currentIv = iv }
+        fun setTestSegment(url: String) { 
+            if (testSegmentUrl == null) testSegmentUrl = url 
+        }
+
+        private fun handleClient(socket: Socket) {
+            try {
+                val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
+                val line = reader.readLine() ?: return
+                val parts = line.split(" ")
+                if (parts.size < 2) return
+                
+                val path = parts[1]
+                val output = socket.getOutputStream()
+
+                when {
+                    path.contains("playlist.m3u8") -> {
+                        val payload = currentPlaylist.toByteArray()
+                        output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nConnection: close\r\nContent-Length: ${payload.size}\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
+                        output.write(payload)
+                    }
+                    path.contains("/key.bin") -> {
+                        if (verifiedKey == null) {
+                            verifiedKey = verifyMultipleKeys()
+                        }
+                        
+                        val keyPayload = verifiedKey ?: ByteArray(16)
+                        output.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\nContent-Length: ${keyPayload.size}\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
+                        output.write(keyPayload)
+                    }
+                }
+                output.flush(); socket.close()
+            } catch (e: Exception) { try { socket.close() } catch(e2: Exception) {} }
+        }
+
+        private fun verifyMultipleKeys(): ByteArray? = runBlocking {
+            val url = testSegmentUrl ?: return@runBlocking null
+            val targetIv = currentIv ?: ByteArray(16)
+            
+            try {
+                val responseData = app.get(url, headers = currentHeaders).body.bytes()
+                val checkSize = 1024 
+                val safeCheckSize = if (responseData.size < checkSize) responseData.size else checkSize
+                
+                val cipher = Cipher.getInstance("AES/CBC/NoPadding")
+
+                synchronized(sessionKeys) {
+                    for ((index, hexKey) in sessionKeys.withIndex()) {
+                        try {
+                            val keyBytes = hexKey.hexToByteArray()
+                            val secretKey = SecretKeySpec(keyBytes, "AES")
+                            val ivSpec = IvParameterSpec(targetIv)
+                            
+                            for (offset in 0..512) {
+                                if (responseData.size < offset + safeCheckSize) break
+                                val testChunk = responseData.copyOfRange(offset, offset + safeCheckSize)
+                                
+                                cipher.init(Cipher.DECRYPT_MODE, secretKey, ivSpec)
+                                val decrypted = cipher.doFinal(testChunk)
+                                
+                                if (decrypted.size >= 377 && decrypted[0] == 0x47.toByte() && decrypted[188] == 0x47.toByte() && decrypted[376] == 0x47.toByte()) {
+                                    return@synchronized keyBytes
+                                }
+                            }
+                        } catch (e: Exception) {}
+                    }
+                    null
+                }
+            } catch (e: Exception) { 
+                null 
+            }
+        }
+    }
+}
+
+fun String.hexToByteArray(): ByteArray {
+    val len = length
+    val data = ByteArray(len / 2)
+    var i = 0
+    while (i < len) {
+        data[i / 2] = ((Character.digit(this[i], 16) shl 4) + Character.digit(this[i+1], 16)).toByte()
+        i += 2
+    }
+    return data
 }
