@@ -1,10 +1,10 @@
 [
     {
         "iconUrl": "https://anilife.live/assets/img/animestream.png",
-        "fileHash": "sha256-1504b95713953012ff6da8114db5485363d1983308341cb55fcc0250131168ca",
+        "fileHash": "sha256-61c72a02238e904c5fd3b37a80a4093b6a20c171423676deb4ea55d933a539ad",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 24864,
+        "fileSize": 25328,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -41,10 +41,10 @@
     },
     {
         "iconUrl": "https://m135.kotbc2.com/img/ktblogo.gif",
-        "fileHash": "sha256-963de0d09b263b53a123115426fbea8e37daa5f2645a3335db9f7b795b0880a8",
+        "fileHash": "sha256-2245cc24b3c3c31936f3f8aa72c5f17636d228c44066cecf20d445717800ac1a",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 28896,
+        "fileSize": 29331,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -84,10 +84,10 @@
     },
     {
         "iconUrl": "https://mvking6.org/resource/favicon.ico",
-        "fileHash": "sha256-9ae385c9d14e19de821b5e43190efd89a4b58f1e0c84bbcf59b4b6fc752e7879",
+        "fileHash": "sha256-9d2c62cdf335b1aad16094a45f92eff4e4593cbd562268de6a69c7272c9effaa",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 31804,
+        "fileSize": 32363,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -150,10 +150,10 @@
     },
     {
         "iconUrl": "https://tvmon.site/img/111.png",
-        "fileHash": "sha256-82e1768e3cbd6faaae24356d4cf5c209bf5bf64c3bb188a8058771001d14b774",
+        "fileHash": "sha256-34ef718517c562cc910865c4292c195470c0ef460d79895f657570785f65820d",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 44167,
+        "fileSize": 43775,
         "status": 1,
         "language": "ko",
         "authors": [
