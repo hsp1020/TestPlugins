@@ -505,15 +505,22 @@ class YoutubeProvider(
 
     private fun findTokenRecursive(data: Any?): String? {
         if (data is Map<*, *>) {
-            if (data.containsKey("continuationCommand")) return (data["continuationCommand"] as? Map<*, *>)?.get(
-                "token"
-            ) as? String
+            // 채널, 재생목록, 검색 등에서 사용되는 다양한 형태의 Continuation Endpoint 대응
+            val token = (data["continuationCommand"] as? Map<*, *>)?.get("token") as? String
+                ?: (data["browseContinuationEndpoint"] as? Map<*, *>)?.get("token") as? String
+                ?: (data["searchContinuationEndpoint"] as? Map<*, *>)?.get("token") as? String
+                ?: (data["continuationEndpoint"] as? Map<*, *>)?.get("token") as? String
+            
+            if (!token.isNullOrBlank()) return token
+
             for (v in data.values) {
-                val t = findTokenRecursive(v); if (t != null) return t
+                val t = findTokenRecursive(v)
+                if (t != null) return t
             }
         } else if (data is List<*>) {
             for (i in data) {
-                val t = findTokenRecursive(i); if (t != null) return t
+                val t = findTokenRecursive(i)
+                if (t != null) return t
             }
         }
         return null
@@ -522,22 +529,25 @@ class YoutubeProvider(
     override val mainPage: List<MainPageData>
         get() {
             val list = mutableListOf<MainPageData>()
-            val isEn = lang == "en"
+            val trendingName = if (lang == "ko") "인기" else "Trending"
 
             if (sharedPref?.getBoolean("show_trending_home", true) == true) {
-                list.add(MainPageData(if (isEn) "Trending" else "الرئيسية (Trending)", "Home"))
+                // 가로 썸네일 (horizontalImages) 활성화
+                list.add(MainPageData(trendingName, "Home", horizontalImages = true))
             }
 
             val customSections = getCustomHomepages()
 
-            customSections.filter { it.isEnabled }.forEach { section ->
+            // Custom 채널 추가 시 Home이 중복되어 아랍어 카탈로그가 생성되는 충돌 방지 (url != "Home")
+            customSections.filter { it.isEnabled && it.url != "Home" }.forEach { section ->
                 var title = section.name
                 if (title.isBlank()) title = extractNameFromUrl(section.url)
-                list.add(MainPageData(title, section.url))
+                list.add(MainPageData(title, section.url, horizontalImages = true))
             }
 
             return list
         }
+        
     private fun getCustomHomepages(): List<CustomSection> {
         val json = sharedPref?.getString("custom_homepages_v3", "[]") ?: "[]"
         return try {
