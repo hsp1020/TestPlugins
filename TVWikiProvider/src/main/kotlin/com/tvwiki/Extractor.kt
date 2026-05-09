@@ -21,9 +21,9 @@ import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.suspendCancellableCoroutine
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.ServerSocket
@@ -250,7 +250,8 @@ class BunnyPoorCdn : ExtractorApi() {
                             val key = msg.substringAfter("CapturedKeyHex:").removePrefix("[SET]").removePrefix("[CRYPTO]")
                             if (sessionKeys.add(key)) { 
                                 if (detectedCUrl != null && cont.isActive) {
-                                    handler.removeCallbacks(discoveryTimeout)
+                                    // [수정: 불완전한 콜백 해제 차단]
+                                    handler.removeCallbacksAndMessages(null)
                                     handler.post {
                                         try { webView?.destroy(); webView = null } catch (e: Exception) {}
                                         cont.resume(detectedCUrl)
@@ -274,7 +275,7 @@ class BunnyPoorCdn : ExtractorApi() {
                             view?.post { view.evaluateJavascript(hookScript, null) }
                             
                             if (sessionKeys.isNotEmpty() && cont.isActive) {
-                                handler.removeCallbacks(discoveryTimeout)
+                                handler.removeCallbacksAndMessages(null)
                                 handler.post {
                                     try { webView?.destroy(); webView = null } catch (e: Exception) {}
                                     cont.resume(detectedCUrl)
@@ -282,7 +283,7 @@ class BunnyPoorCdn : ExtractorApi() {
                             } else {
                                 handler.postDelayed({
                                     if (cont.isActive) {
-                                        handler.removeCallbacks(discoveryTimeout)
+                                        handler.removeCallbacksAndMessages(null)
                                         try { webView?.destroy(); webView = null } catch (e: Exception) {}
                                         cont.resume(detectedCUrl)
                                     }
@@ -328,10 +329,11 @@ class BunnyPoorCdn : ExtractorApi() {
                 isRunning = true
                 
                 CoroutineScope(Dispatchers.IO).launch {
-                    while (isRunning) { 
+                    while (isRunning && serverSocket != null && !serverSocket!!.isClosed) { 
                         try { 
-                            val socket = serverSocket?.accept() ?: break
-                            handleClient(socket) 
+                            val socket = serverSocket!!.accept()
+                            // [수정: 동시성 누락 및 블로킹 병목 차단] 개별 클라이언트를 비동기로 처리
+                            launch(Dispatchers.IO) { handleClient(socket) } 
                         } catch (e: Exception) {
                             delay(100L)
                         } 
@@ -352,12 +354,14 @@ class BunnyPoorCdn : ExtractorApi() {
             if (testSegmentUrl == null) testSegmentUrl = url 
         }
 
-        private fun handleClient(socket: Socket) {
+        // [수정: I/O 컨텍스트 매핑] 시스템 스레드 풀 잠식 방어
+        private suspend fun handleClient(socket: Socket) = withContext(Dispatchers.IO) {
             try {
+                socket.soTimeout = 5000
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
-                val line = reader.readLine() ?: return
+                val line = reader.readLine() ?: return@withContext
                 val parts = line.split(" ")
-                if (parts.size < 2) return
+                if (parts.size < 2) return@withContext
                 
                 val path = parts[1]
                 val output = socket.getOutputStream()
@@ -378,12 +382,13 @@ class BunnyPoorCdn : ExtractorApi() {
                         output.write(keyPayload)
                     }
                 }
-                output.flush(); socket.close()
-            } catch (e: Exception) { try { socket.close() } catch(e2: Exception) {} }
+                output.flush()
+            } catch (e: Exception) { 
+            } finally { try { socket.close() } catch(e: Exception) {} }
         }
 
-        private fun verifyMultipleKeys(): ByteArray? = runBlocking {
-            val url = testSegmentUrl ?: return@runBlocking null
+        private suspend fun verifyMultipleKeys(): ByteArray? {
+            val url = testSegmentUrl ?: return null
             val targetIv = currentIv ?: ByteArray(16)
             
             try {
@@ -391,44 +396,34 @@ class BunnyPoorCdn : ExtractorApi() {
                 val checkSize = 1024 
                 val safeCheckSize = if (responseData.size < checkSize) responseData.size else checkSize
                 
-                val cipher = Cipher.getInstance("AES/CBC/NoPadding")
-
                 synchronized(sessionKeys) {
                     for ((index, hexKey) in sessionKeys.withIndex()) {
                         try {
                             val keyBytes = hexKey.hexToByteArray()
-                            val secretKey = SecretKeySpec(keyBytes, "AES")
-                            val ivSpec = IvParameterSpec(targetIv)
-                            
                             for (offset in 0..512) {
                                 if (responseData.size < offset + safeCheckSize) break
                                 val testChunk = responseData.copyOfRange(offset, offset + safeCheckSize)
-                                
-                                cipher.init(Cipher.DECRYPT_MODE, secretKey, ivSpec)
-                                val decrypted = cipher.doFinal(testChunk)
+                                val decrypted = decryptAES(testChunk, keyBytes, targetIv)
                                 
                                 if (decrypted.size >= 377 && decrypted[0] == 0x47.toByte() && decrypted[188] == 0x47.toByte() && decrypted[376] == 0x47.toByte()) {
-                                    return@synchronized keyBytes
+                                    return keyBytes
                                 }
                             }
                         } catch (e: Exception) {}
                     }
-                    null
+                    return null
                 }
             } catch (e: Exception) { 
-                null 
+                return null 
             }
         }
+        
+        private fun decryptAES(data: ByteArray, key: ByteArray, iv: ByteArray): ByteArray {
+            return try {
+                val cipher = Cipher.getInstance("AES/CBC/NoPadding")
+                cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+                cipher.doFinal(data)
+            } catch (e: Exception) { ByteArray(0) }
+        }
     }
-}
-
-fun String.hexToByteArray(): ByteArray {
-    val len = length
-    val data = ByteArray(len / 2)
-    var i = 0
-    while (i < len) {
-        data[i / 2] = ((Character.digit(this[i], 16) shl 4) + Character.digit(this[i+1], 16)).toByte()
-        i += 2
-    }
-    return data
 }
