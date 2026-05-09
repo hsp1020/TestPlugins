@@ -89,8 +89,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         val label = buildVideoLabelNumber(vs)
                         val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
                         
-                        // 720p 미만 해상도 필터링
-                        if (height in 1..719) return@mapNotNull null
 
                         var mime = vs.format?.mimeType
                         if (mime.isNullOrEmpty()) mime = getMimeTypeFromUrl(streamUrl, false)
@@ -171,8 +169,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         val label = buildVideoLabelNumber(vs)
                         val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
                         
-                        // 720p 미만 해상도 필터링
-                        if (height in 1..719) return@mapNotNull null
                         
                         Triple(mUrl, label, height)
                     } catch (e: Exception) { null }
