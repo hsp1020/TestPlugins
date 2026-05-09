@@ -1,4 +1,4 @@
-// v1.9 (Fix: Build Errors - Resolved Log.e signature & Removed leftover StreamPlayAnime references)
+// 파일명: hsp1020/testplugins/TestPlugins-d1a26fae88cb55c8f1d621560cf4e45bd7fd78f6/StremioX/src/main/kotlin/com/hsp1020/settings/SettingsBottomFragment.kt
 package com.hsp1020
 
 import android.annotation.SuppressLint
@@ -22,6 +22,7 @@ import androidx.core.content.edit
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.lagradost.api.Log
+import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CommonActivity.showToast
 import org.json.JSONArray
 import org.json.JSONObject
@@ -121,8 +122,16 @@ class SettingsBottomFragment(
         return inflater.inflate(layout, container, false)
     }
 
-    private fun isCineStreamInstalled(): Boolean = StremioC.getCineStreamProvider(forceSearch = true) != null
-    private fun isStreamPlayInstalled(): Boolean = StremioC.getStreamPlayProvider(forceSearch = true) != null
+    // [수정: 의존성 에러 교정] 정적 호출 불가 함수를 APIHolder와 공개된 동적 로더로 우회 검증
+    private fun isCineStreamInstalled(): Boolean {
+        return APIHolder.allProviders.any { it.name.equals("CineStream", true) } ||
+               StremioC.loadProviderDynamically("megix", "com.megix.CineStreamProvider") != null
+    }
+
+    private fun isStreamPlayInstalled(): Boolean {
+        return APIHolder.allProviders.any { it.name.equals("StreamPlay", true) } ||
+               StremioC.loadProviderDynamically("phisher", "com.phisher98.StreamPlay") != null
+    }
 
     @SuppressLint("DiscouragedApi")
     override fun onCreateView(
