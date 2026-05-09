@@ -49,9 +49,7 @@ class YoutubeProvider(
 
     private var isSearchContext = false
 
-
-class YouTubeInterceptor(private val prefs: SharedPreferences?, private val provider: YoutubeProvider) : Interceptor {
-        
+    class YouTubeInterceptor(private val prefs: SharedPreferences?, private val provider: YoutubeProvider) : Interceptor {
         private fun sha1(input: String): String {
             val md = java.security.MessageDigest.getInstance("SHA-1")
             val bytes = md.digest(input.toByteArray())
@@ -81,13 +79,12 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                     if (key == "SAPISID") sapisidVal = value
                 }
             }
-            
+
             cookieBuilder.append("PREF=f6=40000000&hl=${provider.lang}; CONSENT=YES+fx.456722336;")
 
             requestBuilder.addHeader("Cookie", cookieBuilder.toString())
             requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
 
-            // [인증 규격 추가]: SAPISIDHASH 연산 및 글로벌 Authorization 헤더 주입
             if (!sapisidVal.isNullOrBlank()) {
                 try {
                     val timestamp = (System.currentTimeMillis() / 1000).toString()
@@ -105,15 +102,16 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
             return chain.proceed(requestBuilder.build())
         }
     }
-    
+
     private val ytInterceptor = YouTubeInterceptor(sharedPref, this)
-    private val safariUserAgent =
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
+    private val safariUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
 
     private var savedContinuationToken: String? = null
     private var savedVisitorData: String? = null
     private var savedApiKey: String? = null
     private var savedClientVersion: String? = null
+    
+
 
     @Suppress("PropertyName")
     private data class PlayerResponse(@JsonProperty("streamingData") val streamingData: StreamingData?)
@@ -524,20 +522,27 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                 ?: (data["searchContinuationEndpoint"] as? Map<*, *>)?.get("token") as? String
                 ?: (data["continuationEndpoint"] as? Map<*, *>)?.get("token") as? String
                 ?: (data["nextContinuationData"] as? Map<*, *>)?.get("continuation") as? String
+                ?: (safeGet(data, "continuations", 0, "nextContinuationData", "continuation") as? String)
+                ?: (safeGet(data, "continuations", 0, "reloadContinuationData", "continuation") as? String)
             
             if (!token.isNullOrBlank()) return token
-            for (v in data.values) { val t = findTokenRecursive(v); if (t != null) return t }
+
+            for (v in data.values) {
+                val t = findTokenRecursive(v)
+                if (t != null) return t
+            }
         } else if (data is List<*>) {
-            for (i in data) { val t = findTokenRecursive(i); if (t != null) return t }
+            for (i in data) {
+                val t = findTokenRecursive(i)
+                if (t != null) return t
+            }
         }
         return null
     }
 
-
     override val mainPage: List<MainPageData>
         get() {
             val list = mutableListOf<MainPageData>()
-            // 홈 카탈로그 이름 지역화
             val homeTitle = when(lang) {
                 "ko" -> "홈"
                 "ar" -> "الرئيسية"
@@ -545,14 +550,12 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
             }
 
             if (sharedPref?.getBoolean("show_trending_home", true) == true) {
-                // 가로 썸네일(horizontalImages) 강제 적용
                 list.add(MainPageData(homeTitle, "Home", horizontalImages = true))
                 
-                val cachedChipsJson = sharedPref.getString("yt_cached_chips", "[]") ?: "[]"
+                val cachedChipsJson = sharedPref?.getString("yt_cached_chips", "[]") ?: "[]"
                 try {
                     val chips: List<CachedChip> = AppUtils.parseJson(cachedChipsJson)
                     chips.forEach { chip ->
-                        // 모든 칩 카탈로그에 가로 썸네일 적용
                         list.add(MainPageData(chip.name, "chip_${chip.token}", horizontalImages = true))
                     }
                 } catch (e: Exception) {
@@ -561,6 +564,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
             }
 
             val customSections = getCustomHomepages()
+
             customSections.filter { it.isEnabled && it.url != "Home" }.forEach { section ->
                 var title = section.name
                 if (title.isBlank()) title = extractNameFromUrl(section.url)
@@ -603,15 +607,53 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
         val results = mutableListOf<SearchResponse>()
         val seenIds = mutableSetOf<String>()
         var nextContinuation: String? = null
+
         val requestData = request.data
+        val isPlaylist = if (page == 1) requestData.contains("list=") else requestData.startsWith("playlist_")
         val isChip = requestData.startsWith("chip_")
+
+        fun extractPlaylistVideos(items: List<*>) {
+            items.forEach { item ->
+                val videoMap = item as? Map<*, *>
+                val renderer = videoMap?.get("playlistVideoRenderer") as? Map<*, *>
+                if (renderer != null) {
+                    val vId = renderer["videoId"] as? String
+                    if (vId != null && seenIds.add(vId)) {
+                        val vidTitle = extractTitle(renderer["title"] as? Map<*, *>) ?: "Video"
+                        val thumb = getBestThumbnail(renderer["thumbnail"]) ?: buildThumbnailFromId(vId)
+                        val vidUrl = "$mainUrl/watch?v=$vId"
+                        val durationText = extractTitle(safeGet(renderer, "lengthText") as? Map<*, *>)
+                        val finalTitle = if (durationText != null) "{$durationText} $vidTitle" else vidTitle
+
+                        results.add(
+                            newMovieSearchResponse(finalTitle, vidUrl, TvType.Movie) {
+                                this.posterUrl = thumb
+                            }
+                        )
+                    }
+                }
+            }
+        }
+
+        fun findPlaylistToken(items: List<*>?): String? {
+            if (items == null) return null
+            for (it in items) {
+                val m = it as? Map<*, *> ?: continue
+                val token = safeGet(m, "continuationItemRenderer", "continuationEndpoint", "continuationCommand", "token") as? String
+                if (!token.isNullOrBlank()) return token
+            }
+            return null
+        }
 
         try {
             if (page == 1) {
                 continuationTokens.remove(requestData)
+                if (requestData == "Home") homeShorts.clear()
+
                 if (isChip) {
                     savedApiKey = sharedPref?.getString("yt_api_key", null)
                     savedVisitorData = sharedPref?.getString("yt_visitor_data", null)
+                    savedClientVersion = sharedPref?.getString("yt_client_version", "2.20240725.01.00")
                     val tokenToUse = requestData.removePrefix("chip_")
                     
                     if (!savedApiKey.isNullOrBlank()) {
@@ -628,48 +670,158 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                         val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                         
                         if (response != null) {
-                            // 칩 아이템 누락 방지를 위한 광범위 경로 체크
                             val actions = response["onResponseReceivedActions"] 
                                 ?: response["onResponseReceivedCommands"] 
                                 ?: response["contents"] 
                                 ?: response
                             processRecursive(actions, results, seenIds, playlistMode = false)
                             nextContinuation = findTokenRecursive(response)
+
+                            if (results.isEmpty()) {
+                                val cachedChipsJson = sharedPref?.getString("yt_cached_chips", "[]") ?: "[]"
+                                try {
+                                    val chips: MutableList<CachedChip> = AppUtils.parseJson<List<CachedChip>>(cachedChipsJson).toMutableList()
+                                    val initialSize = chips.size
+                                    chips.removeAll { it.token == tokenToUse }
+                                    if (chips.size < initialSize) {
+                                        val mapper = com.fasterxml.jackson.module.kotlin.jacksonObjectMapper()
+                                        sharedPref?.edit()?.putString("yt_cached_chips", mapper.writeValueAsString(chips))?.apply()
+                                    }
+                                } catch (e: Exception) {
+                                    logError(e)
+                                }
+                            }
                         }
                     }
                 } else {
-                    // 기존 Home/Channel 로직 유지 (단, 칩 파싱 시 lang 설정 반영)
-                    val html = app.get(if(requestData == "Home") mainUrl else requestData, interceptor = ytInterceptor).text
+                    val targetUrl = when {
+                        requestData.contains("/@") || requestData.contains("/channel/") || requestData.contains("/c/") || requestData.contains("/user/") -> {
+                            var cleanUrl = requestData
+                            if (cleanUrl.contains("?")) cleanUrl = cleanUrl.substringBefore("?")
+                            if (!cleanUrl.endsWith("/videos")) "$cleanUrl/videos" else requestData
+                        }
+                        requestData.startsWith("http") -> requestData
+                        else -> mainUrl
+                    }
+
+                    val response = app.get(targetUrl, interceptor = ytInterceptor)
+                    val html = response.text
+
+                    response.headers.values("Set-Cookie").forEach { cookie ->
+                        if (cookie.contains("VISITOR_INFO1_LIVE=")) {
+                            val value = cookie.substringAfter("VISITOR_INFO1_LIVE=").substringBefore(";")
+                            sharedPref?.edit()?.putString("VISITOR_INFO1_LIVE", value)?.apply()
+                        }
+                    }
+
+                    savedApiKey = findConfig(html, "INNERTUBE_API_KEY")
+                    savedClientVersion = findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: "2.20240725.01.00"
+                    savedVisitorData = findConfig(html, "VISITOR_DATA")
+
+                    sharedPref?.edit()?.apply {
+                        putString("yt_api_key", savedApiKey)
+                        putString("yt_client_version", savedClientVersion)
+                        putString("yt_visitor_data", savedVisitorData)
+                    }?.apply()
+
                     val initialData = extractYtInitialData(html)
                     if (initialData != null) {
-                        if (requestData == "Home") {
-                            // 홈에서 칩을 새로 긁어올 때도 지역화된 텍스트 보존
-                            val chipBar = safeGet(initialData, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0, "tabRenderer", "content", "richGridRenderer", "header", "feedFilterChipBarRenderer", "contents") as? List<*>
-                            chipBar?.let { /* 기존 칩 캐싱 로직 */ }
+                        if (isPlaylist) {
+                            val contents = safeGet(
+                                initialData, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0,
+                                "tabRenderer", "content", "sectionListRenderer", "contents",
+                                0, "itemSectionRenderer", "contents", 0,
+                                "playlistVideoListRenderer", "contents"
+                            ) as? List<*>
+
+                            if (contents != null) {
+                                extractPlaylistVideos(contents)
+                                nextContinuation = findPlaylistToken(contents)
+                            }
+
+                            if (nextContinuation.isNullOrBlank()) {
+                                val conts = findContinuationItemsRecursive(initialData)
+                                nextContinuation = findPlaylistToken(conts)
+                            }
+                        } else {
+                            if (requestData == "Home") {
+                                try {
+                                    val chipBar = safeGet(initialData, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0, "tabRenderer", "content", "richGridRenderer", "header", "feedFilterChipBarRenderer", "contents") as? List<*>
+                                    if (chipBar != null) {
+                                        val chipsList = mutableListOf<CachedChip>()
+                                        chipBar.forEach { chipObj ->
+                                            val chipRenderer = (chipObj as? Map<*, *>)?.get("chipCloudChipRenderer") as? Map<*, *>
+                                            if (chipRenderer != null) {
+                                                val isSelected = chipRenderer["isSelected"] as? Boolean ?: false
+                                                if (!isSelected) {
+                                                    val text = getText(chipRenderer["text"])
+                                                    val token = safeGet(chipRenderer, "navigationEndpoint", "continuationCommand", "token") as? String
+                                                    if (text.isNotBlank() && !token.isNullOrBlank()) {
+                                                        chipsList.add(CachedChip(text, token))
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if (chipsList.isNotEmpty()) {
+                                            val mapper = com.fasterxml.jackson.module.kotlin.jacksonObjectMapper()
+                                            sharedPref?.edit()?.putString("yt_cached_chips", mapper.writeValueAsString(chipsList))?.apply()
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    logError(e)
+                                }
+                            }
+                            processRecursive(initialData, results, seenIds, playlistMode = false)
+                            nextContinuation = findTokenRecursive(initialData)
                         }
-                        processRecursive(initialData, results, seenIds, playlistMode = false)
-                        nextContinuation = findTokenRecursive(initialData)
                     }
                 }
             } else {
-                // 페이지네이션 로직: 저장된 토큰을 사용하여 인피니트 스크롤 구현
                 val tokenToUse = continuationTokens[requestData]
                 if (!tokenToUse.isNullOrBlank()) {
+                    val decodedToken = java.net.URLDecoder.decode(tokenToUse, "UTF-8")
                     val apiKey = savedApiKey ?: sharedPref?.getString("yt_api_key", null)
-                    val apiUrl = if (requestData.contains("/results")) "$mainUrl/youtubei/v1/search?key=$apiKey" else "$mainUrl/youtubei/v1/browse?key=$apiKey"
+                    
+                    val apiUrl = if (requestData.contains("/results")) {
+                        "$mainUrl/youtubei/v1/search?key=$apiKey"
+                    } else {
+                        "$mainUrl/youtubei/v1/browse?key=$apiKey"
+                    }
+                    
                     val payload = mapOf(
-                        "context" to mapOf("client" to mapOf("clientName" to "WEB", "clientVersion" to "2.20240725.01.00", "hl" to lang)),
-                        "continuation" to tokenToUse
+                        "context" to mapOf("client" to mapOf(
+                            "visitorData" to (savedVisitorData ?: sharedPref?.getString("yt_visitor_data", "") ?: ""), 
+                            "clientName" to "WEB",
+                            "clientVersion" to (savedClientVersion ?: sharedPref?.getString("yt_client_version", "2.20240725.01.00") ?: "2.20240725.01.00"),
+                            "platform" to "DESKTOP", "hl" to lang
+                        )),
+                        "continuation" to decodedToken
                     )
-                    val response = app.post(apiUrl, json = payload, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                    val headers = mapOf(
+                        "X-Youtube-Client-Name" to "WEB",
+                        "X-Youtube-Client-Version" to (savedClientVersion ?: sharedPref?.getString("yt_client_version", "2.20240725.01.00") ?: ""),
+                        "Origin" to mainUrl, "Referer" to mainUrl
+                    )
+
+                    val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                     if (response != null) {
-                        val actions = response["onResponseReceivedActions"] ?: response["onResponseReceivedCommands"] ?: response["continuationContents"] ?: response
-                        processRecursive(actions, results, seenIds, playlistMode = false)
-                        nextContinuation = findTokenRecursive(response)
+                        if (isPlaylist) {
+                            val continuationItems = findContinuationItemsRecursive(response)
+                            if (continuationItems != null) {
+                                extractPlaylistVideos(continuationItems)
+                                nextContinuation = findPlaylistToken(continuationItems)
+                            }
+                        } else {
+                            val actions = response["onResponseReceivedActions"] ?: response["onResponseReceivedCommands"] ?: response["continuationContents"] ?: response
+                            processRecursive(actions, results, seenIds, playlistMode = false)
+                            nextContinuation = findTokenRecursive(response)
+                        }
                     }
                 }
             }
-        } catch (e: Exception) { logError(e) }
+        } catch (e: Exception) {
+            logError(e)
+        }
 
         if (!nextContinuation.isNullOrBlank()) {
             continuationTokens[requestData] = nextContinuation
@@ -1002,7 +1154,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                         val continuationItems = findContinuationItemsRecursive(jsonResponse) ?: break
                         extractVideosFromItems(continuationItems, allEpisodes)
                         currentToken = findContinuationTokenFromItems(continuationItems)
-                        kotlinx.coroutines.delay((SLEEP_BETWEEN * 10).toLong())
+                        kotlinx.coroutines.delay((10).toLong())
                     } catch (e: Exception) {
                         break
                     }
@@ -1015,7 +1167,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                 }
 
             } catch (e: Exception) {
-
+                logError(e)
             }
         }
 
@@ -1032,28 +1184,30 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                 val description = extractTitle(safeGet(header, "description") as? Map<*, *>)
 
                 val episodes = mutableListOf<Episode>()
-                val contents = safeGet(
-                    data, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0,
-                    "tabRenderer", "content", "sectionListRenderer", "contents",
-                    0, "itemSectionRenderer", "contents", 0,
-                    "playlistVideoListRenderer", "contents"
-                ) as? List<*>
+                val tempSearchResponses = mutableListOf<SearchResponse>()
+                val seenPlaylistIds = mutableSetOf<String>()
 
-                contents?.forEachIndexed { index, item ->
-                    val videoMap = item as? Map<*, *>
-                    val renderer = videoMap?.get("playlistVideoRenderer") as? Map<*, *>
-                    if (renderer != null) {
-                        val vId = renderer["videoId"] as? String
-                        if (vId != null) {
-                            val vidTitle = extractTitle(renderer["title"] as? Map<*, *>) ?: "Episode ${index + 1}"
-                            val thumb = getBestThumbnail(renderer["thumbnail"]) ?: buildThumbnailFromId(vId)
-                            val vidUrl = "$mainUrl/watch?v=$vId"
-                            val durationText = extractTitle(safeGet(renderer, "lengthText") as? Map<*, *>)
-                            episodes.add(newEpisode(vidUrl) {
-                                this.name = vidTitle
+                processRecursive(data, tempSearchResponses, seenPlaylistIds, playlistMode = false)
+
+                tempSearchResponses.forEachIndexed { index, res ->
+                    if (res.url.contains("watch?v=")) {
+                        episodes.add(newEpisode(res.url) {
+                            this.name = res.name.substringAfter("} ").trim()
+                            this.episode = index + 1
+                            this.posterUrl = res.posterUrl
+                        })
+                    }
+                }
+
+                if (episodes.isEmpty()) {
+                    val contents = safeGet(data, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0, "tabRenderer", "content", "sectionListRenderer", "contents") as? List<*>
+                    processRecursive(contents, tempSearchResponses, seenPlaylistIds, playlistMode = false)
+                    tempSearchResponses.forEachIndexed { index, res ->
+                        if (res.url.contains("watch?v=")) {
+                            episodes.add(newEpisode(res.url) {
+                                this.name = res.name.substringAfter("} ").trim()
                                 this.episode = index + 1
-                                this.posterUrl = thumb
-                                this.description = if (durationText != null) "Duration: $durationText" else null
+                                this.posterUrl = res.posterUrl
                             })
                         }
                     }
@@ -1068,7 +1222,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                     this.tags = listOf(author)
                 }
             } catch (e: Exception) {
-
+                logError(e)
             }
         }
 
@@ -1166,7 +1320,8 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
             this.recommendations = filteredRecs
         }
     }
-
+               
+                                               
     private fun sha1(input: String): String {
         val md = java.security.MessageDigest.getInstance("SHA-1")
         val bytes = md.digest(input.toByteArray())
