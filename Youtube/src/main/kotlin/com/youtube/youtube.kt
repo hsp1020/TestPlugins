@@ -666,15 +666,15 @@ class YoutubeProvider(
                             )),
                             "continuation" to tokenToUse
                         )
-                        val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
+                        val headers = mapOf(
+                            "Origin" to mainUrl, "Referer" to mainUrl,
+                            "X-Youtube-Client-Name" to "WEB",
+                            "X-Youtube-Client-Version" to (savedClientVersion ?: "2.20240725.01.00")
+                        )
                         val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                         
                         if (response != null) {
-                            val actions = response["onResponseReceivedActions"] 
-                                ?: response["onResponseReceivedCommands"] 
-                                ?: response["contents"] 
-                                ?: response
-                            processRecursive(actions, results, seenIds, playlistMode = false)
+                            processRecursive(response, results, seenIds, playlistMode = false)
                             nextContinuation = findTokenRecursive(response)
 
                             if (results.isEmpty()) {
@@ -779,7 +779,6 @@ class YoutubeProvider(
             } else {
                 val tokenToUse = continuationTokens[requestData]
                 if (!tokenToUse.isNullOrBlank()) {
-                    val decodedToken = java.net.URLDecoder.decode(tokenToUse, "UTF-8")
                     val apiKey = savedApiKey ?: sharedPref?.getString("yt_api_key", null)
                     
                     val apiUrl = if (requestData.contains("/results")) {
@@ -795,7 +794,7 @@ class YoutubeProvider(
                             "clientVersion" to (savedClientVersion ?: sharedPref?.getString("yt_client_version", "2.20240725.01.00") ?: "2.20240725.01.00"),
                             "platform" to "DESKTOP", "hl" to lang
                         )),
-                        "continuation" to decodedToken
+                        "continuation" to tokenToUse
                     )
                     val headers = mapOf(
                         "X-Youtube-Client-Name" to "WEB",
@@ -812,8 +811,7 @@ class YoutubeProvider(
                                 nextContinuation = findPlaylistToken(continuationItems)
                             }
                         } else {
-                            val actions = response["onResponseReceivedActions"] ?: response["onResponseReceivedCommands"] ?: response["continuationContents"] ?: response
-                            processRecursive(actions, results, seenIds, playlistMode = false)
+                            processRecursive(response, results, seenIds, playlistMode = false)
                             nextContinuation = findTokenRecursive(response)
                         }
                     }
