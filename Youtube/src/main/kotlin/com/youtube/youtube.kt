@@ -518,6 +518,16 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
 
     private fun findTokenRecursive(data: Any?): String? {
         if (data is Map<*, *>) {
+            // [핵심 교정]: 칩 카탈로그 횡스크롤용 토큰 오진출 원천 차단
+            if (data.containsKey("feedFilterChipBarRenderer") || data.containsKey("chipCloudRenderer")) {
+                return null
+            }
+            
+            val targetId = data["targetId"] as? String
+            if (targetId != null && targetId.contains("chip", ignoreCase = true)) {
+                return null
+            }
+
             val renderer = data["continuationItemRenderer"] as? Map<*, *>
             if (renderer != null) {
                 val endpoint = renderer["continuationEndpoint"] as? Map<*, *>
@@ -527,6 +537,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                         ?: (endpoint["searchContinuationEndpoint"] as? Map<*, *>)?.get("token") as? String
                         ?: (endpoint["command"] as? Map<*, *>)?.get("token") as? String
                         ?: endpoint["token"] as? String
+                    
                     if (!token.isNullOrBlank()) return token
                 }
             }
@@ -542,6 +553,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                 if (t != null) return t
             }
         } else if (data is List<*>) {
+            // 비디오 배열의 가장 끝에 실제 스크롤 토큰이 존재하므로 역순(reversed) 탐색 우선
             for (i in data.indices.reversed()) {
                 val t = findTokenRecursive(data[i])
                 if (t != null) return t
@@ -549,8 +561,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
         }
         return null
     }
-
-
+    
     
     override val mainPage: List<MainPageData>
         get() {
