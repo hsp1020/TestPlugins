@@ -22,8 +22,6 @@ class YoutubeProvider(
     private val sharedPref: SharedPreferences? = null
 ) : MainAPI() {
 
-
-
     data class CustomSection(
         @JsonProperty("name") var name: String = "",
         @JsonProperty("url") var url: String = "",
@@ -35,17 +33,15 @@ class YoutubeProvider(
     override var mainUrl = "https://www.youtube.com"
     override var name = "YouTube"
     override val hasMainPage = true
-    override var lang = "ko"
+    override var lang = "ar"
     override val supportedTypes = setOf(TvType.Movie, TvType.Live)
 
     companion object {
-
         private val homeShorts = mutableListOf<Episode>()
         private val searchShorts = mutableListOf<Episode>()
     }
 
     private var isSearchContext = false
-
 
     class YouTubeInterceptor(private val prefs: SharedPreferences?) : Interceptor {
         override fun intercept(chain: Interceptor.Chain): Response {
@@ -91,9 +87,6 @@ class YoutubeProvider(
     private data class PlayerResponse(@JsonProperty("streamingData") val streamingData: StreamingData?)
     private data class StreamingData(@JsonProperty("hlsManifestUrl") val hlsManifestUrl: String?)
 
-
-
-
     private fun Map<*, *>.getMapKey(key: String): Map<*, *>? =
         this.entries.firstOrNull { (it.key as? String) == key }?.value as? Map<*, *>
 
@@ -102,7 +95,6 @@ class YoutubeProvider(
 
     private fun Map<*, *>.getString(key: String): String? =
         this.entries.firstOrNull { (it.key as? String) == key }?.value as? String
-
 
     private fun getText(obj: Any?): String {
         if (obj == null) return ""
@@ -143,15 +135,9 @@ class YoutubeProvider(
                 parts?.forEach { part ->
                     val text = getText(part.getMapKey("text")) ?: ""
                     if (text.isNotBlank()) {
-
                         if (text.matches(Regex(".*(\\d+[KMBkmb]|views|مشاهدة).*"))) {
                             views = formatViews(text)
-                        }
-
-                        else if (!text.matches(Regex(".*(\\d+:\\d+|ago|قبل).*")) && text.length > 1 && !text.contains(
-                                "•"
-                            )
-                        ) {
+                        } else if (!text.matches(Regex(".*(\\d+:\\d+|ago|قبل).*")) && text.length > 1 && !text.contains("•")) {
                             channel = text
                         }
                     }
@@ -220,9 +206,6 @@ class YoutubeProvider(
         if (videoId.isNullOrBlank()) return null
         return "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
     }
-
-
-
 
     private fun collectFromRenderer(
         renderer: Map<*, *>?,
@@ -424,7 +407,6 @@ class YoutubeProvider(
         return null
     }
 
-
     private fun processRecursive(
         data: Any?,
         outList: MutableList<SearchResponse>,
@@ -505,7 +487,6 @@ class YoutubeProvider(
 
     private fun findTokenRecursive(data: Any?): String? {
         if (data is Map<*, *>) {
-            // 채널, 재생목록, 검색 등에서 사용되는 다양한 형태의 Continuation Endpoint 대응
             val token = (data["continuationCommand"] as? Map<*, *>)?.get("token") as? String
                 ?: (data["browseContinuationEndpoint"] as? Map<*, *>)?.get("token") as? String
                 ?: (data["searchContinuationEndpoint"] as? Map<*, *>)?.get("token") as? String
@@ -514,13 +495,11 @@ class YoutubeProvider(
             if (!token.isNullOrBlank()) return token
 
             for (v in data.values) {
-                val t = findTokenRecursive(v)
-                if (t != null) return t
+                val t = findTokenRecursive(v); if (t != null) return t
             }
         } else if (data is List<*>) {
             for (i in data) {
-                val t = findTokenRecursive(i)
-                if (t != null) return t
+                val t = findTokenRecursive(i); if (t != null) return t
             }
         }
         return null
@@ -529,16 +508,32 @@ class YoutubeProvider(
     override val mainPage: List<MainPageData>
         get() {
             val list = mutableListOf<MainPageData>()
-            val trendingName = if (lang == "ko") "인기" else "Trending"
 
             if (sharedPref?.getBoolean("show_trending_home", true) == true) {
-                // 가로 썸네일 (horizontalImages) 활성화
-                list.add(MainPageData(trendingName, "Home", horizontalImages = true))
+                val categories = listOf(
+                    "전체" to "Home",
+                    "라이브" to "$mainUrl/results?search_query=라이브&sp=EgJAAQ%3D%3D",
+                    "음악" to "$mainUrl/results?search_query=음악",
+                    "게임" to "$mainUrl/gaming",
+                    "팟캐스트" to "$mainUrl/podcasts",
+                    "뉴스" to "$mainUrl/news",
+                    "믹스" to "$mainUrl/results?search_query=믹스",
+                    "야구" to "$mainUrl/results?search_query=야구",
+                    "축구" to "$mainUrl/results?search_query=축구",
+                    "요리" to "$mainUrl/results?search_query=요리",
+                    "랩" to "$mainUrl/results?search_query=랩",
+                    "힙합" to "$mainUrl/results?search_query=힙합",
+                    "만화 영화" to "$mainUrl/results?search_query=만화+영화",
+                    "최근에 업로드된 동영상" to "$mainUrl/results?search_query=최신+동영상&sp=CAI%253D",
+                    "새로운 맞춤 동영상" to "$mainUrl/results?search_query=추천+동영상"
+                )
+                categories.forEach { (name, url) ->
+                    list.add(MainPageData(name, url, horizontalImages = true))
+                }
             }
 
             val customSections = getCustomHomepages()
 
-            // Custom 채널 추가 시 Home이 중복되어 아랍어 카탈로그가 생성되는 충돌 방지 (url != "Home")
             customSections.filter { it.isEnabled && it.url != "Home" }.forEach { section ->
                 var title = section.name
                 if (title.isBlank()) title = extractNameFromUrl(section.url)
@@ -547,7 +542,7 @@ class YoutubeProvider(
 
             return list
         }
-        
+
     private fun getCustomHomepages(): List<CustomSection> {
         val json = sharedPref?.getString("custom_homepages_v3", "[]") ?: "[]"
         return try {
@@ -574,14 +569,15 @@ class YoutubeProvider(
     private val continuationTokens = mutableMapOf<String, String>()
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        val maxPages = sharedPref?.getInt("channel_pages_limit", 6) ?: 6
+        if (page > maxPages) return newHomePageResponse(request, emptyList(), hasNext = false)
+
         val results = mutableListOf<SearchResponse>()
         val seenIds = mutableSetOf<String>()
         var nextContinuation: String? = null
 
         val requestData = request.data
         val isPlaylist = if (page == 1) requestData.contains("list=") else requestData.startsWith("playlist_")
-
-
 
         fun extractPlaylistVideos(items: List<*>) {
             items.forEach { item ->
@@ -616,8 +612,6 @@ class YoutubeProvider(
             return null
         }
 
-
-
         try {
             if (page == 1) {
                 continuationTokens.remove(requestData)
@@ -627,7 +621,9 @@ class YoutubeProvider(
                 if (cleanUrl.contains("?")) cleanUrl = cleanUrl.substringBefore("?")
 
                 val targetUrl = when {
-                    requestData.startsWith("http") && !isPlaylist && !cleanUrl.endsWith("/videos") -> "$cleanUrl/videos"
+                    requestData.contains("/@") || requestData.contains("/channel/") || requestData.contains("/c/") || requestData.contains("/user/") -> {
+                        if (!cleanUrl.endsWith("/videos")) "$cleanUrl/videos" else requestData
+                    }
                     requestData.startsWith("http") -> requestData
                     else -> mainUrl
                 }
@@ -641,7 +637,6 @@ class YoutubeProvider(
                 val initialData = extractYtInitialData(html)
                 if (initialData != null) {
                     if (isPlaylist) {
-
                         val contents = safeGet(
                             initialData, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0,
                             "tabRenderer", "content", "sectionListRenderer", "contents",
@@ -660,20 +655,21 @@ class YoutubeProvider(
                         }
 
                     } else {
-
                         processRecursive(initialData, results, seenIds, playlistMode = false)
                         nextContinuation = findTokenRecursive(initialData)
                     }
                 }
             } else {
-
-
-
                 val tokenToUse = continuationTokens[requestData]
                 if (!tokenToUse.isNullOrBlank() && !savedApiKey.isNullOrBlank()) {
                     val decodedToken = java.net.URLDecoder.decode(tokenToUse, "UTF-8")
 
-                    val apiUrl = "$mainUrl/youtubei/v1/browse?key=$savedApiKey"
+                    val apiUrl = if (requestData.contains("/results")) {
+                        "$mainUrl/youtubei/v1/search?key=$savedApiKey"
+                    } else {
+                        "$mainUrl/youtubei/v1/browse?key=$savedApiKey"
+                    }
+                    
                     val payload = mapOf(
                         "context" to mapOf("client" to mapOf(
                             "visitorData" to (savedVisitorData ?: ""), "clientName" to "WEB",
@@ -691,14 +687,12 @@ class YoutubeProvider(
                     val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                     if (response != null) {
                         if (isPlaylist) {
-
                             val continuationItems = findContinuationItemsRecursive(response)
                             if (continuationItems != null) {
                                 extractPlaylistVideos(continuationItems)
                                 nextContinuation = findPlaylistToken(continuationItems)
                             }
                         } else {
-
                             val actions = response["onResponseReceivedActions"] ?: response["onResponseReceivedCommands"] ?: response["continuationContents"] ?: response
                             processRecursive(actions, results, seenIds, playlistMode = false)
                             nextContinuation = findTokenRecursive(response)
@@ -752,23 +746,21 @@ class YoutubeProvider(
         return null
     }
 
-
-
     override suspend fun search(query: String): List<SearchResponse> {
         return search(query, 1)?.items ?: emptyList()
     }
 
     override suspend fun search(query: String, page: Int): SearchResponseList? {
-        val results = mutableListOf<SearchResponse>()
+        val maxPages = sharedPref?.getInt("channel_pages_limit", 6) ?: 6
+        if (page > maxPages) return newSearchResponseList(emptyList(), false)
 
+        val results = mutableListOf<SearchResponse>()
         isSearchContext = true
         if (page == 1) {
             searchShorts.clear()
         }
 
-
         val seenIds = mutableSetOf<String>()
-
         var actualQuery = query
         var playlistMode = false
         var spParam = ""
@@ -828,7 +820,6 @@ class YoutubeProvider(
     private val collectedShorts = mutableListOf<Episode>()
 
     private fun addShortToCache(title: String, url: String, poster: String?) {
-
         if (collectedShorts.none { it.data == url }) {
             collectedShorts.add(
                 newEpisode(url) {
@@ -859,10 +850,7 @@ class YoutubeProvider(
             ?: titleObject.getString("text")
     }
 
-
-
     override suspend fun load(url: String): LoadResponse {
-
         if (url.contains("/shorts/")) {
             val videoId = url.extractYoutubeId() ?: "video"
             val useSearchList = url.contains("&ctx=search")
@@ -888,8 +876,6 @@ class YoutubeProvider(
                 this.tags = listOf("Shorts", "Feed")
             }
         }
-
-
 
         if (url.contains("/@") || url.contains("/channel/") || url.contains("/c/") || url.contains("/user/")) {
             try {
@@ -1065,8 +1051,6 @@ class YoutubeProvider(
             }
         }
 
-
-
         if (url.contains("list=")) {
             try {
                 val response = app.get(url, interceptor = ytInterceptor)
@@ -1120,8 +1104,6 @@ class YoutubeProvider(
             }
         }
 
-
-
         val videoId = url.extractYoutubeId() ?: throw ErrorLoadingException("Invalid YouTube URL")
 
         val response = app.get(url, interceptor = ytInterceptor)
@@ -1140,7 +1122,6 @@ class YoutubeProvider(
         val seenRecIds = mutableSetOf<String>()
 
         if (data != null) {
-
             val resultsContents = safeGet(data, "contents", "twoColumnWatchNextResults", "results", "results", "contents") as? List<*>
 
             resultsContents?.forEach { item ->
@@ -1157,14 +1138,12 @@ class YoutubeProvider(
 
                 val secondary = m?.get("videoSecondaryInfoRenderer") as? Map<*, *>
                 if (secondary != null) {
-
                     val owner = safeGet(secondary, "owner", "videoOwnerRenderer") as? Map<*, *>
                     if (owner != null) {
                         channelName = extractTitle(owner["title"] as? Map<*, *>) ?: ""
                         channelAvatar = getBestThumbnail(owner["thumbnail"]) ?: ""
                         channelId = safeGet(owner, "navigationEndpoint", "browseEndpoint", "browseId") as? String ?: ""
                         if (channelId.isEmpty()) {
-
                             val curl = safeGet(owner, "navigationEndpoint", "commandMetadata", "webCommandMetadata", "url") as? String
                             if (!curl.isNullOrBlank()) channelId = curl.substringAfterLast("/")
                         }
@@ -1173,7 +1152,7 @@ class YoutubeProvider(
                     val descObj = secondary["attributedDescription"] as? Map<*, *>
                         ?: secondary["description"] as? Map<*, *>
 
-                    val fullDesc = getText(descObj)// استخدام دالة getText الموحدة
+                    val fullDesc = getText(descObj)
                     if (fullDesc.isNotBlank()) {
                         plot += fullDesc
                     }
@@ -1186,13 +1165,11 @@ class YoutubeProvider(
             }
 
         } else {
-
             val doc = response.document
             title = doc.selectFirst("meta[property=og:title]")?.attr("content") ?: title
             poster = doc.selectFirst("meta[property=og:image]")?.attr("content") ?: poster
             plot = doc.selectFirst("meta[property=og:description]")?.attr("content") ?: plot
         }
-
 
         if (channelName.isNotBlank() && channelId.isNotBlank()) {
             val channelUrlFull = if (channelId.startsWith("UC") || channelId.startsWith("@")) "$mainUrl/channel/$channelId" else "$mainUrl/$channelId"
@@ -1203,8 +1180,6 @@ class YoutubeProvider(
                 TvType.Live
             ) {
                 this.posterUrl = channelAvatar
-
-
             }
 
             recommendations.add(0, channelCard)
@@ -1239,6 +1214,7 @@ class YoutubeProvider(
         val hash = sha1(msg)
         return "SAPISIDHASH ${timestamp}_$hash"
     }
+
     private fun extractYoutubeIdSafe(input: String): String {
         return when {
             input.contains("youtu.be/") ->
@@ -1254,9 +1230,6 @@ class YoutubeProvider(
         }
     }
 
-
-
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -1265,8 +1238,6 @@ class YoutubeProvider(
     ): Boolean {
         val videoId = data.extractYoutubeId() ?: data
         val fullUrl = "https://www.youtube.com/watch?v=$videoId"
-
-
 
         val context = AcraApplication.context
         val playerType = if (context != null) {
@@ -1277,11 +1248,9 @@ class YoutubeProvider(
         }
 
         if (playerType == "classic") {
-
-            loadExtractor(fullUrl, subtitleCallback, callback)
+            loadLinksClassic(fullUrl, isCasting, subtitleCallback, callback)
         } else {
-
-            com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback, callback)
+            loadLinksAdvanced(videoId, subtitleCallback, callback)
         }
 
         try {
@@ -1372,21 +1341,12 @@ class YoutubeProvider(
         return true
     }
 
-
-
-
-
-
-
-
-
     private suspend fun loadLinksAdvanced(
         videoId: String,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val fullUrl = "https://www.youtube.com/watch?v=$videoId"
-
 
         try {
             val apiUrl = "$mainUrl/youtubei/v1/player"
@@ -1474,23 +1434,17 @@ class YoutubeProvider(
         return true
     }
 
-
-
     private suspend fun loadLinksClassic(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-
-
-
             fun logLarge(tag: String, text: String) {
                 var i = 0
                 val max = 4000
                 while (i < text.length) {
                     val end = minOf(i + max, text.length)
-
                     i = end
                 }
             }
@@ -1512,13 +1466,10 @@ class YoutubeProvider(
             )
 
             try {
-
-
                 val videoId = data.extractYoutubeId() ?: run {
                     if (data.length == 11 && data.matches(Regex("[A-Za-z0-9_-]{11}"))) {
                         data
                     } else {
-
                         return false
                     }
                 }
@@ -1539,12 +1490,10 @@ class YoutubeProvider(
                         ?: watchHtml.substringAfter("ytcfg.set(", "").substringBefore(");")
                             .takeIf { it.trim().startsWith("{") }
                 } catch (e: Exception) {
-
                     null
                 }
 
                 if (ytcfgJsonString.isNullOrBlank()) {
-
                     return false
                 }
 
@@ -1554,7 +1503,6 @@ class YoutubeProvider(
                 val visitorData = findConfig(ytcfgJsonString, "VISITOR_DATA")
 
                 if (apiKey.isNullOrBlank() || visitorData.isNullOrBlank()) {
-
                     return false
                 }
 
@@ -1578,9 +1526,6 @@ class YoutubeProvider(
                 postHeaders["X-Youtube-Client-Name"] = "WEB"
                 postHeaders["X-Youtube-Client-Version"] = clientVersion
                 if (!visitorData.isNullOrBlank()) postHeaders["X-Goog-Visitor-Id"] = visitorData
-
-
-
 
                 val cookieBuilder = StringBuilder()
                 val savedVis = sharedPref?.getString("VISITOR_INFO1_LIVE", null)
@@ -1612,19 +1557,13 @@ class YoutubeProvider(
                         postHeaders["X-Origin"] = origin
                         postHeaders["Origin"] = origin
                         postHeaders["X-Goog-AuthUser"] = "0"
-
                     } catch (e: Exception) {
 
                     }
                 }
 
-
-
-
                 val responseText = app.post(apiUrl, headers = postHeaders, json = payload).text
                 logLarge(name, "PLAYER API Response (first 55k chars):\n${responseText.take(55000)}")
-
-
 
                 try {
                     val root = org.json.JSONObject(responseText)
@@ -1710,25 +1649,18 @@ class YoutubeProvider(
 
                 }
 
-
-
-
-
                 val playerResponse = try {
                     parseJson<PlayerResponse>(responseText)
                 } catch (e: Exception) {
-
                     null
                 }
 
                 if (playerResponse == null) {
-
                     return false
                 }
 
                 val hlsUrl = playerResponse.streamingData?.hlsManifestUrl
                 if (!hlsUrl.isNullOrBlank()) {
-
                     callback(
                         newExtractorLink(this.name, "M3U AUTO", hlsUrl) {
                             this.referer = mainUrl
@@ -1737,10 +1669,8 @@ class YoutubeProvider(
                     )
 
                     try {
-
                         val masterM3u8 = app.get(hlsUrl, referer = mainUrl).text
                         val lines = masterM3u8.lines()
-
 
                         lines.filter { it.startsWith("#EXT-X-MEDIA") && it.contains("TYPE=SUBTITLES") }
                             .forEach { line ->
@@ -1750,11 +1680,9 @@ class YoutubeProvider(
 
                                 if (subUri != null) {
                                     val displayName = subName ?: subLang ?: "Subtitle (HLS)"
-
                                     subtitleCallback(SubtitleFile(displayName, subUri))
                                 }
                             }
-
 
                         lines.forEachIndexed { index, line ->
                             if (line.startsWith("#EXT-X-STREAM-INF")) {
@@ -1766,7 +1694,6 @@ class YoutubeProvider(
                                 val resolution = parseM3u8Tag(infoLine, "RESOLUTION")
                                 val parsedHeight = resolution?.substringAfter("x")?.toIntOrNull() ?: 0
                                 
-                                // 720p 미만 해상도 필터링
                                 if (parsedHeight in 1..719) return@forEachIndexed
 
                                 val resolutionHeight = resolution?.substringAfter("x")?.plus("p") ?: ""
@@ -1792,7 +1719,6 @@ class YoutubeProvider(
                                 }
 
                                 val streamName = nameBuilder.toString().trim()
-                                // 언어별 우선순위 분리를 위한 소스명 변경
                                 val sourceProviderName = if (lang != null) "${this.name} ($lang)" else this.name
 
                                 if (streamName.isNotBlank()) {
@@ -1802,31 +1728,24 @@ class YoutubeProvider(
                                             this.quality = getQualityFromName(resolutionHeight)
                                         }
                                     )
-
                                 }
                             }
                         }
-                        
                     } catch (e: Exception) {
 
                     }
 
                     return true
                 } else {
-
                     return false
                 }
-
             } catch (e: Exception) {
-
                 logError(e)
                 return false
             }
         }
 
-
     private fun parseM3u8Tag(tag: String, key: String): String? {
-
         val regex = Regex("""$key=("([^"]*)"|([^,]*))""")
         val match = regex.find(tag)
         return match?.groupValues?.get(2)?.ifBlank { null }
@@ -1838,14 +1757,3 @@ class YoutubeProvider(
         return regex.find(this)?.groupValues?.getOrNull(1)
     }
 }
-
-
-
-
-
-
-
-
-
-
-
