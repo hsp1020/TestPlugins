@@ -1032,34 +1032,62 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                 val description = extractTitle(safeGet(header, "description") as? Map<*, *>)
 
                 val episodes = mutableListOf<Episode>()
-                val tempSearchResponses = mutableListOf<SearchResponse>()
-                val seenPlaylistIds = mutableSetOf<String>()
 
-                // 하드코딩된 경로 대신 재귀 탐색을 수행하여 OL... 계열 음악/토픽 재생목록의 비디오 데이터 확보
-                processRecursive(data, tempSearchResponses, seenPlaylistIds, playlistMode = false)
+                // 1차 추출: 일반 재생목록 (playlistVideoRenderer 명시적 파싱)
+                val contents = safeGet(
+                    data, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0,
+                    "tabRenderer", "content", "sectionListRenderer", "contents",
+                    0, "itemSectionRenderer", "contents", 0,
+                    "playlistVideoListRenderer", "contents"
+                ) as? List<*>
 
-                tempSearchResponses.forEachIndexed { index, res ->
-                    if (res.url.contains("watch?v=")) {
-                        episodes.add(newEpisode(res.url) {
-                            // processRecursive에서 주입된 태그 메타데이터를 제거하고 순수 제목만 추출
-                            this.name = res.name.substringAfter("} ").trim()
-                            this.episode = index + 1
-                            this.posterUrl = res.posterUrl
-                        })
+                contents?.forEachIndexed { index, item ->
+                    val videoMap = item as? Map<*, *>
+                    val renderer = videoMap?.get("playlistVideoRenderer") as? Map<*, *>
+                    if (renderer != null) {
+                        val vId = renderer["videoId"] as? String
+                        if (vId != null) {
+                            val vidTitle = extractTitle(renderer["title"] as? Map<*, *>) ?: "Episode ${index + 1}"
+                            val thumb = getBestThumbnail(renderer["thumbnail"]) ?: buildThumbnailFromId(vId)
+                            val vidUrl = "$mainUrl/watch?v=$vId"
+                            episodes.add(newEpisode(vidUrl) {
+                                this.name = vidTitle
+                                this.episode = index + 1
+                                this.posterUrl = thumb
+                            })
+                        }
                     }
                 }
 
-                // 재귀 탐색으로도 아이템이 발견되지 않을 경우 폴백(Fallback)으로 기존 탭 구조 탐색
+                // 2차 폴백: 1차 추출 실패 시 OL 계열 토픽/앨범 재생목록 대응 (processRecursive 재귀 탐색)
                 if (episodes.isEmpty()) {
-                    val contents = safeGet(data, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0, "tabRenderer", "content", "sectionListRenderer", "contents") as? List<*>
-                    processRecursive(contents, tempSearchResponses, seenPlaylistIds, playlistMode = false)
+                    val tempSearchResponses = mutableListOf<SearchResponse>()
+                    val seenPlaylistIds = mutableSetOf<String>()
+                    
+                    processRecursive(data, tempSearchResponses, seenPlaylistIds, playlistMode = false)
+
                     tempSearchResponses.forEachIndexed { index, res ->
                         if (res.url.contains("watch?v=")) {
                             episodes.add(newEpisode(res.url) {
                                 this.name = res.name.substringAfter("} ").trim()
                                 this.episode = index + 1
-                                this.posterUrl = res.posterUrl                                
+                                this.posterUrl = res.posterUrl
                             })
+                        }
+                    }
+                    
+                    // 최상위 data에서 찾지 못한 경우 하위 탭 내부 재차 탐색
+                    if (episodes.isEmpty()) {
+                        val fallbackContents = safeGet(data, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0, "tabRenderer", "content", "sectionListRenderer", "contents") as? List<*>
+                        processRecursive(fallbackContents, tempSearchResponses, seenPlaylistIds, playlistMode = false)
+                        tempSearchResponses.forEachIndexed { index, res ->
+                            if (res.url.contains("watch?v=")) {
+                                episodes.add(newEpisode(res.url) {
+                                    this.name = res.name.substringAfter("} ").trim()
+                                    this.episode = index + 1
+                                    this.posterUrl = res.posterUrl
+                                })
+                            }
                         }
                     }
                 }
