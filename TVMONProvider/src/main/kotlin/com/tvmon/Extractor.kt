@@ -1,3 +1,4 @@
+// 파일명: hsp1020/testplugins/TestPlugins-d1a26fae88cb55c8f1d621560cf4e45bd7fd78f6/TVMONProvider/src/main/kotlin/com/tvmon/Extractor.kt
 package com.tvmon
 
 import android.content.Context
@@ -20,6 +21,7 @@ import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.io.BufferedReader
 import java.io.InputStreamReader
@@ -30,7 +32,6 @@ import java.util.Collections
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
-import kotlin.concurrent.thread
 import kotlin.coroutines.resume
 
 class BunnyPoorCdn : ExtractorApi() {
@@ -223,7 +224,6 @@ class BunnyPoorCdn : ExtractorApi() {
                         val reqUrl = request?.url?.toString() ?: ""
                         
                         if (reqUrl.contains("/key.bin") || reqUrl.contains("key7")) {
-                            // [v1.1 수정] app.get(suspend 함수) 호출을 위해 thread 블록을 CoroutineScope(Dispatchers.IO).launch로 대체
                             CoroutineScope(Dispatchers.IO).launch {
                                 println("[v1.1 디버그] key.bin 가로채기 시도: $reqUrl")
                                 try {
@@ -289,10 +289,10 @@ class BunnyPoorCdn : ExtractorApi() {
                     while (isRunning && serverSocket != null && !serverSocket!!.isClosed) { 
                         try { 
                             val socket = serverSocket!!.accept()
-                            // [수정: 에러 원인 제거] 소켓 처리를 개별 코루틴(launch)으로 분리
                             launch { handleClient(socket) } 
                         } catch (e: Exception) {
                             println("[v1.1 디버그] 소켓 accept 중 예외: ${e.message}")
+                            delay(100L)
                         } 
                     } 
                 }
@@ -307,7 +307,6 @@ class BunnyPoorCdn : ExtractorApi() {
         fun setIv(iv: ByteArray) { currentIv = iv }
         fun setTestSegment(url: String) { if (testSegmentUrl == null) testSegmentUrl = url }
 
-        // [수정: 에러 원인 제거] suspend 키워드 추가
         private suspend fun handleClient(socket: Socket) {
             try {
                 socket.soTimeout = 5000
@@ -321,7 +320,7 @@ class BunnyPoorCdn : ExtractorApi() {
                     output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nConnection: close\r\nContent-Length: ${payload.size}\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
                     output.write(payload)
                 } else if (path.contains("/key.bin")) {
-                    if (verifiedKey == null) verifiedKey = verifyMultipleKeys() // suspend 함수 정상 호출 가능!
+                    if (verifiedKey == null) verifiedKey = verifyMultipleKeys()
                     val keyPayload = verifiedKey ?: ByteArray(16)
                     output.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\nContent-Length: ${keyPayload.size}\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
                     output.write(keyPayload)
@@ -332,7 +331,6 @@ class BunnyPoorCdn : ExtractorApi() {
             } finally { try { socket.close() } catch(e: Exception) {} }
         }
 
-        // [수정: 에러 원인 제거] runBlocking 없이 순수 suspend 함수로 작성
         private suspend fun verifyMultipleKeys(): ByteArray? {
             val url = testSegmentUrl ?: return null
             val targetIv = currentIv ?: ByteArray(16)
