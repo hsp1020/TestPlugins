@@ -1695,7 +1695,6 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                                 val resolution = parseM3u8Tag(infoLine, "RESOLUTION")
                                 val parsedHeight = resolution?.substringAfter("x")?.toIntOrNull() ?: 0
                                 
-                                if (parsedHeight in 1..719) return@forEachIndexed
 
                                 val resolutionHeight = resolution?.substringAfter("x")?.plus("p") ?: ""
 
