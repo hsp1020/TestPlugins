@@ -518,16 +518,14 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
 
     private fun findTokenRecursive(data: Any?): String? {
         if (data is Map<*, *>) {
-            // [핵심 교정]: 칩 카탈로그 횡스크롤용 토큰 오진출 원천 차단
-            if (data.containsKey("feedFilterChipBarRenderer") || data.containsKey("chipCloudRenderer")) {
-                return null
-            }
-            
-            val targetId = data["targetId"] as? String
-            if (targetId != null && targetId.contains("chip", ignoreCase = true)) {
+            // [방어 로직]: 칩 바(가로 스크롤 메뉴) 자체의 더미 토큰 탐색 원천 차단
+            if (data.containsKey("feedFilterChipBarRenderer") || 
+                data.containsKey("chipCloudRenderer") || 
+                data.containsKey("relatedChipCloudRenderer")) {
                 return null
             }
 
+            // [추출 로직 1]: 명시적 비디오 그리드 스크롤 렌더러 타겟팅
             val renderer = data["continuationItemRenderer"] as? Map<*, *>
             if (renderer != null) {
                 val endpoint = renderer["continuationEndpoint"] as? Map<*, *>
@@ -537,33 +535,32 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                         ?: (endpoint["searchContinuationEndpoint"] as? Map<*, *>)?.get("token") as? String
                         ?: (endpoint["command"] as? Map<*, *>)?.get("token") as? String
                         ?: endpoint["token"] as? String
-                    
                     if (!token.isNullOrBlank()) return token
                 }
             }
-            
+
+            // [추출 로직 2]: 레거시 스크롤 컨테이너 타겟팅
             val nextData = data["nextContinuationData"] as? Map<*, *>
             if (nextData != null) {
                 val token = nextData["continuation"] as? String
                 if (!token.isNullOrBlank()) return token
             }
-            
+
+            // 정방향 재귀 탐색 (구조적 결함을 차단했으므로 역순 탐색 불필요)
             for (v in data.values) {
                 val t = findTokenRecursive(v)
                 if (t != null) return t
             }
         } else if (data is List<*>) {
-            // 비디오 배열의 가장 끝에 실제 스크롤 토큰이 존재하므로 역순(reversed) 탐색 우선
-            for (i in data.indices.reversed()) {
-                val t = findTokenRecursive(data[i])
+            for (i in data) {
+                val t = findTokenRecursive(i)
                 if (t != null) return t
             }
         }
         return null
     }
-    
-    
-    override val mainPage: List<MainPageData>
+
+        override val mainPage: List<MainPageData>
         get() {
             val list = mutableListOf<MainPageData>()
             val homeTitle = when(lang) {
@@ -621,7 +618,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
     }
 
     private val continuationTokens = mutableMapOf<String, String>()
-    
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val maxPages = sharedPref?.getInt("channel_pages_limit", 6) ?: 6
         if (page > maxPages) return newHomePageResponse(request, emptyList(), hasNext = false)
@@ -638,6 +635,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                 if (isChip) {
                     savedApiKey = savedApiKey ?: sharedPref?.getString("yt_api_key", null)
                     savedVisitorData = savedVisitorData ?: sharedPref?.getString("yt_visitor_data", null)
+                    savedClientVersion = savedClientVersion ?: sharedPref?.getString("yt_client_version", "2.20240725.01.00")
                     val tokenToUse = requestData.removePrefix("chip_")
                     
                     if (!savedApiKey.isNullOrBlank()) {
@@ -667,12 +665,13 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                     
                     savedApiKey = findConfig(html, "INNERTUBE_API_KEY") ?: savedApiKey
                     savedVisitorData = findConfig(html, "VISITOR_DATA") ?: savedVisitorData
-                    savedClientVersion = findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: savedClientVersion
+                    savedClientVersion = findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: savedClientVersion ?: "2.20240725.01.00"
                     
                     if (!savedApiKey.isNullOrBlank()) {
                         sharedPref?.edit()
                             ?.putString("yt_api_key", savedApiKey)
                             ?.putString("yt_visitor_data", savedVisitorData)
+                            ?.putString("yt_client_version", savedClientVersion)
                             ?.apply()
                     }
 
@@ -707,7 +706,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                 if (!tokenToUse.isNullOrBlank()) {
                     val apiKey = savedApiKey ?: sharedPref?.getString("yt_api_key", null)
                     val vData = savedVisitorData ?: sharedPref?.getString("yt_visitor_data", null) ?: ""
-                    val cVersion = savedClientVersion ?: "2.20240725.01.00"
+                    val cVersion = savedClientVersion ?: sharedPref?.getString("yt_client_version", "2.20240725.01.00") ?: "2.20240725.01.00"
                     val apiUrl = if (requestData.contains("/results")) "$mainUrl/youtubei/v1/search?key=$apiKey" else "$mainUrl/youtubei/v1/browse?key=$apiKey"
                     val payload = mapOf(
                         "context" to mapOf("client" to mapOf(
@@ -738,9 +737,6 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
 
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
     }
-
-
-
     
        
     fun findContinuationItemsRecursive(obj: Any?): List<*>? {
