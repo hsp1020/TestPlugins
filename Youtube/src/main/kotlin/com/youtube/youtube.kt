@@ -49,7 +49,15 @@ class YoutubeProvider(
 
     private var isSearchContext = false
 
-    class YouTubeInterceptor(private val prefs: SharedPreferences?, private val provider: YoutubeProvider) : Interceptor {
+
+class YouTubeInterceptor(private val prefs: SharedPreferences?, private val provider: YoutubeProvider) : Interceptor {
+        
+        private fun sha1(input: String): String {
+            val md = java.security.MessageDigest.getInstance("SHA-1")
+            val bytes = md.digest(input.toByteArray())
+            return bytes.joinToString("") { "%02x".format(it) }
+        }
+
         override fun intercept(chain: Interceptor.Chain): Response {
             val requestBuilder = chain.request().newBuilder()
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36")
@@ -64,17 +72,36 @@ class YoutubeProvider(
             }
 
             val authKeys = listOf("SID", "HSID", "SSID", "APISID", "SAPISID")
+            var sapisidVal: String? = null
+
             authKeys.forEach { key ->
                 val value = prefs?.getString(key, null)
                 if (!value.isNullOrBlank()) {
                     cookieBuilder.append("$key=$value; ")
+                    if (key == "SAPISID") sapisidVal = value
                 }
             }
-            // hl 설정을 provider.lang과 동기화하여 칩 이름 및 영상 정보를 지역화함
+            
             cookieBuilder.append("PREF=f6=40000000&hl=${provider.lang}; CONSENT=YES+fx.456722336;")
 
             requestBuilder.addHeader("Cookie", cookieBuilder.toString())
             requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
+
+            // [인증 규격 추가]: SAPISIDHASH 연산 및 글로벌 Authorization 헤더 주입
+            if (!sapisidVal.isNullOrBlank()) {
+                try {
+                    val timestamp = (System.currentTimeMillis() / 1000).toString()
+                    val origin = "https://www.youtube.com"
+                    val msg = "$timestamp $sapisidVal $origin"
+                    val hash = sha1(msg)
+                    requestBuilder.addHeader("Authorization", "SAPISIDHASH ${timestamp}_$hash")
+                    requestBuilder.addHeader("X-Origin", origin)
+                    requestBuilder.addHeader("X-Goog-AuthUser", "0")
+                } catch (e: Exception) {
+                    logError(e)
+                }
+            }
+
             return chain.proceed(requestBuilder.build())
         }
     }
