@@ -89,6 +89,14 @@ subprojects {
         // Stubs for all cloudstream classes
         cloudstream("com.github.recloudstream:cloudstream:pre-release")
 
+        // UI 컴파일 에러 해결을 위한 AndroidX 및 Material 라이브러리 추가
+        implementation("androidx.core:core-ktx:1.12.0")
+        implementation("androidx.appcompat:appcompat:1.6.1")
+        implementation("androidx.fragment:fragment-ktx:1.6.2")
+        implementation("androidx.recyclerview:recyclerview:1.3.2")
+        implementation("com.google.android.material:material:1.11.0")
+        implementation("androidx.preference:preference-ktx:1.2.1")
+
         implementation(kotlin("stdlib"))
         implementation("com.github.Blatzar:NiceHttp:0.4.16")
         implementation("org.jsoup:jsoup:1.22.1")
