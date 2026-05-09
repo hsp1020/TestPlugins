@@ -542,37 +542,6 @@ class YoutubeProvider(
             return list
         }
         
-    override val mainPage: List<MainPageData>
-        get() {
-            val list = mutableListOf<MainPageData>()
-            val isEn = lang == "en"
-
-            if (sharedPref?.getBoolean("show_trending_home", true) == true) {
-                list.add(MainPageData(if (isEn) "Home" else "الرئيسية (Home)", "Home"))
-                
-                // 비동기 캐싱된 카탈로그 칩 데이터 로드
-                val cachedChipsJson = sharedPref.getString("yt_cached_chips", "[]") ?: "[]"
-                try {
-                    val mapper = com.fasterxml.jackson.module.kotlin.jacksonObjectMapper()
-                    val chips: List<CachedChip> = mapper.readValue(cachedChipsJson, com.fasterxml.jackson.core.type.TypeReference<List<CachedChip>>() {})
-                    chips.forEach { chip ->
-                        list.add(MainPageData(chip.name, "chip_${chip.token}", horizontalImages = true))
-                    }
-                } catch (e: Exception) {
-                    logError(e)
-                }
-            }
-
-            val customSections = getCustomHomepages()
-            customSections.filter { it.isEnabled && it.url != "Home" }.forEach { section ->
-                var title = section.name
-                if (title.isBlank()) title = extractNameFromUrl(section.url)
-                list.add(MainPageData(title, section.url, horizontalImages = true))
-            }
-
-            return list
-        }
-        
 
     private fun getCustomHomepages(): List<CustomSection> {
         val json = sharedPref?.getString("custom_homepages_v3", "[]") ?: "[]"
