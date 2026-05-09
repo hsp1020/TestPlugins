@@ -1058,8 +1058,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                             episodes.add(newEpisode(res.url) {
                                 this.name = res.name.substringAfter("} ").trim()
                                 this.episode = index + 1
-                                this.posterUrl = res.posterUrl
-                                this.description = if (durationText != null) "Duration: $durationText" else null
+                                this.posterUrl = res.posterUrl                                
                             })
                         }
                     }
