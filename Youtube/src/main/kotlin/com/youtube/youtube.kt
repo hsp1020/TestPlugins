@@ -789,7 +789,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
 
     private fun addShortToCache(title: String, url: String, poster: String?) {
         if (collectedShorts.none { it.data == url }) {
-            collectedShorts.add(
+             collectedShorts.add(
                 newEpisode(url) {
                     this.name = title
                     this.posterUrl = poster
@@ -840,7 +840,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
 
             return newTvSeriesLoadResponse("Shorts Feed", url, TvType.TvSeries, targetEpisodes) {
                 this.posterUrl = poster
-                this.plot = "قائمة تشغيل تلقائية من الشورت스 (${targetEpisodes.size} فيديو)"
+                this.plot = "قائمة تشغيل تلقائية من الشورتس (${targetEpisodes.size} فيديو)"
                 this.tags = listOf("Shorts", "Feed")
             }
         }
@@ -1032,40 +1032,24 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                 val description = extractTitle(safeGet(header, "description") as? Map<*, *>)
 
                 val episodes = mutableListOf<Episode>()
+                val tempSearchResponses = mutableListOf<SearchResponse>()
+                val seenPlaylistIds = mutableSetOf<String>()
 
-                // 1차 추출: 일반 재생목록 (playlistVideoRenderer 명시적 파싱)
-                val contents = safeGet(
-                    data, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0,
-                    "tabRenderer", "content", "sectionListRenderer", "contents",
-                    0, "itemSectionRenderer", "contents", 0,
-                    "playlistVideoListRenderer", "contents"
-                ) as? List<*>
+                processRecursive(data, tempSearchResponses, seenPlaylistIds, playlistMode = false)
 
-                contents?.forEachIndexed { index, item ->
-                    val videoMap = item as? Map<*, *>
-                    val renderer = videoMap?.get("playlistVideoRenderer") as? Map<*, *>
-                    if (renderer != null) {
-                        val vId = renderer["videoId"] as? String
-                        if (vId != null) {
-                            val vidTitle = extractTitle(renderer["title"] as? Map<*, *>) ?: "Episode ${index + 1}"
-                            val thumb = getBestThumbnail(renderer["thumbnail"]) ?: buildThumbnailFromId(vId)
-                            val vidUrl = "$mainUrl/watch?v=$vId"
-                            episodes.add(newEpisode(vidUrl) {
-                                this.name = vidTitle
-                                this.episode = index + 1
-                                this.posterUrl = thumb
-                            })
-                        }
+                tempSearchResponses.forEachIndexed { index, res ->
+                    if (res.url.contains("watch?v=")) {
+                        episodes.add(newEpisode(res.url) {
+                            this.name = res.name.substringAfter("} ").trim()
+                            this.episode = index + 1
+                            this.posterUrl = res.posterUrl
+                        })
                     }
                 }
 
-                // 2차 폴백: 1차 추출 실패 시 OL 계열 토픽/앨범 재생목록 대응 (processRecursive 재귀 탐색)
                 if (episodes.isEmpty()) {
-                    val tempSearchResponses = mutableListOf<SearchResponse>()
-                    val seenPlaylistIds = mutableSetOf<String>()
-                    
-                    processRecursive(data, tempSearchResponses, seenPlaylistIds, playlistMode = false)
-
+                    val contents = safeGet(data, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0, "tabRenderer", "content", "sectionListRenderer", "contents") as? List<*>
+                    processRecursive(contents, tempSearchResponses, seenPlaylistIds, playlistMode = false)
                     tempSearchResponses.forEachIndexed { index, res ->
                         if (res.url.contains("watch?v=")) {
                             episodes.add(newEpisode(res.url) {
@@ -1073,21 +1057,6 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                                 this.episode = index + 1
                                 this.posterUrl = res.posterUrl
                             })
-                        }
-                    }
-                    
-                    // 최상위 data에서 찾지 못한 경우 하위 탭 내부 재차 탐색
-                    if (episodes.isEmpty()) {
-                        val fallbackContents = safeGet(data, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0, "tabRenderer", "content", "sectionListRenderer", "contents") as? List<*>
-                        processRecursive(fallbackContents, tempSearchResponses, seenPlaylistIds, playlistMode = false)
-                        tempSearchResponses.forEachIndexed { index, res ->
-                            if (res.url.contains("watch?v=")) {
-                                episodes.add(newEpisode(res.url) {
-                                    this.name = res.name.substringAfter("} ").trim()
-                                    this.episode = index + 1
-                                    this.posterUrl = res.posterUrl
-                                })
-                            }
                         }
                     }
                 }
@@ -1248,10 +1217,14 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
             "advanced"
         }
 
+        var handled = false
         if (playerType == "classic") {
-            loadLinksClassic(fullUrl, isCasting, subtitleCallback, callback)
-        } else {
+            handled = loadLinksClassic(fullUrl, isCasting, subtitleCallback, callback)
+        }
+        
+        if (!handled) {
             loadLinksAdvanced(videoId, subtitleCallback, callback)
+            loadExtractor(fullUrl, subtitleCallback, callback)
         }
 
         try {
@@ -1508,8 +1481,8 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                 }
 
                 val clientMap = mapOf(
-                    "hl" to "en",
-                    "gl" to "US",
+                    "hl" to "ko",
+                    "gl" to "KR",
                     "clientName" to "WEB",
                     "clientVersion" to clientVersion,
                     "userAgent" to safariUserAgent,
@@ -1695,6 +1668,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                                 val resolution = parseM3u8Tag(infoLine, "RESOLUTION")
                                 val parsedHeight = resolution?.substringAfter("x")?.toIntOrNull() ?: 0
                                 
+                                if (parsedHeight in 1..719) return@forEachIndexed
 
                                 val resolutionHeight = resolution?.substringAfter("x")?.plus("p") ?: ""
 
