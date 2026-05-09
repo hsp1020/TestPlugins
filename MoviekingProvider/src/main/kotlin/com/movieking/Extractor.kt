@@ -1,3 +1,4 @@
+// 파일명: hsp1020/testplugins/TestPlugins-d1a26fae88cb55c8f1d621560cf4e45bd7fd78f6/MoviekingProvider/src/main/kotlin/com/movieking/Extractor.kt
 package com.movieking
 
 import android.util.Base64
@@ -6,6 +7,7 @@ import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.SubtitleFile
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.*
@@ -38,7 +40,6 @@ class BcbcRedExtractor : ExtractorApi() {
             val keyMatch = Regex("""#EXT-X-KEY:METHOD=AES-128,URI="([^"]+)"(?:,IV=(0x[0-9a-fA-F]+))?""").find(playlistRes)
             val hexIv = keyMatch?.groupValues?.get(2)
             
-            // [고유 개선] 무거운 CPU 연산을 백그라운드 코루틴으로 분리하여 ANR(UI 멈춤) 방지
             val candidates = if (keyMatch != null) withContext(Dispatchers.Default) { solveKeyCandidatesCombinatorial(baseHeaders, keyMatch.groupValues[1]) } else emptyList()
             
             val lines = playlistRes.lines()
@@ -122,7 +123,6 @@ class BcbcRedExtractor : ExtractorApi() {
         return ivs
     }
 
-    // [고유 개선] 하드코딩된 암호화 갭 배열을 다중 패턴으로 유연화하여, 사이트 방어 대응력 확보
     private suspend fun solveKeyCandidatesCombinatorial(h: Map<String, String>, kUrl: String): List<ByteArray> {
         val list = mutableListOf<ByteArray>()
         try {
@@ -185,7 +185,12 @@ class BcbcRedExtractor : ExtractorApi() {
                 isRunning = true
                 CoroutineScope(Dispatchers.IO).launch { 
                     while (isRunning && serverSocket != null && !serverSocket!!.isClosed) { 
-                        try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {} 
+                        try {
+                            val socket = serverSocket!!.accept()
+                            launch { handleClient(socket) }
+                        } catch (e: Exception) {
+                            delay(100L)
+                        } 
                     } 
                 }
             } catch (e: Exception) {}
@@ -193,14 +198,13 @@ class BcbcRedExtractor : ExtractorApi() {
 
         fun stop() { isRunning = false; try { serverSocket?.close(); serverSocket = null } catch (e: Exception) {} }
         
-        private fun handleClient(socket: Socket) {
+        private suspend fun handleClient(socket: Socket) {
             try {
                 socket.soTimeout = 5000
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
                 val path = reader.readLine()?.split(" ")?.get(1) ?: return
                 val output = socket.getOutputStream()
 
-                //[공통 개선] Connection: close & Content-Length 로 무한 버퍼링 픽스
                 if (path.contains("/playlist.m3u8")) {
                     val payload = finalM3u8.toByteArray(charset("UTF-8"))
                     output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nConnection: close\r\nContent-Length: ${payload.size}\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
