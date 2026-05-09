@@ -81,7 +81,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 val builtLinks = mutableListOf<ExtractorLink>()
                 val seenUrls = mutableSetOf<String>()
 
-
                 val videoOnlyList = (s.videoOnlyStreams ?: emptyList()).mapNotNull { vs ->
                     try {
                         val streamUrl = vs.content ?: return@mapNotNull null
@@ -89,6 +88,10 @@ open class YoutubeExtractor : ExtractorApi() {
 
                         val label = buildVideoLabelNumber(vs)
                         val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
+                        
+                        // 720p 미만 해상도 필터링
+                        if (height in 1..719) return@mapNotNull null
+
                         var mime = vs.format?.mimeType
                         if (mime.isNullOrEmpty()) mime = getMimeTypeFromUrl(streamUrl, false)
 
@@ -97,7 +100,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
                         StreamInfo(streamUrl, mime, height, label, initR, indexR)
                     } catch (e: Exception) { null }
-                }.distinctBy { it.height } // هذا السطر يمنع تكرار الجودات المتشابهة
+                }.distinctBy { it.height }
 
                 val audioInfoList = (s.audioStreams ?: emptyList()).mapNotNull { asr ->
                     try {
@@ -110,7 +113,7 @@ open class YoutubeExtractor : ExtractorApi() {
                         val indexR = if (asr.indexStart != null && asr.indexEnd != null) "${asr.indexStart}-${asr.indexEnd}" else null
 
                         var rawLang = asr.audioTrackId ?: "Default"
-                        if (rawLang.contains(".")) rawLang = rawLang.substringBefore(".") // يحول fr.3 إلى fr
+                        if (rawLang.contains(".")) rawLang = rawLang.substringBefore(".")
 
                         AudioInfo(aUrl, mime, bitrate, initR, indexR, rawLang.uppercase())
                     } catch (e: Exception) { null }
@@ -123,9 +126,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 } catch (e: Exception) { }
 
                 startServerIfNeeded()
-
-
-
 
                 for (video in videoOnlyList) {
                     if (audiosByLanguage.isNotEmpty()) {
@@ -143,14 +143,13 @@ open class YoutubeExtractor : ExtractorApi() {
                                 val localLink = registerManifestAndGetUrl(dashXml)
 
                                 if (localLink != null) {
-
-
-
                                     val finalName = "${video.label} ($lang) ${video.label}"
+                                    // 언어별 우선순위 분리를 위한 소스명 변경
+                                    val sourceName = "${this.name} ($lang)"
 
                                     builtLinks.add(
                                         newExtractorLink(
-                                            this.name,
+                                            sourceName,
                                             finalName,
                                             localLink,
                                             type = ExtractorLinkType.DASH
@@ -171,6 +170,10 @@ open class YoutubeExtractor : ExtractorApi() {
                         if (!seenUrls.add(mUrl)) return@mapNotNull null
                         val label = buildVideoLabelNumber(vs)
                         val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
+                        
+                        // 720p 미만 해상도 필터링
+                        if (height in 1..719) return@mapNotNull null
+                        
                         Triple(mUrl, label, height)
                     } catch (e: Exception) { null }
                 }
@@ -198,8 +201,6 @@ open class YoutubeExtractor : ExtractorApi() {
             } catch (e: Exception) { null }
         }?.forEach { subtitleCallback(it) }
     }
-
-
 
     @Synchronized
     private fun startServerIfNeeded() {
@@ -253,8 +254,6 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         } catch (e: Exception) {}
     }
-
-
 
     private fun buildDashManifestXml(
         video: StreamInfo,
