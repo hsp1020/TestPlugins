@@ -1754,6 +1754,11 @@ class YoutubeProvider(
                                         ?: return@forEachIndexed
 
                                 val resolution = parseM3u8Tag(infoLine, "RESOLUTION")
+                                val parsedHeight = resolution?.substringAfter("x")?.toIntOrNull() ?: 0
+                                
+                                // 720p 미만 해상도 필터링
+                                if (parsedHeight in 1..719) return@forEachIndexed
+
                                 val resolutionHeight = resolution?.substringAfter("x")?.plus("p") ?: ""
 
                                 val audioId = parseM3u8Tag(infoLine, "YT-EXT-AUDIO-CONTENT-ID")
@@ -1777,10 +1782,12 @@ class YoutubeProvider(
                                 }
 
                                 val streamName = nameBuilder.toString().trim()
+                                // 언어별 우선순위 분리를 위한 소스명 변경
+                                val sourceProviderName = if (lang != null) "${this.name} ($lang)" else this.name
 
                                 if (streamName.isNotBlank()) {
                                     callback(
-                                        newExtractorLink(this.name, streamName, urlLine) {
+                                        newExtractorLink(sourceProviderName, streamName, urlLine) {
                                             this.referer = mainUrl
                                             this.quality = getQualityFromName(resolutionHeight)
                                         }
@@ -1789,6 +1796,7 @@ class YoutubeProvider(
                                 }
                             }
                         }
+                        
                     } catch (e: Exception) {
 
                     }
