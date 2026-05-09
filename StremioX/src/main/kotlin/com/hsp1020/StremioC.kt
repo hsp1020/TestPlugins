@@ -587,8 +587,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val globalId = if (!loadData.imdbId.isNullOrBlank()) loadData.imdbId else primaryId
         val targetType = loadData.type ?: if ((loadData.season ?: 0) > 0 || (loadData.episode ?: 0) > 0) "series" else "movie"
         
-        val globalSeason = if (targetType == "movie") null else loadData.imdbSeason?.takeIf { it > 0 } ?: loadData.season?.takeIf { it > 0 } ?: 1
-        val globalEpisode = if (targetType == "movie") null else loadData.imdbEpisode?.takeIf { it > 0 } ?: loadData.episode?.takeIf { it > 0 } ?: 1
+        // [교정]: type이 other이더라도 season/episode가 없으면 영화로 취급
+        val actualIsMovie = targetType == "movie" || (loadData.season == null && loadData.episode == null)
+        
+        val globalSeason = if (actualIsMovie) null else loadData.imdbSeason?.takeIf { it > 0 } ?: loadData.season?.takeIf { it > 0 } ?: 1
+        val globalEpisode = if (actualIsMovie) null else loadData.imdbEpisode?.takeIf { it > 0 } ?: loadData.episode?.takeIf { it > 0 } ?: 1
 
         val primaryStremioId = buildStremioId(targetType, primaryId, loadData.season, loadData.episode) ?: primaryId
         val encodedPrimaryId = primaryStremioId.urlEncode()
@@ -677,6 +680,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val finalTitle = if (isSeason2Plus) "$scrapingTitle Season $globalSeason" else scrapingTitle
         val finalYear = if (isSeason2Plus) loadData.airedYear?.toString() ?: loadData.year?.toString() else loadData.year?.toString()
 
+        // [교정]: type 판별 논리 무결성 확보
+        val actualIsMovie = targetType == "movie" || (loadData.season == null && loadData.episode == null)
+
         return mutableMapOf(
             "title" to scrapingTitle,
             "orgTitle" to loadData.originalTitle,
@@ -695,7 +701,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             "tmdbId" to loadData.tmdbId,
             "type" to targetType,
             "tvtype" to targetType,
-            "isMovie" to (targetType == "movie"),
+            "isMovie" to actualIsMovie,
             "isAnime" to isAnimeMedia,
             "isBollywood" to loadData.isBollywood,
             "isAsian" to loadData.isAsian,
@@ -703,7 +709,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             "malId" to loadData.malId
         )
     }
-
+    
     private suspend fun invokeCineStream(
         loadData: LoadData,
         targetType: String,
