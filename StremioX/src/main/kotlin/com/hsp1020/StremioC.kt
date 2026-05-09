@@ -1,5 +1,4 @@
-
-// v1.208 (Refactored: Clean Code, DRY Principle Applied, Removed Spaghetti Reflection & Mapping)
+// 파일명: hsp1020/testplugins/TestPlugins-d1a26fae88cb55c8f1d621560cf4e45bd7fd78f6/StremioX/src/main/kotlin/com/hsp1020/StremioC.kt
 package com.hsp1020
 
 import android.content.Context
@@ -66,6 +65,7 @@ import java.net.URLEncoder
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.lang.ref.WeakReference
 
 inline fun <T> runSuspendCatching(block: () -> T): Result<T> {
     return try {
@@ -119,30 +119,31 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         private val cacheMutexes = ConcurrentHashMap<String, Mutex>()
         private val CACHE_TTL_MS = TimeUnit.HOURS.toMillis(1)
         
-        // Cache Instances
-        @Volatile private var cachedCineStreamProvider: MainAPI? = null
-        @Volatile private var cachedStreamPlayProvider: MainAPI? = null
+        // [수정: 메모리 누수 방지] 약한 참조(WeakReference)를 사용하여 ClassLoader 영구 누수 차단
+        @Volatile private var cachedCineStreamProviderRef: WeakReference<MainAPI>? = null
+        @Volatile private var cachedStreamPlayProviderRef: WeakReference<MainAPI>? = null
 
         @Volatile private var hasSearchedCineStream = false
         @Volatile private var hasSearchedStreamPlay = false
         
         @Volatile private var hasSyncedCineStreamSettings = false
 
-        // Settings Cache
         private val settingsCache = ConcurrentHashMap<String, Pair<Boolean, Long>>()
         
         @Volatile private var cachedCustomHosts: Set<String>? = null
         @Volatile private var cachedCustomHostsTime: Long = 0
         private const val SETTINGS_CACHE_TTL = 60_000L
 
-        val networkSemaphore = Semaphore(20)
+        // [수정: 동시성 과부하 방지] 트래픽 스톰 방지를 위해 세마포어 허용량 하향 조정
+        val networkSemaphore = Semaphore(10)
 
         val customSession by lazy {
             val newClient = app.baseClient.newBuilder()
                 .protocols(listOf(Protocol.HTTP_1_1))
                 .dispatcher(Dispatcher().apply {
-                    maxRequests = 100
-                    maxRequestsPerHost = 100
+                    // [수정: 리소스 최적화] 극단적인 커넥션 풀 설정을 정상 범위로 제한하여 네트워크 병목 방지
+                    maxRequests = 30
+                    maxRequestsPerHost = 15
                 })
                 .connectionPool(ConnectionPool(30, 1, TimeUnit.MINUTES))
                 .build()
@@ -153,22 +154,13 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
         }
 
-        // ==========================================
-        // 🔧 StremioC 최적화: 전역 OkHttp Dispatcher의 호스트당 동시 연결 제한 증가
-        //    기본값 5 → 30 으로 상향하여 CineStream/StreamPlay 등 다른 플러그인이
-        //    동일 호스트에 대해 다수의 요청을 병렬로 보낼 수 있도록 함.
-        //    (전역 설정 변경이나 스크래핑 환경에서는 이로운 편)
-        // ==========================================
         init {
-            app.baseClient.dispatcher.maxRequestsPerHost = 100
-            app.baseClient.dispatcher.maxRequests = 100 // 혹시 모를 전역 최대치도 함께 조절
+            // [수정: 리소스 최적화] 전역 커넥션 제한 하향
+            app.baseClient.dispatcher.maxRequestsPerHost = 15
+            app.baseClient.dispatcher.maxRequests = 30 
         }
 
-        // ==========================================
-        // REFACTORED: Generic Reflection Loader
-        // ==========================================
         private fun loadProviderDynamically(pluginKeyword: String, className: String): MainAPI? {
-            
             try {
                 val pmClass = Class.forName("com.lagradost.cloudstream3.plugins.PluginManager")
                 val pmInstance = pmClass.getField("INSTANCE").get(null)
@@ -200,39 +192,36 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     val clazz = foundLoader.loadClass(className)
                     return clazz.newInstance() as? MainAPI
                 }
-            } catch (e: Exception) {
-                // Ignore gracefully
-            }
+            } catch (e: Exception) {}
             return null
         }
 
         @Synchronized
         fun getCineStreamProvider(forceSearch: Boolean = false): MainAPI? {
-            if (cachedCineStreamProvider != null) return cachedCineStreamProvider
+            cachedCineStreamProviderRef?.get()?.let { return it }
             if (!forceSearch && hasSearchedCineStream) return null
             hasSearchedCineStream = true
 
-            cachedCineStreamProvider = APIHolder.allProviders.find { it.name.equals("CineStream", true) }
+            val provider = APIHolder.allProviders.find { it.name.equals("CineStream", true) }
                 ?: loadProviderDynamically("megix", "com.megix.CineStreamProvider")
             
-            return cachedCineStreamProvider
+            if (provider != null) cachedCineStreamProviderRef = WeakReference(provider)
+            return provider
         }
 
         @Synchronized
         fun getStreamPlayProvider(forceSearch: Boolean = false): MainAPI? {
-            if (cachedStreamPlayProvider != null) return cachedStreamPlayProvider
+            cachedStreamPlayProviderRef?.get()?.let { return it }
             if (!forceSearch && hasSearchedStreamPlay) return null
             hasSearchedStreamPlay = true
 
-            cachedStreamPlayProvider = APIHolder.allProviders.find { it.name.equals("StreamPlay", true) }
+            val provider = APIHolder.allProviders.find { it.name.equals("StreamPlay", true) }
                 ?: loadProviderDynamically("phisher", "com.phisher98.StreamPlay")
             
-            return cachedStreamPlayProvider
+            if (provider != null) cachedStreamPlayProviderRef = WeakReference(provider)
+            return provider
         }
         
-        // ==========================================
-        // REFACTORED: Generic Preference Checker
-        // ==========================================
         private fun isIntegrationEnabled(prefKey: String): Boolean {
             val now = System.currentTimeMillis()
             val cached = settingsCache[prefKey]
@@ -260,18 +249,18 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             key: String, 
             fetchBlock: suspend () -> Pair<List<SearchResponse>, Int>?
         ): Pair<List<SearchResponse>, Int>? {
+            // [수정: 메모리 누수 방지] 맵 접근 시 만료 데이터 능동 제거 로직 추가
+            val now = System.currentTimeMillis()
+            globalPageCache.entries.removeIf { now - it.value.third > CACHE_TTL_MS }
+
             globalPageCache[key]?.let { entry ->
-                if (System.currentTimeMillis() - entry.third < CACHE_TTL_MS) {
-                    return Pair(entry.first, entry.second)
-                }
+                return Pair(entry.first, entry.second)
             }
 
             val mutex = cacheMutexes.getOrPut(key) { Mutex() }
             return mutex.withLock {
                 globalPageCache[key]?.let { entry ->
-                    if (System.currentTimeMillis() - entry.third < CACHE_TTL_MS) {
-                        return@withLock Pair(entry.first, entry.second)
-                    }
+                    return@withLock Pair(entry.first, entry.second)
                 }
 
                 val result = fetchBlock()
@@ -608,9 +597,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val primaryStremioId = buildStremioId(targetType, primaryId, loadData.season, loadData.episode) ?: primaryId
         val encodedPrimaryId = primaryStremioId.urlEncode()
 
-        // ----------------------------------------------------
-        // REFACTORED: Deduplication Set to prevent double links
-        // ----------------------------------------------------
         val seenLinks = Collections.synchronizedSet(mutableSetOf<String>())
         val wrappedCallback: (ExtractorLink) -> Unit = { link ->
             if (seenLinks.add(link.url)) {
@@ -673,9 +659,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
     }
 
-    // ==========================================
-    // REFACTORED: Base Payload Builder
-    // ==========================================
     private fun buildBasePayload(
         loadData: LoadData,
         targetType: String,
@@ -774,7 +757,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
             val payload = buildBasePayload(loadData, targetType, globalId, globalSeason, globalEpisode)
             
-            // CineStream specific overrides
             val isKitsuMedia = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
             payload["id"] = payload["imdbId"] ?: ""
             payload["anilistId"] = loadData.anilistId
@@ -806,12 +788,13 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
             val payload = buildBasePayload(loadData, targetType, globalId, globalSeason, globalEpisode)
             
-            // StreamPlay specific overrides
-            payload["id"] = loadData.tmdbId
-                ?: loadData.imdbId
-                ?: loadData.id       // "mal:63019" 등의 원본 ID
-            payload["year"] = loadData.year
-            payload["lastSeason"] = 1 // Required for Kisskh relaxed search
+            payload["id"] = loadData.tmdbId ?: loadData.imdbId ?: loadData.id
+            payload["year"] = loadData.year ?: loadData.airedYear
+            
+            if (payload["title"] == null || payload["title"] == "Unknown") {
+            payload["title"] = loadData.id ?: payload["id"]?.toString() ?: "Unknown Title"
+            }
+            payload["lastSeason"] = 1 
             payload["aniId"] = loadData.anilistId?.toString()
 
             kotlinx.coroutines.withTimeoutOrNull(25000L) {
@@ -930,6 +913,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val thinData = LoadData(
                 id = this.id,
                 type = this.type ?: "movie",
+                title = this.name ?: this.id ?: "Empty",
                 tmdbId = this.moviedb_id ?: this.tmdbIdExt?.toIntOrNull(),
                 malId = this.malIdExt?.toIntOrNull(),
                 kitsuId = this.kitsuIdExt
@@ -1046,12 +1030,15 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     .filter { it.first !in existingTmdbIds && it.first != tmdbIdStr.toIntOrNull() }
                     .toList()
 
+                // [수정: CPU 및 통신 과부하 방지] 비동기 동시 요청을 Semaphore로 제어하여 I/O 스톰 억제
                 val missingMediaDeferred = missingPairs.map { pair ->
                     async(Dispatchers.IO) {
-                        runSuspendCatching {
-                            val res = StremioC.customSession.get(provider.buildTmdbUrl("/${pair.second}/${pair.first}"), timeout = 10).parsedSafe<TmdbDetailResponse>()
-                            res?.toTmdbMedia(pair.second)
-                        }.getOrNull()
+                        StremioC.networkSemaphore.withPermit {
+                            runSuspendCatching {
+                                val res = StremioC.customSession.get(provider.buildTmdbUrl("/${pair.second}/${pair.first}"), timeout = 10).parsedSafe<TmdbDetailResponse>()
+                                res?.toTmdbMedia(pair.second)
+                            }.getOrNull()
+                        }
                     }
                 }
                 val fetchedMissingMedia = missingMediaDeferred.awaitAll().filterNotNull()
@@ -1146,10 +1133,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val enTranslation = (translationData?.title ?: translationData?.name)?.takeIf { it.isNotBlank() }
 
             val extractedEnglishTitle = if (detailRes.original_language == "en") {
-            // 1. 미국/영국 영화면 원본 제목이 곧 영어 제목임
             detailRes.original_title ?: detailRes.original_name
             } else {
-            // 2. 한국/외국 영화면 번역 데이터에 있는 영어 제목을 우선 사용
             enTranslation ?: detailRes.original_title ?: detailRes.original_name
             }
 
