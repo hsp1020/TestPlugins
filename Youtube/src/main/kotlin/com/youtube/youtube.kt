@@ -840,7 +840,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
 
             return newTvSeriesLoadResponse("Shorts Feed", url, TvType.TvSeries, targetEpisodes) {
                 this.posterUrl = poster
-                this.plot = "قائمة تشغيل تلقائية من الشورتس (${targetEpisodes.size} فيديو)"
+                this.plot = "قائمة تشغيل تلقائية من الشورت스 (${targetEpisodes.size} فيديو)"
                 this.tags = listOf("Shorts", "Feed")
             }
         }
@@ -1002,7 +1002,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                         val continuationItems = findContinuationItemsRecursive(jsonResponse) ?: break
                         extractVideosFromItems(continuationItems, allEpisodes)
                         currentToken = findContinuationTokenFromItems(continuationItems)
-                        kotlinx.coroutines.delay((SLEEP_BETWEEN * 10).toLong())
+                        kotlinx.coroutines.delay((10).toLong())
                     } catch (e: Exception) {
                         break
                     }
@@ -1015,7 +1015,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                 }
 
             } catch (e: Exception) {
-
+                logError(e)
             }
         }
 
@@ -1032,28 +1032,33 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                 val description = extractTitle(safeGet(header, "description") as? Map<*, *>)
 
                 val episodes = mutableListOf<Episode>()
-                val contents = safeGet(
-                    data, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0,
-                    "tabRenderer", "content", "sectionListRenderer", "contents",
-                    0, "itemSectionRenderer", "contents", 0,
-                    "playlistVideoListRenderer", "contents"
-                ) as? List<*>
+                val tempSearchResponses = mutableListOf<SearchResponse>()
+                val seenPlaylistIds = mutableSetOf<String>()
 
-                contents?.forEachIndexed { index, item ->
-                    val videoMap = item as? Map<*, *>
-                    val renderer = videoMap?.get("playlistVideoRenderer") as? Map<*, *>
-                    if (renderer != null) {
-                        val vId = renderer["videoId"] as? String
-                        if (vId != null) {
-                            val vidTitle = extractTitle(renderer["title"] as? Map<*, *>) ?: "Episode ${index + 1}"
-                            val thumb = getBestThumbnail(renderer["thumbnail"]) ?: buildThumbnailFromId(vId)
-                            val vidUrl = "$mainUrl/watch?v=$vId"
-                            val durationText = extractTitle(safeGet(renderer, "lengthText") as? Map<*, *>)
-                            episodes.add(newEpisode(vidUrl) {
-                                this.name = vidTitle
+                // 하드코딩된 경로 대신 재귀 탐색을 수행하여 OL... 계열 음악/토픽 재생목록의 비디오 데이터 확보
+                processRecursive(data, tempSearchResponses, seenPlaylistIds, playlistMode = false)
+
+                tempSearchResponses.forEachIndexed { index, res ->
+                    if (res.url.contains("watch?v=")) {
+                        episodes.add(newEpisode(res.url) {
+                            // processRecursive에서 주입된 태그 메타데이터를 제거하고 순수 제목만 추출
+                            this.name = res.name.substringAfter("} ").trim()
+                            this.episode = index + 1
+                            this.posterUrl = res.posterUrl
+                        })
+                    }
+                }
+
+                // 재귀 탐색으로도 아이템이 발견되지 않을 경우 폴백(Fallback)으로 기존 탭 구조 탐색
+                if (episodes.isEmpty()) {
+                    val contents = safeGet(data, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0, "tabRenderer", "content", "sectionListRenderer", "contents") as? List<*>
+                    processRecursive(contents, tempSearchResponses, seenPlaylistIds, playlistMode = false)
+                    tempSearchResponses.forEachIndexed { index, res ->
+                        if (res.url.contains("watch?v=")) {
+                            episodes.add(newEpisode(res.url) {
+                                this.name = res.name.substringAfter("} ").trim()
                                 this.episode = index + 1
-                                this.posterUrl = thumb
-                                this.description = if (durationText != null) "Duration: $durationText" else null
+                                this.posterUrl = res.posterUrl
                             })
                         }
                     }
@@ -1068,7 +1073,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                     this.tags = listOf(author)
                 }
             } catch (e: Exception) {
-
+                logError(e)
             }
         }
 
