@@ -87,7 +87,6 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
             requestBuilder.addHeader("Cookie", cookieBuilder.toString())
             requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
 
-            // [인증 규격 추가]: SAPISIDHASH 연산 및 글로벌 Authorization 헤더 주입
             if (!sapisidVal.isNullOrBlank()) {
                 try {
                     val timestamp = (System.currentTimeMillis() / 1000).toString()
@@ -537,7 +536,6 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
     override val mainPage: List<MainPageData>
         get() {
             val list = mutableListOf<MainPageData>()
-            // 홈 카탈로그 이름 지역화
             val homeTitle = when(lang) {
                 "ko" -> "홈"
                 "ar" -> "الرئيسية"
@@ -545,14 +543,12 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
             }
 
             if (sharedPref?.getBoolean("show_trending_home", true) == true) {
-                // 가로 썸네일(horizontalImages) 강제 적용
                 list.add(MainPageData(homeTitle, "Home", horizontalImages = true))
                 
                 val cachedChipsJson = sharedPref.getString("yt_cached_chips", "[]") ?: "[]"
                 try {
                     val chips: List<CachedChip> = AppUtils.parseJson(cachedChipsJson)
                     chips.forEach { chip ->
-                        // 모든 칩 카탈로그에 가로 썸네일 적용
                         list.add(MainPageData(chip.name, "chip_${chip.token}", horizontalImages = true))
                     }
                 } catch (e: Exception) {
@@ -628,7 +624,6 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                         val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                         
                         if (response != null) {
-                            // 칩 아이템 누락 방지를 위한 광범위 경로 체크
                             val actions = response["onResponseReceivedActions"] 
                                 ?: response["onResponseReceivedCommands"] 
                                 ?: response["contents"] 
@@ -638,27 +633,45 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                         }
                     }
                 } else {
-                    // 기존 Home/Channel 로직 유지 (단, 칩 파싱 시 lang 설정 반영)
                     val html = app.get(if(requestData == "Home") mainUrl else requestData, interceptor = ytInterceptor).text
                     val initialData = extractYtInitialData(html)
                     if (initialData != null) {
                         if (requestData == "Home") {
-                            // 홈에서 칩을 새로 긁어올 때도 지역화된 텍스트 보존
                             val chipBar = safeGet(initialData, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0, "tabRenderer", "content", "richGridRenderer", "header", "feedFilterChipBarRenderer", "contents") as? List<*>
-                            chipBar?.let { /* 기존 칩 캐싱 로직 */ }
+                            if (chipBar != null) {
+                                val chipsToCache = mutableListOf<CachedChip>()
+                                for (chipItem in chipBar) {
+                                    val chipMap = (chipItem as? Map<*, *>)?.get("chipCloudChipRenderer") as? Map<*, *> ?: continue
+                                    val text = getText(chipMap["text"])
+                                    val token = safeGet(chipMap, "navigationEndpoint", "continuationCommand", "token") as? String
+                                    if (text.isNotBlank() && !token.isNullOrBlank()) {
+                                        chipsToCache.add(CachedChip(text, token))
+                                    }
+                                }
+                                if (chipsToCache.isNotEmpty()) {
+                                    sharedPref?.edit()?.putString("yt_cached_chips", AppUtils.toJson(chipsToCache))?.apply()
+                                }
+                            }
                         }
                         processRecursive(initialData, results, seenIds, playlistMode = false)
                         nextContinuation = findTokenRecursive(initialData)
                     }
                 }
             } else {
-                // 페이지네이션 로직: 저장된 토큰을 사용하여 인피니트 스크롤 구현
                 val tokenToUse = continuationTokens[requestData]
                 if (!tokenToUse.isNullOrBlank()) {
                     val apiKey = savedApiKey ?: sharedPref?.getString("yt_api_key", null)
+                    val vData = savedVisitorData ?: sharedPref?.getString("yt_visitor_data", null) ?: ""
+                    val cVersion = savedClientVersion ?: "2.20240725.01.00"
                     val apiUrl = if (requestData.contains("/results")) "$mainUrl/youtubei/v1/search?key=$apiKey" else "$mainUrl/youtubei/v1/browse?key=$apiKey"
                     val payload = mapOf(
-                        "context" to mapOf("client" to mapOf("clientName" to "WEB", "clientVersion" to "2.20240725.01.00", "hl" to lang)),
+                        "context" to mapOf("client" to mapOf(
+                            "clientName" to "WEB", 
+                            "clientVersion" to cVersion, 
+                            "hl" to lang,
+                            "visitorData" to vData,
+                            "platform" to "DESKTOP"
+                        )),
                         "continuation" to tokenToUse
                     )
                     val response = app.post(apiUrl, json = payload, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
@@ -1217,7 +1230,6 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
             "advanced"
         }
 
-        // [라이브 스트림 사전 감지 및 playerResponse 데이터 캐싱]
         var isLive = false
         var playerResponseText = ""
         try {
@@ -1245,7 +1257,6 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
             logError(e)
         }
 
-        // 라이브 방송은 Cloudstream 내장 추출기(loadExtractor)가 쿠키 종속성 없이 완벽히 지원하므로 강제 우회 라우팅
         if (isLive) {
             loadExtractor(fullUrl, subtitleCallback, callback)
         } else {
@@ -1262,7 +1273,6 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                 }
 
                 if (advancedLinksCount == 0) {
-                    // 고급 추출기 실패 시 폴백
                     loadExtractor(fullUrl, subtitleCallback, callback)
                 } else {
                     loadLinksAdvanced(videoId, subtitleCallback) { }
@@ -1270,7 +1280,6 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
             }
         }
 
-        // 자막 추출 로직 (사전 호출한 playerResponseText 데이터 재사용)
         try {
             if (playerResponseText.isNotBlank()) {
                 val root = JSONObject(playerResponseText)
