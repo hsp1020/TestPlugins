@@ -1,3 +1,4 @@
+// 파일명: hsp1020/testplugins/TestPlugins-d1a26fae88cb55c8f1d621560cf4e45bd7fd78f6/TVMONProvider/src/main/kotlin/com/tvmon/TVMon.kt
 package com.tvmon
 
 import com.lagradost.cloudstream3.*
@@ -12,8 +13,6 @@ import java.net.URLEncoder
 import com.fasterxml.jackson.annotation.JsonProperty
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CancellationException
 
@@ -27,7 +26,6 @@ class TVMon : MainAPI() {
     private val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
     private val commonHeaders = mapOf("User-Agent" to USER_AGENT, "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8", "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7", "Referer" to "$mainUrl/", "Upgrade-Insecure-Requests" to "1")
     private val tagCleanRegex = Regex("""\s*(한국|해외)?영화\s*\(\d{4}\).*""")
-    private val requestMutex = Mutex()
 
     data class SessionResponse(@JsonProperty("success") val success: Boolean, @JsonProperty("player_url") val playerUrl: String?, @JsonProperty("t") val t: String?, @JsonProperty("sig") val sig: String?)
 
@@ -36,7 +34,8 @@ class TVMon : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = "$mainUrl${request.data}?page=$page"
         return try {
-            val doc = requestMutex.withLock { delay((200..800).random().toLong()); app.get(url, headers = commonHeaders).document }
+            delay((200..800).random().toLong()) 
+            val doc = app.get(url, headers = commonHeaders).document
             var elements = doc.select(".mov_list ul li")
             if (elements.isEmpty()) elements = doc.select(".item")
             if (elements.isEmpty()) elements = doc.select("li, div.item")
@@ -117,7 +116,6 @@ class TVMon : MainAPI() {
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val doc = try { app.get(data, headers = commonHeaders).document } catch (e: Exception) { if (e is CancellationException) throw e; return false }
 
-        // [고유 개선] Fast-Fail: 죽은 영상에 대한 불필요한 15초 대기 방지
         if (doc.text().contains("삭제된 영상") || doc.text().contains("존재하지 않는") || doc.text().contains("404")) return false
 
         if (extractFromApi(doc, data, subtitleCallback, callback)) return true
