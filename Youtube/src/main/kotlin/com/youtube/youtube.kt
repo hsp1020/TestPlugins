@@ -1199,8 +1199,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
             else -> input
         }
     }
-
-    override suspend fun loadLinks(
+override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
@@ -1210,38 +1209,18 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
         val fullUrl = "https://www.youtube.com/watch?v=$videoId"
 
         val context = AcraApplication.context
-        val playerType = if (context != null) {
+        var playerType = if (context != null) {
             val prefs = PreferenceManager.getDefaultSharedPreferences(context)
             prefs.getString("youtube_player_type", "advanced")
         } else {
             "advanced"
         }
 
-        var linkFound = false
-
-        if (playerType == "classic") {
-            // [교정 1]: 클래식 모드 정상 라우팅 (HLS 라이브 완벽 지원)
-            linkFound = loadLinksClassic(fullUrl, isCasting, subtitleCallback, callback)
-        } else {
-            // [교정 2]: 고급 모드 실행 및 라이브 방송 폴백 감지
-            var advancedLinksCount = 0
-            com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback) {
-                advancedLinksCount++
-                callback(it)
-            }
-
-            if (advancedLinksCount == 0) {
-                // 고급 파서가 실패한 경우 (라이브 방송 등), 클래식 파서로 자동 폴백
-                linkFound = loadLinksClassic(fullUrl, isCasting, subtitleCallback, callback)
-            } else {
-                linkFound = true
-                loadLinksAdvanced(videoId, subtitleCallback) { }
-            }
-        }
-
+        // [라이브 스트림 사전 감지 및 playerResponse 데이터 캐싱]
+        var isLive = false
+        var playerResponseText = ""
         try {
             val apiUrl = "$mainUrl/youtubei/v1/player"
-
             val payload = mapOf(
                 "context" to mapOf(
                     "client" to mapOf(
@@ -1253,11 +1232,46 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                 ),
                 "videoId" to videoId
             )
+            playerResponseText = app.post(apiUrl, json = payload, interceptor = ytInterceptor).text
+            if (playerResponseText.isNotBlank()) {
+                val root = JSONObject(playerResponseText)
+                val videoDetails = root.optJSONObject("videoDetails")
+                if (videoDetails != null && videoDetails.optBoolean("isLiveContent", false)) {
+                    isLive = true
+                }
+            }
+        } catch (e: Exception) {
+            logError(e)
+        }
 
-            val responseText = app.post(apiUrl, json = payload, interceptor = ytInterceptor).text
+        // 라이브 방송 시 고급 모드(DASH XML 생성)에서 NumberFormatException(2000)이 발생하므로 클래식(HLS) 모드로 강제 전환
+        if (isLive) {
+            playerType = "classic"
+        }
 
-            if (responseText.isNotBlank()) {
-                val root = JSONObject(responseText)
+        var linkFound = false
+
+        if (playerType == "classic") {
+            linkFound = loadLinksClassic(fullUrl, isCasting, subtitleCallback, callback)
+        } else {
+            var advancedLinksCount = 0
+            com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback) {
+                advancedLinksCount++
+                callback(it)
+            }
+
+            if (advancedLinksCount == 0) {
+                linkFound = loadLinksClassic(fullUrl, isCasting, subtitleCallback, callback)
+            } else {
+                linkFound = true
+                loadLinksAdvanced(videoId, subtitleCallback) { }
+            }
+        }
+
+        // 자막 추출 로직 (사전 호출한 playerResponseText 데이터 재사용)
+        try {
+            if (playerResponseText.isNotBlank()) {
+                val root = JSONObject(playerResponseText)
                 val captions = root.optJSONObject("captions")
                 val tracklist = captions?.optJSONObject("playerCaptionsTracklistRenderer")
                 val captionTracks = tracklist?.optJSONArray("captionTracks")
@@ -1321,11 +1335,12 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                 }
             }
         } catch (e: Exception) {
-
+            logError(e)
         }
 
         return true
     }
+
 
     private suspend fun loadLinksAdvanced(
         videoId: String,
