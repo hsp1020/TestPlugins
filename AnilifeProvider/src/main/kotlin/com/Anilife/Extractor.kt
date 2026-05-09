@@ -1,3 +1,4 @@
+// 파일명: hsp1020/testplugins/TestPlugins-d1a26fae88cb55c8f1d621560cf4e45bd7fd78f6/AnilifeProvider/src/main/kotlin/com/Anilife/Extractor.kt
 package com.anilife
 
 import android.util.Base64
@@ -9,6 +10,7 @@ import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.ServerSocket
@@ -167,10 +169,14 @@ class AnilifeProxyExtractor : ExtractorApi() {
             try {
                 serverSocket = ServerSocket(0).also { port = it.localPort }
                 isRunning = true
-                // [Fix] 코루틴으로 전환
                 CoroutineScope(Dispatchers.IO).launch { 
                     while (isRunning && serverSocket != null && !serverSocket!!.isClosed) { 
-                        try { handleClient(serverSocket!!.accept()) } catch (e: Exception) {} 
+                        try { 
+                            val socket = serverSocket!!.accept()
+                            launch { handleClient(socket) } 
+                        } catch (e: Exception) {
+                            delay(100L)
+                        } 
                     } 
                 }
             } catch (e: Exception) { }
@@ -197,7 +203,6 @@ class AnilifeProxyExtractor : ExtractorApi() {
 
                 if (path.contains("playlist.m3u8")) {
                     val payload = playlistData.toByteArray(charset("UTF-8"))
-                    //[Fix] 안정성: Connection close 및 Content-Length 추가
                     out.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nConnection: close\r\nContent-Length: ${payload.size}\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
                     out.write(payload)
                 } else {
