@@ -465,6 +465,10 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                 "richShelfRenderer",
                 "reelShelfRenderer",
                 "appendContinuationItemsAction",
+                "continuationItems", // 추가
+                "reloadContinuationItemsCommand", // 추가
+                "onResponseReceivedEndpoints", // 추가
+                "onResponseReceivedActions" // 추가
                 "onResponseReceivedCommands"
             )
             var foundContainer = false
@@ -518,11 +522,31 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
 
     private fun findTokenRecursive(data: Any?): String? {
         if (data is Map<*, *>) {
-            // [방어 로직]: 칩 바(가로 스크롤 메뉴) 자체의 더미 토큰 탐색 원천 차단
+            //[방어 로직]: 칩 바(가로 스크롤 메뉴) 자체의 더미 토큰 탐색 원천 차단
             if (data.containsKey("feedFilterChipBarRenderer") || 
                 data.containsKey("chipCloudRenderer") || 
                 data.containsKey("relatedChipCloudRenderer")) {
                 return null
+            }
+
+            // 🌟 [핵심 수정 1]: 메인 페이지네이션 토큰 우선 추출
+            // 메인 토큰은 항상 continuationItems 배열의 '마지막'에 위치합니다.
+            // Shorts 선반 등의 중간 토큰을 먼저 가져오는 것을 방지합니다.
+            val continuationItems = data["continuationItems"] as? List<*>
+            if (!continuationItems.isNullOrEmpty()) {
+                val lastItem = continuationItems.last() as? Map<*, *>
+                val renderer = lastItem?.get("continuationItemRenderer") as? Map<*, *>
+                if (renderer != null) {
+                    val endpoint = renderer["continuationEndpoint"] as? Map<*, *>
+                    if (endpoint != null) {
+                        val token = (endpoint["continuationCommand"] as? Map<*, *>)?.get("token") as? String
+                            ?: (endpoint["browseContinuationEndpoint"] as? Map<*, *>)?.get("token") as? String
+                            ?: (endpoint["searchContinuationEndpoint"] as? Map<*, *>)?.get("token") as? String
+                            ?: (endpoint["command"] as? Map<*, *>)?.get("token") as? String
+                            ?: endpoint["token"] as? String
+                        if (!token.isNullOrBlank()) return token
+                    }
+                }
             }
 
             // [추출 로직 1]: 명시적 비디오 그리드 스크롤 렌더러 타겟팅
@@ -539,26 +563,30 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                 }
             }
 
-            // [추출 로직 2]: 레거시 스크롤 컨테이너 타겟팅
+            //[추출 로직 2]: 레거시 스크롤 컨테이너 타겟팅
             val nextData = data["nextContinuationData"] as? Map<*, *>
             if (nextData != null) {
                 val token = nextData["continuation"] as? String
                 if (!token.isNullOrBlank()) return token
             }
 
-            // 정방향 재귀 탐색 (구조적 결함을 차단했으므로 역순 탐색 불필요)
+            // 정방향 재귀 탐색
             for (v in data.values) {
                 val t = findTokenRecursive(v)
                 if (t != null) return t
             }
         } else if (data is List<*>) {
-            for (i in data) {
+            // 🌟[핵심 수정 2]: 리스트 역순 탐색
+            // 리스트 내부를 탐색할 때 '역순(reversed)'으로 탐색하여 
+            // 페이지 하단에 있는 진짜 메인 continuation 토큰을 먼저 찾도록 유도합니다.
+            for (i in data.reversed()) {
                 val t = findTokenRecursive(i)
                 if (t != null) return t
             }
         }
         return null
     }
+
 
         override val mainPage: List<MainPageData>
         get() {
