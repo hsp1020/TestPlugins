@@ -14,9 +14,9 @@ import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addImdbId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTMDbId
-import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addAniListId
+import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.Score
@@ -536,7 +536,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
 
         val tmdbIdFromRes = res.moviedb_id?.toString() ?: res.tmdbIdExt
-        val targetTmdbId = resolvedTmdbId ?: if (res.id.startsWith("tmdb:")) res.id.removePrefix("tmdb:") else tmdbIdFromRes
+        val rawTargetTmdbId = resolvedTmdbId ?: if (res.id.startsWith("tmdb:")) res.id.removePrefix("tmdb:") else tmdbIdFromRes
+        val targetTmdbId = rawTargetTmdbId?.substringBefore(":")
         
         val tmdbDeferred = targetTmdbId?.let { id ->
             async(Dispatchers.IO) {
@@ -1189,11 +1190,10 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
                 uniqueEpisodeChecker.add(key)
                 maxEpisodePerSeason[displaySeason] = maxOf(maxEpisodePerSeason.getOrDefault(displaySeason, 0), displayEpisode)
-
+                
                 val imdbSeason = video.imdbSeason ?: video.seasonNumber ?: 0
                 val imdbEpisode = video.imdbEpisode ?: video.episode ?: video.number ?: 0
-                
-                // [안전 정제]: Stremio 에피소드 접미사(:1:1) 절삭
+                // [안전 정제] 자식 객체: Simkl 동기화 무결성 확보 및 스트림 보호
                 val rawEpImdbId = video.imdb_id ?: finalImdbId
                 val epImdbId = rawEpImdbId?.let { idStr ->
                     val parts = idStr.split(":")
@@ -1205,7 +1205,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
                 
                 video.toEpisode(provider, type, epImdbId, episodeTmdbMeta, displaySeason, displayEpisode, showTitle, tmdbId, isAnime, isBollywood, isAsian, isCartoon, imdbSeason, imdbEpisode, originalTitle, englishTitle, aniListId, malId, kitsuId)
-                 
             }
         }
 
@@ -1319,14 +1318,13 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 runSuspendCatching {
                     val mappingRes = StremioC.customSession.get("https://api.ani.zip/mappings?imdb_id=$finalImdbId", timeout = 5L).text
                     if (mappingRes.contains("mal_id")) {
-                        val mappingJson = JSONObject(mappingRes).optJSONObject("mappings")
-                        finalMalId = mappingJson?.optInt("mal_id")?.takeIf { it > 0 } ?: finalMalId
-                        finalAniId = mappingJson?.optInt("anilist_id")?.takeIf { it > 0 } ?: finalAniId
+                        val mappingJson = JSONObject(mappingRes)
+                        finalMalId = mappingJson.optInt("mal_id").takeIf { it > 0 } ?: finalMalId
+                        finalAniId = mappingJson.optInt("anilist_id").takeIf { it > 0 } ?: finalAniId
                     }
                 }
             }
 
-            // [안전 정제]: Stremio 접미사 제거
             val cleanImdbId = finalImdbId?.let { idStr ->
                 val parts = idStr.split(":")
                 if (idStr.startsWith("kitsu:") || idStr.startsWith("mal:") || idStr.startsWith("tmdb:")) {
@@ -1337,10 +1335,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
             val cleanTmdbId = tmdbIdStr?.substringBefore(":")
 
-            // [도메인 롤백]: 애니메이션 식별자 부재 시 일반 도메인으로 강등
-            val hasAnimeTrackerIds = finalMalId != null || finalAniId != null || this@CatalogEntry.kitsuIdExt != null
-            val finalMovieType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.AnimeMovie else TvType.Movie
-            val finalSeriesType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.Anime else TvType.TvSeries
+            val finalMovieType = if (isAnimeMedia) TvType.AnimeMovie else TvType.Movie
+            val finalSeriesType = if (isAnimeMedia) TvType.Anime else TvType.TvSeries
 
             if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
                 return@coroutineScope provider.newMovieLoadResponse(
@@ -1369,18 +1365,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     this.tags = finalGenre
                     this.recommendations = tmdbData?.fetchedRecommendations 
                     addTrailer(finalTrailers); this.duration = tmdbData?.fetchedRuntime; this.contentRating = tmdbData?.fetchedAgeRating
-                    tmdbData?.fetchedLogo?.let { this.logoUrl = it }
-                    
-                    // [상호 배타적 주입]: IMDB 존재 시 TMDB 주입 차단 (Simkl 교차 검증 충돌 방지)
-
-                    val validImdb = cleanImdbId?.takeIf { it.startsWith("tt") }
-                    validImdb?.let { addImdbId(it) }
-                    if (validImdb == null) {
-                        cleanTmdbId?.takeIf { it.isNotBlank() }?.let { addTMDbId(it) }
-                    }
-                    
-                    finalMalId?.let { addMalId(it) }
-                    finalAniId?.let { addAniListId(it) }
+                    tmdbData?.fetchedLogo?.let { this.logoUrl = it }; cleanTmdbId?.let { addTMDbId(it) }; cleanImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }; finalMalId?.let { addMalId(it) }; finalAniId?.let { addAniListId(it) }
                 }
             } else {
                 val finalEpisodes = processEpisodes(provider, cleanImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, cleanTmdbId?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, finalAniId, finalMalId, this@CatalogEntry.kitsuIdExt)
@@ -1394,20 +1379,10 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     this.tags = finalGenre
                     this.recommendations = tmdbData?.fetchedRecommendations
                     addTrailer(finalTrailers.firstOrNull()); this.contentRating = tmdbData?.fetchedAgeRating
-                    tmdbData?.fetchedLogo?.let { this.logoUrl = it }
-                    
-                    // [상호 배타적 주입]: IMDB 존재 시 TMDB 주입 차단 (Simkl 교차 검증 충돌 방지)
-                    val validImdb = cleanImdbId?.takeIf { it.startsWith("tt") }
-                    validImdb?.let { addImdbId(it) }
-                    if (validImdb == null) {
-                        cleanTmdbId?.takeIf { it.isNotBlank() }?.let { addTMDbId(it) }
-                    }
-                    
-                    finalMalId?.let { addMalId(it) }
-                    finalAniId?.let { addAniListId(it) }
+                    tmdbData?.fetchedLogo?.let { this.logoUrl = it }; cleanTmdbId?.let { addTMDbId(it) }; cleanImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }; finalMalId?.let { addMalId(it) }; finalAniId?.let { addAniListId(it) }
                 }
-            }
-                        
+            }            
+                
         }
     }
 
