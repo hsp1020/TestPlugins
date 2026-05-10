@@ -445,24 +445,17 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     }
 
     override suspend fun load(url: String): LoadResponse = coroutineScope {
-        // [프래그먼트 분리]: 하이브리드 URL에서 JSON 페이로드 추출
-        val payload = url.substringAfterLast("#", "")
-        
-        val res: CatalogEntry = if (payload.startsWith("{")) {
-            parseJson(payload)
-        } else if (url.startsWith("{")) {
+        val res: CatalogEntry = if (url.startsWith("{")) {
             parseJson(url)
         } else {
-            val actualUrl = url.substringBeforeLast("#")
-            val responseText = customSession.get(actualUrl).text
+            val responseText = customSession.get(url).text
             try {
                 parseJson<CatalogResponse>(responseText).meta ?: throw Exception()
             } catch (e: Exception) {
                 JSONObject(responseText).optJSONObject("meta")?.toString()?.let { parseJson(it) }
-                    ?: throw IllegalStateException("Metadata not found: $actualUrl")
+                    ?: throw IllegalStateException("Metadata not found: $url")
             }
         }
-
         
         val normalizedId = try { normalizeId(res.id) } catch (e: Exception) { res.id }
         val encodedId = normalizedId.urlEncode()
@@ -920,28 +913,16 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         @JsonProperty("trailerStreams") val trailerStreams: List<TrailerStream> = emptyList(), 
         @JsonProperty("links") val links: List<Link> = emptyList()
     ) {
-
+        
         fun toSearchResponse(provider: StremioC): SearchResponse {
             val targetType = this.type ?: "movie"
+            // 네이티브 HTTP URL 조합 (Cloudstream 코어의 startsWith("http") 검증 통과)
             val metaUrl = "${provider.mainUrl.substringBefore("?")}/meta/$targetType/${this.id}.json"
 
-            val thinData = LoadData(
-                id = this.id,
-                type = targetType,
-                title = this.name ?: this.id ?: "Empty",
-                tmdbId = this.moviedb_id ?: this.tmdbIdExt?.toIntOrNull(),
-                malId = this.malIdExt?.toIntOrNull(),
-                kitsuId = this.kitsuIdExt
-            )
-            
-            // URL Fragment(#)를 이용한 초경량 하이브리드 결합 (인코딩 불필요)
-            val safeUrl = "$metaUrl#${thinData.toJson()}"
-
-            return provider.newMovieSearchResponse(name ?: "Unknown", safeUrl, TvType.Others) { 
+            return provider.newMovieSearchResponse(name ?: "Unknown", metaUrl, TvType.Others) { 
                 posterUrl = poster 
             }
         }
-        
         
         private fun isSingleMovie(finalType: String?, finalVideos: List<Video>?): Boolean {
             return (finalType == "movie" && finalVideos?.size == 1 && finalVideos[0].seasonNumber == 1 && (finalVideos[0].episode == 1 || finalVideos[0].number == 1)) ||
