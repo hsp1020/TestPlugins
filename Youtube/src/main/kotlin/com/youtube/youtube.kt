@@ -521,7 +521,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
         Log.d("YoutubeProvider", "v1.1: findTokenRecursive start")
         if (data is Map<*, *>) {
             // [방어 로직]: 칩 바 및 독립된 페이지네이션을 갖는 하위 쉘프 탐색 원천 차단
-            if (data.containsKey("1")) {
+            if (data.containsKey("mama")) {
                 Log.d("YoutubeProvider", "v1.1: Blocked sub-shelf token extraction")
                 return null
             }
