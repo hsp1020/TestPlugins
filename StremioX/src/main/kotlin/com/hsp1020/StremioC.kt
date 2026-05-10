@@ -15,8 +15,9 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addImdbId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTMDbId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
-import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
-import com.lagradost.cloudstream3.LoadResponse.Companion.addAniListId
+import com.lagradost.cloudstream3.newAnimeLoadResponse
+import com.lagradost.cloudstream3.DubStatus
+import com.lagradost.cloudstream3.addEpisodes
 import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.MainPageRequest
 import com.lagradost.cloudstream3.Score
@@ -1326,7 +1327,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
             }
 
-            // [안전 정제]: Stremio 접미사 제거
+            // 1. [안전 정제]: Stremio 접미사 제거
             val cleanImdbId = finalImdbId?.let { idStr ->
                 val parts = idStr.split(":")
                 if (idStr.startsWith("kitsu:") || idStr.startsWith("mal:") || idStr.startsWith("tmdb:")) {
@@ -1337,7 +1338,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
             val cleanTmdbId = tmdbIdStr?.substringBefore(":")
 
-            // [도메인 롤백]: 애니메이션 식별자 부재 시 일반 도메인으로 강등
+            // 2. [도메인 롤백]: 애니메이션 식별자 부재 시 일반 도메인으로 강등
             val hasAnimeTrackerIds = finalMalId != null || finalAniId != null || this@CatalogEntry.kitsuIdExt != null
             val finalMovieType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.AnimeMovie else TvType.Movie
             val finalSeriesType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.Anime else TvType.TvSeries
@@ -1371,45 +1372,68 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     addTrailer(finalTrailers); this.duration = tmdbData?.fetchedRuntime; this.contentRating = tmdbData?.fetchedAgeRating
                     tmdbData?.fetchedLogo?.let { this.logoUrl = it }
                     
-                    // [상호 배타적 주입]: IMDB 존재 시 TMDB 주입 차단 (Simkl 교차 검증 충돌 방지)
-
+                    // [상호 배타적 주입]: IMDB 존재 시 TMDB 주입 차단
                     val validImdb = cleanImdbId?.takeIf { it.startsWith("tt") }
                     validImdb?.let { addImdbId(it) }
                     if (validImdb == null) {
                         cleanTmdbId?.takeIf { it.isNotBlank() }?.let { addTMDbId(it) }
                     }
-                    
-                    finalMalId?.let { addMalId(it) }
-                    finalAniId?.let { addAniListId(it) }
                 }
             } else {
                 val finalEpisodes = processEpisodes(provider, cleanImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, cleanTmdbId?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, finalAniId, finalMalId, this@CatalogEntry.kitsuIdExt)
-                return@coroutineScope provider.newTvSeriesLoadResponse(
-                    finalName, "${provider.mainUrl}/meta/${finalType ?: "series"}/${this@CatalogEntry.id}.json", finalSeriesType, finalEpisodes
-                ) {
-                    posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
-                    this.showStatus = tmdbData?.fetchedStatus 
-                    this.plot = finalDescription
-                    this.actors = tmdbData?.fetchedActors
-                    this.tags = finalGenre
-                    this.recommendations = tmdbData?.fetchedRecommendations
-                    addTrailer(finalTrailers.firstOrNull()); this.contentRating = tmdbData?.fetchedAgeRating
-                    tmdbData?.fetchedLogo?.let { this.logoUrl = it }
-                    
-                    // [상호 배타적 주입]: IMDB 존재 시 TMDB 주입 차단 (Simkl 교차 검증 충돌 방지)
-                    val validImdb = cleanImdbId?.takeIf { it.startsWith("tt") }
-                    validImdb?.let { addImdbId(it) }
-                    if (validImdb == null) {
-                        cleanTmdbId?.takeIf { it.isNotBlank() }?.let { addTMDbId(it) }
+                
+                // 3. [객체 분기]: 애니메이션인 경우 AnimeLoadResponse 클래스로 인스턴스 강제 생성
+                if (finalSeriesType == TvType.Anime) {
+                    return@coroutineScope provider.newAnimeLoadResponse(
+                        finalName, "${provider.mainUrl}/meta/${finalType ?: "series"}/${this@CatalogEntry.id}.json", finalSeriesType
+                    ) {
+                        this.japName = tmdbData?.fetchedOriginalTitle
+                        this.engName = tmdbData?.fetchedEnglishTitle
+                        posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
+                        this.showStatus = tmdbData?.fetchedStatus 
+                        this.plot = finalDescription
+                        this.actors = tmdbData?.fetchedActors
+                        this.tags = finalGenre
+                        this.recommendations = tmdbData?.fetchedRecommendations
+                        addTrailer(finalTrailers.firstOrNull()); this.contentRating = tmdbData?.fetchedAgeRating
+                        tmdbData?.fetchedLogo?.let { this.logoUrl = it }
+                        
+                        // [네이티브 식별자 할당]: SyncVM이 직접 추출 가능한 프로퍼티로 선언
+                        finalMalId?.let { this.malId = it }
+                        finalAniId?.let { this.anilistId = it }
+                        
+                        // [상호 배타적 주입]
+                        val validImdb = cleanImdbId?.takeIf { it.startsWith("tt") }
+                        validImdb?.let { addImdbId(it) }
+                        if (validImdb == null) {
+                            cleanTmdbId?.takeIf { it.isNotBlank() }?.let { addTMDbId(it) }
+                        }
+                        
+                        addEpisodes(DubStatus.Subbed, finalEpisodes)
                     }
-                    
-                    finalMalId?.let { addMalId(it) }
-                    finalAniId?.let { addAniListId(it) }
+                } else {
+                    return@coroutineScope provider.newTvSeriesLoadResponse(
+                        finalName, "${provider.mainUrl}/meta/${finalType ?: "series"}/${this@CatalogEntry.id}.json", finalSeriesType, finalEpisodes
+                    ) {
+                        posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
+                        this.showStatus = tmdbData?.fetchedStatus 
+                        this.plot = finalDescription
+                        this.actors = tmdbData?.fetchedActors
+                        this.tags = finalGenre
+                        this.recommendations = tmdbData?.fetchedRecommendations
+                        addTrailer(finalTrailers.firstOrNull()); this.contentRating = tmdbData?.fetchedAgeRating
+                        tmdbData?.fetchedLogo?.let { this.logoUrl = it }
+                        
+                        // [상호 배타적 주입]
+                        val validImdb = cleanImdbId?.takeIf { it.startsWith("tt") }
+                        validImdb?.let { addImdbId(it) }
+                        if (validImdb == null) {
+                            cleanTmdbId?.takeIf { it.isNotBlank() }?.let { addTMDbId(it) }
+                        }
+                    }
                 }
             }
-                        
-        }
-    }
+                                
 
     private data class Video(
         @JsonProperty("id") val id: String? = null,
