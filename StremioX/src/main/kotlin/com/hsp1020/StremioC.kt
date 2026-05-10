@@ -46,6 +46,7 @@ import com.lagradost.cloudstream3.utils.SubtitleHelper
 import com.lagradost.cloudstream3.utils.USER_PROVIDER_API
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.hsp1020.SubsExtractors.invokeOpenSubs
 import com.hsp1020.SubsExtractors.invokeWatchsomuch
 import com.lagradost.nicehttp.Requests
@@ -1342,9 +1343,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val cleanTmdbId = tmdbIdStr?.substringBefore(":")
 
             // [도메인 롤백]: 애니메이션 식별자 부재 시 일반 도메인으로 강등
-            val hasAnimeTrackerIds = finalMalId != null || finalAniId != null || this@CatalogEntry.kitsuIdExt != null
-            val finalMovieType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.AnimeMovie else TvType.Movie
-            val finalSeriesType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.Anime else TvType.TvSeries
+            // [캐시 휘발 방어]: 초기 URL에 애니메이션 고유 ID가 없어 오프라인 복구가 불가능한 항목은 도메인 승격을 차단함
+            val canSurviveCache = this@CatalogEntry.id.startsWith("kitsu:") || this@CatalogEntry.id.startsWith("mal:") || this@CatalogEntry.kitsuIdExt != null
+            val finalMovieType = if (isAnimeMedia && canSurviveCache) TvType.AnimeMovie else TvType.Movie
+            val finalSeriesType = if (isAnimeMedia && canSurviveCache) TvType.Anime else TvType.TvSeries
+        
 
             if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
                 return@coroutineScope provider.newMovieLoadResponse(
