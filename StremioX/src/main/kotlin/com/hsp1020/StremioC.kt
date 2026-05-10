@@ -913,15 +913,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         @JsonProperty("trailerStreams") val trailerStreams: List<TrailerStream> = emptyList(), 
         @JsonProperty("links") val links: List<Link> = emptyList()
     ) {
-        fun toSearchResponse(provider: StremioC): SearchResponse {
-            val targetType = this.type ?: "movie"
-            // 네이티브 HTTP URL 조합 (Cloudstream 코어의 startsWith("http") 검증 통과)
-            val metaUrl = "${provider.mainUrl.substringBefore("?")}/meta/$targetType/${this.id}.json"
-
-            return provider.newMovieSearchResponse(name ?: "Unknown", metaUrl, TvType.Others) { 
-                posterUrl = poster 
-            }
-        }
+        
         fun toSearchResponse(provider: StremioC): SearchResponse {
             val targetType = this.type ?: "movie"
             // 네이티브 HTTP URL 조합 (Cloudstream 코어의 startsWith("http") 검증 통과)
