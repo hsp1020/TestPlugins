@@ -1193,7 +1193,16 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 
                 val imdbSeason = video.imdbSeason ?: video.seasonNumber ?: 0
                 val imdbEpisode = video.imdbEpisode ?: video.episode ?: video.number ?: 0
-                val epImdbId = video.imdb_id ?: finalImdbId
+                // [안전 정제] 자식 객체: Simkl 동기화 무결성 확보 및 스트림 보호
+                val rawEpImdbId = video.imdb_id ?: finalImdbId
+                val epImdbId = rawEpImdbId?.let { idStr ->
+                    val parts = idStr.split(":")
+                    if (idStr.startsWith("kitsu:") || idStr.startsWith("mal:") || idStr.startsWith("tmdb:")) {
+                        if (parts.size >= 2) "${parts[0]}:${parts[1]}" else idStr
+                    } else {
+                        parts[0]
+                    }
+                }
                 
                 video.toEpisode(provider, type, epImdbId, episodeTmdbMeta, displaySeason, displayEpisode, showTitle, tmdbId, isAnime, isBollywood, isAsian, isCartoon, imdbSeason, imdbEpisode, originalTitle, englishTitle, aniListId, malId, kitsuId)
             }
@@ -1316,16 +1325,29 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
             }
 
+            val cleanImdbId = finalImdbId?.let { idStr ->
+                val parts = idStr.split(":")
+                if (idStr.startsWith("kitsu:") || idStr.startsWith("mal:") || idStr.startsWith("tmdb:")) {
+                    if (parts.size >= 2) "${parts[0]}:${parts[1]}" else idStr
+                } else {
+                    parts[0]
+                }
+            }
+            val cleanTmdbId = tmdbIdStr?.substringBefore(":")
+
+            val finalMovieType = if (isAnimeMedia) TvType.AnimeMovie else TvType.Movie
+            val finalSeriesType = if (isAnimeMedia) TvType.Anime else TvType.TvSeries
+
             if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
                 return@coroutineScope provider.newMovieLoadResponse(
-                    finalName, "${provider.mainUrl}/meta/${finalType ?: "movie"}/${this@CatalogEntry.id}.json", TvType.Movie, 
+                    finalName, "${provider.mainUrl}/meta/${finalType ?: "movie"}/${this@CatalogEntry.id}.json", finalMovieType, 
                     LoadData(
                         type = finalType, 
                         id = movieId, 
-                        imdbId = finalImdbId, 
+                        imdbId = cleanImdbId, 
                         year = tmdbData?.fetchedYear, 
                         title = finalName, 
-                        tmdbId = tmdbIdStr?.toIntOrNull(), 
+                        tmdbId = cleanTmdbId?.toIntOrNull(), 
                         isAnime = isAnimeMedia,
                         isBollywood = isBollywood,
                         isAsian = isAsian,
@@ -1343,13 +1365,12 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     this.tags = finalGenre
                     this.recommendations = tmdbData?.fetchedRecommendations 
                     addTrailer(finalTrailers); this.duration = tmdbData?.fetchedRuntime; this.contentRating = tmdbData?.fetchedAgeRating
-                    tmdbData?.fetchedLogo?.let { this.logoUrl = it }; tmdbIdStr?.let { addTMDbId(it) }; finalImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }; fetchedMalId?.let { addMalId(it) }; fetchedAniListId?.let { addAniListId(it) }                    
+                    tmdbData?.fetchedLogo?.let { this.logoUrl = it }; cleanTmdbId?.let { addTMDbId(it) }; cleanImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }; finalMalId?.let { addMalId(it) }; finalAniId?.let { addAniListId(it) }
                 }
             } else {
-                val finalEpisodes = processEpisodes(provider, finalImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, tmdbIdStr?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, finalAniId, finalMalId, this@CatalogEntry.kitsuIdExt)
-
+                val finalEpisodes = processEpisodes(provider, cleanImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, cleanTmdbId?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, finalAniId, finalMalId, this@CatalogEntry.kitsuIdExt)
                 return@coroutineScope provider.newTvSeriesLoadResponse(
-                    finalName, "${provider.mainUrl}/meta/${finalType ?: "series"}/${this@CatalogEntry.id}.json", TvType.TvSeries, finalEpisodes
+                    finalName, "${provider.mainUrl}/meta/${finalType ?: "series"}/${this@CatalogEntry.id}.json", finalSeriesType, finalEpisodes
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
                     this.showStatus = tmdbData?.fetchedStatus 
@@ -1358,9 +1379,10 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     this.tags = finalGenre
                     this.recommendations = tmdbData?.fetchedRecommendations
                     addTrailer(finalTrailers.firstOrNull()); this.contentRating = tmdbData?.fetchedAgeRating
-                    tmdbData?.fetchedLogo?.let { this.logoUrl = it }; tmdbIdStr?.let { addTMDbId(it) }; finalImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }; fetchedMalId?.let { addMalId(it) }; fetchedAniListId?.let { addAniListId(it) }                    
+                    tmdbData?.fetchedLogo?.let { this.logoUrl = it }; cleanTmdbId?.let { addTMDbId(it) }; cleanImdbId?.let { if (it.startsWith("tt")) addImdbId(it) }; finalMalId?.let { addMalId(it) }; finalAniId?.let { addAniListId(it) }
                 }
-            }
+            }            
+                
         }
     }
 
