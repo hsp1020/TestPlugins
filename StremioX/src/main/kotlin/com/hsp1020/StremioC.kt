@@ -14,6 +14,8 @@ import com.lagradost.cloudstream3.LoadResponse
 import com.lagradost.cloudstream3.LoadResponse.Companion.addActors
 import com.lagradost.cloudstream3.LoadResponse.Companion.addImdbId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTMDbId
+import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
+import com.lagradost.cloudstream3.LoadResponse.Companion.addAniListId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
 import com.lagradost.cloudstream3.newAnimeLoadResponse
 import com.lagradost.cloudstream3.DubStatus
@@ -1396,9 +1398,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         this.recommendations = tmdbData?.fetchedRecommendations
                         addTrailer(finalTrailers.firstOrNull()); this.contentRating = tmdbData?.fetchedAgeRating
                         tmdbData?.fetchedLogo?.let { this.logoUrl = it }
-                        
-                        finalMalId?.let { this.malId = it }
-                        finalAniId?.let { this.anilistId = it }
+
+                        // [네이티브 식별자 할당]: Cloudstream 표준 확장 함수 규격으로 주입
+                        finalMalId?.let { addMalId(it) }
+                        finalAniId?.let { addAniListId(it) }
+                                                
                         
                         val validImdb = cleanImdbId?.takeIf { it.startsWith("tt") }
                         validImdb?.let { addImdbId(it) }
