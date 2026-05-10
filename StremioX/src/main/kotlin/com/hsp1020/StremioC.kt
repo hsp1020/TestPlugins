@@ -1433,6 +1433,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         if (validImdb == null) {
                             cleanTmdbId?.takeIf { it.isNotBlank() }?.let { addTMDbId(it) }
                         }
+                        finalMalId?.let { addMalId(it) }
+                        finalAniId?.let { addAniListId(it) }
                     }
                 }
             }
