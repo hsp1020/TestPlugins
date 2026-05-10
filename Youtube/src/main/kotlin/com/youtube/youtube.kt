@@ -50,7 +50,7 @@ class YoutubeProvider(
     private var isSearchContext = false
 
 
-    class YouTubeInterceptor(private val prefs: SharedPreferences?, private val provider: YoutubeProvider) : Interceptor {
+class YouTubeInterceptor(private val prefs: SharedPreferences?, private val provider: YoutubeProvider) : Interceptor {
         
         private fun sha1(input: String): String {
             val md = java.security.MessageDigest.getInstance("SHA-1")
