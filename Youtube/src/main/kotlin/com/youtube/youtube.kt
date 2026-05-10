@@ -465,10 +465,6 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                 "richShelfRenderer",
                 "reelShelfRenderer",
                 "appendContinuationItemsAction",
-                "continuationItems", // 추가
-                "reloadContinuationItemsCommand", // 추가
-                "onResponseReceivedEndpoints", // 추가
-                "onResponseReceivedActions", // 추가
                 "onResponseReceivedCommands"
             )
             var foundContainer = false
@@ -522,31 +518,11 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
 
     private fun findTokenRecursive(data: Any?): String? {
         if (data is Map<*, *>) {
-            //[방어 로직]: 칩 바(가로 스크롤 메뉴) 자체의 더미 토큰 탐색 원천 차단
+            // [방어 로직]: 칩 바(가로 스크롤 메뉴) 자체의 더미 토큰 탐색 원천 차단
             if (data.containsKey("feedFilterChipBarRenderer") || 
                 data.containsKey("chipCloudRenderer") || 
                 data.containsKey("relatedChipCloudRenderer")) {
                 return null
-            }
-
-            // 🌟 [핵심 수정 1]: 메인 페이지네이션 토큰 우선 추출
-            // 메인 토큰은 항상 continuationItems 배열의 '마지막'에 위치합니다.
-            // Shorts 선반 등의 중간 토큰을 먼저 가져오는 것을 방지합니다.
-            val continuationItems = data["continuationItems"] as? List<*>
-            if (!continuationItems.isNullOrEmpty()) {
-                val lastItem = continuationItems.last() as? Map<*, *>
-                val renderer = lastItem?.get("continuationItemRenderer") as? Map<*, *>
-                if (renderer != null) {
-                    val endpoint = renderer["continuationEndpoint"] as? Map<*, *>
-                    if (endpoint != null) {
-                        val token = (endpoint["continuationCommand"] as? Map<*, *>)?.get("token") as? String
-                            ?: (endpoint["browseContinuationEndpoint"] as? Map<*, *>)?.get("token") as? String
-                            ?: (endpoint["searchContinuationEndpoint"] as? Map<*, *>)?.get("token") as? String
-                            ?: (endpoint["command"] as? Map<*, *>)?.get("token") as? String
-                            ?: endpoint["token"] as? String
-                        if (!token.isNullOrBlank()) return token
-                    }
-                }
             }
 
             // [추출 로직 1]: 명시적 비디오 그리드 스크롤 렌더러 타겟팅
@@ -563,30 +539,26 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                 }
             }
 
-            //[추출 로직 2]: 레거시 스크롤 컨테이너 타겟팅
+            // [추출 로직 2]: 레거시 스크롤 컨테이너 타겟팅
             val nextData = data["nextContinuationData"] as? Map<*, *>
             if (nextData != null) {
                 val token = nextData["continuation"] as? String
                 if (!token.isNullOrBlank()) return token
             }
 
-            // 정방향 재귀 탐색
+            // 정방향 재귀 탐색 (구조적 결함을 차단했으므로 역순 탐색 불필요)
             for (v in data.values) {
                 val t = findTokenRecursive(v)
                 if (t != null) return t
             }
         } else if (data is List<*>) {
-            // 🌟[핵심 수정 2]: 리스트 역순 탐색
-            // 리스트 내부를 탐색할 때 '역순(reversed)'으로 탐색하여 
-            // 페이지 하단에 있는 진짜 메인 continuation 토큰을 먼저 찾도록 유도합니다.
-            for (i in data.reversed()) {
+            for (i in data) {
                 val t = findTokenRecursive(i)
                 if (t != null) return t
             }
         }
         return null
     }
-
 
         override val mainPage: List<MainPageData>
         get() {
@@ -647,46 +619,6 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
 
     private val continuationTokens = mutableMapOf<String, String>()
 
-    // 🌟 새롭게 추가된 토큰 추출 전용 헬퍼 함수 (getMainPage 바로 위에 배치하세요)
-    private fun extractProperContinuationToken(response: Map<String, Any>?): String? {
-        if (response == null) return null
-
-        // 1. 정확한 경로에서 비디오 그리드의 다음 페이지 토큰을 우선 탐색
-        val actions = (response["onResponseReceivedActions"] as? List<*>)
-            ?: (response["onResponseReceivedEndpoints"] as? List<*>)
-            ?: (response["onResponseReceivedCommands"] as? List<*>)
-
-        if (actions != null) {
-            for (action in actions) {
-                val actionMap = action as? Map<*, *> ?: continue
-                val cmd = actionMap["appendContinuationItemsAction"] as? Map<*, *>
-                    ?: actionMap["reloadContinuationItemsCommand"] as? Map<*, *>
-                
-                val items = cmd?.get("continuationItems") as? List<*>
-                if (!items.isNullOrEmpty()) {
-                    // 메인 그리드의 토큰은 항상 continuationItems의 마지막에 위치함
-                    val lastItem = items.last() as? Map<*, *>
-                    val renderer = lastItem?.get("continuationItemRenderer") as? Map<*, *>
-                    if (renderer != null) {
-                        val endpoint = renderer["continuationEndpoint"] as? Map<*, *>
-                        val token = endpoint?.let {
-                            (it["continuationCommand"] as? Map<*, *>)?.get("token") as? String
-                            ?: (it["browseContinuationEndpoint"] as? Map<*, *>)?.get("token") as? String
-                            ?: (it["searchContinuationEndpoint"] as? Map<*, *>)?.get("token") as? String
-                            ?: (it["command"] as? Map<*, *>)?.get("token") as? String
-                            ?: it["token"] as? String
-                        }
-                        if (!token.isNullOrBlank()) return token
-                    }
-                }
-            }
-        }
-
-        // 2. 위 경로에서 못 찾았을 경우 기존 재귀 탐색으로 폴백
-        return findTokenRecursive(response)
-    }
-
-    // 🌟 수정된 getMainPage 함수 전체
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val maxPages = sharedPref?.getInt("channel_pages_limit", 6) ?: 6
         if (page > maxPages) return newHomePageResponse(request, emptyList(), hasNext = false)
@@ -720,15 +652,12 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                         val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                         
                         if (response != null) {
-                            // onResponseReceivedEndpoints 추가
                             val actions = response["onResponseReceivedActions"] 
-                                ?: response["onResponseReceivedEndpoints"]
                                 ?: response["onResponseReceivedCommands"] 
                                 ?: response["contents"] 
                                 ?: response
                             processRecursive(actions, results, seenIds, playlistMode = false)
-                            // 새로운 토큰 추출 함수 적용
-                            nextContinuation = extractProperContinuationToken(response)
+                            nextContinuation = findTokenRecursive(response)
                         }
                     }
                 } else {
@@ -769,8 +698,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                             }
                         }
                         processRecursive(initialData, results, seenIds, playlistMode = false)
-                        // 새로운 토큰 추출 함수 적용
-                        nextContinuation = extractProperContinuationToken(initialData)
+                        nextContinuation = findTokenRecursive(initialData)
                     }
                 }
             } else {
@@ -793,15 +721,9 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                     val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
                     val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                     if (response != null) {
-                        // onResponseReceivedEndpoints 추가
-                        val actions = response["onResponseReceivedActions"] 
-                            ?: response["onResponseReceivedEndpoints"]
-                            ?: response["onResponseReceivedCommands"] 
-                            ?: response["continuationContents"] 
-                            ?: response
+                        val actions = response["onResponseReceivedActions"] ?: response["onResponseReceivedCommands"] ?: response["continuationContents"] ?: response
                         processRecursive(actions, results, seenIds, playlistMode = false)
-                        // 새로운 토큰 추출 함수 적용
-                        nextContinuation = extractProperContinuationToken(response)
+                        nextContinuation = findTokenRecursive(response)
                     }
                 }
             }
@@ -815,7 +737,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
 
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
     }
-
+    
        
     fun findContinuationItemsRecursive(obj: Any?): List<*>? {
         when (obj) {
