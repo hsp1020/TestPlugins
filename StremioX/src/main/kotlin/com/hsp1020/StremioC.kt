@@ -1430,6 +1430,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
             }
         }
+    }
                                 
 
     private data class Video(
