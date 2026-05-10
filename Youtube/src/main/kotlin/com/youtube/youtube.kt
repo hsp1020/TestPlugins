@@ -516,18 +516,26 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
         }
     }
 
+    // v1.1
     private fun findTokenRecursive(data: Any?): String? {
+        Log.d("YoutubeProvider", "v1.1: findTokenRecursive start")
         if (data is Map<*, *>) {
-            // [방어 로직]: 칩 바(가로 스크롤 메뉴) 자체의 더미 토큰 탐색 원천 차단
+            // [방어 로직]: 칩 바 및 독립된 페이지네이션을 갖는 하위 쉘프 탐색 원천 차단
             if (data.containsKey("feedFilterChipBarRenderer") || 
                 data.containsKey("chipCloudRenderer") || 
-                data.containsKey("relatedChipCloudRenderer")) {
+                data.containsKey("relatedChipCloudRenderer") ||
+                data.containsKey("richShelfRenderer") ||
+                data.containsKey("reelShelfRenderer") ||
+                data.containsKey("shelfRenderer") ||
+                data.containsKey("horizontalListRenderer")) {
+                Log.d("YoutubeProvider", "v1.1: Blocked sub-shelf token extraction")
                 return null
             }
 
             // [추출 로직 1]: 명시적 비디오 그리드 스크롤 렌더러 타겟팅
             val renderer = data["continuationItemRenderer"] as? Map<*, *>
             if (renderer != null) {
+                Log.d("YoutubeProvider", "v1.1: continuationItemRenderer identified")
                 val endpoint = renderer["continuationEndpoint"] as? Map<*, *>
                 if (endpoint != null) {
                     val token = (endpoint["continuationCommand"] as? Map<*, *>)?.get("token") as? String
@@ -535,18 +543,24 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                         ?: (endpoint["searchContinuationEndpoint"] as? Map<*, *>)?.get("token") as? String
                         ?: (endpoint["command"] as? Map<*, *>)?.get("token") as? String
                         ?: endpoint["token"] as? String
-                    if (!token.isNullOrBlank()) return token
+                    if (!token.isNullOrBlank()) {
+                        Log.d("YoutubeProvider", "v1.1: Token extracted successfully")
+                        return token
+                    }
                 }
             }
 
             // [추출 로직 2]: 레거시 스크롤 컨테이너 타겟팅
             val nextData = data["nextContinuationData"] as? Map<*, *>
             if (nextData != null) {
+                Log.d("YoutubeProvider", "v1.1: nextContinuationData identified")
                 val token = nextData["continuation"] as? String
-                if (!token.isNullOrBlank()) return token
+                if (!token.isNullOrBlank()) {
+                    Log.d("YoutubeProvider", "v1.1: Legacy token extracted successfully")
+                    return token
+                }
             }
 
-            // 정방향 재귀 탐색 (구조적 결함을 차단했으므로 역순 탐색 불필요)
             for (v in data.values) {
                 val t = findTokenRecursive(v)
                 if (t != null) return t
@@ -559,6 +573,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
         }
         return null
     }
+                 
 
         override val mainPage: List<MainPageData>
         get() {
