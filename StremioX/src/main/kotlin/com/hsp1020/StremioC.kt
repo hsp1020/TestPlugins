@@ -1372,10 +1372,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     tmdbData?.fetchedLogo?.let { this.logoUrl = it }
                     
                     // [상호 배타적 주입]: IMDB 존재 시 TMDB 주입 차단 (Simkl 교차 검증 충돌 방지)
+
                     val validImdb = cleanImdbId?.takeIf { it.startsWith("tt") }
                     validImdb?.let { addImdbId(it) }
                     if (validImdb == null) {
-                        cleanTmdbId?.toIntOrNull()?.let { addTMDbId(it) }
+                        cleanTmdbId?.takeIf { it.isNotBlank() }?.let { addTMDbId(it) }
                     }
                     
                     finalMalId?.let { addMalId(it) }
@@ -1399,7 +1400,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     val validImdb = cleanImdbId?.takeIf { it.startsWith("tt") }
                     validImdb?.let { addImdbId(it) }
                     if (validImdb == null) {
-                        cleanTmdbId?.toIntOrNull()?.let { addTMDbId(it) }
+                        cleanTmdbId?.takeIf { it.isNotBlank() }?.let { addTMDbId(it) }
                     }
                     
                     finalMalId?.let { addMalId(it) }
