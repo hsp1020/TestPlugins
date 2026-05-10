@@ -519,18 +519,12 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
     // v1.1
     private fun findTokenRecursive(data: Any?): String? {
         Log.d("YoutubeProvider", "v1.1: findTokenRecursive start")
-  //      if (data is Map<*, *>) {
-//            // [방어 로직]: 칩 바 및 독립된 페이지네이션을 갖는 하위 쉘프 탐색 원천 차단
- //           if (data.containsKey("feedFilterChipBarRenderer") || 
-  // //             data.containsKey("chipCloudRenderer") || 
- //               data.containsKey("relatedChipCloudRenderer") ||
- //               data.containsKey("richShelfRenderer") ||
- //               data.containsKey("reelShelfRenderer") ||
-  ////              data.containsKey("shelfRenderer") ||
-  //              data.containsKey("horizontalListRenderer")) {
-   //             Log.d("YoutubeProvider", "v1.1: Blocked sub-shelf token extraction")
-  //              return null
- //           }
+        if (data is Map<*, *>) {
+            // [방어 로직]: 칩 바 및 독립된 페이지네이션을 갖는 하위 쉘프 탐색 원천 차단
+            if (data.containsKey("1")) {
+                Log.d("YoutubeProvider", "v1.1: Blocked sub-shelf token extraction")
+                return null
+            }
 
             // [추출 로직 1]: 명시적 비디오 그리드 스크롤 렌더러 타겟팅
             val renderer = data["continuationItemRenderer"] as? Map<*, *>
