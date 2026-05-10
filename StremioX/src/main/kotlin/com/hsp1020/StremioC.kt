@@ -1433,6 +1433,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     }
                 }
             }
+        }
                                 
 
     private data class Video(
@@ -1537,6 +1538,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
     }
 }
+        
 
 private data class TraktRelatedIds(@JsonProperty("tmdb") val tmdb: Int?)
 private data class TraktRelatedItem(@JsonProperty("ids") val ids: TraktRelatedIds?)
