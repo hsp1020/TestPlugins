@@ -914,20 +914,24 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         @JsonProperty("links") val links: List<Link> = emptyList()
     ) {
         fun toSearchResponse(provider: StremioC): SearchResponse {
-            val thinData = LoadData(
-                id = this.id,
-                type = this.type ?: "movie",
-                title = this.name ?: this.id ?: "Empty",
-                tmdbId = this.moviedb_id ?: this.tmdbIdExt?.toIntOrNull(),
-                malId = this.malIdExt?.toIntOrNull(),
-                kitsuId = this.kitsuIdExt
-            )
+            val targetType = this.type ?: "movie"
+            // 네이티브 HTTP URL 조합 (Cloudstream 코어의 startsWith("http") 검증 통과)
+            val metaUrl = "${provider.mainUrl.substringBefore("?")}/meta/$targetType/${this.id}.json"
 
-            return provider.newMovieSearchResponse(name ?: "Unknown", thinData.toJson(), TvType.Others) { 
+            return provider.newMovieSearchResponse(name ?: "Unknown", metaUrl, TvType.Others) { 
                 posterUrl = poster 
             }
         }
+        fun toSearchResponse(provider: StremioC): SearchResponse {
+            val targetType = this.type ?: "movie"
+            // 네이티브 HTTP URL 조합 (Cloudstream 코어의 startsWith("http") 검증 통과)
+            val metaUrl = "${provider.mainUrl.substringBefore("?")}/meta/$targetType/${this.id}.json"
 
+            return provider.newMovieSearchResponse(name ?: "Unknown", metaUrl, TvType.Others) { 
+                posterUrl = poster 
+            }
+        }
+        
         private fun isSingleMovie(finalType: String?, finalVideos: List<Video>?): Boolean {
             return (finalType == "movie" && finalVideos?.size == 1 && finalVideos[0].seasonNumber == 1 && (finalVideos[0].episode == 1 || finalVideos[0].number == 1)) ||
                    (finalVideos?.size == 1 && (finalVideos[0].seasonNumber ?: 0) == 0 && (finalVideos[0].episode ?: finalVideos[0].number ?: 0) == 0)
