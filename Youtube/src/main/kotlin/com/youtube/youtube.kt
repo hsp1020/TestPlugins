@@ -468,7 +468,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                 "continuationItems", // 추가
                 "reloadContinuationItemsCommand", // 추가
                 "onResponseReceivedEndpoints", // 추가
-                "onResponseReceivedActions" // 추가
+                "onResponseReceivedActions", // 추가
                 "onResponseReceivedCommands"
             )
             var foundContainer = false
