@@ -445,24 +445,17 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     }
 
     override suspend fun load(url: String): LoadResponse = coroutineScope {
-        // [캡슐화 디코딩]: 하이브리드 URL에서 은닉된 JSON 페이로드 복구
-        val payload = url.substringAfter("?payload=", "").takeIf { it.isNotEmpty() }?.let { java.net.URLDecoder.decode(it, "UTF-8") }
-
-        val res: CatalogEntry = if (payload != null && payload.startsWith("{")) {
-            parseJson(payload)
-        } else if (url.startsWith("{")) {
+        val res: CatalogEntry = if (url.startsWith("{")) {
             parseJson(url)
         } else {
-            val actualUrl = url.substringBefore("?payload=")
-            val responseText = customSession.get(actualUrl).text
+            val responseText = customSession.get(url).text
             try {
                 parseJson<CatalogResponse>(responseText).meta ?: throw Exception()
             } catch (e: Exception) {
                 JSONObject(responseText).optJSONObject("meta")?.toString()?.let { parseJson(it) }
-                    ?: throw IllegalStateException("Metadata not found: $actualUrl")
+                    ?: throw IllegalStateException("Metadata not found: $url")
             }
         }
-
         
         val normalizedId = try { normalizeId(res.id) } catch (e: Exception) { res.id }
         val encodedId = normalizedId.urlEncode()
@@ -920,29 +913,17 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         @JsonProperty("trailerStreams") val trailerStreams: List<TrailerStream> = emptyList(), 
         @JsonProperty("links") val links: List<Link> = emptyList()
     ) {
+        
         fun toSearchResponse(provider: StremioC): SearchResponse {
             val targetType = this.type ?: "movie"
+            // 네이티브 HTTP URL 조합 (Cloudstream 코어의 startsWith("http") 검증 통과)
             val metaUrl = "${provider.mainUrl.substringBefore("?")}/meta/$targetType/${this.id}.json"
 
-            // [캡슐화]: 스트리밍 검색에 필수적인 확장 식별자를 보존하기 위해 JSON 텍스트 생성
-            val thinData = LoadData(
-                id = this.id,
-                type = targetType,
-                title = this.name ?: this.id ?: "Empty",
-                tmdbId = this.moviedb_id ?: this.tmdbIdExt?.toIntOrNull(),
-                malId = this.malIdExt?.toIntOrNull(),
-                kitsuId = this.kitsuIdExt
-            )
-            
-            // Cloudstream 앱 엔진의 http 검증과 메타데이터 보존을 동시에 충족하는 하이브리드 URL 조합
-            val safeUrl = "$metaUrl?payload=${thinData.toJson().urlEncode()}"
-
-            return provider.newMovieSearchResponse(name ?: "Unknown", safeUrl, TvType.Others) { 
+            return provider.newMovieSearchResponse(name ?: "Unknown", metaUrl, TvType.Others) { 
                 posterUrl = poster 
             }
         }
         
-                
         private fun isSingleMovie(finalType: String?, finalVideos: List<Video>?): Boolean {
             return (finalType == "movie" && finalVideos?.size == 1 && finalVideos[0].seasonNumber == 1 && (finalVideos[0].episode == 1 || finalVideos[0].number == 1)) ||
                    (finalVideos?.size == 1 && (finalVideos[0].seasonNumber ?: 0) == 0 && (finalVideos[0].episode ?: finalVideos[0].number ?: 0) == 0)
@@ -1095,12 +1076,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     val outType = if (rawMediaType == "tv") "series" else "movie"
                     
                     val customPosterUrl = "https://xrdb.ibbylabs.dev/poster/tmdb:$posterType:$recTmdbId.jpg?idSource=tmdb&tmdbKey=cc9982c4801545a1481d167137ea7b53&mdblistKey=d2tmbmhnrgdz7ft9re7j2gjr3&posterRatings=myanimelist%2Cimdb%2Cletterboxd%2Cmetacriticuser%2Ctomatoesaudience%2Ctrakt%2Ctmdb%2Cmetacritic%2Ctomatoes%2Crogerebert&lang=ko&ratingValueMode=normalized&posterGenreBadgeStyle=plain&posterGenreBadgePosition=bottomLeft&posterStreamBadges=on&ageRatingBadgePosition=left-top&posterQualityBadges=&posterRatingStyle=plain&posterRatingBadgeScale=115&imageText=original&posterRatingsLayout=right&posterNoBackgroundBadgeOutlineColor=%23ff0000&posterEdgeOffset=3&providerAppearance=eyJ0b21hdG9lcyI6eyJzdGFja2VkQWNjZW50TW9kZSI6ImxvZ28ifX0"
-                    // 네이티브 HTTP URL 조합
-                    val thinData = LoadData(id = "tmdb:${media.id}", type = outType)
-                    val metaUrl = "${provider.mainUrl.substringBefore("?")}/meta/$outType/tmdb:${media.id}.json"
-                    val safeUrl = "$metaUrl?payload=${thinData.toJson().urlEncode()}"                    
-                    provider.newMovieSearchResponse(recTitle, safeUrl, if (outType == "movie") TvType.Movie else TvType.TvSeries) { this.posterUrl = customPosterUrl }
                     
+                    val thinData = LoadData(id = "tmdb:${media.id}", type = outType)
+                    provider.newMovieSearchResponse(recTitle, thinData.toJson(), if (outType == "movie") TvType.Movie else TvType.TvSeries) { this.posterUrl = customPosterUrl }
                 }
             }
 
