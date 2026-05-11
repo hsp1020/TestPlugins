@@ -154,6 +154,14 @@ class Linkkf : MainAPI() {
         val title = this.selectFirst(".vod-item-title a")?.text()?.trim() ?: return null
         val href = aTag.attr("href")
         val poster = this.selectFirst(".img-wrapper")?.attr("data-original")?.ifEmpty { this.selectFirst("img")?.attr("src") }
-        return newTvSeriesSearchResponse(title, href, TvType.Anime) { this.posterUrl = poster }
+        
+        return newTvSeriesSearchResponse(title, href, TvType.Anime) {
+            val encodedPoster = java.net.URLEncoder.encode(poster ?: "", "UTF-8")
+            this.posterUrl = if (!poster.isNullOrBlank()) {
+                "https://wsrv.nl/?url=$encodedPoster&w=300&h=450&fit=contain&cbg=black"
+            } else {
+                poster
+            }
+        }
     }
 }
