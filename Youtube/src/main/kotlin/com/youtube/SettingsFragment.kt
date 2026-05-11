@@ -215,7 +215,7 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
 
             pagesPref = SeekBarPreference(ctx).apply {
                 key = KEY_PAGES
-                min = 1; max = 50
+                min = 1; max = 100
                 setDefaultValue(6)
                 showSeekBarValue = true
                 setOnPreferenceChangeListener { _, newVal ->
