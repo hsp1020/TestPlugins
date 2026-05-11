@@ -66,17 +66,16 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36")
 
             val cookieBuilder = StringBuilder()
-            val visitor = prefs?.getString("VISITOR_INFO1_LIVE", null)
-
-            if (!visitor.isNullOrBlank()) {
-                cookieBuilder.append("VISITOR_INFO1_LIVE=$visitor; ")
-            } else {
-                cookieBuilder.append("VISITOR_INFO1_LIVE=_Mk3UVhY40g; ")
-            }
-
             var sapisidVal: String? = null
 
             if (!noAuth) {
+                val visitor = prefs?.getString("VISITOR_INFO1_LIVE", null)
+                if (!visitor.isNullOrBlank()) {
+                    cookieBuilder.append("VISITOR_INFO1_LIVE=$visitor; ")
+                } else {
+                    cookieBuilder.append("VISITOR_INFO1_LIVE=_Mk3UVhY40g; ")
+                }
+
                 val authKeys = listOf("SID", "HSID", "SSID", "APISID", "SAPISID")
                 authKeys.forEach { key ->
                     val value = prefs?.getString(key, null)
@@ -85,6 +84,8 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                         if (key == "SAPISID") sapisidVal = value
                     }
                 }
+            } else {
+                cookieBuilder.append("VISITOR_INFO1_LIVE=_Mk3UVhY40g; ")
             }
             
             cookieBuilder.append("PREF=f6=40000000&hl=${provider.lang}; CONSENT=YES+fx.456722336;")
@@ -110,7 +111,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
         }
     }
 
-
+            
 
     private val ytInterceptor = YouTubeInterceptor(sharedPref, this)
     private val safariUserAgent =
@@ -824,8 +825,15 @@ private fun collectFromRenderer(
                 val html = app.get(url, headers = searchHeaders, interceptor = ytInterceptor).text
 
                 val regexKey = Regex(""""INNERTUBE_API_KEY":"([^"]+)"""")
-                savedApiKey = regexKey.find(html)?.groupValues?.get(1)
-                savedVisitorData = findConfig(html, "VISITOR_DATA")
+                val extractedApiKey = regexKey.find(html)?.groupValues?.get(1)
+                val extractedVisitorData = findConfig(html, "VISITOR_DATA")
+                
+                if (syncHistory) {
+                    savedApiKey = extractedApiKey ?: savedApiKey
+                    savedVisitorData = extractedVisitorData ?: savedVisitorData
+                } else {
+                    savedApiKey = extractedApiKey ?: savedApiKey
+                }
 
                 val initialData = extractYtInitialData(html)
                 if (initialData != null) {
@@ -835,12 +843,13 @@ private fun collectFromRenderer(
             } else {
                 if (!savedContinuationToken.isNullOrBlank() && !savedApiKey.isNullOrBlank()) {
                     val apiUrl = "$mainUrl/youtubei/v1/search?key=$savedApiKey"
+                    val vData = if (syncHistory) (savedVisitorData ?: "") else ""
                     val payload = mapOf(
                         "context" to mapOf(
                             "client" to mapOf(
                                 "clientName" to "WEB",
                                 "clientVersion" to "2.20240101.00",
-                                "visitorData" to (savedVisitorData ?: "")
+                                "visitorData" to vData
                             )
                         ),
                         "continuation" to savedContinuationToken
@@ -860,8 +869,9 @@ private fun collectFromRenderer(
             return newSearchResponseList(emptyList(), false)
         }
     }
-
     
+     
+                         
     private val collectedShorts = mutableListOf<Episode>()
 
     private fun addShortToCache(title: String, url: String, poster: String?) {
