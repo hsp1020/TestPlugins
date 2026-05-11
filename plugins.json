@@ -64,10 +64,10 @@
     },
     {
         "iconUrl": "https://i.namu.wiki/i/4NbnTney9AChyoNRvChxbZQE806zcx9Z_wIjM32htHGOcp7ZOQWFvBCSyQfTu3NloC8WRcRE4hnGq2FNxOFdxjvYm82uiRnwMhu95ehEDONK8OSiIVctKBYVWmU7FjOItqs5Hf0OEZRbAbL9yE5a8w.webp",
-        "fileHash": "sha256-fafe22d45cffea3c1cb410589813d127f3784e6b7a33eebccca772d5a67e3d5d",
+        "fileHash": "sha256-f111f3a522e21e7aa91fc405a5b7189946546d13f5bf23019adf9d1e39ac79bc",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 18674,
+        "fileSize": 18873,
         "status": 1,
         "language": "ko",
         "authors": [
