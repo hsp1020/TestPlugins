@@ -39,12 +39,12 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.*
 import com.lagradost.cloudstream3.app
 import org.jsoup.Jsoup
-
 data class CustomSection(
     @JsonProperty("name") var name: String = "",
     @JsonProperty("url") var url: String = "",
     @JsonProperty("isEnabled") var isEnabled: Boolean = true
 )
+
 
 class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : BottomSheetDialogFragment() {
 
@@ -80,6 +80,8 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
         }
     }
 
+
+
     class PrefsFragment(private val sharedPref: SharedPreferences) : PreferenceFragmentCompat() {
 
         private val KEY_VISITOR = "VISITOR_INFO1_LIVE"
@@ -101,7 +103,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
         private lateinit var homeCategory: PreferenceCategory
         private lateinit var manageChannelsPref: Preference
         private lateinit var trendingPref: SwitchPreferenceCompat
-        private lateinit var syncSearchPref: SwitchPreferenceCompat
 
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
             val ctx = requireContext()
@@ -136,6 +137,7 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 if (value == null) setValue("ar")
                 summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
                 setOnPreferenceChangeListener { _, newValue ->
+
                     sharedPref.edit().putString(KEY_LANGUAGE, newValue as String).apply()
                     view?.post { updateTexts() }
                     true
@@ -179,6 +181,7 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
 
             clearPref = Preference(ctx).apply {
                 setOnPreferenceClickListener {
+
                     MaterialAlertDialogBuilder(ctx)
                         .setTitle(Loc.getString(sharedPref, "logout_confirm_title"))
                         .setMessage(Loc.getString(sharedPref, "logout_confirm_msg"))
@@ -212,7 +215,7 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
 
             pagesPref = SeekBarPreference(ctx).apply {
                 key = KEY_PAGES
-                min = 1; max = 200
+                min = 1; max = 50
                 setDefaultValue(6)
                 showSeekBarValue = true
                 setOnPreferenceChangeListener { _, newVal ->
@@ -240,12 +243,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
             if (!sharedPref.contains(KEY_PLAYLIST_TAG)) sharedPref.edit().putString(KEY_PLAYLIST_TAG, "{p}").apply()
             playlistTagPref.text = sharedPref.getString(KEY_PLAYLIST_TAG, "{p}")
             customCategory.addPreference(playlistTagPref)
-
-            syncSearchPref = SwitchPreferenceCompat(ctx).apply {
-                key = "sync_search_history"
-                setDefaultValue(true)
-            }
-            customCategory.addPreference(syncSearchPref)
 
             updateTexts()
         }
@@ -289,11 +286,10 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
             playlistTagPref.dialogTitle = Loc.getString(sharedPref, "tag_hint")
             playlistTagPref.setPositiveButtonText(Loc.getString(sharedPref, "ok"))
             playlistTagPref.setNegativeButtonText(Loc.getString(sharedPref, "cancel"))
-
-            syncSearchPref.title = Loc.getString(sharedPref, "sync_search_title")
-            syncSearchPref.summary = Loc.getString(sharedPref, "sync_search_summary")
         }
     }
+
+
 
     class CustomSectionsDialog(private val sharedPref: SharedPreferences) : DialogFragment() {
 
@@ -324,14 +320,18 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
             }
 
             val backBtn = ImageView(ctx).apply {
+
                 setImageDrawable(createSvgIcon("M20,11H7.83l5.59,-5.59L12,4l-8,8 8,8 1.41,-1.41L7.83,13H20v-2z", "#FFFFFF"))
+
                 val outValue = android.util.TypedValue()
                 ctx.theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, outValue, true)
                 setBackgroundResource(outValue.resourceId)
+
                 setPadding(15, 15, 15, 15)
                 layoutParams = LinearLayout.LayoutParams(90, 90).apply {
                     setMargins(0, 0, 30, 0)
                 }
+
                 setOnClickListener { dismiss() }
             }
 
@@ -436,6 +436,7 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
 
             val loadingIndicator = ProgressBar(ctx, null, android.R.attr.progressBarStyleSmall).apply {
                 visibility = View.GONE
+
                 layoutParams = FrameLayout.LayoutParams(80, 80).apply {
                     gravity = Gravity.CENTER_VERTICAL or Gravity.END
                     marginEnd = 20
@@ -452,13 +453,14 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
                 override fun afterTextChanged(s: android.text.Editable?) {
                     val url = s.toString().trim()
-                    fetchJob?.cancel() 
+                    fetchJob?.cancel() // إلغاء أي عملية سابقة
 
                     if (url.startsWith("http") && url.contains("youtube") && inputName.text.isBlank()) {
                         loadingIndicator.visibility = View.VISIBLE
 
                         fetchJob = kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                             try {
+
                                 val response = com.lagradost.cloudstream3.app.get(url).text
                                 val doc = org.jsoup.Jsoup.parse(response)
                                 var title = doc.selectFirst("meta[property=og:title]")?.attr("content")
@@ -648,6 +650,8 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
             override fun getItemCount(): Int = sectionsList.size
         }
     }
+
+
 
     class WebViewCaptureDialog(
         private val sharedPref: SharedPreferences,
