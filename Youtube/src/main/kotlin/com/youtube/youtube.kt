@@ -75,7 +75,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
             }
 
             var sapisidVal: String? = null
-            
+
             if (!noAuth) {
                 val authKeys = listOf("SID", "HSID", "SSID", "APISID", "SAPISID")
                 authKeys.forEach { key ->
@@ -89,8 +89,8 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
             
             cookieBuilder.append("PREF=f6=40000000&hl=${provider.lang}; CONSENT=YES+fx.456722336;")
 
-            requestBuilder.addHeader("Cookie", cookieBuilder.toString())
-            requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
+            requestBuilder.header("Cookie", cookieBuilder.toString())
+            requestBuilder.header("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
 
             if (!noAuth && !sapisidVal.isNullOrBlank()) {
                 try {
@@ -98,9 +98,9 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                     val origin = "https://www.youtube.com"
                     val msg = "$timestamp $sapisidVal $origin"
                     val hash = sha1(msg)
-                    requestBuilder.addHeader("Authorization", "SAPISIDHASH ${timestamp}_$hash")
-                    requestBuilder.addHeader("X-Origin", origin)
-                    requestBuilder.addHeader("X-Goog-AuthUser", "0")
+                    requestBuilder.header("Authorization", "SAPISIDHASH ${timestamp}_$hash")
+                    requestBuilder.header("X-Origin", origin)
+                    requestBuilder.header("X-Goog-AuthUser", "0")
                 } catch (e: Exception) {
                     logError(e)
                 }
@@ -109,6 +109,8 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
             return chain.proceed(requestBuilder.build())
         }
     }
+
+
 
     private val ytInterceptor = YouTubeInterceptor(sharedPref, this)
     private val safariUserAgent =
@@ -860,7 +862,6 @@ private fun collectFromRenderer(
     }
 
     
-
     private val collectedShorts = mutableListOf<Episode>()
 
     private fun addShortToCache(title: String, url: String, poster: String?) {
