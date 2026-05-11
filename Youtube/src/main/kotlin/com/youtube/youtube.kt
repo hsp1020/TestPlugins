@@ -238,7 +238,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
         return "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
     }
 
-    private fun collectFromRenderer(
+private fun collectFromRenderer(
         renderer: Map<*, *>?,
         seenIds: MutableSet<String>
     ): SearchResponse? {
@@ -265,7 +265,9 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                     finalTitle,
                     "$mainUrl/watch?v=$videoId",
                     TvType.Movie
-                ) { this.posterUrl = poster }
+                ) {
+                    this.posterUrl = poster?.let { "https://wsrv.nl/?url=${java.net.URLEncoder.encode(it, "UTF-8")}&w=300&h=450&fit=contain&cbg=black" } ?: poster
+                }
             }
             return null
         }
@@ -358,7 +360,9 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                         finalTitle,
                         "$mainUrl/playlist?list=$playlistId",
                         TvType.TvSeries
-                    ) { this.posterUrl = poster }
+                    ) {
+                        this.posterUrl = poster?.let { "https://wsrv.nl/?url=${java.net.URLEncoder.encode(it, "UTF-8")}&w=300&h=450&fit=contain&cbg=black" } ?: poster
+                    }
                 }
             }
 
@@ -415,7 +419,9 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                         finalTitle,
                         "$mainUrl/watch?v=$videoId",
                         TvType.Movie
-                    ) { this.posterUrl = poster }
+                    ) {
+                        this.posterUrl = "https://wsrv.nl/?url=${java.net.URLEncoder.encode(poster, "UTF-8")}&w=300&h=450&fit=contain&cbg=black"
+                    }
                 }
             }
         }
@@ -432,7 +438,9 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                     "$title ($stats)",
                     "$mainUrl/channel/$id",
                     TvType.Live
-                ) { this.posterUrl = poster }
+                ) {
+                    this.posterUrl = poster?.let { "https://wsrv.nl/?url=${java.net.URLEncoder.encode(it, "UTF-8")}&w=300&h=450&fit=contain&cbg=black" } ?: poster
+                }
             }
         }
         return null
