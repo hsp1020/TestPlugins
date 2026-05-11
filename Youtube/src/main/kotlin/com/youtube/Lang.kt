@@ -1,3 +1,5 @@
+package com.youtube
+
 import android.content.SharedPreferences
 
 object Loc {
@@ -80,7 +82,9 @@ object Loc {
             "edit_item" to "تعديل",
             "url_empty" to "الرابط لا يمكن أن يكون فارغاً",
             "browse_youtube" to "تصفح ليتعرف يوتيوب على تفضيلاتك",
-            "url_hint" to "الرابط (https://...)"
+            "url_hint" to "الرابط (https://...)",
+            "sync_search_title" to "مزامنة سجل بحث YouTube",
+            "sync_search_summary" to "السماح بمزامنة استعلامات البحث مع حساب YouTube الخاص بك"
         ),
         "en" to mapOf(
             "lang_title" to "Language / اللغة",
@@ -127,7 +131,9 @@ object Loc {
             "edit_item" to "Edit Item",
             "url_empty" to "URL cannot be empty",
             "browse_youtube" to "Browse so YouTube can know your preferences",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "sync_search_title" to "Sync YouTube Search",
+            "sync_search_summary" to "Allow syncing search queries to your YouTube account"
         ),
         "tr" to mapOf(
             "lang_title" to "Dil / Language",
@@ -174,7 +180,9 @@ object Loc {
             "edit_item" to "Öğeyi Düzenle",
             "url_empty" to "URL boş olamaz",
             "browse_youtube" to "YouTube'un tercihlerinizi bilmesi için göz atın",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "sync_search_title" to "YouTube Arama Senkronizasyonu",
+            "sync_search_summary" to "Arama sorgularının YouTube hesabınızla senkronize edilmesine izin ver"
         ),
         "es" to mapOf(
             "lang_title" to "Idioma / Language",
@@ -221,7 +229,9 @@ object Loc {
             "edit_item" to "Editar",
             "url_empty" to "La URL no puede estar vacía",
             "browse_youtube" to "Navega para que YouTube conozca tus preferencias",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "sync_search_title" to "Sincronizar búsqueda de YouTube",
+            "sync_search_summary" to "Permitir sincronizar las consultas de búsqueda con tu cuenta de YouTube"
         ),
 
         "de" to mapOf(
@@ -269,7 +279,9 @@ object Loc {
             "edit_item" to "Element bearbeiten",
             "url_empty" to "URL darf nicht leer sein",
             "browse_youtube" to "Stöbern Sie, damit YouTube Ihre Vorlieben kennenlernt",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "sync_search_title" to "YouTube-Suche synchronisieren",
+            "sync_search_summary" to "Zulassen, dass Suchanfragen mit Ihrem YouTube-Konto synchronisiert werden"
         ),
         "fr" to mapOf(
             "lang_title" to "Langue / Language",
@@ -316,7 +328,9 @@ object Loc {
             "edit_item" to "Modifier l'élément",
             "url_empty" to "L'URL ne peut pas être vide",
             "browse_youtube" to "Naviguez pour que YouTube connaisse vos préférences",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "sync_search_title" to "Synchroniser la recherche YouTube",
+            "sync_search_summary" to "Autoriser la synchronisation des requêtes de recherche avec votre compte YouTube"
         ),
         "ja" to mapOf(
             "lang_title" to "言語 / Language",
@@ -363,7 +377,9 @@ object Loc {
             "edit_item" to "アイテムを編集",
             "url_empty" to "URLは空にできません",
             "browse_youtube" to "YouTubeがあなたの好みを学習できるように閲覧してください",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "sync_search_title" to "YouTube検索を同期",
+            "sync_search_summary" to "検索クエリをYouTubeアカウントに同期することを許可する"
         ),
         "ru" to mapOf(
             "lang_title" to "Язык / Language",
@@ -410,7 +426,9 @@ object Loc {
             "edit_item" to "Редактировать",
             "url_empty" to "URL не может быть пустым",
             "browse_youtube" to "Просматривайте, чтобы YouTube узнал ваши предпочтения",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "sync_search_title" to "Синхронизация поиска YouTube",
+            "sync_search_summary" to "Разрешить синхронизацию поисковых запросов с вашим аккаунтом YouTube"
         ),
         "pt" to mapOf(
             "lang_title" to "Idioma / Language",
@@ -457,7 +475,9 @@ object Loc {
             "edit_item" to "Editar Item",
             "url_empty" to "A URL não pode estar vazia",
             "browse_youtube" to "Navegue para que o YouTube conheça suas preferências",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "sync_search_title" to "Sincronizar pesquisa do YouTube",
+            "sync_search_summary" to "Permitir a sincronização de consultas de pesquisa com sua conta do YouTube"
         ),
         "it" to mapOf(
             "lang_title" to "Lingua / Language",
@@ -504,7 +524,9 @@ object Loc {
             "edit_item" to "Modifica Elemento",
             "url_empty" to "L'URL non può essere vuoto",
             "browse_youtube" to "Naviga in modo che YouTube possa conoscere le tue preferenze",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "sync_search_title" to "Sincronizza ricerca YouTube",
+            "sync_search_summary" to "Consenti la sincronizzazione delle query di ricerca con il tuo account YouTube"
         ),
         "id" to mapOf(
             "lang_title" to "Bahasa / Language",
@@ -551,7 +573,9 @@ object Loc {
             "edit_item" to "Edit Item",
             "url_empty" to "URL tidak boleh kosong",
             "browse_youtube" to "Jelajahi agar YouTube dapat mengetahui preferensi Anda",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "sync_search_title" to "Sinkronkan Pencarian YouTube",
+            "sync_search_summary" to "Izinkan sinkronisasi kueri pencarian ke akun YouTube Anda"
         ),
         "pl" to mapOf(
             "lang_title" to "Język / Language",
@@ -598,7 +622,9 @@ object Loc {
             "edit_item" to "Edytuj element",
             "url_empty" to "URL nie może być pusty",
             "browse_youtube" to "Przeglądaj, aby YouTube poznał Twoje preferencje",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "sync_search_title" to "Synchronizuj wyszukiwanie YouTube",
+            "sync_search_summary" to "Zezwalaj na synchronizację zapytań wyszukiwania z kontem YouTube"
         ),
 
 
@@ -647,7 +673,9 @@ object Loc {
             "edit_item" to "ویرایش مورد",
             "url_empty" to "URL نمی‌تواند خالی باشد",
             "browse_youtube" to "مرور کنید تا یوتیوب با سلیقه شما آشنا شود",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "sync_search_title" to "همگام‌سازی جستجوی یوتیوب",
+            "sync_search_summary" to "اجازه همگام‌سازی پرس‌وجوهای جستجو با حساب یوتیوب شما"
         ),
         "hi" to mapOf(
             "lang_title" to "भाषा / Language",
@@ -694,7 +722,9 @@ object Loc {
             "edit_item" to "आइटम संपादित करें",
             "url_empty" to "URL खाली नहीं हो सकता",
             "browse_youtube" to "ब्राउज़ करें ताकि यूट्यूब आपकी पसंद जान सके",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "sync_search_title" to "यूट्यूब खोज सिंक करें",
+            "sync_search_summary" to "खोज क्वेरी को अपने यूट्यूब खाते से सिंक करने की अनुमति दें"
         ),
         "ko" to mapOf(
             "lang_title" to "언어 / Language",
@@ -741,7 +771,9 @@ object Loc {
             "edit_item" to "항목 편집",
             "url_empty" to "URL은 비워 둘 수 없습니다",
             "browse_youtube" to "YouTube가 귀하의 선호를 알 수 있도록 탐색하세요",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "sync_search_title" to "유튜브 검색 기록 연동",
+            "sync_search_summary" to "검색 시 내 유튜브 계정 검색 기록에 동기화 허용"
         ),
         "zh" to mapOf(
             "lang_title" to "语言 / Language",
@@ -788,7 +820,9 @@ object Loc {
             "edit_item" to "编辑项目",
             "url_empty" to "URL 不能为空",
             "browse_youtube" to "浏览以便 YouTube 了解您的偏好",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "sync_search_title" to "同步 YouTube 搜索",
+            "sync_search_summary" to "允许将搜索查询同步到您的 YouTube 帐户"
         ),
 
         "bn" to mapOf(
@@ -836,7 +870,9 @@ object Loc {
             "edit_item" to "আইটেম সম্পাদনা করুন",
             "url_empty" to "URL খালি রাখা যাবে না",
             "browse_youtube" to "ব্রাউজ করুন যাতে YouTube আপনার পছন্দগুলি জানতে পারে",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "sync_search_title" to "YouTube অনুসন্ধান সিঙ্ক করুন",
+            "sync_search_summary" to "আপনার YouTube অ্যাকাউন্টের সাথে অনুসন্ধান প্রশ্নগুলি সিঙ্ক করার অনুমতি দিন"
         ),
         "cs" to mapOf(
             "lang_title" to "Jazyk / Language",
@@ -883,7 +919,9 @@ object Loc {
             "edit_item" to "Upravit položku",
             "url_empty" to "URL nesmí být prázdná",
             "browse_youtube" to "Procházejte, aby YouTube poznal vaše preference",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "sync_search_title" to "Synchronizovat vyhledávání YouTube",
+            "sync_search_summary" to "Povolit synchronizaci vyhledávacích dotazů s vaším účtem YouTube"
         ),
         "da" to mapOf(
             "lang_title" to "Sprog / Language",
@@ -930,7 +968,9 @@ object Loc {
             "edit_item" to "Rediger element",
             "url_empty" to "URL kan ikke være tom",
             "browse_youtube" to "Gennemse, så YouTube kan kende dine præferencer",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "sync_search_title" to "Synkroniser YouTube-søgning",
+            "sync_search_summary" to "Tillad synkronisering af søgeforespørgsler til din YouTube-konto"
         ),
         "nl" to mapOf(
             "lang_title" to "Taal / Language",
@@ -977,7 +1017,9 @@ object Loc {
             "edit_item" to "Item bewerken",
             "url_empty" to "URL mag niet leeg zijn",
             "browse_youtube" to "Blader zodat YouTube uw voorkeuren kan leren kennen",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "sync_search_title" to "YouTube-zoekopdracht synchroniseren",
+            "sync_search_summary" to "Sta synchronisatie van zoekopdrachten met uw YouTube-account toe"
         ),
         "fi" to mapOf(
             "lang_title" to "Kieli / Language",
@@ -1024,7 +1066,9 @@ object Loc {
             "edit_item" to "Muokkaa kohdetta",
             "url_empty" to "URL ei voi olla tyhjä",
             "browse_youtube" to "Selaa, jotta YouTube voi oppia asetuksesi",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "sync_search_title" to "Synkronoi YouTube-haku",
+            "sync_search_summary" to "Salli hakukyselyjen synkronointi YouTube-tiliisi"
         ),
         "el" to mapOf(
             "lang_title" to "Γλώσσα / Language",
@@ -1071,7 +1115,9 @@ object Loc {
             "edit_item" to "Επεξεργασία",
             "url_empty" to "Το URL δεν μπορεί να είναι κενό",
             "browse_youtube" to "Περιηγηθείτε ώστε το YouTube να μάθει τις προτιμήσεις σας",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "sync_search_title" to "Συγχρονισμός αναζήτησης YouTube",
+            "sync_search_summary" to "Επιτρέψτε τον συγχρονισμό ερωτημάτων αναζήτησης στον λογαριασμό σας στο YouTube"
         ),
         "no" to mapOf(
             "lang_title" to "Språk / Language",
@@ -1118,7 +1164,9 @@ object Loc {
             "edit_item" to "Rediger element",
             "url_empty" to "URL kan ikke være tom",
             "browse_youtube" to "Surf slik at YouTube kan kjenne preferansene dine",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "sync_search_title" to "Synkroniser YouTube-søk",
+            "sync_search_summary" to "Tillat synkronisering av søkeforespørsler til YouTube-kontoen din"
         ),
         "ps" to mapOf(
             "lang_title" to "ژبه / Language",
@@ -1165,7 +1213,9 @@ object Loc {
             "edit_item" to "توکي ایډیټ کړئ",
             "url_empty" to "URL نشي کولی خالي وي",
             "browse_youtube" to "لټون وکړئ ترڅو یوټیوب ستاسو خوښې وپیژني",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "sync_search_title" to "د یوټیوب لټون همغږي کړئ",
+            "sync_search_summary" to "خپل یوټیوب حساب ته د لټون پوښتنو همغږي کولو اجازه ورکړئ"
         ),
         "ro" to mapOf(
             "lang_title" to "Limbă / Language",
@@ -1212,7 +1262,9 @@ object Loc {
             "edit_item" to "Editare element",
             "url_empty" to "URL-ul nu poate fi gol",
             "browse_youtube" to "Navigați pentru ca YouTube să vă cunoască preferințele",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "sync_search_title" to "Sincronizați căutarea YouTube",
+            "sync_search_summary" to "Permiteți sincronizarea interogărilor de căutare cu contul dvs. YouTube"
         ),
         "sv" to mapOf(
             "lang_title" to "Språk / Language",
@@ -1259,7 +1311,9 @@ object Loc {
             "edit_item" to "Redigera objekt",
             "url_empty" to "URL kan inte vara tom",
             "browse_youtube" to "Surfa så att YouTube kan lära känna dina preferenser",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "sync_search_title" to "Synkronisera YouTube-sökning",
+            "sync_search_summary" to "Tillåt synkronisering av sökfrågor till ditt YouTube-konto"
         ),
         "uk" to mapOf(
             "lang_title" to "Мова / Language",
@@ -1303,10 +1357,12 @@ object Loc {
             "confirm_delete_msg" to "Цей канал буде назавжди видалено з головної сторінки.",
             "section_name" to "Назва розділу",
             "add_new" to "Додати новий",
-            "edit_item" to "Редагувати",
+            "edit_item" to "Редактировать",
             "url_empty" to "URL не може бути порожнім",
             "browse_youtube" to "Переглядайте, щоб YouTube дізнався про ваші вподобання",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "sync_search_title" to "Синхронізувати пошук YouTube",
+            "sync_search_summary" to "Дозволити синхронізацію пошукових запитів з вашим обліковим записом YouTube"
         ),
         "ur" to mapOf(
             "lang_title" to "زبان / Language",
@@ -1353,7 +1409,9 @@ object Loc {
             "edit_item" to "آئٹم میں ترمیم کریں",
             "url_empty" to "URL خالی نہیں ہو سکتا",
             "browse_youtube" to "براؤز کریں تاکہ یوٹیوب آپ کی پسند جان سکے",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "sync_search_title" to "یوٹیوب تلاش کی ہم آہنگی",
+            "sync_search_summary" to "تلاش کی درخواستوں کو اپنے یوٹیوب اکاؤنٹ کے ساتھ ہم آہنگ کرنے کی اجازت دیں"
         ),
         "ku" to mapOf(
             "lang_title" to "زمان / Language",
@@ -1400,11 +1458,10 @@ object Loc {
             "edit_item" to "دەستکاریکردنی بەند",
             "url_empty" to "ناونیشان ناتوانێت بەتاڵ بێت",
             "browse_youtube" to "بگەڕێ با یوتیوب ئارەزووەکانت بزانێت",
-            "url_hint" to "ناونیشان (https://...)"
+            "url_hint" to "ناونیشان (https://...)",
+            "sync_search_title" to "هاوکاتکردنی گەڕانی یوتیوب",
+            "sync_search_summary" to "ڕێگەدان بە هاوکاتکردنی پرسیارەکانی گەڕان بۆ هەژماری یوتیوبەکەت"
         )
-
-
-
     )
 
     fun getString(sharedPref: SharedPreferences, key: String): String {
