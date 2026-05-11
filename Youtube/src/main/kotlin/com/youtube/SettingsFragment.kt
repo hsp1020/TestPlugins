@@ -295,10 +295,9 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
             playlistTagPref.setPositiveButtonText(Loc.getString(sharedPref, "ok"))
             playlistTagPref.setNegativeButtonText(Loc.getString(sharedPref, "cancel"))
 
-            syncSearchPref.title = "유튜브 검색 기록 연동"
-            syncSearchPref.summary = "검색 시 내 유튜브 계정 검색 기록에 동기화 허용"
-        }        
-        
+            syncSearchPref.title = Loc.getString(sharedPref, "sync_search_title")
+            syncSearchPref.summary = Loc.getString(sharedPref, "sync_search_summary")
+        }      
 
     class CustomSectionsDialog(private val sharedPref: SharedPreferences) : DialogFragment() {
 
