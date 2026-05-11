@@ -103,6 +103,10 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
         private lateinit var homeCategory: PreferenceCategory
         private lateinit var manageChannelsPref: Preference
         private lateinit var trendingPref: SwitchPreferenceCompat
+        private lateinit var playerTypePref: ListPreference
+        private lateinit var pagesPref: SeekBarPreference
+        private lateinit var playlistTagPref: EditTextPreference
+        private lateinit var syncSearchPref: SwitchPreferenceCompat
 
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
             val ctx = requireContext()
@@ -137,7 +141,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 if (value == null) setValue("ar")
                 summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
                 setOnPreferenceChangeListener { _, newValue ->
-
                     sharedPref.edit().putString(KEY_LANGUAGE, newValue as String).apply()
                     view?.post { updateTexts() }
                     true
@@ -181,7 +184,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
 
             clearPref = Preference(ctx).apply {
                 setOnPreferenceClickListener {
-
                     MaterialAlertDialogBuilder(ctx)
                         .setTitle(Loc.getString(sharedPref, "logout_confirm_title"))
                         .setMessage(Loc.getString(sharedPref, "logout_confirm_msg"))
@@ -215,7 +217,7 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
 
             pagesPref = SeekBarPreference(ctx).apply {
                 key = KEY_PAGES
-                min = 1; max = 100
+                min = 1; max = 200
                 setDefaultValue(6)
                 showSeekBarValue = true
                 setOnPreferenceChangeListener { _, newVal ->
@@ -243,6 +245,12 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
             if (!sharedPref.contains(KEY_PLAYLIST_TAG)) sharedPref.edit().putString(KEY_PLAYLIST_TAG, "{p}").apply()
             playlistTagPref.text = sharedPref.getString(KEY_PLAYLIST_TAG, "{p}")
             customCategory.addPreference(playlistTagPref)
+
+            syncSearchPref = SwitchPreferenceCompat(ctx).apply {
+                key = "sync_search_history"
+                setDefaultValue(true)
+            }
+            customCategory.addPreference(syncSearchPref)
 
             updateTexts()
         }
@@ -286,10 +294,11 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
             playlistTagPref.dialogTitle = Loc.getString(sharedPref, "tag_hint")
             playlistTagPref.setPositiveButtonText(Loc.getString(sharedPref, "ok"))
             playlistTagPref.setNegativeButtonText(Loc.getString(sharedPref, "cancel"))
-        }
-    }
 
-
+            syncSearchPref.title = "유튜브 검색 기록 연동"
+            syncSearchPref.summary = "검색 시 내 유튜브 계정 검색 기록에 동기화 허용"
+        }        
+        
 
     class CustomSectionsDialog(private val sharedPref: SharedPreferences) : DialogFragment() {
 
