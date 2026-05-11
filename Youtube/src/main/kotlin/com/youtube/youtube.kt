@@ -518,16 +518,24 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
 
     private fun findTokenRecursive(data: Any?): String? {
         if (data is Map<*, *>) {
-            // [방어 로직]: 칩 바(가로 스크롤 메뉴) 자체의 더미 토큰 탐색 원천 차단
+            // [방어 로직]: 칩 바 및 독립된 페이지네이션을 갖는 하위 쉘프 탐색 원천 차단
+            /*  
             if (data.containsKey("feedFilterChipBarRenderer") || 
                 data.containsKey("chipCloudRenderer") || 
-                data.containsKey("relatedChipCloudRenderer")) {
+                data.containsKey("relatedChipCloudRenderer") ||
+                data.containsKey("richShelfRenderer") ||
+                data.containsKey("reelShelfRenderer") ||
+                data.containsKey("shelfRenderer") ||
+                data.containsKey("horizontalListRenderer")) {
+                Log.d("YoutubeProvider", "v1.1: Blocked sub-shelf token extraction")
                 return null
             }
+            */
 
             // [추출 로직 1]: 명시적 비디오 그리드 스크롤 렌더러 타겟팅
             val renderer = data["continuationItemRenderer"] as? Map<*, *>
             if (renderer != null) {
+                Log.d("YoutubeProvider", "v1.1: continuationItemRenderer identified")
                 val endpoint = renderer["continuationEndpoint"] as? Map<*, *>
                 if (endpoint != null) {
                     val token = (endpoint["continuationCommand"] as? Map<*, *>)?.get("token") as? String
@@ -535,18 +543,24 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                         ?: (endpoint["searchContinuationEndpoint"] as? Map<*, *>)?.get("token") as? String
                         ?: (endpoint["command"] as? Map<*, *>)?.get("token") as? String
                         ?: endpoint["token"] as? String
-                    if (!token.isNullOrBlank()) return token
+                    if (!token.isNullOrBlank()) {
+                        Log.d("YoutubeProvider", "v1.1: Token extracted successfully")
+                        return token
+                    }
                 }
             }
 
             // [추출 로직 2]: 레거시 스크롤 컨테이너 타겟팅
             val nextData = data["nextContinuationData"] as? Map<*, *>
             if (nextData != null) {
+                Log.d("YoutubeProvider", "v1.1: nextContinuationData identified")
                 val token = nextData["continuation"] as? String
-                if (!token.isNullOrBlank()) return token
+                if (!token.isNullOrBlank()) {
+                    Log.d("YoutubeProvider", "v1.1: Legacy token extracted successfully")
+                    return token
+                }
             }
 
-            // 정방향 재귀 탐색 (구조적 결함을 차단했으므로 역순 탐색 불필요)
             for (v in data.values) {
                 val t = findTokenRecursive(v)
                 if (t != null) return t
@@ -618,7 +632,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
     }
 
     private val continuationTokens = mutableMapOf<String, String>()
-    
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val maxPages = sharedPref?.getInt("channel_pages_limit", 6) ?: 6
         if (page > maxPages) return newHomePageResponse(request, emptyList(), hasNext = false)
@@ -724,6 +738,11 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                         "continuation" to tokenToUse
                     )
                     val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
+
+                    // ★ 추가된 로그 ★
+                    println("Page$page request URL: $apiUrl")
+                    println("Page$page request payload: $payload")
+
                     val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
 
                     if (response != null) {
@@ -749,8 +768,8 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
         println("◀ results=${results.size} hasNext=${!nextContinuation.isNullOrBlank()}")
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
     }
-     
-                    
+    
+                       
     fun findContinuationItemsRecursive(obj: Any?): List<*>? {
         when (obj) {
             is Map<*, *> -> {
