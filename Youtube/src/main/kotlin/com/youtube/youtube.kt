@@ -49,7 +49,6 @@ class YoutubeProvider(
 
     private var isSearchContext = false
 
-
 class YouTubeInterceptor(private val prefs: SharedPreferences?, private val provider: YoutubeProvider) : Interceptor {
         
         private fun sha1(input: String): String {
@@ -59,7 +58,11 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
         }
 
         override fun intercept(chain: Interceptor.Chain): Response {
-            val requestBuilder = chain.request().newBuilder()
+            val originalRequest = chain.request()
+            val noAuth = originalRequest.header("X-No-Auth") == "true"
+            
+            val requestBuilder = originalRequest.newBuilder()
+                .removeHeader("X-No-Auth")
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36")
 
             val cookieBuilder = StringBuilder()
@@ -71,14 +74,16 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                 cookieBuilder.append("VISITOR_INFO1_LIVE=_Mk3UVhY40g; ")
             }
 
-            val authKeys = listOf("SID", "HSID", "SSID", "APISID", "SAPISID")
             var sapisidVal: String? = null
-
-            authKeys.forEach { key ->
-                val value = prefs?.getString(key, null)
-                if (!value.isNullOrBlank()) {
-                    cookieBuilder.append("$key=$value; ")
-                    if (key == "SAPISID") sapisidVal = value
+            
+            if (!noAuth) {
+                val authKeys = listOf("SID", "HSID", "SSID", "APISID", "SAPISID")
+                authKeys.forEach { key ->
+                    val value = prefs?.getString(key, null)
+                    if (!value.isNullOrBlank()) {
+                        cookieBuilder.append("$key=$value; ")
+                        if (key == "SAPISID") sapisidVal = value
+                    }
                 }
             }
             
@@ -87,7 +92,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
             requestBuilder.addHeader("Cookie", cookieBuilder.toString())
             requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
 
-            if (!sapisidVal.isNullOrBlank()) {
+            if (!noAuth && !sapisidVal.isNullOrBlank()) {
                 try {
                     val timestamp = (System.currentTimeMillis() / 1000).toString()
                     val origin = "https://www.youtube.com"
@@ -104,7 +109,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
             return chain.proceed(requestBuilder.build())
         }
     }
-    
+
     private val ytInterceptor = YouTubeInterceptor(sharedPref, this)
     private val safariUserAgent =
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
@@ -806,12 +811,15 @@ private fun collectFromRenderer(
             spParam = "&sp=EgIQAw%3D%3D"
         }
 
+        val syncHistory = sharedPref?.getBoolean("sync_search_history", true) ?: true
+        val searchHeaders = if (!syncHistory) mapOf("X-No-Auth" to "true") else emptyMap()
+
         try {
             if (page == 1) {
                 savedContinuationToken = null
                 val encoded = URLEncoder.encode(actualQuery, "utf-8")
                 val url = "$mainUrl/results?search_query=$encoded$spParam"
-                val html = app.get(url, interceptor = ytInterceptor).text
+                val html = app.get(url, headers = searchHeaders, interceptor = ytInterceptor).text
 
                 val regexKey = Regex(""""INNERTUBE_API_KEY":"([^"]+)"""")
                 savedApiKey = regexKey.find(html)?.groupValues?.get(1)
@@ -836,7 +844,7 @@ private fun collectFromRenderer(
                         "continuation" to savedContinuationToken
                     )
 
-                    val response = app.post(apiUrl, json = payload, interceptor = ytInterceptor)
+                    val response = app.post(apiUrl, headers = searchHeaders, json = payload, interceptor = ytInterceptor)
                         .parsedSafe<Map<String, Any>>()
                     if (response != null) {
                         val actions = response["onResponseReceivedCommands"] ?: response
@@ -850,6 +858,8 @@ private fun collectFromRenderer(
             return newSearchResponseList(emptyList(), false)
         }
     }
+
+    
 
     private val collectedShorts = mutableListOf<Episode>()
 
