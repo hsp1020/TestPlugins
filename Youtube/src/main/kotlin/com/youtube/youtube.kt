@@ -618,7 +618,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
     }
 
     private val continuationTokens = mutableMapOf<String, String>()
-
+    
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val maxPages = sharedPref?.getInt("channel_pages_limit", 6) ?: 6
         if (page > maxPages) return newHomePageResponse(request, emptyList(), hasNext = false)
@@ -629,6 +629,8 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
         val requestData = request.data
         val isChip = requestData.startsWith("chip_")
 
+        println("▶ page=$page req=$requestData")
+
         try {
             if (page == 1) {
                 continuationTokens.remove(requestData)
@@ -637,7 +639,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                     savedVisitorData = savedVisitorData ?: sharedPref?.getString("yt_visitor_data", null)
                     savedClientVersion = savedClientVersion ?: sharedPref?.getString("yt_client_version", "2.20240725.01.00")
                     val tokenToUse = requestData.removePrefix("chip_")
-                    
+
                     if (!savedApiKey.isNullOrBlank()) {
                         val apiUrl = "$mainUrl/youtubei/v1/browse?key=$savedApiKey"
                         val payload = mapOf(
@@ -650,23 +652,24 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                         )
                         val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
                         val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
-                        
+
                         if (response != null) {
-                            val actions = response["onResponseReceivedActions"] 
-                                ?: response["onResponseReceivedCommands"] 
-                                ?: response["contents"] 
+                            val actions = response["onResponseReceivedActions"]
+                                ?: response["onResponseReceivedCommands"]
+                                ?: response["contents"]
                                 ?: response
                             processRecursive(actions, results, seenIds, playlistMode = false)
                             nextContinuation = findTokenRecursive(response)
+                            println("Chip page1 respLen=${response.toString().length}, nextToken=$nextContinuation")
                         }
                     }
                 } else {
                     val html = app.get(if(requestData == "Home") mainUrl else requestData, interceptor = ytInterceptor).text
-                    
+
                     savedApiKey = findConfig(html, "INNERTUBE_API_KEY") ?: savedApiKey
                     savedVisitorData = findConfig(html, "VISITOR_DATA") ?: savedVisitorData
                     savedClientVersion = findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: savedClientVersion ?: "2.20240725.01.00"
-                    
+
                     if (!savedApiKey.isNullOrBlank()) {
                         sharedPref?.edit()
                             ?.putString("yt_api_key", savedApiKey)
@@ -710,8 +713,8 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                     val apiUrl = if (requestData.contains("/results")) "$mainUrl/youtubei/v1/search?key=$apiKey" else "$mainUrl/youtubei/v1/browse?key=$apiKey"
                     val payload = mapOf(
                         "context" to mapOf("client" to mapOf(
-                            "clientName" to "WEB", 
-                            "clientVersion" to cVersion, 
+                            "clientName" to "WEB",
+                            "clientVersion" to cVersion,
                             "hl" to lang,
                             "visitorData" to vData,
                             "platform" to "DESKTOP"
@@ -720,14 +723,20 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                     )
                     val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
                     val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+
                     if (response != null) {
                         val actions = response["onResponseReceivedActions"] ?: response["onResponseReceivedCommands"] ?: response["continuationContents"] ?: response
                         processRecursive(actions, results, seenIds, playlistMode = false)
                         nextContinuation = findTokenRecursive(response)
+                        println("Page$page respLen=${response.toString().length}, nextToken=$nextContinuation")
                     }
+                } else {
+                    println("Page$page no token")
                 }
             }
-        } catch (e: Exception) { logError(e) }
+        } catch (e: Exception) {
+            logError(e)
+        }
 
         if (!nextContinuation.isNullOrBlank()) {
             continuationTokens[requestData] = nextContinuation
@@ -735,10 +744,11 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
             continuationTokens.remove(requestData)
         }
 
+        println("◀ results=${results.size} hasNext=${!nextContinuation.isNullOrBlank()}")
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
     }
-    
-       
+        
+                    
     fun findContinuationItemsRecursive(obj: Any?): List<*>? {
         when (obj) {
             is Map<*, *> -> {
