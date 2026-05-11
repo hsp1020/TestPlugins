@@ -661,6 +661,8 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                             processRecursive(actions, results, seenIds, playlistMode = false)
                             nextContinuation = findTokenRecursive(response)
                             println("Chip page1 respLen=${response.toString().length}, nextToken=$nextContinuation")
+                        } else {
+                            println("Chip page1 FAILED for $requestData")
                         }
                     }
                 } else {
@@ -747,7 +749,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
         println("◀ results=${results.size} hasNext=${!nextContinuation.isNullOrBlank()}")
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
     }
-        
+     
                     
     fun findContinuationItemsRecursive(obj: Any?): List<*>? {
         when (obj) {
