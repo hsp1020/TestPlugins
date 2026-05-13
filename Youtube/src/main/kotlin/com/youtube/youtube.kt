@@ -238,7 +238,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
         return "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
     }
 
-private fun collectFromRenderer(
+    private fun collectFromRenderer(
         renderer: Map<*, *>?,
         seenIds: MutableSet<String>
     ): SearchResponse? {
@@ -317,11 +317,12 @@ private fun collectFromRenderer(
                 val episodeNum = currentList.size + 1
                 val contextTag = if (isSearchContext) "&ctx=search" else "&ctx=home"
                 val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
+                val proxiedPoster = poster?.let { "https://wsrv.nl/?url=${java.net.URLEncoder.encode(it, "UTF-8")}&w=300&h=450&fit=contain&cbg=black" } ?: poster
 
                 if (currentList.none { it.data == finalUrl }) {
                     currentList.add(newEpisode(finalUrl) {
                         this.name = title
-                        this.posterUrl = poster
+                        this.posterUrl = proxiedPoster
                         this.episode = episodeNum
                     })
                 }
@@ -329,7 +330,7 @@ private fun collectFromRenderer(
                 val finalTitle = "#$episodeNum {$views} $title"
 
                 return newMovieSearchResponse(finalTitle, finalUrl, TvType.Movie) {
-                    this.posterUrl = poster
+                    this.posterUrl = proxiedPoster
                 }
             }
         }
@@ -396,10 +397,12 @@ private fun collectFromRenderer(
                     val contextTag = if (isSearchContext) "&ctx=search" else "&ctx=home"
                     val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
                     poster = "https://i.ytimg.com/vi/$videoId/oar2.jpg"
+                    val proxiedPoster = "https://wsrv.nl/?url=${java.net.URLEncoder.encode(poster, "UTF-8")}&w=300&h=450&fit=contain&cbg=black"
+                    
                     if (currentList.none { it.data == finalUrl }) {
                         currentList.add(newEpisode(finalUrl) {
                             this.name = title
-                            this.posterUrl = poster
+                            this.posterUrl = proxiedPoster
                             this.episode = episodeNum
                         })
                     }
@@ -408,7 +411,7 @@ private fun collectFromRenderer(
                         finalTitle,
                         finalUrl,
                         TvType.Movie
-                    ) { this.posterUrl = poster }
+                    ) { this.posterUrl = proxiedPoster }
                 } else {
                     finalTitle =
                         if (channel.isNotBlank()) "{$channel | $views} $title" else "{$views} $title"
@@ -445,7 +448,7 @@ private fun collectFromRenderer(
         }
         return null
     }
-
+                  
     private fun processRecursive(
         data: Any?,
         outList: MutableList<SearchResponse>,
