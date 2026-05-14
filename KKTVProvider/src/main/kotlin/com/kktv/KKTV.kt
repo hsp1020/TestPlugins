@@ -1,4 +1,4 @@
-// v7.7 - 포털 사이트(kingkongtv.org) 기반 동적 도메인 파싱 적용 및 기존 로직 유지
+// v7.8 - 텔레그램 채널(t.me/s/kktvinfo) 기반 동적 도메인 파싱 추가 및 기존 포털 로직 Fallback 강등
 package com.KingkongTv
 
 import android.net.Uri
@@ -20,47 +20,79 @@ class KingkongTv : MainAPI() {
 
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
     
-    // [추가 포인트 v7.7] 고정된 안내 포털 주소
+    // [유지] 고정된 안내 포털 주소
     private val portalUrl = "https://kingkongtv.org"
+    // [추가] 텔레그램 안내 채널 주소 (웹 프리뷰용 /s/ 추가)
+    private val telegramUrl = "https://t.me/s/kktvinfo"
 
     override val mainPage = mainPageOf(
         "/live/sportstv" to "실시간 스포츠 중계",
     )
 
-    // [추가 포인트 v7.7] 메인 페이지 로드 전, 포털에서 최신 주소를 동적으로 긁어오는 함수
+    // [수정 포인트 v7.8] 텔레그램 채널 우선 파싱 -> 실패 시 포털 사이트 파싱(Fallback)
     private suspend fun updateMainUrlIfNeeded() {
         try {
-            println("DEBUG [KingkongTv] v7.7: 포털 사이트($portalUrl)에서 최신 접속 주소 확인 시작")
-            val doc = app.get(portalUrl).document
-            // class="nav-cta" 인 a 태그의 href 속성 추출
-            val latestUrl = doc.selectFirst("a.nav-cta")?.attr("href")
+            println("DEBUG [KingkongTv] v7.8: 텔레그램 채널($telegramUrl)에서 최신 접속 주소 확인 시도")
+            val tgDoc = app.get(telegramUrl).document
+            val tgHtml = tgDoc.html()
             
-            if (!latestUrl.isNullOrBlank()) {
-                // 끝에 붙은 '/' 제거 (기존 mainUrl 형식과 맞추기 위함)
-                val cleanedUrl = latestUrl.trimEnd('/')
+            // 정규식을 사용하여 "킹콩티비 주소 : <a href="주소">" 패턴 추출
+            val regex = Regex("""킹콩티비 주소\s*:\s*<a[^>]*href=["']([^"']+)["']""")
+            val matchResult = regex.find(tgHtml)
+            
+            var newUrl: String? = null
+            if (matchResult != null) {
+                newUrl = matchResult.groupValues[1]
+            }
+
+            // 1순위: 텔레그램에서 유효한 주소를 찾았고, 그 주소가 텔레그램 자기 자신이 아닌 경우
+            if (!newUrl.isNullOrBlank() && !newUrl.contains("t.me")) {
+                // http로 적혀있어도 https로 강제 변환 (보안 및 Cloudstream 호환성)
+                var cleanedUrl = newUrl.trimEnd('/')
+                if (cleanedUrl.startsWith("http://")) {
+                    cleanedUrl = cleanedUrl.replace("http://", "https://")
+                }
+
                 if (mainUrl != cleanedUrl) {
-                    println("DEBUG [KingkongTv] v7.7: 최신 주소 획득 완료 - $cleanedUrl (이전 주소: $mainUrl)")
+                    println("DEBUG [KingkongTv] v7.8: 텔레그램에서 최신 주소 획득 완료 - $cleanedUrl (이전 주소: $mainUrl)")
                     mainUrl = cleanedUrl
                 } else {
-                    println("DEBUG [KingkongTv] v7.7: 기존 주소 유지(변경사항 없음) - $mainUrl")
+                    println("DEBUG [KingkongTv] v7.8: 기존 주소 유지(변경사항 없음) - $mainUrl")
+                }
+                return // 성공했으므로 함수 종료
+            }
+
+            println("DEBUG [KingkongTv] v7.8: 텔레그램에서 주소를 찾지 못함. 기존 포털 사이트($portalUrl) 폴백 로직 실행")
+
+            // 2순위 (Fallback): 기존 포털 사이트 파싱 로직
+            val doc = app.get(portalUrl).document
+            val latestUrl = doc.selectFirst("a.nav-cta")?.attr("href")
+            
+            // 포털에서 가져온 주소가 텔레그램 주소가 아닐 때만 적용 (무한루프/오류 방지)
+            if (!latestUrl.isNullOrBlank() && !latestUrl.contains("t.me")) {
+                val cleanedUrl = latestUrl.trimEnd('/')
+                if (mainUrl != cleanedUrl) {
+                    println("DEBUG [KingkongTv] v7.8: 포털(Fallback)에서 최신 주소 획득 완료 - $cleanedUrl (이전 주소: $mainUrl)")
+                    mainUrl = cleanedUrl
                 }
             } else {
-                println("DEBUG [KingkongTv] v7.7: 포털에서 최신 주소를 찾지 못했습니다. 기본 주소를 사용합니다 - $mainUrl")
+                println("DEBUG [KingkongTv] v7.8: 포털에서도 유효한 스트리밍 주소를 찾지 못했습니다. 기본 주소를 사용합니다 - $mainUrl")
             }
+
         } catch (e: Exception) {
-            println("DEBUG [KingkongTv] v7.7: 최신 주소 확인 중 오류 발생 - ${e.message}")
+            println("DEBUG [KingkongTv] v7.8: 최신 주소 확인 중 오류 발생 - ${e.message}")
             e.printStackTrace()
         }
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        // [추가 포인트 v7.7] 메인 페이지 로드 전 최신 도메인으로 업데이트
+        // 메인 페이지 로드 전 최신 도메인으로 업데이트
         updateMainUrlIfNeeded()
 
         val url = "$mainUrl${request.data}"
         
         try {
-            println("DEBUG [KingkongTv] v7.7: 메인 페이지 로드 시작 - $url")
+            println("DEBUG [KingkongTv] v7.8: 메인 페이지 로드 시작 - $url")
             val mainDoc = app.get(url).document
             val iframeElement = mainDoc.selectFirst("iframe#broadcastFrame")
             var iframeSrc = iframeElement?.attr("src")
@@ -79,7 +111,7 @@ class KingkongTv : MainAPI() {
                 isImportant
             }
             
-            println("DEBUG [KingkongTv] v7.7: 총 ${rows.size}개 경기 중 중요 경기(bold) 우선 정렬 완료")
+            println("DEBUG [KingkongTv] v7.8: 총 ${rows.size}개 경기 중 중요 경기(bold) 우선 정렬 완료")
 
             val home = sortedRows.mapNotNull { row ->
                 row.toSearchResult(realUrl)
@@ -94,7 +126,7 @@ class KingkongTv : MainAPI() {
                 hasNext = false
             )
         } catch (e: Exception) {
-            println("DEBUG [KingkongTv] v7.7: 메인 페이지 로드 실패 - ${e.message}")
+            println("DEBUG [KingkongTv] v7.8: 메인 페이지 로드 실패 - ${e.message}")
             e.printStackTrace()
             return newHomePageResponse(request.name, emptyList())
         }
@@ -128,7 +160,7 @@ class KingkongTv : MainAPI() {
 
         val fakeUrl = "$mainUrl/live_stream/$streamId?title=$encodedTitle&poster=$encodedPoster&ref=$encodedRef"
 
-        println("DEBUG [KingkongTv] v7.7: 검색 결과 항목 생성 중 - $title")
+        println("DEBUG [KingkongTv] v7.8: 검색 결과 항목 생성 중 - $title")
         
         // [수정 포인트 v7.6] 객체 껍데기는 VOD용(MovieSearch)을 쓰되, 실제 카테고리는 사용자님이 원하시는 TvType.Others로 전달
         return newMovieSearchResponse(title, fakeUrl, TvType.Others) {
@@ -146,7 +178,7 @@ class KingkongTv : MainAPI() {
         val rawPoster = uri.getQueryParameter("poster")
         val poster = if (!rawPoster.isNullOrBlank()) URLDecoder.decode(rawPoster, "UTF-8") else null
 
-        println("DEBUG [KingkongTv] v7.7: 상세 정보 로드 중 - $title")
+        println("DEBUG [KingkongTv] v7.8: 상세 정보 로드 중 - $title")
 
         // [수정 포인트 v7.6] LiveStream 구조 대신 시청 기록이 남는 단일 영상 구조(MovieLoad)를 차용하며, 타입은 Others로 유지
         return newMovieLoadResponse(title, url, TvType.Others, url) {
@@ -166,7 +198,7 @@ class KingkongTv : MainAPI() {
         val rawRef = uri.getQueryParameter("ref")
         val refererUrl = if (!rawRef.isNullOrBlank()) URLDecoder.decode(rawRef, "UTF-8") else "https://kktv.speed10-1.com/kktv/index.php"
         
-        println("DEBUG [KingkongTv] v7.7: 링크 로드 시작 ID=$streamId, Referer=$refererUrl")
+        println("DEBUG [KingkongTv] v7.8: 링크 로드 시작 ID=$streamId, Referer=$refererUrl")
 
         val playerPageUrl = "https://kktv.speed10-1.com/kktv/pc_view.php?stream=$streamId"
         
@@ -186,7 +218,7 @@ class KingkongTv : MainAPI() {
             if (m3u8Url == null) {
                 val webrtcMatch = Regex("""['"](webrtc://[^'"]+)['"]""").find(response)?.groupValues?.get(1)
                 if (webrtcMatch != null) {
-                    println("DEBUG [KingkongTv] v7.7: WebRTC 링크 발견 - $webrtcMatch")
+                    println("DEBUG [KingkongTv] v7.8: WebRTC 링크 발견 - $webrtcMatch")
                     m3u8Url = webrtcMatch
                         .replace("webrtc://", "https://")
                         .replace(streamId, "$streamId.m3u8") 
@@ -198,12 +230,12 @@ class KingkongTv : MainAPI() {
                 m3u8Url = "https://play.ogtv3.com/live/$streamId.m3u8?site=kktv"
             }
 
-            println("DEBUG [KingkongTv] v7.7: 원본 M3U8 URL - $m3u8Url")
+            println("DEBUG [KingkongTv] v7.8: 원본 M3U8 URL - $m3u8Url")
 
             // [기존 로직 보존] v7.2 - SSL 인증서 만료 에러 우회를 위한 다운그레이드 처리
             val finalUrl = if (m3u8Url != null && m3u8Url!!.contains("play.ogtv3.com") && m3u8Url!!.startsWith("https://")) {
                 val bypassedUrl = m3u8Url!!.replaceFirst("https://", "http://")
-                println("DEBUG [KingkongTv] v7.7: SSL 우회 적용됨 (HTTPS -> HTTP 변경) - $bypassedUrl")
+                println("DEBUG [KingkongTv] v7.8: SSL 우회 적용됨 (HTTPS -> HTTP 변경) - $bypassedUrl")
                 bypassedUrl
             } else {
                 m3u8Url!!
@@ -227,7 +259,7 @@ class KingkongTv : MainAPI() {
             )
 
         } catch (e: Exception) {
-            println("DEBUG [KingkongTv] v7.7: 에러 - ${e.message}")
+            println("DEBUG [KingkongTv] v7.8: 에러 - ${e.message}")
             e.printStackTrace()
         }
 
