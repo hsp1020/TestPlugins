@@ -15,14 +15,13 @@ class KingkongTv : MainAPI() {
     override val hasMainPage = true
     override var lang = "ko"
     
-    // [수정 포인트 v7.6] 사용자님의 의도대로 카테고리는 원래의 Others로 유지합니다.
     override val supportedTypes = setOf(TvType.Others)
 
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
     
-    // [유지] 고정된 안내 포털 주소
+    // 고정된 안내 포털 주소
     private val portalUrl = "https://kingkongtv.org"
-    // [추가] 텔레그램 안내 채널 주소 (웹 프리뷰용 /s/ 추가)
+    // 텔레그램 안내 채널 주소 (웹 프리뷰용 /s/ 추가)
     private val telegramUrl = "https://t.me/s/kktvinfo"
 
     override val mainPage = mainPageOf(
@@ -36,8 +35,8 @@ class KingkongTv : MainAPI() {
             val tgDoc = app.get(telegramUrl).document
             val tgHtml = tgDoc.html()
             
-            // 정규식을 사용하여 "킹콩티비 주소 : <a href="주소">" 패턴 추출
-            val regex = Regex("""킹콩티비 주소\s*:\s*<a[^>]*href=["']([^"']+)["']""")
+            // 정규식을 사용하여 "킹콩티비 주소 : <a href="주소">" 패턴 추출 (띄어쓰기 변수 고려)
+            val regex = Regex("""킹콩티비\s*주소\s*[:：]?\s*<a[^>]*href=["']([^"']+)["']""")
             val matchResult = regex.find(tgHtml)
             
             var newUrl: String? = null
@@ -105,7 +104,6 @@ class KingkongTv : MainAPI() {
             val contentDoc = app.get(realUrl, referer = url).document
             val rows = contentDoc.select("div.sports_on_list table tbody tr")
 
-            // [기존 로직 보존] 중요 경기(subject bold)를 먼저 오도록(true) 내림차순 우선 정렬
             val sortedRows = rows.sortedByDescending { row ->
                 val isImportant = row.selectFirst("td.subject")?.hasClass("bold") == true
                 isImportant
@@ -136,17 +134,15 @@ class KingkongTv : MainAPI() {
         if (this.selectFirst("span.off") != null) return null
 
         val channelDiv = this.selectFirst("div.channel_on") ?: return null
-        var title = channelDiv.attr("data-title") // var로 변경하여 수정 가능하게 함
+        var title = channelDiv.attr("data-title")
         val streamId = channelDiv.attr("data-stream")
         
         if (title.isBlank() || streamId.isBlank()) return null
 
-        // [기존 로직 보존] 중요 경기인 경우 시각적 식별을 위해 제목에 불꽃 이모지 추가
         if (this.selectFirst("td.subject")?.hasClass("bold") == true) {
             title = "🔥 $title"
         }
 
-        // [기존 로직 보존] 썸네일 캐시 무효화 (Cache Busting)
         val thumbUrlRaw = this.selectFirst("td.thumb img")?.attr("src")
         val thumbUrl = if (thumbUrlRaw != null) {
             val fixedUrl = fixUrl(refererUrl, thumbUrlRaw)
@@ -162,7 +158,6 @@ class KingkongTv : MainAPI() {
 
         println("DEBUG [KingkongTv] v7.8: 검색 결과 항목 생성 중 - $title")
         
-        // [수정 포인트 v7.6] 객체 껍데기는 VOD용(MovieSearch)을 쓰되, 실제 카테고리는 사용자님이 원하시는 TvType.Others로 전달
         return newMovieSearchResponse(title, fakeUrl, TvType.Others) {
             this.posterUrl = thumbUrl
         }
@@ -180,7 +175,6 @@ class KingkongTv : MainAPI() {
 
         println("DEBUG [KingkongTv] v7.8: 상세 정보 로드 중 - $title")
 
-        // [수정 포인트 v7.6] LiveStream 구조 대신 시청 기록이 남는 단일 영상 구조(MovieLoad)를 차용하며, 타입은 Others로 유지
         return newMovieLoadResponse(title, url, TvType.Others, url) {
             this.posterUrl = poster
             this.plot = "실시간 중계" 
@@ -211,10 +205,8 @@ class KingkongTv : MainAPI() {
         try {
             val response = app.get(playerPageUrl, headers = headers).text
             
-            // 1. m3u8 패턴 찾기
             var m3u8Url = Regex("""['"](http[^'"]+\.m3u8[^'"]*)['"]""").find(response)?.groupValues?.get(1)
             
-            // 2. webrtc 패턴 찾기 및 변환
             if (m3u8Url == null) {
                 val webrtcMatch = Regex("""['"](webrtc://[^'"]+)['"]""").find(response)?.groupValues?.get(1)
                 if (webrtcMatch != null) {
@@ -225,14 +217,12 @@ class KingkongTv : MainAPI() {
                 }
             }
 
-            // 3. 실패 시 백업
             if (m3u8Url == null) {
                 m3u8Url = "https://play.ogtv3.com/live/$streamId.m3u8?site=kktv"
             }
 
             println("DEBUG [KingkongTv] v7.8: 원본 M3U8 URL - $m3u8Url")
 
-            // [기존 로직 보존] v7.2 - SSL 인증서 만료 에러 우회를 위한 다운그레이드 처리
             val finalUrl = if (m3u8Url != null && m3u8Url!!.contains("play.ogtv3.com") && m3u8Url!!.startsWith("https://")) {
                 val bypassedUrl = m3u8Url!!.replaceFirst("https://", "http://")
                 println("DEBUG [KingkongTv] v7.8: SSL 우회 적용됨 (HTTPS -> HTTP 변경) - $bypassedUrl")
