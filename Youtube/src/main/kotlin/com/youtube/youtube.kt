@@ -238,7 +238,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
         return "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
     }
 
-    private fun collectFromRenderer(
+private fun collectFromRenderer(
         renderer: Map<*, *>?,
         seenIds: MutableSet<String>
     ): SearchResponse? {
@@ -266,7 +266,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                     "$mainUrl/watch?v=$videoId",
                     TvType.Movie
                 ) {
-                    this.posterUrl = poster?.let { "https://wsrv.nl/?url=${java.net.URLEncoder.encode(it, "UTF-8")}&w=300&h=450&fit=contain&bg=black" } ?: poster
+                    this.posterUrl = poster?.let { "https://wsrv.nl/?url=${java.net.URLEncoder.encode(it, "UTF-8")}&w=300&h=450&fit=contain&cbg=black" } ?: poster
                 }
             }
             return null
@@ -317,12 +317,11 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                 val episodeNum = currentList.size + 1
                 val contextTag = if (isSearchContext) "&ctx=search" else "&ctx=home"
                 val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
-                val proxiedPoster = poster?.let { "https://wsrv.nl/?url=${java.net.URLEncoder.encode(it, "UTF-8")}&w=300&h=450&fit=contain&bg=black" } ?: poster
 
                 if (currentList.none { it.data == finalUrl }) {
                     currentList.add(newEpisode(finalUrl) {
                         this.name = title
-                        this.posterUrl = proxiedPoster
+                        this.posterUrl = poster
                         this.episode = episodeNum
                     })
                 }
@@ -330,7 +329,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                 val finalTitle = "#$episodeNum {$views} $title"
 
                 return newMovieSearchResponse(finalTitle, finalUrl, TvType.Movie) {
-                    this.posterUrl = proxiedPoster
+                    this.posterUrl = poster
                 }
             }
         }
@@ -362,7 +361,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                         "$mainUrl/playlist?list=$playlistId",
                         TvType.TvSeries
                     ) {
-                        this.posterUrl = poster?.let { "https://wsrv.nl/?url=${java.net.URLEncoder.encode(it, "UTF-8")}&w=300&h=450&fit=contain&bg=black" } ?: poster
+                        this.posterUrl = poster?.let { "https://wsrv.nl/?url=${java.net.URLEncoder.encode(it, "UTF-8")}&w=300&h=450&fit=contain&cbg=black" } ?: poster
                     }
                 }
             }
@@ -397,12 +396,10 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                     val contextTag = if (isSearchContext) "&ctx=search" else "&ctx=home"
                     val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
                     poster = "https://i.ytimg.com/vi/$videoId/oar2.jpg"
-                    val proxiedPoster = "https://wsrv.nl/?url=${java.net.URLEncoder.encode(poster, "UTF-8")}&w=300&h=450&fit=contain&bg=black"
-                    
                     if (currentList.none { it.data == finalUrl }) {
                         currentList.add(newEpisode(finalUrl) {
                             this.name = title
-                            this.posterUrl = proxiedPoster
+                            this.posterUrl = poster
                             this.episode = episodeNum
                         })
                     }
@@ -411,7 +408,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                         finalTitle,
                         finalUrl,
                         TvType.Movie
-                    ) { this.posterUrl = proxiedPoster }
+                    ) { this.posterUrl = poster }
                 } else {
                     finalTitle =
                         if (channel.isNotBlank()) "{$channel | $views} $title" else "{$views} $title"
@@ -423,7 +420,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                         "$mainUrl/watch?v=$videoId",
                         TvType.Movie
                     ) {
-                        this.posterUrl = "https://wsrv.nl/?url=${java.net.URLEncoder.encode(poster, "UTF-8")}&w=300&h=450&fit=contain&bg=black"
+                        this.posterUrl = "https://wsrv.nl/?url=${java.net.URLEncoder.encode(poster, "UTF-8")}&w=300&h=450&fit=contain&cbg=black"
                     }
                 }
             }
@@ -442,13 +439,12 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
                     "$mainUrl/channel/$id",
                     TvType.Live
                 ) {
-                    this.posterUrl = poster?.let { "https://wsrv.nl/?url=${java.net.URLEncoder.encode(it, "UTF-8")}&w=300&h=450&fit=contain&bg=black" } ?: poster
+                    this.posterUrl = poster?.let { "https://wsrv.nl/?url=${java.net.URLEncoder.encode(it, "UTF-8")}&w=300&h=450&fit=contain&cbg=black" } ?: poster
                 }
             }
         }
         return null
     }
-    
 
     private fun processRecursive(
         data: Any?,
