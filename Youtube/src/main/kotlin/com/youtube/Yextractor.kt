@@ -263,7 +263,10 @@ open class YoutubeExtractor : ExtractorApi() {
                             val targetUrl = manifestMap[id]
                             if (targetUrl != null) {
                                 try {
-                                    val vttText = java.net.URL(targetUrl).readText()
+                                    // [수정된 부분] java.net.URL 대신 Cloudstream의 app.get()을 사용하여 봇 차단을 우회
+                                    val vttText = kotlinx.coroutines.runBlocking {
+                                        app.get(targetUrl).text
+                                    }
                                     val cleanedVtt = vttText.replace(Regex("(align|position|line|size):[^\\s]+"), "")
                                     output.println("HTTP/1.1 200 OK")
                                     output.println("Content-Type: text/vtt")
@@ -298,6 +301,7 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         } catch (e: Exception) {}
     }
+
 
     private fun buildDashManifestXml(
         video: StreamInfo,
