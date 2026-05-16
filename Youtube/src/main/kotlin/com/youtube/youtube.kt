@@ -1333,6 +1333,75 @@ private fun collectFromRenderer(
             }
         }
 
+        try {
+            if (playerResponseText.isNotBlank()) {
+                val root = JSONObject(playerResponseText)
+                val captions = root.optJSONObject("captions")
+                val tracklist = captions?.optJSONObject("playerCaptionsTracklistRenderer")
+                val captionTracks = tracklist?.optJSONArray("captionTracks")
+
+                if (captionTracks != null && captionTracks.length() > 0) {
+                    val seenSubs = mutableSetOf<String>()
+
+                    var baseTrack = captionTracks.optJSONObject(0)
+                    var baseLangCode = ""
+
+                    for (i in 0 until captionTracks.length()) {
+                        val t = captionTracks.optJSONObject(i)
+                        val lang = t.optString("languageCode")
+                        if (lang == "en") {
+                            baseTrack = t
+                            break
+                        }
+                    }
+
+                    val baseUrl = baseTrack.optString("baseUrl", "")
+                    baseLangCode = baseTrack.optString("languageCode", "original").lowercase()
+
+                    for (i in 0 until captionTracks.length()) {
+                        val track = captionTracks.optJSONObject(i)
+                        val name = track.optJSONObject("name")?.optString("simpleText") ?: ""
+                        val lang = track.optString("languageCode")
+                        val url = track.optString("baseUrl")
+
+                        val vttUrl = "$url&fmt=srt"
+                        if (!seenSubs.contains(vttUrl)) {
+                            seenSubs.add(vttUrl)
+                            val displayTitle = "$name ($lang)"
+                            subtitleCallback(SubtitleFile(displayTitle, vttUrl))
+                        }
+                    }
+
+                    if (baseUrl.isNotEmpty()) {
+                        val autoLangs = listOf(
+                            "aa","ab","af","ak","am","ar","as","ay","az","ba","be","bg","bho","bn","bo","br","bs","ca","ceb","co","crs",
+                            "cs","cy","da","de","dv","dz","ee","el","en","eo","es","et","eu","fa","fi","fil","fj","fo","fr","fy","ga",
+                            "gaa","gd","gl","gn","gu","gv","ha","haw","he","hi","hmn","hr","ht","hu","hy","id","ig","is","it","iu","iw",
+                            "ja","jv","ka","kha","kk","kl","km","kn","ko","kri","ku","ky","la","lb","lg","ln","lo","lt","lua","luo","lv",
+                            "mfe","mg","mi","mk","ml","mn","mr","ms","mt","my","ne","new","nl","no","nso","ny","oc","om","or","os","pa",
+                            "pam","pl","ps","pt","pt-BR","pt-PT","qu","rn","ro","ru","rw","sa","sd","sg","si","sk","sl","sm","sn","so","sq",
+                            "sr","ss","st","su","sv","sw","ta","te","tg","th","ti","tk","tn","to","tr","ts","tt","tum","ug","uk","ur","uz",
+                            "ve","vi","war","wo","xh","yi","yo","zh-Hans","zh-Hant","zu"
+                        )
+
+                        for (targetLang in autoLangs) {
+                            if (targetLang.equals(baseLangCode, true)) continue
+
+                            val autoUrl = "$baseUrl&fmt=srt&tlang=$targetLang"
+
+                            if (!seenSubs.contains(autoUrl)) {
+                                seenSubs.add(autoUrl)
+                                val displayName = "$baseLangCode → $targetLang"
+                                subtitleCallback(SubtitleFile(displayName, autoUrl))
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            logError(e)
+        }
+
         return true
     }
 
@@ -1361,6 +1430,69 @@ private fun collectFromRenderer(
 
             val responseText = app.post(apiUrl, json = payload, interceptor = ytInterceptor).text
 
+            if (responseText.isNotBlank()) {
+                val root = JSONObject(responseText)
+                val captions = root.optJSONObject("captions")
+                val tracklist = captions?.optJSONObject("playerCaptionsTracklistRenderer")
+                val captionTracks = tracklist?.optJSONArray("captionTracks")
+
+                if (captionTracks != null && captionTracks.length() > 0) {
+                    val seenSubs = mutableSetOf<String>()
+
+                    var baseTrack = captionTracks.optJSONObject(0)
+                    var baseLangCode = ""
+
+                    for (i in 0 until captionTracks.length()) {
+                        val t = captionTracks.optJSONObject(i)
+                        val lang = t.optString("languageCode")
+                        if (lang == "en") {
+                            baseTrack = t
+                            break
+                        }
+                    }
+
+                    val baseUrl = baseTrack.optString("baseUrl", "")
+                    baseLangCode = baseTrack.optString("languageCode", "original").lowercase()
+
+                    for (i in 0 until captionTracks.length()) {
+                        val track = captionTracks.optJSONObject(i)
+                        val name = track.optJSONObject("name")?.optString("simpleText") ?: ""
+                        val lang = track.optString("languageCode")
+                        val url = track.optString("baseUrl")
+
+                        val ttmlUrl = "$url&fmt=srt"
+                        if (!seenSubs.contains(ttmlUrl)) {
+                            seenSubs.add(ttmlUrl)
+                            val displayTitle = "$name ($lang)"
+                            subtitleCallback(SubtitleFile(displayTitle, ttmlUrl))
+                        }
+                    }
+
+                    if (baseUrl.isNotEmpty()) {
+                        val autoLangs = listOf(
+                            "aa","ab","af","ak","am","ar","as","ay","az","ba","be","bg","bho","bn","bo","br","bs","ca","ceb","co","crs",
+                            "cs","cy","da","de","dv","dz","ee","el","en","eo","es","et","eu","fa","fi","fil","fj","fo","fr","fy","ga",
+                            "gaa","gd","gl","gn","gu","gv","ha","haw","he","hi","hmn","hr","ht","hu","hy","id","ig","is","it","iu","iw",
+                            "ja","jv","ka","kha","kk","kl","km","kn","ko","kri","ku","ky","la","lb","lg","ln","lo","lt","lua","luo","lv",
+                            "mfe","mg","mi","mk","ml","mn","mr","ms","mt","my","ne","new","nl","no","nso","ny","oc","om","or","os","pa",
+                            "pam","pl","ps","pt","pt-BR","pt-PT","qu","rn","ro","ru","rw","sa","sd","sg","si","sk","sl","sm","sn","so","sq",
+                            "sr","ss","st","su","sv","sw","ta","te","tg","th","ti","tk","tn","to","tr","ts","tt","tum","ug","uk","ur","uz",
+                            "ve","vi","war","wo","xh","yi","yo","zh-Hans","zh-Hant","zu"
+                        )
+
+                        for (targetLang in autoLangs) {
+                            if (targetLang.equals(baseLangCode, true)) continue
+
+                            val autoUrl = "$baseUrl&fmt=srt&tlang=$targetLang"
+                            if (!seenSubs.contains(autoUrl)) {
+                                seenSubs.add(autoUrl)
+                                val displayName = "$baseLangCode → $targetLang"
+                                subtitleCallback(SubtitleFile(displayName, autoUrl))
+                            }
+                        }
+                    }
+                }
+            }
         } catch (e: Exception) {
 
         }
@@ -1498,6 +1630,90 @@ private fun collectFromRenderer(
 
                 val responseText = app.post(apiUrl, headers = postHeaders, json = payload).text
                 logLarge(name, "PLAYER API Response (first 55k chars):\n${responseText.take(55000)}")
+
+                try {
+                    val root = org.json.JSONObject(responseText)
+                    val captions = root.optJSONObject("captions")
+                    val tracklist = captions?.optJSONObject("playerCaptionsTracklistRenderer")
+                    val captionTracks = tracklist?.optJSONArray("captionTracks")
+
+                    if (captionTracks != null && captionTracks.length() > 0) {
+
+                        var preferredIndex = -1
+                        for (i in 0 until captionTracks.length()) {
+                            val track = captionTracks.optJSONObject(i) ?: continue
+                            val lang = track.optString("languageCode", "")
+                            if (lang.equals("en", ignoreCase = true)) {
+                                preferredIndex = i
+                                break
+                            }
+                        }
+                        if (preferredIndex == -1) preferredIndex = 0
+
+                        val baseTrack = captionTracks.optJSONObject(preferredIndex)
+                        val baseUrl = baseTrack.optString("baseUrl", "")
+                        val baseLang = baseTrack.optString("languageCode", "")
+                        val baseName = baseTrack.optJSONObject("name")?.optString("simpleText", baseLang) ?: baseLang
+
+                        val seenSubs = mutableSetOf<String>()
+
+                        val targets = ALL_LANGS.toMutableList()
+                        val trackTranslation = baseTrack.optJSONArray("translationLanguages")
+                        if (trackTranslation != null && trackTranslation.length() > 0) {
+                            targets.clear()
+                            for (i in 0 until trackTranslation.length()) {
+                                val t = trackTranslation.optJSONObject(i)
+                                val code = t?.optString("languageCode", "")
+                                if (!code.isNullOrBlank()) targets.add(code)
+                            }
+                        }
+
+                        val originals = listOf(
+                            
+                            addParamsToUrl(baseUrl, mapOf("fmt" to "srt"))
+                        )
+                        for (u in originals) {
+                            if (u !in seenSubs) {
+                                seenSubs.add(u)
+                                subtitleCallback(SubtitleFile("$baseName ($baseLang)", u))
+                            }
+                        }
+
+                        for (tlang in targets) {
+                            if (tlang.equals(baseLang, ignoreCase = true)) continue
+
+                            
+                            val tsrt = addParamsToUrl(baseUrl, mapOf("fmt" to "srt", "tlang" to tlang))
+
+                            listOf(tsrt).forEach { u ->
+                                if (u !in seenSubs) {
+                                    seenSubs.add(u)
+                                    subtitleCallback(SubtitleFile("$baseLang → $tlang", u))
+                                }
+                            }
+                        }
+
+                        for (i in 0 until captionTracks.length()) {
+                            if (i == preferredIndex) continue
+                            val tr = captionTracks.optJSONObject(i) ?: continue
+                            val url = tr.optString("baseUrl", "")
+                            val lang = tr.optString("languageCode", "")
+                            val name = tr.optJSONObject("name")?.optString("simpleText", lang) ?: lang
+
+                            val vtt = addParamsToUrl(url, mapOf("fmt" to "vtt"))
+                            val srt = addParamsToUrl(url, mapOf("fmt" to "srt"))
+
+                            for (u in listOf(vtt, srt)) {
+                                if (u !in seenSubs) {
+                                    seenSubs.add(u)
+                                    subtitleCallback(SubtitleFile("$name ($lang)", u))
+                                }
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+
+                }
 
                 val playerResponse = try {
                     parseJson<PlayerResponse>(responseText)
