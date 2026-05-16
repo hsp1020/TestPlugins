@@ -2,7 +2,7 @@ package com.lagradost.cloudstream3.plugins.tvchak
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.utils.AppUtils.parseJson
+import com.lagradost.cloudstream3.utils.parseJson  // 수정: 올바른 import
 import java.net.URI
 
 class TvchakProvider : MainAPI() {
@@ -38,7 +38,7 @@ class TvchakProvider : MainAPI() {
             val originalAttr = anchor.attr("data-original")
             val poster = fixUrl(if (originalAttr.isNotBlank()) originalAttr else anchor.attr("src"))
             
-            // 캐시 프리 로드 (OOM 및 라이프사이클 파괴 방어용 페이로드 브릿징)
+            // 캐시 프리 로드 페이로드
             val payloadUrl = "$link||$poster||$title"
             
             newTvSeriesSearchResponse(title, payloadUrl, TvType.TvSeries) {
@@ -77,8 +77,8 @@ class TvchakProvider : MainAPI() {
         val title = document.selectFirst(".title, h1, .stui-content__title")?.text() ?: injectedTitle
         
         val episodes = document.select(".stui-content__playlist li a, .playlist li a").map {
-            // API 규격 준수: newEpisode 빌더 활용
-            newEpisode(data = fixUrl(it.attr("href"))) {
+            // 수정: named parameter 제거, 위치 기반 인자 사용 (newEpisode)
+            newEpisode(fixUrl(it.attr("href"))) {
                 this.name = it.text().trim()
             }
         }
@@ -107,16 +107,10 @@ class TvchakProvider : MainAPI() {
             if (isM3u8) {
                 M3u8Helper.generateM3u8(this.name, videoUrl, mainUrl).forEach(callback)
             } else {
-                // API 규격 준수: newExtractorLink 팩토리 메서드 활용
+                // 수정: named parameter 제거, 위치 기반 인자 사용 (newExtractorLink)
+                // 순서: source, name, url, referer, quality, isM3u8
                 callback.invoke(
-                    newExtractorLink(
-                        source = this.name,
-                        name = "Direct HD",
-                        url = videoUrl,
-                        referer = mainUrl,
-                        quality = Qualities.P1080.value,
-                        isM3u8 = false
-                    )
+                    newExtractorLink(this.name, "Direct HD", videoUrl, mainUrl, Qualities.P1080.value, false)
                 )
             }
             return true
@@ -125,6 +119,7 @@ class TvchakProvider : MainAPI() {
         val playerDataMatch = """var\s+player_data\s*=\s*(\{.*?\})""".toRegex().find(html)
         if (playerDataMatch != null) {
             runCatching {
+                // 수정: 정확한 parseJson 사용
                 val json = parseJson<Map<String, String>>(playerDataMatch.groupValues[1])
                 val videoUrl = json["url"] ?: return@runCatching
                 
