@@ -3,7 +3,6 @@ package com.Tvchak
 import android.content.Context
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -210,7 +209,7 @@ class TvchakProvider : MainAPI() {
         val scriptContent = document.select("script").find { it.data().contains("player_aaaa") }?.data() ?: return false
         val jsonString = scriptContent.substringAfter("player_aaaa=").substringBefore("</script>").trim().removeSuffix(";")
         
-        // AppUtils 명시적 호출로 Unresolved reference 에러 해결
+        // AppUtils 명시적 호출
         val playerJson = AppUtils.parseJson<PlayerAaaa>(jsonString)
         val rawUrl = playerJson.url ?: return false
 
@@ -227,16 +226,17 @@ class TvchakProvider : MainAPI() {
 
         val type = if (videoUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
 
-        // 명시적 생성자 호출로 ExtractorLink 에러 원천 차단
+        // 네가 원했던 최신 newExtractorLink 빌더 패턴 완벽 복구
         callback.invoke(
-            ExtractorLink(
+            newExtractorLink(
                 source = this.name,
                 name = this.name,
                 url = videoUrl,
-                referer = mainUrl,
-                quality = Qualities.P1080.value,
                 type = type
-            )
+            ) {
+                this.referer = mainUrl
+                this.quality = Qualities.P1080.value
+            }
         )
 
         if (!subUrl.isNullOrBlank()) {
