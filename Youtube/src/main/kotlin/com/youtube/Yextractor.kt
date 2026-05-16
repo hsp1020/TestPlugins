@@ -189,36 +189,39 @@ open class YoutubeExtractor : ExtractorApi() {
 
         ytVideos[videoId]?.forEach { callback(it) }
 
+        startServerIfNeeded()
+        
         ytVideosSubtitles[videoId]?.forEach { ss ->
             try {
                 val lang = ss.locale?.language ?: return@forEach
                 val rawUrl = ss.content ?: ss.getUrl() ?: return@forEach
                 
                 if (rawUrl.startsWith("http")) {
-                    // 1. 기존 포맷 제거하고 무조건 하단 고정형 SRT로 변경
                     val cleanUrl = rawUrl.replace(Regex("&fmt=[^&]+"), "")
-                    val srtUrl = "$cleanUrl&fmt=srt"
                     
-                    // 2. 원본 자막 콜백 전송
+                    val srtUrl = "$cleanUrl&fmt=srt"
                     val originalName = ss.locale?.getDisplayLanguage(java.util.Locale.getDefault()) ?: lang
                     subtitleCallback(SubtitleFile(originalName, srtUrl))
                     
-                    // 3. 100여 개국 자동 번역 자막 생성 (원본 코드와 동일한 언어 목록)
                     val autoLangs = listOf(
                         "ko"
                     )
 
                     for (targetLang in autoLangs) {
-                        if (targetLang.equals(lang, true)) continue // 원본 언어는 번역 제외
+                        if (targetLang.equals(lang, true)) continue
                         
-                        val autoUrl = "$srtUrl&tlang=$targetLang"
-                        subtitleCallback(SubtitleFile("$lang → $targetLang", autoUrl))
+                        val autoVttUrl = "$cleanUrl&fmt=vtt&tlang=$targetLang"
+                        
+                        val proxyId = UUID.randomUUID().toString()
+                        manifestMap[proxyId] = autoVttUrl
+                        val localAutoUrl = "http://127.0.0.1:$serverPort/sub_$proxyId.vtt"
+                        
+                        subtitleCallback(SubtitleFile("$lang → $targetLang", localAutoUrl))
                     }
                 }
             } catch (e: Exception) { }
         }
     }
-
 
     @Synchronized
     private fun startServerIfNeeded() {
@@ -254,6 +257,29 @@ open class YoutubeExtractor : ExtractorApi() {
                     val parts = line.split(" ")
                     if (parts.size > 1) {
                         var path = parts[1].substring(1)
+                        
+                        if (path.startsWith("sub_")) {
+                            val id = path.substringAfter("sub_").substringBefore(".vtt")
+                            val targetUrl = manifestMap[id]
+                            if (targetUrl != null) {
+                                try {
+                                    val vttText = java.net.URL(targetUrl).readText()
+                                    val cleanedVtt = vttText.replace(Regex("(align|position|line|size):[^\\s]+"), "")
+                                    output.println("HTTP/1.1 200 OK")
+                                    output.println("Content-Type: text/vtt")
+                                    output.println("Connection: close")
+                                    output.println("Access-Control-Allow-Origin: *")
+                                    output.println("")
+                                    output.println(cleanedVtt)
+                                } catch (e: Exception) {
+                                    output.println("HTTP/1.1 500 Internal Server Error\r\n\r\n")
+                                }
+                            } else {
+                                output.println("HTTP/1.1 404 Not Found\r\n\r\n")
+                            }
+                            return
+                        }
+
                         if (path.endsWith(".mpd")) path = path.replace(".mpd", "")
                         val content = manifestMap[path]
                         if (content != null) {
