@@ -189,6 +189,8 @@ open class YoutubeExtractor : ExtractorApi() {
 
         ytVideos[videoId]?.forEach { callback(it) }
 
+        // NewPipe에서 제공하는 위치 데이터 포함 자막 사용 안 함 (상단 고정 문제 방지)
+        /*
         ytVideosSubtitles[videoId]?.mapNotNull { ss ->
             try {
                 val lang = ss.locale?.language ?: return@mapNotNull null
@@ -196,7 +198,9 @@ open class YoutubeExtractor : ExtractorApi() {
                 newSubtitleFile(lang, content)
             } catch (e: Exception) { null }
         }?.forEach { subtitleCallback(it) }
+        */
     }
+    
 
     @Synchronized
     private fun startServerIfNeeded() {
