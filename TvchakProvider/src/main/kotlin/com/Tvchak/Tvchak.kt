@@ -4,8 +4,10 @@ import android.content.Context
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.utils.AppUtils
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.Qualities
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -15,7 +17,7 @@ import kotlinx.coroutines.sync.withLock
 import org.jsoup.nodes.Element
 import java.util.Base64
 
-class Tvchak : MainAPI() {
+class TvchakProvider : MainAPI() {
     companion object {
         var currentMainUrl = "https://tvchak200.com"
         var isDomainChecked = false
@@ -30,7 +32,6 @@ class Tvchak : MainAPI() {
     override var lang = "ko"
     override val hasDownloadSupport = true
     
-    // Variety 제거, TvSeries로 통합
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime)
 
     override val mainPage = mainPageOf(
@@ -115,7 +116,7 @@ class Tvchak : MainAPI() {
     }
 
     /**
-     * 메인 페이지 로드 (apmap 대신 async + awaitAll 사용)
+     * 메인 페이지 로드
      */
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         checkAndUpdateDomain()
@@ -132,7 +133,7 @@ class Tvchak : MainAPI() {
     }
 
     /**
-     * 검색 기능 (apmap 대신 async + awaitAll 사용)
+     * 검색 기능
      */
     override suspend fun search(query: String): List<SearchResponse> {
         checkAndUpdateDomain()
@@ -158,7 +159,7 @@ class Tvchak : MainAPI() {
     }
 
     /**
-     * 상세 페이지 (최신 newEpisode 빌더 사용)
+     * 상세 페이지
      */
     override suspend fun load(url: String): LoadResponse {
         checkAndUpdateDomain()
@@ -179,7 +180,6 @@ class Tvchak : MainAPI() {
             val epHref = fixUrlNull(element.attr("href")) ?: return@mapNotNull null
             val epNum = Regex("\\d+").find(epTitle)?.value?.toIntOrNull()
 
-            // 구식 생성자 대신 newEpisode 사용
             newEpisode(epHref) {
                 this.name = epTitle
                 this.episode = epNum
@@ -195,7 +195,7 @@ class Tvchak : MainAPI() {
     }
 
     /**
-     * 영상 링크 추출 (정확한 시그니처 및 newExtractorLink 사용, 자막 정규식 처리)
+     * 영상 링크 추출
      */
     override suspend fun loadLinks(
         data: String,
@@ -210,7 +210,8 @@ class Tvchak : MainAPI() {
         val scriptContent = document.select("script").find { it.data().contains("player_aaaa") }?.data() ?: return false
         val jsonString = scriptContent.substringAfter("player_aaaa=").substringBefore("</script>").trim().removeSuffix(";")
         
-        val playerJson = parseJson<PlayerAaaa>(jsonString)
+        // AppUtils 명시적 호출로 Unresolved reference 에러 해결
+        val playerJson = AppUtils.parseJson<PlayerAaaa>(jsonString)
         val rawUrl = playerJson.url ?: return false
 
         var videoUrl = rawUrl
@@ -226,16 +227,16 @@ class Tvchak : MainAPI() {
 
         val type = if (videoUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
 
-        // 구식 ExtractorLink 대신 최신 newExtractorLink 빌더 사용
+        // 명시적 생성자 호출로 ExtractorLink 에러 원천 차단
         callback.invoke(
-            newExtractorLink(
+            ExtractorLink(
                 source = this.name,
                 name = this.name,
                 url = videoUrl,
+                referer = mainUrl,
+                quality = Qualities.P1080.value,
                 type = type
-            ) {
-                this.referer = mainUrl
-            }
+            )
         )
 
         if (!subUrl.isNullOrBlank()) {
