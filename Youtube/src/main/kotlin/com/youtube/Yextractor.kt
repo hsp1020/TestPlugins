@@ -1,5 +1,7 @@
 package com.youtube
 
+import androidx.preference.PreferenceManager
+import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mvvm.logError
@@ -90,7 +92,6 @@ open class YoutubeExtractor : ExtractorApi() {
 
                         val label = buildVideoLabelNumber(vs)
                         val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
-                        
 
                         var mime = vs.format?.mimeType
                         if (mime.isNullOrEmpty()) mime = getMimeTypeFromUrl(streamUrl, false)
@@ -130,7 +131,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 for (video in videoOnlyList) {
                     if (audiosByLanguage.isNotEmpty()) {
                         for ((lang, audios) in audiosByLanguage) {
-
                             val bestAudioForLang = if (video.mimeType.contains("webm")) {
                                 audios.sortedWith(compareByDescending<AudioInfo> { it.mimeType.contains("webm") }.thenByDescending { it.bitrate }).firstOrNull()
                             } else {
@@ -169,7 +169,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         if (!seenUrls.add(mUrl)) return@mapNotNull null
                         val label = buildVideoLabelNumber(vs)
                         val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
-                        
                         Triple(mUrl, label, height)
                     } catch (e: Exception) { null }
                 }
@@ -190,30 +189,30 @@ open class YoutubeExtractor : ExtractorApi() {
         ytVideos[videoId]?.forEach { callback(it) }
 
         startServerIfNeeded()
-        
+
         ytVideosSubtitles[videoId]?.forEach { ss ->
             try {
                 val lang = ss.locale?.language ?: return@forEach
                 val rawUrl = ss.content ?: ss.getUrl() ?: return@forEach
-                
+
                 if (rawUrl.startsWith("http")) {
                     val cleanUrl = rawUrl.replace(Regex("&fmt=[^&]+"), "")
-                    
+
                     val srtUrl = "$cleanUrl&fmt=srt"
                     val originalName = ss.locale?.getDisplayLanguage(java.util.Locale.getDefault()) ?: lang
                     subtitleCallback(SubtitleFile(originalName, srtUrl))
-                    
+
                     val autoLangs = listOf("ko")
 
                     for (targetLang in autoLangs) {
                         if (targetLang.equals(lang, true)) continue
-                        
+
                         val autoVttUrl = "$cleanUrl&fmt=vtt&tlang=$targetLang"
-                        
+
                         val proxyId = UUID.randomUUID().toString()
                         manifestMap[proxyId] = autoVttUrl
                         val localAutoUrl = "http://127.0.0.1:$serverPort/sub_$proxyId.vtt"
-                        
+
                         subtitleCallback(SubtitleFile("$lang → $targetLang", localAutoUrl))
                     }
                 }
@@ -264,25 +263,57 @@ open class YoutubeExtractor : ExtractorApi() {
 
                             if (targetUrl != null) {
                                 try {
-                                    // NewPipe 다운로더 대신 Cloudstream의 강력한 app.get() 사용
-                                    val vttText = runBlocking {
-                                        app.get(targetUrl, interceptor = ytInterceptor).text
-                                        
+                                    // 봇 차단을 우회하기 위한 헤더 즉석 생성
+                                    val context = AcraApplication.context
+                                    val prefs = context?.let { PreferenceManager.getDefaultSharedPreferences(it) }
+                                    val visitor = prefs?.getString("VISITOR_INFO1_LIVE", "_Mk3UVhY40g") ?: "_Mk3UVhY40g"
+                                    val sapisid = prefs?.getString("SAPISID", null)
+
+                                    val cookieBuilder = StringBuilder()
+                                    cookieBuilder.append("VISITOR_INFO1_LIVE=$visitor; PREF=f6=40000000&hl=ko; CONSENT=YES+fx.456722336; ")
+                                    if (!sapisid.isNullOrBlank()) {
+                                        cookieBuilder.append("SAPISID=$sapisid; ")
                                     }
 
-                                    // 차단 HTML 페이지인지 확인하여 크래시 방지
+                                    val requestHeaders = mutableMapOf(
+                                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36",
+                                        "Accept-Language" to "ko,en-US;q=0.9,en;q=0.8",
+                                        "Cookie" to cookieBuilder.toString(),
+                                        "Origin" to "https://www.youtube.com",
+                                        "Referer" to "https://www.youtube.com/"
+                                    )
+
+                                    // SAPISID 해시 생성 (세션 인증)
+                                    if (!sapisid.isNullOrBlank()) {
+                                        try {
+                                            val timestamp = (System.currentTimeMillis() / 1000).toString()
+                                            val md = java.security.MessageDigest.getInstance("SHA-1")
+                                            val msg = "$timestamp $sapisid https://www.youtube.com"
+                                            val hash = md.digest(msg.toByteArray()).joinToString("") { "%02x".format(it) }
+                                            requestHeaders["Authorization"] = "SAPISIDHASH ${timestamp}_$hash"
+                                            requestHeaders["X-Origin"] = "https://www.youtube.com"
+                                            requestHeaders["X-Goog-AuthUser"] = "0"
+                                        } catch (e: Exception) { }
+                                    }
+
+                                    // 생성한 헤더를 기반으로 안전하게 텍스트 호출
+                                    val vttText = runBlocking {
+                                        app.get(targetUrl, headers = requestHeaders).text
+                                    }
+
+                                    // 유튜브 봇 차단 HTML 감지 (크래시 방지)
                                     if (vttText.trim().startsWith("<html", ignoreCase = true)) {
                                         sendError(out, 500, "Blocked by YouTube Bot Protection")
                                         return
                                     }
 
                                     var finalVtt = vttText.trim()
-                                    // WEBVTT 헤더가 유실된 채 왔다면 강제 주입
+                                    // WEBVTT 헤더가 누락된 채 왔다면 강제 주입
                                     if (!finalVtt.contains("WEBVTT")) {
                                         finalVtt = "WEBVTT\n\n$finalVtt"
                                     }
 
-                                    // VTT 찌꺼기 완벽 청소
+                                    // VTT 찌꺼기 위치 태그 및 포맷팅 완벽 청소
                                     val cleanedVtt = finalVtt
                                         .replace(Regex("(align|position|line|size|c\\.color[A-Za-z0-9]+):[^\\s]+"), "")
                                         .replace(Regex("<[^>]*>"), "")
@@ -320,7 +351,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 "Content-Length: ${responseBytes.size}\r\n" +
                 "Connection: close\r\n" +
                 "Access-Control-Allow-Origin: *\r\n\r\n"
-        
+
         out.write(headers.toByteArray(Charsets.UTF_8))
         out.write(responseBytes)
         out.flush()
