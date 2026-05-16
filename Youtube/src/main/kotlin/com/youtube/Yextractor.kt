@@ -192,10 +192,20 @@ open class YoutubeExtractor : ExtractorApi() {
         ytVideosSubtitles[videoId]?.mapNotNull { ss ->
             try {
                 val lang = ss.locale?.language ?: return@mapNotNull null
-                val content = ss.content ?: ss.getUrl() ?: return@mapNotNull null
-                newSubtitleFile(lang, content)
+                var url = ss.content ?: ss.getUrl() ?: return@mapNotNull null
+                
+                // 핵심: NewPipe가 가져온 URL에서 기존 포맷을 강제로 뜯어내고 SRT를 주입합니다.
+                if (url.startsWith("http")) {
+                    url = url.replace(Regex("&fmt=[^&]+"), "")
+                    if (!url.contains("fmt=srt")) {
+                        url = "$url&fmt=srt"
+                    }
+                }
+                
+                newSubtitleFile(lang, url)
             } catch (e: Exception) { null }
-        }?.forEach { subtitleCallback(it) }
+        }?.forEach { subtitleCallback(it) }        
+        
     }
 
     @Synchronized
