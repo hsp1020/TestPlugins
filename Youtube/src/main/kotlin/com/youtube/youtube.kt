@@ -1358,24 +1358,21 @@ private fun collectFromRenderer(
                     val baseUrl = baseTrack.optString("baseUrl", "")
                     baseLangCode = baseTrack.optString("languageCode", "original").lowercase()
 
-
                     for (i in 0 until captionTracks.length()) {
                         val track = captionTracks.optJSONObject(i)
                         val name = track.optJSONObject("name")?.optString("simpleText") ?: ""
                         val lang = track.optString("languageCode")
-                        val rawUrl = track.optString("baseUrl")
-                        val cleanUrl = rawUrl.replace(Regex("&fmt=[^&]+"), "")
+                        val url = track.optString("baseUrl")
 
-                        val srtUrl = "$cleanUrl&fmt=srt"
-                        if (!seenSubs.contains(srtUrl)) {
-                            seenSubs.add(srtUrl)
+                        val vttUrl = "$url&fmt=srt"
+                        if (!seenSubs.contains(vttUrl)) {
+                            seenSubs.add(vttUrl)
                             val displayTitle = "$name ($lang)"
-                            subtitleCallback(SubtitleFile(displayTitle, srtUrl))
+                            subtitleCallback(SubtitleFile(displayTitle, vttUrl))
                         }
                     }
 
                     if (baseUrl.isNotEmpty()) {
-                        val cleanBaseUrl = baseUrl.replace(Regex("&fmt=[^&]+"), "")
                         val autoLangs = listOf(
                             "aa","ab","af","ak","am","ar","as","ay","az","ba","be","bg","bho","bn","bo","br","bs","ca","ceb","co","crs",
                             "cs","cy","da","de","dv","dz","ee","el","en","eo","es","et","eu","fa","fi","fil","fj","fo","fr","fy","ga",
@@ -1390,7 +1387,7 @@ private fun collectFromRenderer(
                         for (targetLang in autoLangs) {
                             if (targetLang.equals(baseLangCode, true)) continue
 
-                            val autoUrl = "$cleanBaseUrl&fmt=srt&tlang=$targetLang"
+                            val autoUrl = "$baseUrl&fmt=srt&tlang=$targetLang"
 
                             if (!seenSubs.contains(autoUrl)) {
                                 seenSubs.add(autoUrl)
@@ -1461,19 +1458,17 @@ private fun collectFromRenderer(
                         val track = captionTracks.optJSONObject(i)
                         val name = track.optJSONObject("name")?.optString("simpleText") ?: ""
                         val lang = track.optString("languageCode")
-                        val rawUrl = track.optString("baseUrl")
-                        val cleanUrl = rawUrl.replace(Regex("&fmt=[^&]+"), "")
+                        val url = track.optString("baseUrl")
 
-                        val srtUrl = "$cleanUrl&fmt=srt"
-                        if (!seenSubs.contains(srtUrl)) {
-                            seenSubs.add(srtUrl)
+                        val ttmlUrl = "$url&fmt=srt"
+                        if (!seenSubs.contains(ttmlUrl)) {
+                            seenSubs.add(ttmlUrl)
                             val displayTitle = "$name ($lang)"
-                            subtitleCallback(SubtitleFile(displayTitle, srtUrl))
+                            subtitleCallback(SubtitleFile(displayTitle, ttmlUrl))
                         }
                     }
 
                     if (baseUrl.isNotEmpty()) {
-                        val cleanBaseUrl = baseUrl.replace(Regex("&fmt=[^&]+"), "")
                         val autoLangs = listOf(
                             "aa","ab","af","ak","am","ar","as","ay","az","ba","be","bg","bho","bn","bo","br","bs","ca","ceb","co","crs",
                             "cs","cy","da","de","dv","dz","ee","el","en","eo","es","et","eu","fa","fi","fil","fj","fo","fr","fy","ga",
@@ -1488,7 +1483,7 @@ private fun collectFromRenderer(
                         for (targetLang in autoLangs) {
                             if (targetLang.equals(baseLangCode, true)) continue
 
-                            val autoUrl = "$cleanBaseUrl&fmt=srt&tlang=$targetLang"
+                            val autoUrl = "$baseUrl&fmt=srt&tlang=$targetLang"
                             if (!seenSubs.contains(autoUrl)) {
                                 seenSubs.add(autoUrl)
                                 val displayName = "$baseLangCode → $targetLang"
@@ -1673,9 +1668,9 @@ private fun collectFromRenderer(
                             }
                         }
 
-                        val cleanBaseUrl = baseUrl.replace(Regex("&fmt=[^&]+"), "")
                         val originals = listOf(
-                            addParamsToUrl(cleanBaseUrl, mapOf("fmt" to "srt"))
+                            
+                            addParamsToUrl(baseUrl, mapOf("fmt" to "srt"))
                         )
                         for (u in originals) {
                             if (u !in seenSubs) {
@@ -1687,7 +1682,8 @@ private fun collectFromRenderer(
                         for (tlang in targets) {
                             if (tlang.equals(baseLang, ignoreCase = true)) continue
 
-                            val tsrt = addParamsToUrl(cleanBaseUrl, mapOf("fmt" to "srt", "tlang" to tlang))
+                            
+                            val tsrt = addParamsToUrl(baseUrl, mapOf("fmt" to "srt", "tlang" to tlang))
 
                             listOf(tsrt).forEach { u ->
                                 if (u !in seenSubs) {
@@ -1700,14 +1696,14 @@ private fun collectFromRenderer(
                         for (i in 0 until captionTracks.length()) {
                             if (i == preferredIndex) continue
                             val tr = captionTracks.optJSONObject(i) ?: continue
-                            val rawUrl = tr.optString("baseUrl", "")
-                            val cleanUrl = rawUrl.replace(Regex("&fmt=[^&]+"), "")
+                            val url = tr.optString("baseUrl", "")
                             val lang = tr.optString("languageCode", "")
                             val name = tr.optJSONObject("name")?.optString("simpleText", lang) ?: lang
 
-                            val srt = addParamsToUrl(cleanUrl, mapOf("fmt" to "srt"))
+                            val vtt = addParamsToUrl(url, mapOf("fmt" to "vtt"))
+                            val srt = addParamsToUrl(url, mapOf("fmt" to "srt"))
 
-                            for (u in listOf(srt)) {
+                            for (u in listOf(vtt, srt)) {
                                 if (u !in seenSubs) {
                                     seenSubs.add(u)
                                     subtitleCallback(SubtitleFile("$name ($lang)", u))
