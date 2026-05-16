@@ -189,24 +189,43 @@ open class YoutubeExtractor : ExtractorApi() {
 
         ytVideos[videoId]?.forEach { callback(it) }
 
-        ytVideosSubtitles[videoId]?.mapNotNull { ss ->
+        ytVideosSubtitles[videoId]?.forEach { ss ->
             try {
-                val lang = ss.locale?.language ?: return@mapNotNull null
-                var url = ss.content ?: ss.getUrl() ?: return@mapNotNull null
+                val lang = ss.locale?.language ?: return@forEach
+                val rawUrl = ss.content ?: ss.getUrl() ?: return@forEach
                 
-                // 핵심: NewPipe가 가져온 URL에서 기존 포맷을 강제로 뜯어내고 SRT를 주입합니다.
-                if (url.startsWith("http")) {
-                    url = url.replace(Regex("&fmt=[^&]+"), "")
-                    if (!url.contains("fmt=srt")) {
-                        url = "$url&fmt=srt"
+                if (rawUrl.startsWith("http")) {
+                    // 1. 기존 포맷 제거하고 무조건 하단 고정형 SRT로 변경
+                    val cleanUrl = rawUrl.replace(Regex("&fmt=[^&]+"), "")
+                    val srtUrl = "$cleanUrl&fmt=srt"
+                    
+                    // 2. 원본 자막 콜백 전송
+                    val originalName = ss.locale?.getDisplayLanguage(java.util.Locale.getDefault()) ?: lang
+                    subtitleCallback(SubtitleFile(originalName, srtUrl))
+                    
+                    // 3. 100여 개국 자동 번역 자막 생성 (원본 코드와 동일한 언어 목록)
+                    val autoLangs = listOf(
+                        "aa","ab","af","ak","am","ar","as","ay","az","ba","be","bg","bho","bn","bo","br","bs","ca","ceb","co","crs",
+                        "cs","cy","da","de","dv","dz","ee","el","en","eo","es","et","eu","fa","fi","fil","fj","fo","fr","fy","ga",
+                        "gaa","gd","gl","gn","gu","gv","ha","haw","he","hi","hmn","hr","ht","hu","hy","id","ig","is","it","iu","iw",
+                        "ja","jv","ka","kha","kk","kl","km","kn","ko","kri","ku","ky","la","lb","lg","ln","lo","lt","lua","luo","lv",
+                        "mfe","mg","mi","mk","ml","mn","mr","ms","mt","my","ne","new","nl","no","nso","ny","oc","om","or","os","pa",
+                        "pam","pl","ps","pt","pt-BR","pt-PT","qu","rn","ro","ru","rw","sa","sd","sg","si","sk","sl","sm","sn","so","sq",
+                        "sr","ss","st","su","sv","sw","ta","te","tg","th","ti","tk","tn","to","tr","ts","tt","tum","ug","uk","ur","uz",
+                        "ve","vi","war","wo","xh","yi","yo","zh-Hans","zh-Hant","zu"
+                    )
+
+                    for (targetLang in autoLangs) {
+                        if (targetLang.equals(lang, true)) continue // 원본 언어는 번역 제외
+                        
+                        val autoUrl = "$srtUrl&tlang=$targetLang"
+                        subtitleCallback(SubtitleFile("$lang → $targetLang", autoUrl))
                     }
                 }
-                
-                newSubtitleFile(lang, url)
-            } catch (e: Exception) { null }
-        }?.forEach { subtitleCallback(it) }        
-        
+            } catch (e: Exception) { }
+        }
     }
+
 
     @Synchronized
     private fun startServerIfNeeded() {
