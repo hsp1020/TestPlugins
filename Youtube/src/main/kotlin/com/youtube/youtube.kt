@@ -1364,7 +1364,7 @@ private fun collectFromRenderer(
                         val lang = track.optString("languageCode")
                         val url = track.optString("baseUrl")
 
-                        val vttUrl = "$url&fmt=vtt"
+                        val vttUrl = "$url&fmt=srt"
                         if (!seenSubs.contains(vttUrl)) {
                             seenSubs.add(vttUrl)
                             val displayTitle = "$name ($lang)"
@@ -1387,7 +1387,7 @@ private fun collectFromRenderer(
                         for (targetLang in autoLangs) {
                             if (targetLang.equals(baseLangCode, true)) continue
 
-                            val autoUrl = "$baseUrl&fmt=vtt&tlang=$targetLang"
+                            val autoUrl = "$baseUrl&fmt=srt&tlang=$targetLang"
 
                             if (!seenSubs.contains(autoUrl)) {
                                 seenSubs.add(autoUrl)
@@ -1460,7 +1460,7 @@ private fun collectFromRenderer(
                         val lang = track.optString("languageCode")
                         val url = track.optString("baseUrl")
 
-                        val ttmlUrl = "$url&fmt=ttml"
+                        val ttmlUrl = "$url&fmt=srt"
                         if (!seenSubs.contains(ttmlUrl)) {
                             seenSubs.add(ttmlUrl)
                             val displayTitle = "$name ($lang)"
@@ -1483,7 +1483,7 @@ private fun collectFromRenderer(
                         for (targetLang in autoLangs) {
                             if (targetLang.equals(baseLangCode, true)) continue
 
-                            val autoUrl = "$baseUrl&fmt=ttml&tlang=$targetLang"
+                            val autoUrl = "$baseUrl&fmt=srt&tlang=$targetLang"
                             if (!seenSubs.contains(autoUrl)) {
                                 seenSubs.add(autoUrl)
                                 val displayName = "$baseLangCode → $targetLang"
@@ -1669,7 +1669,7 @@ private fun collectFromRenderer(
                         }
 
                         val originals = listOf(
-                            addParamsToUrl(baseUrl, mapOf("fmt" to "vtt")),
+                            
                             addParamsToUrl(baseUrl, mapOf("fmt" to "srt"))
                         )
                         for (u in originals) {
@@ -1682,7 +1682,7 @@ private fun collectFromRenderer(
                         for (tlang in targets) {
                             if (tlang.equals(baseLang, ignoreCase = true)) continue
 
-                            val tvtt = addParamsToUrl(baseUrl, mapOf("fmt" to "vtt", "tlang" to tlang))
+                            
                             val tsrt = addParamsToUrl(baseUrl, mapOf("fmt" to "srt", "tlang" to tlang))
 
                             listOf(tvtt, tsrt).forEach { u ->
