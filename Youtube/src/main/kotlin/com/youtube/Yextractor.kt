@@ -266,7 +266,8 @@ open class YoutubeExtractor : ExtractorApi() {
                                 try {
                                     // NewPipe 다운로더 대신 Cloudstream의 강력한 app.get() 사용
                                     val vttText = runBlocking {
-                                        app.get(targetUrl).text
+                                        app.get(targetUrl, interceptor = ytInterceptor).text
+                                        
                                     }
 
                                     // 차단 HTML 페이지인지 확인하여 크래시 방지
