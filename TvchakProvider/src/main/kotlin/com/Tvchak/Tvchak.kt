@@ -1,4 +1,4 @@
-package com.Tvchak
+package com.lagradost.cloudstream3.plugins.tvchak // 패키지명 완벽 동기화
 
 import android.content.Context
 import com.lagradost.cloudstream3.*
@@ -228,7 +228,7 @@ class TvchakProvider : MainAPI() {
 
         val type = if (videoUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
 
-        // 네가 증명한 최신 newExtractorLink 빌더 패턴 (위치 기반 인자 사용)
+        // 최신 newExtractorLink 빌더 패턴 (위치 기반 인자 사용)
         callback.invoke(
             newExtractorLink(
                 this.name,
