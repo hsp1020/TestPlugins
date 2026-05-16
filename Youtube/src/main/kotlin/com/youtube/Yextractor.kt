@@ -316,3 +316,72 @@ open class YoutubeExtractor : ExtractorApi() {
         audioList: List<AudioInfo>,
         durationSec: Long
     ): String {
+        val cleanVideoUrl = escapeXml(video.url)
+        val durationString = "PT${durationSec}S"
+
+        val sb = StringBuilder()
+        sb.append("""<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011" type="static" minBufferTime="PT5.0S" mediaPresentationDuration="$durationString">""")
+        sb.append("<Period>")
+
+        val vMime = video.mimeType
+        val vCodecs = if (vMime.contains("webm")) "vp9" else "avc1.4d401f"
+
+        val vSegmentBase = if (video.initRange != null && video.indexRange != null) {
+            """<SegmentBase indexRange="${video.indexRange}"><Initialization range="${video.initRange}" /></SegmentBase>"""
+        } else ""
+
+        sb.append("""
+            <AdaptationSet mimeType="$vMime" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
+              <Representation id="video" bandwidth="4000000" width="0" height="${video.height}" codecs="$vCodecs">
+                <BaseURL>$cleanVideoUrl</BaseURL>
+                $vSegmentBase
+              </Representation>
+            </AdaptationSet>
+        """.trimIndent())
+
+        audioList.forEachIndexed { index, audio ->
+            val cleanAudioUrl = escapeXml(audio.url)
+            val audioId = "audio_$index"
+            val aMime = audio.mimeType
+            val aCodecs = if (aMime.contains("webm")) "opus" else "mp4a.40.2"
+
+            val aSegmentBase = if (audio.initRange != null && audio.indexRange != null) {
+                """<SegmentBase indexRange="${audio.indexRange}"><Initialization range="${audio.initRange}" /></SegmentBase>"""
+            } else ""
+
+            sb.append("""
+                <AdaptationSet mimeType="$aMime" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
+                  <Representation id="$audioId" bandwidth="${if(audio.bitrate>0) audio.bitrate else 128000}" codecs="$aCodecs">
+                    <BaseURL>$cleanAudioUrl</BaseURL>
+                    $aSegmentBase
+                  </Representation>
+                </AdaptationSet>
+            """.trimIndent())
+        }
+
+        sb.append("</Period>")
+        sb.append("</MPD>")
+        return sb.toString()
+    }
+
+    private fun escapeXml(url: String): String {
+        return url.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    }
+
+    private fun getMimeTypeFromUrl(url: String, isAudio: Boolean): String {
+        return try {
+            val decoded = URLDecoder.decode(url, "UTF-8")
+            if (decoded.contains("video/webm") || decoded.contains("audio/webm")) {
+                if (isAudio) "audio/webm" else "video/webm"
+            } else {
+                if (isAudio) "audio/mp4" else "video/mp4"
+            }
+        } catch (e: Exception) { if (isAudio) "audio/mp4" else "video/mp4" }
+    }
+
+    private fun buildVideoLabelNumber(vs: org.schabi.newpipe.extractor.stream.VideoStream): String {
+        val height = runCatching { vs.height }.getOrNull() ?: 0
+        if (height > 0) return height.toString()
+        return "video"
+    }
+}
