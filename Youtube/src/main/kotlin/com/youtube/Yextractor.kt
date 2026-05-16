@@ -203,7 +203,14 @@ open class YoutubeExtractor : ExtractorApi() {
                     subtitleCallback(SubtitleFile(originalName, srtUrl))
                     
                     val autoLangs = listOf(
-                        "ko"
+                        "aa","ab","af","ak","am","ar","as","ay","az","ba","be","bg","bho","bn","bo","br","bs","ca","ceb","co","crs",
+                        "cs","cy","da","de","dv","dz","ee","el","en","eo","es","et","eu","fa","fi","fil","fj","fo","fr","fy","ga",
+                        "gaa","gd","gl","gn","gu","gv","ha","haw","he","hi","hmn","hr","ht","hu","hy","id","ig","is","it","iu","iw",
+                        "ja","jv","ka","kha","kk","kl","km","kn","ko","kri","ku","ky","la","lb","lg","ln","lo","lt","lua","luo","lv",
+                        "mfe","mg","mi","mk","ml","mn","mr","ms","mt","my","ne","new","nl","no","nso","ny","oc","om","or","os","pa",
+                        "pam","pl","ps","pt","pt-BR","pt-PT","qu","rn","ro","ru","rw","sa","sd","sg","si","sk","sl","sm","sn","so","sq",
+                        "sr","ss","st","su","sv","sw","ta","te","tg","th","ti","tk","tn","to","tr","ts","tt","tum","ug","uk","ur","uz",
+                        "ve","vi","war","wo","xh","yi","yo","zh-Hans","zh-Hant","zu"
                     )
 
                     for (targetLang in autoLangs) {
@@ -264,9 +271,9 @@ open class YoutubeExtractor : ExtractorApi() {
                             
                             if (targetUrl != null) {
                                 try {
-                                    // [핵심 변경점] 원본 영상을 가져올 때 썼던 NewPipe의 Downloader를 그대로 사용하여 세션 불일치 및 봇 차단 100% 우회
+                                    // 괄호() 추가 완료! NewPipe 공식 다운로더의 responseBody() 함수를 호출합니다.
                                     val response = org.schabi.newpipe.extractor.NewPipe.getDownloader().get(targetUrl)
-                                    val vttText = response.responseBody ?: ""
+                                    val vttText = response.responseBody() ?: ""
                                     
                                     // 유튜브가 자막 대신 HTML 봇 차단 페이지를 내려줬는지 검사 (플레이어 크래시 방지)
                                     if (vttText.trim().startsWith("<html", ignoreCase = true) || !vttText.contains("WEBVTT")) {
@@ -316,72 +323,3 @@ open class YoutubeExtractor : ExtractorApi() {
         audioList: List<AudioInfo>,
         durationSec: Long
     ): String {
-        val cleanVideoUrl = escapeXml(video.url)
-        val durationString = "PT${durationSec}S"
-
-        val sb = StringBuilder()
-        sb.append("""<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011" type="static" minBufferTime="PT5.0S" mediaPresentationDuration="$durationString">""")
-        sb.append("<Period>")
-
-        val vMime = video.mimeType
-        val vCodecs = if (vMime.contains("webm")) "vp9" else "avc1.4d401f"
-
-        val vSegmentBase = if (video.initRange != null && video.indexRange != null) {
-            """<SegmentBase indexRange="${video.indexRange}"><Initialization range="${video.initRange}" /></SegmentBase>"""
-        } else ""
-
-        sb.append("""
-            <AdaptationSet mimeType="$vMime" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
-              <Representation id="video" bandwidth="4000000" width="0" height="${video.height}" codecs="$vCodecs">
-                <BaseURL>$cleanVideoUrl</BaseURL>
-                $vSegmentBase
-              </Representation>
-            </AdaptationSet>
-        """.trimIndent())
-
-        audioList.forEachIndexed { index, audio ->
-            val cleanAudioUrl = escapeXml(audio.url)
-            val audioId = "audio_$index"
-            val aMime = audio.mimeType
-            val aCodecs = if (aMime.contains("webm")) "opus" else "mp4a.40.2"
-
-            val aSegmentBase = if (audio.initRange != null && audio.indexRange != null) {
-                """<SegmentBase indexRange="${audio.indexRange}"><Initialization range="${audio.initRange}" /></SegmentBase>"""
-            } else ""
-
-            sb.append("""
-                <AdaptationSet mimeType="$aMime" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
-                  <Representation id="$audioId" bandwidth="${if(audio.bitrate>0) audio.bitrate else 128000}" codecs="$aCodecs">
-                    <BaseURL>$cleanAudioUrl</BaseURL>
-                    $aSegmentBase
-                  </Representation>
-                </AdaptationSet>
-            """.trimIndent())
-        }
-
-        sb.append("</Period>")
-        sb.append("</MPD>")
-        return sb.toString()
-    }
-
-    private fun escapeXml(url: String): String {
-        return url.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    }
-
-    private fun getMimeTypeFromUrl(url: String, isAudio: Boolean): String {
-        return try {
-            val decoded = URLDecoder.decode(url, "UTF-8")
-            if (decoded.contains("video/webm") || decoded.contains("audio/webm")) {
-                if (isAudio) "audio/webm" else "video/webm"
-            } else {
-                if (isAudio) "audio/mp4" else "video/mp4"
-            }
-        } catch (e: Exception) { if (isAudio) "audio/mp4" else "video/mp4" }
-    }
-
-    private fun buildVideoLabelNumber(vs: org.schabi.newpipe.extractor.stream.VideoStream): String {
-        val height = runCatching { vs.height }.getOrNull() ?: 0
-        if (height > 0) return height.toString()
-        return "video"
-    }
-}
