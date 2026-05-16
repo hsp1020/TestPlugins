@@ -1,6 +1,7 @@
 package com.youtube
 
 import com.lagradost.cloudstream3.SubtitleFile
+import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.newSubtitleFile
 import com.lagradost.cloudstream3.utils.ExtractorApi
@@ -9,13 +10,14 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.schemaStripRegex
+import kotlinx.coroutines.runBlocking
 import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor
 import org.schabi.newpipe.extractor.services.youtube.linkHandler.YoutubeStreamLinkHandlerFactory
 import org.schabi.newpipe.extractor.stream.SubtitlesStream
 import java.io.BufferedReader
 import java.io.InputStreamReader
-import java.io.PrintWriter
+import java.io.OutputStream
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URLDecoder
@@ -168,7 +170,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         val label = buildVideoLabelNumber(vs)
                         val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
                         
-                        
                         Triple(mUrl, label, height)
                     } catch (e: Exception) { null }
                 }
@@ -202,9 +203,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     val originalName = ss.locale?.getDisplayLanguage(java.util.Locale.getDefault()) ?: lang
                     subtitleCallback(SubtitleFile(originalName, srtUrl))
                     
-                    val autoLangs = listOf(
-                        "ko"
-                    )
+                    val autoLangs = listOf("ko")
 
                     for (targetLang in autoLangs) {
                         if (targetLang.equals(lang, true)) continue
@@ -250,65 +249,86 @@ open class YoutubeExtractor : ExtractorApi() {
         try {
             client.use { socket ->
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
-                val output = PrintWriter(socket.getOutputStream(), true)
-                val line = reader.readLine()
-                
-                if (line != null && line.startsWith("GET")) {
+                val out = socket.getOutputStream()
+                val line = reader.readLine() ?: return
+
+                if (line.startsWith("GET")) {
                     val parts = line.split(" ")
                     if (parts.size > 1) {
                         var path = parts[1].substring(1)
-                        
+
+                        // 1. 자막(VTT) 프록시 요청 처리
                         if (path.startsWith("sub_")) {
                             val id = path.substringAfter("sub_").substringBefore(".vtt")
                             val targetUrl = manifestMap[id]
-                            
+
                             if (targetUrl != null) {
                                 try {
-                                    // 괄호() 추가 완료! NewPipe 공식 다운로더의 responseBody() 함수를 호출합니다.
-                                    val response = org.schabi.newpipe.extractor.NewPipe.getDownloader().get(targetUrl)
-                                    val vttText = response.responseBody() ?: ""
-                                    
-                                    // 유튜브가 자막 대신 HTML 봇 차단 페이지를 내려줬는지 검사 (플레이어 크래시 방지)
-                                    if (vttText.trim().startsWith("<html", ignoreCase = true) || !vttText.contains("WEBVTT")) {
-                                        output.println("HTTP/1.1 500 Internal Server Error\r\n\r\n")
+                                    // NewPipe 다운로더 대신 Cloudstream의 강력한 app.get() 사용
+                                    val vttText = runBlocking {
+                                        app.get(targetUrl).text
+                                    }
+
+                                    // 차단 HTML 페이지인지 확인하여 크래시 방지
+                                    if (vttText.trim().startsWith("<html", ignoreCase = true)) {
+                                        sendError(out, 500, "Blocked by YouTube Bot Protection")
                                         return
                                     }
 
-                                    // VTT 상단 고정 및 위치 태그를 정규식으로 모조리 삭제 (하단 고정)
-                                    val cleanedVtt = vttText.replace(Regex("(align|position|line|size):[^\\s]+"), "")
-                                    
-                                    output.println("HTTP/1.1 200 OK")
-                                    output.println("Content-Type: text/vtt; charset=utf-8")
-                                    output.println("Connection: close")
-                                    output.println("Access-Control-Allow-Origin: *")
-                                    output.println("")
-                                    output.println(cleanedVtt)
+                                    var finalVtt = vttText.trim()
+                                    // WEBVTT 헤더가 유실된 채 왔다면 강제 주입
+                                    if (!finalVtt.contains("WEBVTT")) {
+                                        finalVtt = "WEBVTT\n\n$finalVtt"
+                                    }
+
+                                    // VTT 찌꺼기 완벽 청소
+                                    val cleanedVtt = finalVtt
+                                        .replace(Regex("(align|position|line|size|c\\.color[A-Za-z0-9]+):[^\\s]+"), "")
+                                        .replace(Regex("<[^>]*>"), "")
+
+                                    sendSuccessResponse(out, "text/vtt; charset=utf-8", cleanedVtt)
                                 } catch (e: Exception) {
-                                    output.println("HTTP/1.1 500 Internal Server Error\r\n\r\n")
+                                    sendError(out, 500, "Internal Server Error")
                                 }
                             } else {
-                                output.println("HTTP/1.1 404 Not Found\r\n\r\n")
+                                sendError(out, 404, "Not Found")
                             }
                             return
                         }
 
+                        // 2. MPD 매니페스트 프록시 요청 처리
                         if (path.endsWith(".mpd")) path = path.replace(".mpd", "")
                         val content = manifestMap[path]
                         if (content != null) {
-                            output.println("HTTP/1.1 200 OK")
-                            output.println("Content-Type: application/dash+xml")
-                            output.println("Connection: close")
-                            output.println("Access-Control-Allow-Origin: *")
-                            output.println("")
-                            output.println(content)
+                            sendSuccessResponse(out, "application/dash+xml", content)
                         } else {
-                            output.println("HTTP/1.1 404 Not Found")
-                            output.println("")
+                            sendError(out, 404, "Not Found")
                         }
                     }
                 }
             }
-        } catch (e: Exception) {}
+        } catch (e: Exception) {
+            // 소켓 파이프라인 에러 무시
+        }
+    }
+
+    private fun sendSuccessResponse(out: OutputStream, contentType: String, content: String) {
+        val responseBytes = content.toByteArray(Charsets.UTF_8)
+        val headers = "HTTP/1.1 200 OK\r\n" +
+                "Content-Type: $contentType\r\n" +
+                "Content-Length: ${responseBytes.size}\r\n" +
+                "Connection: close\r\n" +
+                "Access-Control-Allow-Origin: *\r\n\r\n"
+        
+        out.write(headers.toByteArray(Charsets.UTF_8))
+        out.write(responseBytes)
+        out.flush()
+    }
+
+    private fun sendError(out: OutputStream, code: Int, message: String) {
+        val response = "HTTP/1.1 $code $message\r\nConnection: close\r\n\r\n"
+        out.write(response.toByteArray(Charsets.UTF_8))
+        out.flush()
     }
 
     private fun buildDashManifestXml(
