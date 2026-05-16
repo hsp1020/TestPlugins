@@ -205,14 +205,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     
                     // 3. 100여 개국 자동 번역 자막 생성 (원본 코드와 동일한 언어 목록)
                     val autoLangs = listOf(
-                        "aa","ab","af","ak","am","ar","as","ay","az","ba","be","bg","bho","bn","bo","br","bs","ca","ceb","co","crs",
-                        "cs","cy","da","de","dv","dz","ee","el","en","eo","es","et","eu","fa","fi","fil","fj","fo","fr","fy","ga",
-                        "gaa","gd","gl","gn","gu","gv","ha","haw","he","hi","hmn","hr","ht","hu","hy","id","ig","is","it","iu","iw",
-                        "ja","jv","ka","kha","kk","kl","km","kn","ko","kri","ku","ky","la","lb","lg","ln","lo","lt","lua","luo","lv",
-                        "mfe","mg","mi","mk","ml","mn","mr","ms","mt","my","ne","new","nl","no","nso","ny","oc","om","or","os","pa",
-                        "pam","pl","ps","pt","pt-BR","pt-PT","qu","rn","ro","ru","rw","sa","sd","sg","si","sk","sl","sm","sn","so","sq",
-                        "sr","ss","st","su","sv","sw","ta","te","tg","th","ti","tk","tn","to","tr","ts","tt","tum","ug","uk","ur","uz",
-                        "ve","vi","war","wo","xh","yi","yo","zh-Hans","zh-Hant","zu"
+                        "en","ko"
                     )
 
                     for (targetLang in autoLangs) {
