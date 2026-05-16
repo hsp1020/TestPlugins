@@ -253,7 +253,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 val reader = java.io.BufferedReader(java.io.InputStreamReader(socket.getInputStream()))
                 val output = java.io.PrintWriter(socket.getOutputStream(), true)
                 val line = reader.readLine()
-                
+
                 android.util.Log.d("YoutubeProxy", "====== [프록시 요청 수신] ======")
                 android.util.Log.d("YoutubeProxy", "Request Line: $line")
 
@@ -271,20 +271,35 @@ open class YoutubeExtractor : ExtractorApi() {
 
                             if (targetUrl != null) {
                                 try {
-                                    android.util.Log.d("YoutubeProxy", "자막 다운로드 시도 시작...")
+                                    android.util.Log.d("YoutubeProxy", "자막 다운로드 시도 시작 (OkHttp3 사용)...")
                                     
-                                    val proxyApp = com.lagradost.nicehttp.Requests()
-                                    val vttText = kotlinx.coroutines.runBlocking {
-                                        proxyApp.get(targetUrl).text
+                                    // 완벽한 브라우저 위장을 위한 OkHttp3 직접 호출
+                                    val okHttpClient = okhttp3.OkHttpClient()
+                                    val request = okhttp3.Request.Builder()
+                                        .url(targetUrl)
+                                        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36")
+                                        .header("Accept-Language", "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7")
+                                        .header("Accept", "text/vtt,text/plain,*/*")
+                                        .build()
+
+                                    val response = okHttpClient.newCall(request).execute()
+                                    val vttText = response.body?.string() ?: ""
+                                    
+                                    // 구글 봇 차단 페이지(HTML)를 받았는지 검사
+                                    if (vttText.trim().startsWith("<html", ignoreCase = true)) {
+                                        android.util.Log.e("YoutubeProxy", "❌ 구글 봇 차단 (HTML 응답): $vttText")
+                                        output.println("HTTP/1.1 500 Internal Server Error\r\n\r\n")
+                                        return
                                     }
-                                    
+
                                     android.util.Log.d("YoutubeProxy", "자막 다운로드 성공! (텍스트 길이: ${vttText.length})")
                                     
+                                    // VTT 상단 고정 태그 정규식으로 완벽 삭제
                                     val cleanedVtt = vttText.replace(Regex("(align|position|line|size):[^\\s]+"), "")
                                     android.util.Log.d("YoutubeProxy", "정규식 세탁 완료. 플레이어에 전송합니다.")
                                     
                                     output.println("HTTP/1.1 200 OK")
-                                    output.println("Content-Type: text/vtt")
+                                    output.println("Content-Type: text/vtt; charset=utf-8")
                                     output.println("Connection: close")
                                     output.println("Access-Control-Allow-Origin: *")
                                     output.println("")
@@ -292,7 +307,6 @@ open class YoutubeExtractor : ExtractorApi() {
                                     
                                     android.util.Log.d("YoutubeProxy", "플레이어에 자막 전송 성공.")
                                 } catch (e: Exception) {
-                                    // 여기가 핵심입니다. 왜 500 에러가 났는지 정확한 원인을 출력합니다.
                                     android.util.Log.e("YoutubeProxy", "❌ 자막 다운로드 또는 처리 중 치명적 에러 발생!", e)
                                     output.println("HTTP/1.1 500 Internal Server Error\r\n\r\n")
                                 }
@@ -324,7 +338,6 @@ open class YoutubeExtractor : ExtractorApi() {
             android.util.Log.e("YoutubeProxy", "❌ 소켓 통신 자체 에러 발생", e)
         }
     }
-
 
     private fun buildDashManifestXml(
         video: StreamInfo,
