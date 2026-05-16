@@ -2,11 +2,15 @@ package com.Tvchak
 
 import android.content.Context
 import com.fasterxml.jackson.annotation.JsonProperty
+import com.fasterxml.jackson.databind.DeserializationFeature
+import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import com.fasterxml.jackson.module.kotlin.readValue
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.AppUtils
+import com.lagradost.cloudstream3.newSubtitleFile
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -14,7 +18,8 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.jsoup.nodes.Element
-import java.util.Base64
+import java.net.URLDecoder
+import java.net.URLEncoder
 
 class TvchakProvider : MainAPI() {
     companion object {
@@ -23,6 +28,9 @@ class TvchakProvider : MainAPI() {
         private val domainMutex = Mutex()
         private const val PREFS_NAME = "TvChak_Domain_Cache"
         private const val PREF_KEY = "current_domain"
+        
+        // parseJson 에러 원천 차단을 위한 Jackson Mapper 직접 선언
+        private val mapper = jacksonObjectMapper().configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
     }
 
     override var mainUrl = currentMainUrl
@@ -146,7 +154,8 @@ class TvchakProvider : MainAPI() {
                     val href = fixUrlNull(element.selectFirst("a.cover-link")?.attr("href")) ?: return@async null
                     val poster = element.selectFirst(".movie-post-lazyload")?.attr("data-original") ?: ""
                     
-                    val encodedPoster = Base64.getEncoder().encodeToString(poster.toByteArray())
+                    // Base64 대신 안전한 URLEncoder 사용
+                    val encodedPoster = URLEncoder.encode(poster, "UTF-8")
                     val finalUrl = "$href?poster=$encodedPoster"
 
                     newTvSeriesSearchResponse(title, finalUrl, TvType.TvSeries) {
@@ -166,7 +175,7 @@ class TvchakProvider : MainAPI() {
         val realUrl = url.substringBefore("?poster=")
         val encodedPoster = url.substringAfter("?poster=", "")
         val passedPoster = if (encodedPoster.isNotBlank()) {
-            String(Base64.getDecoder().decode(encodedPoster))
+            URLDecoder.decode(encodedPoster, "UTF-8")
         } else null
 
         val document = app.get(realUrl).document
@@ -209,8 +218,8 @@ class TvchakProvider : MainAPI() {
         val scriptContent = document.select("script").find { it.data().contains("player_aaaa") }?.data() ?: return false
         val jsonString = scriptContent.substringAfter("player_aaaa=").substringBefore("</script>").trim().removeSuffix(";")
         
-        // AppUtils 명시적 호출
-        val playerJson = AppUtils.parseJson<PlayerAaaa>(jsonString)
+        // Jackson Mapper를 직접 사용하여 parseJson 에러 완벽 회피
+        val playerJson = mapper.readValue<PlayerAaaa>(jsonString)
         val rawUrl = playerJson.url ?: return false
 
         var videoUrl = rawUrl
@@ -226,7 +235,7 @@ class TvchakProvider : MainAPI() {
 
         val type = if (videoUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
 
-        // 네가 원했던 최신 newExtractorLink 빌더 패턴 완벽 복구
+        // 네가 증명한 최신 newExtractorLink 빌더 패턴 완벽 적용
         callback.invoke(
             newExtractorLink(
                 source = this.name,
@@ -240,8 +249,9 @@ class TvchakProvider : MainAPI() {
         )
 
         if (!subUrl.isNullOrBlank()) {
+            // 최신 newSubtitleFile 빌더 패턴 적용
             subtitleCallback.invoke(
-                SubtitleFile(
+                newSubtitleFile(
                     lang = "Korean",
                     url = subUrl
                 )
@@ -264,7 +274,8 @@ class TvchakProvider : MainAPI() {
                 ?.substringAfter("url('")?.substringBefore("')") ?: ""
         }
 
-        val encodedPoster = Base64.getEncoder().encodeToString(poster.toByteArray())
+        // Base64 대신 안전한 URLEncoder 사용
+        val encodedPoster = URLEncoder.encode(poster, "UTF-8")
         val finalUrl = "$href?poster=$encodedPoster"
         val type = if (isMovie) TvType.Movie else TvType.TvSeries
 
