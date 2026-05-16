@@ -1685,7 +1685,7 @@ private fun collectFromRenderer(
                             
                             val tsrt = addParamsToUrl(baseUrl, mapOf("fmt" to "srt", "tlang" to tlang))
 
-                            listOf(tvtt, tsrt).forEach { u ->
+                            listOf(tsrt).forEach { u ->
                                 if (u !in seenSubs) {
                                     seenSubs.add(u)
                                     subtitleCallback(SubtitleFile("$baseLang → $tlang", u))
