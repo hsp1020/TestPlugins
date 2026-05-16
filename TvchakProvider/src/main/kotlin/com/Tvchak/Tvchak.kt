@@ -1,11 +1,8 @@
 package com.lagradost.cloudstream3.plugins.tvchak
 
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
-import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.M3u8Helper
-import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.loadExtractor
 import java.net.URI
 
 class TvchakProvider : MainAPI() {
@@ -41,6 +38,7 @@ class TvchakProvider : MainAPI() {
             val originalAttr = anchor.attr("data-original")
             val poster = fixUrl(if (originalAttr.isNotBlank()) originalAttr else anchor.attr("src"))
             
+            // 캐시 프리 로드 (OOM 및 라이프사이클 파괴 방어용 페이로드 브릿징)
             val payloadUrl = "$link||$poster||$title"
             
             newTvSeriesSearchResponse(title, payloadUrl, TvType.TvSeries) {
@@ -79,7 +77,7 @@ class TvchakProvider : MainAPI() {
         val title = document.selectFirst(".title, h1, .stui-content__title")?.text() ?: injectedTitle
         
         val episodes = document.select(".stui-content__playlist li a, .playlist li a").map {
-            // Deprecation 대응: newEpisode 빌더 패턴 사용
+            // API 규격 준수: newEpisode 빌더 활용
             newEpisode(data = fixUrl(it.attr("href"))) {
                 this.name = it.text().trim()
             }
@@ -90,7 +88,6 @@ class TvchakProvider : MainAPI() {
         }
     }
 
-    // 시그니처 강제 대응: subtitleCallback이 callback보다 선행
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -110,7 +107,7 @@ class TvchakProvider : MainAPI() {
             if (isM3u8) {
                 M3u8Helper.generateM3u8(this.name, videoUrl, mainUrl).forEach(callback)
             } else {
-                // Deprecation 대응: newExtractorLink 팩토리 메서드 사용
+                // API 규격 준수: newExtractorLink 팩토리 메서드 활용
                 callback.invoke(
                     newExtractorLink(
                         source = this.name,
@@ -140,7 +137,7 @@ class TvchakProvider : MainAPI() {
             return true
         }
         
-        // document 객체를 응답에서 직접 추출하여 select 연산 수행
+        // Iframe Fallback 루틴
         response.document.select("iframe").map { it.attr("src") }.forEach { src ->
             if (src.isNotBlank()) loadExtractor(src, mainUrl, subtitleCallback, callback)
         }
