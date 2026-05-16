@@ -205,7 +205,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     
                     // 3. 100여 개국 자동 번역 자막 생성 (원본 코드와 동일한 언어 목록)
                     val autoLangs = listOf(
-                        "en","ko"
+                        "ko"
                     )
 
                     for (targetLang in autoLangs) {
