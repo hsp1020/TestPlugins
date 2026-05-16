@@ -1,6 +1,9 @@
 package com.youtube
 
+import androidx.preference.PreferenceManager
+import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.SubtitleFile
+import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.newSubtitleFile
 import com.lagradost.cloudstream3.utils.ExtractorApi
@@ -9,13 +12,14 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.schemaStripRegex
+import kotlinx.coroutines.runBlocking
 import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor
 import org.schabi.newpipe.extractor.services.youtube.linkHandler.YoutubeStreamLinkHandlerFactory
 import org.schabi.newpipe.extractor.stream.SubtitlesStream
 import java.io.BufferedReader
 import java.io.InputStreamReader
-import java.io.PrintWriter
+import java.io.OutputStream
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URLDecoder
@@ -88,7 +92,6 @@ open class YoutubeExtractor : ExtractorApi() {
 
                         val label = buildVideoLabelNumber(vs)
                         val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
-                        
 
                         var mime = vs.format?.mimeType
                         if (mime.isNullOrEmpty()) mime = getMimeTypeFromUrl(streamUrl, false)
@@ -128,7 +131,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 for (video in videoOnlyList) {
                     if (audiosByLanguage.isNotEmpty()) {
                         for ((lang, audios) in audiosByLanguage) {
-
                             val bestAudioForLang = if (video.mimeType.contains("webm")) {
                                 audios.sortedWith(compareByDescending<AudioInfo> { it.mimeType.contains("webm") }.thenByDescending { it.bitrate }).firstOrNull()
                             } else {
@@ -142,7 +144,6 @@ open class YoutubeExtractor : ExtractorApi() {
 
                                 if (localLink != null) {
                                     val finalName = "${video.label} ($lang) ${video.label}"
-                                    // 언어별 우선순위 분리를 위한 소스명 변경
                                     val sourceName = "${this.name} ($lang)"
 
                                     builtLinks.add(
@@ -168,8 +169,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         if (!seenUrls.add(mUrl)) return@mapNotNull null
                         val label = buildVideoLabelNumber(vs)
                         val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
-                        
-                        
                         Triple(mUrl, label, height)
                     } catch (e: Exception) { null }
                 }
@@ -189,23 +188,36 @@ open class YoutubeExtractor : ExtractorApi() {
 
         ytVideos[videoId]?.forEach { callback(it) }
 
-        ytVideosSubtitles[videoId]?.mapNotNull { ss ->
+        startServerIfNeeded()
+
+        ytVideosSubtitles[videoId]?.forEach { ss ->
             try {
-                val lang = ss.locale?.language ?: return@mapNotNull null
-                var url = ss.content ?: ss.getUrl() ?: return@mapNotNull null
-                
-                // 핵심: NewPipe가 가져온 URL에서 기존 포맷을 강제로 뜯어내고 SRT를 주입합니다.
-                if (url.startsWith("http")) {
-                    url = url.replace(Regex("&fmt=[^&]+"), "")
-                    if (!url.contains("fmt=srt")) {
-                        url = "$url&fmt=srt"
+                val lang = ss.locale?.language ?: return@forEach
+                val rawUrl = ss.content ?: ss.getUrl() ?: return@forEach
+
+                if (rawUrl.startsWith("http")) {
+                    val cleanUrl = rawUrl.replace(Regex("&fmt=[^&]+"), "")
+
+                    val srtUrl = "$cleanUrl&fmt=srt"
+                    val originalName = ss.locale?.getDisplayLanguage(java.util.Locale.getDefault()) ?: lang
+                    subtitleCallback(SubtitleFile(originalName, srtUrl))
+
+                    val autoLangs = listOf("ko")
+
+                    for (targetLang in autoLangs) {
+                        if (targetLang.equals(lang, true)) continue
+
+                        val autoVttUrl = "$cleanUrl&fmt=vtt&tlang=$targetLang"
+
+                        val proxyId = UUID.randomUUID().toString()
+                        manifestMap[proxyId] = autoVttUrl
+                        val localAutoUrl = "http://127.0.0.1:$serverPort/sub_$proxyId.vtt"
+
+                        subtitleCallback(SubtitleFile("$lang → $targetLang", localAutoUrl))
                     }
                 }
-                
-                newSubtitleFile(lang, url)
-            } catch (e: Exception) { null }
-        }?.forEach { subtitleCallback(it) }        
-        
+            } catch (e: Exception) { }
+        }
     }
 
     @Synchronized
@@ -214,6 +226,7 @@ open class YoutubeExtractor : ExtractorApi() {
         try {
             activeServer = ServerSocket(0)
             serverPort = activeServer!!.localPort
+            println("PROXY_DEBUG: [Server] Started local proxy on port $serverPort")
             thread {
                 try {
                     while (activeServer != null && !activeServer!!.isClosed) {
@@ -236,29 +249,131 @@ open class YoutubeExtractor : ExtractorApi() {
         try {
             client.use { socket ->
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
-                val output = PrintWriter(socket.getOutputStream(), true)
-                val line = reader.readLine()
-                if (line != null && line.startsWith("GET")) {
+                val out = socket.getOutputStream()
+                val line = reader.readLine() ?: return
+
+                if (line.startsWith("GET")) {
                     val parts = line.split(" ")
                     if (parts.size > 1) {
                         var path = parts[1].substring(1)
+                        println("PROXY_DEBUG: [Req] Received GET request for path: $path")
+
+                        // 1. 자막(VTT) 프록시 요청 처리
+                        if (path.startsWith("sub_")) {
+                            val id = path.substringAfter("sub_").substringBefore(".vtt")
+                            val targetUrl = manifestMap[id]
+
+                            if (targetUrl != null) {
+                                try {
+                                    println("PROXY_DEBUG: [VTT] Fetching from YouTube via Cloudstream app.get()...")
+                                    
+                                    // 봇 차단을 우회하기 위한 헤더 즉석 생성 (SharedPreferences 공유)
+                                    val context = AcraApplication.context
+                                    val prefs = context?.let { PreferenceManager.getDefaultSharedPreferences(it) }
+                                    val visitor = prefs?.getString("VISITOR_INFO1_LIVE", "_Mk3UVhY40g") ?: "_Mk3UVhY40g"
+                                    val sapisid = prefs?.getString("SAPISID", null)
+
+                                    val cookieBuilder = StringBuilder()
+                                    cookieBuilder.append("VISITOR_INFO1_LIVE=$visitor; PREF=f6=40000000&hl=ko; CONSENT=YES+fx.456722336; ")
+                                    if (!sapisid.isNullOrBlank()) {
+                                        cookieBuilder.append("SAPISID=$sapisid; ")
+                                    }
+
+                                    val requestHeaders = mutableMapOf(
+                                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36",
+                                        "Accept-Language" to "ko,en-US;q=0.9,en;q=0.8",
+                                        "Cookie" to cookieBuilder.toString(),
+                                        "Origin" to "https://www.youtube.com",
+                                        "Referer" to "https://www.youtube.com/"
+                                    )
+
+                                    // SAPISID 해시 생성 (세션 인증)
+                                    if (!sapisid.isNullOrBlank()) {
+                                        try {
+                                            val timestamp = (System.currentTimeMillis() / 1000).toString()
+                                            val md = java.security.MessageDigest.getInstance("SHA-1")
+                                            val msg = "$timestamp $sapisid https://www.youtube.com"
+                                            val hash = md.digest(msg.toByteArray()).joinToString("") { "%02x".format(it) }
+                                            requestHeaders["Authorization"] = "SAPISIDHASH ${timestamp}_$hash"
+                                            requestHeaders["X-Origin"] = "https://www.youtube.com"
+                                            requestHeaders["X-Goog-AuthUser"] = "0"
+                                        } catch (e: Exception) { }
+                                    }
+
+                                    // 생성한 헤더를 기반으로 안전하게 텍스트 호출 (reCaptcha 우회)
+                                    val responseText = runBlocking {
+                                        app.get(targetUrl, headers = requestHeaders).text
+                                    }
+
+                                    println("PROXY_DEBUG: [VTT] Raw Body Length: ${responseText.length}")
+
+                                    // 유튜브 봇 차단 HTML 감지 시 500 에러 처리 (크래시 방지)
+                                    if (responseText.trim().startsWith("<html", ignoreCase = true)) {
+                                        println("PROXY_DEBUG: [VTT-Error] Bot protection triggered (HTML returned).")
+                                        sendError(out, 500, "Blocked by YouTube Bot Protection")
+                                        return
+                                    }
+
+                                    var finalVtt = responseText.trim()
+                                    // WEBVTT 헤더가 누락된 채 왔다면 강제 주입
+                                    if (!finalVtt.contains("WEBVTT")) {
+                                        finalVtt = "WEBVTT\n\n$finalVtt"
+                                    }
+
+                                    // VTT 찌꺼기 위치 태그 및 포맷팅 완벽 청소
+                                    val cleanedVtt = finalVtt
+                                        .replace(Regex("(align|position|line|size|c\\.color[A-Za-z0-9]+):[^\\s]+"), "")
+                                        .replace(Regex("<[^>]*>"), "")
+
+                                    println("PROXY_DEBUG: [VTT] Cleaned VTT Length: ${cleanedVtt.length}")
+                                    sendSuccessResponse(out, "text/vtt; charset=utf-8", cleanedVtt)
+                                } catch (e: Exception) {
+                                    println("PROXY_DEBUG: [VTT-Exception] Exception occurred during fetch/clean: ${e.message}")
+                                    sendError(out, 500, "Internal Server Error")
+                                }
+                            } else {
+                                sendError(out, 404, "Not Found")
+                            }
+                            return
+                        }
+
+                        // 2. MPD 매니페스트 프록시 요청 처리
                         if (path.endsWith(".mpd")) path = path.replace(".mpd", "")
                         val content = manifestMap[path]
                         if (content != null) {
-                            output.println("HTTP/1.1 200 OK")
-                            output.println("Content-Type: application/dash+xml")
-                            output.println("Connection: close")
-                            output.println("Access-Control-Allow-Origin: *")
-                            output.println("")
-                            output.println(content)
+                            println("PROXY_DEBUG: [MPD] Sending MPD manifest. Length: ${content.length}")
+                            sendSuccessResponse(out, "application/dash+xml", content)
                         } else {
-                            output.println("HTTP/1.1 404 Not Found")
-                            output.println("")
+                            sendError(out, 404, "Not Found")
                         }
                     }
                 }
             }
-        } catch (e: Exception) {}
+        } catch (e: Exception) {
+            println("PROXY_DEBUG: [Socket-Exception] ${e.message}")
+        }
+    }
+
+    // 완벽한 HTTP 규격(\r\n)과 Content-Length를 준수하여 ExoPlayer 파싱 오류 원천 차단
+    private fun sendSuccessResponse(out: OutputStream, contentType: String, content: String) {
+        val responseBytes = content.toByteArray(Charsets.UTF_8)
+        val headers = "HTTP/1.1 200 OK\r\n" +
+                "Content-Type: $contentType\r\n" +
+                "Content-Length: ${responseBytes.size}\r\n" +
+                "Connection: close\r\n" +
+                "Access-Control-Allow-Origin: *\r\n\r\n"
+
+        println("PROXY_DEBUG: [HTTP] Writing 200 OK Response (Length: ${responseBytes.size})")
+        out.write(headers.toByteArray(Charsets.UTF_8))
+        out.write(responseBytes)
+        out.flush()
+    }
+
+    private fun sendError(out: OutputStream, code: Int, message: String) {
+        println("PROXY_DEBUG: [HTTP] Writing Error Response: $code $message")
+        val response = "HTTP/1.1 $code $message\r\nConnection: close\r\n\r\n"
+        out.write(response.toByteArray(Charsets.UTF_8))
+        out.flush()
     }
 
     private fun buildDashManifestXml(
