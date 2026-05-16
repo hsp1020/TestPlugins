@@ -263,10 +263,13 @@ open class YoutubeExtractor : ExtractorApi() {
                             val targetUrl = manifestMap[id]
                             if (targetUrl != null) {
                                 try {
-                                    // [수정된 부분] java.net.URL 대신 Cloudstream의 app.get()을 사용하여 봇 차단을 우회
-                                    val vttText = kotlinx.coroutines.runBlocking {
-                                        app.get(targetUrl).text
-                                    }
+                                    // app.get() 대신 내장 HttpURLConnection을 사용해 User-Agent를 주입 (봇 차단 우회 및 빌드에러 방지)
+                                    val connection = java.net.URL(targetUrl).openConnection() as java.net.HttpURLConnection
+                                    connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36")
+                                    connection.requestMethod = "GET"
+                                    
+                                    val vttText = connection.inputStream.bufferedReader().use { it.readText() }
+                                    
                                     val cleanedVtt = vttText.replace(Regex("(align|position|line|size):[^\\s]+"), "")
                                     output.println("HTTP/1.1 200 OK")
                                     output.println("Content-Type: text/vtt")
@@ -301,7 +304,6 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         } catch (e: Exception) {}
     }
-
 
     private fun buildDashManifestXml(
         video: StreamInfo,
