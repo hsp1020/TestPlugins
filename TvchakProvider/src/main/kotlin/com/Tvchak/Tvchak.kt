@@ -1,4 +1,4 @@
-package com.lagradost.cloudstream3.plugins.tvchak // 패키지명 완벽 동기화
+package com.lagradost.cloudstream3.plugins.tvchak
 
 import android.content.Context
 import com.lagradost.cloudstream3.*
@@ -27,7 +27,7 @@ class TvchakProvider : MainAPI() {
     }
 
     override var mainUrl = currentMainUrl
-    override var name = "TVChak"
+    override var name = "티비착(TVChak)"
     override val hasMainPage = true
     override var lang = "ko"
     override val hasDownloadSupport = true
@@ -159,7 +159,7 @@ class TvchakProvider : MainAPI() {
     }
 
     /**
-     * 상세 페이지
+     * 상세 페이지 (에피소드 날짜 포맷 완벽 대응)
      */
     override suspend fun load(url: String): LoadResponse {
         checkAndUpdateDomain()
@@ -175,16 +175,21 @@ class TvchakProvider : MainAPI() {
         val plot = document.selectFirst("h2#sum_tag")?.text()?.trim() ?: ""
         val poster = passedPoster ?: document.selectFirst(".poster img")?.attr("src") ?: ""
         
-        val episodes = document.select(".content_playlist li a").mapNotNull { element ->
+        // HTML 목록은 최신화(nid/1)가 맨 위, 1화(nid/max)가 맨 아래에 있음.
+        // reversed()로 뒤집어서 1화부터 순차적으로 정렬되게 만듦.
+        val episodes = document.select(".content_playlist li a").reversed().mapIndexedNotNull { index, element ->
             val epTitle = element.text().trim()
-            val epHref = fixUrlNull(element.attr("href")) ?: return@mapNotNull null
-            val epNum = Regex("\\d+").find(epTitle)?.value?.toIntOrNull()
+            val epHref = fixUrlNull(element.attr("href")) ?: return@mapIndexedNotNull null
+            
+            // 1. "제11화", "10회", "1부" 등 명시적인 숫자가 있으면 추출
+            // 2. "26/05/15" 같은 날짜 포맷이라 매칭이 안 되면, 뒤집힌 순서(index + 1)를 에피소드 번호로 강제 할당
+            val epNum = Regex("(\\d+)\\s*[화회부]").find(epTitle)?.groupValues?.get(1)?.toIntOrNull() ?: (index + 1)
 
             newEpisode(epHref) {
                 this.name = epTitle
                 this.episode = epNum
             }
-        }.reversed()
+        }
 
         val tvType = if (episodes.size == 1 && title.contains("영화")) TvType.Movie else TvType.TvSeries
 
