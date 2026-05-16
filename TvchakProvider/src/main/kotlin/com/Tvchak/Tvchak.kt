@@ -27,7 +27,7 @@ class TvchakProvider : MainAPI() {
     }
 
     override var mainUrl = currentMainUrl
-    override var name = "티비착(TVChak)"
+    override var name = "TVChak"
     override val hasMainPage = true
     override var lang = "ko"
     override val hasDownloadSupport = true
