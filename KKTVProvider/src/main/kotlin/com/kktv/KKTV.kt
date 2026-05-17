@@ -86,16 +86,16 @@ class KKTVProvider : MainAPI() {
                               else if (cleanLink.contains("hudtv")) "채널 2 (FHD)" 
                               else "채널 ${index + 1}"
 
+            // [수정 완료] 보내주신 원본 코드와 동일한 빌더 패턴 적용
             callback.invoke(
                 newExtractorLink(
                     source = this.name,
                     name = qualityName,
-                    url = cleanLink
+                    url = cleanLink,
+                    type = ExtractorLinkType.M3U8
                 ) {
-                    // 에러가 나던 quality 할당 부분은 삭제했습니다. (어차피 기본값이 Unknown으로 들어갑니다)
-                    this.isM3u8 = true
-                    // 에러가 나던 headers 삽입 방식을 통째로 덮어씌우는 방식으로 변경했습니다.
-                    this.headers = mapOf("Referer" to "https://sol7.galaxy-stream.live/")
+                    this.referer = "https://sol7.galaxy-stream.live/"
+                    this.quality = Qualities.Unknown.value
                 }
             )
         }
