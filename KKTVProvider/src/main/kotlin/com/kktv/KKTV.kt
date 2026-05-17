@@ -1,4 +1,4 @@
-package com.kktv // 기존 플러그인 구조 유지를 위해 패키지명은 그대로 둡니다.
+package com.kktv
 
 import android.net.Uri
 import com.lagradost.cloudstream3.*
@@ -7,15 +7,13 @@ import org.jsoup.Jsoup
 import java.net.URLDecoder
 import java.net.URLEncoder
 
-// 클래스 이름을 CUTVProvider로 변경했습니다. (Plugin.kt 수정 필요 - 하단 설명 참고)
 class CUTVProvider : MainAPI() {
     override var mainUrl = "https://cu-tv.com"
-    override var name = "씨유티비 (CUTV)"
+    override var name = "CUTV"
     override val supportedTypes = setOf(TvType.Live)
     override var lang = "ko"
     override val hasMainPage = true
 
-    // 사용자님이 알려주신 새로운 메인 페이지 주소
     override val mainPage = mainPageOf(
         "/main/index.php" to "실시간 스포츠 중계"
     )
@@ -35,22 +33,20 @@ class CUTVProvider : MainAPI() {
         
         try {
             println("DEBUG [CUTV] 1. 메인 페이지 로드 시작: $url")
-            
-            // 클라우드플레어가 없으므로 일반 get 요청으로 1초 만에 가져옵니다.
             val doc = app.get(url, headers = defaultHeaders).document
             
-            // 소스코드에 있는 iframe 주소 추출
-            var iframeSrc = doc.selectFirst("div.na-row iframe")?.attr("src")
-                ?: doc.selectFirst("iframe[src*='galaxy-stream']")?.attr("src")
-                ?: doc.selectFirst("iframe[src*='hudtv']")?.attr("src")
+            // [핵심 수정] 하드코딩 제거. 
+            // 페이지 내의 모든 iframe 중 'galaxy-stream', 'hudtv', 'cli/mobile'이 포함된 진짜 주소만 동적으로 찾습니다.
+            val iframeSrc = doc.select("iframe").mapNotNull { it.attr("src") }
+                .firstOrNull { it.contains("galaxy-stream") || it.contains("hudtv") || it.contains("cli/mobile") }
 
             if (iframeSrc.isNullOrBlank()) {
-                // 소스코드에서 확인한 주소로 Fallback
-                iframeSrc = "https://sol13.galaxy-stream.live/cli/mobile"
-                println("DEBUG [CUTV] 2. Iframe 추출 실패. Fallback 주소 사용: $iframeSrc")
-            } else {
-                println("DEBUG [CUTV] 2. 정상 추출된 Iframe 주소: $iframeSrc")
+                // 하드코딩된 예비 주소로 가지 않고, 깔끔하게 에러 처리하여 구조 변경에 대응합니다.
+                println("DEBUG [CUTV] 🚨 메인 페이지에서 Iframe을 찾지 못했습니다. 사이트 구조가 변경되었습니다.")
+                return newHomePageResponse(request.name, emptyList())
             }
+            
+            println("DEBUG [CUTV] 2. 동적으로 추출된 Iframe 주소: $iframeSrc")
 
             // Iframe 호출 (500 에러 방지를 위해 Referer 필수)
             println("DEBUG [CUTV] 3. Iframe 페이지 로드 시작 (Referer: $url)")
@@ -132,6 +128,8 @@ class CUTVProvider : MainAPI() {
             // 영상 링크를 딸 때도 500 에러 방지를 위해 Referer를 강제합니다.
             val responseText = app.get(iframeUrl, headers = defaultHeaders, referer = "$mainUrl/main/index.php").text
             
+            // [정규식 설명] http 또는 https로 시작하고 .m3u8을 포함하는 모든 문자열을 추출합니다.
+            // lux1.hudtv01.com, coupangstreaming.com 등 도메인에 상관없이 모두 완벽하게 잡아냅니다.
             val m3u8Regex = """(https?://[^"'\s]+?\.m3u8[^"'\s]*)""".toRegex()
             val streamLinks = m3u8Regex.findAll(responseText).map { it.value }.toSet().toList()
 
