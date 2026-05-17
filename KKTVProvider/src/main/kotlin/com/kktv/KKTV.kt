@@ -1,8 +1,6 @@
 // v7.8 - 텔레그램 채널(t.me/s/kktvinfo) 기반 동적 도메인 파싱 추가 및 기존 포털 로직 Fallback 강등
 package com.KingkongTv
 
-// v1.2
-package com.lagradost.cloudstream3.plugins
 
 import android.util.Log
 import com.lagradost.cloudstream3.*
