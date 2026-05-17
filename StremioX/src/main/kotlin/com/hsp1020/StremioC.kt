@@ -923,8 +923,14 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 posterUrl = poster 
             }
         }
+                      
+        private fun isSingleMovie(finalType: String?, finalVideos: List<Video>?): Boolean {
+            return (finalType == "movie" && finalVideos?.size == 1 && finalVideos[0].seasonNumber == 1 && (finalVideos[0].episode == 1 || finalVideos[0].number == 1)) ||
+                   (finalVideos?.size == 1 && (finalVideos[0].seasonNumber ?: 0) == 0 && (finalVideos[0].episode ?: finalVideos[0].number ?: 0) == 0)
+        }
+        
 
-        // v1.2 - 중복 선언 충돌 교정 및 추천/에피소드 무손실 병렬 최적화 완결안
+    // v1.2 - 중복 선언 충돌 교정 및 추천/에피소드 무손실 병렬 최적화 완결안
     private suspend fun fetchTmdbDetails(
         provider: StremioC, tmdbMediaType: String, tmdbIdStr: String, isMovie: Boolean, finalImdbId: String?,
         stremioType: String?, targetVideos: List<Video>?, preFetchedDetail: TmdbDetailResponse? = null
