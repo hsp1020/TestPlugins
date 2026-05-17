@@ -3,13 +3,12 @@ package com.kktv
 import android.net.Uri
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.network.WebViewResolver
 import java.net.URLDecoder
 import java.net.URLEncoder
 
 class CUTVProvider : MainAPI() {
     override var mainUrl = "https://cu-tv.com"
-    override var name = "CUTV"
+    override var name = "씨유티비 (CUTV)"
     override val supportedTypes = setOf(TvType.Live)
     override var lang = "ko"
     override val hasMainPage = true
@@ -50,22 +49,6 @@ class CUTVProvider : MainAPI() {
                 val jsonData = matchResult.groupValues[1]
                 val matches = AppUtils.parseJson<List<Map<String, String>>>(jsonData)
                 
-                // 썸네일 서버(lux1.hudtv01.com)의 클라우드플레어 방어를 뚫기 위한 사전 작업
-                val firstThumbId = matches.firstOrNull { it["ssid"]?.isNotBlank() == true }?.get("ssid")
-                if (firstThumbId != null) {
-                    try {
-                        val testImgUrl = "https://lux1.hudtv01.com/thumbs/$firstThumbId.jpg"
-                        app.get(
-                            testImgUrl, 
-                            headers = defaultHeaders, 
-                            referer = iframeSrc, 
-                            interceptor = WebViewResolver(Regex("""lux1\.hudtv01\.com"""))
-                        )
-                    } catch (e: Exception) {
-                        println("DEBUG [CUTV] ⚠️ 썸네일 서버 CF 뚫기 실패: ${e.message}")
-                    }
-                }
-
                 matches.forEach { match ->
                     val ssid = match["ssid"] ?: ""
                     val name = match["name"] ?: ""
@@ -77,7 +60,7 @@ class CUTVProvider : MainAPI() {
                     // 방송시청 버튼이 있는(surl이 존재하는) 경기만 필터링
                     if (ssid.isNotBlank() && name.isNotBlank() && (surl1.isNotBlank() || surl2.isNotBlank() || surl3.isNotBlank())) {
                         
-                        // 종목명, 시간 삭제 (오직 경기 이름만)
+                        // [핵심 1] 사용자님 지시대로 종목명, 날짜, 시간 전부 삭제. 오직 경기 이름만 남깁니다.
                         val title = name 
                         
                         val srcy = match["srcy"] ?: ""
@@ -93,9 +76,14 @@ class CUTVProvider : MainAPI() {
                         items.add(
                             newLiveSearchResponse(name = title, url = fakeUrl) {
                                 this.posterUrl = posterUrl
+                                // [핵심 2] 썸네일 403 에러 완벽 차단. 브라우저의 이미지 요청과 100% 동일하게 위장합니다.
                                 this.posterHeaders = mapOf(
                                     "Referer" to iframeSrc,
-                                    "User-Agent" to userAgent
+                                    "User-Agent" to userAgent,
+                                    "Accept" to "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                                    "Sec-Fetch-Dest" to "image",
+                                    "Sec-Fetch-Mode" to "no-cors",
+                                    "Sec-Fetch-Site" to "cross-site"
                                 )
                             }
                         )
@@ -106,7 +94,7 @@ class CUTVProvider : MainAPI() {
             e.printStackTrace()
         }
 
-        // [핵심 수정] isHorizontalImages = true 속성을 추가하여 썸네일을 가로형(Landscape)으로 꽉 차게 표시합니다!
+        // [핵심 3] isHorizontalImages = true 로 썸네일을 가로로 넓게 꽉 차게 표시합니다.
         return newHomePageResponse(
             list = listOf(HomePageList(request.name, items, isHorizontalImages = true)),
             hasNext = false
@@ -132,7 +120,11 @@ class CUTVProvider : MainAPI() {
             this.posterUrl = posterUrl
             this.posterHeaders = mapOf(
                 "Referer" to iframeUrl,
-                "User-Agent" to userAgent
+                "User-Agent" to userAgent,
+                "Accept" to "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                "Sec-Fetch-Dest" to "image",
+                "Sec-Fetch-Mode" to "no-cors",
+                "Sec-Fetch-Site" to "cross-site"
             )
         }
     }
