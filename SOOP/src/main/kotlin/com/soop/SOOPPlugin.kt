@@ -7,7 +7,6 @@ import android.content.Context
 @CloudstreamPlugin
 class SOOPPlugin: Plugin() {
     override fun load(context: Context) {
-        // 이 부분을 CUTVProvider() 로 변경해주세요!
-        registerMainAPI(SoopProvider()) 
+        registerMainAPI(SOOP())
     }
 }
