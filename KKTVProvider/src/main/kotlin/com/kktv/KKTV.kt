@@ -9,7 +9,7 @@ import java.net.URLEncoder
 
 class CUTVProvider : MainAPI() {
     override var mainUrl = "https://cu-tv.com"
-    override var name = "CUTV"
+    override var name = "씨유티비 (CUTV)"
     override val supportedTypes = setOf(TvType.Live)
     override var lang = "ko"
     override val hasMainPage = true
@@ -18,7 +18,7 @@ class CUTVProvider : MainAPI() {
         "/main/index.php" to "실시간 스포츠 중계"
     )
 
-    private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
+    private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
     private val defaultHeaders = mapOf(
         "User-Agent" to userAgent,
@@ -35,26 +35,33 @@ class CUTVProvider : MainAPI() {
             println("DEBUG [CUTV] 1. 메인 페이지 로드 시작: $url")
             val doc = app.get(url, headers = defaultHeaders).document
             
-            // [핵심 수정] 하드코딩 제거. 
-            // 페이지 내의 모든 iframe 중 'galaxy-stream', 'hudtv', 'cli/mobile'이 포함된 진짜 주소만 동적으로 찾습니다.
             val iframeSrc = doc.select("iframe").mapNotNull { it.attr("src") }
-                .firstOrNull { it.contains("galaxy-stream") || it.contains("hudtv") || it.contains("cli/mobile") }
+                .firstOrNull { it.contains("galaxy-stream") || it.contains("hudtv") || it.contains("cli") }
 
             if (iframeSrc.isNullOrBlank()) {
-                // 하드코딩된 예비 주소로 가지 않고, 깔끔하게 에러 처리하여 구조 변경에 대응합니다.
-                println("DEBUG [CUTV] 🚨 메인 페이지에서 Iframe을 찾지 못했습니다. 사이트 구조가 변경되었습니다.")
+                println("DEBUG [CUTV] 🚨 메인 페이지에서 Iframe을 찾지 못했습니다.")
                 return newHomePageResponse(request.name, emptyList())
             }
             
             println("DEBUG [CUTV] 2. 동적으로 추출된 Iframe 주소: $iframeSrc")
 
-            // Iframe 호출 (500 에러 방지를 위해 Referer 필수)
-            println("DEBUG [CUTV] 3. Iframe 페이지 로드 시작 (Referer: $url)")
-            val iframeHtml = app.get(iframeSrc, headers = defaultHeaders, referer = url).text
-            val iframeDoc = Jsoup.parse(iframeHtml)
+            // Iframe 호출 (Referer 필수)
+            var iframeHtml = app.get(iframeSrc, headers = defaultHeaders, referer = url).text
+            var iframeDoc = Jsoup.parse(iframeHtml)
             
-            val rows = iframeDoc.select("tr.ssc-row-candy")
-            println("DEBUG [CUTV] 4. 파싱된 경기 개수: ${rows.size}")
+            var rows = iframeDoc.select("tr.ssc-row-candy")
+            
+            // [핵심 로직] cli/box 에서 목록을 못 찾으면 cli/mobile 로 주소를 바꿔서 즉시 재시도합니다.
+            if (rows.isEmpty()) {
+                val altSrc = if (iframeSrc.contains("cli/box")) iframeSrc.replace("cli/box", "cli/mobile") else iframeSrc.replace("cli/mobile", "cli/box")
+                println("DEBUG [CUTV] 3. 목록을 찾지 못했습니다. 대체 주소로 재시도합니다: $altSrc")
+                
+                iframeHtml = app.get(altSrc, headers = defaultHeaders, referer = url).text
+                iframeDoc = Jsoup.parse(iframeHtml)
+                rows = iframeDoc.select("tr.ssc-row-candy")
+            }
+
+            println("DEBUG [CUTV] 4. 최종 파싱된 경기 개수: ${rows.size}")
 
             if (rows.isNotEmpty()) {
                 rows.forEach { row ->
@@ -74,17 +81,18 @@ class CUTVProvider : MainAPI() {
                         val fakeUrl = "$mainUrl/live_stream/dummy?title=$encodedTitle&poster=$encodedPoster&iframe=$encodedIframe"
 
                         items.add(
-                            newLiveSearchResponse(
-                                name = title,
-                                url = fakeUrl
-                            ) {
+                            newLiveSearchResponse(name = title, url = fakeUrl) {
                                 this.posterUrl = posterUrl
                             }
                         )
                     }
                 }
             } else {
-                println("DEBUG [CUTV] 🚨 경기 목록이 없습니다. HTML 확인: ${iframeHtml.take(300)}")
+                // [최후의 수단] 이래도 안 뜨면 서버가 뭘 숨기고 있는지 전체 HTML을 로그캣에 낱낱이 출력합니다.
+                println("DEBUG [CUTV] 🚨 경기 목록 파싱 완전 실패. 서버가 반환한 HTML 전체를 덤프합니다.")
+                iframeHtml.chunked(3000).forEachIndexed { index, chunk ->
+                    println("DEBUG [CUTV] HTML_DUMP_$index: $chunk")
+                }
             }
         } catch (e: Exception) {
             println("DEBUG [CUTV] 🚨 에러 발생 (getMainPage): ${e.message}")
@@ -125,11 +133,8 @@ class CUTVProvider : MainAPI() {
         val iframeUrl = if (!rawIframe.isNullOrBlank()) URLDecoder.decode(rawIframe, "UTF-8") else return false
 
         try {
-            // 영상 링크를 딸 때도 500 에러 방지를 위해 Referer를 강제합니다.
             val responseText = app.get(iframeUrl, headers = defaultHeaders, referer = "$mainUrl/main/index.php").text
             
-            // [정규식 설명] http 또는 https로 시작하고 .m3u8을 포함하는 모든 문자열을 추출합니다.
-            // lux1.hudtv01.com, coupangstreaming.com 등 도메인에 상관없이 모두 완벽하게 잡아냅니다.
             val m3u8Regex = """(https?://[^"'\s]+?\.m3u8[^"'\s]*)""".toRegex()
             val streamLinks = m3u8Regex.findAll(responseText).map { it.value }.toSet().toList()
 
