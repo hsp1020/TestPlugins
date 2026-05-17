@@ -923,110 +923,97 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 posterUrl = poster 
             }
         }
+
+        // v1.2 - 중복 선언 충돌 교정 및 추천/에피소드 무손실 병렬 최적화 완결안
+    private suspend fun fetchTmdbDetails(
+        provider: StremioC, tmdbMediaType: String, tmdbIdStr: String, isMovie: Boolean, finalImdbId: String?,
+        stremioType: String?, targetVideos: List<Video>?, preFetchedDetail: TmdbDetailResponse? = null
+    ): FetchedTmdbData {
+        var fetchedRecommendations: List<SearchResponse>? = null
         
-        private fun isSingleMovie(finalType: String?, finalVideos: List<Video>?): Boolean {
-            return (finalType == "movie" && finalVideos?.size == 1 && finalVideos[0].seasonNumber == 1 && (finalVideos[0].episode == 1 || finalVideos[0].number == 1)) ||
-                   (finalVideos?.size == 1 && (finalVideos[0].seasonNumber ?: 0) == 0 && (finalVideos[0].episode ?: finalVideos[0].number ?: 0) == 0)
+        val detailRes = preFetchedDetail ?: run {
+            val detailAppend = if (isMovie) "release_dates,credits,images,videos,external_ids,recommendations,translations" else "content_ratings,credits,images,videos,external_ids,recommendations,translations"
+            val detailUrl = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr", "append_to_response" to detailAppend)
+            StremioC.customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>()
+        }
+        
+        if (detailRes == null) {
+            return FetchedTmdbData(null, null, null, emptyList(), null, null, null, null, null, null, emptyMap(), emptyList(), null, null)
         }
 
-        // v1.1 - 원본 데이터 무손실 유지 및 구조적 4-way 동시 병렬화 최적화 프로토콜
-        private suspend fun fetchTmdbDetails(
-            provider: StremioC, tmdbMediaType: String, tmdbIdStr: String, isMovie: Boolean, finalImdbId: String?,
-            stremioType: String?, targetVideos: List<Video>?, preFetchedDetail: TmdbDetailResponse? = null
-        ): FetchedTmdbData {
-            println("StremioC v1.1: fetchTmdbDetails 시작 - ID: $tmdbIdStr")
-            var fetchedRecommendations: List<SearchResponse>? = null
-            
-            val detailRes = preFetchedDetail ?: run {
-                val detailAppend = if (isMovie) "release_dates,credits,images,videos,external_ids,recommendations,translations" else "content_ratings,credits,images,videos,external_ids,recommendations,translations"
-                val detailUrl = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr", "append_to_response" to detailAppend)
-                StremioC.customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>()
-            }
-            
-            if (detailRes == null) {
-                println("StremioC v1.1: detailRes 결과 공백 수집")
-                return FetchedTmdbData(null, null, null, emptyList(), null, null, null, null, null, null, emptyMap(), emptyList(), null, null)
-            }
+        val validImdbId = (detailRes.external_ids?.imdb_id ?: finalImdbId)?.takeIf { it.startsWith("tt") }
+        val targetCountry = detailRes.origin_country?.firstOrNull()
+        val targetLanguage = detailRes.original_language
+        val isSameOrigin: (TmdbMedia?) -> Boolean = { media -> 
+            media != null && ((targetCountry != null && media.origin_country?.contains(targetCountry) == true) || (targetLanguage != null && media.original_language == targetLanguage)) 
+        }
 
-            val validImdbId = (detailRes.external_ids?.imdb_id ?: finalImdbId)?.takeIf { it.startsWith("tt") }
-            val targetCountry = detailRes.origin_country?.firstOrNull()
-            val targetLanguage = detailRes.original_language
-            val isSameOrigin: (TmdbMedia?) -> Boolean = { media -> 
-                media != null && ((targetCountry != null && media.origin_country?.contains(targetCountry) == true) || (targetLanguage != null && media.original_language == targetLanguage)) 
-            }
+        // 단일 선언 보존: 에피소드 저장을 위한 스레드 세이프 맵 인프라 구축
+        val episodeTmdbMeta = ConcurrentHashMap<String, TmdbEpisode>()
 
-            // 동시성 레이스 컨디션 차단을 위한 스레드 세이프 컬렉션 구조 전환
-            val episodeTmdbMeta = ConcurrentHashMap<String, TmdbEpisode>()
-
-            coroutineScope {
-                // [논리 최적화 1]: 데이터 의존성이 없는 에피소드 수집 로직을 최상위 스코프로 인상하여 완전 비동기 병렬화
-                val shouldFetchEpisodes = (!isMovie && targetVideos.isNullOrEmpty()) || (stremioType == "other" && !isMovie)
-                val episodeDeferred = if (shouldFetchEpisodes) {
-                    println("StremioC v1.1: 에피소드 데이터 비동기 병렬 페칭 트리거")
-                    var requiredSeasons = targetVideos?.mapNotNull { it.seasonNumber }?.filter { it > 0 }?.distinct() ?: emptyList()
-                    if (requiredSeasons.isEmpty()) {
-                        val totalSeasons = detailRes.number_of_seasons ?: 1
-                        requiredSeasons = if (totalSeasons > 0) (1..totalSeasons).toList() else listOf(1)
-                    }
-                    
-                    async(Dispatchers.IO) {
-                        requiredSeasons.map { seasonNum ->
-                            async(Dispatchers.IO) {
-                                StremioC.networkSemaphore.withPermit {
-                                    withTimeoutOrNull(10000L) {
-                                        runSuspendCatching {
-                                            val seasonRes = StremioC.customSession.get(provider.buildTmdbUrl("/tv/$tmdbIdStr/season/$seasonNum")).parsedSafe<TmdbSeasonDetail>()
-                                            seasonRes?.episodes?.forEach { ep -> if (ep.episodeNumber != null) episodeTmdbMeta["${seasonNum}_${ep.episodeNumber}"] = ep }
-                                        }
+        coroutineScope {
+            val shouldFetchEpisodes = (!isMovie && targetVideos.isNullOrEmpty()) || (stremioType == "other" && !isMovie)
+            val episodeDeferred = if (shouldFetchEpisodes) {
+                var requiredSeasons = targetVideos?.mapNotNull { it.seasonNumber }?.filter { it > 0 }?.distinct() ?: emptyList()
+                if (requiredSeasons.isEmpty()) {
+                    val totalSeasons = detailRes.number_of_seasons ?: 1
+                    requiredSeasons = if (totalSeasons > 0) (1..totalSeasons).toList() else listOf(1)
+                }
+                
+                async(Dispatchers.IO) {
+                    requiredSeasons.map { seasonNum ->
+                        async(Dispatchers.IO) {
+                            StremioC.networkSemaphore.withPermit {
+                                withTimeoutOrNull(10000L) {
+                                    runSuspendCatching {
+                                        val seasonRes = StremioC.customSession.get(provider.buildTmdbUrl("/tv/$tmdbIdStr/season/$seasonNum")).parsedSafe<TmdbSeasonDetail>()
+                                        seasonRes?.episodes?.forEach { ep -> if (ep.episodeNumber != null) episodeTmdbMeta["${seasonNum}_${ep.episodeNumber}"] = ep }
                                     }
                                 }
                             }
-                        }.awaitAll()
-                    }
-                } else {
-                    println("StremioC v1.1: 에피소드 대상 없음 - 스킵 처리")
-                    null
+                        }
+                    }.awaitAll()
                 }
+            } else null
 
-                // [논리 최적화 2]: Trakt, Simkl 가동과 동시에 TMDB 컬렉션까지 3대 추천 소스를 완전 동시 병렬화
-                val traktDeferred = async(Dispatchers.IO) {
-                    if (validImdbId == null || TRAKT_CLIENT_ID.isEmpty()) return@async emptyList<Pair<Int, String>>()
-                    val traktMediaType = if (tmdbMediaType == "movie") "movies" else "shows"
-                    val expectedType = if (tmdbMediaType == "movie") "movie" else "tv"
-                    runSuspendCatching {
-                        val req = StremioC.customSession.get("https://api.trakt.tv/$traktMediaType/$validImdbId/related?limit=30", headers = mapOf("Content-Type" to "application/json", "trakt-api-version" to "2", "trakt-api-key" to TRAKT_CLIENT_ID), timeout = 15)
-                        if (req.isSuccessful && req.text.isNotBlank()) {
-                            parseJson<List<TraktRelatedItem>>(req.text).mapNotNull {
-                                val tmdbId = it.ids?.tmdb ?: 0
-                                if (tmdbId > 0) Pair(tmdbId, expectedType) else null
-                            }
-                        } else emptyList()
-                    }.getOrDefault(emptyList())
-                }
+            val traktDeferred = async(Dispatchers.IO) {
+                if (validImdbId == null || TRAKT_CLIENT_ID.isEmpty()) return@async emptyList<Pair<Int, String>>()
+                val traktMediaType = if (tmdbMediaType == "movie") "movies" else "shows"
+                val expectedType = if (tmdbMediaType == "movie") "movie" else "tv"
+                runSuspendCatching {
+                    val req = StremioC.customSession.get("https://api.trakt.tv/$traktMediaType/$validImdbId/related?limit=30", headers = mapOf("Content-Type" to "application/json", "trakt-api-version" to "2", "trakt-api-key" to TRAKT_CLIENT_ID), timeout = 15)
+                    if (req.isSuccessful && req.text.isNotBlank()) {
+                        parseJson<List<TraktRelatedItem>>(req.text).mapNotNull {
+                            val tmdbId = it.ids?.tmdb ?: 0
+                            if (tmdbId > 0) Pair(tmdbId, expectedType) else null
+                        }
+                    } else emptyList()
+                }.getOrDefault(emptyList())
+            }
 
-                val simklDeferred = async(Dispatchers.IO) {
-                    if (validImdbId == null || SIMKL_CLIENT_ID.isEmpty()) return@async emptyList<Pair<Int, String>>()
-                    val simklMediaType = if (tmdbMediaType == "movie") "movies" else "tv"
-                    val parentExpectedType = if (tmdbMediaType == "movie") "movie" else "tv"
-                    
-                    runSuspendCatching {
-                        val req = StremioC.customSession.get("https://api.simkl.com/$simklMediaType/$validImdbId?extended=full&client_id=$SIMKL_CLIENT_ID", timeout = 15)
-                        if (req.isSuccessful && req.text.isNotBlank()) {
-                            val simklRes = parseJson<SimklRecResponse>(req.text)
-                            val rawSimklRecs = mutableListOf<Triple<Int, Int, String>>()
-                            
-                            simklRes.users_recommendations?.take(30)?.forEach { recItem ->
-                                val itemTypeRaw = recItem.type ?: parentExpectedType
-                                val itemTmdbType = if (itemTypeRaw.contains("movie")) "movie" else "tv"
-                                val tmdb = recItem.ids?.tmdb ?: 0
-                                val simkl = recItem.ids?.simkl ?: 0
-                                if (tmdb > 0 || simkl > 0) rawSimklRecs.add(Triple(tmdb, simkl, itemTmdbType))
-                            }
-                            
-                            coroutineScope {
-                                rawSimklRecs.map { (tmdbId, simklId, itemTmdbType) ->
-                                    async(Dispatchers.IO) {
-                                        if (tmdbId > 0) Pair(tmdbId, itemTmdbType) 
+            val simklDeferred = async(Dispatchers.IO) {
+                if (validImdbId == null || SIMKL_CLIENT_ID.isEmpty()) return@async emptyList<Pair<Int, String>>()
+                val simklMediaType = if (tmdbMediaType == "movie") "movies" else "tv"
+                val parentExpectedType = if (tmdbMediaType == "movie") "movie" else "tv"
+                
+                runSuspendCatching {
+                    val req = StremioC.customSession.get("https://api.simkl.com/$simklMediaType/$validImdbId?extended=full&client_id=$SIMKL_CLIENT_ID", timeout = 15)
+                    if (req.isSuccessful && req.text.isNotBlank()) {
+                        val simklRes = parseJson<SimklRecResponse>(req.text)
+                        val rawSimklRecs = mutableListOf<Triple<Int, Int, String>>()
+                        
+                        simklRes.users_recommendations?.take(30)?.forEach { recItem ->
+                            val itemTypeRaw = recItem.type ?: parentExpectedType
+                            val itemTmdbType = if (itemTypeRaw.contains("movie")) "movie" else "tv"
+                            val tmdb = recItem.ids?.tmdb ?: 0
+                            val simkl = recItem.ids?.simkl ?: 0
+                            if (tmdb > 0 || simkl > 0) rawSimklRecs.add(Triple(tmdb, simkl, itemTmdbType))
+                        }
+                        
+                        coroutineScope {
+                            rawSimklRecs.map { (tmdbId, simklId, itemTmdbType) ->
+                                async(Dispatchers.IO) {
+                                    if (tmdbId > 0) Pair(tmdbId, itemTmdbType) 
                                         else if (simklId > 0) {
                                             try {
                                                 val simklReqType = if (itemTmdbType == "movie") "movies" else "tv"
@@ -1041,160 +1028,130 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                                 }
                                 .awaitAll().filterNotNull()
                             }
-                        } else emptyList()
-                    }.getOrDefault(emptyList())
-                }
-
-                // 동기식 블로킹 구조에서 비동기 선행 패칭 구조로 교정
-                val collectionDeferred = async(Dispatchers.IO) {
-                    if (isMovie && detailRes.belongs_to_collection?.id != null) {
-                        runSuspendCatching {
-                            val colUrl = provider.buildTmdbUrl("/collection/${detailRes.belongs_to_collection.id}")
-                            StremioC.customSession.get(colUrl).parsedSafe<TmdbCollectionDetail>()?.parts ?: emptyList()
-                        }.getOrDefault(emptyList())
                     } else emptyList()
-                }
+                }.getOrDefault(emptyList())
+            }
 
-                val traktResults = traktDeferred.await()
-                val simklResults = simklDeferred.await()
-                val collectionParts = collectionDeferred.await()
-                
-                val tmdbRecs = detailRes.recommendations?.results ?: emptyList()
-                val tmdbRecsIds = tmdbRecs.mapNotNull { it.id }.toSet()
+            val collectionDeferred = async(Dispatchers.IO) {
+                if (isMovie && detailRes.belongs_to_collection?.id != null) {
+                    runSuspendCatching {
+                        val colUrl = provider.buildTmdbUrl("/collection/${detailRes.belongs_to_collection.id}")
+                        StremioC.customSession.get(colUrl).parsedSafe<TmdbCollectionDetail>()?.parts ?: emptyList()
+                    }.getOrDefault(emptyList())
+                } else emptyList()
+            }
 
-                val existingTmdbIds = collectionParts.mapNotNull { it.id }.toSet() + tmdbRecsIds
-                
-                val missingPairs = sequenceOf(traktResults, simklResults)
-                    .flatten()
-                    .distinctBy { it.first }
-                    .filter { it.first !in existingTmdbIds && it.first != tmdbIdStr.toIntOrNull() }
-                    .toList() // 요구사항에 의거 데이터 유실 전면 차단 (가져오던 기존 범위 100% 무손실 보존)
+            val traktResults = traktDeferred.await()
+            val simklResults = simklDeferred.await()
+            val collectionParts = collectionDeferred.await()
+            
+            val tmdbRecs = detailRes.recommendations?.results ?: emptyList()
+            val tmdbRecsIds = tmdbRecs.mapNotNull { it.id }.toSet()
 
-                val missingMediaDeferred = missingPairs.map { pair ->
-                    async(Dispatchers.IO) {
-                        StremioC.networkSemaphore.withPermit {
-                            withTimeoutOrNull(10000L) {
-                                runSuspendCatching {
-                                    val res = StremioC.customSession.get(provider.buildTmdbUrl("/${pair.second}/${pair.first}"), timeout = 10).parsedSafe<TmdbDetailResponse>()
-                                    res?.toTmdbMedia(pair.second)
-                                }.getOrNull()
-                            }
+            val existingTmdbIds = collectionParts.mapNotNull { it.id }.toSet() + tmdbRecsIds
+            
+            val missingPairs = sequenceOf(traktResults, simklResults)
+                .flatten()
+                .distinctBy { it.first }
+                .filter { it.first !in existingTmdbIds && it.first != tmdbIdStr.toIntOrNull() }
+                .toList()
+
+            val missingMediaDeferred = missingPairs.map { pair ->
+                async(Dispatchers.IO) {
+                    StremioC.networkSemaphore.withPermit {
+                        withTimeoutOrNull(10000L) {
+                            runSuspendCatching {
+                                val res = StremioC.customSession.get(provider.buildTmdbUrl("/${pair.second}/${pair.first}"), timeout = 10).parsedSafe<TmdbDetailResponse>()
+                                res?.toTmdbMedia(pair.second)
+                            }.getOrNull()
                         }
                     }
                 }
-                val fetchedMissingMedia = missingMediaDeferred.awaitAll().filterNotNull()
-
-                val allCandidates = (collectionParts + tmdbRecs + fetchedMissingMedia).distinctBy { it.id }.filter { it.id != null && it.id != tmdbIdStr.toIntOrNull() }
-                
-                val traktIds = traktResults.map { it.first }.toSet()
-                val simklIds = simklResults.map { it.first }.toSet()
-
-                val finalCombinedMedia = allCandidates.map { media ->
-                    var score = 0.0 
-                    if (collectionParts.any { it.id == media.id }) score += 10.0 
-                    if (isSameOrigin(media)) score += 1.0 
-                    if (media.id in traktIds) score += 2.5 
-                    if (media.id in simklIds) score += 2.0 
-                    if (media.id in tmdbRecsIds) score += 1.7 
-                    
-                    if (score >= 10.0) score = 10.0
-                    Pair(media, score)
-                }.sortedWith(compareByDescending<Pair<TmdbMedia, Double>> { it.second }.thenBy { 
-                    if (it.second >= 10.0) {
-                        it.first.releaseDate?.takeIf { d -> d.isNotBlank() } ?: it.first.firstAirDate?.takeIf { d -> d.isNotBlank() } ?: "9999-12-31"
-                    } else {
-                        "" 
-                    }
-                }).map { it.first }.take(50) 
-
-                fetchedRecommendations = finalCombinedMedia.mapNotNull { media ->
-                    val recTitle = media.title ?: media.name ?: media.originalTitle ?: return@mapNotNull null
-                    val recTmdbId = media.id ?: return@mapNotNull null
-                    val rawMediaType = media.mediaType ?: tmdbMediaType
-                    val posterType = if (rawMediaType == "tv") "tv" else "movie"
-                    val outType = if (rawMediaType == "tv") "series" else "movie"
-                    
-                    val customPosterUrl = "https://xrdb.ibbylabs.dev/poster/tmdb:$posterType:$recTmdbId.jpg?idSource=tmdb&tmdbKey=cc9982c4801545a1481d167137ea7b53&mdblistKey=d2tmbmhnrgdz7ft9re7j2gjr3&posterRatings=myanimelist%2Cimdb%2Cletterboxd%2Cmetacriticuser%2Ctomatoesaudience%2Ctrakt%2Ctmdb%2Cmetacritic%2Ctomatoes%2Crogerebert&lang=ko&ratingValueMode=normalized&posterGenreBadgeStyle=plain&posterGenreBadgePosition=bottomLeft&posterStreamBadges=on&ageRatingBadgePosition=left-top&posterQualityBadges=&posterRatingStyle=plain&posterRatingBadgeScale=115&imageText=original&posterRatingsLayout=right&posterNoBackgroundBadgeOutlineColor=%23ff0000&posterEdgeOffset=3&providerAppearance=eyJ0b21hdG9lcyI6eyJzdGFja2VkQWNjZW50TW9kZSI6ImxvZ28ifX0"
-                    
-                    val thinData = LoadData(id = "tmdb:${media.id}", type = outType)
-                    provider.newMovieSearchResponse(recTitle, thinData.toJson(), if (outType == "movie") TvType.Movie else TvType.TvSeries) { this.posterUrl = customPosterUrl }
-                }
-
-                // 최상위 컨텍스트 탈출 직전 병렬 구동 중이던 에피소드 비동기 스레드의 동기화 대기 처리 완결
-                episodeDeferred?.await()
-                println("StremioC v1.1: 전체 비동기 병렬 연산 무손실 동기화 완결")
             }
+            val fetchedMissingMedia = missingMediaDeferred.awaitAll().filterNotNull()
 
-            val fetchedAgeRating = if (isMovie) {
-                detailRes.release_dates?.results?.firstOrNull { it.iso_3166_1 == "KR" }?.release_dates?.firstOrNull { !it.certification.isNullOrEmpty() }?.certification
-            } else {
-                detailRes.content_ratings?.results?.firstOrNull { it.iso_3166_1 == "KR" }?.rating
-            }
-
-            val crewList = detailRes.credits?.crew?.filter { it.job == "Director" || it.job == "Writer" }?.groupBy { it.name ?: it.originalName }?.mapNotNull { (name, roles) ->
-                if (name == null) return@mapNotNull null
-                val sortedJobs = roles.mapNotNull { it.job }.distinct().sortedBy { if (it == "Director") 1 else 2 }.joinToString(", ")
-                val img = roles.firstNotNullOfOrNull { it.profilePath }?.let { provider.getActorUrl(it) } ?: TRANSPARENT_PIXEL
-                ActorData(Actor(name, img), roleString = sortedJobs)
-            }?.sortedBy { if (it.roleString?.contains("Director, Writer") == true) 1 else if (it.roleString?.contains("Director") == true) 2 else 3 } ?: emptyList()
-
-            val castList = detailRes.credits?.cast?.mapNotNull { cast ->
-                val actorName = cast.name ?: cast.originalName ?: return@mapNotNull null
-                val profileImg = cast.profilePath?.let { provider.getActorUrl(it) } ?: TRANSPARENT_PIXEL
-                ActorData(Actor(actorName, profileImg), roleString = cast.character)
-            } ?: emptyList()
-
-            val fetchedTrailers = (detailRes.videos?.results ?: emptyList()).filter { it.type == "Trailer" || it.type == "Teaser" }.sortedWith(compareBy({ if (it.type == "Trailer") 0 else 1 }, { it.publishedAt ?: "9999-12-31" })).mapNotNull { it.key }.map { "https://m.youtube.com/watch?v=$it" }
-
-            val episodeTmdbMeta = mutableMapOf<String, TmdbEpisode>()
-            val shouldFetchEpisodes = (!isMovie && targetVideos.isNullOrEmpty()) || (stremioType == "other" && !isMovie)
+            val allCandidates = (collectionParts + tmdbRecs + fetchedMissingMedia).distinctBy { it.id }.filter { it.id != null && it.id != tmdbIdStr.toIntOrNull() }
             
-            if (shouldFetchEpisodes) {
-                var requiredSeasons = targetVideos?.mapNotNull { it.seasonNumber }?.filter { it > 0 }?.distinct() ?: emptyList()
-                if (requiredSeasons.isEmpty()) {
-                    val totalSeasons = detailRes.number_of_seasons ?: 1
-                    requiredSeasons = if (totalSeasons > 0) (1..totalSeasons).toList() else listOf(1)
-                }
+            val traktIds = traktResults.map { it.first }.toSet()
+            val simklIds = simklResults.map { it.first }.toSet()
+
+            val finalCombinedMedia = allCandidates.map { media ->
+                var score = 0.0 
+                if (collectionParts.any { it.id == media.id }) score += 10.0 
+                if (isSameOrigin(media)) score += 1.0 
+                if (media.id in traktIds) score += 2.5 
+                if (media.id in simklIds) score += 2.0 
+                if (media.id in tmdbRecsIds) score += 1.7 
                 
-                if (requiredSeasons.isNotEmpty()) {
-                    coroutineScope {
-                        requiredSeasons.map { seasonNum ->
-                            async(Dispatchers.IO) {
-                                StremioC.networkSemaphore.withPermit {
-                                    withTimeoutOrNull(10000L) {
-                                        runSuspendCatching {
-                                            val seasonRes = StremioC.customSession.get(provider.buildTmdbUrl("/tv/$tmdbIdStr/season/$seasonNum")).parsedSafe<TmdbSeasonDetail>()
-                                            seasonRes?.episodes?.forEach { ep -> if (ep.episodeNumber != null) episodeTmdbMeta["${seasonNum}_${ep.episodeNumber}"] = ep }
-                                        }
-                                    }
-                                }
-                            }
-                        }.awaitAll()
-                    }
+                if (score >= 10.0) score = 10.0
+                Pair(media, score)
+            }.sortedWith(compareByDescending<Pair<TmdbMedia, Double>> { it.second }.thenBy { 
+                if (it.second >= 10.0) {
+                    it.first.releaseDate?.takeIf { d -> d.isNotBlank() } ?: it.first.firstAirDate?.takeIf { d -> d.isNotBlank() } ?: "9999-12-31"
+                } else {
+                    "" 
                 }
+            }).map { it.first }.take(50) 
+
+            fetchedRecommendations = finalCombinedMedia.mapNotNull { media ->
+                val recTitle = media.title ?: media.name ?: media.originalTitle ?: return@mapNotNull null
+                val recTmdbId = media.id ?: return@mapNotNull null
+                val rawMediaType = media.mediaType ?: tmdbMediaType
+                val posterType = if (rawMediaType == "tv") "tv" else "movie"
+                val outType = if (rawMediaType == "tv") "series" else "movie"
+                
+                val customPosterUrl = "https://xrdb.ibbylabs.dev/poster/tmdb:$posterType:$recTmdbId.jpg?idSource=tmdb&tmdbKey=cc9982c4801545a1481d167137ea7b53&mdblistKey=d2tmbmhnrgdz7ft9re7j2gjr3&posterRatings=myanimelist%2Cimdb%2Cletterboxd%2Cmetacriticuser%2Ctomatoesaudience%2Ctrakt%2Ctmdb%2Cmetacritic%2Ctomatoes%2Crogerebert&lang=ko&ratingValueMode=normalized&posterGenreBadgeStyle=plain&posterGenreBadgePosition=bottomLeft&posterStreamBadges=on&ageRatingBadgePosition=left-top&posterQualityBadges=&posterRatingStyle=plain&posterRatingBadgeScale=115&imageText=original&posterRatingsLayout=right&posterNoBackgroundBadgeOutlineColor=%23ff0000&posterEdgeOffset=3&providerAppearance=eyJ0b21hdG9lcyI6eyJzdGFja2VkQWNjZW50TW9kZSI6ImxvZ28ifX0"
+                
+                val thinData = LoadData(id = "tmdb:${media.id}", type = outType)
+                provider.newMovieSearchResponse(recTitle, thinData.toJson(), if (outType == "movie") TvType.Movie else TvType.TvSeries) { this.posterUrl = customPosterUrl }
             }
 
-            val translationData = detailRes.translations?.translations?.firstOrNull { 
-            it.iso_3166_1 == "US" || it.iso_639_1 == "en" 
-            }?.data
-            val enTranslation = (translationData?.title ?: translationData?.name)?.takeIf { it.isNotBlank() }
-
-            val extractedEnglishTitle = if (detailRes.original_language == "en") {
-            detailRes.original_title ?: detailRes.original_name
-            } else {
-            enTranslation ?: detailRes.original_title ?: detailRes.original_name
-            }
-
-            return FetchedTmdbData(
-                if (isMovie) detailRes.title ?: detailRes.original_title else detailRes.name ?: detailRes.original_name,
-                detailRes.overview, detailRes.images?.logos?.firstOrNull()?.file_path?.let { "https://image.tmdb.org/t/p/w500$it" },
-                fetchedTrailers, fetchedRecommendations, if (isMovie) detailRes.runtime else null, fetchedAgeRating, crewList + castList,
-                (detailRes.releaseDate ?: detailRes.firstAirDate)?.split("-")?.first()?.toIntOrNull(),
-                if (detailRes.status == "Returning Series") ShowStatus.Ongoing else ShowStatus.Completed, episodeTmdbMeta, detailRes.origin_country,
-                detailRes.original_title ?: detailRes.original_name,
-                extractedEnglishTitle
-            )
+            episodeDeferred?.await()
         }
+
+        val fetchedAgeRating = if (isMovie) {
+            detailRes.release_dates?.results?.firstOrNull { it.iso_3166_1 == "KR" }?.release_dates?.firstOrNull { !it.certification.isNullOrEmpty() }?.certification
+        } else {
+            detailRes.content_ratings?.results?.firstOrNull { it.iso_3166_1 == "KR" }?.rating
+        }
+
+        val crewList = detailRes.credits?.crew?.filter { it.job == "Director" || it.job == "Writer" }?.groupBy { it.name ?: it.originalName }?.mapNotNull { (name, roles) ->
+            if (name == null) return@mapNotNull null
+            val sortedJobs = roles.mapNotNull { it.job }.distinct().sortedBy { if (it == "Director") 1 else 2 }.joinToString(", ")
+            val img = roles.firstNotNullOfOrNull { it.profilePath }?.let { provider.getActorUrl(it) } ?: TRANSPARENT_PIXEL
+            ActorData(Actor(name, img), roleString = sortedJobs)
+        }?.sortedBy { if (it.roleString?.contains("Director, Writer") == true) 1 else if (it.roleString?.contains("Director") == true) 2 else 3 } ?: emptyList()
+
+        val castList = detailRes.credits?.cast?.mapNotNull { cast ->
+            val actorName = cast.name ?: cast.originalName ?: return@mapNotNull null
+            val profileImg = cast.profilePath?.let { provider.getActorUrl(it) } ?: TRANSPARENT_PIXEL
+            ActorData(Actor(actorName, profileImg), roleString = cast.character)
+        } ?: emptyList()
+
+        val fetchedTrailers = (detailRes.videos?.results ?: emptyList()).filter { it.type == "Trailer" || it.type == "Teaser" }.sortedWith(compareBy({ if (it.type == "Trailer") 0 else 1 }, { it.publishedAt ?: "9999-12-31" })).mapNotNull { it.key }.map { "https://m.youtube.com/watch?v=$it" }
+
+        val translationData = detailRes.translations?.translations?.firstOrNull { 
+            it.iso_3166_1 == "US" || it.iso_639_1 == "en" 
+        }?.data
+        val enTranslation = (translationData?.title ?: translationData?.name)?.takeIf { it.isNotBlank() }
+
+        val extractedEnglishTitle = if (detailRes.original_language == "en") {
+            detailRes.original_title ?: detailRes.original_name
+        } else {
+            enTranslation ?: detailRes.original_title ?: detailRes.original_name
+        }
+
+        return FetchedTmdbData(
+            if (isMovie) detailRes.title ?: detailRes.original_title else detailRes.name ?: detailRes.original_name,
+            detailRes.overview, detailRes.images?.logos?.firstOrNull()?.file_path?.let { "https://image.tmdb.org/t/p/w500$it" },
+            fetchedTrailers, fetchedRecommendations, if (isMovie) detailRes.runtime else null, fetchedAgeRating, crewList + castList,
+            (detailRes.releaseDate ?: detailRes.firstAirDate)?.split("-")?.first()?.toIntOrNull(),
+            if (detailRes.status == "Returning Series") ShowStatus.Ongoing else ShowStatus.Completed, episodeTmdbMeta, detailRes.origin_country,
+            detailRes.original_title ?: detailRes.original_name,
+            extractedEnglishTitle
+        )
+    }
+        
 
         private fun processEpisodes(provider: StremioC, finalImdbId: String?, episodeTmdbMeta: Map<String, TmdbEpisode>, targetVideos: List<Video>?, type: String?, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, originalTitle: String?, englishTitle: String?, aniListId: Int?, malId: Int?, kitsuId: String?): List<Episode> {
             val videos = targetVideos ?: emptyList()
