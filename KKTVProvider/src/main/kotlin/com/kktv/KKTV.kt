@@ -8,7 +8,7 @@ import java.net.URLEncoder
 
 class CUTVProvider : MainAPI() {
     override var mainUrl = "https://cu-tv.com"
-    override var name = "CUTV"
+    override var name = "씨유티비 (CUTV)"
     override val supportedTypes = setOf(TvType.Live)
     override var lang = "ko"
     override val hasMainPage = true
@@ -53,23 +53,37 @@ class CUTVProvider : MainAPI() {
                     val ssid = match["ssid"] ?: ""
                     val name = match["name"] ?: ""
                     val league = match["leag"] ?: ""
-                    val time = match["dttm"] ?: ""
+                    val rawTime = match["dttm"] ?: "" // 예: "2026-05-17 19:00:00"
                     
-                    // [핵심 1] 영상 주소(surl) 확인
                     val surl1 = match["surl"] ?: ""
                     val surl2 = match["surl2"] ?: ""
                     val surl3 = match["surl3"] ?: ""
                     
-                    // [핵심 2] surl이 하나라도 비어있지 않은(=방송시청 버튼이 있는) 경기만 필터링합니다.
+                    // 방송시청 버튼이 있는(surl이 존재하는) 경기만 필터링
                     if (ssid.isNotBlank() && name.isNotBlank() && (surl1.isNotBlank() || surl2.isNotBlank() || surl3.isNotBlank())) {
                         
-                        val title = "[$league] $name ($time)"
+                        // [핵심 1] 날짜를 지우고 AM/PM 시간 형식으로 변환
+                        var formattedTime = rawTime
+                        if (rawTime.contains(" ")) {
+                            try {
+                                val timePart = rawTime.substringAfter(" ") // "19:00:00"
+                                val hour = timePart.substringBefore(":").toInt()
+                                val minute = timePart.substringAfter(":").substringBefore(":")
+                                val ampm = if (hour < 12) "AM" else "PM"
+                                val displayHour = if (hour % 12 == 0) 12 else hour % 12
+                                formattedTime = "$ampm $displayHour:$minute" // 예: "PM 7:00"
+                            } catch (e: Exception) {
+                                formattedTime = rawTime.substringAfter(" ") // 파싱 실패 시 시간만 출력
+                            }
+                        }
+
+                        val title = "[$league] $name ($formattedTime)"
                         
-                        // [핵심 3] 썸네일 주소 생성 (올려주신 스크린샷 구조 반영)
-                        // 만약 쿠팡스트리밍(Ch.2) 같은 서브 채널이라면 원본 ID(srcy)를 사용해 썸네일을 가져옵니다.
+                        // [핵심 2] 썸네일 주소에 현재 시간(Timestamp) 파라미터 추가
                         val srcy = match["srcy"] ?: ""
                         val thumbId = if (srcy.isNotBlank()) srcy else ssid
-                        val posterUrl = "https://lux1.hudtv01.com/thumbs/$thumbId.jpg"
+                        val timestamp = System.currentTimeMillis()
+                        val posterUrl = "https://lux1.hudtv01.com/thumbs/$thumbId.jpg?a=$timestamp"
                         
                         val encodedTitle = URLEncoder.encode(title, "UTF-8")
                         val encodedIframe = URLEncoder.encode(iframeSrc, "UTF-8")
@@ -79,6 +93,11 @@ class CUTVProvider : MainAPI() {
                         items.add(
                             newLiveSearchResponse(name = title, url = fakeUrl) {
                                 this.posterUrl = posterUrl
+                                // [핵심 3] 이미지 로딩 시 엑박(차단)을 막기 위해 Referer 헤더 강제 주입
+                                this.posterHeaders = mapOf(
+                                    "Referer" to iframeSrc,
+                                    "User-Agent" to userAgent
+                                )
                             }
                         )
                     }
@@ -98,12 +117,25 @@ class CUTVProvider : MainAPI() {
         val uri = Uri.parse(url)
         val rawTitle = uri.getQueryParameter("title")
         val title = if (!rawTitle.isNullOrBlank()) URLDecoder.decode(rawTitle, "UTF-8") else "Live Stream"
+        
+        val rawIframe = uri.getQueryParameter("iframe")
+        val iframeUrl = if (!rawIframe.isNullOrBlank()) URLDecoder.decode(rawIframe, "UTF-8") else "https://sol13.galaxy-stream.live/cli/box"
+
+        // 상세 페이지(LoadResponse)에서도 썸네일이 차단되지 않도록 헤더를 넘겨줍니다.
+        val ssid = url.substringBefore("?").substringAfterLast("/")
+        val posterUrl = "https://lux1.hudtv01.com/thumbs/$ssid.jpg?a=${System.currentTimeMillis()}"
 
         return newLiveStreamLoadResponse(
             name = title,
             url = url,
             dataUrl = url
-        )
+        ) {
+            this.posterUrl = posterUrl
+            this.posterHeaders = mapOf(
+                "Referer" to iframeUrl,
+                "User-Agent" to userAgent
+            )
+        }
     }
 
     override suspend fun loadLinks(
