@@ -128,6 +128,26 @@
         "name": "OHLI24"
     },
     {
+        "iconUrl": "https://res.sooplive.com/images/svg/soop_logo.svg",
+        "fileHash": "sha256-f61423cd94e9605bff66cfbbea1cdc502e624df7de3f0141827352c50b660e56",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
+        "fileSize": 12283,
+        "status": 1,
+        "language": "ko",
+        "authors": [
+            "hsp1020"
+        ],
+        "tvTypes": [
+            "Live"
+        ],
+        "version": 1,
+        "internalName": "SOOP",
+        "description": "SOOP \uc81c\uacf5",
+        "url": "https://raw.githubusercontent.com/hsp1020/TestPlugins/builds/SOOP.cs3",
+        "name": "SOOP"
+    },
+    {
         "iconUrl": "https://raw.githubusercontent.com/hexated/cloudstream-extensions-hexated/master/StremioX/icon.png",
         "fileHash": "sha256-eeabf2ee4d725f5058c2391e932607f1007c04f9ccc9a4121256c4ffe8f9d810",
         "apiVersion": 1,
