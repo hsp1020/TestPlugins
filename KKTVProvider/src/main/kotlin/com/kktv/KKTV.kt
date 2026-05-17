@@ -17,7 +17,8 @@ class CUTVProvider : MainAPI() {
         "/main/index.php" to "실시간 스포츠 중계"
     )
 
-    private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    // [핵심 1] 스크린샷에 찍힌 User-Agent와 100% 동일하게 맞춰서 봇 의심을 원천 차단합니다.
+    private val userAgent = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
 
     private val defaultHeaders = mapOf(
         "User-Agent" to userAgent,
@@ -57,10 +58,8 @@ class CUTVProvider : MainAPI() {
                     val surl2 = match["surl2"] ?: ""
                     val surl3 = match["surl3"] ?: ""
                     
-                    // 방송시청 버튼이 있는(surl이 존재하는) 경기만 필터링
                     if (ssid.isNotBlank() && name.isNotBlank() && (surl1.isNotBlank() || surl2.isNotBlank() || surl3.isNotBlank())) {
                         
-                        // [핵심 1] 사용자님 지시대로 종목명, 날짜, 시간 전부 삭제. 오직 경기 이름만 남깁니다.
                         val title = name 
                         
                         val srcy = match["srcy"] ?: ""
@@ -76,7 +75,6 @@ class CUTVProvider : MainAPI() {
                         items.add(
                             newLiveSearchResponse(name = title, url = fakeUrl) {
                                 this.posterUrl = posterUrl
-                                // [핵심 2] 썸네일 403 에러 완벽 차단. 브라우저의 이미지 요청과 100% 동일하게 위장합니다.
                                 this.posterHeaders = mapOf(
                                     "Referer" to iframeSrc,
                                     "User-Agent" to userAgent,
@@ -94,7 +92,6 @@ class CUTVProvider : MainAPI() {
             e.printStackTrace()
         }
 
-        // [핵심 3] isHorizontalImages = true 로 썸네일을 가로로 넓게 꽉 차게 표시합니다.
         return newHomePageResponse(
             list = listOf(HomePageList(request.name, items, isHorizontalImages = true)),
             hasNext = false
@@ -157,10 +154,13 @@ class CUTVProvider : MainAPI() {
                         .filter { it.isNotBlank() }
                         .distinct()
 
+                    // [핵심 2] Iframe 주소에서 Origin(출처) 도메인을 동적으로 추출합니다. (예: https://sol13.galaxy-stream.live)
+                    val iframeOrigin = "https://${Uri.parse(iframeUrl).host}"
+
                     urls.forEachIndexed { index, link ->
                         val cleanLink = link.replace("\\/", "/") 
-                        val qualityName = if (cleanLink.contains("coupangstreaming")) "채널 1 (HD)" 
-                                          else if (cleanLink.contains("hudtv")) "채널 2 (FHD)" 
+                        val qualityName = if (cleanLink.contains("coupangstreaming")) "채널 1" 
+                                          else if (cleanLink.contains("hudtv")) "채널 2" 
                                           else "채널 ${index + 1}"
 
                         callback.invoke(
@@ -170,7 +170,16 @@ class CUTVProvider : MainAPI() {
                                 url = cleanLink,
                                 type = ExtractorLinkType.M3U8
                             ) {
-                                this.referer = iframeUrl
+                                // [핵심 3] 스크린샷에 찍힌 브라우저 요청 헤더를 100% 똑같이 플레이어에 주입합니다.
+                                this.referer = "$iframeOrigin/"
+                                this.headers = mapOf(
+                                    "Origin" to iframeOrigin,
+                                    "Accept" to "*/*",
+                                    "Sec-Fetch-Dest" to "empty",
+                                    "Sec-Fetch-Mode" to "cors",
+                                    "Sec-Fetch-Site" to "cross-site",
+                                    "User-Agent" to userAgent
+                                )
                             }
                         )
                     }
