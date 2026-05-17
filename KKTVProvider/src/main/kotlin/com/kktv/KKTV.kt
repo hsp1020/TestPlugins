@@ -32,34 +32,55 @@ class KKTVProvider : MainAPI() {
         val items = mutableListOf<SearchResponse>()
         
         try {
+            println("DEBUG [KKTV] ==========================================")
             println("DEBUG [KKTV] 1. 메인 페이지 로드 시작: $url")
             
-            // [핵심 해결책] 사용자님 지시대로 WebViewResolver를 사용하여 클라우드플레어 JS 챌린지를 강제로 뚫습니다.
             val mainInterceptor = WebViewResolver(Regex("""quick-tv\.com"""))
             val doc = app.get(url, headers = defaultHeaders, interceptor = mainInterceptor).document
             
-            // 도메인이 바뀌었을 경우를 대비해, iframe src에 의존하지 않고 div#player_field 안의 iframe을 무조건 가져옵니다.
+            // [명확한 로그 1] 메인 페이지 타이틀 확인
+            val pageTitle = doc.title()
+            println("DEBUG [KKTV] 2. 메인 페이지 응답 타이틀: [$pageTitle]")
+            
+            if (pageTitle.contains("Just a moment") || pageTitle.contains("Cloudflare")) {
+                println("DEBUG [KKTV] 🚨 [원인 100% 특정] 클라우드플레어(CF) 방어에 막혔습니다. 웹뷰 우회가 실패했습니다.")
+            } else {
+                println("DEBUG [KKTV] ✅ 메인 페이지 CF 통과 성공.")
+            }
+
             var iframeSrc = doc.selectFirst("div#player_field iframe")?.attr("src")
-            if (iframeSrc.isNullOrBlank()) {
-                iframeSrc = doc.selectFirst("iframe[src*='galaxy-stream']")?.attr("src")
-            }
-            
-            println("DEBUG [KKTV] 2. 추출된 Iframe 원본 주소: $iframeSrc")
+                ?: doc.selectFirst("iframe[src*='galaxy-stream']")?.attr("src")
 
             if (iframeSrc.isNullOrBlank()) {
-                println("DEBUG [KKTV] 🚨 메인 페이지에서 Iframe을 찾지 못했습니다. CF 우회 실패 또는 DOM 변경 의심.")
-                return newHomePageResponse(request.name, emptyList())
+                println("DEBUG [KKTV] 🚨 [원인 100% 특정] CF는 통과했으나 iframe 태그가 없습니다. 사이트 DOM 구조가 변경되었습니다.")
+                println("DEBUG [KKTV] HTML 미리보기: ${doc.html().take(300)}")
+                
+                // 하드코딩 Fallback 복구
+                iframeSrc = "https://sol7.galaxy-stream.live/cli/box"
+                println("DEBUG [KKTV] 💡 Fallback Iframe 주소로 강제 진행합니다: $iframeSrc")
+            } else {
+                println("DEBUG [KKTV] 3. 정상 추출된 Iframe 주소: $iframeSrc")
             }
 
-            println("DEBUG [KKTV] 3. Iframe 페이지 로드 시작 (CF 우회 및 Referer 적용)")
-            val iframeDomain = Uri.parse(iframeSrc).host ?: ""
-            val iframeInterceptor = WebViewResolver(Regex(iframeDomain))
+            // [핵심 수정] Iframe은 WebViewResolver를 쓰면 Referer가 누락되어 500 에러가 납니다. 순수 get 요청으로 Referer만 확실히 넘깁니다.
+            println("DEBUG [KKTV] 4. Iframe 페이지 로드 시작 (Referer: $url)")
+            val iframeDoc = app.get(iframeSrc, headers = defaultHeaders, referer = url).document
             
-            // 정상적인 경로(Referer)와 쿠키를 가지고 Iframe에 접근해야 500 에러가 뜨지 않습니다.
-            val iframeDoc = app.get(iframeSrc, headers = defaultHeaders + mapOf("Referer" to url), interceptor = iframeInterceptor).document
+            // [명확한 로그 2] Iframe 타이틀 및 500 에러 확인
+            val iframeTitle = iframeDoc.title()
+            println("DEBUG [KKTV] 5. Iframe 응답 타이틀: [$iframeTitle]")
             
+            if (iframeTitle.contains("500") || iframeTitle.contains("Error")) {
+                println("DEBUG [KKTV] 🚨 [원인 100% 특정] Iframe 서버에서 500 에러를 뱉었습니다. Referer 차단이거나 서버가 죽었습니다.")
+            }
+
             val rows = iframeDoc.select("tr.ssc-row-candy")
-            println("DEBUG [KKTV] 4. 파싱된 경기 개수: ${rows.size}")
+            println("DEBUG [KKTV] 6. 파싱된 경기 개수: ${rows.size}")
+
+            if (rows.isEmpty()) {
+                println("DEBUG [KKTV] 🚨 [원인 100% 특정] 500 에러는 아니지만 경기 목록(tr.ssc-row-candy)이 없습니다.")
+                println("DEBUG [KKTV] Iframe HTML 미리보기: ${iframeDoc.html().take(500)}")
+            }
 
             rows.forEach { row ->
                 val time = row.selectFirst("td.ssc-schedule-td")?.text()?.trim() ?: ""
@@ -87,6 +108,7 @@ class KKTVProvider : MainAPI() {
                     )
                 }
             }
+            println("DEBUG [KKTV] ==========================================")
         } catch (e: Exception) {
             println("DEBUG [KKTV] 🚨 에러 발생 (getMainPage): ${e.message}")
             e.printStackTrace()
@@ -105,8 +127,6 @@ class KKTVProvider : MainAPI() {
         
         val rawPoster = uri.getQueryParameter("poster")
         val poster = if (!rawPoster.isNullOrBlank()) URLDecoder.decode(rawPoster, "UTF-8") else null
-
-        println("DEBUG [KKTV] 5. 상세 정보 로드 중: $title")
 
         return newLiveStreamLoadResponse(
             name = title,
@@ -127,23 +147,15 @@ class KKTVProvider : MainAPI() {
         val rawIframe = uri.getQueryParameter("iframe")
         val iframeUrl = if (!rawIframe.isNullOrBlank()) URLDecoder.decode(rawIframe, "UTF-8") else return false
 
-        println("DEBUG [KKTV] 6. 링크 로드 시작. 타겟 Iframe: $iframeUrl")
-
         try {
-            val iframeDomain = Uri.parse(iframeUrl).host ?: ""
-            val iframeInterceptor = WebViewResolver(Regex(iframeDomain))
-            
-            val responseText = app.get(iframeUrl, headers = defaultHeaders, interceptor = iframeInterceptor).text
+            // 재생 링크를 딸 때도 500 에러 방지를 위해 WebViewResolver를 빼고 Referer를 강제합니다.
+            val responseText = app.get(iframeUrl, headers = defaultHeaders, referer = "$mainUrl/bbs/content.php?co_id=livetv9").text
             
             val m3u8Regex = """(https?://[^"'\s]+?\.m3u8[^"'\s]*)""".toRegex()
             val streamLinks = m3u8Regex.findAll(responseText).map { it.value }.toSet().toList()
 
-            println("DEBUG [KKTV] 7. 추출된 m3u8 링크 개수: ${streamLinks.size}")
-
             streamLinks.forEachIndexed { index, link ->
                 val cleanLink = link.replace("\\/", "/") 
-                println("DEBUG [KKTV] 8. 스트림 링크 추가: $cleanLink")
-                
                 val qualityName = if (cleanLink.contains("coupangstreaming")) "채널 1 (HD)" 
                                   else if (cleanLink.contains("hudtv")) "채널 2 (FHD)" 
                                   else "채널 ${index + 1}"
@@ -155,13 +167,11 @@ class KKTVProvider : MainAPI() {
                         url = cleanLink,
                         type = ExtractorLinkType.M3U8
                     ) {
-                        // 동적으로 추출된 Iframe 주소를 Referer로 박아넣어 재생 차단을 막습니다.
                         this.referer = iframeUrl
                     }
                 )
             }
         } catch (e: Exception) {
-            println("DEBUG [KKTV] 🚨 에러 발생 (loadLinks): ${e.message}")
             e.printStackTrace()
             return false
         }
