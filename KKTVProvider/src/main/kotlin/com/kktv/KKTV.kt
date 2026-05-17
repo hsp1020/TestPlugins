@@ -42,15 +42,6 @@ class CUTVProvider : MainAPI() {
 
             val iframeHtml = app.get(iframeSrc, headers = defaultHeaders, referer = url).text
             
-            // [핵심 1] 썸네일 엑박 해결을 위한 이미지 서버 쿠키 발급 (Ping)
-            // 여기서 이미지 서버를 한 번 호출해두면, 앱 전체에 쿠키가 저장되어 썸네일 로딩 시 엑박이 뜨지 않습니다.
-            try {
-                app.get("https://lux1.hudtv01.com/", headers = defaultHeaders, referer = iframeSrc)
-                println("DEBUG [CUTV] ✅ 썸네일 서버 쿠키 획득 완료")
-            } catch (e: Exception) {
-                println("DEBUG [CUTV] ⚠️ 썸네일 서버 Ping 에러 (무시됨)")
-            }
-
             val jsonRegex = """window\.galaxystream\.data2\s*=\s*'(.*?)';""".toRegex()
             val matchResult = jsonRegex.find(iframeHtml)
             
@@ -58,28 +49,28 @@ class CUTVProvider : MainAPI() {
                 val jsonData = matchResult.groupValues[1]
                 val matches = AppUtils.parseJson<List<Map<String, String>>>(jsonData)
                 
+                // [디버깅] 만약 JSON을 찾았는데도 목록이 비어있다면 HTML을 덤프합니다.
+                if (matches.isEmpty()) {
+                    println("DEBUG [CUTV] 🚨 JSON 데이터는 찾았으나 경기 목록이 0개입니다. HTML 전체 덤프 시작:")
+                    iframeHtml.chunked(3000).forEachIndexed { index, chunk ->
+                        println("DEBUG [CUTV] HTML_DUMP_$index: $chunk")
+                    }
+                }
+
                 matches.forEach { match ->
                     val ssid = match["ssid"] ?: ""
                     val name = match["name"] ?: ""
-                    val league = match["leag"] ?: ""
-                    val rawTime = match["dttm"] ?: "" // 예: "2026-05-17 19:00:00"
                     
                     val surl1 = match["surl"] ?: ""
                     val surl2 = match["surl2"] ?: ""
                     val surl3 = match["surl3"] ?: ""
                     
+                    // 방송시청 버튼이 있는(surl이 존재하는) 경기만 필터링
                     if (ssid.isNotBlank() && name.isNotBlank() && (surl1.isNotBlank() || surl2.isNotBlank() || surl3.isNotBlank())) {
                         
-                        // [핵심 2] 날짜 지우고 24시간 형식으로 깔끔하게 추출 (예: "2026-05-17 19:00:00" -> "19:00")
-                        val formattedTime = if (rawTime.length >= 16) {
-                            rawTime.substring(11, 16)
-                        } else {
-                            rawTime
-                        }
-
-                        val title = "[$league] $name ($formattedTime)"
+                        // [핵심 1] 사용자님 지시대로 종목명과 시간 아예 삭제. 오직 경기 이름만 사용.
+                        val title = name 
                         
-                        // [핵심 3] 썸네일 주소 생성 (타임스탬프 추가)
                         val srcy = match["srcy"] ?: ""
                         val thumbId = if (srcy.isNotBlank()) srcy else ssid
                         val timestamp = System.currentTimeMillis()
@@ -93,18 +84,25 @@ class CUTVProvider : MainAPI() {
                         items.add(
                             newLiveSearchResponse(name = title, url = fakeUrl) {
                                 this.posterUrl = posterUrl
-                                // 발급받은 쿠키와 함께 완벽한 헤더를 전송합니다.
+                                // [핵심 2] 썸네일 차단 방지를 위해 브라우저와 완벽히 동일한 이미지 요청 헤더 세팅
                                 this.posterHeaders = mapOf(
                                     "Referer" to iframeSrc,
-                                    "Origin" to "https://${Uri.parse(iframeSrc).host}",
-                                    "User-Agent" to userAgent
+                                    "User-Agent" to userAgent,
+                                    "Accept" to "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
                                 )
                             }
                         )
                     }
                 }
+            } else {
+                // [디버깅] JSON 자체를 못 찾았을 경우 서버가 뱉은 HTML 전체 덤프
+                println("DEBUG [CUTV] 🚨 JSON 데이터를 찾을 수 없습니다. HTML 전체 덤프 시작:")
+                iframeHtml.chunked(3000).forEachIndexed { index, chunk ->
+                    println("DEBUG [CUTV] HTML_DUMP_$index: $chunk")
+                }
             }
         } catch (e: Exception) {
+            println("DEBUG [CUTV] 🚨 에러 발생: ${e.message}")
             e.printStackTrace()
         }
 
@@ -133,8 +131,8 @@ class CUTVProvider : MainAPI() {
             this.posterUrl = posterUrl
             this.posterHeaders = mapOf(
                 "Referer" to iframeUrl,
-                "Origin" to "https://${Uri.parse(iframeUrl).host}",
-                "User-Agent" to userAgent
+                "User-Agent" to userAgent,
+                "Accept" to "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
             )
         }
     }
