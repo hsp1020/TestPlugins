@@ -8,7 +8,7 @@ import java.net.URLEncoder
 
 class CUTVProvider : MainAPI() {
     override var mainUrl = "https://cu-tv.com"
-    override var name = "씨유티비 (CUTV)"
+    override var name = "CUTV"
     override val supportedTypes = setOf(TvType.Live)
     override var lang = "ko"
     override val hasMainPage = true
