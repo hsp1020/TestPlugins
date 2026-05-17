@@ -39,7 +39,6 @@ class KKTVProvider : MainAPI() {
             val matchIdentifier = homeTeam
             val loadUrl = "$iframeSrc?matchKey=$matchIdentifier"
 
-            // [수정 1] tvType 파라미터 제거 (기본값이 Live 이므로 생략해야 정상 빌드됨)
             items.add(
                 newLiveSearchResponse(
                     name = title,
@@ -50,7 +49,6 @@ class KKTVProvider : MainAPI() {
             )
         }
 
-        // [수정 2] 파라미터명을 items 가 아닌 list 로 수정
         return newHomePageResponse(
             list = listOf(HomePageList("실시간 라이브 중계", items)),
             hasNext = false
@@ -88,7 +86,6 @@ class KKTVProvider : MainAPI() {
                               else if (cleanLink.contains("hudtv")) "채널 2 (FHD)" 
                               else "채널 ${index + 1}"
 
-            // [수정 3] ExtractorLink 빌더 문법 적용: source, name, url 외의 설정은 {} 안으로 이동
             callback.invoke(
                 newExtractorLink(
                     source = this.name,
@@ -97,7 +94,8 @@ class KKTVProvider : MainAPI() {
                 ) {
                     this.quality = Qualities.Unknown.value
                     this.isM3u8 = true
-                    this.headers = mapOf("Referer" to "https://sol7.galaxy-stream.live/")
+                    // [핵심 수정] headers는 val 이므로 = 로 덮어씌우지 않고 배열처럼 값을 넣어줍니다.
+                    this.headers["Referer"] = "https://sol7.galaxy-stream.live/"
                 }
             )
         }
