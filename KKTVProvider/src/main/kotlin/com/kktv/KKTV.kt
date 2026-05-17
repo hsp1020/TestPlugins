@@ -42,39 +42,47 @@ class CUTVProvider : MainAPI() {
 
             val iframeHtml = app.get(iframeSrc, headers = defaultHeaders, referer = url).text
             
-            // [핵심 해킹 로직] 로그캣에서 발견한 숨겨진 JSON 데이터를 정규식으로 뜯어냅니다.
             val jsonRegex = """window\.galaxystream\.data2\s*=\s*'(.*?)';""".toRegex()
             val matchResult = jsonRegex.find(iframeHtml)
             
             if (matchResult != null) {
                 val jsonData = matchResult.groupValues[1]
-                
-                // 뜯어낸 JSON 데이터를 Cloudstream 내장 파서로 Map 리스트로 변환합니다.
                 val matches = AppUtils.parseJson<List<Map<String, String>>>(jsonData)
                 
-                println("DEBUG [CUTV] ✅ 숨겨진 JSON 데이터 해킹 성공! 총 ${matches.size}개 경기 발견")
-
                 matches.forEach { match ->
                     val ssid = match["ssid"] ?: ""
                     val name = match["name"] ?: ""
                     val league = match["leag"] ?: ""
                     val time = match["dttm"] ?: ""
                     
-                    if (ssid.isNotBlank() && name.isNotBlank()) {
+                    // [핵심 1] 영상 주소(surl) 확인
+                    val surl1 = match["surl"] ?: ""
+                    val surl2 = match["surl2"] ?: ""
+                    val surl3 = match["surl3"] ?: ""
+                    
+                    // [핵심 2] surl이 하나라도 비어있지 않은(=방송시청 버튼이 있는) 경기만 필터링합니다.
+                    if (ssid.isNotBlank() && name.isNotBlank() && (surl1.isNotBlank() || surl2.isNotBlank() || surl3.isNotBlank())) {
+                        
                         val title = "[$league] $name ($time)"
+                        
+                        // [핵심 3] 썸네일 주소 생성 (올려주신 스크린샷 구조 반영)
+                        // 만약 쿠팡스트리밍(Ch.2) 같은 서브 채널이라면 원본 ID(srcy)를 사용해 썸네일을 가져옵니다.
+                        val srcy = match["srcy"] ?: ""
+                        val thumbId = if (srcy.isNotBlank()) srcy else ssid
+                        val posterUrl = "https://lux1.hudtv01.com/thumbs/$thumbId.jpg"
+                        
                         val encodedTitle = URLEncoder.encode(title, "UTF-8")
                         val encodedIframe = URLEncoder.encode(iframeSrc, "UTF-8")
                         
-                        // ssid를 URL에 박아넣어 나중에 영상을 바로 찾을 수 있게 합니다.
                         val fakeUrl = "$mainUrl/live_stream/$ssid?title=$encodedTitle&iframe=$encodedIframe"
 
                         items.add(
-                            newLiveSearchResponse(name = title, url = fakeUrl)
+                            newLiveSearchResponse(name = title, url = fakeUrl) {
+                                this.posterUrl = posterUrl
+                            }
                         )
                     }
                 }
-            } else {
-                println("DEBUG [CUTV] 🚨 JSON 데이터를 찾을 수 없습니다.")
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -112,7 +120,6 @@ class CUTVProvider : MainAPI() {
         try {
             val iframeHtml = app.get(iframeUrl, headers = defaultHeaders, referer = "$mainUrl/main/index.php").text
             
-            // 영상 주소도 JSON 안에 다 들어있으므로 다시 JSON을 뜯어옵니다.
             val jsonRegex = """window\.galaxystream\.data2\s*=\s*'(.*?)';""".toRegex()
             val matchResult = jsonRegex.find(iframeHtml)
             
@@ -120,11 +127,9 @@ class CUTVProvider : MainAPI() {
                 val jsonData = matchResult.groupValues[1]
                 val matches = AppUtils.parseJson<List<Map<String, String>>>(jsonData)
                 
-                // 클릭한 경기(ssid)와 일치하는 데이터를 찾습니다.
                 val targetMatch = matches.find { it["ssid"] == ssid }
                 
                 if (targetMatch != null) {
-                    // JSON 안에 있는 surl, surl2, surl3 에서 실제 m3u8 주소를 꺼냅니다.
                     val urls = listOfNotNull(targetMatch["surl"], targetMatch["surl2"], targetMatch["surl3"])
                         .filter { it.isNotBlank() }
                         .distinct()
