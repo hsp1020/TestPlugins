@@ -3,13 +3,12 @@ package com.kktv
 import android.net.Uri
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import org.jsoup.Jsoup
 import java.net.URLDecoder
 import java.net.URLEncoder
 
 class CUTVProvider : MainAPI() {
     override var mainUrl = "https://cu-tv.com"
-    override var name = "씨유티비 (CUTV)"
+    override var name = "CUTV"
     override val supportedTypes = setOf(TvType.Live)
     override var lang = "ko"
     override val hasMainPage = true
@@ -32,70 +31,52 @@ class CUTVProvider : MainAPI() {
         val items = mutableListOf<SearchResponse>()
         
         try {
-            println("DEBUG [CUTV] 1. 메인 페이지 로드 시작: $url")
             val doc = app.get(url, headers = defaultHeaders).document
             
             val iframeSrc = doc.select("iframe").mapNotNull { it.attr("src") }
                 .firstOrNull { it.contains("galaxy-stream") || it.contains("hudtv") || it.contains("cli") }
 
             if (iframeSrc.isNullOrBlank()) {
-                println("DEBUG [CUTV] 🚨 메인 페이지에서 Iframe을 찾지 못했습니다.")
                 return newHomePageResponse(request.name, emptyList())
             }
-            
-            println("DEBUG [CUTV] 2. 동적으로 추출된 Iframe 주소: $iframeSrc")
 
-            // Iframe 호출 (Referer 필수)
-            var iframeHtml = app.get(iframeSrc, headers = defaultHeaders, referer = url).text
-            var iframeDoc = Jsoup.parse(iframeHtml)
+            val iframeHtml = app.get(iframeSrc, headers = defaultHeaders, referer = url).text
             
-            var rows = iframeDoc.select("tr.ssc-row-candy")
+            // [핵심 해킹 로직] 로그캣에서 발견한 숨겨진 JSON 데이터를 정규식으로 뜯어냅니다.
+            val jsonRegex = """window\.galaxystream\.data2\s*=\s*'(.*?)';""".toRegex()
+            val matchResult = jsonRegex.find(iframeHtml)
             
-            // [핵심 로직] cli/box 에서 목록을 못 찾으면 cli/mobile 로 주소를 바꿔서 즉시 재시도합니다.
-            if (rows.isEmpty()) {
-                val altSrc = if (iframeSrc.contains("cli/box")) iframeSrc.replace("cli/box", "cli/mobile") else iframeSrc.replace("cli/mobile", "cli/box")
-                println("DEBUG [CUTV] 3. 목록을 찾지 못했습니다. 대체 주소로 재시도합니다: $altSrc")
+            if (matchResult != null) {
+                val jsonData = matchResult.groupValues[1]
                 
-                iframeHtml = app.get(altSrc, headers = defaultHeaders, referer = url).text
-                iframeDoc = Jsoup.parse(iframeHtml)
-                rows = iframeDoc.select("tr.ssc-row-candy")
-            }
+                // 뜯어낸 JSON 데이터를 Cloudstream 내장 파서로 Map 리스트로 변환합니다.
+                val matches = AppUtils.parseJson<List<Map<String, String>>>(jsonData)
+                
+                println("DEBUG [CUTV] ✅ 숨겨진 JSON 데이터 해킹 성공! 총 ${matches.size}개 경기 발견")
 
-            println("DEBUG [CUTV] 4. 최종 파싱된 경기 개수: ${rows.size}")
-
-            if (rows.isNotEmpty()) {
-                rows.forEach { row ->
-                    val time = row.selectFirst("td.ssc-schedule-td")?.text()?.trim() ?: ""
-                    val league = row.selectFirst("td.ssc-league-td")?.text()?.trim() ?: ""
-                    val homeTeam = row.selectFirst("span.ssc-title-team-1-text")?.text()?.trim() ?: ""
-                    val awayTeam = row.selectFirst("span.ssc-title-team-2-text")?.text()?.trim() ?: ""
+                matches.forEach { match ->
+                    val ssid = match["ssid"] ?: ""
+                    val name = match["name"] ?: ""
+                    val league = match["leag"] ?: ""
+                    val time = match["dttm"] ?: ""
                     
-                    if (homeTeam.isNotBlank()) {
-                        val title = "[$league] $homeTeam vs $awayTeam ($time)"
-                        val posterUrl = row.selectFirst("img.ssc-thumbnail-icon")?.attr("src") ?: ""
-
+                    if (ssid.isNotBlank() && name.isNotBlank()) {
+                        val title = "[$league] $name ($time)"
                         val encodedTitle = URLEncoder.encode(title, "UTF-8")
-                        val encodedPoster = URLEncoder.encode(posterUrl, "UTF-8")
                         val encodedIframe = URLEncoder.encode(iframeSrc, "UTF-8")
                         
-                        val fakeUrl = "$mainUrl/live_stream/dummy?title=$encodedTitle&poster=$encodedPoster&iframe=$encodedIframe"
+                        // ssid를 URL에 박아넣어 나중에 영상을 바로 찾을 수 있게 합니다.
+                        val fakeUrl = "$mainUrl/live_stream/$ssid?title=$encodedTitle&iframe=$encodedIframe"
 
                         items.add(
-                            newLiveSearchResponse(name = title, url = fakeUrl) {
-                                this.posterUrl = posterUrl
-                            }
+                            newLiveSearchResponse(name = title, url = fakeUrl)
                         )
                     }
                 }
             } else {
-                // [최후의 수단] 이래도 안 뜨면 서버가 뭘 숨기고 있는지 전체 HTML을 로그캣에 낱낱이 출력합니다.
-                println("DEBUG [CUTV] 🚨 경기 목록 파싱 완전 실패. 서버가 반환한 HTML 전체를 덤프합니다.")
-                iframeHtml.chunked(3000).forEachIndexed { index, chunk ->
-                    println("DEBUG [CUTV] HTML_DUMP_$index: $chunk")
-                }
+                println("DEBUG [CUTV] 🚨 JSON 데이터를 찾을 수 없습니다.")
             }
         } catch (e: Exception) {
-            println("DEBUG [CUTV] 🚨 에러 발생 (getMainPage): ${e.message}")
             e.printStackTrace()
         }
 
@@ -109,17 +90,12 @@ class CUTVProvider : MainAPI() {
         val uri = Uri.parse(url)
         val rawTitle = uri.getQueryParameter("title")
         val title = if (!rawTitle.isNullOrBlank()) URLDecoder.decode(rawTitle, "UTF-8") else "Live Stream"
-        
-        val rawPoster = uri.getQueryParameter("poster")
-        val poster = if (!rawPoster.isNullOrBlank()) URLDecoder.decode(rawPoster, "UTF-8") else null
 
         return newLiveStreamLoadResponse(
             name = title,
             url = url,
             dataUrl = url
-        ) {
-            this.posterUrl = poster
-        }
+        )
     }
 
     override suspend fun loadLinks(
@@ -129,31 +105,49 @@ class CUTVProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val uri = Uri.parse(data)
+        val ssid = data.substringBefore("?").substringAfterLast("/")
         val rawIframe = uri.getQueryParameter("iframe")
         val iframeUrl = if (!rawIframe.isNullOrBlank()) URLDecoder.decode(rawIframe, "UTF-8") else return false
 
         try {
-            val responseText = app.get(iframeUrl, headers = defaultHeaders, referer = "$mainUrl/main/index.php").text
+            val iframeHtml = app.get(iframeUrl, headers = defaultHeaders, referer = "$mainUrl/main/index.php").text
             
-            val m3u8Regex = """(https?://[^"'\s]+?\.m3u8[^"'\s]*)""".toRegex()
-            val streamLinks = m3u8Regex.findAll(responseText).map { it.value }.toSet().toList()
+            // 영상 주소도 JSON 안에 다 들어있으므로 다시 JSON을 뜯어옵니다.
+            val jsonRegex = """window\.galaxystream\.data2\s*=\s*'(.*?)';""".toRegex()
+            val matchResult = jsonRegex.find(iframeHtml)
+            
+            if (matchResult != null) {
+                val jsonData = matchResult.groupValues[1]
+                val matches = AppUtils.parseJson<List<Map<String, String>>>(jsonData)
+                
+                // 클릭한 경기(ssid)와 일치하는 데이터를 찾습니다.
+                val targetMatch = matches.find { it["ssid"] == ssid }
+                
+                if (targetMatch != null) {
+                    // JSON 안에 있는 surl, surl2, surl3 에서 실제 m3u8 주소를 꺼냅니다.
+                    val urls = listOfNotNull(targetMatch["surl"], targetMatch["surl2"], targetMatch["surl3"])
+                        .filter { it.isNotBlank() }
+                        .distinct()
 
-            streamLinks.forEachIndexed { index, link ->
-                val cleanLink = link.replace("\\/", "/") 
-                val qualityName = if (cleanLink.contains("coupangstreaming")) "채널 1 (HD)" 
-                                  else if (cleanLink.contains("hudtv")) "채널 2 (FHD)" 
-                                  else "채널 ${index + 1}"
+                    urls.forEachIndexed { index, link ->
+                        val cleanLink = link.replace("\\/", "/") 
+                        val qualityName = if (cleanLink.contains("coupangstreaming")) "채널 1 (HD)" 
+                                          else if (cleanLink.contains("hudtv")) "채널 2 (FHD)" 
+                                          else "채널 ${index + 1}"
 
-                callback.invoke(
-                    newExtractorLink(
-                        source = this.name,
-                        name = qualityName,
-                        url = cleanLink,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        this.referer = iframeUrl
+                        callback.invoke(
+                            newExtractorLink(
+                                source = this.name,
+                                name = qualityName,
+                                url = cleanLink,
+                                type = ExtractorLinkType.M3U8
+                            ) {
+                                this.referer = iframeUrl
+                            }
+                        )
                     }
-                )
+                    return true
+                }
             }
         } catch (e: Exception) {
             e.printStackTrace()
