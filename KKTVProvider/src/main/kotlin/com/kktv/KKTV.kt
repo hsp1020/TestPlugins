@@ -8,7 +8,7 @@ import java.net.URLEncoder
 
 class CUTVProvider : MainAPI() {
     override var mainUrl = "https://cu-tv.com"
-    override var name = "CUTV"
+    override var name = "씨유티비 (CUTV)"
     override val supportedTypes = setOf(TvType.Live)
     override var lang = "ko"
     override val hasMainPage = true
@@ -42,6 +42,15 @@ class CUTVProvider : MainAPI() {
 
             val iframeHtml = app.get(iframeSrc, headers = defaultHeaders, referer = url).text
             
+            // [핵심 1] 썸네일 엑박 해결을 위한 이미지 서버 쿠키 발급 (Ping)
+            // 여기서 이미지 서버를 한 번 호출해두면, 앱 전체에 쿠키가 저장되어 썸네일 로딩 시 엑박이 뜨지 않습니다.
+            try {
+                app.get("https://lux1.hudtv01.com/", headers = defaultHeaders, referer = iframeSrc)
+                println("DEBUG [CUTV] ✅ 썸네일 서버 쿠키 획득 완료")
+            } catch (e: Exception) {
+                println("DEBUG [CUTV] ⚠️ 썸네일 서버 Ping 에러 (무시됨)")
+            }
+
             val jsonRegex = """window\.galaxystream\.data2\s*=\s*'(.*?)';""".toRegex()
             val matchResult = jsonRegex.find(iframeHtml)
             
@@ -59,10 +68,9 @@ class CUTVProvider : MainAPI() {
                     val surl2 = match["surl2"] ?: ""
                     val surl3 = match["surl3"] ?: ""
                     
-                    // 방송시청 버튼이 있는(surl이 존재하는) 경기만 필터링
                     if (ssid.isNotBlank() && name.isNotBlank() && (surl1.isNotBlank() || surl2.isNotBlank() || surl3.isNotBlank())) {
                         
-                        // [핵심 1] 날짜 지우고 24시간 형식으로 깔끔하게 추출 (예: "2026-05-17 19:00:00" -> "19:00")
+                        // [핵심 2] 날짜 지우고 24시간 형식으로 깔끔하게 추출 (예: "2026-05-17 19:00:00" -> "19:00")
                         val formattedTime = if (rawTime.length >= 16) {
                             rawTime.substring(11, 16)
                         } else {
@@ -71,7 +79,7 @@ class CUTVProvider : MainAPI() {
 
                         val title = "[$league] $name ($formattedTime)"
                         
-                        // [핵심 2] 썸네일 주소 생성 (스크린샷과 동일하게 타임스탬프 ?a= 추가)
+                        // [핵심 3] 썸네일 주소 생성 (타임스탬프 추가)
                         val srcy = match["srcy"] ?: ""
                         val thumbId = if (srcy.isNotBlank()) srcy else ssid
                         val timestamp = System.currentTimeMillis()
@@ -85,8 +93,12 @@ class CUTVProvider : MainAPI() {
                         items.add(
                             newLiveSearchResponse(name = title, url = fakeUrl) {
                                 this.posterUrl = posterUrl
-                                // [핵심 3] 이미지 엑박 방지를 위해 Iframe 주소를 Referer로 강제 주입
-                                this.posterHeaders = mapOf("Referer" to iframeSrc)
+                                // 발급받은 쿠키와 함께 완벽한 헤더를 전송합니다.
+                                this.posterHeaders = mapOf(
+                                    "Referer" to iframeSrc,
+                                    "Origin" to "https://${Uri.parse(iframeSrc).host}",
+                                    "User-Agent" to userAgent
+                                )
                             }
                         )
                     }
@@ -119,8 +131,11 @@ class CUTVProvider : MainAPI() {
             dataUrl = url
         ) {
             this.posterUrl = posterUrl
-            // 상세 페이지에서도 썸네일이 차단되지 않도록 헤더 추가
-            this.posterHeaders = mapOf("Referer" to iframeUrl)
+            this.posterHeaders = mapOf(
+                "Referer" to iframeUrl,
+                "Origin" to "https://${Uri.parse(iframeUrl).host}",
+                "User-Agent" to userAgent
+            )
         }
     }
 
