@@ -3,13 +3,14 @@ package com.kktv
 import android.net.Uri
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.network.CloudflareInterceptor
 import org.jsoup.Jsoup
 import java.net.URLDecoder
 import java.net.URLEncoder
 
 class KKTVProvider : MainAPI() {
     override var mainUrl = "https://quick-tv.com"
-    override var name = "KkTV (빠른티비)"
+    override var name = "KkTV"
     override val supportedTypes = setOf(TvType.Live)
     override var lang = "ko"
     override val hasMainPage = true
@@ -34,8 +35,10 @@ class KKTVProvider : MainAPI() {
         try {
             println("DEBUG [KKTV] 1. 메인 페이지 로드 시작: $url")
             
-            // [수정 1] 어설픈 WebViewResolver를 제거하고 Cloudstream의 내장 CF 우회 기능에 맡깁니다.
-            val doc = app.get(url, headers = defaultHeaders).document
+            // [핵심 수정] 사용자님 지시대로 대기 시간을 가지며 CF를 뚫어주는 전용 인터셉터 사용
+            val cfInterceptor = CloudflareInterceptor()
+            val doc = app.get(url, headers = defaultHeaders, interceptor = cfInterceptor).document
+            
             println("DEBUG [KKTV] 2. 메인 페이지 응답 타이틀: [${doc.title()}]")
 
             var iframeSrc = doc.selectFirst("div#player_field iframe")?.attr("src")
@@ -49,15 +52,15 @@ class KKTVProvider : MainAPI() {
                 println("DEBUG [KKTV] 3. 정상 추출된 Iframe 주소: $iframeSrc")
             }
 
-            // [수정 2] 500 에러 방지를 위해 Referer를 반드시 포함하여 Iframe을 호출합니다.
-            val iframeHtml = app.get(iframeSrc, headers = defaultHeaders, referer = url).text
+            // Iframe 서버도 CF 검사를 할 수 있으므로 동일하게 대기 인터셉터 적용 + 500 에러 방지용 Referer
+            println("DEBUG [KKTV] 4. Iframe 페이지 로드 시작 (Referer: $url)")
+            val iframeHtml = app.get(iframeSrc, headers = defaultHeaders, referer = url, interceptor = cfInterceptor).text
             val iframeDoc = Jsoup.parse(iframeHtml)
             
             val rows = iframeDoc.select("tr.ssc-row-candy")
-            println("DEBUG [KKTV] 4. Jsoup 파싱된 경기 개수: ${rows.size}")
+            println("DEBUG [KKTV] 5. 파싱된 경기 개수: ${rows.size}")
 
             if (rows.isNotEmpty()) {
-                // 정상적인 DOM 구조일 경우
                 rows.forEach { row ->
                     val time = row.selectFirst("td.ssc-schedule-td")?.text()?.trim() ?: ""
                     val league = row.selectFirst("td.ssc-league-td")?.text()?.trim() ?: ""
@@ -75,27 +78,17 @@ class KKTVProvider : MainAPI() {
                         val fakeUrl = "$mainUrl/live_stream/dummy?title=$encodedTitle&poster=$encodedPoster&iframe=$encodedIframe"
 
                         items.add(
-                            newLiveSearchResponse(name = title, url = fakeUrl) {
+                            newLiveSearchResponse(
+                                name = title,
+                                url = fakeUrl
+                            ) {
                                 this.posterUrl = posterUrl
                             }
                         )
                     }
                 }
             } else {
-                // [수정 3] Jsoup이 DOM을 못 읽을 경우를 대비한 2중 안전장치 (정규식 강제 추출)
-                println("DEBUG [KKTV] 5. DOM 파싱 실패. 정규식(Regex)으로 강제 추출 시도합니다.")
-                val titleRegex = """title=["']([^"']+\s+vs\s+[^"']+)["']""".toRegex()
-                val titles = titleRegex.findAll(iframeHtml).map { it.groupValues[1] }.distinct().toList()
-                
-                println("DEBUG [KKTV] 6. 정규식 추출된 경기 개수: ${titles.size}")
-                
-                titles.forEach { title ->
-                    val encodedTitle = URLEncoder.encode(title, "UTF-8")
-                    val encodedIframe = URLEncoder.encode(iframeSrc, "UTF-8")
-                    val fakeUrl = "$mainUrl/live_stream/dummy?title=$encodedTitle&iframe=$encodedIframe"
-                    
-                    items.add(newLiveSearchResponse(name = title, url = fakeUrl))
-                }
+                println("DEBUG [KKTV] 🚨 경기 목록이 없습니다. HTML 확인: ${iframeHtml.take(300)}")
             }
         } catch (e: Exception) {
             println("DEBUG [KKTV] 🚨 에러 발생 (getMainPage): ${e.message}")
@@ -136,8 +129,9 @@ class KKTVProvider : MainAPI() {
         val iframeUrl = if (!rawIframe.isNullOrBlank()) URLDecoder.decode(rawIframe, "UTF-8") else return false
 
         try {
-            // 재생 링크를 딸 때도 500 에러 방지를 위해 Referer를 강제합니다.
-            val responseText = app.get(iframeUrl, headers = defaultHeaders, referer = "$mainUrl/bbs/content.php?co_id=livetv9").text
+            // 영상 링크를 추출할 때도 CF 대기 로직을 태웁니다.
+            val cfInterceptor = CloudflareInterceptor()
+            val responseText = app.get(iframeUrl, headers = defaultHeaders, referer = "$mainUrl/bbs/content.php?co_id=livetv9", interceptor = cfInterceptor).text
             
             val m3u8Regex = """(https?://[^"'\s]+?\.m3u8[^"'\s]*)""".toRegex()
             val streamLinks = m3u8Regex.findAll(responseText).map { it.value }.toSet().toList()
