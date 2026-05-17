@@ -3,7 +3,6 @@ package com.kktv
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 
-// 클래스명을 에러 로그의 플러그인에 맞추기 위해 KKTVProvider 로 통일했습니다.
 class KKTVProvider : MainAPI() {
     override var mainUrl = "https://quick-tv.com"
     override var name = "KkTV (빠른티비)"
@@ -40,21 +39,20 @@ class KKTVProvider : MainAPI() {
             val matchIdentifier = homeTeam
             val loadUrl = "$iframeSrc?matchKey=$matchIdentifier"
 
-            // [에러 223 해결] LiveSearchResponse 대신 newLiveSearchResponse 빌더 사용
+            // [수정 1] tvType 파라미터 제거 (기본값이 Live 이므로 생략해야 정상 빌드됨)
             items.add(
                 newLiveSearchResponse(
                     name = title,
-                    url = loadUrl,
-                    tvType = TvType.Live
+                    url = loadUrl
                 ) {
                     this.posterUrl = posterUrl
                 }
             )
         }
 
-        // [에러 225 해결] HomePageResponse 대신 newHomePageResponse 빌더 사용
+        // [수정 2] 파라미터명을 items 가 아닌 list 로 수정
         return newHomePageResponse(
-            items = listOf(HomePageList("실시간 라이브 중계", items)),
+            list = listOf(HomePageList("실시간 라이브 중계", items)),
             hasNext = false
         )
     }
@@ -62,7 +60,6 @@ class KKTVProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val title = url.substringAfter("matchKey=").let { java.net.URLDecoder.decode(it, "UTF-8") }
         
-        // [에러 227 해결] LiveStreamLoadResponse 대신 newLiveStreamLoadResponse 빌더 사용
         return newLiveStreamLoadResponse(
             name = title,
             url = url,
@@ -70,8 +67,6 @@ class KKTVProvider : MainAPI() {
         )
     }
 
-    // [에러 228, 229 해결] loadLinks 오버라이드 에러 
-    // 이유: Cloudstream 최신 버전에서 subtitleCallback과 callback의 순서가 뒤바뀌었습니다!
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -93,16 +88,17 @@ class KKTVProvider : MainAPI() {
                               else if (cleanLink.contains("hudtv")) "채널 2 (FHD)" 
                               else "채널 ${index + 1}"
 
-            // [에러 230 해결] ExtractorLink 대신 newExtractorLink 함수 사용
+            // [수정 3] ExtractorLink 빌더 문법 적용: source, name, url 외의 설정은 {} 안으로 이동
             callback.invoke(
                 newExtractorLink(
                     source = this.name,
                     name = qualityName,
-                    url = cleanLink,
-                    referer = "https://sol7.galaxy-stream.live/",
-                    quality = Qualities.Unknown.value,
-                    isM3u8 = true
-                )
+                    url = cleanLink
+                ) {
+                    this.quality = Qualities.Unknown.value
+                    this.isM3u8 = true
+                    this.headers = mapOf("Referer" to "https://sol7.galaxy-stream.live/")
+                }
             )
         }
         return true
