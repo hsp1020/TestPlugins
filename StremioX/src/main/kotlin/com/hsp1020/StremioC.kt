@@ -1169,7 +1169,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     val currentZeroCount = zeroEpCounterPerSeason.getOrDefault(displaySeason, 0) + 1
                     zeroEpCounterPerSeason[displaySeason] = currentZeroCount
                     maxEpisodePerSeason.getOrDefault(displaySeason, 0) + currentZeroCount
-                    maxEpisodePerSeason[displaySeason] ?: 0
                 } else {
                     val currentMax = maxEpisodePerSeason.getOrDefault(displaySeason, 0)
                     if (originalEpisode > currentMax) maxEpisodePerSeason[displaySeason] = originalEpisode
