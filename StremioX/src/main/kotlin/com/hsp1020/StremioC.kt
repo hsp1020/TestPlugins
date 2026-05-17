@@ -929,10 +929,12 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                    (finalVideos?.size == 1 && (finalVideos[0].seasonNumber ?: 0) == 0 && (finalVideos[0].episode ?: finalVideos[0].number ?: 0) == 0)
         }
 
+        // v1.1 - 원본 데이터 무손실 유지 및 구조적 4-way 동시 병렬화 최적화 프로토콜
         private suspend fun fetchTmdbDetails(
             provider: StremioC, tmdbMediaType: String, tmdbIdStr: String, isMovie: Boolean, finalImdbId: String?,
             stremioType: String?, targetVideos: List<Video>?, preFetchedDetail: TmdbDetailResponse? = null
         ): FetchedTmdbData {
+            println("StremioC v1.1: fetchTmdbDetails 시작 - ID: $tmdbIdStr")
             var fetchedRecommendations: List<SearchResponse>? = null
             
             val detailRes = preFetchedDetail ?: run {
@@ -942,6 +944,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
             
             if (detailRes == null) {
+                println("StremioC v1.1: detailRes 결과 공백 수집")
                 return FetchedTmdbData(null, null, null, emptyList(), null, null, null, null, null, null, emptyMap(), emptyList(), null, null)
             }
 
@@ -952,7 +955,40 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 media != null && ((targetCountry != null && media.origin_country?.contains(targetCountry) == true) || (targetLanguage != null && media.original_language == targetLanguage)) 
             }
 
+            // 동시성 레이스 컨디션 차단을 위한 스레드 세이프 컬렉션 구조 전환
+            val episodeTmdbMeta = ConcurrentHashMap<String, TmdbEpisode>()
+
             coroutineScope {
+                // [논리 최적화 1]: 데이터 의존성이 없는 에피소드 수집 로직을 최상위 스코프로 인상하여 완전 비동기 병렬화
+                val shouldFetchEpisodes = (!isMovie && targetVideos.isNullOrEmpty()) || (stremioType == "other" && !isMovie)
+                val episodeDeferred = if (shouldFetchEpisodes) {
+                    println("StremioC v1.1: 에피소드 데이터 비동기 병렬 페칭 트리거")
+                    var requiredSeasons = targetVideos?.mapNotNull { it.seasonNumber }?.filter { it > 0 }?.distinct() ?: emptyList()
+                    if (requiredSeasons.isEmpty()) {
+                        val totalSeasons = detailRes.number_of_seasons ?: 1
+                        requiredSeasons = if (totalSeasons > 0) (1..totalSeasons).toList() else listOf(1)
+                    }
+                    
+                    async(Dispatchers.IO) {
+                        requiredSeasons.map { seasonNum ->
+                            async(Dispatchers.IO) {
+                                StremioC.networkSemaphore.withPermit {
+                                    withTimeoutOrNull(10000L) {
+                                        runSuspendCatching {
+                                            val seasonRes = StremioC.customSession.get(provider.buildTmdbUrl("/tv/$tmdbIdStr/season/$seasonNum")).parsedSafe<TmdbSeasonDetail>()
+                                            seasonRes?.episodes?.forEach { ep -> if (ep.episodeNumber != null) episodeTmdbMeta["${seasonNum}_${ep.episodeNumber}"] = ep }
+                                        }
+                                    }
+                                }
+                            }
+                        }.awaitAll()
+                    }
+                } else {
+                    println("StremioC v1.1: 에피소드 대상 없음 - 스킵 처리")
+                    null
+                }
+
+                // [논리 최적화 2]: Trakt, Simkl 가동과 동시에 TMDB 컬렉션까지 3대 추천 소스를 완전 동시 병렬화
                 val traktDeferred = async(Dispatchers.IO) {
                     if (validImdbId == null || TRAKT_CLIENT_ID.isEmpty()) return@async emptyList<Pair<Int, String>>()
                     val traktMediaType = if (tmdbMediaType == "movie") "movies" else "shows"
@@ -1009,15 +1045,19 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     }.getOrDefault(emptyList())
                 }
 
-                val collectionParts = if (isMovie && detailRes.belongs_to_collection?.id != null) {
-                    runSuspendCatching {
-                        val colUrl = provider.buildTmdbUrl("/collection/${detailRes.belongs_to_collection.id}")
-                        StremioC.customSession.get(colUrl).parsedSafe<TmdbCollectionDetail>()?.parts ?: emptyList()
-                    }.getOrDefault(emptyList())
-                } else emptyList()
+                // 동기식 블로킹 구조에서 비동기 선행 패칭 구조로 교정
+                val collectionDeferred = async(Dispatchers.IO) {
+                    if (isMovie && detailRes.belongs_to_collection?.id != null) {
+                        runSuspendCatching {
+                            val colUrl = provider.buildTmdbUrl("/collection/${detailRes.belongs_to_collection.id}")
+                            StremioC.customSession.get(colUrl).parsedSafe<TmdbCollectionDetail>()?.parts ?: emptyList()
+                        }.getOrDefault(emptyList())
+                    } else emptyList()
+                }
 
                 val traktResults = traktDeferred.await()
                 val simklResults = simklDeferred.await()
+                val collectionParts = collectionDeferred.await()
                 
                 val tmdbRecs = detailRes.recommendations?.results ?: emptyList()
                 val tmdbRecsIds = tmdbRecs.mapNotNull { it.id }.toSet()
@@ -1028,9 +1068,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     .flatten()
                     .distinctBy { it.first }
                     .filter { it.first !in existingTmdbIds && it.first != tmdbIdStr.toIntOrNull() }
-                    .toList()
+                    .toList() // 요구사항에 의거 데이터 유실 전면 차단 (가져오던 기존 범위 100% 무손실 보존)
 
-                // [수정: 데드락 방지] Timeout을 명시적으로 부여하여 Semaphore 회수를 보장
                 val missingMediaDeferred = missingPairs.map { pair ->
                     async(Dispatchers.IO) {
                         StremioC.networkSemaphore.withPermit {
@@ -1080,6 +1119,10 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     val thinData = LoadData(id = "tmdb:${media.id}", type = outType)
                     provider.newMovieSearchResponse(recTitle, thinData.toJson(), if (outType == "movie") TvType.Movie else TvType.TvSeries) { this.posterUrl = customPosterUrl }
                 }
+
+                // 최상위 컨텍스트 탈출 직전 병렬 구동 중이던 에피소드 비동기 스레드의 동기화 대기 처리 완결
+                episodeDeferred?.await()
+                println("StremioC v1.1: 전체 비동기 병렬 연산 무손실 동기화 완결")
             }
 
             val fetchedAgeRating = if (isMovie) {
