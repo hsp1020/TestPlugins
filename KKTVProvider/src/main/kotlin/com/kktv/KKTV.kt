@@ -3,18 +3,20 @@ package com.kktv
 import android.net.Uri
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.network.CloudflareInterceptor
+import com.lagradost.cloudstream3.network.WebViewResolver
 import org.jsoup.Jsoup
 import java.net.URLDecoder
 import java.net.URLEncoder
+import kotlinx.coroutines.delay
 
 class KKTVProvider : MainAPI() {
     override var mainUrl = "https://quick-tv.com"
-    override var name = "KkTV"
+    override var name = "KkTV (빠른티비)"
     override val supportedTypes = setOf(TvType.Live)
     override var lang = "ko"
     override val hasMainPage = true
 
+    // 사용자님 지시대로 무조건 이 주소로 들어갑니다.
     override val mainPage = mainPageOf(
         "/bbs/content.php?co_id=livetv9" to "실시간 스포츠 중계"
     )
@@ -35,60 +37,62 @@ class KKTVProvider : MainAPI() {
         try {
             println("DEBUG [KKTV] 1. 메인 페이지 로드 시작: $url")
             
-            // [핵심 수정] 사용자님 지시대로 대기 시간을 가지며 CF를 뚫어주는 전용 인터셉터 사용
-            val cfInterceptor = CloudflareInterceptor()
-            val doc = app.get(url, headers = defaultHeaders, interceptor = cfInterceptor).document
+            // 웹뷰리졸버 실행
+            var doc = app.get(url, headers = defaultHeaders, interceptor = WebViewResolver(Regex("""quick-tv\.com"""))).document
+            var retries = 0
             
-            println("DEBUG [KKTV] 2. 메인 페이지 응답 타이틀: [${doc.title()}]")
+            // [핵심 로직] 사용자님 지시대로 대기시간을 줍니다.
+            // CF 챌린지 화면(Just a moment)이 뜨면 3초 대기 후 다시 웹뷰를 열어 쿠키를 획득합니다.
+            while ((doc.title().contains("Just a moment") || doc.title().contains("Cloudflare")) && retries < 5) {
+                println("DEBUG [KKTV] 🚨 클라우드플레어 감지됨. 30초 대기 후 웹뷰리졸버 재실행... (${retries + 1}/5)")
+                delay(30000) // 3초 대기
+                doc = app.get(url, headers = defaultHeaders, interceptor = WebViewResolver(Regex("""quick-tv\.com"""))).document
+                retries++
+            }
+            
+            println("DEBUG [KKTV] 2. 메인 페이지 최종 응답 타이틀: [${doc.title()}]")
 
-            var iframeSrc = doc.selectFirst("div#player_field iframe")?.attr("src")
+            // 메인 페이지에서 Iframe 주소 추출 (Fallback 없이 무조건 여기서 찾습니다)
+            val iframeSrc = doc.selectFirst("div#player_field iframe")?.attr("src")
                 ?: doc.selectFirst("iframe[src*='galaxy-stream']")?.attr("src")
                 ?: doc.selectFirst("iframe[src*='hudtv']")?.attr("src")
 
             if (iframeSrc.isNullOrBlank()) {
-                iframeSrc = "https://sol7.galaxy-stream.live/cli/box"
-                println("DEBUG [KKTV] 3. Iframe 추출 실패. Fallback 주소 사용: $iframeSrc")
-            } else {
-                println("DEBUG [KKTV] 3. 정상 추출된 Iframe 주소: $iframeSrc")
+                println("DEBUG [KKTV] 🚨 메인 페이지에서 Iframe을 찾지 못했습니다. 사이트 구조 변경 의심.")
+                return newHomePageResponse(request.name, emptyList())
             }
 
-            // Iframe 서버도 CF 검사를 할 수 있으므로 동일하게 대기 인터셉터 적용 + 500 에러 방지용 Referer
-            println("DEBUG [KKTV] 4. Iframe 페이지 로드 시작 (Referer: $url)")
-            val iframeHtml = app.get(iframeSrc, headers = defaultHeaders, referer = url, interceptor = cfInterceptor).text
+            println("DEBUG [KKTV] 3. 정상 추출된 Iframe 주소: $iframeSrc")
+
+            // Iframe 호출 (500 에러 방지를 위해 Referer 필수)
+            val iframeHtml = app.get(iframeSrc, headers = defaultHeaders, referer = url).text
             val iframeDoc = Jsoup.parse(iframeHtml)
             
             val rows = iframeDoc.select("tr.ssc-row-candy")
-            println("DEBUG [KKTV] 5. 파싱된 경기 개수: ${rows.size}")
+            println("DEBUG [KKTV] 4. 파싱된 경기 개수: ${rows.size}")
 
-            if (rows.isNotEmpty()) {
-                rows.forEach { row ->
-                    val time = row.selectFirst("td.ssc-schedule-td")?.text()?.trim() ?: ""
-                    val league = row.selectFirst("td.ssc-league-td")?.text()?.trim() ?: ""
-                    val homeTeam = row.selectFirst("span.ssc-title-team-1-text")?.text()?.trim() ?: ""
-                    val awayTeam = row.selectFirst("span.ssc-title-team-2-text")?.text()?.trim() ?: ""
+            rows.forEach { row ->
+                val time = row.selectFirst("td.ssc-schedule-td")?.text()?.trim() ?: ""
+                val league = row.selectFirst("td.ssc-league-td")?.text()?.trim() ?: ""
+                val homeTeam = row.selectFirst("span.ssc-title-team-1-text")?.text()?.trim() ?: ""
+                val awayTeam = row.selectFirst("span.ssc-title-team-2-text")?.text()?.trim() ?: ""
+                
+                if (homeTeam.isNotBlank()) {
+                    val title = "[$league] $homeTeam vs $awayTeam ($time)"
+                    val posterUrl = row.selectFirst("img.ssc-thumbnail-icon")?.attr("src") ?: ""
+
+                    val encodedTitle = URLEncoder.encode(title, "UTF-8")
+                    val encodedPoster = URLEncoder.encode(posterUrl, "UTF-8")
+                    val encodedIframe = URLEncoder.encode(iframeSrc, "UTF-8")
                     
-                    if (homeTeam.isNotBlank()) {
-                        val title = "[$league] $homeTeam vs $awayTeam ($time)"
-                        val posterUrl = row.selectFirst("img.ssc-thumbnail-icon")?.attr("src") ?: ""
+                    val fakeUrl = "$mainUrl/live_stream/dummy?title=$encodedTitle&poster=$encodedPoster&iframe=$encodedIframe"
 
-                        val encodedTitle = URLEncoder.encode(title, "UTF-8")
-                        val encodedPoster = URLEncoder.encode(posterUrl, "UTF-8")
-                        val encodedIframe = URLEncoder.encode(iframeSrc, "UTF-8")
-                        
-                        val fakeUrl = "$mainUrl/live_stream/dummy?title=$encodedTitle&poster=$encodedPoster&iframe=$encodedIframe"
-
-                        items.add(
-                            newLiveSearchResponse(
-                                name = title,
-                                url = fakeUrl
-                            ) {
-                                this.posterUrl = posterUrl
-                            }
-                        )
-                    }
+                    items.add(
+                        newLiveSearchResponse(name = title, url = fakeUrl) {
+                            this.posterUrl = posterUrl
+                        }
+                    )
                 }
-            } else {
-                println("DEBUG [KKTV] 🚨 경기 목록이 없습니다. HTML 확인: ${iframeHtml.take(300)}")
             }
         } catch (e: Exception) {
             println("DEBUG [KKTV] 🚨 에러 발생 (getMainPage): ${e.message}")
@@ -129,9 +133,8 @@ class KKTVProvider : MainAPI() {
         val iframeUrl = if (!rawIframe.isNullOrBlank()) URLDecoder.decode(rawIframe, "UTF-8") else return false
 
         try {
-            // 영상 링크를 추출할 때도 CF 대기 로직을 태웁니다.
-            val cfInterceptor = CloudflareInterceptor()
-            val responseText = app.get(iframeUrl, headers = defaultHeaders, referer = "$mainUrl/bbs/content.php?co_id=livetv9", interceptor = cfInterceptor).text
+            // 영상 링크를 딸 때도 500 에러 방지를 위해 Referer를 강제합니다.
+            val responseText = app.get(iframeUrl, headers = defaultHeaders, referer = "$mainUrl/bbs/content.php?co_id=livetv9").text
             
             val m3u8Regex = """(https?://[^"'\s]+?\.m3u8[^"'\s]*)""".toRegex()
             val streamLinks = m3u8Regex.findAll(responseText).map { it.value }.toSet().toList()
