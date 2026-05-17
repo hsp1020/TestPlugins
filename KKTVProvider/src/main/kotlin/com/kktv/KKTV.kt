@@ -1,3 +1,4 @@
+// v1.1 - DESKTOP_UA unresolved reference 수정
 // v7.8 - 텔레그램 채널(t.me/s/kktvinfo) 기반 동적 도메인 파싱 추가 및 기존 포털 로직 Fallback 강등
 package com.KingkongTv
 
@@ -18,7 +19,6 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
-
 
 class KingkongTv : MainAPI() {
     // 기본값으로 설정해두지만, 실행 시 updateMainUrlIfNeeded()에 의해 동적으로 변경됩니다.
@@ -294,7 +294,7 @@ class KingkongTv : MainAPI() {
                         javaScriptEnabled = true
                         domStorageEnabled = true
                         mediaPlaybackRequiresUserGesture = false 
-                        userAgentString = DESKTOP_UA
+                        userAgentString = userAgent // [Fix] DESKTOP_UA 대신 클래스 내부 정의된 userAgent 변수 참조로 변경
                         mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                     }
 
@@ -349,7 +349,7 @@ class KingkongTv : MainAPI() {
             val headers = reqHeaders.toMutableMap()
             
             if (headers.keys.none { it.equals("User-Agent", ignoreCase = true) }) {
-                headers["User-Agent"] = DESKTOP_UA
+                headers["User-Agent"] = userAgent // [Fix] DESKTOP_UA 대신 클래스 내부 정의된 userAgent 변수 참조로 변경
             }
             
             headers["Referer"] = "https://wdbroad.com/"
