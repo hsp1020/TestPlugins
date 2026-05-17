@@ -92,10 +92,10 @@ class KKTVProvider : MainAPI() {
                     name = qualityName,
                     url = cleanLink
                 ) {
-                    this.quality = Qualities.Unknown.value
+                    // 에러가 나던 quality 할당 부분은 삭제했습니다. (어차피 기본값이 Unknown으로 들어갑니다)
                     this.isM3u8 = true
-                    // [핵심 수정] headers는 val 이므로 = 로 덮어씌우지 않고 배열처럼 값을 넣어줍니다.
-                    this.headers["Referer"] = "https://sol7.galaxy-stream.live/"
+                    // 에러가 나던 headers 삽입 방식을 통째로 덮어씌우는 방식으로 변경했습니다.
+                    this.headers = mapOf("Referer" to "https://sol7.galaxy-stream.live/")
                 }
             )
         }
