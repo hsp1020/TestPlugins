@@ -3,6 +3,7 @@ package com.kktv
 import android.net.Uri
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.network.WebViewResolver
 import java.net.URLDecoder
 import java.net.URLEncoder
 
@@ -49,11 +50,19 @@ class CUTVProvider : MainAPI() {
                 val jsonData = matchResult.groupValues[1]
                 val matches = AppUtils.parseJson<List<Map<String, String>>>(jsonData)
                 
-                // [디버깅] 만약 JSON을 찾았는데도 목록이 비어있다면 HTML을 덤프합니다.
-                if (matches.isEmpty()) {
-                    println("DEBUG [CUTV] 🚨 JSON 데이터는 찾았으나 경기 목록이 0개입니다. HTML 전체 덤프 시작:")
-                    iframeHtml.chunked(3000).forEachIndexed { index, chunk ->
-                        println("DEBUG [CUTV] HTML_DUMP_$index: $chunk")
+                // 썸네일 서버(lux1.hudtv01.com)의 클라우드플레어 방어를 뚫기 위한 사전 작업
+                val firstThumbId = matches.firstOrNull { it["ssid"]?.isNotBlank() == true }?.get("ssid")
+                if (firstThumbId != null) {
+                    try {
+                        val testImgUrl = "https://lux1.hudtv01.com/thumbs/$firstThumbId.jpg"
+                        app.get(
+                            testImgUrl, 
+                            headers = defaultHeaders, 
+                            referer = iframeSrc, 
+                            interceptor = WebViewResolver(Regex("""lux1\.hudtv01\.com"""))
+                        )
+                    } catch (e: Exception) {
+                        println("DEBUG [CUTV] ⚠️ 썸네일 서버 CF 뚫기 실패: ${e.message}")
                     }
                 }
 
@@ -68,7 +77,7 @@ class CUTVProvider : MainAPI() {
                     // 방송시청 버튼이 있는(surl이 존재하는) 경기만 필터링
                     if (ssid.isNotBlank() && name.isNotBlank() && (surl1.isNotBlank() || surl2.isNotBlank() || surl3.isNotBlank())) {
                         
-                        // [핵심 1] 사용자님 지시대로 종목명과 시간 아예 삭제. 오직 경기 이름만 사용.
+                        // 종목명, 시간 삭제 (오직 경기 이름만)
                         val title = name 
                         
                         val srcy = match["srcy"] ?: ""
@@ -84,30 +93,22 @@ class CUTVProvider : MainAPI() {
                         items.add(
                             newLiveSearchResponse(name = title, url = fakeUrl) {
                                 this.posterUrl = posterUrl
-                                // [핵심 2] 썸네일 차단 방지를 위해 브라우저와 완벽히 동일한 이미지 요청 헤더 세팅
                                 this.posterHeaders = mapOf(
                                     "Referer" to iframeSrc,
-                                    "User-Agent" to userAgent,
-                                    "Accept" to "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+                                    "User-Agent" to userAgent
                                 )
                             }
                         )
                     }
                 }
-            } else {
-                // [디버깅] JSON 자체를 못 찾았을 경우 서버가 뱉은 HTML 전체 덤프
-                println("DEBUG [CUTV] 🚨 JSON 데이터를 찾을 수 없습니다. HTML 전체 덤프 시작:")
-                iframeHtml.chunked(3000).forEachIndexed { index, chunk ->
-                    println("DEBUG [CUTV] HTML_DUMP_$index: $chunk")
-                }
             }
         } catch (e: Exception) {
-            println("DEBUG [CUTV] 🚨 에러 발생: ${e.message}")
             e.printStackTrace()
         }
 
+        // [핵심 수정] isHorizontalImages = true 속성을 추가하여 썸네일을 가로형(Landscape)으로 꽉 차게 표시합니다!
         return newHomePageResponse(
-            list = listOf(HomePageList(request.name, items)),
+            list = listOf(HomePageList(request.name, items, isHorizontalImages = true)),
             hasNext = false
         )
     }
@@ -131,8 +132,7 @@ class CUTVProvider : MainAPI() {
             this.posterUrl = posterUrl
             this.posterHeaders = mapOf(
                 "Referer" to iframeUrl,
-                "User-Agent" to userAgent,
-                "Accept" to "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+                "User-Agent" to userAgent
             )
         }
     }
