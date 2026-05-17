@@ -44,7 +44,7 @@ class KKTVProvider : MainAPI() {
             // [핵심 로직] 사용자님 지시대로 대기시간을 줍니다.
             // CF 챌린지 화면(Just a moment)이 뜨면 3초 대기 후 다시 웹뷰를 열어 쿠키를 획득합니다.
             while ((doc.title().contains("Just a moment") || doc.title().contains("Cloudflare")) && retries < 5) {
-                println("DEBUG [KKTV] 🚨 클라우드플레어 감지됨. 30초 대기 후 웹뷰리졸버 재실행... (${retries + 1}/5)")
+                println("DEBUG [KKTV] 🚨 클라우드플레어 감지됨. 5초 대기 후 웹뷰리졸버 재실행... (${retries + 1}/5)")
                 delay(5000) // 3초 대기
                 doc = app.get(url, headers = defaultHeaders, interceptor = WebViewResolver(Regex("""quick-tv\.com"""))).document
                 retries++
