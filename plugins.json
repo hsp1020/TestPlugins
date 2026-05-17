@@ -129,10 +129,10 @@
     },
     {
         "iconUrl": "https://res.sooplive.com/images/svg/soop_logo.svg",
-        "fileHash": "sha256-c0e499c965759410c5f1076964f57400fff37b64784008b4462a9c9494d29221",
+        "fileHash": "sha256-95461f20bd57b3630a98cb4f4507d9ad3ebb92fa4188552483a5a7d83d1ef87e",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 12773,
+        "fileSize": 12884,
         "status": 1,
         "language": "ko",
         "authors": [
