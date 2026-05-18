@@ -557,6 +557,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
         val loadRes = res.toLoadResponse(
             provider = this@StremioC, 
+            originalUrl = url,
             imdbId = finalProcessedId, 
             addonDeferred = addonDeferred, 
             preFetchedDetail = preFetchedTmdbDetail, 
@@ -1203,6 +1204,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
         suspend fun toLoadResponse(
             provider: StremioC, 
+            originalUrl: String,
             imdbId: String?, 
             addonDeferred: Deferred<CatalogEntry?>?, 
             preFetchedDetail: TmdbDetailResponse? = null, 
@@ -1334,7 +1336,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
             if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
                 return@coroutineScope provider.newMovieLoadResponse(
-                    finalName, "${provider.mainUrl}/meta/${finalType ?: "movie"}/${this@CatalogEntry.id}.json", finalMovieType, 
+                    finalName, originalUrl, finalMovieType, 
                     LoadData(
                         type = finalType, 
                         id = movieId, 
@@ -1351,7 +1353,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         kitsuId = this@CatalogEntry.kitsuIdExt,
                         originalTitle = tmdbData?.fetchedOriginalTitle,
                         englishTitle = tmdbData?.fetchedEnglishTitle
-                    )
+                    ).toJson()
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
                     this.plot = finalDescription
@@ -1373,7 +1375,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             } else {
                 val finalEpisodes = processEpisodes(provider, cleanImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, cleanTmdbId?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, finalAniId, finalMalId, this@CatalogEntry.kitsuIdExt)
                 return@coroutineScope provider.newTvSeriesLoadResponse(
-                    finalName, "${provider.mainUrl}/meta/${finalType ?: "series"}/${this@CatalogEntry.id}.json", finalSeriesType, finalEpisodes
+                    finalName, originalUrl, finalSeriesType, finalEpisodes
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
                     this.showStatus = tmdbData?.fetchedStatus 
