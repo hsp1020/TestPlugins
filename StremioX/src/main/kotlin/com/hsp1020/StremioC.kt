@@ -577,6 +577,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
+    
         // [CORE BUG FIX]: Duplicate URL-keyed header caches to ID-keyed caches
         // to prevent the core player's DataStoreHelper from overwriting them with hollow shells and breaking the season UI.
         runSuspendCatching {
@@ -1170,13 +1171,15 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         private fun processEpisodes(provider: StremioC, finalImdbId: String?, episodeTmdbMeta: Map<String, TmdbEpisode>, targetVideos: List<Video>?, type: String?, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, originalTitle: String?, englishTitle: String?, aniListId: Int?, malId: Int?, kitsuId: String?): List<Episode> {
             val videos = targetVideos ?: emptyList()
             val sortedVideos = videos.groupBy { Pair(it.seasonNumber ?: 0, it.episode ?: it.number ?: 0) }.flatMap { (_, group) -> group.sortedBy { it.title ?: it.name ?: "" } }
+            val maxRegularSeason = sortedVideos.mapNotNull { it.seasonNumber }.filter { it > 0 }.maxOrNull() ?: 0
+            val targetSeasonForZero = maxRegularSeason + 1
             
             val maxEpisodePerSeason = mutableMapOf<Int, Int>()
             val zeroEpCounterPerSeason = mutableMapOf<Int, Int>()
             val uniqueEpisodeChecker = mutableSetOf<String>()
 
             return sortedVideos.map { video ->
-                val displaySeason = video.seasonNumber ?: 0
+                val displaySeason = if ((video.seasonNumber ?: 0) == 0) targetSeasonForZero else (video.seasonNumber ?: 0)
                 val originalEpisode = video.episode ?: video.number ?: 0
                 
                 var displayEpisode = if (originalEpisode == 0) {
@@ -1386,15 +1389,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
             } else {
                 val finalEpisodes = processEpisodes(provider, cleanImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, cleanTmdbId?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, finalAniId, finalMalId, this@CatalogEntry.kitsuIdExt)
-                
-                val extractedSeasonNames = finalEpisodes.mapNotNull { it.season }.distinct().sorted().map { s ->
-                    com.lagradost.cloudstream3.SeasonData(s, if (s == 0) "Specials" else "Season $s")
-                }
-                
                 return@coroutineScope provider.newTvSeriesLoadResponse(
                     finalName, "${provider.mainUrl}/meta/${finalType ?: "series"}/${this@CatalogEntry.id}.json", finalSeriesType, finalEpisodes
                 ) {
-                    this.seasonNames = extractedSeasonNames
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
                     this.showStatus = tmdbData?.fetchedStatus 
                     this.plot = finalDescription
