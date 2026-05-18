@@ -1334,7 +1334,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val finalMovieType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.AnimeMovie else TvType.Movie
             val finalSeriesType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.Anime else TvType.TvSeries
 
-            if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
+            val isExplicitlyMovie = finalType == "movie" || isSingleMovie(finalType, finalVideos)
+
+            if (isExplicitlyMovie) {
                 return@coroutineScope provider.newMovieLoadResponse(
                     finalName, originalUrl, finalMovieType, 
                     LoadData(
@@ -1361,7 +1363,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     this.tags = finalGenre
                     this.recommendations = tmdbData?.fetchedRecommendations 
                     addTrailer(finalTrailers); this.duration = tmdbData?.fetchedRuntime; this.contentRating = tmdbData?.fetchedAgeRating
-                    tmdbData?.fetchedLogo?.let { this.logoUrl = it }
+                    try { tmdbData?.fetchedLogo?.let { this.logoUrl = it } } catch(_:Throwable){}
 
                     val validImdb = cleanImdbId?.takeIf { it.startsWith("tt") }
                     validImdb?.let { addImdbId(it) }
@@ -1373,18 +1375,20 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     finalAniId?.let { addAniListId(it) }
                 }
             } else {
-                val finalEpisodes = processEpisodes(provider, cleanImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, cleanTmdbId?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, finalAniId, finalMalId, this@CatalogEntry.kitsuIdExt)
+                val safeVideos = finalVideos ?: emptyList()
+                val finalEpisodes = processEpisodes(provider, cleanImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), safeVideos, finalType, finalName, cleanTmdbId?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, finalAniId, finalMalId, this@CatalogEntry.kitsuIdExt)
+                
                 return@coroutineScope provider.newTvSeriesLoadResponse(
                     finalName, originalUrl, finalSeriesType, finalEpisodes
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
-                    this.showStatus = tmdbData?.fetchedStatus 
+                    this.showStatus = tmdbData?.fetchedStatus ?: ShowStatus.Ongoing
                     this.plot = finalDescription
-                    this.actors = tmdbData?.fetchedActors
+                    this.actors = tmdbData?.fetchedActors ?: emptyList()
                     this.tags = finalGenre
                     this.recommendations = tmdbData?.fetchedRecommendations
                     addTrailer(finalTrailers.firstOrNull()); this.contentRating = tmdbData?.fetchedAgeRating
-                    tmdbData?.fetchedLogo?.let { this.logoUrl = it }
+                    try { tmdbData?.fetchedLogo?.let { this.logoUrl = it } } catch(_:Throwable){}
                     
                     val validImdb = cleanImdbId?.takeIf { it.startsWith("tt") }
                     validImdb?.let { addImdbId(it) }
@@ -1394,7 +1398,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     
                     finalMalId?.let { addMalId(it) }
                     finalAniId?.let { addAniListId(it) }
-                    this.totalSeasons = finalEpisodes.mapNotNull { it.season }.maxOrNull() ?: 1
                 }
             }
         }
