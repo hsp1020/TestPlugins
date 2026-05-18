@@ -557,7 +557,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
         val loadRes = res.toLoadResponse(
             provider = this@StremioC, 
-            originalUrl = url,
             imdbId = finalProcessedId, 
             addonDeferred = addonDeferred, 
             preFetchedDetail = preFetchedTmdbDetail, 
@@ -1155,15 +1154,13 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         private fun processEpisodes(provider: StremioC, finalImdbId: String?, episodeTmdbMeta: Map<String, TmdbEpisode>, targetVideos: List<Video>?, type: String?, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, originalTitle: String?, englishTitle: String?, aniListId: Int?, malId: Int?, kitsuId: String?): List<Episode> {
             val videos = targetVideos ?: emptyList()
             val sortedVideos = videos.groupBy { Pair(it.seasonNumber ?: 0, it.episode ?: it.number ?: 0) }.flatMap { (_, group) -> group.sortedBy { it.title ?: it.name ?: "" } }
-            val maxRegularSeason = sortedVideos.mapNotNull { it.seasonNumber }.filter { it > 0 }.maxOrNull() ?: 0
-            val targetSeasonForZero = maxRegularSeason + 1
             
             val maxEpisodePerSeason = mutableMapOf<Int, Int>()
             val zeroEpCounterPerSeason = mutableMapOf<Int, Int>()
             val uniqueEpisodeChecker = mutableSetOf<String>()
 
             return sortedVideos.map { video ->
-                val displaySeason = if ((video.seasonNumber ?: 0) == 0) targetSeasonForZero else (video.seasonNumber ?: 0)
+                val displaySeason = video.seasonNumber ?: 0
                 val originalEpisode = video.episode ?: video.number ?: 0
                 
                 var displayEpisode = if (originalEpisode == 0) {
@@ -1204,7 +1201,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
         suspend fun toLoadResponse(
             provider: StremioC, 
-            originalUrl: String,
             imdbId: String?, 
             addonDeferred: Deferred<CatalogEntry?>?, 
             preFetchedDetail: TmdbDetailResponse? = null, 
@@ -1334,11 +1330,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val finalMovieType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.AnimeMovie else TvType.Movie
             val finalSeriesType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.Anime else TvType.TvSeries
 
-            val isExplicitlyMovie = finalType == "movie" || isSingleMovie(finalType, finalVideos)
-
-            if (isExplicitlyMovie) {
+            if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
                 return@coroutineScope provider.newMovieLoadResponse(
-                    finalName, originalUrl, finalMovieType, 
+                    finalName, "${provider.mainUrl}/meta/${finalType ?: "movie"}/${this@CatalogEntry.id}.json", finalMovieType, 
                     LoadData(
                         type = finalType, 
                         id = movieId, 
@@ -1355,7 +1349,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         kitsuId = this@CatalogEntry.kitsuIdExt,
                         originalTitle = tmdbData?.fetchedOriginalTitle,
                         englishTitle = tmdbData?.fetchedEnglishTitle
-                    ).toJson()
+                    )
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
                     this.plot = finalDescription
@@ -1363,7 +1357,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     this.tags = finalGenre
                     this.recommendations = tmdbData?.fetchedRecommendations 
                     addTrailer(finalTrailers); this.duration = tmdbData?.fetchedRuntime; this.contentRating = tmdbData?.fetchedAgeRating
-                    try { tmdbData?.fetchedLogo?.let { this.logoUrl = it } } catch(_:Throwable){}
+                    tmdbData?.fetchedLogo?.let { this.logoUrl = it }
 
                     val validImdb = cleanImdbId?.takeIf { it.startsWith("tt") }
                     validImdb?.let { addImdbId(it) }
@@ -1375,20 +1369,24 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     finalAniId?.let { addAniListId(it) }
                 }
             } else {
-                val safeVideos = finalVideos ?: emptyList()
-                val finalEpisodes = processEpisodes(provider, cleanImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), safeVideos, finalType, finalName, cleanTmdbId?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, finalAniId, finalMalId, this@CatalogEntry.kitsuIdExt)
+                val finalEpisodes = processEpisodes(provider, cleanImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, cleanTmdbId?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, finalAniId, finalMalId, this@CatalogEntry.kitsuIdExt)
+                
+                val extractedSeasonNames = finalEpisodes.mapNotNull { it.season }.distinct().sorted().map { s ->
+                    com.lagradost.cloudstream3.SeasonData(s, if (s == 0) "Specials" else "Season $s")
+                }
                 
                 return@coroutineScope provider.newTvSeriesLoadResponse(
-                    finalName, originalUrl, finalSeriesType, finalEpisodes
+                    finalName, "${provider.mainUrl}/meta/${finalType ?: "series"}/${this@CatalogEntry.id}.json", finalSeriesType, finalEpisodes
                 ) {
+                    this.seasonNames = extractedSeasonNames
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
-                    this.showStatus = tmdbData?.fetchedStatus ?: ShowStatus.Ongoing
+                    this.showStatus = tmdbData?.fetchedStatus 
                     this.plot = finalDescription
-                    this.actors = tmdbData?.fetchedActors ?: emptyList()
+                    this.actors = tmdbData?.fetchedActors
                     this.tags = finalGenre
                     this.recommendations = tmdbData?.fetchedRecommendations
                     addTrailer(finalTrailers.firstOrNull()); this.contentRating = tmdbData?.fetchedAgeRating
-                    try { tmdbData?.fetchedLogo?.let { this.logoUrl = it } } catch(_:Throwable){}
+                    tmdbData?.fetchedLogo?.let { this.logoUrl = it }
                     
                     val validImdb = cleanImdbId?.takeIf { it.startsWith("tt") }
                     validImdb?.let { addImdbId(it) }
