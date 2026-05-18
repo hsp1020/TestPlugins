@@ -577,6 +577,22 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
+        // [CORE BUG FIX]: Duplicate URL-keyed header caches to ID-keyed caches
+        // to prevent the core player's DataStoreHelper from overwriting them with hollow shells and breaking the season UI.
+        runSuspendCatching {
+            val keys = CloudStreamApp.getKeys("download_header_cache") ?: emptyList()
+            for (fullKey in keys) {
+                val realKey = fullKey.removePrefix("download_header_cache/")
+                if (realKey.isNotEmpty() && !realKey.all { it.isDigit() || it == '-' }) {
+                    val entry = CloudStreamApp.getKey<Map<String, Any>>("download_header_cache", realKey)
+                    val entryId = entry?.get("id")?.toString()
+                    if (entryId != null) {
+                        CloudStreamApp.setKey("download_header_cache", entryId, entry)
+                    }
+                }
+            }
+        }
+
         val loadData = try { parseJson<LoadData>(data) } catch (e: Exception) { null } ?: return false
         
         val primaryId = if (loadData.id?.startsWith("tmdb:") == true && !loadData.imdbId.isNullOrBlank()) {
