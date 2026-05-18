@@ -1394,6 +1394,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     
                     finalMalId?.let { addMalId(it) }
                     finalAniId?.let { addAniListId(it) }
+                    this.totalSeasons = finalEpisodes.mapNotNull { it.season }.maxOrNull() ?: 1
                 }
             }
         }
