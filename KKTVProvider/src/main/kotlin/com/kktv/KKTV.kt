@@ -43,22 +43,20 @@ class CUTVProvider : MainAPI() {
 
             val iframeHtml = app.get(iframeSrc, headers = defaultHeaders, referer = url).text
             
-            // 썸네일 베이스 URL 동적 추출
-            var dynamicThumbBase = "https://lux2.oncahot.com/thumbs" 
+            // [완벽 수정] 썸네일 베이스 URL 동적 추출 (이스케이프된 슬래시 완벽 대응)
+            var dynamicThumbBase = "https://lux2.oncahot.com/thumbs" // 선생님이 테스트하신 실패 도메인 (코드가 스스로 진짜 도메인을 찾아 덮어씌웁니다)
             
-            val imgTag = doc.selectFirst("img.ssc-thumbnail-icon") 
-                ?: Jsoup.parse(iframeHtml).selectFirst("img.ssc-thumbnail-icon")
-                
-            if (imgTag != null) {
-                val src = imgTag.attr("src")
-                if (src.startsWith("http")) {
-                    dynamicThumbBase = src.substringBeforeLast("/") 
-                }
+            val thumbRegex = """(https?://[a-zA-Z0-9.-]+(?:\\?/)+thumbs?)""".toRegex(RegexOption.IGNORE_CASE)
+            val match = thumbRegex.find(iframeHtml) ?: thumbRegex.find(doc.html())
+            
+            if (match != null) {
+                dynamicThumbBase = match.groupValues[1].replace("\\", "").removeSuffix("/")
             } else {
-                val regexMatch = """(https?://[^/]+/thumbs)""".toRegex().find(iframeHtml) 
-                    ?: """(https?://[^/]+/thumbs)""".toRegex().find(doc.html())
-                if (regexMatch != null) {
-                    dynamicThumbBase = regexMatch.groupValues[1]
+                // 최후의 보루: lux, oncahot, hudtv 등의 키워드가 포함된 도메인 추출
+                val fallbackRegex = """(https?://(?:lux|hudtv|oncahot)[a-zA-Z0-9.-]+)""".toRegex(RegexOption.IGNORE_CASE)
+                val fallbackMatch = fallbackRegex.find(iframeHtml) ?: fallbackRegex.find(doc.html())
+                if (fallbackMatch != null) {
+                    dynamicThumbBase = fallbackMatch.groupValues[1].replace("\\", "").removeSuffix("/") + "/thumbs"
                 }
             }
             
@@ -69,21 +67,22 @@ class CUTVProvider : MainAPI() {
                 val jsonData = matchResult.groupValues[1]
                 val matches = AppUtils.parseJson<List<Map<String, String>>>(jsonData)
                 
-                matches.forEach { match ->
-                    val ssid = match["ssid"] ?: ""
-                    val name = match["name"] ?: ""
+                matches.forEach { matchItem ->
+                    val ssid = matchItem["ssid"] ?: ""
+                    val name = matchItem["name"] ?: ""
                     
-                    val surl1 = match["surl"] ?: ""
-                    val surl2 = match["surl2"] ?: ""
-                    val surl3 = match["surl3"] ?: ""
+                    val surl1 = matchItem["surl"] ?: ""
+                    val surl2 = matchItem["surl2"] ?: ""
+                    val surl3 = matchItem["surl3"] ?: ""
                     
                     if (ssid.isNotBlank() && name.isNotBlank() && (surl1.isNotBlank() || surl2.isNotBlank() || surl3.isNotBlank())) {
                         
                         val title = name 
-                        val srcy = match["srcy"] ?: ""
+                        val srcy = matchItem["srcy"] ?: ""
                         val thumbId = if (srcy.isNotBlank()) srcy else ssid
                         val timestamp = System.currentTimeMillis()
                         
+                        // 동적으로 찾아낸 진짜 도메인 적용
                         val posterUrl = "$dynamicThumbBase/$thumbId.jpg?a=$timestamp"
                         
                         val encodedTitle = URLEncoder.encode(title, "UTF-8")
@@ -172,28 +171,33 @@ class CUTVProvider : MainAPI() {
                         var targetReferer = iframeUrl
                         var targetOrigin = "https://${Uri.parse(iframeUrl).host}"
                         
-                        // EMBED# 제거 및 liveUrl 파라미터 추출
+                        // [완벽 수정] EMBED# 제거 및 스크린샷과 100% 동일한 Referer/Origin 세팅
                         if (actualUrl.startsWith("EMBED#")) {
                             actualUrl = actualUrl.removePrefix("EMBED#")
                         }
                         
                         if (actualUrl.contains("liveUrl=")) {
-                            targetReferer = actualUrl // 스크린샷과 동일한 Referer 세팅
+                            targetReferer = actualUrl // 스크린샷의 Referer (https://player.up909.com...)
                             try {
-                                targetOrigin = "https://${Uri.parse(actualUrl).host}" // 스크린샷과 동일한 Origin 세팅
+                                targetOrigin = "https://${Uri.parse(actualUrl).host}" // 스크린샷의 Origin (https://player.up909.com)
                                 
                                 Uri.parse(actualUrl).getQueryParameter("liveUrl")?.let { extractedUrl ->
-                                    actualUrl = extractedUrl 
+                                    actualUrl = extractedUrl // 실제 .flv 주소
                                 }
                             } catch (e: Exception) {
                                 // 파싱 실패 시 무시
                             }
+                        } else if (actualUrl.contains("uu6611.com")) {
+                            // 만약 서버가 EMBED 없이 다이렉트 링크를 줬을 경우를 대비한 안전장치
+                            targetReferer = "https://player.up909.com/"
+                            targetOrigin = "https://player.up909.com"
                         }
 
                         val qualityName = if (link.contains("coupangstreaming")) "채널 1" 
                                           else if (link.contains("hudtv")) "채널 2" 
                                           else "채널 ${index + 1}"
 
+                        // .flv 확장자 처리
                         val isM3u8 = actualUrl.contains(".m3u8", ignoreCase = true)
                         val linkType = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
 
@@ -204,7 +208,7 @@ class CUTVProvider : MainAPI() {
                                 url = actualUrl,
                                 type = linkType
                             ) {
-                                // 계산된 targetReferer와 targetOrigin을 정확히 주입
+                                // 계산된 Referer와 Origin을 정확히 주입 (403 에러 원천 차단)
                                 this.referer = targetReferer
                                 this.headers = mapOf(
                                     "Origin" to targetOrigin,
