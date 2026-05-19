@@ -43,21 +43,18 @@ class CUTVProvider : MainAPI() {
 
             val iframeHtml = app.get(iframeSrc, headers = defaultHeaders, referer = url).text
             
-            // [핵심 1] 썸네일 베이스 URL 동적 추출 (도메인이 바뀌어도 무적)
-            var dynamicThumbBase = "https://lux2.oncahot.com/thumbs" // 파싱 실패 시 최후의 보루
+            // 썸네일 베이스 URL 동적 추출
+            var dynamicThumbBase = "https://lux1.oncahot.com/thumbs" 
             
-            // 메인 페이지(doc) 또는 iframe 내부에서 썸네일 img 태그를 찾음
             val imgTag = doc.selectFirst("img.ssc-thumbnail-icon") 
                 ?: Jsoup.parse(iframeHtml).selectFirst("img.ssc-thumbnail-icon")
                 
             if (imgTag != null) {
                 val src = imgTag.attr("src")
                 if (src.startsWith("http")) {
-                    // 예: "https://lux1.oncahot.com/thumbs/80c5038c...jpg?a=..." -> "https://lux1.oncahot.com/thumbs"
                     dynamicThumbBase = src.substringBeforeLast("/") 
                 }
             } else {
-                // 태그 클래스명이 바뀌었을 경우를 대비한 정규식 백업
                 val regexMatch = """(https?://[^/]+/thumbs)""".toRegex().find(iframeHtml) 
                     ?: """(https?://[^/]+/thumbs)""".toRegex().find(doc.html())
                 if (regexMatch != null) {
@@ -87,26 +84,20 @@ class CUTVProvider : MainAPI() {
                         val thumbId = if (srcy.isNotBlank()) srcy else ssid
                         val timestamp = System.currentTimeMillis()
                         
-                        // 동적으로 찾은 도메인 적용
                         val posterUrl = "$dynamicThumbBase/$thumbId.jpg?a=$timestamp"
                         
                         val encodedTitle = URLEncoder.encode(title, "UTF-8")
                         val encodedIframe = URLEncoder.encode(iframeSrc, "UTF-8")
                         val encodedThumbBase = URLEncoder.encode(dynamicThumbBase, "UTF-8")
                         
-                        // load() 함수로 동적 도메인을 넘겨주기 위해 파라미터 추가
                         val fakeUrl = "$mainUrl/live_stream/$ssid?title=$encodedTitle&iframe=$encodedIframe&thumbBase=$encodedThumbBase"
 
                         items.add(
                             newLiveSearchResponse(name = title, url = fakeUrl) {
                                 this.posterUrl = posterUrl
                                 this.posterHeaders = mapOf(
-                                    "Referer" to iframeSrc,
-                                    "User-Agent" to userAgent,
-                                    "Accept" to "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-                                    "Sec-Fetch-Dest" to "image",
-                                    "Sec-Fetch-Mode" to "no-cors",
-                                    "Sec-Fetch-Site" to "cross-site"
+                                    "Referer" to "$mainUrl/",
+                                    "User-Agent" to userAgent
                                 )
                             }
                         )
@@ -128,10 +119,6 @@ class CUTVProvider : MainAPI() {
         val rawTitle = uri.getQueryParameter("title")
         val title = if (!rawTitle.isNullOrBlank()) URLDecoder.decode(rawTitle, "UTF-8") else "Live Stream"
         
-        val rawIframe = uri.getQueryParameter("iframe")
-        val iframeUrl = if (!rawIframe.isNullOrBlank()) URLDecoder.decode(rawIframe, "UTF-8") else "https://sol13.galaxy-stream.live/cli/box"
-
-        // [핵심 2] getMainPage에서 넘겨준 동적 썸네일 도메인을 받아서 사용
         val rawThumbBase = uri.getQueryParameter("thumbBase")
         val thumbBase = if (!rawThumbBase.isNullOrBlank()) URLDecoder.decode(rawThumbBase, "UTF-8") else "https://lux1.oncahot.com/thumbs"
 
@@ -145,12 +132,8 @@ class CUTVProvider : MainAPI() {
         ) {
             this.posterUrl = posterUrl
             this.posterHeaders = mapOf(
-                "Referer" to iframeUrl,
-                "User-Agent" to userAgent,
-                "Accept" to "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-                "Sec-Fetch-Dest" to "image",
-                "Sec-Fetch-Mode" to "no-cors",
-                "Sec-Fetch-Site" to "cross-site"
+                "Referer" to "$mainUrl/",
+                "User-Agent" to userAgent
             )
         }
     }
@@ -183,25 +166,27 @@ class CUTVProvider : MainAPI() {
                         .filter { it.isNotBlank() }
                         .distinct()
 
-                    val iframeOrigin = "https://${Uri.parse(iframeUrl).host}"
-
                     urls.forEachIndexed { index, link ->
-                        var cleanLink = link.replace("\\/", "/") 
+                        var actualUrl = link.replace("\\/", "/") 
                         
-                        // [핵심 3] EMBED# 제거 및 liveUrl 파라미터 추출 (재생 불가 문제 해결)
-                        if (cleanLink.startsWith("EMBED#")) {
-                            cleanLink = cleanLink.removePrefix("EMBED#")
+                        var targetReferer = iframeUrl
+                        var targetOrigin = "https://${Uri.parse(iframeUrl).host}"
+                        
+                        // EMBED# 제거 및 liveUrl 파라미터 추출
+                        if (actualUrl.startsWith("EMBED#")) {
+                            actualUrl = actualUrl.removePrefix("EMBED#")
                         }
                         
-                        if (cleanLink.contains("liveUrl=")) {
+                        if (actualUrl.contains("liveUrl=")) {
+                            targetReferer = actualUrl // 스크린샷과 동일한 Referer 세팅
                             try {
-                                val parsedUri = Uri.parse(cleanLink)
-                                parsedUri.getQueryParameter("liveUrl")?.let { extractedUrl ->
-                                    // Uri.getQueryParameter가 자동으로 디코딩해주므로 바로 사용 가능
-                                    cleanLink = extractedUrl
+                                targetOrigin = "https://${Uri.parse(actualUrl).host}" // 스크린샷과 동일한 Origin 세팅
+                                
+                                Uri.parse(actualUrl).getQueryParameter("liveUrl")?.let { extractedUrl ->
+                                    actualUrl = extractedUrl 
                                 }
                             } catch (e: Exception) {
-                                // 파싱 실패 시 원본 유지
+                                // 파싱 실패 시 무시
                             }
                         }
 
@@ -209,20 +194,20 @@ class CUTVProvider : MainAPI() {
                                           else if (link.contains("hudtv")) "채널 2" 
                                           else "채널 ${index + 1}"
 
-                        // .flv 확장자일 경우 ExtractorLinkType.VIDEO로 전달해야 ExoPlayer가 정상 인식함
-                        val isM3u8 = cleanLink.contains(".m3u8", ignoreCase = true)
+                        val isM3u8 = actualUrl.contains(".m3u8", ignoreCase = true)
                         val linkType = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
 
                         callback.invoke(
                             newExtractorLink(
                                 source = this.name,
                                 name = qualityName,
-                                url = cleanLink,
+                                url = actualUrl,
                                 type = linkType
                             ) {
-                                this.referer = "$iframeOrigin/"
+                                // 계산된 targetReferer와 targetOrigin을 정확히 주입
+                                this.referer = targetReferer
                                 this.headers = mapOf(
-                                    "Origin" to iframeOrigin,
+                                    "Origin" to targetOrigin,
                                     "Accept" to "*/*",
                                     "Sec-Fetch-Dest" to "empty",
                                     "Sec-Fetch-Mode" to "cors",
