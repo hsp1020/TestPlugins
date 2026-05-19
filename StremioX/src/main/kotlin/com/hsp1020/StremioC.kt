@@ -168,7 +168,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 .protocols(listOf(Protocol.HTTP_1_1))
                 .dispatcher(Dispatcher().apply {
                     maxRequests = 30
-                    maxRequestsPerHost = 15
+                    maxRequestsPerHost = 20
                 })
                 .connectionPool(ConnectionPool(30, 1, TimeUnit.MINUTES))
                 .build()
@@ -180,7 +180,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
 
         init {
-            app.baseClient.dispatcher.maxRequestsPerHost = 15
+            app.baseClient.dispatcher.maxRequestsPerHost = 20
             app.baseClient.dispatcher.maxRequests = 30 
         }
 
