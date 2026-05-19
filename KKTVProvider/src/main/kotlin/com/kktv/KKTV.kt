@@ -61,7 +61,7 @@ class CUTVProvider : MainAPI() {
                 if (match != null) {
                     dynamicThumbBase = match.groupValues[1].replace("\\", "")
                 } else {
-                    dynamicThumbBase = "https://lux1.oncahot.com/thumbs"
+                    dynamicThumbBase = "https://lux99.oncahot.com/thumbs"
                 }
             }
             
