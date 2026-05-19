@@ -161,7 +161,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         @Volatile private var cachedCustomHostsTime: Long = 0
         private const val SETTINGS_CACHE_TTL = 60_000L
 
-        val networkSemaphore = Semaphore(10)
+        val networkSemaphore = Semaphore(20)
 
         val customSession by lazy {
             val newClient = app.baseClient.newBuilder()
