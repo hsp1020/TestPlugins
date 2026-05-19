@@ -43,25 +43,26 @@ class CUTVProvider : MainAPI() {
 
             val iframeHtml = app.get(iframeSrc, headers = defaultHeaders, referer = url).text
             
-            // [하드코딩 완전 제거] 썸네일 베이스 URL 동적 추출
-            var dynamicThumbBase: String? = null
+            // [완벽 수정 1] 썸네일 베이스 URL 동적 추출 (어떤 도메인이든 /thumbs/ 기준으로 추출)
+            var dynamicThumbBase = "" 
             
-            val imgTag = doc.selectFirst("img.ssc-thumbnail-icon") 
-                ?: Jsoup.parse(iframeHtml).selectFirst("img.ssc-thumbnail-icon")
-                
-            if (imgTag != null) {
-                val src = imgTag.attr("src")
-                if (src.startsWith("http")) {
-                    dynamicThumbBase = src.substringBeforeLast("/") 
+            val imgTags = doc.select("img.ssc-thumbnail-icon")
+            for (img in imgTags) {
+                val src = img.attr("src")
+                if (src.contains("/thumbs/")) {
+                    dynamicThumbBase = src.substringBefore("/thumbs/") + "/thumbs"
+                    break
                 }
-            } 
+            }
             
-            // 태그에서 못 찾았을 경우 JS 내부의 이스케이프된 주소(https:\/\/...) 정규식 추출
-            if (dynamicThumbBase.isNullOrBlank()) {
-                val thumbRegex = """https?:[\\/]+[a-zA-Z0-9.-]+[\\/]+thumbs?""".toRegex(RegexOption.IGNORE_CASE)
-                val match = thumbRegex.find(iframeHtml) ?: thumbRegex.find(doc.html())
+            // 만약 태그 클래스명이 바뀌었을 경우를 대비한 정규식 백업
+            if (dynamicThumbBase.isEmpty()) {
+                val fallbackRegex = """(https?://[a-zA-Z0-9.-]+(?:/|\\/)+thumbs)""".toRegex(RegexOption.IGNORE_CASE)
+                val match = fallbackRegex.find(doc.html()) ?: fallbackRegex.find(iframeHtml)
                 if (match != null) {
-                    dynamicThumbBase = match.value.replace("\\", "").removeSuffix("/")
+                    dynamicThumbBase = match.groupValues[1].replace("\\", "")
+                } else {
+                    dynamicThumbBase = "https://lux1.oncahot.com/thumbs" // 최후의 보루
                 }
             }
             
@@ -87,19 +88,18 @@ class CUTVProvider : MainAPI() {
                         val thumbId = if (srcy.isNotBlank()) srcy else ssid
                         val timestamp = System.currentTimeMillis()
                         
-                        // 동적 도메인을 찾았을 때만 포스터 URL 생성
-                        val posterUrl = if (!dynamicThumbBase.isNullOrBlank()) "$dynamicThumbBase/$thumbId.jpg?a=$timestamp" else null
+                        val posterUrl = "$dynamicThumbBase/$thumbId.jpg?a=$timestamp"
                         
                         val encodedTitle = URLEncoder.encode(title, "UTF-8")
                         val encodedIframe = URLEncoder.encode(iframeSrc, "UTF-8")
-                        val encodedThumbBase = if (!dynamicThumbBase.isNullOrBlank()) URLEncoder.encode(dynamicThumbBase, "UTF-8") else ""
+                        val encodedThumbBase = URLEncoder.encode(dynamicThumbBase, "UTF-8")
                         
                         val fakeUrl = "$mainUrl/live_stream/$ssid?title=$encodedTitle&iframe=$encodedIframe&thumbBase=$encodedThumbBase"
 
                         items.add(
                             newLiveSearchResponse(name = title, url = fakeUrl) {
                                 this.posterUrl = posterUrl
-                                // 선생님이 찾아내신 Cloudflare WAF 우회 특수 헤더 적용
+                                // [완벽 수정 2] 선생님이 찾아내신 WAF 우회용 특수 헤더 완벽 복구
                                 this.posterHeaders = mapOf(
                                     "Referer" to iframeSrc,
                                     "User-Agent" to userAgent,
@@ -132,10 +132,10 @@ class CUTVProvider : MainAPI() {
         val iframeUrl = if (!rawIframe.isNullOrBlank()) URLDecoder.decode(rawIframe, "UTF-8") else "https://sol13.galaxy-stream.live/cli/box"
 
         val rawThumbBase = uri.getQueryParameter("thumbBase")
-        val thumbBase = if (!rawThumbBase.isNullOrBlank()) URLDecoder.decode(rawThumbBase, "UTF-8") else null
+        val thumbBase = if (!rawThumbBase.isNullOrBlank()) URLDecoder.decode(rawThumbBase, "UTF-8") else "https://lux1.oncahot.com/thumbs"
 
         val ssid = url.substringBefore("?").substringAfterLast("/")
-        val posterUrl = if (!thumbBase.isNullOrBlank()) "$thumbBase/$ssid.jpg?a=${System.currentTimeMillis()}" else null
+        val posterUrl = "$thumbBase/$ssid.jpg?a=${System.currentTimeMillis()}"
 
         return newLiveStreamLoadResponse(
             name = title,
@@ -143,6 +143,7 @@ class CUTVProvider : MainAPI() {
             dataUrl = url
         ) {
             this.posterUrl = posterUrl
+            // [완벽 수정 2] 상세 페이지에서도 WAF 우회 헤더 적용
             this.posterHeaders = mapOf(
                 "Referer" to iframeUrl,
                 "User-Agent" to userAgent,
@@ -168,14 +169,6 @@ class CUTVProvider : MainAPI() {
         try {
             val iframeHtml = app.get(iframeUrl, headers = defaultHeaders, referer = "$mainUrl/main/index.php").text
             
-            // 플레이어 베이스 URL 동적 추출 (up909 등 하드코딩 완전 제거)
-            var playerBaseUrl = ""
-            val playerRegex = """(https?:(?:/|\\/){2}[a-zA-Z0-9.-]+(?:/|\\/)[^"'\s]*liveUrl=)""".toRegex(RegexOption.IGNORE_CASE)
-            val playerMatch = playerRegex.find(iframeHtml)
-            if (playerMatch != null) {
-                playerBaseUrl = playerMatch.groupValues[1].replace("\\", "")
-            }
-            
             val jsonRegex = """window\.galaxystream\.data2\s*=\s*'(.*?)';""".toRegex()
             val matchResult = jsonRegex.find(iframeHtml)
             
@@ -196,12 +189,10 @@ class CUTVProvider : MainAPI() {
                         var targetReferer = iframeUrl
                         var targetOrigin = "https://${Uri.parse(iframeUrl).host}"
                         
-                        // EMBED# 제거
                         if (actualUrl.startsWith("EMBED#")) {
                             actualUrl = actualUrl.removePrefix("EMBED#")
                         }
                         
-                        // URL에 liveUrl이 포함되어 있으면 자체적으로 파싱하여 Referer/Origin 완벽 위장
                         if (actualUrl.contains("liveUrl=")) {
                             targetReferer = actualUrl 
                             try {
@@ -210,12 +201,17 @@ class CUTVProvider : MainAPI() {
                                     actualUrl = extractedUrl 
                                 }
                             } catch (e: Exception) {}
-                        } else if (playerBaseUrl.isNotEmpty()) {
-                            // 다이렉트 링크일 경우, 동적으로 찾은 플레이어 주소를 조합하여 Referer 위장
-                            targetReferer = playerBaseUrl + URLEncoder.encode(actualUrl, "UTF-8")
-                            try {
-                                targetOrigin = "https://${Uri.parse(playerBaseUrl).host}"
-                            } catch (e: Exception) {}
+                        } else {
+                            // 다이렉트 링크일 경우 iframe 내의 플레이어 주소를 찾아 Referer로 위장
+                            val playerRegex = """(https?:(?:/|\\/){2}[a-zA-Z0-9.-]+(?:/|\\/)[^"'\s]*liveUrl=)""".toRegex(RegexOption.IGNORE_CASE)
+                            val playerMatch = playerRegex.find(iframeHtml)
+                            if (playerMatch != null) {
+                                val playerBaseUrl = playerMatch.groupValues[1].replace("\\", "")
+                                targetReferer = playerBaseUrl + URLEncoder.encode(actualUrl, "UTF-8")
+                                try {
+                                    targetOrigin = "https://${Uri.parse(playerBaseUrl).host}"
+                                } catch (e: Exception) {}
+                            }
                         }
 
                         val qualityName = if (link.contains("coupangstreaming")) "채널 1" 
@@ -226,23 +222,22 @@ class CUTVProvider : MainAPI() {
                         val linkType = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
 
                         callback.invoke(
-                            ExtractorLink(
+                            newExtractorLink(
                                 source = this.name,
                                 name = qualityName,
                                 url = actualUrl,
-                                referer = targetReferer,
-                                quality = Qualities.Unknown.value,
-                                isM3u8 = isM3u8,
-                                headers = mapOf(
+                                type = linkType
+                            ) {
+                                this.referer = targetReferer
+                                this.headers = mapOf(
                                     "Origin" to targetOrigin,
                                     "Accept" to "*/*",
                                     "Sec-Fetch-Dest" to "empty",
                                     "Sec-Fetch-Mode" to "cors",
                                     "Sec-Fetch-Site" to "cross-site",
                                     "User-Agent" to userAgent
-                                ),
-                                type = linkType
-                            )
+                                )
+                            }
                         )
                     }
                     return true
