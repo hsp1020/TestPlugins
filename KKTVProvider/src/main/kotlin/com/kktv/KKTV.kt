@@ -34,8 +34,9 @@ class CUTVProvider : MainAPI() {
         try {
             val doc = app.get(url, headers = defaultHeaders).document
             
+            // 하드코딩 제거: http로 시작하는 첫 번째 iframe을 동적으로 가져옴
             val iframeSrc = doc.select("iframe").mapNotNull { it.attr("src") }
-                .firstOrNull { it.contains("galaxy-stream") || it.contains("hudtv") || it.contains("cli") }
+                .firstOrNull { it.startsWith("http") }
 
             if (iframeSrc.isNullOrBlank()) {
                 return newHomePageResponse(request.name, emptyList())
@@ -43,8 +44,8 @@ class CUTVProvider : MainAPI() {
 
             val iframeHtml = app.get(iframeSrc, headers = defaultHeaders, referer = url).text
             
-            // [수정] 하드코딩 완전히 제거. 무조건 HTML에서 동적으로 찾아냄
-            var dynamicThumbBase = "" 
+            // 하드코딩 제거: 썸네일 베이스 URL 동적 추출
+            var dynamicThumbBase = mainUrl 
             
             val imgTag = doc.selectFirst("img.ssc-thumbnail-icon") 
                 ?: Jsoup.parse(iframeHtml).selectFirst("img.ssc-thumbnail-icon")
@@ -54,16 +55,12 @@ class CUTVProvider : MainAPI() {
                 if (src.startsWith("http")) {
                     dynamicThumbBase = src.substringBeforeLast("/") 
                 }
-            } 
-            
-            // 태그를 못 찾았을 경우 정규식으로 /thumbs 경로를 가진 도메인 동적 추출
-            if (dynamicThumbBase.isEmpty()) {
-                val thumbRegex = """(https?://[^"']+(?:\\?/)+thumbs?)""".toRegex(RegexOption.IGNORE_CASE)
+            } else {
+                // 이스케이프된 슬래시(\/)까지 완벽하게 잡아내는 정규식
+                val thumbRegex = """(https?:[\\/]+[a-zA-Z0-9.-]+[\\/]+thumbs?)""".toRegex(RegexOption.IGNORE_CASE)
                 val match = thumbRegex.find(iframeHtml) ?: thumbRegex.find(doc.html())
                 if (match != null) {
                     dynamicThumbBase = match.groupValues[1].replace("\\", "").removeSuffix("/")
-                } else {
-                    dynamicThumbBase = mainUrl // 최후의 기본값
                 }
             }
             
@@ -100,9 +97,14 @@ class CUTVProvider : MainAPI() {
                         items.add(
                             newLiveSearchResponse(name = title, url = fakeUrl) {
                                 this.posterUrl = posterUrl
+                                // Cloudflare WAF 우회 특수 헤더 적용
                                 this.posterHeaders = mapOf(
-                                    "Referer" to "$mainUrl/",
-                                    "User-Agent" to userAgent
+                                    "Referer" to iframeSrc,
+                                    "User-Agent" to userAgent,
+                                    "Accept" to "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                                    "Sec-Fetch-Dest" to "image",
+                                    "Sec-Fetch-Mode" to "no-cors",
+                                    "Sec-Fetch-Site" to "cross-site"
                                 )
                             }
                         )
@@ -124,6 +126,9 @@ class CUTVProvider : MainAPI() {
         val rawTitle = uri.getQueryParameter("title")
         val title = if (!rawTitle.isNullOrBlank()) URLDecoder.decode(rawTitle, "UTF-8") else "Live Stream"
         
+        val rawIframe = uri.getQueryParameter("iframe")
+        val iframeUrl = if (!rawIframe.isNullOrBlank()) URLDecoder.decode(rawIframe, "UTF-8") else mainUrl
+
         val rawThumbBase = uri.getQueryParameter("thumbBase")
         val thumbBase = if (!rawThumbBase.isNullOrBlank()) URLDecoder.decode(rawThumbBase, "UTF-8") else mainUrl
 
@@ -137,8 +142,12 @@ class CUTVProvider : MainAPI() {
         ) {
             this.posterUrl = posterUrl
             this.posterHeaders = mapOf(
-                "Referer" to "$mainUrl/",
-                "User-Agent" to userAgent
+                "Referer" to iframeUrl,
+                "User-Agent" to userAgent,
+                "Accept" to "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+                "Sec-Fetch-Dest" to "image",
+                "Sec-Fetch-Mode" to "no-cors",
+                "Sec-Fetch-Site" to "cross-site"
             )
         }
     }
@@ -157,6 +166,14 @@ class CUTVProvider : MainAPI() {
         try {
             val iframeHtml = app.get(iframeUrl, headers = defaultHeaders, referer = "$mainUrl/main/index.php").text
             
+            // 하드코딩 제거: 플레이어 베이스 URL 동적 추출 (liveUrl= 파라미터를 갖는 주소 찾기)
+            var playerBaseUrl = ""
+            val playerRegex = """(https?:[\\/]+[a-zA-Z0-9.-]+[\\/]+[^"'\s]*liveUrl=)""".toRegex(RegexOption.IGNORE_CASE)
+            val playerMatch = playerRegex.find(iframeHtml)
+            if (playerMatch != null) {
+                playerBaseUrl = playerMatch.groupValues[1].replace("\\", "")
+            }
+            
             val jsonRegex = """window\.galaxystream\.data2\s*=\s*'(.*?)';""".toRegex()
             val matchResult = jsonRegex.find(iframeHtml)
             
@@ -174,7 +191,6 @@ class CUTVProvider : MainAPI() {
                     urls.forEachIndexed { index, link ->
                         var actualUrl = link.replace("\\/", "/") 
                         
-                        // 기본값: 부모 iframe의 주소
                         var targetReferer = iframeUrl
                         var targetOrigin = "https://${Uri.parse(iframeUrl).host}"
                         
@@ -182,24 +198,24 @@ class CUTVProvider : MainAPI() {
                             actualUrl = actualUrl.removePrefix("EMBED#")
                         }
                         
-                        // [수정] up909, uu6611 등 도메인 하드코딩 완전 삭제.
-                        // 파라미터에 liveUrl이 있으면 무조건 그 앞의 플레이어 주소를 Referer/Origin으로 사용
                         if (actualUrl.contains("liveUrl=")) {
                             targetReferer = actualUrl 
                             try {
                                 targetOrigin = "https://${Uri.parse(actualUrl).host}" 
-                                
                                 Uri.parse(actualUrl).getQueryParameter("liveUrl")?.let { extractedUrl ->
                                     actualUrl = extractedUrl 
                                 }
-                            } catch (e: Exception) {
-                                // 파싱 실패 시 무시
-                            }
+                            } catch (e: Exception) {}
+                        } else if (playerBaseUrl.isNotEmpty()) {
+                            // 다이렉트 링크일 경우, 동적으로 찾은 플레이어 주소를 조합하여 Referer 위장
+                            targetReferer = playerBaseUrl + URLEncoder.encode(actualUrl, "UTF-8")
+                            try {
+                                targetOrigin = "https://${Uri.parse(playerBaseUrl).host}"
+                            } catch (e: Exception) {}
                         }
 
-                        val qualityName = if (link.contains("coupangstreaming")) "채널 1" 
-                                          else if (link.contains("hudtv")) "채널 2" 
-                                          else "채널 ${index + 1}"
+                        // 하드코딩 제거: 채널 이름 동적 할당
+                        val qualityName = "채널 ${index + 1}"
 
                         val isM3u8 = actualUrl.contains(".m3u8", ignoreCase = true)
                         val linkType = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
