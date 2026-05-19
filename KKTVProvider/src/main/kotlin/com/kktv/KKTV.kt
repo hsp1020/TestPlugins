@@ -44,7 +44,7 @@ class CUTVProvider : MainAPI() {
             val iframeHtml = app.get(iframeSrc, headers = defaultHeaders, referer = url).text
             
             // [핵심 1] 썸네일 베이스 URL 동적 추출 (도메인이 바뀌어도 무적)
-            var dynamicThumbBase = "https://lux1.oncahot.com/thumbs" // 파싱 실패 시 최후의 보루
+            var dynamicThumbBase = "https://lux2.oncahot.com/thumbs" // 파싱 실패 시 최후의 보루
             
             // 메인 페이지(doc) 또는 iframe 내부에서 썸네일 img 태그를 찾음
             val imgTag = doc.selectFirst("img.ssc-thumbnail-icon") 
