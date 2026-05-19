@@ -34,9 +34,8 @@ class CUTVProvider : MainAPI() {
         try {
             val doc = app.get(url, headers = defaultHeaders).document
             
-            // 하드코딩 제거: http로 시작하는 첫 번째 iframe을 동적으로 가져옴
             val iframeSrc = doc.select("iframe").mapNotNull { it.attr("src") }
-                .firstOrNull { it.startsWith("http") }
+                .firstOrNull { it.contains("galaxy-stream") || it.contains("hudtv") || it.contains("cli") }
 
             if (iframeSrc.isNullOrBlank()) {
                 return newHomePageResponse(request.name, emptyList())
@@ -44,8 +43,8 @@ class CUTVProvider : MainAPI() {
 
             val iframeHtml = app.get(iframeSrc, headers = defaultHeaders, referer = url).text
             
-            // 하드코딩 제거: 썸네일 베이스 URL 동적 추출
-            var dynamicThumbBase = mainUrl 
+            // [하드코딩 완전 제거] 썸네일 베이스 URL 동적 추출
+            var dynamicThumbBase: String? = null
             
             val imgTag = doc.selectFirst("img.ssc-thumbnail-icon") 
                 ?: Jsoup.parse(iframeHtml).selectFirst("img.ssc-thumbnail-icon")
@@ -55,12 +54,14 @@ class CUTVProvider : MainAPI() {
                 if (src.startsWith("http")) {
                     dynamicThumbBase = src.substringBeforeLast("/") 
                 }
-            } else {
-                // 이스케이프된 슬래시(\/)까지 완벽하게 잡아내는 정규식
-                val thumbRegex = """(https?:[\\/]+[a-zA-Z0-9.-]+[\\/]+thumbs?)""".toRegex(RegexOption.IGNORE_CASE)
+            } 
+            
+            // 태그에서 못 찾았을 경우 JS 내부의 이스케이프된 주소(https:\/\/...) 정규식 추출
+            if (dynamicThumbBase.isNullOrBlank()) {
+                val thumbRegex = """https?:[\\/]+[a-zA-Z0-9.-]+[\\/]+thumbs?""".toRegex(RegexOption.IGNORE_CASE)
                 val match = thumbRegex.find(iframeHtml) ?: thumbRegex.find(doc.html())
                 if (match != null) {
-                    dynamicThumbBase = match.groupValues[1].replace("\\", "").removeSuffix("/")
+                    dynamicThumbBase = match.value.replace("\\", "").removeSuffix("/")
                 }
             }
             
@@ -86,18 +87,19 @@ class CUTVProvider : MainAPI() {
                         val thumbId = if (srcy.isNotBlank()) srcy else ssid
                         val timestamp = System.currentTimeMillis()
                         
-                        val posterUrl = "$dynamicThumbBase/$thumbId.jpg?a=$timestamp"
+                        // 동적 도메인을 찾았을 때만 포스터 URL 생성
+                        val posterUrl = if (!dynamicThumbBase.isNullOrBlank()) "$dynamicThumbBase/$thumbId.jpg?a=$timestamp" else null
                         
                         val encodedTitle = URLEncoder.encode(title, "UTF-8")
                         val encodedIframe = URLEncoder.encode(iframeSrc, "UTF-8")
-                        val encodedThumbBase = URLEncoder.encode(dynamicThumbBase, "UTF-8")
+                        val encodedThumbBase = if (!dynamicThumbBase.isNullOrBlank()) URLEncoder.encode(dynamicThumbBase, "UTF-8") else ""
                         
                         val fakeUrl = "$mainUrl/live_stream/$ssid?title=$encodedTitle&iframe=$encodedIframe&thumbBase=$encodedThumbBase"
 
                         items.add(
                             newLiveSearchResponse(name = title, url = fakeUrl) {
                                 this.posterUrl = posterUrl
-                                // Cloudflare WAF 우회 특수 헤더 적용
+                                // 선생님이 찾아내신 Cloudflare WAF 우회 특수 헤더 적용
                                 this.posterHeaders = mapOf(
                                     "Referer" to iframeSrc,
                                     "User-Agent" to userAgent,
@@ -127,13 +129,13 @@ class CUTVProvider : MainAPI() {
         val title = if (!rawTitle.isNullOrBlank()) URLDecoder.decode(rawTitle, "UTF-8") else "Live Stream"
         
         val rawIframe = uri.getQueryParameter("iframe")
-        val iframeUrl = if (!rawIframe.isNullOrBlank()) URLDecoder.decode(rawIframe, "UTF-8") else mainUrl
+        val iframeUrl = if (!rawIframe.isNullOrBlank()) URLDecoder.decode(rawIframe, "UTF-8") else "https://sol13.galaxy-stream.live/cli/box"
 
         val rawThumbBase = uri.getQueryParameter("thumbBase")
-        val thumbBase = if (!rawThumbBase.isNullOrBlank()) URLDecoder.decode(rawThumbBase, "UTF-8") else mainUrl
+        val thumbBase = if (!rawThumbBase.isNullOrBlank()) URLDecoder.decode(rawThumbBase, "UTF-8") else null
 
         val ssid = url.substringBefore("?").substringAfterLast("/")
-        val posterUrl = "$thumbBase/$ssid.jpg?a=${System.currentTimeMillis()}"
+        val posterUrl = if (!thumbBase.isNullOrBlank()) "$thumbBase/$ssid.jpg?a=${System.currentTimeMillis()}" else null
 
         return newLiveStreamLoadResponse(
             name = title,
@@ -166,9 +168,9 @@ class CUTVProvider : MainAPI() {
         try {
             val iframeHtml = app.get(iframeUrl, headers = defaultHeaders, referer = "$mainUrl/main/index.php").text
             
-            // 하드코딩 제거: 플레이어 베이스 URL 동적 추출 (liveUrl= 파라미터를 갖는 주소 찾기)
+            // 플레이어 베이스 URL 동적 추출 (up909 등 하드코딩 완전 제거)
             var playerBaseUrl = ""
-            val playerRegex = """(https?:[\\/]+[a-zA-Z0-9.-]+[\\/]+[^"'\s]*liveUrl=)""".toRegex(RegexOption.IGNORE_CASE)
+            val playerRegex = """(https?:(?:/|\\/){2}[a-zA-Z0-9.-]+(?:/|\\/)[^"'\s]*liveUrl=)""".toRegex(RegexOption.IGNORE_CASE)
             val playerMatch = playerRegex.find(iframeHtml)
             if (playerMatch != null) {
                 playerBaseUrl = playerMatch.groupValues[1].replace("\\", "")
@@ -194,10 +196,12 @@ class CUTVProvider : MainAPI() {
                         var targetReferer = iframeUrl
                         var targetOrigin = "https://${Uri.parse(iframeUrl).host}"
                         
+                        // EMBED# 제거
                         if (actualUrl.startsWith("EMBED#")) {
                             actualUrl = actualUrl.removePrefix("EMBED#")
                         }
                         
+                        // URL에 liveUrl이 포함되어 있으면 자체적으로 파싱하여 Referer/Origin 완벽 위장
                         if (actualUrl.contains("liveUrl=")) {
                             targetReferer = actualUrl 
                             try {
@@ -214,29 +218,31 @@ class CUTVProvider : MainAPI() {
                             } catch (e: Exception) {}
                         }
 
-                        // 하드코딩 제거: 채널 이름 동적 할당
-                        val qualityName = "채널 ${index + 1}"
+                        val qualityName = if (link.contains("coupangstreaming")) "채널 1" 
+                                          else if (link.contains("hudtv")) "채널 2" 
+                                          else "채널 ${index + 1}"
 
                         val isM3u8 = actualUrl.contains(".m3u8", ignoreCase = true)
                         val linkType = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
 
                         callback.invoke(
-                            newExtractorLink(
+                            ExtractorLink(
                                 source = this.name,
                                 name = qualityName,
                                 url = actualUrl,
-                                type = linkType
-                            ) {
-                                this.referer = targetReferer
-                                this.headers = mapOf(
+                                referer = targetReferer,
+                                quality = Qualities.Unknown.value,
+                                isM3u8 = isM3u8,
+                                headers = mapOf(
                                     "Origin" to targetOrigin,
                                     "Accept" to "*/*",
                                     "Sec-Fetch-Dest" to "empty",
                                     "Sec-Fetch-Mode" to "cors",
                                     "Sec-Fetch-Site" to "cross-site",
                                     "User-Agent" to userAgent
-                                )
-                            }
+                                ),
+                                type = linkType
+                            )
                         )
                     }
                     return true
