@@ -43,7 +43,7 @@ class CUTVProvider : MainAPI() {
 
             val iframeHtml = app.get(iframeSrc, headers = defaultHeaders, referer = url).text
             
-            // [완벽 수정 1] 썸네일 베이스 URL 동적 추출 (어떤 도메인이든 /thumbs/ 기준으로 추출)
+            // 썸네일 베이스 URL 동적 추출
             var dynamicThumbBase = "" 
             
             val imgTags = doc.select("img.ssc-thumbnail-icon")
@@ -55,14 +55,13 @@ class CUTVProvider : MainAPI() {
                 }
             }
             
-            // 만약 태그 클래스명이 바뀌었을 경우를 대비한 정규식 백업
             if (dynamicThumbBase.isEmpty()) {
                 val fallbackRegex = """(https?://[a-zA-Z0-9.-]+(?:/|\\/)+thumbs)""".toRegex(RegexOption.IGNORE_CASE)
                 val match = fallbackRegex.find(doc.html()) ?: fallbackRegex.find(iframeHtml)
                 if (match != null) {
                     dynamicThumbBase = match.groupValues[1].replace("\\", "")
                 } else {
-                    dynamicThumbBase = "https://lux1.oncahot.com/thumbs" // 최후의 보루
+                    dynamicThumbBase = "https://lux1.oncahot.com/thumbs"
                 }
             }
             
@@ -99,7 +98,6 @@ class CUTVProvider : MainAPI() {
                         items.add(
                             newLiveSearchResponse(name = title, url = fakeUrl) {
                                 this.posterUrl = posterUrl
-                                // [완벽 수정 2] 선생님이 찾아내신 WAF 우회용 특수 헤더 완벽 복구
                                 this.posterHeaders = mapOf(
                                     "Referer" to iframeSrc,
                                     "User-Agent" to userAgent,
@@ -143,7 +141,6 @@ class CUTVProvider : MainAPI() {
             dataUrl = url
         ) {
             this.posterUrl = posterUrl
-            // [완벽 수정 2] 상세 페이지에서도 WAF 우회 헤더 적용
             this.posterHeaders = mapOf(
                 "Referer" to iframeUrl,
                 "User-Agent" to userAgent,
@@ -186,6 +183,7 @@ class CUTVProvider : MainAPI() {
                     urls.forEachIndexed { index, link ->
                         var actualUrl = link.replace("\\/", "/") 
                         
+                        // 기본값: 다이렉트 링크(lux1.oncahot 등)는 부모 iframe 주소를 Referer로 사용
                         var targetReferer = iframeUrl
                         var targetOrigin = "https://${Uri.parse(iframeUrl).host}"
                         
@@ -193,6 +191,7 @@ class CUTVProvider : MainAPI() {
                             actualUrl = actualUrl.removePrefix("EMBED#")
                         }
                         
+                        // liveUrl 파라미터가 있는 경우에만 Referer를 해당 플레이어 주소로 위장
                         if (actualUrl.contains("liveUrl=")) {
                             targetReferer = actualUrl 
                             try {
@@ -201,17 +200,6 @@ class CUTVProvider : MainAPI() {
                                     actualUrl = extractedUrl 
                                 }
                             } catch (e: Exception) {}
-                        } else {
-                            // 다이렉트 링크일 경우 iframe 내의 플레이어 주소를 찾아 Referer로 위장
-                            val playerRegex = """(https?:(?:/|\\/){2}[a-zA-Z0-9.-]+(?:/|\\/)[^"'\s]*liveUrl=)""".toRegex(RegexOption.IGNORE_CASE)
-                            val playerMatch = playerRegex.find(iframeHtml)
-                            if (playerMatch != null) {
-                                val playerBaseUrl = playerMatch.groupValues[1].replace("\\", "")
-                                targetReferer = playerBaseUrl + URLEncoder.encode(actualUrl, "UTF-8")
-                                try {
-                                    targetOrigin = "https://${Uri.parse(playerBaseUrl).host}"
-                                } catch (e: Exception) {}
-                            }
                         }
 
                         val qualityName = if (link.contains("coupangstreaming")) "채널 1" 
