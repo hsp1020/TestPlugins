@@ -44,7 +44,7 @@ class CUTVProvider : MainAPI() {
             val iframeHtml = app.get(iframeSrc, headers = defaultHeaders, referer = url).text
             
             // 썸네일 베이스 URL 동적 추출
-            var dynamicThumbBase = "https://lux1.oncahot.com/thumbs" 
+            var dynamicThumbBase = "https://lux2.oncahot.com/thumbs" 
             
             val imgTag = doc.selectFirst("img.ssc-thumbnail-icon") 
                 ?: Jsoup.parse(iframeHtml).selectFirst("img.ssc-thumbnail-icon")
