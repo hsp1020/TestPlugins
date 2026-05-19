@@ -129,10 +129,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hexated/cloudstream-extensions-hexated/master/StremioX/icon.png",
-        "fileHash": "sha256-a74b78e2ecfc41bf267be4e60eb1c55042cbe572ee1c1ed925218b50633bb587",
+        "fileHash": "sha256-225082c6f31c984a84ba6dd9bd325d192f7631cbf735d2de01b4aadab61cb62c",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 184913,
+        "fileSize": 184903,
         "status": 1,
         "language": "en",
         "authors": [
