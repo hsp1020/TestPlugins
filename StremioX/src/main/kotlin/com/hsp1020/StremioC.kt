@@ -167,7 +167,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val newClient = app.baseClient.newBuilder()
                 .protocols(listOf(Protocol.HTTP_1_1))
                 .dispatcher(Dispatcher().apply {
-                    maxRequests = 30
+                    maxRequests = 40
                     maxRequestsPerHost = 20
                 })
                 .connectionPool(ConnectionPool(30, 1, TimeUnit.MINUTES))
@@ -181,7 +181,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
         init {
             app.baseClient.dispatcher.maxRequestsPerHost = 20
-            app.baseClient.dispatcher.maxRequests = 30 
+            app.baseClient.dispatcher.maxRequests = 40 
         }
 
         fun loadProviderDynamically(pluginKeyword: String, className: String): MainAPI? {
