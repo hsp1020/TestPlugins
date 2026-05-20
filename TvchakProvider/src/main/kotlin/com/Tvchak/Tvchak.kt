@@ -116,7 +116,7 @@ class TvchakProvider : MainAPI() {
     }
 
     /**
-     * 메인 페이지 로드 (추천 슬라이더/배너 아이템 필터링 적용)
+     * 메인 페이지 로드
      */
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         checkAndUpdateDomain()
@@ -126,22 +126,12 @@ class TvchakProvider : MainAPI() {
             
             val document = app.get(url).document
 
-            // 부모 레이아웃이 슬라이더/추천 영역인 것들을 걸러내어, 중복되는 상위 추천 아이템 6개 노출 차단
-            val items = document.select(".movie-list-item").filter { element ->
-                element.parents().none { parent ->
-                    val className = parent.className().lowercase()
-                    className.contains("swiper") || 
-                    className.contains("slide") || 
-                    className.contains("banner") || 
-                    className.contains("hot") || 
-                    className.contains("featured") ||
-                    className.contains("rec")
-                }
-            }.mapNotNull { element ->
+            // 사이드바(.movie-list-body2)를 완벽히 우회하고 본문 목록(.movie-list-body)만 저격하여 수집
+            val items = document.select(".movie-list-body .movie-list-item").mapNotNull { element ->
                 parseItem(element, request.data == "1")
             }
 
-            println("TVCHAK_DEBUG: [getMainPage] 페이지 $page 로드 성공 - 중복 제외 필터링 후 아이템 수: ${items.size}")
+            println("TVCHAK_DEBUG: [getMainPage] 페이지 $page 로드 성공 - 중복 배제된 본문 아이템 수: ${items.size}")
             
             newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
         } catch (e: Exception) {
