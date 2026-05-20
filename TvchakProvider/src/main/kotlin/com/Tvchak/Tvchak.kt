@@ -59,7 +59,8 @@ class TvchakProvider : MainAPI() {
                 mainUrl = currentMainUrl
             }
 
-            val testPath = "/index.php/vod/type/id/1.html"
+            // 도메인 유효성 체크용 테스트 경로를 페이지네이션 가능 경로로 변경
+            val testPath = "/index.php/vod/show/id/1/page/1.html"
 
             try {
                 val res = app.get("$currentMainUrl$testPath", timeout = 3L)
@@ -120,7 +121,8 @@ class TvchakProvider : MainAPI() {
      */
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         checkAndUpdateDomain()
-        val url = "$mainUrl/index.php/vod/type/id/${request.data}/page/$page.html"
+        // /type/ 경로를 /show/ 경로로 변경하여 페이지네이션 정상 대응
+        val url = "$mainUrl/index.php/vod/show/id/${request.data}/page/$page.html"
         val document = app.get(url).document
 
         val items = coroutineScope {
