@@ -1,6 +1,7 @@
 package com.kktv
 
 import android.net.Uri
+import android.util.Log // 디버깅 로그용 임포트
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
@@ -38,22 +39,43 @@ class CUTVProvider : MainAPI() {
                 .firstOrNull { it.contains("galaxy-stream") || it.contains("hudtv") || it.contains("cli") }
 
             if (iframeSrc.isNullOrBlank()) {
+                Log.d("CUTV_DEBUG", "FAIL: iframeSrc를 찾을 수 없습니다.")
                 return newHomePageResponse(request.name, emptyList())
             }
 
             val iframeHtml = app.get(iframeSrc, headers = defaultHeaders, referer = url).text
             
+            // ================= 디버깅 로그 세션 시작 =================
+            Log.d("CUTV_DEBUG", "=== START CUTV 썸네일 디버깅 ===")
+            Log.d("CUTV_DEBUG", "접속 메인 URL: $url")
+            Log.d("CUTV_DEBUG", "추출된 iframe 주소: $iframeSrc")
+            Log.d("CUTV_DEBUG", "메인 HTML 크기: ${doc.html().length}자")
+            Log.d("CUTV_DEBUG", "iframe HTML 크기: ${iframeHtml.length}자")
+            
+            // 키워드 포함 여부 확인
+            Log.d("CUTV_DEBUG", "메인 HTML에 'thumbs' 포함 여부: ${doc.html().contains("thumbs", ignoreCase = true)}")
+            Log.d("CUTV_DEBUG", "iframe HTML에 'thumbs' 포함 여부: ${iframeHtml.contains("thumbs", ignoreCase = true)}")
+            Log.d("CUTV_DEBUG", "메인 HTML에 'oncahot' 포함 여부: ${doc.html().contains("oncahot", ignoreCase = true)}")
+            Log.d("CUTV_DEBUG", "iframe HTML에 'oncahot' 포함 여부: ${iframeHtml.contains("oncahot", ignoreCase = true)}")
+            
+            // 외부 JS 스크립트 파일 목록 수집 (CDN 도메인이 외부 스크립트에 있을 가능성 대비)
+            val iframeDoc = Jsoup.parse(iframeHtml)
+            val scripts = iframeDoc.select("script").map { it.attr("src") }.filter { it.isNotBlank() }
+            Log.d("CUTV_DEBUG", "iframe 내의 외부 스크립트 파일들: $scripts")
+            // =========================================================
+
             // 썸네일 베이스 URL 동적 추출
             var dynamicThumbBase = "" 
             
-            // iframeHtml 또는 doc.html() 코드 내부에서 패턴 탐색
             val fallbackRegex = """(https?://[a-zA-Z0-9.-]+(?:/|\\/)+thumbs)""".toRegex(RegexOption.IGNORE_CASE)
             val match = fallbackRegex.find(iframeHtml) ?: fallbackRegex.find(doc.html())
             
             if (match != null) {
                 dynamicThumbBase = match.groupValues[1].replace("\\", "")
+                Log.d("CUTV_DEBUG", "SUCCESS: 정규식 추출 성공 -> $dynamicThumbBase")
             } else {
                 dynamicThumbBase = "" // 백업용 하드코딩 주소 제거 (검증용)
+                Log.d("CUTV_DEBUG", "WARNING: 정규식 추출 실패. thumbBase가 빈 값으로 처리됩니다.")
             }
             
             val jsonRegex = """window\.galaxystream\.data2\s*=\s*'(.*?)';""".toRegex()
@@ -101,8 +123,11 @@ class CUTVProvider : MainAPI() {
                         )
                     }
                 }
+            } else {
+                Log.d("CUTV_DEBUG", "FAIL: window.galaxystream.data2 데이터를 찾지 못했습니다.")
             }
         } catch (e: Exception) {
+            Log.e("CUTV_DEBUG", "ERROR 발생", e)
             e.printStackTrace()
         }
 
@@ -122,6 +147,8 @@ class CUTVProvider : MainAPI() {
 
         val rawThumbBase = uri.getQueryParameter("thumbBase")
         val thumbBase = if (!rawThumbBase.isNullOrBlank()) URLDecoder.decode(rawThumbBase, "UTF-8") else ""
+
+        Log.d("CUTV_DEBUG", "load() 진입 -> 전달받은 thumbBase: $thumbBase")
 
         val ssid = url.substringBefore("?").substringAfterLast("/")
         val posterUrl = if (thumbBase.isNotBlank()) "$thumbBase/$ssid.jpg?a=${System.currentTimeMillis()}" else ""
@@ -174,7 +201,6 @@ class CUTVProvider : MainAPI() {
                     urls.forEachIndexed { index, link ->
                         var actualUrl = link.replace("\\/", "/") 
                         
-                        // 기본값: 다이렉트 링크는 부모 iframe 주소를 Referer로 사용
                         var targetReferer = iframeUrl
                         var targetOrigin = "https://${Uri.parse(iframeUrl).host}"
                         
@@ -182,7 +208,6 @@ class CUTVProvider : MainAPI() {
                             actualUrl = actualUrl.removePrefix("EMBED#")
                         }
                         
-                        // liveUrl 파라미터가 있는 경우에만 Referer를 해당 플레이어 주소로 위장
                         if (actualUrl.contains("liveUrl=")) {
                             targetReferer = actualUrl 
                             try {
