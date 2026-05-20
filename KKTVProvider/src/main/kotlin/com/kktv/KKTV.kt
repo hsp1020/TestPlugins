@@ -1,7 +1,7 @@
 package com.kktv
 
 import android.net.Uri
-import android.util.Log // 디버깅 로그용 임포트
+import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
@@ -45,37 +45,54 @@ class CUTVProvider : MainAPI() {
 
             val iframeHtml = app.get(iframeSrc, headers = defaultHeaders, referer = url).text
             
-            // ================= 디버깅 로그 세션 시작 =================
             Log.d("CUTV_DEBUG", "=== START CUTV 썸네일 디버깅 ===")
             Log.d("CUTV_DEBUG", "접속 메인 URL: $url")
             Log.d("CUTV_DEBUG", "추출된 iframe 주소: $iframeSrc")
             Log.d("CUTV_DEBUG", "메인 HTML 크기: ${doc.html().length}자")
             Log.d("CUTV_DEBUG", "iframe HTML 크기: ${iframeHtml.length}자")
-            
-            // 키워드 포함 여부 확인
-            Log.d("CUTV_DEBUG", "메인 HTML에 'thumbs' 포함 여부: ${doc.html().contains("thumbs", ignoreCase = true)}")
-            Log.d("CUTV_DEBUG", "iframe HTML에 'thumbs' 포함 여부: ${iframeHtml.contains("thumbs", ignoreCase = true)}")
-            Log.d("CUTV_DEBUG", "메인 HTML에 'oncahot' 포함 여부: ${doc.html().contains("oncahot", ignoreCase = true)}")
-            Log.d("CUTV_DEBUG", "iframe HTML에 'oncahot' 포함 여부: ${iframeHtml.contains("oncahot", ignoreCase = true)}")
-            
-            // 외부 JS 스크립트 파일 목록 수집 (CDN 도메인이 외부 스크립트에 있을 가능성 대비)
-            val iframeDoc = Jsoup.parse(iframeHtml)
-            val scripts = iframeDoc.select("script").map { it.attr("src") }.filter { it.isNotBlank() }
-            Log.d("CUTV_DEBUG", "iframe 내의 외부 스크립트 파일들: $scripts")
-            // =========================================================
 
             // 썸네일 베이스 URL 동적 추출
             var dynamicThumbBase = "" 
             
-            val fallbackRegex = """(https?://[a-zA-Z0-9.-]+(?:/|\\/)+thumbs)""".toRegex(RegexOption.IGNORE_CASE)
-            val match = fallbackRegex.find(iframeHtml) ?: fallbackRegex.find(doc.html())
+            // [방안 1] iframeHtml 내부에서 oncahot.com 도메인을 직접 정규식으로 매칭하여 후가공
+            val hostRegex = """(https?://[a-zA-Z0-9.-]*oncahot\.com)""".toRegex(RegexOption.IGNORE_CASE)
+            val hostMatch = hostRegex.find(iframeHtml)
             
-            if (match != null) {
-                dynamicThumbBase = match.groupValues[1].replace("\\", "")
-                Log.d("CUTV_DEBUG", "SUCCESS: 정규식 추출 성공 -> $dynamicThumbBase")
+            if (hostMatch != null) {
+                val cleanDomain = hostMatch.groupValues[1].replace("\\", "")
+                dynamicThumbBase = "$cleanDomain/thumbs"
+                Log.d("CUTV_DEBUG", "SUCCESS: iframeHtml 도메인 매칭 및 thumbs 조립 성공 -> $dynamicThumbBase")
             } else {
-                dynamicThumbBase = "" // 백업용 하드코딩 주소 제거 (검증용)
-                Log.d("CUTV_DEBUG", "WARNING: 정규식 추출 실패. thumbBase가 빈 값으로 처리됩니다.")
+                // [방안 2] 만약 oncahot 도메인마저 변경되었을 경우를 위한 백업: 외부 script.bootstrap.js 파싱 추적
+                val iframeDoc = Jsoup.parse(iframeHtml)
+                val scriptSrc = iframeDoc.select("script").map { it.attr("src") }
+                    .firstOrNull { it.contains("script.bootstrap.js") }
+
+                if (!scriptSrc.isNullOrBlank()) {
+                    val iframeUri = Uri.parse(iframeSrc)
+                    val scriptUrl = if (scriptSrc.startsWith("http")) {
+                        scriptSrc
+                    } else {
+                        val cleanPath = scriptSrc.replace("../", "")
+                        "${iframeUri.scheme}://${iframeUri.host}/$cleanPath"
+                    }
+                    
+                    try {
+                        val scriptHtml = app.get(scriptUrl, headers = defaultHeaders, referer = iframeSrc).text
+                        val fallbackRegex = """(https?://[a-zA-Z0-9.-]+(?:/|\\/)+thumbs)""".toRegex(RegexOption.IGNORE_CASE)
+                        val scriptMatch = fallbackRegex.find(scriptHtml)
+                        if (scriptMatch != null) {
+                            dynamicThumbBase = scriptMatch.groupValues[1].replace("\\", "")
+                            Log.d("CUTV_DEBUG", "SUCCESS: script.bootstrap.js에서 thumbs 주소 파싱 성공 -> $dynamicThumbBase")
+                        }
+                    } catch (e: Exception) {
+                        Log.e("CUTV_DEBUG", "script.bootstrap.js 로드 중 예외 발생", e)
+                    }
+                }
+            }
+
+            if (dynamicThumbBase.isBlank()) {
+                Log.d("CUTV_DEBUG", "WARNING: 모든 동적 감지 로직이 실패했습니다. thumbBase가 빈 값으로 처리됩니다.")
             }
             
             val jsonRegex = """window\.galaxystream\.data2\s*=\s*'(.*?)';""".toRegex()
