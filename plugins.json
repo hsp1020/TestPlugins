@@ -150,10 +150,10 @@
     },
     {
         "iconUrl": "https://tvchak200.com/template/xiaozhuti/img/logo.png",
-        "fileHash": "sha256-eca41531786a103e613aeafeaa06f736c408b7e3700331733eed31c2341e3ef6",
+        "fileHash": "sha256-d849453269c435c908b2cf5376a463f11d405d1bd8437fdb74f31798e66c0806",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 19839,
+        "fileSize": 20240,
         "status": 1,
         "language": "ko",
         "authors": [
