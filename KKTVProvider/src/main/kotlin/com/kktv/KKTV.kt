@@ -45,25 +45,49 @@ class CUTVProvider : MainAPI() {
 
             val iframeHtml = app.get(iframeSrc, headers = defaultHeaders, referer = url).text
             
-            Log.d("CUTV_DEBUG", "=== START CUTV 썸네일 디버깅 ===")
+            // ================= [강화된 디버깅 로깅 시스템] =================
+            Log.d("CUTV_DEBUG", "=== START CUTV 팩트 체크 디버깅 ===")
             Log.d("CUTV_DEBUG", "접속 메인 URL: $url")
             Log.d("CUTV_DEBUG", "추출된 iframe 주소: $iframeSrc")
             Log.d("CUTV_DEBUG", "메인 HTML 크기: ${doc.html().length}자")
             Log.d("CUTV_DEBUG", "iframe HTML 크기: ${iframeHtml.length}자")
 
+            // 1. iframeHtml 내에서 'oncahot' 근처의 문자열 구조를 그대로 출력하여 구조적 팩트 확인
+            val indexOfOncahot = iframeHtml.indexOf("oncahot", ignoreCase = true)
+            if (indexOfOncahot != -1) {
+                val start = maxOf(0, indexOfOncahot - 100)
+                val end = minOf(iframeHtml.length, indexOfOncahot + 100)
+                val context = iframeHtml.substring(start, end)
+                Log.d("CUTV_DEBUG", "🔍 [FACT DUMP] iframe 내 'oncahot' 주변 200자 원본 데이터:\n[DUMP_START]\n$context\n[DUMP_END]")
+            } else {
+                Log.d("CUTV_DEBUG", "🔍 [FACT DUMP] iframe 내부에 'oncahot' 문자열 자체가 존재하지 않습니다.")
+            }
+
+            // 2. doc.html (메인페이지) 내의 'thumbs' 주변 문자열 팩트 확인
+            val indexOfThumbsDoc = doc.html().indexOf("thumbs", ignoreCase = true)
+            if (indexOfThumbsDoc != -1) {
+                val start = maxOf(0, indexOfThumbsDoc - 100)
+                val end = minOf(doc.html().length, indexOfThumbsDoc + 100)
+                val context = doc.html().substring(start, end)
+                Log.d("CUTV_DEBUG", "🔍 [FACT DUMP] 메인 HTML 내 'thumbs' 주변 200자 원본 데이터:\n[DUMP_START]\n$context\n[DUMP_END]")
+            }
+            // ===============================================================
+
             // 썸네일 베이스 URL 동적 추출
             var dynamicThumbBase = "" 
             
-            // [방안 1] iframeHtml 내부에서 oncahot.com 도메인을 직접 정규식으로 매칭하여 후가공
-            val hostRegex = """(https?://[a-zA-Z0-9.-]*oncahot\.com)""".toRegex(RegexOption.IGNORE_CASE)
+            // [방안 1] 프로토콜 구조와 무관하게 oncahot.com 도메인 영역만 정밀 매칭하는 유연한 패턴
+            val hostRegex = """([a-zA-Z0-9.-]*oncahot\.com)""".toRegex(RegexOption.IGNORE_CASE)
             val hostMatch = hostRegex.find(iframeHtml)
             
             if (hostMatch != null) {
-                val cleanDomain = hostMatch.groupValues[1].replace("\\", "")
-                dynamicThumbBase = "$cleanDomain/thumbs"
-                Log.d("CUTV_DEBUG", "SUCCESS: iframeHtml 도메인 매칭 및 thumbs 조립 성공 -> $dynamicThumbBase")
+                val cleanDomain = hostMatch.groupValues[1]
+                dynamicThumbBase = "https://$cleanDomain/thumbs"
+                Log.d("CUTV_DEBUG", "SUCCESS: [방안1] 도메인 다이렉트 매칭 성공 -> $dynamicThumbBase")
             } else {
-                // [방안 2] 만약 oncahot 도메인마저 변경되었을 경우를 위한 백업: 외부 script.bootstrap.js 파싱 추적
+                Log.d("CUTV_DEBUG", "INFO: [방안1] 매칭 실패. [방안2] 자바스크립트 파일 추적으로 진입합니다.")
+                
+                // [방안 2] 정밀 추적: 로드되는 외부 script.bootstrap.js 소스코드 직접 패치
                 val iframeDoc = Jsoup.parse(iframeHtml)
                 val scriptSrc = iframeDoc.select("script").map { it.attr("src") }
                     .firstOrNull { it.contains("script.bootstrap.js") }
@@ -76,23 +100,40 @@ class CUTVProvider : MainAPI() {
                         val cleanPath = scriptSrc.replace("../", "")
                         "${iframeUri.scheme}://${iframeUri.host}/$cleanPath"
                     }
+                    Log.d("CUTV_DEBUG", "타겟 스크립트 절대경로: $scriptUrl")
                     
                     try {
                         val scriptHtml = app.get(scriptUrl, headers = defaultHeaders, referer = iframeSrc).text
-                        val fallbackRegex = """(https?://[a-zA-Z0-9.-]+(?:/|\\/)+thumbs)""".toRegex(RegexOption.IGNORE_CASE)
+                        Log.d("CUTV_DEBUG", "스크립트 내용 수신 완료. 크기: ${scriptHtml.length}자")
+
+                        // 스크립트 내부 thumbs 키워드 위치 추적
+                        val indexOfThumbsScript = scriptHtml.indexOf("thumbs", ignoreCase = true)
+                        if (indexOfThumbsScript != -1) {
+                            val start = maxOf(0, indexOfThumbsScript - 100)
+                            val end = minOf(scriptHtml.length, indexOfThumbsScript + 100)
+                            val context = scriptHtml.substring(start, end)
+                            Log.d("CUTV_DEBUG", "🔍 [FACT DUMP] 스크립트 내 'thumbs' 주변 200자 원본 데이터:\n[DUMP_START]\n$context\n[DUMP_END]")
+                        }
+
+                        // 역슬래시 이스케이프(\/)를 완전 무시하고 프로토콜과 도메인, thumbs 서브디렉토리를 통째로 집어내는 초강력 정규식
+                        val fallbackRegex = """(https?(?::|\\:)(?:/|\\/)+[a-zA-Z0-9.-]+(?:/|\\/)+thumbs)""".toRegex(RegexOption.IGNORE_CASE)
                         val scriptMatch = fallbackRegex.find(scriptHtml)
                         if (scriptMatch != null) {
                             dynamicThumbBase = scriptMatch.groupValues[1].replace("\\", "")
-                            Log.d("CUTV_DEBUG", "SUCCESS: script.bootstrap.js에서 thumbs 주소 파싱 성공 -> $dynamicThumbBase")
+                            Log.d("CUTV_DEBUG", "SUCCESS: [방안2] 스크립트 내부에서 완전한 주소 추출 성공 -> $dynamicThumbBase")
+                        } else {
+                            Log.d("CUTV_DEBUG", "FAIL: [방안2] 스크립트는 로드했으나 패턴 매칭 실패")
                         }
                     } catch (e: Exception) {
-                        Log.e("CUTV_DEBUG", "script.bootstrap.js 로드 중 예외 발생", e)
+                        Log.e("CUTV_DEBUG", "FAIL: [방안2] script.bootstrap.js 네트워크 요청 실패", e)
                     }
+                } else {
+                    Log.d("CUTV_DEBUG", "FAIL: iframe 내부에서 script.bootstrap.js 태그 자체를 찾을 수 없음")
                 }
             }
 
             if (dynamicThumbBase.isBlank()) {
-                Log.d("CUTV_DEBUG", "WARNING: 모든 동적 감지 로직이 실패했습니다. thumbBase가 빈 값으로 처리됩니다.")
+                Log.d("CUTV_DEBUG", "WARNING: 모든 동적 추출 알고리즘이 최종 실패했습니다. 빈 주소("")가 부여됩니다.")
             }
             
             val jsonRegex = """window\.galaxystream\.data2\s*=\s*'(.*?)';""".toRegex()
