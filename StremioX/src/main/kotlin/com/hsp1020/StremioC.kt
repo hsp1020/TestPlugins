@@ -1519,9 +1519,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 }
 
 private data class TraktRelatedIds(@JsonProperty("tmdb") val tmdb: Int?)
-private data class TraktRelatedItem(@JsonProperty("ids") val ids: TraktRelatedIds?, @JsonProperty("title") val title: String? = null, @JsonProperty("year") val year: Int? = null)
+private data class TraktRelatedItem(@JsonProperty("ids") val ids: TraktRelatedIds?
 private data class SimklIds(@JsonProperty("tmdb") val tmdb: Int?, @JsonProperty("simkl") val simkl: Int?)
-private data class SimklRecItem(@JsonProperty("type") val type: String?, @JsonProperty("ids") val ids: SimklIds?, @JsonProperty("title") val title: String? = null, @JsonProperty("year") val year: Int? = null)
+private data class SimklRecItem(@JsonProperty("type") val type: String?, @JsonProperty("ids") val ids: SimklIds?
 private data class SimklRecResponse(@JsonProperty("users_recommendations") val users_recommendations: List<SimklRecItem>?)
 private data class SimklDetailResponse(@JsonProperty("ids") val ids: SimklIds?)
 
