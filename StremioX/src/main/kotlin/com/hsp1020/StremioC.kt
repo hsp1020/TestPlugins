@@ -1,4 +1,4 @@
-// 파일명: hsp1020/testplugins/TestPlugins-d1a26fae88cb55c8f1d621560cf4e45bd7fd78f6/StremioX/src/main/kotlin/com/hsp1020/StremioC.kt
+// 버전 정보: v1.4 - 국가 가점 검증 로직 보존 및 하부 OkHttp 디스패처/세마포어 연동 한계치 고속화 버전
 package com.hsp1020
 
 import android.content.Context
@@ -161,16 +161,18 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         @Volatile private var cachedCustomHostsTime: Long = 0
         private const val SETTINGS_CACHE_TTL = 60_000L
 
-        val networkSemaphore = Semaphore(20)
+        // [최적화 수치 확장]: N+1 개별 세부조회의 병렬 처리를 위해 코루틴 락 해제 한도를 10에서 35로 확장
+        val networkSemaphore = Semaphore(35)
 
         val customSession by lazy {
+            // [OkHttp 하부 파이프라인 병목 해제]: 스레드 제약 해제를 위해 디스패처 및 커넥션 풀 크기 고속화 튜닝
             val newClient = app.baseClient.newBuilder()
                 .protocols(listOf(Protocol.HTTP_1_1))
                 .dispatcher(Dispatcher().apply {
-                    maxRequests = 40
-                    maxRequestsPerHost = 20
+                    maxRequests = 70
+                    maxRequestsPerHost = 40
                 })
-                .connectionPool(ConnectionPool(30, 1, TimeUnit.MINUTES))
+                .connectionPool(ConnectionPool(45, 1, TimeUnit.MINUTES))
                 .build()
                 
             Requests(newClient).apply {
@@ -180,8 +182,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
 
         init {
-            app.baseClient.dispatcher.maxRequestsPerHost = 20
-            app.baseClient.dispatcher.maxRequests = 40 
+            app.baseClient.dispatcher.maxRequestsPerHost = 40
+            app.baseClient.dispatcher.maxRequests = 70 
         }
 
         fun loadProviderDynamically(pluginKeyword: String, className: String): MainAPI? {
@@ -578,8 +580,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
     
-        // [CORE BUG FIX]: Duplicate URL-keyed header caches to ID-keyed caches
-        // to prevent the core player's DataStoreHelper from overwriting them with hollow shells and breaking the season UI.
         runSuspendCatching {
             val keys = CloudStreamApp.getKeys("download_header_cache") ?: emptyList()
             for (fullKey in keys) {
@@ -1072,12 +1072,13 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     .filter { it.first !in existingTmdbIds && it.first != tmdbIdStr.toIntOrNull() }
                     .toList()
 
+                // [최적화 병렬 타임아웃 압축]: 대기 지연 감소를 위해 단건 조회 실패 타임아웃을 10초에서 4초로 변경
                 val missingMediaDeferred = missingPairs.map { pair ->
                     async(Dispatchers.IO) {
                         StremioC.networkSemaphore.withPermit {
-                            withTimeoutOrNull(10000L) {
+                            withTimeoutOrNull(4000L) {
                                 runSuspendCatching {
-                                    val res = StremioC.customSession.get(provider.buildTmdbUrl("/${pair.second}/${pair.first}"), timeout = 10).parsedSafe<TmdbDetailResponse>()
+                                    val res = StremioC.customSession.get(provider.buildTmdbUrl("/${pair.second}/${pair.first}"), timeout = 4).parsedSafe<TmdbDetailResponse>()
                                     res?.toTmdbMedia(pair.second)
                                 }.getOrNull()
                             }
@@ -1518,9 +1519,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 }
 
 private data class TraktRelatedIds(@JsonProperty("tmdb") val tmdb: Int?)
-private data class TraktRelatedItem(@JsonProperty("ids") val ids: TraktRelatedIds?)
+private data class TraktRelatedItem(@JsonProperty("ids") val ids: TraktRelatedIds?, @JsonProperty("title") val title: String? = null, @JsonProperty("year") val year: Int? = null)
 private data class SimklIds(@JsonProperty("tmdb") val tmdb: Int?, @JsonProperty("simkl") val simkl: Int?)
-private data class SimklRecItem(@JsonProperty("type") val type: String?, @JsonProperty("ids") val ids: SimklIds?)
+private data class SimklRecItem(@JsonProperty("type") val type: String?, @JsonProperty("ids") val ids: SimklIds?, @JsonProperty("title") val title: String? = null, @JsonProperty("year") val year: Int? = null)
 private data class SimklRecResponse(@JsonProperty("users_recommendations") val users_recommendations: List<SimklRecItem>?)
 private data class SimklDetailResponse(@JsonProperty("ids") val ids: SimklIds?)
 
