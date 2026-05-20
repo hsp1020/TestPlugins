@@ -59,7 +59,6 @@ class TvchakProvider : MainAPI() {
                 mainUrl = currentMainUrl
             }
 
-            // 도메인 유효성 체크용 테스트 경로를 페이지네이션 가능 경로로 변경
             val testPath = "/index.php/vod/show/id/1/page/1.html"
 
             try {
@@ -117,21 +116,24 @@ class TvchakProvider : MainAPI() {
     }
 
     /**
-     * 메인 페이지 로드
+     * 메인 페이지 로드 (try-catch 적용 및 hasNext 값 추가 보완)
      */
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         checkAndUpdateDomain()
-        // /type/ 경로를 /show/ 경로로 변경하여 페이지네이션 정상 대응
-        val url = "$mainUrl/index.php/vod/show/id/${request.data}/page/$page.html"
-        val document = app.get(url).document
+        return try {
+            val url = "$mainUrl/index.php/vod/show/id/${request.data}/page/$page.html"
+            val document = app.get(url).document
 
-        val items = coroutineScope {
-            document.select(".movie-list-item").map { element ->
-                async { parseItem(element, request.data == "1") }
-            }.awaitAll().filterNotNull()
+            val items = document.select(".movie-list-item").mapNotNull { element ->
+                parseItem(element, request.data == "1")
+            }
+
+            // hasNext를 전달하여 코어에 다음 페이지가 존재함을 확실하게 선언합니다.
+            newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            newHomePageResponse(request.name, emptyList(), hasNext = false)
         }
-
-        return newHomePageResponse(request.name, items)
     }
 
     /**
@@ -139,29 +141,30 @@ class TvchakProvider : MainAPI() {
      */
     override suspend fun search(query: String): List<SearchResponse> {
         checkAndUpdateDomain()
-        val url = "$mainUrl/index.php/vod/search.html?wd=$query"
-        val document = app.get(url).document
+        return try {
+            val url = "$mainUrl/index.php/vod/search.html?wd=$query"
+            val document = app.get(url).document
 
-        return coroutineScope {
-            document.select(".vod-search-list .box").map { element ->
-                async {
-                    val title = element.selectFirst(".movie-title")?.text()?.trim() ?: return@async null
-                    val href = fixUrlNull(element.selectFirst("a.cover-link")?.attr("href")) ?: return@async null
-                    val poster = element.selectFirst(".movie-post-lazyload")?.attr("data-original") ?: ""
-                    
-                    val encodedPoster = URLEncoder.encode(poster, "UTF-8")
-                    val finalUrl = "$href?poster=$encodedPoster"
+            document.select(".vod-search-list .box").mapNotNull { element ->
+                val title = element.selectFirst(".movie-title")?.text()?.trim() ?: return@mapNotNull null
+                val href = fixUrlNull(element.selectFirst("a.cover-link")?.attr("href")) ?: return@mapNotNull null
+                val poster = element.selectFirst(".movie-post-lazyload")?.attr("data-original") ?: ""
+                
+                val encodedPoster = URLEncoder.encode(poster, "UTF-8")
+                val finalUrl = "$href?poster=$encodedPoster"
 
-                    newTvSeriesSearchResponse(title, finalUrl, TvType.TvSeries) {
-                        this.posterUrl = poster
-                    }
+                newTvSeriesSearchResponse(title, finalUrl, TvType.TvSeries) {
+                    this.posterUrl = poster
                 }
-            }.awaitAll().filterNotNull()
+            }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            emptyList()
         }
     }
 
     /**
-     * 상세 페이지 (에피소드 날짜 포맷 완벽 대응)
+     * 상세 페이지
      */
     override suspend fun load(url: String): LoadResponse {
         checkAndUpdateDomain()
@@ -177,14 +180,10 @@ class TvchakProvider : MainAPI() {
         val plot = document.selectFirst("h2#sum_tag")?.text()?.trim() ?: ""
         val poster = passedPoster ?: document.selectFirst(".poster img")?.attr("src") ?: ""
         
-        // HTML 목록은 최신화(nid/1)가 맨 위, 1화(nid/max)가 맨 아래에 있음.
-        // reversed()로 뒤집어서 1화부터 순차적으로 정렬되게 만듦.
         val episodes = document.select(".content_playlist li a").reversed().mapIndexedNotNull { index, element ->
             val epTitle = element.text().trim()
             val epHref = fixUrlNull(element.attr("href")) ?: return@mapIndexedNotNull null
             
-            // 1. "제11화", "10회", "1부" 등 명시적인 숫자가 있으면 추출
-            // 2. "26/05/15" 같은 날짜 포맷이라 매칭이 안 되면, 뒤집힌 순서(index + 1)를 에피소드 번호로 강제 할당
             val epNum = Regex("(\\d+)\\s*[화회부]").find(epTitle)?.groupValues?.get(1)?.toIntOrNull() ?: (index + 1)
 
             newEpisode(epHref) {
@@ -217,7 +216,6 @@ class TvchakProvider : MainAPI() {
         val scriptContent = document.select("script").find { it.data().contains("player_aaaa") }?.data() ?: return false
         val jsonString = scriptContent.substringAfter("player_aaaa=").substringBefore("</script>").trim().removeSuffix(";")
         
-        // 빌드 에러의 주범인 JSON 라이브러리를 버리고, 무결점 Regex로 URL만 추출
         val urlRegex = Regex(""""url"\s*:\s*"([^"]+)"""")
         val matchUrl = urlRegex.find(jsonString)
         val rawUrl = matchUrl?.groupValues?.get(1)?.replace("\\/", "/") ?: return false
@@ -225,7 +223,6 @@ class TvchakProvider : MainAPI() {
         var videoUrl = rawUrl
         var subUrl: String? = null
 
-        // 자막 동적 추출 정규식 (?srt 또는 ?vtt 뒤의 URL 추출)
         val subRegex = Regex("""\?(srt|vtt)(https?://.*)""")
         val subMatch = subRegex.find(rawUrl)
         if (subMatch != null) {
@@ -235,7 +232,6 @@ class TvchakProvider : MainAPI() {
 
         val type = if (videoUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
 
-        // 최신 newExtractorLink 빌더 패턴 (위치 기반 인자 사용)
         callback.invoke(
             newExtractorLink(
                 this.name,
@@ -249,7 +245,6 @@ class TvchakProvider : MainAPI() {
         )
 
         if (!subUrl.isNullOrBlank()) {
-            // 최신 newSubtitleFile 빌더 패턴 (위치 기반 인자 사용)
             subtitleCallback.invoke(
                 newSubtitleFile(
                     "Korean",
@@ -262,24 +257,28 @@ class TvchakProvider : MainAPI() {
     }
 
     /**
-     * 공통 아이템 파싱 함수
+     * 공통 아이템 파싱 함수 (오류 복구를 위해 동기식 try-catch 장치 도입)
      */
     private fun parseItem(element: Element, isMovie: Boolean): SearchResponse? {
-        val title = element.selectFirst(".movie-title")?.text()?.trim() ?: return null
-        val href = fixUrlNull(element.selectFirst("a")?.attr("href")) ?: return null
-        
-        var poster = element.selectFirst(".movie-post-lazyload")?.attr("data-original") ?: ""
-        if (poster.isBlank() || poster == "/") {
-            poster = element.selectFirst(".movie-post-lazyload")?.attr("style")
-                ?.substringAfter("url('")?.substringBefore("')") ?: ""
-        }
+        return try {
+            val title = element.selectFirst(".movie-title")?.text()?.trim() ?: return null
+            val href = fixUrlNull(element.selectFirst("a")?.attr("href")) ?: return null
+            
+            var poster = element.selectFirst(".movie-post-lazyload")?.attr("data-original") ?: ""
+            if (poster.isBlank() || poster == "/") {
+                poster = element.selectFirst(".movie-post-lazyload")?.attr("style")
+                    ?.substringAfter("url('")?.substringBefore("')") ?: ""
+            }
 
-        val encodedPoster = URLEncoder.encode(poster, "UTF-8")
-        val finalUrl = "$href?poster=$encodedPoster"
-        val type = if (isMovie) TvType.Movie else TvType.TvSeries
+            val encodedPoster = URLEncoder.encode(poster, "UTF-8")
+            val finalUrl = "$href?poster=$encodedPoster"
+            val type = if (isMovie) TvType.Movie else TvType.TvSeries
 
-        return newTvSeriesSearchResponse(title, finalUrl, type) {
-            this.posterUrl = poster
+            newTvSeriesSearchResponse(title, finalUrl, type) {
+                this.posterUrl = poster
+            }
+        } catch (e: Exception) {
+            null
         }
     }
 }
