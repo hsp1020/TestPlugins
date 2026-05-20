@@ -44,14 +44,12 @@ class CUTVProvider : MainAPI() {
 
             val iframeHtml = app.get(iframeSrc, headers = defaultHeaders, referer = url).text
             
-            // 디버깅 덤프 출력
             println("[CUTV_DEBUG] === START CUTV 팩트 체크 디버깅 ===")
             println("[CUTV_DEBUG] 접속 메인 URL: $url")
             println("[CUTV_DEBUG] 추출된 iframe 주소: $iframeSrc")
             println("[CUTV_DEBUG] 메인 HTML 크기: ${doc.html().length}자")
             println("[CUTV_DEBUG] iframe HTML 크기: ${iframeHtml.length}자")
 
-            // 1. iframeHtml 내에서 'oncahot' 근처의 문자열 구조를 확인용 덤프
             val indexOfOncahot = iframeHtml.indexOf("oncahot", ignoreCase = true)
             if (indexOfOncahot != -1) {
                 val start = maxOf(0, indexOfOncahot - 100)
@@ -62,7 +60,6 @@ class CUTVProvider : MainAPI() {
                 println("[CUTV_DEBUG] 🔍 [FACT DUMP] iframe 내부에 'oncahot' 문자열 자체가 존재하지 않습니다.")
             }
 
-            // 2. doc.html (메인페이지) 내의 'thumbs' 주변 문자열 확인용 덤프
             val indexOfThumbsDoc = doc.html().indexOf("thumbs", ignoreCase = true)
             if (indexOfThumbsDoc != -1) {
                 val start = maxOf(0, indexOfThumbsDoc - 100)
@@ -74,7 +71,6 @@ class CUTVProvider : MainAPI() {
             // 썸네일 베이스 URL 동적 추출
             var dynamicThumbBase = "" 
             
-            // [방안 1] 순수 도메인 부분만 도려내어 thumbs를 구성하는 정규식
             val hostRegex = """([a-zA-Z0-9.-]*oncahot\.com)""".toRegex(RegexOption.IGNORE_CASE)
             val hostMatch = hostRegex.find(iframeHtml)
             
@@ -85,7 +81,6 @@ class CUTVProvider : MainAPI() {
             } else {
                 println("[CUTV_DEBUG] INFO: [방안1] 매칭 실패. [방안2] 자바스크립트 파일 추적으로 진입합니다.")
                 
-                // [방안 2] script.bootstrap.js 파싱 추적
                 val iframeDoc = Jsoup.parse(iframeHtml)
                 val scriptSrc = iframeDoc.select("script").map { it.attr("src") }
                     .firstOrNull { it.contains("script.bootstrap.js") }
@@ -106,7 +101,6 @@ class CUTVProvider : MainAPI() {
                         val scriptHtml = app.get(scriptUrl, headers = defaultHeaders, referer = iframeSrc).text
                         println("[CUTV_DEBUG] 스크립트 내용 수신 완료. 크기: ${scriptHtml.length}자")
 
-                        // 스크립트 내부 thumbs 키워드 위치 추적
                         val indexOfThumbsScript = scriptHtml.indexOf("thumbs", ignoreCase = true)
                         if (indexOfThumbsScript != -1) {
                             val start = maxOf(0, indexOfThumbsScript - 100)
@@ -115,7 +109,6 @@ class CUTVProvider : MainAPI() {
                             println("[CUTV_DEBUG] 🔍 [FACT DUMP] 스크립트 내 'thumbs' 주변 200자 원본 데이터:\n[DUMP_START]\n$context\n[DUMP_END]")
                         }
 
-                        // 역슬래시 이스케이프(\/)까지 완전 무시하고 프로토콜과 도메인, thumbs 서브디렉토리를 통째로 집어내는 정규식
                         val fallbackRegex = """(https?(?::|\\:)(?:/|\\/)+[a-zA-Z0-9.-]+(?:/|\\/)+thumbs)""".toRegex(RegexOption.IGNORE_CASE)
                         val scriptMatch = fallbackRegex.find(scriptHtml)
                         if (scriptMatch != null) {
@@ -162,9 +155,9 @@ class CUTVProvider : MainAPI() {
                         
                         val encodedTitle = URLEncoder.encode(title, "UTF-8")
                         val encodedIframe = URLEncoder.encode(iframeSrc, "UTF-8")
-                        val encodedThumbBase = URLEncoder.encode(dynamicThumbBase, "UTF-8")
-                        
-                        val fakeUrl = "$mainUrl/live_stream/$ssid?title=$encodedTitle&iframe=$encodedIframe&thumbBase=$encodedThumbBase"
+                        val encodedPoster = URLEncoder.encode(posterUrl, "UTF-8") // 검증된 완전한 포스터 주소를 인코딩하여 전송
+
+                        val fakeUrl = "$mainUrl/live_stream/$ssid?title=$encodedTitle&iframe=$encodedIframe&poster=$encodedPoster"
 
                         items.add(
                             newLiveSearchResponse(name = title, url = fakeUrl) {
@@ -203,13 +196,11 @@ class CUTVProvider : MainAPI() {
         val rawIframe = uri.getQueryParameter("iframe")
         val iframeUrl = if (!rawIframe.isNullOrBlank()) URLDecoder.decode(rawIframe, "UTF-8") else "https://sol13.galaxy-stream.live/cli/box"
 
-        val rawThumbBase = uri.getQueryParameter("thumbBase")
-        val thumbBase = if (!rawThumbBase.isNullOrBlank()) URLDecoder.decode(rawThumbBase, "UTF-8") else ""
+        // 홈페이지 단계에서 정상 가공된 포스터 주소를 그대로 받아옵니다 (중복 다운로드 방지)
+        val rawPoster = uri.getQueryParameter("poster")
+        val posterUrl = if (!rawPoster.isNullOrBlank()) URLDecoder.decode(rawPoster, "UTF-8") else ""
 
-        println("[CUTV_DEBUG] load() 진입 -> 전달받은 thumbBase: $thumbBase")
-
-        val ssid = url.substringBefore("?").substringAfterLast("/")
-        val posterUrl = if (thumbBase.isNotBlank()) "$thumbBase/$ssid.jpg?a=${System.currentTimeMillis()}" else ""
+        println("[CUTV_DEBUG] load() 진입 -> 전달받은 posterUrl: $posterUrl")
 
         return newLiveStreamLoadResponse(
             name = title,
@@ -217,6 +208,7 @@ class CUTVProvider : MainAPI() {
             dataUrl = url
         ) {
             this.posterUrl = posterUrl
+            this.plot = "실시간 스포츠 중계" // 플롯 값 고정 지정
             this.posterHeaders = mapOf(
                 "Referer" to iframeUrl,
                 "User-Agent" to userAgent,
