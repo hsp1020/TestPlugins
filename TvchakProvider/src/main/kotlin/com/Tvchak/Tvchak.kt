@@ -116,21 +116,28 @@ class TvchakProvider : MainAPI() {
     }
 
     /**
-     * 메인 페이지 로드 (try-catch 적용 및 hasNext 값 추가 보완)
+     * 메인 페이지 로드 (로그캣 출력 코드 보강)
      */
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         checkAndUpdateDomain()
         return try {
             val url = "$mainUrl/index.php/vod/show/id/${request.data}/page/$page.html"
+            
+            // [디버깅] 호출되는 페이지 수와 엔드포인트 URL 출력
+            println("TVCHAK_DEBUG: [getMainPage] 요청 페이지 = $page, 카테고리 = ${request.name}, URL = $url")
+            
             val document = app.get(url).document
 
             val items = document.select(".movie-list-item").mapNotNull { element ->
                 parseItem(element, request.data == "1")
             }
 
-            // hasNext를 전달하여 코어에 다음 페이지가 존재함을 확실하게 선언합니다.
+            // [디버깅] 성공적으로 파싱된 아이템 갯수 출력
+            println("TVCHAK_DEBUG: [getMainPage] 페이지 $page 로드 성공 - 파싱된 아이템 수: ${items.size}")
+            
             newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
         } catch (e: Exception) {
+            println("TVCHAK_DEBUG: [getMainPage] 페이지 $page 로드 중 에러 발생: ${e.message}")
             if (e is CancellationException) throw e
             newHomePageResponse(request.name, emptyList(), hasNext = false)
         }
@@ -143,9 +150,11 @@ class TvchakProvider : MainAPI() {
         checkAndUpdateDomain()
         return try {
             val url = "$mainUrl/index.php/vod/search.html?wd=$query"
+            println("TVCHAK_DEBUG: [search] 검색어 = $query, URL = $url")
+            
             val document = app.get(url).document
 
-            document.select(".vod-search-list .box").mapNotNull { element ->
+            val items = document.select(".vod-search-list .box").mapNotNull { element ->
                 val title = element.selectFirst(".movie-title")?.text()?.trim() ?: return@mapNotNull null
                 val href = fixUrlNull(element.selectFirst("a.cover-link")?.attr("href")) ?: return@mapNotNull null
                 val poster = element.selectFirst(".movie-post-lazyload")?.attr("data-original") ?: ""
@@ -157,7 +166,10 @@ class TvchakProvider : MainAPI() {
                     this.posterUrl = poster
                 }
             }
+            println("TVCHAK_DEBUG: [search] 검색 결과 수: ${items.size}")
+            items
         } catch (e: Exception) {
+            println("TVCHAK_DEBUG: [search] 검색 실패: ${e.message}")
             if (e is CancellationException) throw e
             emptyList()
         }
