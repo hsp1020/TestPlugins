@@ -116,24 +116,32 @@ class TvchakProvider : MainAPI() {
     }
 
     /**
-     * 메인 페이지 로드 (로그캣 출력 코드 보강)
+     * 메인 페이지 로드 (추천 슬라이더/배너 아이템 필터링 적용)
      */
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         checkAndUpdateDomain()
         return try {
             val url = "$mainUrl/index.php/vod/show/id/${request.data}/page/$page.html"
-            
-            // [디버깅] 호출되는 페이지 수와 엔드포인트 URL 출력
             println("TVCHAK_DEBUG: [getMainPage] 요청 페이지 = $page, 카테고리 = ${request.name}, URL = $url")
             
             val document = app.get(url).document
 
-            val items = document.select(".movie-list-item").mapNotNull { element ->
+            // 부모 레이아웃이 슬라이더/추천 영역인 것들을 걸러내어, 중복되는 상위 추천 아이템 6개 노출 차단
+            val items = document.select(".movie-list-item").filter { element ->
+                element.parents().none { parent ->
+                    val className = parent.className().lowercase()
+                    className.contains("swiper") || 
+                    className.contains("slide") || 
+                    className.contains("banner") || 
+                    className.contains("hot") || 
+                    className.contains("featured") ||
+                    className.contains("rec")
+                }
+            }.mapNotNull { element ->
                 parseItem(element, request.data == "1")
             }
 
-            // [디버깅] 성공적으로 파싱된 아이템 갯수 출력
-            println("TVCHAK_DEBUG: [getMainPage] 페이지 $page 로드 성공 - 파싱된 아이템 수: ${items.size}")
+            println("TVCHAK_DEBUG: [getMainPage] 페이지 $page 로드 성공 - 중복 제외 필터링 후 아이템 수: ${items.size}")
             
             newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
         } catch (e: Exception) {
