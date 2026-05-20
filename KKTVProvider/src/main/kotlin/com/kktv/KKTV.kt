@@ -46,23 +46,14 @@ class CUTVProvider : MainAPI() {
             // 썸네일 베이스 URL 동적 추출
             var dynamicThumbBase = "" 
             
-            val imgTags = doc.select("img.ssc-thumbnail-icon")
-            for (img in imgTags) {
-                val src = img.attr("src")
-                if (src.contains("/thumbs/")) {
-                    dynamicThumbBase = src.substringBefore("/thumbs/") + "/thumbs"
-                    break
-                }
-            }
+            // iframeHtml 또는 doc.html() 코드 내부에서 패턴 탐색
+            val fallbackRegex = """(https?://[a-zA-Z0-9.-]+(?:/|\\/)+thumbs)""".toRegex(RegexOption.IGNORE_CASE)
+            val match = fallbackRegex.find(iframeHtml) ?: fallbackRegex.find(doc.html())
             
-            if (dynamicThumbBase.isEmpty()) {
-                val fallbackRegex = """(https?://[a-zA-Z0-9.-]+(?:/|\\/)+thumbs)""".toRegex(RegexOption.IGNORE_CASE)
-                val match = fallbackRegex.find(doc.html()) ?: fallbackRegex.find(iframeHtml)
-                if (match != null) {
-                    dynamicThumbBase = match.groupValues[1].replace("\\", "")
-                } else {
-                    dynamicThumbBase = "https://lux1.oncahot.com/thumbs"
-                }
+            if (match != null) {
+                dynamicThumbBase = match.groupValues[1].replace("\\", "")
+            } else {
+                dynamicThumbBase = "" // 백업용 하드코딩 주소 제거 (검증용)
             }
             
             val jsonRegex = """window\.galaxystream\.data2\s*=\s*'(.*?)';""".toRegex()
@@ -87,7 +78,7 @@ class CUTVProvider : MainAPI() {
                         val thumbId = if (srcy.isNotBlank()) srcy else ssid
                         val timestamp = System.currentTimeMillis()
                         
-                        val posterUrl = "$dynamicThumbBase/$thumbId.jpg?a=$timestamp"
+                        val posterUrl = if (dynamicThumbBase.isNotBlank()) "$dynamicThumbBase/$thumbId.jpg?a=$timestamp" else ""
                         
                         val encodedTitle = URLEncoder.encode(title, "UTF-8")
                         val encodedIframe = URLEncoder.encode(iframeSrc, "UTF-8")
@@ -130,10 +121,10 @@ class CUTVProvider : MainAPI() {
         val iframeUrl = if (!rawIframe.isNullOrBlank()) URLDecoder.decode(rawIframe, "UTF-8") else "https://sol13.galaxy-stream.live/cli/box"
 
         val rawThumbBase = uri.getQueryParameter("thumbBase")
-        val thumbBase = if (!rawThumbBase.isNullOrBlank()) URLDecoder.decode(rawThumbBase, "UTF-8") else "https://lux1.oncahot.com/thumbs"
+        val thumbBase = if (!rawThumbBase.isNullOrBlank()) URLDecoder.decode(rawThumbBase, "UTF-8") else ""
 
         val ssid = url.substringBefore("?").substringAfterLast("/")
-        val posterUrl = "$thumbBase/$ssid.jpg?a=${System.currentTimeMillis()}"
+        val posterUrl = if (thumbBase.isNotBlank()) "$thumbBase/$ssid.jpg?a=${System.currentTimeMillis()}" else ""
 
         return newLiveStreamLoadResponse(
             name = title,
@@ -183,7 +174,7 @@ class CUTVProvider : MainAPI() {
                     urls.forEachIndexed { index, link ->
                         var actualUrl = link.replace("\\/", "/") 
                         
-                        // 기본값: 다이렉트 링크(lux1.oncahot 등)는 부모 iframe 주소를 Referer로 사용
+                        // 기본값: 다이렉트 링크는 부모 iframe 주소를 Referer로 사용
                         var targetReferer = iframeUrl
                         var targetOrigin = "https://${Uri.parse(iframeUrl).host}"
                         
