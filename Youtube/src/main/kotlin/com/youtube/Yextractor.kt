@@ -35,6 +35,11 @@ open class YoutubeExtractor : ExtractorApi() {
         private var activeServer: ServerSocket? = null
         private var serverPort: Int = 0
         private val manifestMap = ConcurrentHashMap<String, String>()
+
+        // 추가: 클래스 구동 시 NewPipe Extractor에 내장된 iOS HLS 마스터 스트림 자동 우회 수집 모드 활성화
+        init {
+            YoutubeStreamExtractor.setFetchIosClient(true)
+        }
     }
 
     override fun getExtractorUrl(id: String): String {
