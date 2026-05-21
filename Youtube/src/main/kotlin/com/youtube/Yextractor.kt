@@ -277,15 +277,12 @@ open class YoutubeExtractor : ExtractorApi() {
     }
 
     private fun registerManifestAndGetUrl(xmlContent: String): String? {
-        if (serverPort == 0) {
-            println("[YT_DEBUG] [registerManifestAndGetUrl] 경고: 포트가 0입니다. 서버 스레드가 작동하지 않고 있습니다.")
-            return null
-        }
+        println("[YT_DEBUG] [registerManifestAndGetUrl] 호출됨. 포트: $serverPort")
+        if (serverPort == 0) return null
         val id = UUID.randomUUID().toString()
         manifestMap[id] = xmlContent
-        val localUrl = "http://127.0.0.1:$serverPort/$id.mpd"
-        println("[YT_DEBUG] [registerManifestAndGetUrl] 가상 MPD 매니페스트 맵 등록 성공. UUID: $id, 주소: $localUrl")
-        return localUrl
+        println("[YT_DEBUG] [registerManifestAndGetUrl] 가상 MPD 매니페스트 맵 등록 성공. UUID: $id, 주소: http://127.0.0.1:$serverPort/$id.mpd")
+        return "http://127.0.0.1:$serverPort/$id.mpd"
     }
 
     private fun handleClient(client: Socket) {
