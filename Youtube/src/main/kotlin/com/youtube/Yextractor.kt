@@ -35,6 +35,68 @@ open class YoutubeExtractor : ExtractorApi() {
         private var activeServer: ServerSocket? = null
         private var serverPort: Int = 0
         private val manifestMap = ConcurrentHashMap<String, String>()
+
+        // 수정 1: @Synchronized가 글로벌하게 동작하도록 companion object 내부로 이동 및 자원 자가회복(cleanup) 추가
+        @Synchronized
+        private fun startServerIfNeeded() {
+            if (activeServer != null && !activeServer!!.isClosed) return
+            try {
+                activeServer = ServerSocket(0)
+                serverPort = activeServer!!.localPort
+                thread(name = "YT-LocalDASH-Server") {
+                    try {
+                        while (activeServer != null && !activeServer!!.isClosed) {
+                            val client = activeServer!!.accept()
+                            thread { handleClient(client) }
+                        }
+                    } catch (e: Exception) {
+                        logError(e)
+                    } finally {
+                        cleanupServer()
+                    }
+                }
+            } catch (e: Exception) { 
+                logError(e) 
+                cleanupServer()
+            }
+        }
+
+        private fun cleanupServer() {
+            try {
+                activeServer?.close()
+            } catch (e: Exception) {}
+            activeServer = null
+            serverPort = 0
+        }
+
+        private fun handleClient(client: Socket) {
+            try {
+                client.use { socket ->
+                    val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
+                    val output = PrintWriter(socket.getOutputStream(), true)
+                    val line = reader.readLine()
+                    if (line != null && line.startsWith("GET")) {
+                        val parts = line.split(" ")
+                        if (parts.size > 1) {
+                            var path = parts[1].substring(1)
+                            if (path.endsWith(".mpd")) path = path.replace(".mpd", "")
+                            val content = manifestMap[path]
+                            if (content != null) {
+                                output.println("HTTP/1.1 200 OK")
+                                output.println("Content-Type: application/dash+xml")
+                                output.println("Connection: close")
+                                output.println("Access-Control-Allow-Origin: *")
+                                output.println("")
+                                output.println(content)
+                            } else {
+                                output.println("HTTP/1.1 404 Not Found")
+                                output.println("")
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {}
+        }
     }
 
     override fun getExtractorUrl(id: String): String {
@@ -65,7 +127,8 @@ open class YoutubeExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val cleanedUrl = url.replace(schemaStripRegex, "")
+        // 수정 2: 스키마(https://) 강제 제거로 인한 NewPipe 파싱 예외 발생 문제를 유연하게 스키마 보존하도록 수정
+        val cleanedUrl = if (url.startsWith("http")) url else "https://$url"
         val videoId = try { cleanedUrl.substringAfter("v=").substringBefore("&") } catch (e: Exception) { cleanedUrl }
 
         ytVideos.remove(videoId)
@@ -145,193 +208,147 @@ open class YoutubeExtractor : ExtractorApi() {
                                     // 언어별 우선순위 분리를 위한 소스명 변경
                                     val sourceName = "${this.name} ($lang)"
 
-                                    builtLinks.add(
-                                        newExtractorLink(
-                                            sourceName,
-                                            finalName,
-                                            localLink,
-                                            type = ExtractorLinkType.DASH
-                                        ) {
-                                            this.referer = mainUrl
-                                            this.quality = video.height
-                                        }
-                                    )
+                                        builtLinks.add(
+                                            newExtractorLink(
+                                                sourceName,
+                                                finalName,
+                                                localLink,
+                                                type = ExtractorLinkType.DASH
+                                            ) {
+                                                this.referer = mainUrl
+                                                this.quality = video.height
+                                            }
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                val muxedList = (s.videoStreams ?: emptyList()).mapNotNull { vs ->
-                    try {
-                        val mUrl = vs.content ?: return@mapNotNull null
-                        if (!seenUrls.add(mUrl)) return@mapNotNull null
-                        val label = buildVideoLabelNumber(vs)
-                        val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
-                        
-                        
-                        Triple(mUrl, label, height)
-                    } catch (e: Exception) { null }
-                }
-                for ((mUrl, mLabel, mHeight) in muxedList) {
-                    builtLinks.add(
-                        newExtractorLink(this.name, "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
-                            this.referer = mainUrl
-                            this.quality = mHeight
+                    val muxedList = (s.videoStreams ?: emptyList()).mapNotNull { vs ->
+                        try {
+                            val mUrl = vs.content ?: return@mapNotNull null
+                            if (!seenUrls.add(mUrl)) return@mapNotNull null
+                            val label = buildVideoLabelNumber(vs)
+                            val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
+                            
+                            
+                            Triple(mUrl, label, height)
+                        } catch (e: Exception) { null }
+                    }
+                    for ((mUrl, mLabel, mHeight) in muxedList) {
+                        builtLinks.add(
+                            newExtractorLink(this.name, "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
+                                this.referer = mainUrl
+                                this.quality = mHeight
+                            }
+                        )
+                    }
+
+                    ytVideos[videoId] = builtLinks.toList()
+
+                } catch (e: Exception) { logError(e) }
+            }
+
+            ytVideos[videoId]?.forEach { callback(it) }
+
+            ytVideosSubtitles[videoId]?.mapNotNull { ss ->
+                try {
+                    val lang = ss.locale?.language ?: return@mapNotNull null
+                    var url = ss.content ?: ss.getUrl() ?: return@mapNotNull null
+                    
+                    // NewPipe가 가져온 URL에서 기존 포맷을 강제로 뜯어내고 SRT를 주입합니다.
+                    if (url.startsWith("http")) {
+                        url = url.replace(Regex("&fmt=[^&]+"), "")
+                        if (!url.contains("fmt=srt")) {
+                            url = "$url&fmt=srt"
                         }
-                    )
-                }
-
-                ytVideos[videoId] = builtLinks.toList()
-
-            } catch (e: Exception) { logError(e) }
+                    }
+                    
+                    newSubtitleFile(lang, url)
+                } catch (e: Exception) { null }
+            }?.forEach { subtitleCallback(it) }        
+            
         }
 
-        ytVideos[videoId]?.forEach { callback(it) }
+        private fun registerManifestAndGetUrl(xmlContent: String): String? {
+            if (serverPort == 0) return null
+            val id = UUID.randomUUID().toString()
+            manifestMap[id] = xmlContent
+            return "http://127.0.0.1:$serverPort/$id.mpd"
+        }
 
-        ytVideosSubtitles[videoId]?.mapNotNull { ss ->
-            try {
-                val lang = ss.locale?.language ?: return@mapNotNull null
-                var url = ss.content ?: ss.getUrl() ?: return@mapNotNull null
-                
-                // 핵심: NewPipe가 가져온 URL에서 기존 포맷을 강제로 뜯어내고 SRT를 주입합니다.
-                if (url.startsWith("http")) {
-                    url = url.replace(Regex("&fmt=[^&]+"), "")
-                    if (!url.contains("fmt=srt")) {
-                        url = "$url&fmt=srt"
-                    }
-                }
-                
-                newSubtitleFile(lang, url)
-            } catch (e: Exception) { null }
-        }?.forEach { subtitleCallback(it) }        
-        
-    }
+        private fun buildDashManifestXml(
+            video: StreamInfo,
+            audioList: List<AudioInfo>,
+            durationSec: Long
+        ): String {
+            val cleanVideoUrl = escapeXml(video.url)
+            val durationString = "PT${durationSec}S"
 
-    @Synchronized
-    private fun startServerIfNeeded() {
-        if (activeServer != null && !activeServer!!.isClosed) return
-        try {
-            activeServer = ServerSocket(0)
-            serverPort = activeServer!!.localPort
-            thread {
-                try {
-                    while (activeServer != null && !activeServer!!.isClosed) {
-                        val client = activeServer!!.accept()
-                        thread { handleClient(client) }
-                    }
-                } catch (e: Exception) {}
-            }
-        } catch (e: Exception) { logError(e) }
-    }
+            val sb = StringBuilder()
+            sb.append("""<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011" type="static" minBufferTime="PT5.0S" mediaPresentationDuration="$durationString">""")
+            sb.append("<Period>")
 
-    private fun registerManifestAndGetUrl(xmlContent: String): String? {
-        if (serverPort == 0) return null
-        val id = UUID.randomUUID().toString()
-        manifestMap[id] = xmlContent
-        return "http://127.0.0.1:$serverPort/$id.mpd"
-    }
+            val vMime = video.mimeType
+            val vCodecs = if (vMime.contains("webm")) "vp9" else "avc1.4d401f"
 
-    private fun handleClient(client: Socket) {
-        try {
-            client.use { socket ->
-                val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
-                val output = PrintWriter(socket.getOutputStream(), true)
-                val line = reader.readLine()
-                if (line != null && line.startsWith("GET")) {
-                    val parts = line.split(" ")
-                    if (parts.size > 1) {
-                        var path = parts[1].substring(1)
-                        if (path.endsWith(".mpd")) path = path.replace(".mpd", "")
-                        val content = manifestMap[path]
-                        if (content != null) {
-                            output.println("HTTP/1.1 200 OK")
-                            output.println("Content-Type: application/dash+xml")
-                            output.println("Connection: close")
-                            output.println("Access-Control-Allow-Origin: *")
-                            output.println("")
-                            output.println(content)
-                        } else {
-                            output.println("HTTP/1.1 404 Not Found")
-                            output.println("")
-                        }
-                    }
-                }
-            }
-        } catch (e: Exception) {}
-    }
-
-    private fun buildDashManifestXml(
-        video: StreamInfo,
-        audioList: List<AudioInfo>,
-        durationSec: Long
-    ): String {
-        val cleanVideoUrl = escapeXml(video.url)
-        val durationString = "PT${durationSec}S"
-
-        val sb = StringBuilder()
-        sb.append("""<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011" type="static" minBufferTime="PT5.0S" mediaPresentationDuration="$durationString">""")
-        sb.append("<Period>")
-
-        val vMime = video.mimeType
-        val vCodecs = if (vMime.contains("webm")) "vp9" else "avc1.4d401f"
-
-        val vSegmentBase = if (video.initRange != null && video.indexRange != null) {
-            """<SegmentBase indexRange="${video.indexRange}"><Initialization range="${video.initRange}" /></SegmentBase>"""
-        } else ""
-
-        sb.append("""
-            <AdaptationSet mimeType="$vMime" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
-              <Representation id="video" bandwidth="4000000" width="0" height="${video.height}" codecs="$vCodecs">
-                <BaseURL>$cleanVideoUrl</BaseURL>
-                $vSegmentBase
-              </Representation>
-            </AdaptationSet>
-        """.trimIndent())
-
-        audioList.forEachIndexed { index, audio ->
-            val cleanAudioUrl = escapeXml(audio.url)
-            val audioId = "audio_$index"
-            val aMime = audio.mimeType
-            val aCodecs = if (aMime.contains("webm")) "opus" else "mp4a.40.2"
-
-            val aSegmentBase = if (audio.initRange != null && audio.indexRange != null) {
-                """<SegmentBase indexRange="${audio.indexRange}"><Initialization range="${audio.initRange}" /></SegmentBase>"""
+            val vSegmentBase = if (video.initRange != null && video.indexRange != null) {
+                """<SegmentBase indexRange="${video.indexRange}"><Initialization range="${video.initRange}" /></SegmentBase>"""
             } else ""
 
             sb.append("""
-                <AdaptationSet mimeType="$aMime" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
-                  <Representation id="$audioId" bandwidth="${if(audio.bitrate>0) audio.bitrate else 128000}" codecs="$aCodecs">
-                    <BaseURL>$cleanAudioUrl</BaseURL>
-                    $aSegmentBase
+                <AdaptationSet mimeType="$vMime" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
+                  <Representation id="video" bandwidth="4000000" width="0" height="${video.height}" codecs="$vCodecs">
+                    <BaseURL>$cleanVideoUrl</BaseURL>
+                    $vSegmentBase
                   </Representation>
                 </AdaptationSet>
             """.trimIndent())
+
+            audioList.forEachIndexed { index, audio ->
+                val cleanAudioUrl = escapeXml(audio.url)
+                val audioId = "audio_$index"
+                val aMime = audio.mimeType
+                val aCodecs = if (aMime.contains("webm")) "opus" else "mp4a.40.2"
+
+                val aSegmentBase = if (audio.initRange != null && audio.indexRange != null) {
+                    """<SegmentBase indexRange="${audio.indexRange}"><Initialization range="${audio.initRange}" /></SegmentBase>"""
+                } else ""
+
+                sb.append("""
+                    <AdaptationSet mimeType="$aMime" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
+                      <Representation id="$audioId" bandwidth="${if(audio.bitrate>0) audio.bitrate else 128000}" codecs="$aCodecs">
+                        <BaseURL>$cleanAudioUrl</BaseURL>
+                        $aSegmentBase
+                      </Representation>
+                    </AdaptationSet>
+                """.trimIndent())
+            }
+
+            sb.append("</Period>")
+            sb.append("</MPD>")
+            return sb.toString()
         }
 
-        sb.append("</Period>")
-        sb.append("</MPD>")
-        return sb.toString()
-    }
+        private fun escapeXml(url: String): String {
+            return url.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        }
 
-    private fun escapeXml(url: String): String {
-        return url.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    }
+        private fun getMimeTypeFromUrl(url: String, isAudio: Boolean): String {
+            return try {
+                val decoded = URLDecoder.decode(url, "UTF-8")
+                if (decoded.contains("video/webm") || decoded.contains("audio/webm")) {
+                    if (isAudio) "audio/webm" else "video/webm"
+                } else {
+                    if (isAudio) "audio/mp4" else "video/mp4"
+                }
+            } catch (e: Exception) { if (isAudio) "audio/mp4" else "video/mp4" }
+        }
 
-    private fun getMimeTypeFromUrl(url: String, isAudio: Boolean): String {
-        return try {
-            val decoded = URLDecoder.decode(url, "UTF-8")
-            if (decoded.contains("video/webm") || decoded.contains("audio/webm")) {
-                if (isAudio) "audio/webm" else "video/webm"
-            } else {
-                if (isAudio) "audio/mp4" else "video/mp4"
-            }
-        } catch (e: Exception) { if (isAudio) "audio/mp4" else "video/mp4" }
+        private fun buildVideoLabelNumber(vs: org.schabi.newpipe.extractor.stream.VideoStream): String {
+            val height = runCatching { vs.height }.getOrNull() ?: 0
+            if (height > 0) return height.toString()
+            return "video"
+        }
     }
-
-    private fun buildVideoLabelNumber(vs: org.schabi.newpipe.extractor.stream.VideoStream): String {
-        val height = runCatching { vs.height }.getOrNull() ?: 0
-        if (height > 0) return height.toString()
-        return "video"
-    }
-}
