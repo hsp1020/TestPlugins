@@ -74,7 +74,7 @@ open class YoutubeExtractor : ExtractorApi() {
         ytVideosSubtitles.remove(videoId)
 
         if (ytVideos[videoId].isNullOrEmpty()) {
-            println("[YT_DEBUG] [getUrl] 캐시가 비어있어 파싱을 진행합니다.")
+            println("[YT_DEBUG] [getUrl] 분석을 진행합니다.")
             try {
                 println("[YT_DEBUG] [getUrl] NewPipe linkHandler에서 link 분석 시작")
                 val link = YoutubeStreamLinkHandlerFactory.getInstance().fromUrl(cleanedUrl)
@@ -355,10 +355,10 @@ open class YoutubeExtractor : ExtractorApi() {
             val cleanAudioUrl = escapeXml(audio.url)
             val audioId = "audio_$index"
             val aMime = audio.mimeType
-            val aCodecs = if (audio.mimeType.contains("webm")) "opus" else "mp4a.40.2"
+            val aCodecs = if (aMime.contains("webm")) "opus" else "mp4a.40.2"
 
             val aSegmentBase = if (audio.initRange != null && audio.indexRange != null) {
-                """<SegmentBase indexRange="${audio.initRange}"><Initialization range="${audio.initRange}" /></SegmentBase>"""
+                """<SegmentBase indexRange="${audio.indexRange}"><Initialization range="${audio.initRange}" /></SegmentBase>"""
             } else ""
 
             sb.append("""
