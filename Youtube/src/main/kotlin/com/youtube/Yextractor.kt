@@ -29,8 +29,9 @@ open class YoutubeExtractor : ExtractorApi() {
     override val name = "YouTube"
 
     companion object {
-        private var ytVideos: MutableMap<String, List<ExtractorLink>> = mutableMapOf()
-        private var ytVideosSubtitles: MutableMap<String, List<SubtitlesStream>> = mutableMapOf()
+        private const val TAG = "YT_DEBUG"
+        private val ytVideos = ConcurrentHashMap<String, List<ExtractorLink>>()
+        private val ytVideosSubtitles = ConcurrentHashMap<String, List<SubtitlesStream>>()
 
         private var activeServer: ServerSocket? = null
         private var serverPort: Int = 0
@@ -171,11 +172,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 val builtLinks = mutableListOf<ExtractorLink>()
                 val seenUrls = mutableSetOf<String>()
 
-                // DASH 비디오 전용 스트림 수집
-                val rawVideoOnlyStreams = s.videoOnlyStreams ?: emptyList()
-                println("[YT_DEBUG] [getUrl] NewPipe가 수집한 raw videoOnlyStreams 개수: ${rawVideoOnlyStreams.size}")
-                
-                val videoOnlyList = rawVideoOnlyStreams.mapNotNull { vs ->
+                val videoOnlyList = (s.videoOnlyStreams ?: emptyList()).mapNotNull { vs ->
                     try {
                         val streamUrl = vs.content ?: return@mapNotNull null
                         if (!seenUrls.add(streamUrl)) return@mapNotNull null
@@ -183,6 +180,7 @@ open class YoutubeExtractor : ExtractorApi() {
                         val label = buildVideoLabelNumber(vs)
                         val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
                         
+
                         var mime = vs.format?.mimeType
                         if (mime.isNullOrEmpty()) mime = getMimeTypeFromUrl(streamUrl, false)
 
@@ -198,11 +196,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 }.distinctBy { it.height }
                 println("[YT_DEBUG] [getUrl] 중복 제거 후 최종 DASH 비디오 스트림 개수: ${videoOnlyList.size}")
 
-                // DASH 오디오 전용 스트림 수집
-                val rawAudioStreams = s.audioStreams ?: emptyList()
-                println("[YT_DEBUG] [getUrl] NewPipe가 수집한 raw audioStreams 개수: ${rawAudioStreams.size}")
-                
-                val audioInfoList = rawAudioStreams.mapNotNull { asr ->
+                val audioInfoList = (s.audioStreams ?: emptyList()).mapNotNull { asr ->
                     try {
                         val aUrl = asr.content ?: return@mapNotNull null
                         val bitrate = asr.bitrate ?: 128000
@@ -233,7 +227,6 @@ open class YoutubeExtractor : ExtractorApi() {
                     println("[YT_DEBUG] [getUrl] 자막 목록 수집 중 실패: ${e.message}")
                 }
 
-                // DASH용 로컬 서버 재생 준비
                 startServerIfNeeded()
 
                 println("[YT_DEBUG] [getUrl] DASH XML 빌드 및 로컬 루프백 링크 등록 루프 진입")
@@ -280,11 +273,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
 
-                // 2순위 Legacy 360p/640p 단일 Muxed 비디오 수집
-                val rawMuxedStreams = s.videoStreams ?: emptyList()
-                println("[YT_DEBUG] [getUrl] NewPipe가 수집한 raw videoStreams(Muxed) 개수: ${rawMuxedStreams.size}")
-                
-                val muxedList = rawMuxedStreams.mapNotNull { vs ->
+                val muxedList = (s.videoStreams ?: emptyList()).mapNotNull { vs ->
                     try {
                         val mUrl = vs.content ?: return@mapNotNull null
                         if (!seenUrls.add(mUrl)) return@mapNotNull null
@@ -316,7 +305,6 @@ open class YoutubeExtractor : ExtractorApi() {
             println("[YT_DEBUG] [getUrl] 동일 Video ID에 대해 이미 분석된 캐시가 존재합니다. 캐시 데이터 로드.")
         }
 
-        // 콜백 반환부 디버깅
         val cachedLinks = ytVideos[videoId] ?: emptyList()
         println("[YT_DEBUG] [getUrl] ExoPlayer로 반환할 최종 링크 개수: ${cachedLinks.size}")
         cachedLinks.forEachIndexed { index, link ->
@@ -325,7 +313,6 @@ open class YoutubeExtractor : ExtractorApi() {
         
         cachedLinks.forEach { callback(it) }
 
-        // 자막 콜백 반환부 디버깅
         val cachedSubtitles = ytVideosSubtitles[videoId] ?: emptyList()
         println("[YT_DEBUG] [getUrl] 최종 전달할 자막 트랙 개수: ${cachedSubtitles.size}")
         cachedSubtitles.mapNotNull { ss ->
