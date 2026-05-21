@@ -1369,11 +1369,11 @@ private fun collectFromRenderer(
     }
 
     private suspend fun loadLinksClassic(
-            data: String,
-            isCasting: Boolean,
-            subtitleCallback: (SubtitleFile) -> Unit,
-            callback: (ExtractorLink) -> Unit
-        ): Boolean {
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
             fun logLarge(tag: String, text: String) {
                 var i = 0
                 val max = 4000
@@ -1432,26 +1432,22 @@ private fun collectFromRenderer(
                 }
 
                 val apiKey = findConfig(ytcfgJsonString, "INNERTUBE_API_KEY")
+                val clientVersion =
+                    findConfig(ytcfgJsonString, "INNERTUBE_CLIENT_VERSION") ?: "2.20240725.01.00"
                 val visitorData = findConfig(ytcfgJsonString, "VISITOR_DATA")
 
                 if (apiKey.isNullOrBlank() || visitorData.isNullOrBlank()) {
                     return false
                 }
 
-                // 수정: poToken 검증이 필요 없는 모바일 iOS 사양 헤더 및 컨텍스트 강제 정의
-                val iosUserAgent = "com.google.ios.youtube/19.45.4 (iPhone16,1; U; CPU iOS 17_5 like Mac OS X; US; en)"
                 val clientMap = mapOf(
                     "hl" to "ko",
                     "gl" to "KR",
-                    "clientName" to "IOS",
-                    "clientVersion" to "19.45.4",
-                    "userAgent" to iosUserAgent,
-                    "deviceMake" to "Apple",
-                    "deviceModel" to "iPhone16,1",
-                    "osName" to "iOS",
-                    "osVersion" to "17.5",
+                    "clientName" to "WEB",
+                    "clientVersion" to clientVersion,
+                    "userAgent" to safariUserAgent,
                     "visitorData" to visitorData,
-                    "platform" to "MOBILE"
+                    "platform" to "DESKTOP"
                 )
                 val finalContext = mapOf("client" to clientMap)
                 val payload = mapOf("context" to finalContext, "videoId" to videoId)
@@ -1459,18 +1455,18 @@ private fun collectFromRenderer(
                 val apiUrl = "$mainUrl/youtubei/v1/player?key=$apiKey"
 
                 val postHeaders = mutableMapOf<String, String>()
-                postHeaders["User-Agent"] = iosUserAgent
-                postHeaders["Accept-Language"] = "ko,en-US;q=0.9,en;q=0.8"
+                postHeaders.putAll(safariHeaders)
                 postHeaders["Content-Type"] = "application/json"
-                postHeaders["X-Youtube-Client-Name"] = "IOS"
-                postHeaders["X-Youtube-Client-Version"] = "19.45.4"
+                postHeaders["X-Youtube-Client-Name"] = "WEB"
+                postHeaders["X-Youtube-Client-Version"] = clientVersion
                 if (!visitorData.isNullOrBlank()) postHeaders["X-Goog-Visitor-Id"] = visitorData
 
                 val cookieBuilder = StringBuilder()
                 val savedVis = sharedPref?.getString("VISITOR_INFO1_LIVE", null)
-                
                 if (!savedVis.isNullOrBlank()) {
                     cookieBuilder.append("VISITOR_INFO1_LIVE=$savedVis; ")
+                } else {
+                    cookieBuilder.append("VISITOR_INFO1_LIVE=fzYjM8PCwjw; ")
                 }
 
                 val authKeys = listOf("SID", "HSID", "SSID", "APISID", "SAPISID")
@@ -1597,7 +1593,6 @@ private fun collectFromRenderer(
                 return false
             }
         }
-
 
     private fun parseM3u8Tag(tag: String, key: String): String? {
         val regex = Regex("""$key=("([^"]*)"|([^,]*))""")
