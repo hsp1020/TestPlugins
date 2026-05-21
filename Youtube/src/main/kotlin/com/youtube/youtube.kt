@@ -17,10 +17,29 @@ import androidx.preference.PreferenceManager
 import com.lagradost.cloudstream3.ar.youtube.YoutubeProvider.Config.SLEEP_BETWEEN
 import kotlin.collections.remove
 import kotlin.text.get
+import org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor
+import org.schabi.newpipe.extractor.services.youtube.PoTokenProvider
+import org.schabi.newpipe.extractor.services.youtube.PoTokenResult
+
 
 class YoutubeProvider(
     private val sharedPref: SharedPreferences? = null
 ) : MainAPI() {
+        // 여기에 init 블록을 추가하여 플러그인 로드 시점에 주입되도록 합니다.
+    init {
+        YoutubeStreamExtractor.setPoTokenProvider(object : PoTokenProvider {
+            override fun getAndroidClientPoToken(videoId: String?): PoTokenResult {
+                // 안드로이드 클라이언트용 poToken 및 visitorData 우회 반환 로직
+                // (자체 구축한 외부 토큰 생성기 서버가 있다면 여기서 HTTP 통신을 통해 실시간 토큰을 수신해야 합니다.)
+                return PoTokenResult("YOUR_ANDROID_PO_TOKEN", "YOUR_VISITOR_DATA", videoId)
+            }
+
+            override fun getWebClientPoToken(videoId: String?): PoTokenResult {
+                // 웹 클라이언트용 poToken 및 visitorData 우회 반환 로직
+                return PoTokenResult("YOUR_WEB_PO_TOKEN", "YOUR_VISITOR_DATA", videoId)
+            }
+        })
+    } 
 
     data class CustomSection(
         @JsonProperty("name") var name: String = "",
