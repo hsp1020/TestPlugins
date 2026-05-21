@@ -1302,7 +1302,7 @@ private fun collectFromRenderer(
             if (playerResponseText.isNotBlank()) {
                 val root = JSONObject(playerResponseText)
                 val videoDetails = root.optJSONObject("videoDetails")
-                if (videoDetails != null && videoDetails.optBoolean("isLiveContent", false)) {
+                if (videoDetails != null && videoDetails.optBoolean("isLive", false)) {
                     isLive = true
                 }
             }
