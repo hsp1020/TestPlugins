@@ -1,6 +1,5 @@
 package com.youtube
 
-import android.util.Log // 로그 추적을 위한 안드로이드 Log 라이브러리 추가
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.newSubtitleFile
@@ -30,7 +29,6 @@ open class YoutubeExtractor : ExtractorApi() {
     override val name = "YouTube"
 
     companion object {
-        private const val TAG = "YT_DEBUG"
         private var ytVideos: MutableMap<String, List<ExtractorLink>> = mutableMapOf()
         private var ytVideosSubtitles: MutableMap<String, List<SubtitlesStream>> = mutableMapOf()
 
@@ -40,68 +38,68 @@ open class YoutubeExtractor : ExtractorApi() {
 
         @Synchronized
         private fun startServerIfNeeded() {
-            Log.d(TAG, "[startServerIfNeeded] 호출됨. activeServer 존재 여부: ${activeServer != null}, 닫힘 여부: ${activeServer?.isClosed}")
+            println("[YT_DEBUG] [startServerIfNeeded] 호출됨. activeServer 존재 여부: ${activeServer != null}, 닫힘 여부: ${activeServer?.isClosed}")
             if (activeServer != null && !activeServer!!.isClosed) {
-                Log.d(TAG, "[startServerIfNeeded] 기존 로컬 DASH 서버가 포트 $serverPort 에서 정상 동작 중이므로 신규 생성을 스킵합니다.")
+                println("[YT_DEBUG] [startServerIfNeeded] 기존 로컬 DASH 서버가 포트 $serverPort 에서 정상 동작 중이므로 신규 생성을 스킵합니다.")
                 return
             }
             try {
                 activeServer = ServerSocket(0)
                 serverPort = activeServer!!.localPort
-                Log.d(TAG, "[startServerIfNeeded] 신규 로컬 ServerSocket이 성공적으로 생성됨. 할당된 포트: $serverPort")
+                println("[YT_DEBUG] [startServerIfNeeded] 신규 로컬 ServerSocket이 성공적으로 생성됨. 할당된 포트: $serverPort")
                 
                 thread(name = "YT-LocalDASH-Server") {
-                    Log.d(TAG, "[ServerSocket-Thread] 클라이언트 대기 accept() 루프를 시작합니다.")
+                    println("[YT_DEBUG] [ServerSocket-Thread] 클라이언트 대기 accept() 루프를 시작합니다.")
                     try {
                         while (activeServer != null && !activeServer!!.isClosed) {
                             val client = activeServer!!.accept()
-                            Log.d(TAG, "[ServerSocket-Thread] ExoPlayer로부터 로컬 서버 접속 감지됨: ${client.remoteSocketAddress}")
+                            println("[YT_DEBUG] [ServerSocket-Thread] ExoPlayer로부터 로컬 서버 접속 감지됨: ${client.remoteSocketAddress}")
                             thread { handleClient(client) }
                         }
                     } catch (e: Exception) {
-                        Log.e(TAG, "[ServerSocket-Thread] accept() 루프 내부에서 예외 발생하여 서버 스레드 종료됨: ${e.message}", e)
+                        println("[YT_DEBUG] [ServerSocket-Thread] accept() 루프 내부에서 예외 발생하여 서버 스레드 종료됨: ${e.message}")
                     } finally {
-                        Log.w(TAG, "[ServerSocket-Thread] accept() 루프가 마쳤습니다. cleanupServer()를 수행합니다.")
+                        println("[YT_DEBUG] [ServerSocket-Thread] accept() 루프가 마쳤습니다. cleanupServer()를 수행합니다.")
                         cleanupServer()
                     }
                 }
             } catch (e: Exception) { 
-                Log.e(TAG, "[startServerIfNeeded] ServerSocket 초기화 중 심각한 예외 발생: ${e.message}", e)
+                println("[YT_DEBUG] [startServerIfNeeded] ServerSocket 초기화 중 심각한 예외 발생: ${e.message}")
                 cleanupServer()
             }
         }
 
         private fun cleanupServer() {
-            Log.w(TAG, "[cleanupServer] 로컬 서버 자원 해제 시작. (현재 포트: $serverPort)")
+            println("[YT_DEBUG] [cleanupServer] 로컬 서버 자원 해제 시작. (현재 포트: $serverPort)")
             try {
                 activeServer?.close()
-                Log.d(TAG, "[cleanupServer] activeServer.close() 성공")
+                println("[YT_DEBUG] [cleanupServer] activeServer.close() 성공")
             } catch (e: Exception) {
-                Log.e(TAG, "[cleanupServer] activeServer.close() 실패: ${e.message}", e)
+                println("[YT_DEBUG] [cleanupServer] activeServer.close() 실패: ${e.message}")
             }
             activeServer = null
             serverPort = 0
-            Log.w(TAG, "[cleanupServer] 서버 인스턴스 초기화 완료 (activeServer = null, port = 0)")
+            println("[YT_DEBUG] [cleanupServer] 서버 인스턴스 초기화 완료 (activeServer = null, port = 0)")
         }
 
         private fun handleClient(client: Socket) {
-            Log.d(TAG, "[handleClient] 클라이언트 요청 처리 시작: ${client.remoteSocketAddress}")
+            println("[YT_DEBUG] [handleClient] 클라이언트 요청 처리 시작: ${client.remoteSocketAddress}")
             try {
                 client.use { socket ->
                     val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
                     val output = PrintWriter(socket.getOutputStream(), true)
                     val line = reader.readLine()
-                    Log.d(TAG, "[handleClient] 수신된 HTTP Request Line: $line")
+                    println("[YT_DEBUG] [handleClient] 수신된 HTTP Request Line: $line")
                     if (line != null && line.startsWith("GET")) {
                         val parts = line.split(" ")
                         if (parts.size > 1) {
                             var path = parts[1].substring(1)
                             if (path.endsWith(".mpd")) path = path.replace(".mpd", "")
                             
-                            Log.d(TAG, "[handleClient] 파싱된 Manifest UUID Key: $path")
+                            println("[YT_DEBUG] [handleClient] 파싱된 Manifest UUID Key: $path")
                             val content = manifestMap[path]
                             if (content != null) {
-                                Log.d(TAG, "[handleClient] 매칭되는 DASH XML 탐색 성공. ExoPlayer에게 200 OK 응답 전송합니다. (XML 길이: ${content.length})")
+                                println("[YT_DEBUG] [handleClient] 매칭되는 DASH XML 탐색 성공. ExoPlayer에게 200 OK 응답 전송합니다. (XML 길이: ${content.length})")
                                 output.println("HTTP/1.1 200 OK")
                                 output.println("Content-Type: application/dash+xml")
                                 output.println("Connection: close")
@@ -109,7 +107,7 @@ open class YoutubeExtractor : ExtractorApi() {
                                 output.println("")
                                 output.println(content)
                             } else {
-                                Log.e(TAG, "[handleClient] 에러: 요청한 UUID($path)에 매칭되는 DASH XML이 메모리에 존재하지 않습니다. (404 전송)")
+                                println("[YT_DEBUG] [handleClient] 에러: 요청한 UUID($path)에 매칭되는 DASH XML이 메모리에 존재하지 않습니다. (404 전송)")
                                 output.println("HTTP/1.1 404 Not Found")
                                 output.println("")
                             }
@@ -117,7 +115,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "[handleClient] 클라이언트 소켓 통신 중 예외 발생: ${e.message}", e)
+                println("[YT_DEBUG] [handleClient] 클라이언트 소켓 통신 중 예외 발생: ${e.message}")
             }
         }
     }
@@ -150,24 +148,24 @@ open class YoutubeExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        Log.d(TAG, "[getUrl] 호출됨. 원본 URL: $url")
+        println("[YT_DEBUG] [getUrl] 호출됨. 원본 URL: $url")
         val cleanedUrl = if (url.startsWith("http")) url else "https://$url"
         val videoId = try { cleanedUrl.substringAfter("v=").substringBefore("&") } catch (e: Exception) { cleanedUrl }
-        Log.d(TAG, "[getUrl] 가공된 URL: $cleanedUrl, 파싱된 Video ID: $videoId")
+        println("[YT_DEBUG] [getUrl] 가공된 URL: $cleanedUrl, 파싱된 Video ID: $videoId")
 
         ytVideos.remove(videoId)
         ytVideosSubtitles.remove(videoId)
 
         if (ytVideos[videoId].isNullOrEmpty()) {
-            Log.d(TAG, "[getUrl] 캐시가 비어있어 NewPipe Extractor 호출을 준비합니다.")
+            println("[YT_DEBUG] [getUrl] 캐시가 비어있어 NewPipe Extractor 호출을 준비합니다.")
             try {
-                Log.d(TAG, "[getUrl] NewPipe YoutubeStreamLinkHandlerFactory 분석 시작")
+                println("[YT_DEBUG] [getUrl] NewPipe YoutubeStreamLinkHandlerFactory 분석 시작")
                 val link = YoutubeStreamLinkHandlerFactory.getInstance().fromUrl(cleanedUrl)
                 val s = object : YoutubeStreamExtractor(ServiceList.YouTube, link) {}
                 
-                Log.d(TAG, "[getUrl] s.fetchPage() 호출 시작 (네트워크 요청)")
+                println("[YT_DEBUG] [getUrl] s.fetchPage() 호출 시작 (네트워크 요청)")
                 s.fetchPage()
-                Log.d(TAG, "[getUrl] s.fetchPage() 호출 완료. 비디오 제목: '${s.name}', 비디오 길이(초): ${s.length}")
+                println("[YT_DEBUG] [getUrl] s.fetchPage() 호출 완료. 비디오 제목: '${s.name}', 비디오 길이(초): ${s.length}")
 
                 val durationSeconds = if (s.length > 0) s.length else 3600L
                 val builtLinks = mutableListOf<ExtractorLink>()
@@ -175,7 +173,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
                 // DASH 비디오 전용 스트림 수집
                 val rawVideoOnlyStreams = s.videoOnlyStreams ?: emptyList()
-                Log.d(TAG, "[getUrl] NewPipe가 수집한 raw videoOnlyStreams 개수: ${rawVideoOnlyStreams.size}")
+                println("[YT_DEBUG] [getUrl] NewPipe가 수집한 raw videoOnlyStreams 개수: ${rawVideoOnlyStreams.size}")
                 
                 val videoOnlyList = rawVideoOnlyStreams.mapNotNull { vs ->
                     try {
@@ -191,18 +189,18 @@ open class YoutubeExtractor : ExtractorApi() {
                         val initR = if (vs.initStart != null && vs.initEnd != null) "${vs.initStart}-${vs.initEnd}" else null
                         val indexR = if (vs.indexStart != null && vs.indexEnd != null) "${vs.indexStart}-${vs.indexEnd}" else null
 
-                        Log.d(TAG, "[getUrl] 파싱 성공한 DASH 비디오 전용 스트림 -> 화질: ${height}p, 포맷: $mime, URL: ${streamUrl.take(60)}...")
+                        println("[YT_DEBUG] [getUrl] 파싱 성공한 DASH 비디오 전용 스트림 -> 화질: ${height}p, 포맷: $mime, URL: ${streamUrl.take(60)}...")
                         StreamInfo(streamUrl, mime, height, label, initR, indexR)
                     } catch (e: Exception) { 
-                        Log.e(TAG, "[getUrl] DASH 비디오 스트림 정보 분석 중 예외 발생: ${e.message}", e)
+                        println("[YT_DEBUG] [getUrl] DASH 비디오 스트림 정보 분석 중 예외 발생: ${e.message}")
                         null 
                     }
                 }.distinctBy { it.height }
-                Log.d(TAG, "[getUrl] 중복 제거 후 최종 DASH 비디오 스트림 개수: ${videoOnlyList.size}")
+                println("[YT_DEBUG] [getUrl] 중복 제거 후 최종 DASH 비디오 스트림 개수: ${videoOnlyList.size}")
 
                 // DASH 오디오 전용 스트림 수집
                 val rawAudioStreams = s.audioStreams ?: emptyList()
-                Log.d(TAG, "[getUrl] NewPipe가 수집한 raw audioStreams 개수: ${rawAudioStreams.size}")
+                println("[YT_DEBUG] [getUrl] NewPipe가 수집한 raw audioStreams 개수: ${rawAudioStreams.size}")
                 
                 val audioInfoList = rawAudioStreams.mapNotNull { asr ->
                     try {
@@ -217,28 +215,28 @@ open class YoutubeExtractor : ExtractorApi() {
                         var rawLang = asr.audioTrackId ?: "Default"
                         if (rawLang.contains(".")) rawLang = rawLang.substringBefore(".")
 
-                        Log.d(TAG, "[getUrl] 파싱 성공한 DASH 오디오 스트림 -> 언어: $rawLang, 전송률: $bitrate, 포맷: $mime, URL: ${aUrl.take(60)}...")
+                        println("[YT_DEBUG] [getUrl] 파싱 성공한 DASH 오디오 스트림 -> 언어: $rawLang, 전송률: $bitrate, 포맷: $mime, URL: ${aUrl.take(60)}...")
                         AudioInfo(aUrl, mime, bitrate, initR, indexR, rawLang.uppercase())
                     } catch (e: Exception) { 
-                        Log.e(TAG, "[getUrl] DASH 오디오 스트림 정보 분석 중 예외 발생: ${e.message}", e)
+                        println("[YT_DEBUG] [getUrl] DASH 오디오 스트림 정보 분석 중 예외 발생: ${e.message}")
                         null 
                     }
                 }.distinctBy { it.url }
-                Log.d(TAG, "[getUrl] 중복 제거 후 최종 DASH 오디오 스트림 개수: ${audioInfoList.size}")
+                println("[YT_DEBUG] [getUrl] 중복 제거 후 최종 DASH 오디오 스트림 개수: ${audioInfoList.size}")
 
                 val audiosByLanguage = audioInfoList.groupBy { it.language }
 
                 try {
                     ytVideosSubtitles[videoId] = s.subtitlesDefault?.filterNotNull() ?: emptyList()
-                    Log.d(TAG, "[getUrl] NewPipe 자막 트랙 개수: ${ytVideosSubtitles[videoId]?.size}")
+                    println("[YT_DEBUG] [getUrl] NewPipe 자막 트랙 개수: ${ytVideosSubtitles[videoId]?.size}")
                 } catch (e: Exception) {
-                    Log.e(TAG, "[getUrl] 자막 목록 수집 중 실패: ${e.message}")
+                    println("[YT_DEBUG] [getUrl] 자막 목록 수집 중 실패: ${e.message}")
                 }
 
                 // DASH용 로컬 서버 재생 준비
                 startServerIfNeeded()
 
-                Log.d(TAG, "[getUrl] DASH XML 빌드 및 로컬 루프백 링크 등록 루프 진입")
+                println("[YT_DEBUG] [getUrl] DASH XML 빌드 및 로컬 루프백 링크 등록 루프 진입")
                 for (video in videoOnlyList) {
                     if (audiosByLanguage.isNotEmpty()) {
                         for ((lang, audios) in audiosByLanguage) {
@@ -258,7 +256,7 @@ open class YoutubeExtractor : ExtractorApi() {
                                     val finalName = "${video.label} ($lang) ${video.label}"
                                     val sourceName = "${this.name} ($lang)"
 
-                                    Log.d(TAG, "[getUrl] 고화질 DASH 가상 링크 등록 성공 -> 소스: $sourceName, 이름: $finalName, 주소: $localLink")
+                                    println("[YT_DEBUG] [getUrl] 고화질 DASH 가상 링크 등록 성공 -> 소스: $sourceName, 이름: $finalName, 주소: $localLink")
                                     builtLinks.add(
                                         newExtractorLink(
                                             sourceName,
@@ -271,20 +269,20 @@ open class YoutubeExtractor : ExtractorApi() {
                                         }
                                     )
                                 } else {
-                                    Log.e(TAG, "[getUrl] 경고: DASH XML 등록 실패 (localLink가 null 반환됨)")
+                                    println("[YT_DEBUG] [getUrl] 경고: DASH XML 등록 실패 (localLink가 null 반환됨)")
                                 }
                             } else {
-                                Log.e(TAG, "[getUrl] 경고: 비디오 포맷(${video.mimeType})에 맞는 최적의 오디오 트랙($lang) 매칭 실패")
+                                println("[YT_DEBUG] [getUrl] 경고: 비디오 포맷(${video.mimeType})에 맞는 최적의 오디오 트랙($lang) 매칭 실패")
                             }
                         }
                     } else {
-                        Log.w(TAG, "[getUrl] DASH 오디오 트랙 목록(audiosByLanguage)이 완전히 비어있습니다. DASH 생성을 스킵합니다.")
+                        println("[YT_DEBUG] [getUrl] DASH 오디오 트랙 목록(audiosByLanguage)이 완전히 비어있습니다. DASH 생성을 스킵합니다.")
                     }
                 }
 
                 // 2순위 Legacy 360p/640p 단일 Muxed 비디오 수집
                 val rawMuxedStreams = s.videoStreams ?: emptyList()
-                Log.d(TAG, "[getUrl] NewPipe가 수집한 raw videoStreams(Muxed) 개수: ${rawMuxedStreams.size}")
+                println("[YT_DEBUG] [getUrl] NewPipe가 수집한 raw videoStreams(Muxed) 개수: ${rawMuxedStreams.size}")
                 
                 val muxedList = rawMuxedStreams.mapNotNull { vs ->
                     try {
@@ -293,12 +291,12 @@ open class YoutubeExtractor : ExtractorApi() {
                         val label = buildVideoLabelNumber(vs)
                         val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
                         
-                        Log.d(TAG, "[getUrl] 파싱 성공한 Legacy Muxed 스트림 -> 화질: ${height}p, 포맷: $label, URL: ${mUrl.take(60)}...")
+                        println("[YT_DEBUG] [getUrl] 파싱 성공한 Legacy Muxed 스트림 -> 화질: ${height}p, 포맷: $label, URL: ${mUrl.take(60)}...")
                         Triple(mUrl, label, height)
                     } catch (e: Exception) { null }
                 }
                 for ((mUrl, mLabel, mHeight) in muxedList) {
-                    Log.d(TAG, "[getUrl] Legacy Muxed 링크 등록 -> 이름: $mLabel (Legacy), 주소: ${mUrl.take(60)}...")
+                    println("[YT_DEBUG] [getUrl] Legacy Muxed 링크 등록 -> 이름: $mLabel (Legacy), 주소: ${mUrl.take(60)}...")
                     builtLinks.add(
                         newExtractorLink(this.name, "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
                             this.referer = mainUrl
@@ -308,28 +306,28 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
 
                 ytVideos[videoId] = builtLinks.toList()
-                Log.d(TAG, "[getUrl] 최종 링크 리스트 정렬 및 캐싱 완료. 추출된 링크 개수: ${builtLinks.size}")
+                println("[YT_DEBUG] [getUrl] 최종 링크 리스트 정렬 및 캐싱 완료. 추출된 링크 개수: ${builtLinks.size}")
 
             } catch (e: Exception) { 
-                Log.e(TAG, "[getUrl] NewPipe 파싱 전체 과정 중 심각한 치명적 예외 발생: ${e.message}", e)
+                println("[YT_DEBUG] [getUrl] NewPipe 파싱 전체 과정 중 심각한 치명적 예외 발생: ${e.message}")
                 logError(e) 
             }
         } else {
-            Log.d(TAG, "[getUrl] 동일 Video ID에 대해 이미 분석된 캐시가 존재합니다. 캐시 데이터 로드.")
+            println("[YT_DEBUG] [getUrl] 동일 Video ID에 대해 이미 분석된 캐시가 존재합니다. 캐시 데이터 로드.")
         }
 
         // 콜백 반환부 디버깅
         val cachedLinks = ytVideos[videoId] ?: emptyList()
-        Log.d(TAG, "[getUrl] ExoPlayer로 반환할 최종 링크 개수: ${cachedLinks.size}")
+        println("[YT_DEBUG] [getUrl] ExoPlayer로 반환할 최종 링크 개수: ${cachedLinks.size}")
         cachedLinks.forEachIndexed { index, link ->
-            Log.d(TAG, "  -> [링크 #${index + 1}] 이름: '${link.name}', 주소: '${link.url.take(120)}...', 타입: ${link.type}, 화질: ${link.quality}p")
+            println("[YT_DEBUG]   -> [링크 #${index + 1}] 이름: '${link.name}', 주소: '${link.url.take(120)}...', 타입: ${link.type}, 화질: ${link.quality}p")
         }
         
         cachedLinks.forEach { callback(it) }
 
         // 자막 콜백 반환부 디버깅
         val cachedSubtitles = ytVideosSubtitles[videoId] ?: emptyList()
-        Log.d(TAG, "[getUrl] 최종 전달할 자막 트랙 개수: ${cachedSubtitles.size}")
+        println("[YT_DEBUG] [getUrl] 최종 전달할 자막 트랙 개수: ${cachedSubtitles.size}")
         cachedSubtitles.mapNotNull { ss ->
             try {
                 val lang = ss.locale?.language ?: return@mapNotNull null
@@ -341,10 +339,10 @@ open class YoutubeExtractor : ExtractorApi() {
                         url = "$url&fmt=srt"
                     }
                 }
-                Log.d(TAG, "  -> [자막 트랙] 언어: $lang, 주소: ${url.take(120)}...")
+                println("[YT_DEBUG]   -> [자막 트랙] 언어: $lang, 주소: ${url.take(120)}...")
                 newSubtitleFile(lang, url)
             } catch (e: Exception) { 
-                Log.e(TAG, "[getUrl] 자막 트랙 파싱 실패: ${e.message}")
+                println("[YT_DEBUG] [getUrl] 자막 트랙 파싱 실패: ${e.message}")
                 null 
             }
         }.forEach { subtitleCallback(it) }        
@@ -352,13 +350,13 @@ open class YoutubeExtractor : ExtractorApi() {
 
     private fun registerManifestAndGetUrl(xmlContent: String): String? {
         if (serverPort == 0) {
-            Log.e(TAG, "[registerManifestAndGetUrl] 에러: 로컬 서버 포트가 0입니다. 서버가 구동되지 않은 상태입니다.")
+            println("[YT_DEBUG] [registerManifestAndGetUrl] 에러: 로컬 서버 포트가 0입니다. 서버가 구동되지 않은 상태입니다.")
             return null
         }
         val id = UUID.randomUUID().toString()
         manifestMap[id] = xmlContent
         val localUrl = "http://127.0.0.1:$serverPort/$id.mpd"
-        Log.d(TAG, "[registerManifestAndGetUrl] DASH XML 등록 성공. UUID: $id, 로컬 가상 주소: $localUrl")
+        println("[YT_DEBUG] [registerManifestAndGetUrl] DASH XML 등록 성공. UUID: $id, 로컬 가상 주소: $localUrl")
         return localUrl
     }
 
@@ -397,7 +395,7 @@ open class YoutubeExtractor : ExtractorApi() {
             val aCodecs = if (aMime.contains("webm")) "opus" else "mp4a.40.2"
 
             val aSegmentBase = if (audio.initRange != null && audio.indexRange != null) {
-                """<SegmentBase indexRange="${audio.indexRange}"><Initialization range="${audio.initRange}" /></SegmentBase>"""
+                """<SegmentBase indexRange="${audio.initRange}"><Initialization range="${audio.initRange}" /></SegmentBase>"""
             } else ""
 
             sb.append("""
