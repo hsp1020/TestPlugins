@@ -685,23 +685,19 @@ private fun collectFromRenderer(
                     savedVisitorData = savedVisitorData ?: sharedPref?.getString("yt_visitor_data", null)
                     savedClientVersion = savedClientVersion ?: sharedPref?.getString("yt_client_version", "2.20240725.01.00")
                     val tokenToUse = requestData.removePrefix("chip_")
-
+                    
                     if (!savedApiKey.isNullOrBlank()) {
                         val apiUrl = "$mainUrl/youtubei/v1/browse?key=$savedApiKey"
                         val payload = mapOf(
                             "context" to mapOf(
-                                "client" to mapOf(
-                                    "visitorData" to (savedVisitorData ?: ""),
-                                    "clientName" to "WEB",
-                                    "clientVersion" to (savedClientVersion ?: "2.20240725.01.00"),
-                                    "platform" to "DESKTOP",
-                                    "hl" to lang
-                                )
-                            ),
-                            "continuation" to tokenToUse
-                        )
-                        
-                    
+                                "visitorData" to (savedVisitorData ?: ""),
+                                "clientName" to "WEB",
+                                "clientVersion" to (savedClientVersion ?: "2.20240725.01.00"),
+                                "platform" to "DESKTOP",
+                                "hl" to lang
+                            )
+                        ),
+                        "continuation" to tokenToUse
                         val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
                         val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                         
@@ -976,7 +972,6 @@ private fun collectFromRenderer(
                 var data = extractYtInitialData(html)
                     ?: throw ErrorLoadingException("Failed to extract channel data")
 
-                // 자가 치유 로직: 활성화된 탭의 내부 endpoint url을 검사하여 '/videos'가 아니면 잘못 리다이렉트된 것으로 판단
                 val tabsCheck = safeGet(data, "contents", "twoColumnBrowseResultsRenderer", "tabs") as? List<*>
                 val activeTab = tabsCheck?.firstOrNull { tab ->
                     safeGet(tab, "tabRenderer", "selected") == true
@@ -1069,6 +1064,31 @@ private fun collectFromRenderer(
 
                 fun extractVideosFromItems(items: List<*>, collectTo: MutableList<Episode>) {
                     println("[YT_CHANNEL_DEBUG] extractVideosFromItems() 호출됨. 분석할 아이템 개수: ${items.size}")
+                    
+                    // 재귀 구조 평탄화(Flattening) 함수: 모든 Map 내부를 싹 다 까서 특정 키를 가진 객체들을 수집
+                    fun findAllRenderers(obj: Any?, targetKeys: List<String>, results: MutableList<Map<*,*>>) {
+                        when (obj) {
+                            is Map<*, *> -> {
+                                for (key in targetKeys) {
+                                    if (obj.containsKey(key)) {
+                                        val match = obj[key] as? Map<*,*>
+                                        if (match != null) results.add(match)
+                                    }
+                                }
+                                for (value in obj.values) {
+                                    findAllRenderers(value, targetKeys, results)
+                                }
+                            }
+                            is List<*> -> {
+                                for (item in obj) {
+                                    findAllRenderers(item, targetKeys, results)
+                                }
+                            }
+                        }
+                    }
+
+                    val targetRendererKeys = listOf("videoRenderer", "gridVideoRenderer", "compactVideoRenderer", "shortsVideoRenderer", "reelItemRenderer", "shortsLockupViewModel", "videoViewModel", "lockupViewModel")
+
                     items.forEachIndexed { index, item ->
                         try {
                             val map = item as? Map<*, *>
@@ -1077,74 +1097,56 @@ private fun collectFromRenderer(
                                 return@forEachIndexed
                             }
 
-                            // 1단계: 직접적인 렌더러 검색
-                            var videoRenderer = map["videoRenderer"] as? Map<*, *>
-                                ?: map["gridVideoRenderer"] as? Map<*, *>
-                                ?: map["compactVideoRenderer"] as? Map<*, *>
-                                ?: map["shortsVideoRenderer"] as? Map<*, *>
+                            val foundRenderers = mutableListOf<Map<*,*>>()
+                            findAllRenderers(map, targetRendererKeys, foundRenderers)
 
-                            // 2단계: 래퍼 렌더러 내부 검색 (richItemRenderer 등)
-                            if (videoRenderer == null && map.containsKey("richItemRenderer")) {
-                                val content = safeGet(map, "richItemRenderer", "content") as? Map<*, *>
-                                if (content != null) {
-                                    videoRenderer = content["videoRenderer"] as? Map<*, *>
-                                        ?: content["gridVideoRenderer"] as? Map<*, *>
-                                        ?: content["shortsLockupViewModel"] as? Map<*, *>
-                                        ?: content["videoViewModel"] as? Map<*, *>
-                                }
-                            }
-                            
-                            // 3단계: lockupViewModel 검색 (최신 구조)
-                            if (videoRenderer == null && map.containsKey("lockupViewModel")) {
-                                val lockup = map["lockupViewModel"] as? Map<*, *>
-                                if (lockup != null) {
-                                    val vidId = lockup["contentId"] as? String 
-                                        ?: safeGet(lockup, "content", "videoRenderer", "videoId") as? String
-                                    
-                                    if (!vidId.isNullOrBlank()) {
-                                        val titleObj = safeGet(lockup, "metadata", "lockupMetadataViewModel", "title") as? Map<*, *>
-                                        val vidTitle = extractTitle(titleObj) ?: "Video"
-                                        val thumb = getBestThumbnail(safeGet(lockup, "contentImage", "image", "sources")) ?: buildThumbnailFromId(vidId)
-                                        val viewCount = formatViews(safeGet(lockup, "metadata", "lockupMetadataViewModel", "viewCount") as? String)
-                                        
-                                        collectTo.add(newEpisode("$mainUrl/watch?v=$vidId") {
-                                            this.name = vidTitle
-                                            this.posterUrl = thumb
-                                            this.description = viewCount
-                                        })
-                                        println("[YT_CHANNEL_DEBUG] Item $index: lockupViewModel 파싱 성공 -> $vidTitle")
-                                        return@forEachIndexed
-                                    }
-                                }
+                            if (foundRenderers.isEmpty()) {
+                                println("[YT_CHANNEL_DEBUG] Item $index: 인식 가능한 비디오 렌더러를 깊은 탐색으로도 찾지 못함. (최상위 키 목록: ${map.keys})")
+                                return@forEachIndexed
                             }
 
-                            if (videoRenderer != null) {
-                                val vId = videoRenderer["videoId"] as? String
-                                if (vId == null) {
-                                    println("[YT_CHANNEL_DEBUG] Item $index: 렌더러는 찾았으나 videoId가 없음")
-                                    return@forEachIndexed
-                                }
+                            for (renderer in foundRenderers) {
+                                // 일반적인 비디오 렌더러 ID 추출
+                                var vidId = renderer["videoId"] as? String
                                 
-                                val vidTitle = extractTitle(videoRenderer["title"] as? Map<*, *>)
-                                    ?: extractTitle(videoRenderer["headline"] as? Map<*, *>)
-                                    ?: extractTitle(videoRenderer["shortBylineText"] as? Map<*, *>)
-                                    ?: "Video"
-                                val thumb = getBestThumbnail(videoRenderer["thumbnail"]) ?: buildThumbnailFromId(vId)
-                                val vidUrl = "$mainUrl/watch?v=$vId"
-                                val viewCount = formatViews(safeGet(videoRenderer, "viewCountText", "simpleText") as? String)
-                                val publishedTime = extractTitle(safeGet(videoRenderer, "publishedTimeText") as? Map<*, *>)
+                                // lockupViewModel 계열의 ID 추출
+                                if (vidId.isNullOrBlank() && renderer.containsKey("contentId")) {
+                                    vidId = renderer["contentId"] as? String
+                                }
+                                // reelItemRenderer 계열의 ID 추출
+                                if (vidId.isNullOrBlank()) {
+                                    vidId = safeGet(renderer, "onTap", "innertubeCommand", "reelWatchEndpoint", "videoId") as? String
+                                }
 
-                                collectTo.add(newEpisode(vidUrl) {
-                                    this.name = vidTitle
-                                    this.posterUrl = thumb
-                                    this.description = listOfNotNull(viewCount, publishedTime).joinToString(" • ")
-                                })
-                                println("[YT_CHANNEL_DEBUG] Item $index: 렌더러 파싱 성공 -> $vidTitle")
-                            } else {
-                                println("[YT_CHANNEL_DEBUG] Item $index: 인식 가능한 비디오 렌더러를 찾지 못함. (키 목록: ${map.keys})")
+                                if (!vidId.isNullOrBlank()) {
+                                    val vidTitle = extractTitle(renderer["title"] as? Map<*, *>)
+                                        ?: extractTitle(renderer["headline"] as? Map<*, *>)
+                                        ?: extractTitle(renderer["shortBylineText"] as? Map<*, *>)
+                                        ?: extractTitle(safeGet(renderer, "metadata", "lockupMetadataViewModel", "title") as? Map<*, *>)
+                                        ?: "Video"
+
+                                    val thumb = getBestThumbnail(renderer["thumbnail"]) 
+                                        ?: getBestThumbnail(safeGet(renderer, "contentImage", "image", "sources")) 
+                                        ?: buildThumbnailFromId(vidId)
+
+                                    val viewCount = formatViews(safeGet(renderer, "viewCountText", "simpleText") as? String) 
+                                        ?: formatViews(safeGet(renderer, "metadata", "lockupMetadataViewModel", "viewCount") as? String)
+
+                                    val publishedTime = extractTitle(safeGet(renderer, "publishedTimeText") as? Map<*, *>)
+
+                                    collectTo.add(newEpisode("$mainUrl/watch?v=$vidId") {
+                                        this.name = vidTitle
+                                        this.posterUrl = thumb
+                                        this.description = listOfNotNull(viewCount, publishedTime).joinToString(" • ")
+                                    })
+                                    println("[YT_CHANNEL_DEBUG] Item $index: 렌더러 파싱 성공 -> $vidTitle (ID: $vidId)")
+                                    
+                                    // 한 아이템 내에서 여러 렌더러가 발견될 경우 첫 번째 것만 처리하고 다음 아이템으로 넘어감
+                                    break 
+                                }
                             }
                         } catch (e: Exception) {
-                            println("[YT_CHANNEL_DEBUG] Item $index 파싱 중 에러 발생: ${e.message}")
+                            println("[YT_CHANNEL_DEBUG] Item $index 파싱 중 깊은 탐색 에러 발생: ${e.message}")
                         }
                     }
                     println("[YT_CHANNEL_DEBUG] 총 파싱 완료된 에피소드 수: ${collectTo.size}")
