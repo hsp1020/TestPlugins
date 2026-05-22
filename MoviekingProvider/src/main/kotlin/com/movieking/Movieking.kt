@@ -1,4 +1,4 @@
-// 버전 정보: v1.7
+// 버전 정보: v1.6
 package com.movieking
 
 import android.content.Context
@@ -28,11 +28,7 @@ class MovieKing : MainAPI() {
     override var lang = "ko"
 
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie, TvType.AsianDrama, TvType.Anime)
-    
-    // v1.6~v1.7: 동적 도메인 할당을 위한 Getter 적용
-    private val commonHeaders: Map<String, String>
-        get() = mapOf("Referer" to "$mainUrl/")
-        
+    private val commonHeaders = mapOf("Referer" to "$mainUrl/")
     private val titleRegex = Regex("""\s*\(\d{4}\).*""")
     private val tagCleanRegex = Regex("""\s*(한국|해외)?영화\s*\(?\d{4}\)?.*""")
 
@@ -45,17 +41,13 @@ class MovieKing : MainAPI() {
     )
 
     private suspend fun checkAndUpdateDomain() {
-        if (isDomainChecked) {
-            println("[MovieKing v1.7 DBG] checkAndUpdateDomain: 이미 도메인 체크 완료")
-            return
-        }
+        if (isDomainChecked) return
         domainMutex.withLock {
             if (isDomainChecked) return@withLock
             val prefs = AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             val cachedDomain = prefs?.getString(PREF_KEY, null)
             
             if (cachedDomain != null && currentMainUrl == "https://mvking.top") {
-                println("[MovieKing v1.7 DBG] 캐시된 도메인으로 복원: $cachedDomain")
                 currentMainUrl = cachedDomain
                 mainUrl = currentMainUrl
             }
@@ -63,12 +55,9 @@ class MovieKing : MainAPI() {
             try {
                 val res = app.get(currentMainUrl, headers = commonHeaders, timeout = 5L)
                 if (res.isSuccessful && res.text.contains("video-card")) {
-                    println("[MovieKing v1.7 DBG] 현재 도메인 유효: $currentMainUrl")
                     isDomainChecked = true; return@withLock
                 }
-            } catch (e: Exception) {
-                println("[MovieKing v1.7 DBG] 현재 도메인 검증 실패: ${e.message}")
-            }
+            } catch (e: Exception) {}
 
             try {
                 val portalDoc = app.get(PORTAL_URL, timeout = 10L).document
@@ -81,11 +70,8 @@ class MovieKing : MainAPI() {
                     mainUrl = currentMainUrl
                     isDomainChecked = true
                     prefs?.edit()?.putString(PREF_KEY, currentMainUrl)?.apply()
-                    println("[MovieKing v1.7 DBG] 포털 통해 새 도메인 갱신: $currentMainUrl")
                 }
-            } catch (e: Exception) {
-                println("[MovieKing v1.7 DBG] 포털 갱신 실패: ${e.message}")
-            }
+            } catch (e: Exception) {}
             isDomainChecked = true 
         }
     }
@@ -94,7 +80,6 @@ class MovieKing : MainAPI() {
         checkAndUpdateDomain()
         val separator = if (request.data.contains("?")) "&" else "?"
         var url = "$mainUrl${request.data}${separator}page=$page"
-        println("[MovieKing v1.7 DBG] getMainPage 진입: url=$url")
         
         return try {
             var res = app.get(url, headers = commonHeaders)
@@ -105,7 +90,6 @@ class MovieKing : MainAPI() {
             val decodedFinalUrl = URLDecoder.decode(finalUrl, "UTF-8")
 
             if (redirectedDomain != mainUrl || !decodedFinalUrl.contains(decodedRequestData)) {
-                println("[MovieKing v1.7 DBG] 리다이렉션 감지. redirectedDomain=$redirectedDomain")
                 if (redirectedDomain != mainUrl) {
                     currentMainUrl = redirectedDomain; mainUrl = redirectedDomain
                     AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()?.putString(PREF_KEY, currentMainUrl)?.apply()
@@ -118,7 +102,6 @@ class MovieKing : MainAPI() {
             val list = doc.select(".video-card").mapNotNull { it.toSearchResponse(request.name) }
             newHomePageResponse(request.name, list, hasNext = list.isNotEmpty())
         } catch (e: Exception) {
-            println("[MovieKing v1.7 DBG] getMainPage 오류: ${e.message}")
             if (e is CancellationException) throw e 
             newHomePageResponse(request.name, emptyList(), hasNext = false)
         }
@@ -145,27 +128,14 @@ class MovieKing : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         checkAndUpdateDomain()
-        println("[MovieKing v1.7 DBG] search 진입: 쿼리=$query")
         return try {
-            // v1.6~v1.7: 세션 확보 및 리다이렉션 방어를 위한 메인 페이지 선행 호출
-            app.get("$mainUrl/", headers = commonHeaders)
-            println("[MovieKing v1.7 DBG] search 메인 페이지 선행 호출 완료")
-            
-            val encodedQuery = URLEncoder.encode(query, "UTF-8")
-            app.get("$mainUrl/search?k=$encodedQuery", headers = commonHeaders)
-                .document
-                .select(".video-card")
-                .mapNotNull { it.toSearchResponse() }
-        } catch (e: Exception) { 
-            println("[MovieKing v1.7 DBG] search 오류: ${e.message}")
-            if (e is CancellationException) throw e
-            emptyList() 
-        }
+            app.get("$mainUrl/search?k=$query", headers = commonHeaders).document.select(".video-card").mapNotNull { it.toSearchResponse() }
+        } catch (e: Exception) { if (e is CancellationException) throw e; emptyList() }
     }
 
     override suspend fun load(url: String): LoadResponse {
         checkAndUpdateDomain()
-        println("[MovieKing v1.7 DBG] load 진입: $url")
+        println("[MovieKing v1.6 DBG] load 진입: $url")
         
         var passedPoster: String? = null
         var cleanUrl = url
@@ -178,10 +148,10 @@ class MovieKing : MainAPI() {
                 val param = match.value
                 passedPoster = URLDecoder.decode(param.substringAfter("="), "UTF-8")
                 cleanUrl = url.replace(param, "").replace("?&", "?").trimEnd('?', '&')
-                println("[MovieKing v1.7 DBG] URL 클리닝 성공: $cleanUrl")
+                println("[MovieKing v1.6 DBG] URL 클리닝 성공: $cleanUrl")
             }
         } catch (e: Exception) {
-            println("[MovieKing v1.7 DBG] URL 클리닝 중 오류: ${e.message}")
+            println("[MovieKing v1.6 DBG] URL 클리닝 중 오류: ${e.message}")
         }
 
         // 2. 도메인 보정: 청소된 cleanUrl을 기준으로 현재 활성화된 mainUrl 적용
@@ -191,7 +161,7 @@ class MovieKing : MainAPI() {
             cleanUrl
         }
 
-        println("[MovieKing v1.7 DBG] 최종 상세페이지 요청: $finalUrl")
+        println("[MovieKing v1.6 DBG] 최종 상세페이지 요청: $finalUrl")
         
         val doc = app.get(finalUrl, headers = commonHeaders).document
         val title = (doc.selectFirst("h3.title")?.text() ?: doc.selectFirst("h1.text-secondary")?.text() ?: "Unknown").replace(titleRegex, "").trim()
@@ -202,7 +172,7 @@ class MovieKing : MainAPI() {
             newEpisode(fixUrl(it.attr("href"))) { this.name = it.text().trim() } 
         }.reversed()
 
-        println("[MovieKing v1.7 DBG] 파싱 완료: 제목=$title, 에피소드 수=${episodeList.size}")
+        println("[MovieKing v1.6 DBG] 파싱 완료: 제목=$title, 에피소드 수=${episodeList.size}")
 
         return if (episodeList.size <= 1) {
             newMovieLoadResponse(title, finalUrl, TvType.Movie, finalUrl) { this.posterUrl = fixUrl(poster); this.plot = intro }
@@ -213,7 +183,6 @@ class MovieKing : MainAPI() {
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         checkAndUpdateDomain()
-        println("[MovieKing v1.7 DBG] loadLinks 진입: $data")
         var targetData = data
         if (!targetData.startsWith(mainUrl) && targetData.contains("mvking")) {
             targetData = mainUrl + targetData.replace(Regex("https?://[^/]+"), "")
@@ -221,17 +190,8 @@ class MovieKing : MainAPI() {
         
         try {
             val src = app.get(targetData, headers = commonHeaders).document.selectFirst("iframe#view_iframe")?.attr("src")
-            if (src != null) { 
-                println("[MovieKing v1.7 DBG] iframe src 확보: $src")
-                loadExtractor(fixUrl(src), targetData, subtitleCallback, callback)
-                return true 
-            } else {
-                println("[MovieKing v1.7 DBG] iframe 확보 실패")
-            }
-        } catch (e: Exception) { 
-            println("[MovieKing v1.7 DBG] loadLinks 오류: ${e.message}")
-            if (e is CancellationException) throw e 
-        }
+            if (src != null) { loadExtractor(fixUrl(src), targetData, subtitleCallback, callback); return true }
+        } catch (e: Exception) { if (e is CancellationException) throw e }
         return false
     }
 }
