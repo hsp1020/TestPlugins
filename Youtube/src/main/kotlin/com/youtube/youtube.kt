@@ -190,10 +190,17 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
 
     private fun formatViews(viewText: String?): String {
         if (viewText.isNullOrBlank()) return "N/A"
-        val text = viewText.toString()
-        if (text.any { it in listOf('K', 'M', 'B', 'k', 'm', 'b') } && text.length < 15) {
-            return text.split("view")[0].split("مشاهدة")[0].trim()
+        var text = viewText.toString().trim()
+        
+        // "조회수 23만회" -> "23만회" 로 깔끔하게 정리
+        text = text.replace("조회수", "").replace("views", "").replace("مشاهدة", "").trim()
+        
+        // 한국어 단위(만, 천, 억, 회)나 영문 단위(K, M, B)가 이미 포함되어 있으면 그대로 반환
+        if (text.matches(Regex(".*[만천억회KMBkmb].*")) && text.length < 15) {
+            return text
         }
+        
+        // 단위가 없는 순수 숫자일 경우에만 K, M, B로 변환
         val digits = text.filter { it.isDigit() }
         if (digits.isBlank()) return text
         return try {
@@ -208,6 +215,8 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
             text
         }
     }
+    
+
 
     private fun getRawText(map: Map<*, *>?, key: String): String? {
         val obj = map?.getMapKey(key) ?: return null
@@ -1238,6 +1247,8 @@ private fun collectFromRenderer(
                                 "client" to mapOf(
                                     "clientName" to "WEB",
                                     "clientVersion" to clientVersion,
+                                    "hl" to lang, // ✅ 누락되었던 언어 설정 추가
+                                    "gl" to if (lang == "ko") "KR" else "US", // ✅ 지역 설정 추가
                                     "visitorData" to (visitorData ?: ""),
                                     "platform" to "DESKTOP"
                                 )
