@@ -131,34 +131,29 @@ class MovieKing : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        println("[MovieKing v1.6 DBG] =========================================")
-        println("[MovieKing v1.6 DBG] search 진입 - 검색어: [$query]")
         checkAndUpdateDomain()
-        
         return try {
-            val searchUrl = "$mainUrl/search?k=$query"
-            println("[MovieKing v1.6 DBG] search 요청 URL: [$searchUrl]")
-            println("[MovieKing v1.6 DBG] search 요청 헤더: $commonHeaders")
-            
-            val res = app.get(searchUrl, headers = commonHeaders)
-            println("[MovieKing v1.6 DBG] search 응답 코드: ${res.code}")
-            println("[MovieKing v1.6 DBG] search 최종 응답 URL: [${res.url}]")
-            
-            val elements = res.document.select(".video-card")
-            println("[MovieKing v1.6 DBG] search 파싱된 HTML 아이템 개수: ${elements.size}")
-            
-            val list = elements.mapNotNull { it.toSearchResponse() }
-            println("[MovieKing v1.6 DBG] search 최종 반환 아이템 개수: ${list.size}")
-            println("[MovieKing v1.6 DBG] =========================================")
-            
-            list
-        } catch (e: Exception) { 
-            println("[MovieKing v1.6 DBG] search 에러 발생: ${e.message}")
-            if (e is CancellationException) throw e
-            emptyList() 
-        }
+            var searchUrl = "$mainUrl/search?k=$query"
+            var res = app.get(searchUrl, headers = commonHeaders)
+            val finalUrl = res.url
+            val redirectedDomain = Regex("^https?://[^/]+").find(finalUrl)?.value ?: mainUrl
+
+            if (redirectedDomain != mainUrl || !finalUrl.contains("search")) {
+                if (redirectedDomain != mainUrl) {
+                    currentMainUrl = redirectedDomain; mainUrl = redirectedDomain
+                    AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)?.edit()?.putString(PREF_KEY, currentMainUrl)?.apply()
+                }
+                searchUrl = "$mainUrl/search?k=$query"
+                res = app.get(searchUrl, headers = commonHeaders)
+            }
+
+            if (!res.url.contains("search")) return emptyList()
+
+            res.document.select(".video-card").mapNotNull { it.toSearchResponse() }
+        } catch (e: Exception) { if (e is CancellationException) throw e; emptyList() }
     }
 
+    
     override suspend fun load(url: String): LoadResponse {
         checkAndUpdateDomain()
         println("[MovieKing v1.6 DBG] load 진입: $url")
