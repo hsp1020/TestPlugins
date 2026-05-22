@@ -381,7 +381,7 @@ private fun collectFromRenderer(
                     val label = lockup.getMapKey("accessibility")?.getMapKey("accessibilityData")
                         ?.getString("label") ?: ""
                     val match =
-                        Regex("(?:by|من|عبر|قناة)\\s+(.*?)\\s+(?:\\d|view|مشاهدة)").find(label)
+                        Regex("(?:by|من|ع버|قناة)\\s+(.*?)\\s+(?:\\d|view|مشاهدة)").find(label)
                     if (match != null) channel = match.groupValues[1].replace("Shorts", "").trim()
                 }
                 val isShorts = lockup.getMapKey("content")
@@ -700,7 +700,8 @@ private fun collectFromRenderer(
                             ),
                             "continuation" to tokenToUse
                         )
-
+                        
+                    
                         val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
                         val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                         
@@ -977,14 +978,20 @@ private fun collectFromRenderer(
 
                 // 자가 치유(Self-Healing) 로직: 유튜브 서버의 오작동으로 인해 /videos가 탈락하여 홈(@handle) 화면으로 강제 이동된 경우 감지
                 val tabsCheck = safeGet(data, "contents", "twoColumnBrowseResultsRenderer", "tabs") as? List<*>
-                val hasVideoGrid = tabsCheck?.any { 
-                    val tabMap = it as? Map<*, *>
+                
+                // 핵심 수정: 비활성화된 탭 메타데이터의 오탐지를 피하기 위해, '현재 활성화된(selected == true) 탭'만 지정하여 정밀 검사합니다.
+                val activeTab = tabsCheck?.firstOrNull { tab ->
+                    val tabMap = tab as? Map<*, *>
                     val tabRenderer = tabMap?.get("tabRenderer") as? Map<*, *>
-                    val tabContent = tabRenderer?.get("content") as? Map<*, *>
-                    tabContent?.containsKey("richGridRenderer") == true || tabContent?.containsKey("gridRenderer") == true
-                } == true
+                    tabRenderer?.get("selected") == true
+                }
+                val activeContent = (activeTab as? Map<*, *>)?.get("tabRenderer") as? Map<*, *>
+                    ?.get("content") as? Map<*, *>
 
-                println("[YT_CHANNEL_DEBUG] 1차 파싱 결과 - 동영상 그리드 존재 여부: $hasVideoGrid")
+                val hasVideoGrid = activeContent?.containsKey("richGridRenderer") == true || 
+                                   activeContent?.containsKey("gridRenderer") == true
+
+                println("[YT_CHANNEL_DEBUG] 1차 파싱 결과 - 활성 탭 동영상 그리드 존재 여부: $hasVideoGrid")
 
                 if (!hasVideoGrid) {
                     val canonicalUrl = response.document.selectFirst("link[rel=canonical]")?.attr("href")
