@@ -690,16 +690,14 @@ private fun collectFromRenderer(
                         val apiUrl = "$mainUrl/youtubei/v1/browse?key=$savedApiKey"
                         val payload = mapOf(
                             "context" to mapOf(
-                                "client" to mapOf(
-                                    "visitorData" to (savedVisitorData ?: ""),
-                                    "clientName" to "WEB",
-                                    "clientVersion" to (savedClientVersion ?: "2.20240725.01.00"),
-                                    "platform" to "DESKTOP",
-                                    "hl" to lang
-                                )
-                            ),
-                            "continuation" to tokenToUse
-                        )
+                                "visitorData" to (savedVisitorData ?: ""),
+                                "clientName" to "WEB",
+                                "clientVersion" to (savedClientVersion ?: "2.20240725.01.00"),
+                                "platform" to "DESKTOP",
+                                "hl" to lang
+                            )
+                        ),
+                        "continuation" to tokenToUse
                         val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
                         val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                         
@@ -907,7 +905,7 @@ private fun collectFromRenderer(
                     this.posterUrl = poster
                     this.episode = collectedShorts.size + 1
                 }
-            )
+             )
         }
     }
 
@@ -968,10 +966,31 @@ private fun collectFromRenderer(
                     }
                 }
                 val channelUrl = "$cleanUrl/videos"
-                val response = app.get(channelUrl, interceptor = ytInterceptor)
-                val html = response.text
-                val data = extractYtInitialData(html)
+                var response = app.get(channelUrl, interceptor = ytInterceptor)
+                var html = response.text
+                var data = extractYtInitialData(html)
                     ?: throw ErrorLoadingException("Failed to extract channel data")
+
+                // 자가 치유(Self-Healing) 로직: 유튜브 서버의 오작동으로 인해 /videos가 탈락하여 홈(@handle) 화면으로 강제 이동된 경우 감지
+                val tabsCheck = safeGet(data, "contents", "twoColumnBrowseResultsRenderer", "tabs") as? List<*>
+                if (tabsCheck == null || tabsCheck.none { 
+                    val tabMap = it as? Map<*, *>
+                    val tabRenderer = tabMap?.get("tabRenderer") as? Map<*, *>
+                    val tabContent = tabRenderer?.get("content") as? Map<*, *>
+                    tabContent?.containsKey("richGridRenderer") == true || tabContent?.containsKey("gridRenderer") == true
+                }) {
+                    // 메타데이터에 내장된 고유 캐노니컬 핸들 주소를 파싱하여 정확하게 /videos로 다이렉트 재요청을 보냅니다.
+                    val canonicalUrl = response.document.selectFirst("link[rel=canonical]")?.attr("href")
+                    if (!canonicalUrl.isNullOrBlank()) {
+                        val cleanCanonical = canonicalUrl.substringBefore("?").removeSuffix("/")
+                        if (!cleanCanonical.endsWith("/videos")) {
+                            val targetUrl = "$cleanCanonical/videos"
+                            response = app.get(targetUrl, interceptor = ytInterceptor)
+                            html = response.text
+                            data = extractYtInitialData(html) ?: data
+                        }
+                    }
+                }
 
                 val apiKey = findConfig(html, "INNERTUBE_API_KEY")
                 val clientVersion = findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: "2.20240725.01.00"
