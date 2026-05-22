@@ -685,19 +685,24 @@ private fun collectFromRenderer(
                     savedVisitorData = savedVisitorData ?: sharedPref?.getString("yt_visitor_data", null)
                     savedClientVersion = savedClientVersion ?: sharedPref?.getString("yt_client_version", "2.20240725.01.00")
                     val tokenToUse = requestData.removePrefix("chip_")
-                    
+
+
+
                     if (!savedApiKey.isNullOrBlank()) {
                         val apiUrl = "$mainUrl/youtubei/v1/browse?key=$savedApiKey"
                         val payload = mapOf(
                             "context" to mapOf(
-                                "visitorData" to (savedVisitorData ?: ""),
-                                "clientName" to "WEB",
-                                "clientVersion" to (savedClientVersion ?: "2.20240725.01.00"),
-                                "platform" to "DESKTOP",
-                                "hl" to lang
-                            )
-                        ),
-                        "continuation" to tokenToUse
+                                "client" to mapOf(
+                                    "visitorData" to (savedVisitorData ?: ""),
+                                    "clientName" to "WEB",
+                                    "clientVersion" to (savedClientVersion ?: "2.20240725.01.00"),
+                                    "platform" to "DESKTOP",
+                                    "hl" to lang
+                                )
+                            ),
+                            "continuation" to tokenToUse
+                        )
+
                         val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
                         val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                         
