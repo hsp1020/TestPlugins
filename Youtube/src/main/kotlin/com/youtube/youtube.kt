@@ -701,7 +701,6 @@ private fun collectFromRenderer(
                             "continuation" to tokenToUse
                         )
                         
-                    
                         val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
                         val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                         
@@ -981,12 +980,9 @@ private fun collectFromRenderer(
                 
                 // 핵심 수정: 비활성화된 탭 메타데이터의 오탐지를 피하기 위해, '현재 활성화된(selected == true) 탭'만 지정하여 정밀 검사합니다.
                 val activeTab = tabsCheck?.firstOrNull { tab ->
-                    val tabMap = tab as? Map<*, *>
-                    val tabRenderer = tabMap?.get("tabRenderer") as? Map<*, *>
-                    tabRenderer?.get("selected") == true
+                    safeGet(tab, "tabRenderer", "selected") == true
                 }
-                val activeContent = (activeTab as? Map<*, *>)?.get("tabRenderer") as? Map<*, *>
-                    ?.get("content") as? Map<*, *>
+                val activeContent = safeGet(activeTab, "tabRenderer", "content") as? Map<*, *>
 
                 val hasVideoGrid = activeContent?.containsKey("richGridRenderer") == true || 
                                    activeContent?.containsKey("gridRenderer") == true
@@ -1124,7 +1120,7 @@ private fun collectFromRenderer(
                     }
 
                     val activeContent = (activeTab as? Map<*, *>)?.get("tabRenderer") as? Map<*, *>
-                    val content = activeContent?.get("content") as? Map<*, *>
+                        ?.get("content") as? Map<*, *>
 
                     if (content?.containsKey("richGridRenderer") == true) {
                         initialItems = safeGet(content, "richGridRenderer", "contents") as? List<*>
