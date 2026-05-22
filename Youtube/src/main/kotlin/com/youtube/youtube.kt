@@ -1123,25 +1123,51 @@ private fun collectFromRenderer(
                                 }
 
                                 if (!vidId.isNullOrBlank()) {
-                                    val vidTitle = extractTitle(renderer["title"] as? Map<*, *>)
-                                        ?: extractTitle(renderer["headline"] as? Map<*, *>)
-                                        ?: extractTitle(renderer["shortBylineText"] as? Map<*, *>)
-                                        ?: extractTitle(safeGet(renderer, "metadata", "lockupMetadataViewModel", "title") as? Map<*, *>)
-                                        ?: "Video"
+                                    // 1. 제목(Title) 추출: extractTitle 대신 더 강력한 getText 사용
+                                    var vidTitle = getText(renderer["title"])
+                                    if (vidTitle.isBlank()) vidTitle = getText(renderer["headline"])
+                                    if (vidTitle.isBlank()) vidTitle = getText(renderer["shortBylineText"])
+                                    if (vidTitle.isBlank()) vidTitle = getText(safeGet(renderer, "metadata", "lockupMetadataViewModel", "title"))
+                                    if (vidTitle.isBlank()) vidTitle = "Video"
 
+                                    // 2. 썸네일(Thumbnail) 추출
                                     val thumb = getBestThumbnail(renderer["thumbnail"]) 
                                         ?: getBestThumbnail(safeGet(renderer, "contentImage", "image", "sources")) 
                                         ?: buildThumbnailFromId(vidId)
 
-                                    val viewCount = formatViews(safeGet(renderer, "viewCountText", "simpleText") as? String) 
-                                        ?: formatViews(safeGet(renderer, "metadata", "lockupMetadataViewModel", "viewCount") as? String)
+                                    // 3. 메타데이터(조회수, 게시일자) 추출
+                                    val metaList = mutableListOf<String>()
 
-                                    val publishedTime = extractTitle(safeGet(renderer, "publishedTimeText") as? Map<*, *>)
+                                    // (A) 구형 렌더러 방식 (videoRenderer 등)
+                                    val legacyViews = getText(renderer["viewCountText"])
+                                    if (legacyViews.isNotBlank()) metaList.add(formatViews(legacyViews))
+
+                                    val legacyTime = getText(renderer["publishedTimeText"])
+                                    if (legacyTime.isNotBlank()) metaList.add(legacyTime)
+
+                                    // (B) 신형 렌더러 방식 (lockupViewModel 등)
+                                    if (metaList.isEmpty()) {
+                                        val rows = safeGet(renderer, "metadata", "lockupMetadataViewModel", "metadata", "contentMetadataViewModel", "metadataRows") as? List<*>
+                                        rows?.forEach { row ->
+                                            val parts = safeGet(row, "metadataParts") as? List<*>
+                                            parts?.forEach { part ->
+                                                val text = getText(safeGet(part, "text"))
+                                                if (text.isNotBlank()) {
+                                                    // 주의: formatViews는 날짜를 넣으면 숫자만 남기는 부작용이 있으므로, 조회수 키워드가 있을 때만 적용
+                                                    if (text.matches(Regex(".*(조회수|views|회|مشاهدة|[KMBkmb]).*"))) {
+                                                        metaList.add(formatViews(text))
+                                                    } else {
+                                                        metaList.add(text) // 게시일자 등은 원본 그대로 추가
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
 
                                     collectTo.add(newEpisode("$mainUrl/watch?v=$vidId") {
                                         this.name = vidTitle
                                         this.posterUrl = thumb
-                                        this.description = listOfNotNull(viewCount, publishedTime).joinToString(" • ")
+                                        this.description = metaList.joinToString(" • ")
                                     })
                                     println("[YT_CHANNEL_DEBUG] Item $index: 렌더러 파싱 성공 -> $vidTitle (ID: $vidId)")
                                     
