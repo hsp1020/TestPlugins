@@ -685,23 +685,19 @@ private fun collectFromRenderer(
                     savedVisitorData = savedVisitorData ?: sharedPref?.getString("yt_visitor_data", null)
                     savedClientVersion = savedClientVersion ?: sharedPref?.getString("yt_client_version", "2.20240725.01.00")
                     val tokenToUse = requestData.removePrefix("chip_")
-
+                    
                     if (!savedApiKey.isNullOrBlank()) {
                         val apiUrl = "$mainUrl/youtubei/v1/browse?key=$savedApiKey"
                         val payload = mapOf(
                             "context" to mapOf(
-                                "client" to mapOf(
-                                    "visitorData" to (savedVisitorData ?: ""),
-                                    "clientName" to "WEB",
-                                    "clientVersion" to (savedClientVersion ?: "2.20240725.01.00"),
-                                    "platform" to "DESKTOP",
-                                    "hl" to lang
-                                )
-                            ),
-                            "continuation" to tokenToUse
-                        )
-
-                        
+                                "visitorData" to (savedVisitorData ?: ""),
+                                "clientName" to "WEB",
+                                "clientVersion" to (savedClientVersion ?: "2.20240725.01.00"),
+                                "platform" to "DESKTOP",
+                                "hl" to lang
+                            )
+                        ),
+                        "continuation" to tokenToUse
                         val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
                         val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                         
@@ -976,21 +972,16 @@ private fun collectFromRenderer(
                 var data = extractYtInitialData(html)
                     ?: throw ErrorLoadingException("Failed to extract channel data")
 
-                // 자가 치유(Self-Healing) 로직: 유튜브 서버의 오작동으로 인해 /videos가 탈락하여 홈(@handle) 화면으로 강제 이동된 경우 감지
+                // 자가 치유 로직: 활성화된 탭의 내부 endpoint url을 검사하여 '/videos'가 아니면 잘못 리다이렉트된 것으로 판단
                 val tabsCheck = safeGet(data, "contents", "twoColumnBrowseResultsRenderer", "tabs") as? List<*>
-                
-                // 핵심 수정: 비활성화된 탭 메타데이터의 오탐지를 피하기 위해, '현재 활성화된(selected == true) 탭'만 지정하여 정밀 검사합니다.
                 val activeTab = tabsCheck?.firstOrNull { tab ->
                     safeGet(tab, "tabRenderer", "selected") == true
                 }
-                val activeContent = safeGet(activeTab, "tabRenderer", "content") as? Map<*, *>
+                
+                val endpointUrl = safeGet(activeTab, "tabRenderer", "endpoint", "commandMetadata", "webCommandMetadata", "url") as? String
+                println("[YT_CHANNEL_DEBUG] 1차 파싱 결과 - 활성 탭 엔드포인트: $endpointUrl")
 
-                val hasVideoGrid = activeContent?.containsKey("richGridRenderer") == true || 
-                                   activeContent?.containsKey("gridRenderer") == true
-
-                println("[YT_CHANNEL_DEBUG] 1차 파싱 결과 - 활성 탭 동영상 그리드 존재 여부: $hasVideoGrid")
-
-                if (!hasVideoGrid) {
+                if (endpointUrl != null && !endpointUrl.endsWith("/videos")) {
                     val canonicalUrl = response.document.selectFirst("link[rel=canonical]")?.attr("href")
                     println("[YT_CHANNEL_DEBUG] 자가치유 작동 - Canonical URL 파싱: $canonicalUrl")
                     if (!canonicalUrl.isNullOrBlank()) {
@@ -1114,11 +1105,11 @@ private fun collectFromRenderer(
                 var initialItems: List<*>? = null
                 val tabs = safeGet(data, "contents", "twoColumnBrowseResultsRenderer", "tabs") as? List<*>
                 if (tabs != null) {
-                    val activeTab = tabs.firstOrNull { tab ->
+                    val actualActiveTab = tabs.firstOrNull { tab ->
                         safeGet(tab, "tabRenderer", "selected") == true
                     }
 
-                    val activeContent = safeGet(activeTab, "tabRenderer", "content") as? Map<*, *>
+                    val activeContent = safeGet(actualActiveTab, "tabRenderer", "content") as? Map<*, *>
 
                     if (activeContent?.containsKey("richGridRenderer") == true) {
                         initialItems = safeGet(activeContent, "richGridRenderer", "contents") as? List<*>
@@ -1142,6 +1133,8 @@ private fun collectFromRenderer(
                         }
                     }
                 }
+                
+                println("[YT_CHANNEL_DEBUG] 추출된 초기 에피소드 아이템 수: ${initialItems?.size ?: 0}")
                 if (initialItems != null) {
                     extractVideosFromItems(initialItems, allEpisodes)
                 }
@@ -1151,6 +1144,7 @@ private fun collectFromRenderer(
                     val conts = findContinuationItemsRecursive(data)
                     currentToken = findContinuationTokenFromItems(conts)
                 }
+                println("[YT_CHANNEL_DEBUG] 페이지네이션 토큰 발견 여부: ${currentToken != null}")
 
                 var pagesFetchedLocal = 1
                 val maxPages = sharedPref?.getInt("channel_pages_limit", 6) ?: 6
@@ -1501,7 +1495,7 @@ private fun collectFromRenderer(
                 "gaa","gd","gl","gn","gu","gv","ha","haw","he","hi","hmn","hr","ht","hu","hy","id","ig","is","it","iu","iw",
                 "ja","jv","ka","kha","kk","kl","km","kn","ko","kri","ku","ky","la","lb","lg","ln","lo","lt","lua","luo","lv",
                 "mfe","mg","mi","mk","ml","mn","mr","ms","mt","my","ne","new","nl","no","nso","ny","oc","om","or","os","pa",
-                "pam","pl","ps","pt","pt-BR","pt-PT","qu","rn","ro","ru","rw","sa","sd","sg","si","sk","sl","sm","sm","sn","so","sq",
+                "pam","pl","ps","pt","pt-BR","pt-PT","qu","rn","ro","ru","rw","sa","sd","sg","si","sk","sl","sm","sn","so","sq",
                 "sr","ss","st","su","sv","sw","ta","te","tg","th","ti","tk","tn","to","tr","ts","tt","tum","ug","uk","ur","uz",
                 "ve","vi","war","wo","xh","yi","yo","zh-Hans","zh-Hant","zu"
             )
