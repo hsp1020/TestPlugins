@@ -677,7 +677,7 @@ private fun collectFromRenderer(
     private val continuationTokens = mutableMapOf<String, String>()
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val maxPages = sharedPref?.getInt("channel_pages_limit", 6) ?: 6
+        val maxPages = sharedPref?.getInt("channel_pages_limit", 20) ?: 20
         if (page > maxPages) return newHomePageResponse(request, emptyList(), hasNext = false)
 
         val results = mutableListOf<SearchResponse>()
