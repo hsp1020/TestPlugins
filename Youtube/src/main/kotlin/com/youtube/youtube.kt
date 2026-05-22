@@ -685,24 +685,19 @@ private fun collectFromRenderer(
                     savedVisitorData = savedVisitorData ?: sharedPref?.getString("yt_visitor_data", null)
                     savedClientVersion = savedClientVersion ?: sharedPref?.getString("yt_client_version", "2.20240725.01.00")
                     val tokenToUse = requestData.removePrefix("chip_")
-
-
-
+                    
                     if (!savedApiKey.isNullOrBlank()) {
                         val apiUrl = "$mainUrl/youtubei/v1/browse?key=$savedApiKey"
                         val payload = mapOf(
                             "context" to mapOf(
-                                "client" to mapOf(
-                                    "visitorData" to (savedVisitorData ?: ""),
-                                    "clientName" to "WEB",
-                                    "clientVersion" to (savedClientVersion ?: "2.20240725.01.00"),
-                                    "platform" to "DESKTOP",
-                                    "hl" to lang
-                                )
-                            ),
-                            "continuation" to tokenToUse
-                        )
-
+                                "visitorData" to (savedVisitorData ?: ""),
+                                "clientName" to "WEB",
+                                "clientVersion" to (savedClientVersion ?: "2.20240725.01.00"),
+                                "platform" to "DESKTOP",
+                                "hl" to lang
+                            )
+                        ),
+                        "continuation" to tokenToUse
                         val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
                         val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                         
@@ -971,6 +966,7 @@ private fun collectFromRenderer(
                     }
                 }
                 val channelUrl = "$cleanUrl/videos"
+                println("[YT_CHANNEL_DEBUG] 1차 채널 요청 URL: $channelUrl")
                 var response = app.get(channelUrl, interceptor = ytInterceptor)
                 var html = response.text
                 var data = extractYtInitialData(html)
@@ -978,21 +974,32 @@ private fun collectFromRenderer(
 
                 // 자가 치유(Self-Healing) 로직: 유튜브 서버의 오작동으로 인해 /videos가 탈락하여 홈(@handle) 화면으로 강제 이동된 경우 감지
                 val tabsCheck = safeGet(data, "contents", "twoColumnBrowseResultsRenderer", "tabs") as? List<*>
-                if (tabsCheck == null || tabsCheck.none { 
+                val hasVideoGrid = tabsCheck?.any { 
                     val tabMap = it as? Map<*, *>
                     val tabRenderer = tabMap?.get("tabRenderer") as? Map<*, *>
                     val tabContent = tabRenderer?.get("content") as? Map<*, *>
                     tabContent?.containsKey("richGridRenderer") == true || tabContent?.containsKey("gridRenderer") == true
-                }) {
-                    // 메타데이터에 내장된 고유 캐노니컬 핸들 주소를 파싱하여 정확하게 /videos로 다이렉트 재요청을 보냅니다.
+                } == true
+
+                println("[YT_CHANNEL_DEBUG] 1차 파싱 결과 - 동영상 그리드 존재 여부: $hasVideoGrid")
+
+                if (!hasVideoGrid) {
                     val canonicalUrl = response.document.selectFirst("link[rel=canonical]")?.attr("href")
+                    println("[YT_CHANNEL_DEBUG] 자가치유 작동 - Canonical URL 파싱: $canonicalUrl")
                     if (!canonicalUrl.isNullOrBlank()) {
                         val cleanCanonical = canonicalUrl.substringBefore("?").removeSuffix("/")
                         if (!cleanCanonical.endsWith("/videos")) {
                             val targetUrl = "$cleanCanonical/videos"
+                            println("[YT_CHANNEL_DEBUG] 2차 채널 핸들 URL 재요청 시작: $targetUrl")
                             response = app.get(targetUrl, interceptor = ytInterceptor)
                             html = response.text
-                            data = extractYtInitialData(html) ?: data
+                            val newData = extractYtInitialData(html)
+                            if (newData != null) {
+                                data = newData
+                                println("[YT_CHANNEL_DEBUG] 2차 채널 데이터 파싱 성공")
+                            } else {
+                                println("[YT_CHANNEL_DEBUG] 2차 채널 데이터 파싱 실패 (null)")
+                            }
                         }
                     }
                 }
