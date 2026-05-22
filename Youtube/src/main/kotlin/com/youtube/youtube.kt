@@ -700,6 +700,7 @@ private fun collectFromRenderer(
                             ),
                             "continuation" to tokenToUse
                         )
+
                         
                         val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
                         val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
@@ -1114,18 +1115,15 @@ private fun collectFromRenderer(
                 val tabs = safeGet(data, "contents", "twoColumnBrowseResultsRenderer", "tabs") as? List<*>
                 if (tabs != null) {
                     val activeTab = tabs.firstOrNull { tab ->
-                        val tabMap = tab as? Map<*, *>
-                        val tabRenderer = tabMap?.get("tabRenderer") as? Map<*, *>
-                        tabRenderer?.get("selected") == true
+                        safeGet(tab, "tabRenderer", "selected") == true
                     }
 
-                    val activeContent = (activeTab as? Map<*, *>)?.get("tabRenderer") as? Map<*, *>
-                        ?.get("content") as? Map<*, *>
+                    val activeContent = safeGet(activeTab, "tabRenderer", "content") as? Map<*, *>
 
-                    if (content?.containsKey("richGridRenderer") == true) {
-                        initialItems = safeGet(content, "richGridRenderer", "contents") as? List<*>
-                    } else if (content?.containsKey("gridRenderer") == true) {
-                        initialItems = safeGet(content, "gridRenderer", "items") as? List<*>
+                    if (activeContent?.containsKey("richGridRenderer") == true) {
+                        initialItems = safeGet(activeContent, "richGridRenderer", "contents") as? List<*>
+                    } else if (activeContent?.containsKey("gridRenderer") == true) {
+                        initialItems = safeGet(activeContent, "gridRenderer", "items") as? List<*>
                     }
 
                     if (initialItems == null) {
@@ -1503,7 +1501,7 @@ private fun collectFromRenderer(
                 "gaa","gd","gl","gn","gu","gv","ha","haw","he","hi","hmn","hr","ht","hu","hy","id","ig","is","it","iu","iw",
                 "ja","jv","ka","kha","kk","kl","km","kn","ko","kri","ku","ky","la","lb","lg","ln","lo","lt","lua","luo","lv",
                 "mfe","mg","mi","mk","ml","mn","mr","ms","mt","my","ne","new","nl","no","nso","ny","oc","om","or","os","pa",
-                "pam","pl","ps","pt","pt-BR","pt-PT","qu","rn","ro","ru","rw","sa","sd","sg","si","sk","sl","sm","sn","so","sq",
+                "pam","pl","ps","pt","pt-BR","pt-PT","qu","rn","ro","ru","rw","sa","sd","sg","si","sk","sl","sm","sm","sn","so","sq",
                 "sr","ss","st","su","sv","sw","ta","te","tg","th","ti","tk","tn","to","tr","ts","tt","tum","ug","uk","ur","uz",
                 "ve","vi","war","wo","xh","yi","yo","zh-Hans","zh-Hant","zu"
             )
