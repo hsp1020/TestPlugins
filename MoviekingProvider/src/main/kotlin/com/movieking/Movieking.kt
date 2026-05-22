@@ -1,4 +1,4 @@
-// 버전 정보: v1.6
+// 버전 정보: v1.6 (원본 로직 + 디버깅 프린트 추가)
 package com.movieking
 
 import android.content.Context
@@ -115,6 +115,8 @@ class MovieKing : MainAPI() {
         val imgTag = this.selectFirst("img")
         val fixedPoster = fixUrl(imgTag?.attr("src") ?: imgTag?.attr("data-src") ?: "")
 
+        println("[MovieKing v1.6 DBG] toSearchResponse 파싱 중: 제목=[$title], 전달된 카테고리=[$categoryName], href=[$href]")
+
         var finalHref = href
         if (fixedPoster.isNotEmpty()) {
             val separator = if (href.contains("?")) "&" else "?"
@@ -122,15 +124,39 @@ class MovieKing : MainAPI() {
         }
 
         val type = if (categoryName == "영화" || href.contains("movie")) TvType.Movie else TvType.TvSeries
+        println("[MovieKing v1.6 DBG] toSearchResponse 최종 판별 타입: $type")
+        
         return if (type == TvType.Movie) newMovieSearchResponse(title, finalHref, TvType.Movie) { this.posterUrl = fixedPoster }
                else newTvSeriesSearchResponse(title, finalHref, TvType.TvSeries) { this.posterUrl = fixedPoster }
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
+        println("[MovieKing v1.6 DBG] =========================================")
+        println("[MovieKing v1.6 DBG] search 진입 - 검색어: [$query]")
         checkAndUpdateDomain()
+        
         return try {
-            app.get("$mainUrl/search?k=$query", headers = commonHeaders).document.select(".video-card").mapNotNull { it.toSearchResponse() }
-        } catch (e: Exception) { if (e is CancellationException) throw e; emptyList() }
+            val searchUrl = "$mainUrl/search?k=$query"
+            println("[MovieKing v1.6 DBG] search 요청 URL: [$searchUrl]")
+            println("[MovieKing v1.6 DBG] search 요청 헤더: $commonHeaders")
+            
+            val res = app.get(searchUrl, headers = commonHeaders)
+            println("[MovieKing v1.6 DBG] search 응답 코드: ${res.code}")
+            println("[MovieKing v1.6 DBG] search 최종 응답 URL: [${res.url}]")
+            
+            val elements = res.document.select(".video-card")
+            println("[MovieKing v1.6 DBG] search 파싱된 HTML 아이템 개수: ${elements.size}")
+            
+            val list = elements.mapNotNull { it.toSearchResponse() }
+            println("[MovieKing v1.6 DBG] search 최종 반환 아이템 개수: ${list.size}")
+            println("[MovieKing v1.6 DBG] =========================================")
+            
+            list
+        } catch (e: Exception) { 
+            println("[MovieKing v1.6 DBG] search 에러 발생: ${e.message}")
+            if (e is CancellationException) throw e
+            emptyList() 
+        }
     }
 
     override suspend fun load(url: String): LoadResponse {
@@ -140,7 +166,6 @@ class MovieKing : MainAPI() {
         var passedPoster: String? = null
         var cleanUrl = url
 
-        // 1. 순수 URL 확보: &poster_url 및 ?poster_url 파라미터 완전 제거
         try {
             val posterRegex = Regex("""([&?])poster_url=[^&]+""")
             val match = posterRegex.find(url)
@@ -154,7 +179,6 @@ class MovieKing : MainAPI() {
             println("[MovieKing v1.6 DBG] URL 클리닝 중 오류: ${e.message}")
         }
 
-        // 2. 도메인 보정: 청소된 cleanUrl을 기준으로 현재 활성화된 mainUrl 적용
         val finalUrl = if (!cleanUrl.startsWith(mainUrl) && cleanUrl.contains("mvking")) {
             mainUrl + cleanUrl.replace(Regex("^https?://[^/]+"), "")
         } else {
