@@ -700,8 +700,8 @@ private fun collectFromRenderer(
                             ),
                             "continuation" to tokenToUse
                         )
-
                         
+                    
                         val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
                         val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                         
@@ -1068,42 +1068,86 @@ private fun collectFromRenderer(
                 }
 
                 fun extractVideosFromItems(items: List<*>, collectTo: MutableList<Episode>) {
-                    items.forEach { item ->
-                        val map = item as? Map<*, *> ?: return@forEach
-                        val videoRenderer = when {
-                            map.containsKey("videoRenderer") -> map["videoRenderer"] as? Map<*, *>
-                            map.containsKey("gridVideoRenderer") -> map["gridVideoRenderer"] as? Map<*, *>
-                            map.containsKey("compactVideoRenderer") -> map["compactVideoRenderer"] as? Map<*, *>
-                            map.containsKey("shortsVideoRenderer") -> map["shortsVideoRenderer"] as? Map<*, *>
-                            map.containsKey("reelItemRenderer") -> {
-                                val content = safeGet(map, "reelItemRenderer", "content") as? Map<*, *>
-                                content?.get("reelItemRenderer") as? Map<*, *>
+                    println("[YT_CHANNEL_DEBUG] extractVideosFromItems() 호출됨. 분석할 아이템 개수: ${items.size}")
+                    items.forEachIndexed { index, item ->
+                        try {
+                            val map = item as? Map<*, *>
+                            if (map == null) {
+                                println("[YT_CHANNEL_DEBUG] Item $index: Map이 아님 (타입: ${item?.javaClass?.name})")
+                                return@forEachIndexed
                             }
-                            map.containsKey("richItemRenderer") -> {
+
+                            // 1단계: 직접적인 렌더러 검색
+                            var videoRenderer = map["videoRenderer"] as? Map<*, *>
+                                ?: map["gridVideoRenderer"] as? Map<*, *>
+                                ?: map["compactVideoRenderer"] as? Map<*, *>
+                                ?: map["shortsVideoRenderer"] as? Map<*, *>
+
+                            // 2단계: 래퍼 렌더러 내부 검색 (richItemRenderer 등)
+                            if (videoRenderer == null && map.containsKey("richItemRenderer")) {
                                 val content = safeGet(map, "richItemRenderer", "content") as? Map<*, *>
-                                (content?.get("videoRenderer") ?: content?.get("gridVideoRenderer") ?: content?.get("shortsLockupViewModel")) as? Map<*, *>
+                                if (content != null) {
+                                    videoRenderer = content["videoRenderer"] as? Map<*, *>
+                                        ?: content["gridVideoRenderer"] as? Map<*, *>
+                                        ?: content["shortsLockupViewModel"] as? Map<*, *>
+                                        ?: content["videoViewModel"] as? Map<*, *>
+                                }
                             }
-                            else -> null
-                        }
+                            
+                            // 3단계: lockupViewModel 검색 (최신 구조)
+                            if (videoRenderer == null && map.containsKey("lockupViewModel")) {
+                                val lockup = map["lockupViewModel"] as? Map<*, *>
+                                if (lockup != null) {
+                                    val vidId = lockup["contentId"] as? String 
+                                        ?: safeGet(lockup, "content", "videoRenderer", "videoId") as? String
+                                    
+                                    if (!vidId.isNullOrBlank()) {
+                                        val titleObj = safeGet(lockup, "metadata", "lockupMetadataViewModel", "title") as? Map<*, *>
+                                        val vidTitle = extractTitle(titleObj) ?: "Video"
+                                        val thumb = getBestThumbnail(safeGet(lockup, "contentImage", "image", "sources")) ?: buildThumbnailFromId(vidId)
+                                        val viewCount = formatViews(safeGet(lockup, "metadata", "lockupMetadataViewModel", "viewCount") as? String)
+                                        
+                                        collectTo.add(newEpisode("$mainUrl/watch?v=$vidId") {
+                                            this.name = vidTitle
+                                            this.posterUrl = thumb
+                                            this.description = viewCount
+                                        })
+                                        println("[YT_CHANNEL_DEBUG] Item $index: lockupViewModel 파싱 성공 -> $vidTitle")
+                                        return@forEachIndexed
+                                    }
+                                }
+                            }
 
-                        if (videoRenderer != null) {
-                            val vId = videoRenderer["videoId"] as? String ?: return@forEach
-                            val vidTitle = extractTitle(videoRenderer["title"] as? Map<*, *>)
-                                ?: extractTitle(videoRenderer["headline"] as? Map<*, *>)
-                                ?: extractTitle(videoRenderer["shortBylineText"] as? Map<*, *>)
-                                ?: "Video"
-                            val thumb = getBestThumbnail(videoRenderer["thumbnail"]) ?: buildThumbnailFromId(vId)
-                            val vidUrl = "$mainUrl/watch?v=$vId"
-                            val viewCount = formatViews(safeGet(videoRenderer, "viewCountText", "simpleText") as? String)
-                            val publishedTime = extractTitle(safeGet(videoRenderer, "publishedTimeText") as? Map<*, *>)
+                            if (videoRenderer != null) {
+                                val vId = videoRenderer["videoId"] as? String
+                                if (vId == null) {
+                                    println("[YT_CHANNEL_DEBUG] Item $index: 렌더러는 찾았으나 videoId가 없음")
+                                    return@forEachIndexed
+                                }
+                                
+                                val vidTitle = extractTitle(videoRenderer["title"] as? Map<*, *>)
+                                    ?: extractTitle(videoRenderer["headline"] as? Map<*, *>)
+                                    ?: extractTitle(videoRenderer["shortBylineText"] as? Map<*, *>)
+                                    ?: "Video"
+                                val thumb = getBestThumbnail(videoRenderer["thumbnail"]) ?: buildThumbnailFromId(vId)
+                                val vidUrl = "$mainUrl/watch?v=$vId"
+                                val viewCount = formatViews(safeGet(videoRenderer, "viewCountText", "simpleText") as? String)
+                                val publishedTime = extractTitle(safeGet(videoRenderer, "publishedTimeText") as? Map<*, *>)
 
-                            collectTo.add(newEpisode(vidUrl) {
-                                this.name = vidTitle
-                                this.posterUrl = thumb
-                                this.description = listOfNotNull(viewCount, publishedTime).joinToString(" • ")
-                            })
+                                collectTo.add(newEpisode(vidUrl) {
+                                    this.name = vidTitle
+                                    this.posterUrl = thumb
+                                    this.description = listOfNotNull(viewCount, publishedTime).joinToString(" • ")
+                                })
+                                println("[YT_CHANNEL_DEBUG] Item $index: 렌더러 파싱 성공 -> $vidTitle")
+                            } else {
+                                println("[YT_CHANNEL_DEBUG] Item $index: 인식 가능한 비디오 렌더러를 찾지 못함. (키 목록: ${map.keys})")
+                            }
+                        } catch (e: Exception) {
+                            println("[YT_CHANNEL_DEBUG] Item $index 파싱 중 에러 발생: ${e.message}")
                         }
                     }
+                    println("[YT_CHANNEL_DEBUG] 총 파싱 완료된 에피소드 수: ${collectTo.size}")
                 }
 
                 var initialItems: List<*>? = null
@@ -1138,7 +1182,7 @@ private fun collectFromRenderer(
                     }
                 }
                 
-                println("[YT_CHANNEL_DEBUG] 추출된 초기 에피소드 아이템 수: ${initialItems?.size ?: 0}")
+                println("[YT_CHANNEL_DEBUG] 추출된 초기 에피소드 덩어리 수: ${initialItems?.size ?: 0}")
                 if (initialItems != null) {
                     extractVideosFromItems(initialItems, allEpisodes)
                 }
