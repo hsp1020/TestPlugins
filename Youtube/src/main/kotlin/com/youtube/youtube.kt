@@ -677,7 +677,7 @@ private fun collectFromRenderer(
     private val continuationTokens = mutableMapOf<String, String>()
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val maxPages = sharedPref?.getInt("channel_pages_limit", 100) ?: 100
+        val maxPages = sharedPref?.getInt("channel_pages_limit", 10) ?: 10
         if (page > maxPages) return newHomePageResponse(request, emptyList(), hasNext = false)
 
         val results = mutableListOf<SearchResponse>()
@@ -842,7 +842,7 @@ private fun collectFromRenderer(
     }
 
     override suspend fun search(query: String, page: Int): SearchResponseList? {
-        val maxPages = sharedPref?.getInt("channel_pages_limit", 100) ?: 100
+        val maxPages = sharedPref?.getInt("channel_pages_limit", 10) ?: 10
         if (page > maxPages) return newSearchResponseList(emptyList(), false)
 
         val results = mutableListOf<SearchResponse>()
@@ -1238,7 +1238,7 @@ private fun collectFromRenderer(
                 println("[YT_CHANNEL_DEBUG] 페이지네이션 토큰 발견 여부: ${currentToken != null}")
 
                 var pagesFetchedLocal = 1
-                val maxPages = sharedPref?.getInt("channel_pages_limit", 100) ?: 100
+                val maxPages = sharedPref?.getInt("channel_pages_limit", 10) ?: 10
 
                 while (!currentToken.isNullOrBlank() && pagesFetchedLocal < maxPages && !apiKey.isNullOrBlank()) {
                     try {
