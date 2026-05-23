@@ -46,8 +46,12 @@ open class YoutubeExtractor : ExtractorApi() {
         // 403 에러 방지를 위한 iOS 클라이언트 전용 User-Agent
         private const val IOS_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
 
-        // 고정 적용할 커스텀 Cobalt API 서버 주소
-        private const val COBALT_API_URL = "https://melon.clxxped.lol"
+        // 폴백용 기본 무료 API 서버 주소 (트래커 API 전체 실패 시 최후 수단으로 구동)
+        private const val DEFAULT_FALLBACK_API_URL = "https://cobalt.meowing.de"
+
+        // 실시간으로 탐색하여 찾아낸 "유튜브 작동 가능(status=true)" 서버 주소 캐시
+        @Volatile
+        private var cachedAutoInstance: String? = null
 
         init {
             YoutubeStreamExtractor.setFetchIosClient(true)
@@ -77,47 +81,118 @@ open class YoutubeExtractor : ExtractorApi() {
     )
 
     // =================================================================
-    // [수정 완료] NiceHttp의 내부 참조 문제 해결을 위해 독자적인 OkHttpClient 인스턴스 사용
+    // [공식 명세 적용] cobalt.directory/api/tests 를 직접 분석하여 유튜브 status=true 인 서버를 선별
+    // =================================================================
+    private suspend fun fetchWorkingCobaltInstance(): String? {
+        return try {
+            println("[YT_DEBUG] cobalt.directory/api/tests 실시간 탐색 호출 시작")
+            val responseText = withContext(Dispatchers.IO) {
+                app.get("https://cobalt.directory/api/tests").text
+            }
+            if (responseText.isNotBlank()) {
+                val json = parseJson<Map<String, Any>>(responseText)
+                val dataList = json["data"] as? List<*> ?: return null
+                
+                for (item in dataList) {
+                    val instance = item as? Map<*, *> ?: continue
+                    
+                    // 1. 서버가 온라인 상태인지 먼저 필터링
+                    val online = instance["online"] as? Boolean ?: false
+                    if (!online) continue
+                    
+                    // 2. tests -> youtube 결과에 진입
+                    val tests = instance["tests"] as? Map<*, *> ?: continue
+                    val youtube = tests["youtube"] as? Map<*, *> ?: continue
+                    
+                    // 3. youtube 작동 성공 여부(status)가 "true" 인지 정밀 분석 (인증 필요 도메인은 여기서 자동 탈락)
+                    val youtubeStatus = youtube["status"] as? Boolean ?: false
+                    if (youtubeStatus) {
+                        val apiHost = instance["api"] as? String
+                        if (!apiHost.isNullOrBlank()) {
+                            val protocol = instance["protocol"] as? String ?: "https"
+                            val finalUrl = "$protocol://$apiHost"
+                            println("[YT_DEBUG] cobalt.directory 분석 성공. 실시간 무결성 인증 우회 주소 확보: $finalUrl")
+                            cachedAutoInstance = finalUrl
+                            return finalUrl
+                        }
+                    }
+                }
+            }
+            null
+        } catch (e: Exception) {
+            println("[YT_DEBUG] cobalt.directory 원천 API 실시간 탐색 중 오류 발생: ${e.message}")
+            null
+        }
+    }
+
+    // =================================================================
+    // [우회 결합] 설정값이 "auto"일 때 작동 가능한 우회 주소를 트래킹하여 자동 호출
     // =================================================================
     private suspend fun getCobaltMergedLink(videoUrl: String, quality: String): String? {
-        val apiUrl = if (COBALT_API_URL.endsWith("/")) COBALT_API_URL else "$COBALT_API_URL/"
+        val appPrefs = com.lagradost.cloudstream3.AcraApplication.context?.let {
+            androidx.preference.PreferenceManager.getDefaultSharedPreferences(it)
+        }
+        
+        // 주소 기본 설정을 "auto"로 구성하여 자동 탐색 모드로 구동 유도
+        var cobaltInstance = appPrefs?.getString("youtube_cobalt_api", "auto") ?: "auto"
+        val apiKey = appPrefs?.getString("youtube_cobalt_api_key", null)
+
+        // 자동 탐색 모드인 경우 동작하는 서버 실시간 파싱 선별 가동
+        if (cobaltInstance.equals("auto", ignoreCase = true)) {
+            cobaltInstance = cachedAutoInstance ?: fetchWorkingCobaltInstance() ?: DEFAULT_FALLBACK_API_URL
+        }
+
+        val apiUrl = if (cobaltInstance.endsWith("/")) cobaltInstance else "$cobaltInstance/"
         return try {
+            // 명세서 규격: filenameStyle 및 videoQuality 대입
             val jsonString = "{\"url\":\"$videoUrl\",\"videoQuality\":\"$quality\",\"filenameStyle\":\"pretty\"}"
-            
-            // 미디어 타입을 null로 대입하여 OkHttp 자체적으로 charset 수식어가 붙는 것을 방지
             val requestBody = jsonString.toRequestBody(null)
             
+            // 헤더 정보 구성 (Strict Content-Type 우회용 오직 application/json 단일 헤더 구성)
+            val headersMap = mutableMapOf(
+                "Content-Type" to "application/json",
+                "Accept" to "application/json",
+                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+
+            // 만약 개별 수동 인스턴스 사용 중이고 API Key가 존재한다면 Bearer 인증 토큰 탑재
+            if (!apiKey.isNullOrBlank()) {
+                headersMap["Authorization"] = "Bearer $apiKey"
+            }
+
             val request = Request.Builder()
                 .url(apiUrl)
                 .post(requestBody)
-                .header("Content-Type", "application/json") // Cobalt 필수 헤더: 정확히 application/json 일치 비교 통과 유도
-                .header("Accept", "application/json")      // Cobalt 필수 헤더
-                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                .apply {
+                    headersMap.forEach { (k, v) -> header(k, v) }
+                }
                 .build()
 
-            // 100% 확정 컴파일을 유도하기 위해 라이브러리 내부 client 대신 순수 OkHttpClient() 인스턴스를 생성하여 활용
             val localOkHttpClient = OkHttpClient()
 
-            // 비동기 스레드(IO) 내에서 안전하게 실행하여 response 타입 스마트 캐스팅 성공 유도
             val responseText = withContext(Dispatchers.IO) {
                 localOkHttpClient.newCall(request).execute().use { response ->
-                    println("[YT_DEBUG] Cobalt API 응답 수신. 코드: ${response.code}")
+                    println("[YT_DEBUG] Cobalt API 응답 수신 ($cobaltInstance). 코드: ${response.code}")
                     if (response.isSuccessful) {
                         response.body?.string()
                     } else {
                         val errBody = response.body?.string() ?: ""
                         println("[YT_DEBUG] Cobalt API 호출 실패. 에러 코드: ${response.code}, 내용: $errBody")
+                        
+                        // 사용 중이던 탐색 주소에서 에러 발생 시 캐시 만료 유도
+                        if (cobaltInstance == cachedAutoInstance) {
+                            cachedAutoInstance = null
+                        }
                         null
                     }
                 }
             }
 
-            // ?.let 스코프 검사를 거쳐 컴파일러가 Nullable 타입 에러(Argument type mismatch)를 내지 않도록 엄격하게 문자열 확정
             responseText?.takeIf { it.isNotBlank() }?.let { text ->
                 val json = parseJson<Map<String, Any>>(text)
                 val status = json["status"] as? String
                 
-                // 공식 명세: v11의 성공 상태값은 "tunnel" 또는 "redirect"입니다. (하위 호환을 위해 "stream"도 유지)
+                // 공식 명세 v11 규격: "tunnel" 또는 "redirect" (과거 구버전 호환용 "stream" 포함)
                 if (status == "tunnel" || status == "redirect" || status == "stream") {
                     json["url"] as? String
                 } else {
@@ -128,6 +203,10 @@ open class YoutubeExtractor : ExtractorApi() {
         } catch (e: Exception) {
             println("[YT_DEBUG] Cobalt API ($apiUrl) 연동 중 치명적 예외 발생: ${e.message}")
             e.printStackTrace()
+            // 예외 발생 시 자동 선별 캐시 만료 처리
+            if (cobaltInstance == cachedAutoInstance) {
+                cachedAutoInstance = null
+            }
             null
         }
     }
@@ -153,9 +232,9 @@ open class YoutubeExtractor : ExtractorApi() {
             val youtubeWatchUrl = "https://www.youtube.com/watch?v=$videoId"
 
             // =================================================================
-            // Cobalt API 기반 서버 사이드 병합 고화질 링크 추출 시도 (melon.clxxped.lol)
+            // Cobalt API 기반 서버 사이드 병합 고화질 링크 추출 시도
             // =================================================================
-            println("[YT_DEBUG] melon.clxxped.lol 서버를 통해 병합 링크 생성을 시도합니다.")
+            println("[YT_DEBUG] Cobalt 서버를 통해 병합 링크 생성을 시도합니다.")
             val qualitiesToRequest = listOf("1080", "720")
             for (q in qualitiesToRequest) {
                 val mergedUrl = getCobaltMergedLink(youtubeWatchUrl, q)
