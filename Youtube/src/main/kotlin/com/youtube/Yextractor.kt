@@ -74,9 +74,10 @@ open class YoutubeExtractor : ExtractorApi() {
     )
 
     // =================================================================
-    // [수정] 내장 parseJson 유틸을 사용하도록 변경하여 빌드 에러 해결
+    // [개선] 슬래시 처리 보정, 보안 우회 헤더 추가, 응답 실패 상세 로깅 가미
     // =================================================================
     private suspend fun getCobaltMergedLink(videoUrl: String, quality: String): String? {
+        val apiUrl = if (COBALT_API_URL.endsWith("/")) COBALT_API_URL else "$COBALT_API_URL/"
         return try {
             val payload = mapOf(
                 "url" to videoUrl,
@@ -84,27 +85,34 @@ open class YoutubeExtractor : ExtractorApi() {
                 "filenamePattern" to "pretty"
             )
             val response = app.post(
-                COBALT_API_URL,
+                apiUrl,
                 json = payload,
                 headers = mapOf(
                     "Accept" to "application/json",
-                    "Content-Type" to "application/json"
+                    "Content-Type" to "application/json",
+                    // Cloudflare 및 Turnstile 우회를 유도하기 위해 크롬 브라우저 User-Agent 강제 대입
+                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                 )
             )
+            println("[YT_DEBUG] Cobalt API 응답 수신. 코드: ${response.code}")
+            
             if (response.code == 200) {
-                // 앱에 내장된 고속 Jackson 파서를 이용하여 Map으로 즉시 역직렬화
                 val json = parseJson<Map<String, Any>>(response.text)
                 val status = json["status"] as? String
                 if (status == "stream" || status == "redirect") {
                     json["url"] as? String
                 } else {
+                    println("[YT_DEBUG] Cobalt API 처리 상태 비정상: $status. 본문: ${response.text}")
                     null
                 }
             } else {
+                // 200 이외의 오류가 날 경우 로그캣에 코드와 에러 내용(HTML 혹은 JSON)을 직접 출력
+                println("[YT_DEBUG] Cobalt API 호출 실패. 에러 코드: ${response.code}, 내용: ${response.text}")
                 null
             }
         } catch (e: Exception) {
-            println("[YT_DEBUG] Cobalt API ($COBALT_API_URL) 연동 실패: ${e.message}")
+            println("[YT_DEBUG] Cobalt API ($apiUrl) 연동 중 치명적 예외 발생: ${e.message}")
+            e.printStackTrace()
             null
         }
     }
