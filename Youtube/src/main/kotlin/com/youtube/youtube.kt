@@ -2037,4 +2037,12 @@ class YoutubeProvider(
         val regex = Regex("""(?:v=|\/videos\/|embed\/|youtu\.be\/|shorts\/)([A-Za-z0-9_-]{11})""")
         return regex.find(this)?.groupValues?.getOrNull(1)
     }
+
+    private fun String.urlDecode(): String {
+        return try {
+            java.net.URLDecoder.decode(this, "UTF-8")
+        } catch (e: Exception) {
+            this
+        }
+    }
 }
