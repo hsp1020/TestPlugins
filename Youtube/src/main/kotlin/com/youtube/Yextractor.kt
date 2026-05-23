@@ -50,16 +50,13 @@ open class YoutubeExtractor : ExtractorApi() {
         // 폴백용 기본 무료 API 서버 주소 (모든 탐색이 완전히 막혔을 때의 예비 안전 수단)
         private const val DEFAULT_FALLBACK_API_URL = "https://cobalt.meowing.de"
 
-        // 동적으로 탐색된 전체 작동 후보 리스트 캐시
+        // 동적으로 탐색된 전체 작동 후보 리스트 임시 캐시
         @Volatile
         private var cachedInstancesList: List<String>? = null
 
         // 실시간으로 선별되어 현재 작동 성공한 고속 화이트리스트 주소 메모리 캐시
         @Volatile
         private var cachedAutoInstance: String? = null
-
-        // 이번 앱 구동 세션 동안 오류(인증 실패 등)가 감지된 비정상 인스턴스 실시간 블랙리스트
-        private val sessionBlacklist = ConcurrentHashMap.newKeySet<String>()
 
         init {
             YoutubeStreamExtractor.setFetchIosClient(true)
@@ -88,8 +85,14 @@ open class YoutubeExtractor : ExtractorApi() {
         val language: String
     )
 
+    // 소스 코드 가독성 및 무결성을 위해 통신 결과를 담는 독립 데이터 모델 정의
+    data class CobaltResult(
+        val url: String?,
+        val isServerBroken: Boolean
+    )
+
     // =================================================================
-    // [공식 명세 적용] cobalt.directory/api/tests 를 파싱하여 유튜브 status=true 인 전체 인스턴스 확보
+    // cobalt.directory/api/tests 를 파싱하여 유튜브 status=true 인 전체 인스턴스 확보
     // =================================================================
     private suspend fun fetchAllWorkingCobaltInstances(): List<String> {
         val cached = cachedInstancesList
@@ -114,7 +117,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     val tests = instance["tests"] as? Map<*, *> ?: continue
                     val youtube = tests["youtube"] as? Map<*, *> ?: continue
                     
-                    // tests.youtube.status 가 오직 true 인 완전 개방형 활성 서버만 리스트화 (인증 필요 도메인 자동 필터링)
+                    // tests.youtube.status 가 오직 true 인 완전 개방형 활성 서버만 리스트화
                     val youtubeStatus = youtube["status"] as? Boolean ?: false
                     if (youtubeStatus) {
                         val apiHost = instance["api"] as? String
@@ -137,7 +140,7 @@ open class YoutubeExtractor : ExtractorApi() {
     }
 
     // =================================================================
-    // [개선 완료] 화이트리스트 주소 다이렉트 고속 호출 및 실패 시 동적 힐링 재탐색
+    // [설계 교정] 화이트리스트 주소 항시 직접 호출 및 오작동 시에만 순회하여 새 화이트리스트 등록
     // =================================================================
     private suspend fun getCobaltMergedLink(videoUrl: String, quality: String): String? {
         val appPrefs = com.lagradost.cloudstream3.AcraApplication.context?.let {
@@ -150,62 +153,85 @@ open class YoutubeExtractor : ExtractorApi() {
         val isAutoMode = cobaltInstanceSetting.equals("auto", ignoreCase = true)
 
         if (isAutoMode) {
-            // 1. 메모리 캐시가 비어 있으면 스마트폰 기기에 영구 저장된 검증 완료 화이트리스트 복원
+            // 1. 메모리 캐시 복구
             if (cachedAutoInstance == null) {
                 cachedAutoInstance = appPrefs?.getString("yt_cobalt_whitelist_server", null)
             }
 
-            // 2. 검증된 화이트리스트 서버가 있고 블랙리스트가 아니라면 "cobalt.directory API 연동을 스킵"하고 다이렉트 고속 호출 (대기시간 0초)
+            // 이번 동영상 요청 도중 실시간으로 실패한 인스턴스를 일시 기억하여 중복 시도를 방지할 로컬 변수
+            var failedInstance: String? = null
+
+            // 2. 검증된 화이트리스트 서버 다이렉트 찌르기
             cachedAutoInstance?.let { whitelistInstance ->
-                if (!sessionBlacklist.contains(whitelistInstance)) {
-                    println("[YT_DEBUG] [Whitelist] 검증된 화이트리스트 주소로 고속 다이렉트 호출합니다: $whitelistInstance")
-                    val directResult = executeCobaltRequest(videoUrl, quality, whitelistInstance, apiKey)
-                    if (!directResult.isNullOrBlank()) {
-                        return directResult
-                    }
+                println("[YT_DEBUG] [Whitelist] 검증된 화이트리스트 주소 다이렉트 호출: $whitelistInstance")
+                val result = executeCobaltRequest(videoUrl, quality, whitelistInstance, apiKey)
+                if (!result.url.isNullOrBlank()) {
+                    return result.url
+                }
+                
+                // 만약 동영상 제한이 아니라 서버 자체가 깨진 것이라면 화이트리스트 파기 및 재탐색 가동
+                if (result.isServerBroken) {
+                    println("[YT_DEBUG] [Whitelist] 화이트리스트 서버 오작동 감지. 폭파 후 재탐색을 시작합니다.")
+                    failedInstance = whitelistInstance
+                    cachedAutoInstance = null
+                    appPrefs?.edit()?.remove("yt_cobalt_whitelist_server")?.apply()
+                } else {
+                    // 비디오 자체 지역 차단인 경우 더 이상의 무의미한 탐색을 하지 않고 즉시 null 반환 (속도 확보)
+                    println("[YT_DEBUG] [Whitelist] 비디오 자체 지역 차단입니다. 탐색을 조기 종료합니다.")
+                    return null
                 }
             }
 
-            // 3. 화이트리스트 서버가 없거나 차단되어 에러가 난 경우, 실시간 동적 힐링 탐색 발동
-            println("[YT_DEBUG] [Self-Healing] 화이트리스트가 없거나 만료되었습니다. 작동 리스트 탐색을 시작합니다.")
+            // 3. 화이트리스트 서버가 없거나 실패한 경우에만 동적 재탐색 시작
+            println("[YT_DEBUG] [Self-Healing] api/tests 목록 탐색을 시작합니다.")
             val candidates = fetchAllWorkingCobaltInstances()
-            val activeCandidates = candidates.filter { !sessionBlacklist.contains(it) }
             
-            println("[YT_DEBUG] [Self-Healing] 현재 가용한 우회 후보 리스트 (${activeCandidates.size}개): $activeCandidates")
+            // 직전에 실패한 주소는 당연히 제외
+            val activeCandidates = if (failedInstance != null) {
+                candidates.filter { it != failedInstance }
+            } else {
+                candidates
+            }
+            
+            println("[YT_DEBUG] [Self-Healing] 현재 가용한 익명 고화질 후보 리스트 (${activeCandidates.size}개): $activeCandidates")
 
-            // 작동 가능한 모든 인스턴스 전체를 뚫릴 때까지 순차 순회
             for (currentInstance in activeCandidates) {
+                println("[YT_DEBUG] [Self-Healing] 후보 서버 호출 시도: $currentInstance")
                 val result = executeCobaltRequest(videoUrl, quality, currentInstance, apiKey)
-                if (!result.isNullOrBlank()) {
-                    // 성공 즉시 해당 서버를 기기 저장소 및 메모리에 "신규 화이트리스트"로 지정하여 영구 캐싱
-                    println("[YT_DEBUG] [Self-Healing] 작동하는 최적의 서버 검증 완료. 신규 화이트리스트 등록: $currentInstance")
+                if (!result.url.isNullOrBlank()) {
+                    // 성공 즉시 신규 화이트리스트 서버로 영구 등록
+                    println("[YT_DEBUG] [Self-Healing] 신규 작동 서버 검증 완료 및 화이트리스트 등록: $currentInstance")
                     cachedAutoInstance = currentInstance
                     appPrefs?.edit()?.putString("yt_cobalt_whitelist_server", currentInstance)?.apply()
-                    return result
+                    return result.url
+                }
+                
+                // 만약 서버가 깨진 게 아니고 단순 비디오 자체 제한 에러라면, 다른 서버를 찔러도 똑같이 실패하므로 루프를 조기 종료
+                if (!result.isServerBroken) {
+                    println("[YT_DEBUG] [Self-Healing] 비디오 자체 지역 차단입니다. 후보 순회를 조기 종료합니다.")
+                    return null
                 }
             }
 
-            // 최후의 보루: 동적 탐색 후보가 모두 오류인 경우 예비 폴백 서버 최종 호출
-            if (!sessionBlacklist.contains(DEFAULT_FALLBACK_API_URL)) {
+            // 최후의 보루: 폴백 시도
+            if (failedInstance != DEFAULT_FALLBACK_API_URL) {
                 val fallbackResult = executeCobaltRequest(videoUrl, quality, DEFAULT_FALLBACK_API_URL, apiKey)
-                if (!fallbackResult.isNullOrBlank()) {
-                    return fallbackResult
+                if (!fallbackResult.url.isNullOrBlank()) {
+                    return fallbackResult.url
                 }
             }
         } else {
             // 수동 지정 모드인 경우 1회만 정적 호출 실행
-            return executeCobaltRequest(videoUrl, quality, cobaltInstanceSetting, apiKey)
+            val result = executeCobaltRequest(videoUrl, quality, cobaltInstanceSetting, apiKey)
+            return result.url
         }
         return null
     }
 
     // =================================================================
-    // 개별 인스턴스 요청 처리 및 에러 감지 시 화이트리스트 폭파 및 블랙리스트 동적 등록
+    // 개별 인스턴스 통신 처리 및 에러 본문 분석 (서버 결함 vs 비디오 결함 분리)
     // =================================================================
-    private suspend fun executeCobaltRequest(videoUrl: String, quality: String, instanceUrl: String, apiKey: String?): String? {
-        val appPrefs = com.lagradost.cloudstream3.AcraApplication.context?.let {
-            androidx.preference.PreferenceManager.getDefaultSharedPreferences(it)
-        }
+    private suspend fun executeCobaltRequest(videoUrl: String, quality: String, instanceUrl: String, apiKey: String?): CobaltResult {
         val apiUrl = if (instanceUrl.endsWith("/")) instanceUrl else "$instanceUrl/"
         return try {
             val jsonString = "{\"url\":\"$videoUrl\",\"videoQuality\":\"$quality\",\"filenameStyle\":\"pretty\"}"
@@ -229,7 +255,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
                 .build()
 
-            // 2.5초 이내에 무응답이거나 터진 서버는 칼같이 패스하도록 OkHttpClient 빌더 커스텀
+            // 2.5초 타임아웃 세팅
             val localOkHttpClient = OkHttpClient.Builder()
                 .connectTimeout(2500, TimeUnit.MILLISECONDS)
                 .readTimeout(2500, TimeUnit.MILLISECONDS)
@@ -244,50 +270,34 @@ open class YoutubeExtractor : ExtractorApi() {
                         val errBody = response.body?.string() ?: ""
                         println("[YT_DEBUG] Cobalt API 호출 실패. 에러 코드: ${response.code}, 내용: $errBody")
                         
-                        // 지역 제한(video.unavailable) 같은 동영상 자체 에러인 경우 서버를 블랙리스트에 등록하지 않음
+                        // 지역 제한(video.unavailable) 같은 동영상 자체 에러인 경우 서버는 무죄(isServerBroken = false)
                         val isVideoSpecific = errBody.contains("video.unavailable") || errBody.contains("content")
-                        if (!isVideoSpecific) {
-                            sessionBlacklist.add(instanceUrl)
-                            if (instanceUrl == cachedAutoInstance) {
-                                cachedAutoInstance = null
-                                appPrefs?.edit()?.remove("yt_cobalt_whitelist_server")?.apply()
-                            }
-                        }
-                        null
+                        return@use "ERROR:${if (isVideoSpecific) "VIDEO" else "SERVER"}"
                     }
                 }
             }
 
-            responseText?.takeIf { it.isNotBlank() }?.let { text ->
-                val json = parseJson<Map<String, Any>>(text)
+            if (responseText == "ERROR:VIDEO") {
+                CobaltResult(null, isServerBroken = false)
+            } else if (responseText == "ERROR:SERVER" || responseText.isNullOrBlank()) {
+                CobaltResult(null, isServerBroken = true)
+            } else {
+                val json = parseJson<Map<String, Any>>(responseText)
                 val status = json["status"] as? String
                 
                 if (status == "tunnel" || status == "redirect" || status == "stream") {
-                    json["url"] as? String
+                    val streamUrl = json["url"] as? String
+                    CobaltResult(streamUrl, isServerBroken = false)
                 } else {
-                    println("[YT_DEBUG] Cobalt API 처리 상태 비정상: $status. 본문: $text")
-                    
-                    // 지역 제한(video.unavailable) 같은 동영상 자체 에러인 경우 서버를 블랙리스트에 등록하지 않음
-                    val isVideoSpecific = text.contains("video.unavailable") || text.contains("content")
-                    if (!isVideoSpecific) {
-                        sessionBlacklist.add(instanceUrl)
-                        if (instanceUrl == cachedAutoInstance) {
-                            cachedAutoInstance = null
-                            appPrefs?.edit()?.remove("yt_cobalt_whitelist_server")?.apply()
-                        }
-                    }
-                    null
+                    println("[YT_DEBUG] Cobalt API 처리 상태 비정상: $status. 본문: $responseText")
+                    val isVideoSpecific = responseText.contains("video.unavailable") || responseText.contains("content")
+                    CobaltResult(null, isServerBroken = !isVideoSpecific)
                 }
             }
         } catch (e: Exception) {
             println("[YT_DEBUG] Cobalt API ($apiUrl) 연동 중 통신 장해/예외 발생: ${e.message}")
-            // 타임아웃, 커넥션 실패 등 예외 발생 시 기기 화이트리스트 영구 파기 및 세션 블랙리스트 등록
-            sessionBlacklist.add(instanceUrl)
-            if (instanceUrl == cachedAutoInstance) {
-                cachedAutoInstance = null
-                appPrefs?.edit()?.remove("yt_cobalt_whitelist_server")?.apply()
-            }
-            null
+            // 타임아웃, 커넥션 에러 등 예외는 서버 문제(isServerBroken = true)로 취급
+            CobaltResult(null, isServerBroken = true)
         }
     }
 
@@ -588,7 +598,7 @@ open class YoutubeExtractor : ExtractorApi() {
             val aCodecs = if (aMime.contains("webm")) "opus" else "mp4a.40.2"
 
             val aSegmentBase = if (audio.initRange != null && audio.indexRange != null) {
-                """<SegmentBase indexRange="${audio.indexRange}"><Initialization range="${audio.initRange}" /></SegmentBase>"""
+                """<SegmentBase indexRange="${audio.initRange}"><Initialization range="${audio.initRange}" /></SegmentBase>"""
             } else ""
 
             sb.append("""
