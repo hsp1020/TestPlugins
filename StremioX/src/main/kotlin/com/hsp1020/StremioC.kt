@@ -862,15 +862,20 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
 
         suspend fun search(query: String, provider: StremioC): List<SearchResponse> {
-            val allMetas = coroutineScope {
+            val allMetasWithType = coroutineScope {
                 types.map { type ->
                     async(Dispatchers.IO) {
                         val path = "/catalog/${type}/${id}/search=${query.urlEncode()}.json"
-                        fetchMetas(provider, path)
+                        // 각 메타데이터에 어떤 타입(type)에서 가져왔는지 정보를 바인딩하여 쌍(Pair)으로 반환
+                        fetchMetas(provider, path).map { it to type }
                     }
                 }.awaitAll().flatten()
             }
-            return allMetas.distinctBy { it.id }.map { it.toSearchResponse(provider) }
+            
+            // ID 단위로 중복을 제거한 뒤, 변환할 때 카탈로그명(name)과 타입(type)을 함께 전달합니다.
+            return allMetasWithType.distinctBy { it.first.id }.map { (meta, type) ->
+                meta.toSearchResponse(provider, catalogName = name ?: id, typeName = type)
+            }
         }
 
         suspend fun toHomePageList(provider: StremioC, skip: Int): Pair<HomePageList, Int> {
@@ -930,14 +935,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val targetType = this.type ?: "movie"
             val metaUrl = "${provider.mainUrl.substringBefore("?")}/meta/$targetType/${this.id}.json"
 
-            // 제목(name)이 비어있으면 [첫글자대문자 타입] ID 형식으로 대체 이름을 생성합니다.
-            val fallbackName = if (!name.isNullOrBlank()) {
-                name
-            } else {
-                val capitalizedType = targetType.replaceFirstChar { it.uppercase() }
-                "[$capitalizedType] $id"
-            }
-
+            // name이 null인 경우, 고유 id(예: ttXXXX)를 보여주고, id도 없으면 "Unknown"을 사용
+            val fallbackName = name ?: id.takeIf { it.isNotBlank() } ?: "Unknown"
             return provider.newMovieSearchResponse(fallbackName, metaUrl, TvType.Others) { 
                 posterUrl = poster 
             }
