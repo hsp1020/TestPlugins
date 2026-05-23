@@ -1,5 +1,6 @@
 package com.youtube
 
+import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.newSubtitleFile
@@ -23,7 +24,7 @@ import java.net.URLDecoder
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.concurrent.thread
- 
+
 open class YoutubeExtractor : ExtractorApi() {
     override val mainUrl = "https://www.youtube.com"
     override val requiresReferer = false
@@ -130,7 +131,7 @@ open class YoutubeExtractor : ExtractorApi() {
             // Cobalt API 기반 서버 사이드 병합 고화질 링크 추출 시도 (melon.clxxped.lol)
             // =================================================================
             println("[YT_DEBUG] melon.clxxped.lol 서버를 통해 병합 링크 생성을 시도합니다.")
-            val qualitiesToRequest = listOf("2160", "1080", "720")
+            val qualitiesToRequest = listOf("1080", "720")
             for (q in qualitiesToRequest) {
                 val mergedUrl = getCobaltMergedLink(youtubeWatchUrl, q)
                 if (!mergedUrl.isNullOrBlank()) {
