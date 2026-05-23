@@ -883,83 +883,101 @@ class YoutubeProvider(
 
                     val initialData = extractYtInitialData(html)
                     if (initialData != null) {
-                        if (requestData == "Home") {
-                            val chipBar = safeGet(initialData, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0, "tabRenderer", "content", "richGridRenderer", "header", "feedFilterChipBarRenderer", "contents") as? List<*>
-                            println("[YT_DEBUG] Home page tabs chipBar found: ${chipBar != null}")
-                            if (chipBar != null) {
-                                val jsonArray = org.json.JSONArray()
-                                for (chipItem in chipBar) {
-                                    val chipMap = (chipItem as? Map<*, *>)?.get("chipCloudChipRenderer") as? Map<*, *> ?: continue
-                                    val text = getText(chipMap["text"])
-                                    val token = safeGet(chipMap, "navigationEndpoint", "continuationCommand", "token") as? String
-                                    if (text.isNotBlank() && !token.isNullOrBlank()) {
-                                        val obj = org.json.JSONObject()
-                                        obj.put("name", text)
-                                        obj.put("token", token)
-                                        jsonArray.put(obj)
+                        // [하위 탭 정밀 대응 설계] 
+                        // GET 결과로 내려온 탭 배열 중 주소에 정의된 하위 탭 키워드(예: sportstab)가 매칭되는 대상 탐색
+                        val tabs = safeGet(initialData, "contents", "twoColumnBrowseResultsRenderer", "tabs") as? List<*>
+                        var targetTab: Map<*, *>? = null
+                        if (tabs != null) {
+                            for (tab in tabs) {
+                                val tabRenderer = (tab as? Map<*, *>)?.get("tabRenderer") as? Map<*, *> ?: continue
+                                val tabUrl = safeGet(tabRenderer, "endpoint", "commandMetadata", "webCommandMetadata", "url") as? String ?: ""
+                                if (tabUrl.isNotBlank()) {
+                                    val lastSegment = tabUrl.substringAfterLast("/").substringBefore("?")
+                                    if (lastSegment.isNotBlank() && requestData.contains(lastSegment)) {
+                                        targetTab = tabRenderer
+                                        break
                                     }
-                                }
-                                if (jsonArray.length() > 0) {
-                                    appPrefs?.edit()?.putString("yt_cached_chips", jsonArray.toString())?.apply()
                                 }
                             }
                         }
-                        processRecursive(initialData, results, seenIds, playlistMode = false)
-                        nextContinuation = findTokenRecursive(initialData)
-                        println("[YT_DEBUG] Next continuation from Home parsed: $nextContinuation")
+
+                        var skipInitialDataProcess = false
+                        // 타겟 탭이 존재하나 현재 HTML 상에서 비활성화된 탭인 경우, 해당 탭 전용 POST 요청 전개
+                        if (targetTab != null && targetTab["selected"] != true) {
+                            val browseId = safeGet(targetTab, "endpoint", "browseEndpoint", "browseId") as? String
+                            val params = safeGet(targetTab, "endpoint", "browseEndpoint", "params") as? String
+                            println("[YT_DEBUG] Custom sub-tab detected: $browseId, params: $params. Fetching tab POST request...")
+                            if (!browseId.isNullOrBlank() && !savedApiKey.isNullOrBlank()) {
+                                val apiUrl = "$mainUrl/youtubei/v1/browse?key=$savedApiKey"
+                                val payload = mapOf(
+                                    "context" to mapOf(
+                                        "client" to mapOf(
+                                            "clientName" to "WEB",
+                                            "clientVersion" to (savedClientVersion ?: "2.20240725.01.00"),
+                                            "platform" to "DESKTOP",
+                                            "hl" to lang
+                                        )
+                                    ),
+                                    "browseId" to browseId,
+                                    "params" to params
+                                )
+                                val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
+                                val postResponse = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                                if (postResponse != null) {
+                                    println("[YT_DEBUG] Custom sub-tab POST response success. Parsing...")
+                                    processRecursive(postResponse, results, seenIds, playlistMode = false)
+                                    nextContinuation = findTokenRecursive(postResponse)
+                                    println("[YT_DEBUG] Next continuation token from custom tab POST: $nextContinuation")
+                                    skipInitialDataProcess = true
+                                }
+                            }
+                        }
+
+                        // 하위 탭 Self-Redirect 작업을 거치지 않은 경우에만 본문 HTML의 데이터를 기본 수집
+                        if (!skipInitialDataProcess) {
+                            if (requestData == "Home") {
+                                val chipBar = safeGet(initialData, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0, "tabRenderer", "content", "richGridRenderer", "header", "feedFilterChipBarRenderer", "contents") as? List<*>
+                                println("[YT_DEBUG] Home page tabs chipBar found: ${chipBar != null}")
+                                if (chipBar != null) {
+                                    val jsonArray = org.json.JSONArray()
+                                    for (chipItem in chipBar) {
+                                        val chipMap = (chipItem as? Map<*, *>)?.get("chipCloudChipRenderer") as? Map<*, *> ?: continue
+                                        val text = getText(chipMap["text"])
+                                        val token = safeGet(chipMap, "navigationEndpoint", "continuationCommand", "token") as? String
+                                        if (text.isNotBlank() && !token.isNullOrBlank()) {
+                                            val obj = org.json.JSONObject()
+                                            obj.put("name", text)
+                                            obj.put("token", token)
+                                            jsonArray.put(obj)
+                                        }
+                                    }
+                                    if (jsonArray.length() > 0) {
+                                        appPrefs?.edit()?.putString("yt_cached_chips", jsonArray.toString())?.apply()
+                                    }
+                                }
+                            }
+                            processRecursive(initialData, results, seenIds, playlistMode = false)
+                            nextContinuation = findTokenRecursive(initialData)
+                            println("[YT_DEBUG] Next continuation from Home parsed: $nextContinuation")
+                        }
                     } else {
                         println("[YT_DEBUG] InitialData extraction was null.")
                     }
                 }
-            } else {
-                var tokenToUse = getSavedContinuationToken(requestData)
-                
-                // [자가치유 메커니즘] 세션이나 토큰 연결 고리가 유실된 경우 보정된 토큰으로 복원 시도
-                if (tokenToUse.isNullOrBlank()) {
-                    println("[YT_DEBUG] Token to use is null/blank on page $page for $requestData. Fetching fallback continuation...")
-                    val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
-                    val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", "2.20240725.01.00") ?: "2.20240725.01.00"
+            }
+        } else {
+            var tokenToUse = getSavedContinuationToken(requestData)
+            
+            // [자가치유 메커니즘] 세션이나 토큰 연결 고리가 유실된 경우 보정된 토큰으로 복원 시도
+            if (tokenToUse.isNullOrBlank()) {
+                println("[YT_DEBUG] Token to use is null/blank on page $page for $requestData. Fetching fallback continuation...")
+                val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
+                val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", "2.20240725.01.00") ?: "2.20240725.01.00"
 
-                    if (isChip) {
-                        val rawToken = requestData.removePrefix("chip_")
-                        val apiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
-                        // 맞춤형 카테고리의 스크롤 안정성을 높이기 위해 payload context에서 visitorData 명시적 누락
-                        val payload = mapOf(
-                            "context" to mapOf(
-                                "client" to mapOf(
-                                    "clientName" to "WEB", 
-                                    "clientVersion" to cVersion, 
-                                    "hl" to lang,
-                                    "platform" to "DESKTOP"
-                                )
-                            ),
-                            "continuation" to rawToken
-                        )
-                        val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
-                        val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
-                        if (response != null) {
-                            tokenToUse = findTokenRecursive(response)
-                            println("[YT_DEBUG] Fallback: Extracted next token from Chip page 1: $tokenToUse")
-                            saveContinuationToken(requestData, tokenToUse)
-                        }
-                    } else {
-                        val urlToGet = if(requestData == "Home") mainUrl else requestData
-                        val html = app.get(urlToGet, interceptor = ytInterceptor).text
-                        val initialData = extractYtInitialData(html)
-                        if (initialData != null) {
-                            tokenToUse = findTokenRecursive(initialData)
-                            println("[YT_DEBUG] Fallback: Extracted next token from Home/Custom page 1 HTML: $tokenToUse")
-                            saveContinuationToken(requestData, tokenToUse)
-                        }
-                    }
-                }
-
-                println("[YT_DEBUG] Loading page $page using token: $tokenToUse")
-                if (!tokenToUse.isNullOrBlank()) {
-                    val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
-                    val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", "2.20240725.01.00") ?: "2.20240725.01.00"
-                    val apiUrl = if (requestData.contains("/results")) "$mainUrl/youtubei/v1/search?key=$apiKey" else "$mainUrl/youtubei/v1/browse?key=$apiKey"
-                    // 개인화 카테고리의 Continuation 토큰 교차 검증 오류를 우회하기 위해 visitorData 필드를 생략한 페이로드 송신
+                if (isChip) {
+                    val rawToken = requestData.removePrefix("chip_")
+                    val apiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
+                    // 맞춤형 카테고리의 스크롤 안정성을 높이기 위해 payload context에서 visitorData 명시적 누락
                     val payload = mapOf(
                         "context" to mapOf(
                             "client" to mapOf(
@@ -969,29 +987,65 @@ class YoutubeProvider(
                                 "platform" to "DESKTOP"
                             )
                         ),
-                        "continuation" to tokenToUse
+                        "continuation" to rawToken
                     )
-                    println("[YT_DEBUG] POST Page Continuation URL: $apiUrl")
-                    println("[YT_DEBUG] POST Page Continuation payload: $payload")
                     val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
                     val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                     if (response != null) {
-                        println("[YT_DEBUG] Page Continuation response success. Keys: ${response.keys}")
-                        val actions = response["onResponseReceivedActions"] 
-                            ?: response["onResponseReceivedEndpoints"]
-                            ?: response["onResponseReceivedCommands"] 
-                            ?: response["continuationContents"] 
-                            ?: response
-                        processRecursive(actions, results, seenIds, playlistMode = false)
-                        nextContinuation = findTokenRecursive(response)
-                        println("[YT_DEBUG] Page Continuation next token: $nextContinuation")
-                    } else {
-                        println("[YT_DEBUG] Page Continuation response returned null.")
+                        tokenToUse = findTokenRecursive(response)
+                        println("[YT_DEBUG] Fallback: Extracted next token from Chip page 1: $tokenToUse")
+                        saveContinuationToken(requestData, tokenToUse)
                     }
                 } else {
-                    println("[YT_DEBUG] Page Continuation token was null/blank.")
+                    val urlToGet = if(requestData == "Home") mainUrl else requestData
+                    val html = app.get(urlToGet, interceptor = ytInterceptor).text
+                    val initialData = extractYtInitialData(html)
+                    if (initialData != null) {
+                        tokenToUse = findTokenRecursive(initialData)
+                        println("[YT_DEBUG] Fallback: Extracted next token from Home/Custom page 1 HTML: $tokenToUse")
+                        saveContinuationToken(requestData, tokenToUse)
+                    }
                 }
             }
+
+            println("[YT_DEBUG] Loading page $page using token: $tokenToUse")
+            if (!tokenToUse.isNullOrBlank()) {
+                val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
+                val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", "2.20240725.01.00") ?: "2.20240725.01.00"
+                val apiUrl = if (requestData.contains("/results")) "$mainUrl/youtubei/v1/search?key=$apiKey" else "$mainUrl/youtubei/v1/browse?key=$apiKey"
+                // 개인화 카테고리의 Continuation 토큰 교차 검증 오류를 우회하기 위해 visitorData 필드를 생략한 페이로드 송신
+                val payload = mapOf(
+                    "context" to mapOf(
+                        "client" to mapOf(
+                            "clientName" to "WEB", 
+                            "clientVersion" to cVersion, 
+                            "hl" to lang,
+                            "platform" to "DESKTOP"
+                        )
+                    ),
+                    "continuation" to tokenToUse
+                )
+                println("[YT_DEBUG] POST Page Continuation URL: $apiUrl")
+                println("[YT_DEBUG] POST Page Continuation payload: $payload")
+                val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
+                val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                if (response != null) {
+                    println("[YT_DEBUG] Page Continuation response success. Keys: ${response.keys}")
+                    val actions = response["onResponseReceivedActions"] 
+                        ?: response["onResponseReceivedEndpoints"]
+                        ?: response["onResponseReceivedCommands"] 
+                        ?: response["continuationContents"] 
+                        ?: response
+                    processRecursive(actions, results, seenIds, playlistMode = false)
+                    nextContinuation = findTokenRecursive(response)
+                    println("[YT_DEBUG] Page Continuation next token: $nextContinuation")
+                } else {
+                    println("[YT_DEBUG] Page Continuation response returned null.")
+                }
+            } else {
+                println("[YT_DEBUG] Page Continuation token was null/blank.")
+            }
+        }
         } catch (e: Exception) { 
             println("[YT_DEBUG] getMainPage exception: ${e.message}")
             logError(e) 
@@ -1001,7 +1055,6 @@ class YoutubeProvider(
         println("[YT_DEBUG] getMainPage completed. Extracted count: ${results.size}, hasNext: ${!nextContinuation.isNullOrBlank()}")
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
     }
-    
 
     override suspend fun search(query: String): List<SearchResponse> {
         return search(query, 1)?.items ?: emptyList()
