@@ -412,16 +412,17 @@ class YoutubeProvider(
             }
         }
 
+
         val lockup = renderer.getMapKey("lockupViewModel")
         if (lockup != null) {
-            // [추가] 1. 광고 차단을 위한 컨텐츠 타입 검사 코드 추가
+            // 1. 광고 차단을 위한 컨텐츠 타입 검사 추가
             val contentType = lockup.getString("contentType") ?: ""
             if (contentType.contains("AD") || contentType.contains("SPONSORED") || contentType.contains("PROMOTED")) {
                 println("[YT_DEBUG] Skipping ad in lockupViewModel (contentType: $contentType)")
                 return null
             }
 
-            // [변경] 2. 기존의 "LOCKUP_CONTENT_TYPE_PLAYLIST" 조건문을 간결하게 바꾼 형태
+            // 2. 플레이리스트 수집 구역 (지우지 않고 변수 최적화 및 믹스 주소 대응 적용)
             if (contentType == "LOCKUP_CONTENT_TYPE_PLAYLIST") {
                 val playlistId = lockup.getString("contentId")
                 if (!playlistId.isNullOrBlank() && seenIds.add(playlistId)) {
@@ -460,6 +461,7 @@ class YoutubeProvider(
                 }
             }
 
+            // 3. 비디오 수집 구역
             val videoId = lockup.getString("contentId")
                 ?: lockup.getMapKey("content")?.getString("videoId")
                 ?: (lockup.getMapKey("content")?.getMapKey("videoRenderer")?.getString("videoId"))
@@ -469,19 +471,12 @@ class YoutubeProvider(
                     lockup.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")
                         ?.getMapKey("title")
                 )
-                // [변경] 3. 기본값 대체 대신, 빈 제목(광고/기타 노이즈) 발견 시 통째로 패스하도록 조건문 교체
+                // 빈 제목(광고 노이즈) 필터링
                 if (title.isBlank()) {
                     println("[YT_DEBUG] Skipping lockupViewModel $videoId due to empty title (likely an ad or empty placeholder)")
                     return null
                 }
-                var (channel, views) = extractLockupMetadata(lockup)     
-                if (channel.isBlank()) {
-                    val label = lockup.getMapKey("accessibility")?.getMapKey("accessibilityData")
-                        ?.getString("label") ?: ""
-                    val match =
-                        Regex("(?:by|من|ع버|قناة)\\s+(.*?)\\s+(?:\\d|view|مشاهدة)").find(label)
-                    if (match != null) channel = match.groupValues[1].replace("Shorts", "").trim()
-                }
+                var (channel, views) = extractLockupMetadata(lockup)
                 val isShorts = lockup.getMapKey("content")
                     ?.containsKey("shortsLockupViewModel") == true || lockup.toString()
                     .contains("reelWatchEndpoint")
@@ -525,6 +520,7 @@ class YoutubeProvider(
                 }
             }
         }
+
 
         val channelData = renderer.getMapKey("channelRenderer")
         if (channelData != null) {
