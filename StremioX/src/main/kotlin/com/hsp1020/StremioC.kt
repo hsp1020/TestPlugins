@@ -930,8 +930,13 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val targetType = this.type ?: "movie"
             val metaUrl = "${provider.mainUrl.substringBefore("?")}/meta/$targetType/${this.id}.json"
 
-            // name이 null인 경우, 고유 id(예: ttXXXX)를 보여주고, id도 없으면 "Unknown"을 사용
-            val fallbackName = name ?: id.takeIf { it.isNotBlank() } ?: "Unknown"
+            // 제목(name)이 비어있으면 [대문자 타입] ID 형식으로 대체 이름을 생성합니다.
+            val fallbackName = if (!name.isNullOrBlank()) {
+                name
+            } else {
+                "[${targetType.uppercase()}] $id"
+            }
+
             return provider.newMovieSearchResponse(fallbackName, metaUrl, TvType.Others) { 
                 posterUrl = poster 
             }
