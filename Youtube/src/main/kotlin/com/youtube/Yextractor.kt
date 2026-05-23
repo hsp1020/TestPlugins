@@ -1,6 +1,5 @@
 package com.youtube
 
-import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.newSubtitleFile
@@ -28,7 +27,6 @@ import java.net.Socket
 import java.net.URLDecoder
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
 open class YoutubeExtractor : ExtractorApi() {
@@ -47,16 +45,8 @@ open class YoutubeExtractor : ExtractorApi() {
         // 403 에러 방지를 위한 iOS 클라이언트 전용 User-Agent
         private const val IOS_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
 
-        // 폴백용 기본 무료 API 서버 주소 (모든 탐색이 완전히 막혔을 때의 예비 안전 수단)
-        private const val DEFAULT_FALLBACK_API_URL = "https://cobalt.meowing.de"
-
-        // 동적으로 탐색된 전체 작동 후보 리스트 임시 캐시
-        @Volatile
-        private var cachedInstancesList: List<String>? = null
-
-        // 실시간으로 선별되어 현재 작동 성공한 고속 화이트리스트 주소 메모리 캐시
-        @Volatile
-        private var cachedAutoInstance: String? = null
+        // 사용자 고정 사설 yt-dlp API 서버 주소
+        private const val PRIVATE_YTDLP_API_URL = "http://140.245.58.73:8000"
 
         init {
             YoutubeStreamExtractor.setFetchIosClient(true)
@@ -85,219 +75,53 @@ open class YoutubeExtractor : ExtractorApi() {
         val language: String
     )
 
-    // 소스 코드 가독성 및 무결성을 위해 통신 결과를 담는 독립 데이터 모델 정의
-    data class CobaltResult(
-        val url: String?,
-        val isServerBroken: Boolean
-    )
-
     // =================================================================
-    // cobalt.directory/api/tests 를 파싱하여 유튜브 status=true 인 전체 인스턴스 확보
+    // [추가] 지정된 사설 yt-dlp API 서버를 호출하여 고화질 병합 링크를 가져오는 함수
     // =================================================================
-    private suspend fun fetchAllWorkingCobaltInstances(): List<String> {
-        val cached = cachedInstancesList
-        if (!cached.isNullOrEmpty()) return cached
-
-        return try {
-            println("[YT_DEBUG] cobalt.directory/api/tests 실시간 탐색 호출 시작")
-            val responseText = withContext(Dispatchers.IO) {
-                app.get("https://cobalt.directory/api/tests").text
-            }
-            if (responseText.isNotBlank()) {
-                val json = parseJson<Map<String, Any>>(responseText)
-                val dataList = json["data"] as? List<*> ?: return emptyList()
-                
-                val workingList = mutableListOf<String>()
-                for (item in dataList) {
-                    val instance = item as? Map<*, *> ?: continue
-                    
-                    val online = instance["online"] as? Boolean ?: false
-                    if (!online) continue
-                    
-                    val tests = instance["tests"] as? Map<*, *> ?: continue
-                    val youtube = tests["youtube"] as? Map<*, *> ?: continue
-                    
-                    // tests.youtube.status 가 오직 true 인 완전 개방형 활성 서버만 리스트화
-                    val youtubeStatus = youtube["status"] as? Boolean ?: false
-                    if (youtubeStatus) {
-                        val apiHost = instance["api"] as? String
-                        if (!apiHost.isNullOrBlank()) {
-                            val protocol = instance["protocol"] as? String ?: "https"
-                            workingList.add("$protocol://$apiHost")
-                        }
-                    }
-                }
-                println("[YT_DEBUG] cobalt.directory 분석 완료. 작동 후보 리스트 (${workingList.size}개): $workingList")
-                cachedInstancesList = workingList
-                workingList
-            } else {
-                emptyList()
-            }
-        } catch (e: Exception) {
-            println("[YT_DEBUG] cobalt.directory 원천 API 실시간 탐색 중 오류 발생: ${e.message}")
-            emptyList()
-        }
-    }
-
-    // =================================================================
-    // [설계 교정] 화이트리스트 주소 항시 직접 호출 및 오작동 시에만 순회하여 새 화이트리스트 등록
-    // =================================================================
-    private suspend fun getCobaltMergedLink(videoUrl: String, quality: String): String? {
-        val appPrefs = com.lagradost.cloudstream3.AcraApplication.context?.let {
-            androidx.preference.PreferenceManager.getDefaultSharedPreferences(it)
-        }
-        
-        val cobaltInstanceSetting = appPrefs?.getString("youtube_cobalt_api", "auto") ?: "auto"
-        val apiKey = appPrefs?.getString("youtube_cobalt_api_key", null)
-
-        val isAutoMode = cobaltInstanceSetting.equals("auto", ignoreCase = true)
-
-        if (isAutoMode) {
-            // 1. 메모리 캐시 복구
-            if (cachedAutoInstance == null) {
-                cachedAutoInstance = appPrefs?.getString("yt_cobalt_whitelist_server", null)
-            }
-
-            // 이번 동영상 요청 도중 실시간으로 실패한 인스턴스를 일시 기억하여 중복 시도를 방지할 로컬 변수
-            var failedInstance: String? = null
-
-            // 2. 검증된 화이트리스트 서버 다이렉트 찌르기
-            cachedAutoInstance?.let { whitelistInstance ->
-                println("[YT_DEBUG] [Whitelist] 검증된 화이트리스트 주소 다이렉트 호출: $whitelistInstance")
-                val result = executeCobaltRequest(videoUrl, quality, whitelistInstance, apiKey)
-                if (!result.url.isNullOrBlank()) {
-                    return result.url
-                }
-                
-                // 만약 동영상 제한이 아니라 서버 자체가 깨진 것이라면 화이트리스트 파기 및 재탐색 가동
-                if (result.isServerBroken) {
-                    println("[YT_DEBUG] [Whitelist] 화이트리스트 서버 오작동 감지. 폭파 후 재탐색을 시작합니다.")
-                    failedInstance = whitelistInstance
-                    cachedAutoInstance = null
-                    appPrefs?.edit()?.remove("yt_cobalt_whitelist_server")?.apply()
-                } else {
-                    // 비디오 자체 지역 차단인 경우 더 이상의 무의미한 탐색을 하지 않고 즉시 null 반환 (속도 확보)
-                    println("[YT_DEBUG] [Whitelist] 비디오 자체 지역 차단입니다. 탐색을 조기 종료합니다.")
-                    return null
-                }
-            }
-
-            // 3. 화이트리스트 서버가 없거나 실패한 경우에만 동적 재탐색 시작
-            println("[YT_DEBUG] [Self-Healing] api/tests 목록 탐색을 시작합니다.")
-            val candidates = fetchAllWorkingCobaltInstances()
-            
-            // 직전에 실패한 주소는 당연히 제외
-            val activeCandidates = if (failedInstance != null) {
-                candidates.filter { it != failedInstance }
-            } else {
-                candidates
-            }
-            
-            println("[YT_DEBUG] [Self-Healing] 현재 가용한 익명 고화질 후보 리스트 (${activeCandidates.size}개): $activeCandidates")
-
-            for (currentInstance in activeCandidates) {
-                println("[YT_DEBUG] [Self-Healing] 후보 서버 호출 시도: $currentInstance")
-                val result = executeCobaltRequest(videoUrl, quality, currentInstance, apiKey)
-                if (!result.url.isNullOrBlank()) {
-                    // 성공 즉시 신규 화이트리스트 서버로 영구 등록
-                    println("[YT_DEBUG] [Self-Healing] 신규 작동 서버 검증 완료 및 화이트리스트 등록: $currentInstance")
-                    cachedAutoInstance = currentInstance
-                    appPrefs?.edit()?.putString("yt_cobalt_whitelist_server", currentInstance)?.apply()
-                    return result.url
-                }
-                
-                // 만약 서버가 깨진 게 아니고 단순 비디오 자체 제한 에러라면, 다른 서버를 찔러도 똑같이 실패하므로 루프를 조기 종료
-                if (!result.isServerBroken) {
-                    println("[YT_DEBUG] [Self-Healing] 비디오 자체 지역 차단입니다. 후보 순회를 조기 종료합니다.")
-                    return null
-                }
-            }
-
-            // 최후의 보루: 폴백 시도
-            if (failedInstance != DEFAULT_FALLBACK_API_URL) {
-                val fallbackResult = executeCobaltRequest(videoUrl, quality, DEFAULT_FALLBACK_API_URL, apiKey)
-                if (!fallbackResult.url.isNullOrBlank()) {
-                    return fallbackResult.url
-                }
-            }
-        } else {
-            // 수동 지정 모드인 경우 1회만 정적 호출 실행
-            val result = executeCobaltRequest(videoUrl, quality, cobaltInstanceSetting, apiKey)
-            return result.url
-        }
-        return null
-    }
-
-    // =================================================================
-    // 개별 인스턴스 통신 처리 및 에러 본문 분석 (서버 결함 vs 비디오 결함 분리)
-    // =================================================================
-    private suspend fun executeCobaltRequest(videoUrl: String, quality: String, instanceUrl: String, apiKey: String?): CobaltResult {
-        val apiUrl = if (instanceUrl.endsWith("/")) instanceUrl else "$instanceUrl/"
+    private suspend fun getYtDlpMergedLink(videoUrl: String, quality: String): String? {
+        val apiUrl = if (PRIVATE_YTDLP_API_URL.endsWith("/")) PRIVATE_YTDLP_API_URL else "$PRIVATE_YTDLP_API_URL/"
         return try {
             val jsonString = "{\"url\":\"$videoUrl\",\"videoQuality\":\"$quality\",\"filenameStyle\":\"pretty\"}"
             val requestBody = jsonString.toRequestBody(null)
             
-            val headersMap = mutableMapOf(
-                "Content-Type" to "application/json",
-                "Accept" to "application/json",
-                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            )
-
-            if (!apiKey.isNullOrBlank()) {
-                headersMap["Authorization"] = "Bearer $apiKey"
-            }
-
             val request = Request.Builder()
                 .url(apiUrl)
                 .post(requestBody)
-                .apply {
-                    headersMap.forEach { (k, v) -> header(k, v) }
-                }
+                .header("Content-Type", "application/json") // Strict Content-Type 차단 우회
+                .header("Accept", "application/json")
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
                 .build()
 
-            // 2.5초 타임아웃 세팅
+            // 컴파일 충돌 차단을 위해 가벼운 사설 OkHttpClient 단독 가동
             val localOkHttpClient = OkHttpClient.Builder()
-                .connectTimeout(2500, TimeUnit.MILLISECONDS)
-                .readTimeout(2500, TimeUnit.MILLISECONDS)
+                .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS) // 다운로드 및 로컬 빌드를 가미하기 위해 읽기 타임아웃 확보
                 .build()
 
             val responseText = withContext(Dispatchers.IO) {
                 localOkHttpClient.newCall(request).execute().use { response ->
-                    println("[YT_DEBUG] Cobalt API 응답 수신 ($instanceUrl). 코드: ${response.code}")
                     if (response.isSuccessful) {
                         response.body?.string()
                     } else {
-                        val errBody = response.body?.string() ?: ""
-                        println("[YT_DEBUG] Cobalt API 호출 실패. 에러 코드: ${response.code}, 내용: $errBody")
-                        
-                        // 지역 제한(video.unavailable) 같은 동영상 자체 에러인 경우 서버는 무죄(isServerBroken = false)
-                        val isVideoSpecific = errBody.contains("video.unavailable") || errBody.contains("content")
-                        return@use "ERROR:${if (isVideoSpecific) "VIDEO" else "SERVER"}"
+                        println("[YT_DEBUG] Private API Request Failed. Code: ${response.code}")
+                        null
                     }
                 }
             }
 
-            if (responseText == "ERROR:VIDEO") {
-                CobaltResult(null, isServerBroken = false)
-            } else if (responseText == "ERROR:SERVER" || responseText.isNullOrBlank()) {
-                CobaltResult(null, isServerBroken = true)
-            } else {
-                val json = parseJson<Map<String, Any>>(responseText)
+            responseText?.takeIf { it.isNotBlank() }?.let { text ->
+                val json = parseJson<Map<String, Any>>(text)
                 val status = json["status"] as? String
-                
                 if (status == "tunnel" || status == "redirect" || status == "stream") {
-                    val streamUrl = json["url"] as? String
-                    CobaltResult(streamUrl, isServerBroken = false)
+                    json["url"] as? String
                 } else {
-                    println("[YT_DEBUG] Cobalt API 처리 상태 비정상: $status. 본문: $responseText")
-                    val isVideoSpecific = responseText.contains("video.unavailable") || responseText.contains("content")
-                    CobaltResult(null, isServerBroken = !isVideoSpecific)
+                    println("[YT_DEBUG] Private API response status is not tunnel/redirect: $status")
+                    null
                 }
             }
         } catch (e: Exception) {
-            println("[YT_DEBUG] Cobalt API ($apiUrl) 연동 중 통신 장해/예외 발생: ${e.message}")
-            // 타임아웃, 커넥션 에러 등 예외는 서버 문제(isServerBroken = true)로 취급
-            CobaltResult(null, isServerBroken = true)
+            println("[YT_DEBUG] Error connecting to Private yt-dlp API: ${e.message}")
+            null
         }
     }
 
@@ -322,14 +146,14 @@ open class YoutubeExtractor : ExtractorApi() {
             val youtubeWatchUrl = "https://www.youtube.com/watch?v=$videoId"
 
             // =================================================================
-            // Cobalt API 기반 서버 사이드 병합 고화질 링크 추출 시도
+            // [추가] 사설 yt-dlp API 서버를 통해 고화질 원클릭 병합 링크 확보 시도
             // =================================================================
-            println("[YT_DEBUG] Cobalt 서버를 통해 병합 링크 생성을 시도합니다.")
+            println("[YT_DEBUG] 사설 yt-dlp API 서버를 통한 병합 주소 추출 시도")
             val qualitiesToRequest = listOf("1080", "720")
             for (q in qualitiesToRequest) {
-                val mergedUrl = getCobaltMergedLink(youtubeWatchUrl, q)
+                val mergedUrl = getYtDlpMergedLink(youtubeWatchUrl, q)
                 if (!mergedUrl.isNullOrBlank()) {
-                    println("[YT_DEBUG] 서버 병합 링크 획득 성공 -> ${q}p")
+                    println("[YT_DEBUG] 사설 API로부터 병합 링크 획득 성공 -> ${q}p")
                     builtLinks.add(
                         newExtractorLink(
                             "${this.name} (Direct Download)",
@@ -345,7 +169,7 @@ open class YoutubeExtractor : ExtractorApi() {
             }
 
             // =================================================================
-            // 기존 NewPipe Extractor 기반 스트리밍 링크 분석 루틴 구동
+            // [오리지널 복원] 기기 실시간 재생용 오리지널 NewPipe Extractor 분석 구동
             // =================================================================
             try {
                 println("[YT_DEBUG] [getUrl] NewPipe linkHandler에서 link 분석 시작")
@@ -364,6 +188,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
                         val label = buildVideoLabelNumber(vs)
                         val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
+                        
 
                         var mime = vs.format?.mimeType
                         if (mime.isNullOrEmpty()) mime = getMimeTypeFromUrl(streamUrl, false)
@@ -371,12 +196,14 @@ open class YoutubeExtractor : ExtractorApi() {
                         val initR = if (vs.initStart != null && vs.initEnd != null) "${vs.initStart}-${vs.initEnd}" else null
                         val indexR = if (vs.indexStart != null && vs.indexEnd != null) "${vs.indexStart}-${vs.indexEnd}" else null
 
+                        println("[YT_DEBUG] [getUrl] DASH 비디오 스트림 파싱 성공 -> 화질: ${height}p, 포맷: $mime, URL: ${streamUrl.take(60)}...")
                         StreamInfo(streamUrl, mime, height, label, initR, indexR)
                     } catch (e: Exception) { 
                         println("[YT_DEBUG] [getUrl] DASH 비디오 파싱 중 오류 발생: ${e.message}")
                         null 
                     }
                 }.distinctBy { it.height }
+                println("[YT_DEBUG] [getUrl] 최종 수집된 DASH 비디오 스트림 개수: ${videoOnlyList.size}")
 
                 val audioInfoList = (s.audioStreams ?: emptyList()).mapNotNull { asr ->
                     try {
@@ -391,12 +218,14 @@ open class YoutubeExtractor : ExtractorApi() {
                         var rawLang = asr.audioTrackId ?: "Default"
                         if (rawLang.contains(".")) rawLang = rawLang.substringBefore(".")
 
+                        println("[YT_DEBUG] [getUrl] DASH 오디오 스트림 파싱 성공 -> 언어: $rawLang, 전송률: $bitrate, 포맷: $mime, URL: ${aUrl.take(60)}...")
                         AudioInfo(aUrl, mime, bitrate, initR, indexR, rawLang.uppercase())
                     } catch (e: Exception) { 
                         println("[YT_DEBUG] [getUrl] DASH 오디오 파싱 중 오류 발생: ${e.message}")
                         null 
                     }
                 }.distinctBy { it.url }
+                println("[YT_DEBUG] [getUrl] 최종 수집된 DASH 오디오 스트림 개수: ${audioInfoList.size}")
 
                 val audiosByLanguage = audioInfoList.groupBy { it.language }
 
@@ -409,10 +238,11 @@ open class YoutubeExtractor : ExtractorApi() {
 
                 startServerIfNeeded()
 
-                // 플레이어 실시간 재생용 가상 DASH XML 생성
+                println("[YT_DEBUG] [getUrl] DASH 가상 XML 생성 루프를 시작합니다.")
                 for (video in videoOnlyList) {
                     if (audiosByLanguage.isNotEmpty()) {
                         for ((lang, audios) in audiosByLanguage) {
+
                             val bestAudioForLang = if (video.mimeType.contains("webm")) {
                                 audios.sortedWith(compareByDescending<AudioInfo> { it.mimeType.contains("webm") }.thenByDescending { it.bitrate }).firstOrNull()
                             } else {
@@ -428,6 +258,7 @@ open class YoutubeExtractor : ExtractorApi() {
                                     val finalName = "${video.label} ($lang) ${video.label}"
                                     val sourceName = "${this.name} ($lang)"
 
+                                    println("[YT_DEBUG] [getUrl] DASH 가상 링크 빌드 성공 -> 화질: ${video.label}, 언어: $lang, 가상 URL: $localLink")
                                     builtLinks.add(
                                         newExtractorLink(
                                             sourceName,
@@ -437,6 +268,7 @@ open class YoutubeExtractor : ExtractorApi() {
                                         ) {
                                             this.referer = mainUrl
                                             this.quality = video.height
+                                            // ✅ 1분 튕김 방지: iOS User-Agent 및 Origin 헤더 강제 주입
                                             this.headers = mapOf(
                                                 "User-Agent" to IOS_USER_AGENT,
                                                 "Origin" to "https://www.youtube.com",
@@ -450,21 +282,24 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
 
-                // 기기 직접 다운로드 호환성이 완벽한 레거시 Muxed 스트림 (소리 포함 360p 등)
                 val muxedList = (s.videoStreams ?: emptyList()).mapNotNull { vs ->
                     try {
                         val mUrl = vs.content ?: return@mapNotNull null
                         if (!seenUrls.add(mUrl)) return@mapNotNull null
                         val label = buildVideoLabelNumber(vs)
                         val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
+                        
+                        println("[YT_DEBUG] [getUrl] Legacy Muxed 비디오 스트림 수집 완료 -> 화질: ${height}p, URL: ${mUrl.take(60)}...")
                         Triple(mUrl, label, height)
                     } catch (e: Exception) { null }
                 }
                 for ((mUrl, mLabel, mHeight) in muxedList) {
+                    println("[YT_DEBUG] [getUrl] Legacy Muxed 링크 등록 -> 화질: $mHeight, 이름: $mLabel (Legacy)")
                     builtLinks.add(
                         newExtractorLink(this.name, "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
                             this.referer = mainUrl
                             this.quality = mHeight
+                            // ✅ 1분 튕김 방지: iOS User-Agent 및 Origin 헤더 강제 주입
                             this.headers = mapOf(
                                 "User-Agent" to IOS_USER_AGENT,
                                 "Origin" to "https://www.youtube.com",
@@ -474,21 +309,28 @@ open class YoutubeExtractor : ExtractorApi() {
                     )
                 }
 
+                ytVideos[videoId] = builtLinks.toList()
+                println("[YT_DEBUG] [getUrl] 전체 링크 정렬 및 저장 완료. 총 수집 링크 개수: ${builtLinks.size}")
+
             } catch (e: Exception) { 
-                println("[YT_DEBUG] [getUrl] NewPipe Extractor 로직 수행 중 오류 감지: ${e.message}")
+                println("[YT_DEBUG] [getUrl] NewPipe Extractor 분석 도중 에러가 감지되었습니다: ${e.message}")
                 logError(e) 
             }
-
-            ytVideos[videoId] = builtLinks.toList()
+        } else {
+            println("[YT_DEBUG] [getUrl] 이미 캐시된 링크 리스트가 존재하여 캐시 데이터를 반환합니다.")
         }
 
-        // 수집된 모든 결과 전송
         val finalLinks = ytVideos[videoId] ?: emptyList()
-        finalLinks.forEach { callback(it) }
+        println("[YT_DEBUG] [getUrl] 반환되는 최종 링크 리스트 개수: ${finalLinks.size}")
+        finalLinks.forEachIndexed { index, link ->
+            println("[YT_DEBUG]   -> [링크 #${index + 1}] 이름: '${link.name}', 화질: ${link.quality}p, 타입: ${link.type}, 주소: '${link.url.take(100)}'")
+        }
 
-        // 자막 트랙 연결
+        ytVideos[videoId]?.forEach { callback(it) }
+
         val finalSubtitles = ytVideosSubtitles[videoId] ?: emptyList()
-        finalSubtitles.mapNotNull { ss ->
+        println("[YT_DEBUG] [getUrl] 반환되는 최종 자막 개수: ${finalSubtitles.size}")
+        ytVideosSubtitles[videoId]?.mapNotNull { ss ->
             try {
                 val lang = ss.locale?.language ?: return@mapNotNull null
                 var url = ss.content ?: ss.getUrl() ?: return@mapNotNull null
@@ -499,45 +341,61 @@ open class YoutubeExtractor : ExtractorApi() {
                         url = "$url&fmt=srt"
                     }
                 }
+                println("[YT_DEBUG]   -> [자막 트랙] 언어: $lang, 주소: ${url.take(120)}...")
                 newSubtitleFile(lang, url)
-            } catch (e: Exception) { null }
-        }.forEach { subtitleCallback(it) }        
+            } catch (e: Exception) { 
+                println("[YT_DEBUG] [getUrl] 자막 처리 중 에러: ${e.message}")
+                null 
+            }
+        }?.forEach { subtitleCallback(it) }        
     }
 
     @Synchronized
     private fun startServerIfNeeded() {
-        if (activeServer != null && !activeServer!!.isClosed) return
+        println("[YT_DEBUG] [startServerIfNeeded] 호출됨. activeServer 존재: ${activeServer != null}, 닫힘 상태: ${activeServer?.isClosed}")
+        if (activeServer != null && !activeServer!!.isClosed) {
+            println("[YT_DEBUG] [startServerIfNeeded] 기존 DASH 루프백 서버가 구동 중이므로 리스너 스레드 생성을 스킵합니다. (포트: $serverPort)")
+            return
+        }
         try {
             activeServer = ServerSocket(0)
             serverPort = activeServer!!.localPort
+            println("[YT_DEBUG] [startServerIfNeeded] 가상 포트 $serverPort 에 리스너 바인딩 성공")
             thread {
+                println("[YT_DEBUG] [ServerSocket-Thread] accept() 대기 루프 스레드를 시작합니다.")
                 try {
                     while (activeServer != null && !activeServer!!.isClosed) {
                         val client = activeServer!!.accept()
+                        println("[YT_DEBUG] [ServerSocket-Thread] ExoPlayer로부터 로컬 서버로 미디어 요청 감지됨: ${client.remoteSocketAddress}")
                         thread { handleClient(client) }
                     }
                 } catch (e: Exception) {
-                    // 서버 소켓 리스너 에러 로깅 생략
+                    println("[YT_DEBUG] [ServerSocket-Thread] accept() 대기 동작 중 오류 발생: ${e.message}")
                 }
             }
         } catch (e: Exception) { 
+            println("[YT_DEBUG] [startServerIfNeeded] 서버 소켓 생성 실패 예외: ${e.message}")
             logError(e) 
         }
     }
 
     private fun registerManifestAndGetUrl(xmlContent: String): String? {
+        println("[YT_DEBUG] [registerManifestAndGetUrl] 호출됨. 포트: $serverPort")
         if (serverPort == 0) return null
         val id = UUID.randomUUID().toString()
         manifestMap[id] = xmlContent
+        println("[YT_DEBUG] [registerManifestAndGetUrl] 가상 MPD 매니페스트 맵 등록 성공. UUID: $id, 주소: http://127.0.0.1:$serverPort/$id.mpd")
         return "http://127.0.0.1:$serverPort/$id.mpd"
     }
 
     private fun handleClient(client: Socket) {
+        println("[YT_DEBUG] [handleClient] 요청 연결 처리 시작: ${client.remoteSocketAddress}")
         try {
             client.use { socket ->
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
                 val output = PrintWriter(socket.getOutputStream(), true)
                 val line = reader.readLine()
+                println("[YT_DEBUG] [handleClient] HTTP 요청: $line")
                 if (line != null && line.startsWith("GET")) {
                     val parts = line.split(" ")
                     if (parts.size > 1) {
@@ -545,6 +403,7 @@ open class YoutubeExtractor : ExtractorApi() {
                         if (path.endsWith(".mpd")) path = path.replace(".mpd", "")
                         val content = manifestMap[path]
                         if (content != null) {
+                            println("[YT_DEBUG] [handleClient] 가상 MPD UUID($path)를 발견하여 DASH XML을 반환합니다. (XML 길이: ${content.length})")
                             output.println("HTTP/1.1 200 OK")
                             output.println("Content-Type: application/dash+xml")
                             output.println("Connection: close")
@@ -552,6 +411,7 @@ open class YoutubeExtractor : ExtractorApi() {
                             output.println("")
                             output.println(content)
                         } else {
+                            println("[YT_DEBUG] [handleClient] 에러: 메모리에 매칭되는 가상 MPD가 없습니다. UUID: $path (404 반환)")
                             output.println("HTTP/1.1 404 Not Found")
                             output.println("")
                         }
@@ -559,7 +419,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
             }
         } catch (e: Exception) {
-            // 연결 처리 예외 무시
+            println("[YT_DEBUG] [handleClient] 소켓 데이터 스트림 처리 중 예외: ${e.message}")
         }
     }
 
@@ -598,7 +458,7 @@ open class YoutubeExtractor : ExtractorApi() {
             val aCodecs = if (aMime.contains("webm")) "opus" else "mp4a.40.2"
 
             val aSegmentBase = if (audio.initRange != null && audio.indexRange != null) {
-                """<SegmentBase indexRange="${audio.initRange}"><Initialization range="${audio.initRange}" /></SegmentBase>"""
+                """<SegmentBase indexRange="${audio.indexRange}"><Initialization range="${audio.initRange}" /></SegmentBase>"""
             } else ""
 
             sb.append("""
