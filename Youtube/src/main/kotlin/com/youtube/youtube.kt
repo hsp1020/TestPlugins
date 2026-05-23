@@ -886,7 +886,49 @@ class YoutubeProvider(
                     }
                 }
             } else {
-                val tokenToUse = getSavedContinuationToken(requestData)
+                } else {
+                var tokenToUse = getSavedContinuationToken(requestData)        
+                // [자가치유 메커니즘] 세션이나 토큰 연결 고리가 완전 유실된 경우 복원 시도
+                if (tokenToUse.isNullOrBlank()) {
+                    println("[YT_DEBUG] Token to use is null/blank on page $page for $requestData. Fetching fallback continuation...")
+                    val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
+                    val vData = savedVisitorData ?: appPrefs?.getString("yt_visitor_data", null) ?: ""
+                    val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", "2.20240725.01.00") ?: "2.20240725.01.00"
+
+                    if (isChip) {
+                        val rawToken = requestData.removePrefix("chip_")
+                        val apiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
+                        val payload = mapOf(
+                            "context" to mapOf(
+                                "client" to mapOf(
+                                    "clientName" to "WEB", 
+                                    "clientVersion" to cVersion, 
+                                    "hl" to lang,
+                                    "visitorData" to vData,
+                                    "platform" to "DESKTOP"
+                                )
+                            ),
+                            "continuation" to rawToken
+                        )
+                        val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
+                        val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                        if (response != null) {
+                            tokenToUse = findTokenRecursive(response)
+                            println("[YT_DEBUG] Fallback: Extracted next token from Chip page 1: $tokenToUse")
+                            saveContinuationToken(requestData, tokenToUse)
+                        }
+                    } else {
+                        val urlToGet = if(requestData == "Home") mainUrl else requestData
+                        val html = app.get(urlToGet, interceptor = ytInterceptor).text
+                        val initialData = extractYtInitialData(html)
+                        if (initialData != null) {
+                            tokenToUse = findTokenRecursive(initialData)
+                            println("[YT_DEBUG] Fallback: Extracted next token from Home/Custom page 1 HTML: $tokenToUse")
+                            saveContinuationToken(requestData, tokenToUse)
+                        }
+                    }
+                }
+
                 println("[YT_DEBUG] Loading page $page using token: $tokenToUse")
                 if (!tokenToUse.isNullOrBlank()) {
                     val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
@@ -926,6 +968,7 @@ class YoutubeProvider(
                     println("[YT_DEBUG] Page Continuation token was null/blank.")
                 }
             }
+
         } catch (e: Exception) { 
             println("[YT_DEBUG] getMainPage exception: ${e.message}")
             logError(e) 
@@ -1511,7 +1554,12 @@ class YoutubeProvider(
                     fun findMixTitle(obj: Any?): String? {
                         if (obj is Map<*, *>) {
                             val panel = obj["playlistPanelRenderer"] as? Map<*, *>
-                            if (panel != null) return getText(panel["title"])
+                            if (panel != null) {
+                                val tText = getText(panel["titleText"])
+                                if (tText.isNotBlank()) return tText
+                                val t = getText(panel["title"])
+                                if (t.isNotBlank()) return t
+                            }
                             for (v in obj.values) {
                                 val t = findMixTitle(v)
                                 if (t != null) return t
@@ -1526,6 +1574,16 @@ class YoutubeProvider(
                     }
                     title = findMixTitle(data) ?: "YouTube Mix"
                     println("[YT_DEBUG] Title resolved from findMixTitle: $title")
+                }
+
+                // 앱 메인 화면의 규칙인 "믹스명 (믹스 재생목록)" 포맷과 무조건 동기화되도록 보강
+                if (url.contains("list=RD") || url.contains("list=MM") || url.contains("list=UL")) {
+                    val finalTitle = title ?: "YouTube Mix"
+                    title = if (!finalTitle.contains("믹스 재생목록")) {
+                        "$finalTitle (믹스 재생목록)"
+                    } else {
+                        finalTitle
+                    }
                 }
 
                 val ownerObj = safeGet(header, "ownerText") as? Map<*, *>
@@ -1549,7 +1607,7 @@ class YoutubeProvider(
                 println("[YT_DEBUG] Playlist/Mix loading exception: ${e.message}")
                 logError(e)
             }
-        }
+        }          
 
         val videoId = url.extractYoutubeId() ?: throw ErrorLoadingException("Invalid YouTube URL")
         println("[YT_DEBUG] Loading normal video ID: $videoId")
