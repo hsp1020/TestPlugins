@@ -22,6 +22,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.PrintWriter
@@ -144,197 +145,193 @@ open class YoutubeExtractor : ExtractorApi() {
 
         if (ytVideos[videoId].isNullOrEmpty()) {
             println("[YT_DEBUG] [getUrl] 분석을 진행합니다.")
-            val builtLinks = mutableListOf<ExtractorLink>()
-            val seenUrls = mutableSetOf<String>()
+            
+            // 💡 병렬 실행 환경에서의 데이터 안정성을 위해 Thread-Safe 컬렉션으로 정의합니다.
+            val builtLinks = java.util.Collections.synchronizedList(mutableListOf<ExtractorLink>())
+            val seenUrls = java.util.Collections.synchronizedSet(mutableSetOf<String>())
             val youtubeWatchUrl = "https://www.youtube.com/watch?v=$videoId"
 
-            // =================================================================
-            // [추가] 사설 yt-dlp API 서버를 통해 고화질 원클릭 병합 링크 확보 시도
-            // =================================================================
-            println("[YT_DEBUG] 사설 yt-dlp API 서버를 통한 병합 주소 추출 시도")
-            val qualitiesToRequest = listOf("2160", "1080", "720")
-            
-            // 2160p 해상도가 추가됨에 따라, 전체 타임아웃(Read Timeout) 발생을 막기 위해 코루틴 병렬(Parallel) 추출 적용
-            val mergedLinks = coroutineScope {
-                qualitiesToRequest.map { q ->
-                    async {
-                        val mergedUrl = getYtDlpMergedLink(youtubeWatchUrl, q)
-                        if (!mergedUrl.isNullOrBlank()) {
-                            println("[YT_DEBUG] 사설 API로부터 병합 링크 획득 성공 -> ${q}p")
-                            newExtractorLink(
-                                "${this@YoutubeExtractor.name} (Direct Download)",
-                                "${q}p [Merged - Download]",
-                                mergedUrl,
-                                type = INFER_TYPE
-                            ) {
-                                this.referer = mainUrl
-                                this.quality = q.toIntOrNull() ?: 1080
+            // 💡 coroutineScope를 통해 내부 비동기 launch 작업들이 병렬적으로 수행되도록 설계합니다.
+            coroutineScope {
+                // =================================================================
+                // [작업 A] 사설 yt-dlp API 서버를 통한 고화질 병합 링크 확보 (비동기 병렬 실행)
+                // =================================================================
+                launch(Dispatchers.IO) {
+                    println("[YT_DEBUG] 사설 yt-dlp API 서버를 통한 병합 주소 추출 시도")
+                    val qualitiesToRequest = listOf("2160", "1080", "720")
+                    qualitiesToRequest.map { q ->
+                        async {
+                            val mergedUrl = getYtDlpMergedLink(youtubeWatchUrl, q)
+                            if (!mergedUrl.isNullOrBlank()) {
+                                println("[YT_DEBUG] 사설 API로부터 병합 링크 획득 성공 -> ${q}p")
+                                val link = newExtractorLink(
+                                    "${this@YoutubeExtractor.name} (Direct Download)",
+                                    "${q}p [Merged - Download]",
+                                    mergedUrl,
+                                    type = INFER_TYPE
+                                ) {
+                                    this.referer = mainUrl
+                                    this.quality = q.toIntOrNull() ?: 1080
+                                }
+                                builtLinks.add(link)
+                                callback(link) // 💡 대기 없이 링크가 발견되는 즉시 앱 화면에 우선 전달합니다.
                             }
-                        } else null
-                    }
-                }.awaitAll().filterNotNull()
-            }
-            builtLinks.addAll(mergedLinks)
-
-            // =================================================================
-            // [오리지널 복원] 기기 실시간 재생용 오리지널 NewPipe Extractor 분석 구동
-            // =================================================================
-            try {
-                println("[YT_DEBUG] [getUrl] NewPipe linkHandler에서 link 분석 시작")
-                val link = YoutubeStreamLinkHandlerFactory.getInstance().fromUrl(cleanedUrl)
-                val s = object : YoutubeStreamExtractor(ServiceList.YouTube, link) {}
-                println("[YT_DEBUG] [getUrl] s.fetchPage() 네트워크 호출 시작")
-                s.fetchPage()
-                println("[YT_DEBUG] [getUrl] s.fetchPage() 호출 성공. 제목: '${s.name}', 길이: ${s.length}초")
-
-                val durationSeconds = if (s.length > 0) s.length else 3600L
-
-                val videoOnlyList = (s.videoOnlyStreams ?: emptyList()).mapNotNull { vs ->
-                    try {
-                        val streamUrl = vs.content ?: return@mapNotNull null
-                        if (!seenUrls.add(streamUrl)) return@mapNotNull null
-
-                        val label = buildVideoLabelNumber(vs)
-                        val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
-                        
-
-                        var mime = vs.format?.mimeType
-                        if (mime.isNullOrEmpty()) mime = getMimeTypeFromUrl(streamUrl, false)
-
-                        val initR = if (vs.initStart != null && vs.initEnd != null) "${vs.initStart}-${vs.initEnd}" else null
-                        val indexR = if (vs.indexStart != null && vs.indexEnd != null) "${vs.indexStart}-${vs.indexEnd}" else null
-
-                        println("[YT_DEBUG] [getUrl] DASH 비디오 스트림 파싱 성공 -> 화질: ${height}p, 포맷: $mime, URL: ${streamUrl.take(60)}...")
-                        StreamInfo(streamUrl, mime, height, label, initR, indexR)
-                    } catch (e: Exception) { 
-                        println("[YT_DEBUG] [getUrl] DASH 비디오 파싱 중 오류 발생: ${e.message}")
-                        null 
-                    }
-                }.distinctBy { it.height }
-                println("[YT_DEBUG] [getUrl] 최종 수집된 DASH 비디오 스트림 개수: ${videoOnlyList.size}")
-
-                val audioInfoList = (s.audioStreams ?: emptyList()).mapNotNull { asr ->
-                    try {
-                        val aUrl = asr.content ?: return@mapNotNull null
-                        val bitrate = asr.bitrate ?: 128000
-                        var mime = asr.format?.mimeType
-                        if (mime.isNullOrEmpty()) mime = getMimeTypeFromUrl(aUrl, true)
-
-                        val initR = if (asr.initStart != null && asr.initEnd != null) "${asr.initStart}-${asr.initEnd}" else null
-                        val indexR = if (asr.indexStart != null && asr.indexEnd != null) "${asr.indexStart}-${asr.indexEnd}" else null
-
-                        var rawLang = asr.audioTrackId ?: "Default"
-                        if (rawLang.contains(".")) rawLang = rawLang.substringBefore(".")
-
-                        println("[YT_DEBUG] [getUrl] DASH 오디오 스트림 파싱 성공 -> 언어: $rawLang, 전송률: $bitrate, 포맷: $mime, URL: ${aUrl.take(60)}...")
-                        AudioInfo(aUrl, mime, bitrate, initR, indexR, rawLang.uppercase())
-                    } catch (e: Exception) { 
-                        println("[YT_DEBUG] [getUrl] DASH 오디오 파싱 중 오류 발생: ${e.message}")
-                        null 
-                    }
-                }.distinctBy { it.url }
-                println("[YT_DEBUG] [getUrl] 최종 수집된 DASH 오디오 스트림 개수: ${audioInfoList.size}")
-
-                val audiosByLanguage = audioInfoList.groupBy { it.language }
-
-                try {
-                    ytVideosSubtitles[videoId] = s.subtitlesDefault?.filterNotNull() ?: emptyList()
-                    println("[YT_DEBUG] [getUrl] 자막 트랙 개수: ${ytVideosSubtitles[videoId]?.size ?: 0}")
-                } catch (e: Exception) {
-                    println("[YT_DEBUG] [getUrl] 자막 파싱 중 예외 발생: ${e.message}")
+                        }
+                    }.awaitAll()
                 }
 
-                startServerIfNeeded()
+                // =================================================================
+                // [작업 B] 기기 실시간 재생용 오리지널 NewPipe Extractor 분석 구동 (동시 실행)
+                // =================================================================
+                launch(Dispatchers.IO) {
+                    try {
+                        println("[YT_DEBUG] [getUrl] NewPipe linkHandler에서 link 분석 시작")
+                        val link = YoutubeStreamLinkHandlerFactory.getInstance().fromUrl(cleanedUrl)
+                        val s = object : YoutubeStreamExtractor(ServiceList.YouTube, link) {}
+                        println("[YT_DEBUG] [getUrl] s.fetchPage() 네트워크 호출 시작")
+                        s.fetchPage()
+                        println("[YT_DEBUG] [getUrl] s.fetchPage() 호출 성공. 제목: '${s.name}', 길이: ${s.length}초")
 
-                println("[YT_DEBUG] [getUrl] DASH 가상 XML 생성 루프를 시작합니다.")
-                for (video in videoOnlyList) {
-                    if (audiosByLanguage.isNotEmpty()) {
-                        for ((lang, audios) in audiosByLanguage) {
+                        val durationSeconds = if (s.length > 0) s.length else 3600L
 
-                            val bestAudioForLang = if (video.mimeType.contains("webm")) {
-                                audios.sortedWith(compareByDescending<AudioInfo> { it.mimeType.contains("webm") }.thenByDescending { it.bitrate }).firstOrNull()
-                            } else {
-                                audios.sortedWith(compareByDescending<AudioInfo> { it.mimeType.contains("mp4") }.thenByDescending { it.bitrate }).firstOrNull()
+                        val videoOnlyList = (s.videoOnlyStreams ?: emptyList()).mapNotNull { vs ->
+                            try {
+                                val streamUrl = vs.content ?: return@mapNotNull null
+                                if (!seenUrls.add(streamUrl)) return@mapNotNull null
+
+                                val label = buildVideoLabelNumber(vs)
+                                val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
+
+                                var mime = vs.format?.mimeType
+                                if (mime.isNullOrEmpty()) mime = getMimeTypeFromUrl(streamUrl, false)
+
+                                val initR = if (vs.initStart != null && vs.initEnd != null) "${vs.initStart}-${vs.initEnd}" else null
+                                val indexR = if (vs.indexStart != null && vs.indexEnd != null) "${vs.indexStart}-${vs.indexEnd}" else null
+
+                                println("[YT_DEBUG] [getUrl] DASH 비디오 스트림 파싱 성공 -> 화질: ${height}p, 포맷: $mime, URL: ${streamUrl.take(60)}...")
+                                StreamInfo(streamUrl, mime, height, label, initR, indexR)
+                            } catch (e: Exception) { 
+                                println("[YT_DEBUG] [getUrl] DASH 비디오 파싱 중 오류 발생: ${e.message}")
+                                null 
                             }
+                        }.distinctBy { it.height }
+                        println("[YT_DEBUG] [getUrl] 최종 수집된 DASH 비디오 스트림 개수: ${videoOnlyList.size}")
 
-                            if (bestAudioForLang != null) {
-                                val singleAudioList = listOf(bestAudioForLang)
-                                val dashXml = buildDashManifestXml(video, singleAudioList, durationSeconds)
-                                val localLink = registerManifestAndGetUrl(dashXml)
+                        val audioInfoList = (s.audioStreams ?: emptyList()).mapNotNull { asr ->
+                            try {
+                                val aUrl = asr.content ?: return@mapNotNull null
+                                val bitrate = asr.bitrate ?: 128000
+                                var mime = asr.format?.mimeType
+                                if (mime.isNullOrEmpty()) mime = getMimeTypeFromUrl(aUrl, true)
 
-                                if (localLink != null) {
-                                    val finalName = "${video.label} ($lang) ${video.label}"
-                                    val sourceName = "${this.name} ($lang)"
+                                val initR = if (asr.initStart != null && asr.initEnd != null) "${asr.initStart}-${asr.initEnd}" else null
+                                val indexR = if (asr.indexStart != null && asr.indexEnd != null) "${asr.indexStart}-${asr.indexEnd}" else null
 
-                                    println("[YT_DEBUG] [getUrl] DASH 가상 링크 빌드 성공 -> 화질: ${video.label}, 언어: $lang, 가상 URL: $localLink")
-                                    builtLinks.add(
-                                        newExtractorLink(
-                                            sourceName,
-                                            finalName,
-                                            localLink,
-                                            type = ExtractorLinkType.DASH
-                                        ) {
-                                            this.referer = mainUrl
-                                            this.quality = video.height
-                                            // ✅ 1분 튕김 방지: iOS User-Agent 및 Origin 헤더 강제 주입
-                                            this.headers = mapOf(
-                                                "User-Agent" to IOS_USER_AGENT,
-                                                "Origin" to "https://www.youtube.com",
-                                                "Referer" to "https://www.youtube.com"
-                                            )
+                                var rawLang = asr.audioTrackId ?: "Default"
+                                if (rawLang.contains(".")) rawLang = rawLang.substringBefore(".")
+
+                                println("[YT_DEBUG] [getUrl] DASH 오디오 스트림 파싱 성공 -> 언어: $rawLang, 전송률: $bitrate, 포맷: $mime, URL: ${aUrl.take(60)}...")
+                                AudioInfo(aUrl, mime, bitrate, initR, indexR, rawLang.uppercase())
+                            } catch (e: Exception) { 
+                                println("[YT_DEBUG] [getUrl] DASH 오디오 파싱 중 오류 발생: ${e.message}")
+                                null 
+                            }
+                        }.distinctBy { it.url }
+                        println("[YT_DEBUG] [getUrl] 최종 수집된 DASH 오디오 스트림 개수: ${audioInfoList.size}")
+
+                        val audiosByLanguage = audioInfoList.groupBy { it.language }
+
+                        try {
+                            ytVideosSubtitles[videoId] = s.subtitlesDefault?.filterNotNull() ?: emptyList()
+                            println("[YT_DEBUG] [getUrl] 자막 트랙 개수: ${ytVideosSubtitles[videoId]?.size ?: 0}")
+                        } catch (e: Exception) {
+                            println("[YT_DEBUG] [getUrl] 자막 파싱 중 예외 발생: ${e.message}")
+                        }
+
+                        startServerIfNeeded()
+
+                        println("[YT_DEBUG] [getUrl] DASH 가상 XML 생성 루프를 시작합니다.")
+                        for (video in videoOnlyList) {
+                            if (audiosByLanguage.isNotEmpty()) {
+                                for ((lang, audios) in audiosByLanguage) {
+
+                                    val bestAudioForLang = if (video.mimeType.contains("webm")) {
+                                        audios.sortedWith(compareByDescending<AudioInfo> { it.mimeType.contains("webm") }.thenByDescending { it.bitrate }).firstOrNull()
+                                    } else {
+                                        audios.sortedWith(compareByDescending<AudioInfo> { it.mimeType.contains("mp4") }.thenByDescending { it.bitrate }).firstOrNull()
+                                    }
+
+                                    if (bestAudioForLang != null) {
+                                        val singleAudioList = listOf(bestAudioForLang)
+                                        val dashXml = buildDashManifestXml(video, singleAudioList, durationSeconds)
+                                        val localLink = registerManifestAndGetUrl(dashXml)
+
+                                        if (localLink != null) {
+                                            val finalName = "${video.label} ($lang) ${video.label}"
+                                            val sourceName = "${this.name} ($lang)"
+
+                                            println("[YT_DEBUG] [getUrl] DASH 가상 링크 빌드 성공 -> 화질: ${video.label}, 언어: $lang, 가상 URL: $localLink")
+                                            val link = newExtractorLink(
+                                                sourceName,
+                                                finalName,
+                                                localLink,
+                                                type = ExtractorLinkType.DASH
+                                            ) {
+                                                this.referer = mainUrl
+                                                this.quality = video.height
+                                                this.headers = mapOf(
+                                                    "User-Agent" to IOS_USER_AGENT,
+                                                    "Origin" to "https://www.youtube.com",
+                                                    "Referer" to "https://www.youtube.com"
+                                                )
+                                            }
+                                            builtLinks.add(link)
+                                            callback(link) // 💡 로컬 DASH 스트리밍 링크가 빌드되는 즉시 앱 화면에 반환합니다.
                                         }
-                                    )
+                                    }
                                 }
                             }
                         }
+
+                        val muxedList = (s.videoStreams ?: emptyList()).mapNotNull { vs ->
+                            try {
+                                val mUrl = vs.content ?: return@mapNotNull null
+                                if (!seenUrls.add(mUrl)) return@mapNotNull null
+                                val label = buildVideoLabelNumber(vs)
+                                val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
+
+                                println("[YT_DEBUG] [getUrl] Legacy Muxed 비디오 스트림 수집 완료 -> 화질: ${height}p, URL: ${mUrl.take(60)}...")
+                                Triple(mUrl, label, height)
+                            } catch (e: Exception) { null }
+                        }
+                        for ((mUrl, mLabel, mHeight) in muxedList) {
+                            println("[YT_DEBUG] [getUrl] Legacy Muxed 링크 등록 -> 화질: $mHeight, 이름: $mLabel (Legacy)")
+                            val link = newExtractorLink(this@YoutubeExtractor.name, "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
+                                this.referer = mainUrl
+                                this.quality = mHeight
+                                this.headers = mapOf(
+                                    "User-Agent" to IOS_USER_AGENT,
+                                    "Origin" to "https://www.youtube.com",
+                                    "Referer" to "https://www.youtube.com"
+                                )
+                            }
+                            builtLinks.add(link)
+                            callback(link) // 💡 레거시 Muxed 링크가 구성되는 즉시 앱 화면에 반환합니다.
+                        }
+
+                    } catch (e: Exception) { 
+                        println("[YT_DEBUG] [getUrl] NewPipe Extractor 분석 도중 에러가 감지되었습니다: ${e.message}")
+                        logError(e) 
                     }
                 }
-
-                val muxedList = (s.videoStreams ?: emptyList()).mapNotNull { vs ->
-                    try {
-                        val mUrl = vs.content ?: return@mapNotNull null
-                        if (!seenUrls.add(mUrl)) return@mapNotNull null
-                        val label = buildVideoLabelNumber(vs)
-                        val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
-                        
-                        println("[YT_DEBUG] [getUrl] Legacy Muxed 비디오 스트림 수집 완료 -> 화질: ${height}p, URL: ${mUrl.take(60)}...")
-                        Triple(mUrl, label, height)
-                    } catch (e: Exception) { null }
-                }
-                for ((mUrl, mLabel, mHeight) in muxedList) {
-                    println("[YT_DEBUG] [getUrl] Legacy Muxed 링크 등록 -> 화질: $mHeight, 이름: $mLabel (Legacy)")
-                    builtLinks.add(
-                        newExtractorLink(this.name, "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
-                            this.referer = mainUrl
-                            this.quality = mHeight
-                            // ✅ 1분 튕김 방지: iOS User-Agent 및 Origin 헤더 강제 주입
-                            this.headers = mapOf(
-                                "User-Agent" to IOS_USER_AGENT,
-                                "Origin" to "https://www.youtube.com",
-                                "Referer" to "https://www.youtube.com"
-                            )
-                        }
-                    )
-                }
-
-                ytVideos[videoId] = builtLinks.toList()
-                println("[YT_DEBUG] [getUrl] 전체 링크 정렬 및 저장 완료. 총 수집 링크 개수: ${builtLinks.size}")
-
-            } catch (e: Exception) { 
-                println("[YT_DEBUG] [getUrl] NewPipe Extractor 분석 도중 에러가 감지되었습니다: ${e.message}")
-                logError(e) 
-            }
+            } // 이 스코프 끝 지점에서 두 launch 작업이 완벽하게 완료될 때까지 비동기 동시 대기합니다.
+            
+            ytVideos[videoId] = builtLinks.toList()
+            println("[YT_DEBUG] [getUrl] 전체 링크 병렬 처리 및 캐시 저장 완료. 총 수집 링크 개수: ${builtLinks.size}")
         } else {
             println("[YT_DEBUG] [getUrl] 이미 캐시된 링크 리스트가 존재하여 캐시 데이터를 반환합니다.")
+            ytVideos[videoId]?.forEach { callback(it) }
         }
-
-        val finalLinks = ytVideos[videoId] ?: emptyList()
-        println("[YT_DEBUG] [getUrl] 반환되는 최종 링크 리스트 개수: ${finalLinks.size}")
-        finalLinks.forEachIndexed { index, link ->
-            println("[YT_DEBUG]   -> [링크 #${index + 1}] 이름: '${link.name}', 화질: ${link.quality}p, 타입: ${link.type}, 주소: '${link.url.take(100)}'")
-        }
-
-        ytVideos[videoId]?.forEach { callback(it) }
 
         val finalSubtitles = ytVideosSubtitles[videoId] ?: emptyList()
         println("[YT_DEBUG] [getUrl] 반환되는 최종 자막 개수: ${finalSubtitles.size}")
