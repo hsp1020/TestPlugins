@@ -177,9 +177,11 @@ class YoutubeProvider(
                 parts?.forEach { part ->
                     val text = getText(part.getMapKey("text")) ?: ""
                     if (text.isNotBlank()) {
-                        if (text.matches(Regex(".*(\\d+[KMBkmb]|views|مشاهدة).*"))) {
+                        // ✅ 한국어 조회수 키워드(조회수, 회) 매칭 추가
+                        if (text.matches(Regex(".*(\\d+[KMBkmb]|views|조회수|회|مشاهدة).*"))) {
                             views = formatViews(text)
-                        } else if (!text.matches(Regex(".*(\\d+:\\d+|ago|قبل).*")) && text.length > 1 && !text.contains("•")) {
+                        // ✅ 한국어 상대 시간 키워드가 채널 이름으로 오인되는 것 방지
+                        } else if (!text.matches(Regex(".*(\\d+:\\d+|ago|قبل|전|시간|분|일|주|개월|년).*")) && text.length > 1 && !text.contains("•")) {
                             channel = text
                         }
                     }
@@ -198,6 +200,8 @@ class YoutubeProvider(
 
         return Pair(channel, views)
     }
+    
+    
 
     // ✅ 조회수 축약 로직 완벽 적용 (152,891회 -> 15만회)
     private fun formatViews(viewText: String?): String {
@@ -277,6 +281,8 @@ private fun collectFromRenderer(
         val videoData = renderer.getMapKey("videoRenderer")
             ?: renderer.getMapKey("compactVideoRenderer")
             ?: renderer.getMapKey("gridVideoRenderer")
+            // ✅ playlistPanelVideoRenderer를 탐색 대상에 추가
+            ?: renderer.getMapKey("playlistPanelVideoRenderer")
 
         if (videoData != null) {
             val videoId = videoData.getString("videoId")
@@ -596,12 +602,6 @@ private fun collectFromRenderer(
 
     private fun findTokenRecursive(data: Any?): String? {
         if (data is Map<*, *>) {
-            if (data.containsKey("feedFilterChipBarRenderer") || 
-                data.containsKey("chipCloudRenderer") || 
-                data.containsKey("relatedChipCloudRenderer")) {
-                return null
-            }
-
             val renderer = data["continuationItemRenderer"] as? Map<*, *>
             if (renderer != null) {
                 val endpoint = renderer["continuationEndpoint"] as? Map<*, *>
@@ -621,7 +621,15 @@ private fun collectFromRenderer(
                 if (!token.isNullOrBlank()) return token
             }
 
-            for (v in data.values) {
+            // ✅ 전체 null 반환 대신, 루프 내에서 칩 바 관련 키만 무시하고 계속 탐색하도록 수정
+            for ((k, v) in data) {
+                val keyStr = k as? String ?: continue
+                if (keyStr == "feedFilterChipBarRenderer" || 
+                    keyStr == "chipCloudRenderer" || 
+                    keyStr == "relatedChipCloudRenderer" ||
+                    keyStr == "chipCloudChipRenderer") {
+                    continue
+                }
                 val t = findTokenRecursive(v)
                 if (t != null) return t
             }
@@ -633,6 +641,7 @@ private fun collectFromRenderer(
         }
         return null
     }
+    
 
         override val mainPage: List<MainPageData>
         get() {
@@ -1312,7 +1321,29 @@ private fun collectFromRenderer(
                 val data = extractYtInitialData(html) ?: throw ErrorLoadingException("Failed to extract playlist data")
 
                 val header = safeGet(data, "header", "playlistHeaderRenderer") as? Map<*, *>
-                val title = extractTitle(safeGet(header, "title") as? Map<*, *>) ?: "YouTube Playlist"
+                var title = extractTitle(safeGet(header, "title") as? Map<*, *>)
+                
+                // ✅ watch 페이지 기반의 믹스 플레이리스트 타이틀 동적 검색
+                if (title.isNullOrBlank()) {
+                    fun findMixTitle(obj: Any?): String? {
+                        if (obj is Map<*, *>) {
+                            val panel = obj["playlistPanelRenderer"] as? Map<*, *>
+                            if (panel != null) return getText(panel["title"])
+                            for (v in obj.values) {
+                                val t = findMixTitle(v)
+                                if (t != null) return t
+                            }
+                        } else if (obj is List<*>) {
+                            for (i in obj) {
+                                val t = findMixTitle(i)
+                                if (t != null) return t
+                            }
+                        }
+                        return null
+                    }
+                    title = findMixTitle(data) ?: "YouTube Mix"
+                }
+                
                 val ownerObj = safeGet(header, "ownerText") as? Map<*, *>
                 val author = extractTitle(ownerObj) ?: "Unknown Channel"
                 val description = extractTitle(safeGet(header, "description") as? Map<*, *>)
