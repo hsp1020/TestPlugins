@@ -930,14 +930,40 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         @JsonProperty("trailerStreams") val trailerStreams: List<TrailerStream> = emptyList(), 
         @JsonProperty("links") val links: List<Link> = emptyList()
     ) {
-        
-        fun toSearchResponse(provider: StremioC): SearchResponse {
-            val targetType = this.type ?: "movie"
+
+        fun toSearchResponse(
+            provider: StremioC, 
+            catalogName: String? = null, 
+            typeName: String? = null
+        ): SearchResponse {
+            val targetType = this.type ?: typeName ?: "movie"
             val metaUrl = "${provider.mainUrl.substringBefore("?")}/meta/$targetType/${this.id}.json"
 
-            // name이 null인 경우, 고유 id(예: ttXXXX)를 보여주고, id도 없으면 "Unknown"을 사용
-            val fallbackName = name ?: id.takeIf { it.isNotBlank() } ?: "Unknown"
-            return provider.newMovieSearchResponse(fallbackName, metaUrl, TvType.Others) { 
+            // 1. 기본 본문 이름 결정 (제목이 있으면 제목을, 없으면 ID를 사용)
+            val baseName = if (!name.isNullOrBlank()) {
+                name
+            } else {
+                id
+            }
+
+            // 2. 최종 결합 이름 결정
+            val finalName = if (!catalogName.isNullOrBlank() && !typeName.isNullOrBlank()) {
+                // 검색 결과 화면인 경우: 중복 없이 깔끔하게 [카탈로그명-타입명] 제목/ID
+                // 예: 제목 있음 -> [Popular-Series] Naruto / 제목 없음 -> [Popular-Series] kitsu:1234
+                val capType = typeName.replaceFirstChar { it.uppercase() }
+                "[$catalogName-$capType] $baseName"
+            } else {
+                // 메인 화면인 경우 기존 규칙 적용:
+                // 제목 있음 -> 제목 그대로 / 제목 없음 -> [타입명] ID (예: [Series] kitsu:1234)
+                if (!name.isNullOrBlank()) {
+                    name
+                } else {
+                    val capitalizedType = targetType.replaceFirstChar { it.uppercase() }
+                    "[$capitalizedType] $id"
+                }
+            }
+
+            return provider.newMovieSearchResponse(finalName, metaUrl, TvType.Others) { 
                 posterUrl = poster 
             }
         }
