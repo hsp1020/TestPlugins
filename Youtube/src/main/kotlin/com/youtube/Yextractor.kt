@@ -1,7 +1,5 @@
 package com.youtube
 
-import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.mvvm.logError
@@ -17,6 +15,10 @@ import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor
 import org.schabi.newpipe.extractor.services.youtube.linkHandler.YoutubeStreamLinkHandlerFactory
 import org.schabi.newpipe.extractor.stream.SubtitlesStream
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.PrintWriter
@@ -74,40 +76,49 @@ open class YoutubeExtractor : ExtractorApi() {
     )
 
     // =================================================================
-    // [개선] 슬래시 처리 보정, 보안 우회 헤더 추가, 응답 실패 상세 로깅 가미
+    // [수정 완료] Cobalt API v11 공식 문서의 명세 규격을 정확히 대입
     // =================================================================
     private suspend fun getCobaltMergedLink(videoUrl: String, quality: String): String? {
         val apiUrl = if (COBALT_API_URL.endsWith("/")) COBALT_API_URL else "$COBALT_API_URL/"
         return try {
-            val payload = mapOf(
-                "url" to videoUrl,
-                "videoQuality" to quality, // "1080", "720" 등
-                "filenamePattern" to "pretty"
-            )
-            val response = app.post(
-                apiUrl,
-                json = payload,
-                headers = mapOf(
-                    "Accept" to "application/json",
-                    "Content-Type" to "application/json",
-                    // Cloudflare 및 Turnstile 우회를 유도하기 위해 크롬 브라우저 User-Agent 강제 대입
-                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                )
-            )
-            println("[YT_DEBUG] Cobalt API 응답 수신. 코드: ${response.code}")
+            // 공식 명세: filenamePattern이 아닌 filenameStyle이 올바른 규격입니다.
+            val jsonString = "{\"url\":\"$videoUrl\",\"videoQuality\":\"$quality\",\"filenameStyle\":\"pretty\"}"
             
-            if (response.code == 200) {
-                val json = parseJson<Map<String, Any>>(response.text)
+            // 미디어 타입을 null로 대입하여 OkHttp 자체적으로 charset 수식어가 붙는 것을 우회
+            val requestBody = jsonString.toRequestBody(null)
+            
+            val request = Request.Builder()
+                .url(apiUrl)
+                .post(requestBody)
+                .header("Content-Type", "application/json") // Cobalt 필수 헤더: 정확히 application/json 일치 비교 통과 유도
+                .header("Accept", "application/json")      // Cobalt 필수 헤더
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                .build()
+
+            val responseText = withContext(Dispatchers.IO) {
+                app.client.newCall(request).execute().use { response ->
+                    println("[YT_DEBUG] Cobalt API 응답 수신. 코드: ${response.code}")
+                    if (response.isSuccessful) {
+                        response.body?.string()
+                    } else {
+                        println("[YT_DEBUG] Cobalt API 호출 실패. 에러 코드: ${response.code}, 내용: ${response.body?.string()}")
+                        null
+                    }
+                }
+            }
+
+            if (!responseText.isNullOrBlank()) {
+                val json = parseJson<Map<String, Any>>(responseText)
                 val status = json["status"] as? String
-                if (status == "stream" || status == "redirect") {
+                
+                // 공식 명세: v11의 성공 상태값은 "stream"이 아니라 "tunnel" 또는 "redirect"입니다. (하위 호환을 위해 "stream"도 유지)
+                if (status == "tunnel" || status == "redirect" || status == "stream") {
                     json["url"] as? String
                 } else {
-                    println("[YT_DEBUG] Cobalt API 처리 상태 비정상: $status. 본문: ${response.text}")
+                    println("[YT_DEBUG] Cobalt API 처리 상태 비정상: $status. 본문: $responseText")
                     null
                 }
             } else {
-                // 200 이외의 오류가 날 경우 로그캣에 코드와 에러 내용(HTML 혹은 JSON)을 직접 출력
-                println("[YT_DEBUG] Cobalt API 호출 실패. 에러 코드: ${response.code}, 내용: ${response.text}")
                 null
             }
         } catch (e: Exception) {
