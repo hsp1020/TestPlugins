@@ -28,6 +28,7 @@ import java.net.Socket
 import java.net.URLDecoder
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
 open class YoutubeExtractor : ExtractorApi() {
@@ -49,9 +50,16 @@ open class YoutubeExtractor : ExtractorApi() {
         // 폴백용 기본 무료 API 서버 주소 (트래커 API 전체 실패 시 최후 수단으로 구동)
         private const val DEFAULT_FALLBACK_API_URL = "https://cobalt.meowing.de"
 
-        // 실시간으로 탐색하여 찾아낸 "유튜브 작동 가능(status=true)" 서버 주소 캐시
+        // 동적으로 탐색된 전체 작동 후보 리스트 캐시
+        @Volatile
+        private var cachedInstancesList: List<String>? = null
+
+        // 실시간으로 선별되어 현재 정상 통신에 성공한 최적의 서버 주소 캐시
         @Volatile
         private var cachedAutoInstance: String? = null
+
+        // 이번 앱 구동 세션 동안 오류(인증 실패 등)가 감지된 비정상 인스턴스 실시간 블랙리스트
+        private val sessionBlacklist = ConcurrentHashMap.newKeySet<String>()
 
         init {
             YoutubeStreamExtractor.setFetchIosClient(true)
@@ -81,9 +89,12 @@ open class YoutubeExtractor : ExtractorApi() {
     )
 
     // =================================================================
-    // [공식 명세 적용] cobalt.directory/api/tests 를 직접 분석하여 유튜브 status=true 인 서버를 선별
+    // [공식 명세 완벽 대응] cobalt.directory/api/tests 를 직접 분석하여 유튜브 status=true 인 전체 인스턴스 묶음을 빌드
     // =================================================================
-    private suspend fun fetchWorkingCobaltInstance(): String? {
+    private suspend fun fetchAllWorkingCobaltInstances(): List<String> {
+        val cached = cachedInstancesList
+        if (!cached.isNullOrEmpty()) return cached
+
         return try {
             println("[YT_DEBUG] cobalt.directory/api/tests 실시간 탐색 호출 시작")
             val responseText = withContext(Dispatchers.IO) {
@@ -91,71 +102,109 @@ open class YoutubeExtractor : ExtractorApi() {
             }
             if (responseText.isNotBlank()) {
                 val json = parseJson<Map<String, Any>>(responseText)
-                val dataList = json["data"] as? List<*> ?: return null
+                val dataList = json["data"] as? List<*> ?: return emptyList()
                 
+                val workingList = mutableListOf<String>()
                 for (item in dataList) {
                     val instance = item as? Map<*, *> ?: continue
                     
-                    // 1. 서버가 온라인 상태인지 먼저 필터링
                     val online = instance["online"] as? Boolean ?: false
                     if (!online) continue
                     
-                    // 2. tests -> youtube 결과에 진입
                     val tests = instance["tests"] as? Map<*, *> ?: continue
                     val youtube = tests["youtube"] as? Map<*, *> ?: continue
                     
-                    // 3. youtube 작동 성공 여부(status)가 "true" 인지 정밀 분석 (인증 필요 도메인은 여기서 자동 탈락)
+                    // tests.youtube.status 가 오직 true 인 완전 개방형 활성 서버만 리스트화 (인증 필요 도메인 자동 필터링)
                     val youtubeStatus = youtube["status"] as? Boolean ?: false
                     if (youtubeStatus) {
                         val apiHost = instance["api"] as? String
                         if (!apiHost.isNullOrBlank()) {
                             val protocol = instance["protocol"] as? String ?: "https"
-                            val finalUrl = "$protocol://$apiHost"
-                            println("[YT_DEBUG] cobalt.directory 분석 성공. 실시간 무결성 인증 우회 주소 확보: $finalUrl")
-                            cachedAutoInstance = finalUrl
-                            return finalUrl
+                            workingList.add("$protocol://$apiHost")
                         }
                     }
                 }
+                println("[YT_DEBUG] cobalt.directory 분석 완료. 작동 후보 리스트 (${workingList.size}개): $workingList")
+                cachedInstancesList = workingList
+                workingList
+            } else {
+                emptyList()
             }
-            null
         } catch (e: Exception) {
             println("[YT_DEBUG] cobalt.directory 원천 API 실시간 탐색 중 오류 발생: ${e.message}")
-            null
+            emptyList()
         }
     }
 
     // =================================================================
-    // [우회 결합] 설정값이 "auto"일 때 작동 가능한 우회 주소를 트래킹하여 자동 호출
+    // [무제한 순차 복구 루프] 살아있는 전체 후보들을 끝까지 순차적으로 자동 스위칭하며 시도 (타임아웃 2.5초)
     // =================================================================
     private suspend fun getCobaltMergedLink(videoUrl: String, quality: String): String? {
         val appPrefs = com.lagradost.cloudstream3.AcraApplication.context?.let {
             androidx.preference.PreferenceManager.getDefaultSharedPreferences(it)
         }
         
-        // 주소 기본 설정을 "auto"로 구성하여 자동 탐색 모드로 구동 유도
-        var cobaltInstance = appPrefs?.getString("youtube_cobalt_api", "auto") ?: "auto"
+        val cobaltInstanceSetting = appPrefs?.getString("youtube_cobalt_api", "auto") ?: "auto"
         val apiKey = appPrefs?.getString("youtube_cobalt_api_key", null)
 
-        // 자동 탐색 모드인 경우 동작하는 서버 실시간 파싱 선별 가동
-        if (cobaltInstance.equals("auto", ignoreCase = true)) {
-            cobaltInstance = cachedAutoInstance ?: fetchWorkingCobaltInstance() ?: DEFAULT_FALLBACK_API_URL
-        }
+        val isAutoMode = cobaltInstanceSetting.equals("auto", ignoreCase = true)
 
-        val apiUrl = if (cobaltInstance.endsWith("/")) cobaltInstance else "$cobaltInstance/"
+        if (isAutoMode) {
+            // 이전에 성공했던 최적의 작동 서버가 이미 존재하면 우선적으로 1회 호출
+            cachedAutoInstance?.let { activeInstance ->
+                if (!sessionBlacklist.contains(activeInstance)) {
+                    val directResult = executeCobaltRequest(videoUrl, quality, activeInstance, apiKey)
+                    if (!directResult.isNullOrBlank()) {
+                        return directResult
+                    }
+                }
+            }
+
+            // 실패했거나 캐시가 없는 경우 전체 후보 리스트를 동적으로 로드 및 가동
+            val candidates = fetchAllWorkingCobaltInstances()
+            // 에러가 났었던 블랙리스트 서버들은 실시간 제외 처리
+            val activeCandidates = candidates.filter { !sessionBlacklist.contains(it) }
+            
+            println("[YT_DEBUG] 실시간 가용한 무결성 고화질 후보 리스트 (${activeCandidates.size}개): $activeCandidates")
+
+            // 살아있는 모든 후보 인스턴스 전체를 끝까지 순차 대입하며 기어이 찾아냄
+            for (currentInstance in activeCandidates) {
+                val result = executeCobaltRequest(videoUrl, quality, currentInstance, apiKey)
+                if (!result.isNullOrBlank()) {
+                    cachedAutoInstance = currentInstance // 성공 즉시 다음 동영상 로딩용 고속 캐시로 등록
+                    return result
+                }
+            }
+
+            // 최후의 보루: 동적 탐색 후보가 비정상적으로 소진될 경우 디폴트 백업 서버 최종 호출
+            if (!sessionBlacklist.contains(DEFAULT_FALLBACK_API_URL)) {
+                val fallbackResult = executeCobaltRequest(videoUrl, quality, DEFAULT_FALLBACK_API_URL, apiKey)
+                if (!fallbackResult.isNullOrBlank()) {
+                    return fallbackResult
+                }
+            }
+        } else {
+            // 수동 지정 모드인 경우 1회만 정적 호출 실행
+            return executeCobaltRequest(videoUrl, quality, cobaltInstanceSetting, apiKey)
+        }
+        return null
+    }
+
+    // =================================================================
+    // 개별 인스턴스 요청 처리 및 2.5초 타이트 타임아웃 예외 핸들링 함수
+    // =================================================================
+    private suspend fun executeCobaltRequest(videoUrl: String, quality: String, instanceUrl: String, apiKey: String?): String? {
+        val apiUrl = if (instanceUrl.endsWith("/")) instanceUrl else "$instanceUrl/"
         return try {
-            // 명세서 규격: filenameStyle 및 videoQuality 대입
             val jsonString = "{\"url\":\"$videoUrl\",\"videoQuality\":\"$quality\",\"filenameStyle\":\"pretty\"}"
             val requestBody = jsonString.toRequestBody(null)
             
-            // 헤더 정보 구성 (Strict Content-Type 우회용 오직 application/json 단일 헤더 구성)
             val headersMap = mutableMapOf(
                 "Content-Type" to "application/json",
                 "Accept" to "application/json",
                 "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             )
 
-            // 만약 개별 수동 인스턴스 사용 중이고 API Key가 존재한다면 Bearer 인증 토큰 탑재
             if (!apiKey.isNullOrBlank()) {
                 headersMap["Authorization"] = "Bearer $apiKey"
             }
@@ -168,19 +217,22 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
                 .build()
 
-            val localOkHttpClient = OkHttpClient()
+            // 2.5초 이내에 무응답이거나 터진 서버는 칼같이 버리고 패스하도록 OkHttpClient 빌더 커스텀
+            val localOkHttpClient = OkHttpClient.Builder()
+                .connectTimeout(2500, TimeUnit.MILLISECONDS)
+                .readTimeout(2500, TimeUnit.MILLISECONDS)
+                .build()
 
             val responseText = withContext(Dispatchers.IO) {
                 localOkHttpClient.newCall(request).execute().use { response ->
-                    println("[YT_DEBUG] Cobalt API 응답 수신 ($cobaltInstance). 코드: ${response.code}")
+                    println("[YT_DEBUG] Cobalt API 응답 수신 ($instanceUrl). 코드: ${response.code}")
                     if (response.isSuccessful) {
                         response.body?.string()
                     } else {
                         val errBody = response.body?.string() ?: ""
                         println("[YT_DEBUG] Cobalt API 호출 실패. 에러 코드: ${response.code}, 내용: $errBody")
-                        
-                        // 사용 중이던 탐색 주소에서 에러 발생 시 캐시 만료 유도
-                        if (cobaltInstance == cachedAutoInstance) {
+                        sessionBlacklist.add(instanceUrl)
+                        if (instanceUrl == cachedAutoInstance) {
                             cachedAutoInstance = null
                         }
                         null
@@ -192,19 +244,21 @@ open class YoutubeExtractor : ExtractorApi() {
                 val json = parseJson<Map<String, Any>>(text)
                 val status = json["status"] as? String
                 
-                // 공식 명세 v11 규격: "tunnel" 또는 "redirect" (과거 구버전 호환용 "stream" 포함)
                 if (status == "tunnel" || status == "redirect" || status == "stream") {
                     json["url"] as? String
                 } else {
                     println("[YT_DEBUG] Cobalt API 처리 상태 비정상: $status. 본문: $text")
+                    sessionBlacklist.add(instanceUrl)
+                    if (instanceUrl == cachedAutoInstance) {
+                        cachedAutoInstance = null
+                    }
                     null
                 }
             }
         } catch (e: Exception) {
-            println("[YT_DEBUG] Cobalt API ($apiUrl) 연동 중 치명적 예외 발생: ${e.message}")
-            e.printStackTrace()
-            // 예외 발생 시 자동 선별 캐시 만료 처리
-            if (cobaltInstance == cachedAutoInstance) {
+            println("[YT_DEBUG] Cobalt API ($apiUrl) 연동 중 통신 장해/예외 발생: ${e.message}")
+            sessionBlacklist.add(instanceUrl)
+            if (instanceUrl == cachedAutoInstance) {
                 cachedAutoInstance = null
             }
             null
