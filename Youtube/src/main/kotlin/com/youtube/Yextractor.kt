@@ -9,11 +9,11 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.schemaStripRegex
+import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor
 import org.schabi.newpipe.extractor.services.youtube.linkHandler.YoutubeStreamLinkHandlerFactory
 import org.schabi.newpipe.extractor.stream.SubtitlesStream
-import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.PrintWriter
@@ -71,7 +71,7 @@ open class YoutubeExtractor : ExtractorApi() {
     )
 
     // =================================================================
-    // [추가] 지정된 Cobalt API를 호출하여 비디오/오디오 병합 주소를 가져오는 함수
+    // [수정] 내장 parseJson 유틸을 사용하도록 변경하여 빌드 에러 해결
     // =================================================================
     private suspend fun getCobaltMergedLink(videoUrl: String, quality: String): String? {
         return try {
@@ -89,10 +89,11 @@ open class YoutubeExtractor : ExtractorApi() {
                 )
             )
             if (response.code == 200) {
-                val json = JSONObject(response.text)
-                val status = json.optString("status")
+                // 앱에 내장된 고속 Jackson 파서를 이용하여 Map으로 즉시 역직렬화
+                val json = parseJson<Map<String, Any>>(response.text)
+                val status = json["status"] as? String
                 if (status == "stream" || status == "redirect") {
-                    json.optString("url")
+                    json["url"] as? String
                 } else {
                     null
                 }
@@ -126,10 +127,10 @@ open class YoutubeExtractor : ExtractorApi() {
             val youtubeWatchUrl = "https://www.youtube.com/watch?v=$videoId"
 
             // =================================================================
-            // [추가] Cobalt API 기반 서버 사이드 병합 고화질 링크 추출 시도 (melon.clxxped.lol)
+            // Cobalt API 기반 서버 사이드 병합 고화질 링크 추출 시도 (melon.clxxped.lol)
             // =================================================================
             println("[YT_DEBUG] melon.clxxped.lol 서버를 통해 병합 링크 생성을 시도합니다.")
-            val qualitiesToRequest = listOf("2160", "1080", "720")
+            val qualitiesToRequest = listOf("1080", "720")
             for (q in qualitiesToRequest) {
                 val mergedUrl = getCobaltMergedLink(youtubeWatchUrl, q)
                 if (!mergedUrl.isNullOrBlank()) {
