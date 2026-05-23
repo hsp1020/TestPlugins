@@ -886,7 +886,6 @@ class YoutubeProvider(
                     }
                 }
             } else {
-                } else {
                 var tokenToUse = getSavedContinuationToken(requestData)        
                 // [자가치유 메커니즘] 세션이나 토큰 연결 고리가 완전 유실된 경우 복원 시도
                 if (tokenToUse.isNullOrBlank()) {
