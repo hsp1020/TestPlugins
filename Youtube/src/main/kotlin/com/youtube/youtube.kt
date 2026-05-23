@@ -56,25 +56,23 @@ class YoutubeProvider(
 
     private var isSearchContext = false
 
+    // ✅ Interceptor가 appPrefs를 정상적으로 참조하도록 구조 변경
     class YouTubeInterceptor(private val provider: YoutubeProvider) : Interceptor {
         private val prefs get() = provider.appPrefs
-
+        
         private fun sha1(input: String): String {
             val md = java.security.MessageDigest.getInstance("SHA-1")
             val bytes = md.digest(input.toByteArray())
             return bytes.joinToString("") { "%02x".format(it) }
         }
-        
-        private fun String.urlDecode(): String {
-            return try {
-                java.net.URLDecoder.decode(this, "UTF-8")
-            } catch (e: Exception) {
-              this
-            }
-        }
 
         override fun intercept(chain: Interceptor.Chain): Response {
-            val requestBuilder = chain.request().newBuilder()
+            val request = chain.request()
+            val urlStr = request.url.toString()
+            // 검색 엔드포인트(/results 또는 /v1/search)를 감지하여 개인 쿠키 연동 차단 플래그 지정
+            val isSearchRequest = urlStr.contains("/results") || urlStr.contains("/v1/search")
+
+            val requestBuilder = request.newBuilder()
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36")
 
             val cookieBuilder = StringBuilder()
@@ -86,34 +84,42 @@ class YoutubeProvider(
                 cookieBuilder.append("VISITOR_INFO1_LIVE=_Mk3UVhY40g; ")
             }
 
-            val authKeys = listOf("SID", "HSID", "SSID", "APISID", "SAPISID")
-            var sapisidVal: String? = null
+            // 일반 요청인 경우에만 계정 쿠키를 결합하고, 검색 요청일 경우 개인 계정 쿠키를 누락시켜 개인 기록 연동 방지
+            if (!isSearchRequest) {
+                val authKeys = listOf("SID", "HSID", "SSID", "APISID", "SAPISID")
+                var sapisidVal: String? = null
 
-            authKeys.forEach { key ->
-                val value = prefs?.getString(key, null)
-                if (!value.isNullOrBlank()) {
-                    cookieBuilder.append("$key=$value; ")
-                    if (key == "SAPISID") sapisidVal = value
+                authKeys.forEach { key ->
+                    val value = prefs?.getString(key, null)
+                    if (!value.isNullOrBlank()) {
+                        cookieBuilder.append("$key=$value; ")
+                        if (key == "SAPISID") sapisidVal = value
+                    }
                 }
-            }
-            
-            cookieBuilder.append("PREF=f6=40000000&hl=${provider.lang}; CONSENT=YES+fx.456722336;")
+                
+                cookieBuilder.append("PREF=f6=40000000&hl=${provider.lang}; CONSENT=YES+fx.456722336;")
 
-            requestBuilder.addHeader("Cookie", cookieBuilder.toString())
-            requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
+                requestBuilder.addHeader("Cookie", cookieBuilder.toString())
+                requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
 
-            if (!sapisidVal.isNullOrBlank()) {
-                try {
-                    val timestamp = (System.currentTimeMillis() / 1000).toString()
-                    val origin = "https://www.youtube.com"
-                    val msg = "$timestamp $sapisidVal $origin"
-                    val hash = sha1(msg)
-                    requestBuilder.addHeader("Authorization", "SAPISIDHASH ${timestamp}_$hash")
-                    requestBuilder.addHeader("X-Origin", origin)
-                    requestBuilder.addHeader("X-Goog-AuthUser", "0")
-                } catch (e: Exception) {
-                    logError(e)
+                if (!sapisidVal.isNullOrBlank()) {
+                    try {
+                        val timestamp = (System.currentTimeMillis() / 1000).toString()
+                        val origin = "https://www.youtube.com"
+                        val msg = "$timestamp $sapisidVal $origin"
+                        val hash = sha1(msg)
+                        requestBuilder.addHeader("Authorization", "SAPISIDHASH ${timestamp}_$hash")
+                        requestBuilder.addHeader("X-Origin", origin)
+                        requestBuilder.addHeader("X-Goog-AuthUser", "0")
+                    } catch (e: Exception) {
+                        logError(e)
+                    }
                 }
+            } else {
+                // 검색 요청 시에는 비개인화 PREF 쿠키 및 일반 다크 테마/언어 설정 헤더만 송신
+                cookieBuilder.append("PREF=f6=40000000&hl=${provider.lang}; CONSENT=YES+fx.456722336;")
+                requestBuilder.addHeader("Cookie", cookieBuilder.toString())
+                requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
             }
 
             return chain.proceed(requestBuilder.build())
