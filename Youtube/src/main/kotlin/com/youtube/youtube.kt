@@ -905,8 +905,10 @@ class YoutubeProvider(
                         }
 
                         var skipInitialDataProcess = false
-                        // 타겟 탭이 존재하나 현재 HTML 상에서 비활성화된 탭인 경우, 해당 탭 전용 POST 요청 전개
-                        if (targetTab != null && targetTab["selected"] != true) {
+                        // 세부 쿼리 파라미터(?ss= 등)를 지목한 주소인 경우 탭 리다이렉트(POST)를 차단하여 원본 하위 탭을 그대로 긁어오도록 조치
+                        val hasSubParams = requestData.contains("?")
+                        // 타겟 탭이 존재하나 현재 HTML 상에서 비활성화된 탭이며, 추가 하위 파라미터가 없을 때만 리다이렉트 수행
+                        if (targetTab != null && targetTab["selected"] != true && !hasSubParams) {
                             val browseId = safeGet(targetTab, "endpoint", "browseEndpoint", "browseId") as? String
                             val params = safeGet(targetTab, "endpoint", "browseEndpoint", "params") as? String
                             println("[YT_DEBUG] Custom sub-tab detected: $browseId, params: $params. Fetching tab POST request...")
@@ -936,7 +938,7 @@ class YoutubeProvider(
                             }
                         }
 
-                        // 하위 탭 Self-Redirect 작업을 거치지 않은 경우에만 본문 HTML의 데이터를 기본 수집
+                        // 하위 탭 자가 Redirection을 타지 않은 일반적인 상황에서만 본문 HTML의 데이터를 기본 수집
                         if (!skipInitialDataProcess) {
                             if (requestData == "Home") {
                                 val chipBar = safeGet(initialData, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0, "tabRenderer", "content", "richGridRenderer", "header", "feedFilterChipBarRenderer", "contents") as? List<*>
@@ -1056,7 +1058,7 @@ class YoutubeProvider(
         saveContinuationToken(requestData, nextContinuation)
         println("[YT_DEBUG] getMainPage completed. Extracted count: ${results.size}, hasNext: ${!nextContinuation.isNullOrBlank()}")
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
-    }
+    }    
 
     override suspend fun search(query: String): List<SearchResponse> {
         return search(query, 1)?.items ?: emptyList()
