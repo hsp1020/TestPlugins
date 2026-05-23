@@ -36,7 +36,9 @@ open class YoutubeExtractor : ExtractorApi() {
         private var serverPort: Int = 0
         private val manifestMap = ConcurrentHashMap<String, String>()
 
-        // 추가: 클래스 구동 시 NewPipe Extractor에 내장된 iOS HLS 마스터 스트림 자동 우회 수집 모드 활성화
+        // 403 에러 방지를 위한 iOS 클라이언트 전용 User-Agent
+        private const val IOS_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
+
         init {
             YoutubeStreamExtractor.setFetchIosClient(true)
         }
@@ -167,7 +169,6 @@ open class YoutubeExtractor : ExtractorApi() {
 
                                 if (localLink != null) {
                                     val finalName = "${video.label} ($lang) ${video.label}"
-                                    // 언어별 우선순위 분리를 위한 소스명 변경
                                     val sourceName = "${this.name} ($lang)"
 
                                     println("[YT_DEBUG] [getUrl] DASH 가상 링크 빌드 성공 -> 화질: ${video.label}, 언어: $lang, 가상 URL: $localLink")
@@ -180,8 +181,12 @@ open class YoutubeExtractor : ExtractorApi() {
                                         ) {
                                             this.referer = mainUrl
                                             this.quality = video.height
-                                            // ✅ 403 에러 방지용 User-Agent 헤더 강제 주입
-                                            this.headers = mapOf("User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+                                            // ✅ 1분 튕김 방지: iOS User-Agent 및 Origin 헤더 강제 주입
+                                            this.headers = mapOf(
+                                                "User-Agent" to IOS_USER_AGENT,
+                                                "Origin" to "https://www.youtube.com",
+                                                "Referer" to "https://www.youtube.com"
+                                            )
                                         }
                                     )
                                 }
@@ -207,8 +212,12 @@ open class YoutubeExtractor : ExtractorApi() {
                         newExtractorLink(this.name, "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
                             this.referer = mainUrl
                             this.quality = mHeight
-                            // ✅ 403 에러 방지용 User-Agent 헤더 강제 주입
-                            this.headers = mapOf("User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+                            // ✅ 1분 튕김 방지: iOS User-Agent 및 Origin 헤더 강제 주입
+                            this.headers = mapOf(
+                                "User-Agent" to IOS_USER_AGENT,
+                                "Origin" to "https://www.youtube.com",
+                                "Referer" to "https://www.youtube.com"
+                            )
                         }
                     )
                 }
@@ -239,7 +248,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 val lang = ss.locale?.language ?: return@mapNotNull null
                 var url = ss.content ?: ss.getUrl() ?: return@mapNotNull null
                 
-                // 핵심: NewPipe가 가져온 URL에서 기존 포맷을 강제로 뜯어내고 SRT를 주입합니다.
                 if (url.startsWith("http")) {
                     url = url.replace(Regex("&fmt=[^&]+"), "")
                     if (!url.contains("fmt=srt")) {
