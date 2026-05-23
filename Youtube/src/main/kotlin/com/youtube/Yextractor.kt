@@ -1,7 +1,5 @@
 package com.youtube
 
-import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.mvvm.logError
@@ -17,6 +15,7 @@ import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor
 import org.schabi.newpipe.extractor.services.youtube.linkHandler.YoutubeStreamLinkHandlerFactory
 import org.schabi.newpipe.extractor.stream.SubtitlesStream
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import kotlinx.coroutines.Dispatchers
@@ -78,7 +77,7 @@ open class YoutubeExtractor : ExtractorApi() {
     )
 
     // =================================================================
-    // [수정 완료] app.okHttpClient 참조 교정 및 Nullable Type-safe 파싱 적용
+    // [수정 완료] NiceHttp의 내부 참조 문제 해결을 위해 독자적인 OkHttpClient 인스턴스 사용
     // =================================================================
     private suspend fun getCobaltMergedLink(videoUrl: String, quality: String): String? {
         val apiUrl = if (COBALT_API_URL.endsWith("/")) COBALT_API_URL else "$COBALT_API_URL/"
@@ -96,9 +95,12 @@ open class YoutubeExtractor : ExtractorApi() {
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
                 .build()
 
-            // 비동기 스레드(IO) 내에서 Requests의 okHttpClient를 직접 호출하여 안전하게 실행
+            // 100% 확정 컴파일을 유도하기 위해 라이브러리 내부 client 대신 순수 OkHttpClient() 인스턴스를 생성하여 활용
+            val localOkHttpClient = OkHttpClient()
+
+            // 비동기 스레드(IO) 내에서 안전하게 실행하여 response 타입 스마트 캐스팅 성공 유도
             val responseText = withContext(Dispatchers.IO) {
-                app.okHttpClient.newCall(request).execute().use { response ->
+                localOkHttpClient.newCall(request).execute().use { response ->
                     println("[YT_DEBUG] Cobalt API 응답 수신. 코드: ${response.code}")
                     if (response.isSuccessful) {
                         response.body?.string()
