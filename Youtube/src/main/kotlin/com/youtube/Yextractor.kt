@@ -146,12 +146,11 @@ open class YoutubeExtractor : ExtractorApi() {
         if (ytVideos[videoId].isNullOrEmpty()) {
             println("[YT_DEBUG] [getUrl] 분석을 진행합니다.")
             
-            // 💡 병렬 실행 환경에서의 데이터 안정성을 위해 Thread-Safe 컬렉션으로 정의합니다.
             val builtLinks = java.util.Collections.synchronizedList(mutableListOf<ExtractorLink>())
             val seenUrls = java.util.Collections.synchronizedSet(mutableSetOf<String>())
             val youtubeWatchUrl = "https://www.youtube.com/watch?v=$videoId"
 
-            // 💡 coroutineScope를 통해 내부 비동기 launch 작업들이 병렬적으로 수행되도록 설계합니다.
+            // 두 메인 작업(ytdip 로드 vs NewPipe 로드)을 비동기 병렬로 가동합니다.
             coroutineScope {
                 // =================================================================
                 // [작업 A] 사설 yt-dlp API 서버를 통한 고화질 병합 링크 확보 (비동기 병렬 실행)
@@ -164,8 +163,9 @@ open class YoutubeExtractor : ExtractorApi() {
                             val mergedUrl = getYtDlpMergedLink(youtubeWatchUrl, q)
                             if (!mergedUrl.isNullOrBlank()) {
                                 println("[YT_DEBUG] 사설 API로부터 병합 링크 획득 성공 -> ${q}p")
+                                // 💡 'this.name' 대신 바깥 클래스의 'name' 프로퍼티를 직접 사용해 컴파일러 스코프 에러를 방지합니다.
                                 val link = newExtractorLink(
-                                    "${this@YoutubeExtractor.name} (Direct Download)",
+                                    "${name} (Direct Download)",
                                     "${q}p [Merged - Download]",
                                     mergedUrl,
                                     type = INFER_TYPE
@@ -268,7 +268,8 @@ open class YoutubeExtractor : ExtractorApi() {
 
                                         if (localLink != null) {
                                             val finalName = "${video.label} ($lang) ${video.label}"
-                                            val sourceName = "${this.name} ($lang)"
+                                            // 💡 'this.name' 수동 호출을 'name'으로 우회하여 스코프 오류를 제거합니다.
+                                            val sourceName = "${name} ($lang)"
 
                                             println("[YT_DEBUG] [getUrl] DASH 가상 링크 빌드 성공 -> 화질: ${video.label}, 언어: $lang, 가상 URL: $localLink")
                                             val link = newExtractorLink(
@@ -306,7 +307,8 @@ open class YoutubeExtractor : ExtractorApi() {
                         }
                         for ((mUrl, mLabel, mHeight) in muxedList) {
                             println("[YT_DEBUG] [getUrl] Legacy Muxed 링크 등록 -> 화질: $mHeight, 이름: $mLabel (Legacy)")
-                            val link = newExtractorLink(this@YoutubeExtractor.name, "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
+                            // 💡 'this.name' 수동 호출을 'name'으로 변경하여 Unresolved Reference 오류를 방지합니다.
+                            val link = newExtractorLink(name, "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
                                 this.referer = mainUrl
                                 this.quality = mHeight
                                 this.headers = mapOf(
