@@ -58,11 +58,19 @@ class YoutubeProvider(
 
     class YouTubeInterceptor(private val provider: YoutubeProvider) : Interceptor {
         private val prefs get() = provider.appPrefs
-        
+
         private fun sha1(input: String): String {
             val md = java.security.MessageDigest.getInstance("SHA-1")
             val bytes = md.digest(input.toByteArray())
             return bytes.joinToString("") { "%02x".format(it) }
+        }
+        
+        private fun String.urlDecode(): String {
+            return try {
+                java.net.URLDecoder.decode(this, "UTF-8")
+            } catch (e: Exception) {
+              this
+            }
         }
 
         override fun intercept(chain: Interceptor.Chain): Response {
@@ -778,7 +786,10 @@ class YoutubeProvider(
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         isSearchContext = false
-        println("[YT_DEBUG] getMainPage started. page: $page, requestData: ${request.data}")
+        val rawRequestData = request.data
+        // 인계받은 요청 데이터를 안전하게 URL 디코딩 처리하여 일관된 키 및 토큰 포맷 확보
+        val requestData = rawRequestData.urlDecode()
+        println("[YT_DEBUG] getMainPage started. page: $page, requestData: $requestData (raw: $rawRequestData)")
         val maxPages = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
         if (page > maxPages) {
             println("[YT_DEBUG] Page $page exceeds limits. Returning empty.")
@@ -788,7 +799,6 @@ class YoutubeProvider(
         val results = mutableListOf<SearchResponse>()
         val seenIds = mutableSetOf<String>()
         var nextContinuation: String? = null
-        val requestData = request.data
         val isChip = requestData.startsWith("chip_")
 
         try {
@@ -886,8 +896,9 @@ class YoutubeProvider(
                     }
                 }
             } else {
-                var tokenToUse = getSavedContinuationToken(requestData)        
-                // [자가치유 메커니즘] 세션이나 토큰 연결 고리가 완전 유실된 경우 복원 시도
+                var tokenToUse = getSavedContinuationToken(requestData)
+                
+                // [자가치유 메커니즘] 세션이나 토큰 연결 고리가 완전 유실된 경우 디코딩된 정제 토큰으로 복원 시도
                 if (tokenToUse.isNullOrBlank()) {
                     println("[YT_DEBUG] Token to use is null/blank on page $page for $requestData. Fetching fallback continuation...")
                     val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
@@ -967,7 +978,6 @@ class YoutubeProvider(
                     println("[YT_DEBUG] Page Continuation token was null/blank.")
                 }
             }
-
         } catch (e: Exception) { 
             println("[YT_DEBUG] getMainPage exception: ${e.message}")
             logError(e) 
@@ -977,7 +987,7 @@ class YoutubeProvider(
         println("[YT_DEBUG] getMainPage completed. Extracted count: ${results.size}, hasNext: ${!nextContinuation.isNullOrBlank()}")
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
     }
-    
+
     override suspend fun search(query: String): List<SearchResponse> {
         return search(query, 1)?.items ?: emptyList()
     }
