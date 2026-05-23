@@ -22,6 +22,10 @@ class YoutubeProvider(
     private val sharedPref: SharedPreferences? = null
 ) : MainAPI() {
 
+    // ✅ 핵심 픽스: sharedPref가 null일 경우 앱의 전역 설정값을 강제로 끌어옵니다.
+    val appPrefs: SharedPreferences?
+        get() = sharedPref ?: AcraApplication.context?.let { PreferenceManager.getDefaultSharedPreferences(it) }
+
     data class CustomSection(
         @JsonProperty("name") var name: String = "",
         @JsonProperty("url") var url: String = "",
@@ -39,7 +43,12 @@ class YoutubeProvider(
     override var mainUrl = "https://www.youtube.com"
     override var name = "YouTube"
     override val hasMainPage = true
-    override var lang = sharedPref?.getString("youtube_language", "ko") ?: "ko"
+    
+    // ✅ 동적으로 언어 설정을 읽어오도록 변경
+    override var lang: String
+        get() = appPrefs?.getString("youtube_language", "ko") ?: "ko"
+        set(value) {}
+        
     override val supportedTypes = setOf(TvType.Movie, TvType.Live)
 
     companion object {
@@ -50,7 +59,9 @@ class YoutubeProvider(
     private var isSearchContext = false
 
 
-class YouTubeInterceptor(private val prefs: SharedPreferences?, private val provider: YoutubeProvider) : Interceptor {
+    // ✅ Interceptor가 appPrefs를 정상적으로 참조하도록 구조 변경
+    class YouTubeInterceptor(private val provider: YoutubeProvider) : Interceptor {
+        private val prefs get() = provider.appPrefs
         
         private fun sha1(input: String): String {
             val md = java.security.MessageDigest.getInstance("SHA-1")
@@ -105,7 +116,7 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
         }
     }
     
-    private val ytInterceptor = YouTubeInterceptor(sharedPref, this)
+    private val ytInterceptor = YouTubeInterceptor(this)
     private val safariUserAgent =
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
 
@@ -192,15 +203,12 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
         if (viewText.isNullOrBlank()) return "N/A"
         var text = viewText.toString().trim()
         
-        // "조회수 23만회" -> "23만회" 로 깔끔하게 정리
         text = text.replace("조회수", "").replace("views", "").replace("مشاهدة", "").trim()
         
-        // 한국어 단위(만, 천, 억, 회)나 영문 단위(K, M, B)가 이미 포함되어 있으면 그대로 반환
         if (text.matches(Regex(".*[만천억회KMBkmb].*")) && text.length < 15) {
             return text
         }
         
-        // 단위가 없는 순수 숫자일 경우에만 K, M, B로 변환
         val digits = text.filter { it.isDigit() }
         if (digits.isBlank()) return text
         return try {
@@ -215,8 +223,6 @@ class YouTubeInterceptor(private val prefs: SharedPreferences?, private val prov
             text
         }
     }
-    
-
 
     private fun getRawText(map: Map<*, *>?, key: String): String? {
         val obj = map?.getMapKey(key) ?: return null
@@ -575,14 +581,12 @@ private fun collectFromRenderer(
 
     private fun findTokenRecursive(data: Any?): String? {
         if (data is Map<*, *>) {
-            // [방어 로직]: 칩 바(가로 스크롤 메뉴) 자체의 더미 토큰 탐색 원천 차단
             if (data.containsKey("feedFilterChipBarRenderer") || 
                 data.containsKey("chipCloudRenderer") || 
                 data.containsKey("relatedChipCloudRenderer")) {
                 return null
             }
 
-            // [추출 로직 1]: 명시적 비디오 그리드 스크롤 렌더러 타겟팅
             val renderer = data["continuationItemRenderer"] as? Map<*, *>
             if (renderer != null) {
                 val endpoint = renderer["continuationEndpoint"] as? Map<*, *>
@@ -596,14 +600,12 @@ private fun collectFromRenderer(
                 }
             }
 
-            // [추출 로직 2]: 레거시 스크롤 컨테이너 타겟팅
             val nextData = data["nextContinuationData"] as? Map<*, *>
             if (nextData != null) {
                 val token = nextData["continuation"] as? String
                 if (!token.isNullOrBlank()) return token
             }
 
-            // 정방향 재귀 탐색 (구조적 결함을 차단했으므로 역순 탐색 불필요)
             for (v in data.values) {
                 val t = findTokenRecursive(v)
                 if (t != null) return t
@@ -626,10 +628,10 @@ private fun collectFromRenderer(
                 else -> "Home"
             }
 
-            if (sharedPref?.getBoolean("show_trending_home", true) == true) {
+            if (appPrefs?.getBoolean("show_trending_home", true) == true) {
                 list.add(MainPageData(homeTitle, "Home", horizontalImages = true))
                 
-                val cachedChipsJson = sharedPref.getString("yt_cached_chips", "[]") ?: "[]"
+                val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
                 try {
                     val chips: List<CachedChip> = AppUtils.parseJson(cachedChipsJson)
                     chips.forEach { chip ->
@@ -652,7 +654,7 @@ private fun collectFromRenderer(
 
 
     private fun getCustomHomepages(): List<CustomSection> {
-        val json = sharedPref?.getString("custom_homepages_v3", "[]") ?: "[]"
+        val json = appPrefs?.getString("custom_homepages_v3", "[]") ?: "[]"
         return try {
             AppUtils.parseJson<List<CustomSection>>(json)
         } catch (e: Exception) {
@@ -677,7 +679,8 @@ private fun collectFromRenderer(
     private val continuationTokens = mutableMapOf<String, String>()
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val maxPages = sharedPref?.getInt("channel_pages_limit", 10) ?: 10
+        // ✅ UI에서 설정한 값을 정상적으로 읽어옵니다. (기본값 10)
+        val maxPages = appPrefs?.getInt("channel_pages_limit", 10) ?: 10
         if (page > maxPages) return newHomePageResponse(request, emptyList(), hasNext = false)
 
         val results = mutableListOf<SearchResponse>()
@@ -690,9 +693,9 @@ private fun collectFromRenderer(
             if (page == 1) {
                 continuationTokens.remove(requestData)
                 if (isChip) {
-                    savedApiKey = savedApiKey ?: sharedPref?.getString("yt_api_key", null)
-                    savedVisitorData = savedVisitorData ?: sharedPref?.getString("yt_visitor_data", null)
-                    savedClientVersion = savedClientVersion ?: sharedPref?.getString("yt_client_version", "2.20240725.01.00")
+                    savedApiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
+                    savedVisitorData = savedVisitorData ?: appPrefs?.getString("yt_visitor_data", null)
+                    savedClientVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", "2.20240725.01.00")
                     val tokenToUse = requestData.removePrefix("chip_")
 
                     if (!savedApiKey.isNullOrBlank()) {
@@ -731,7 +734,7 @@ private fun collectFromRenderer(
                     savedClientVersion = findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: savedClientVersion ?: "2.20240725.01.00"
                     
                     if (!savedApiKey.isNullOrBlank()) {
-                        sharedPref?.edit()
+                        appPrefs?.edit()
                             ?.putString("yt_api_key", savedApiKey)
                             ?.putString("yt_visitor_data", savedVisitorData)
                             ?.putString("yt_client_version", savedClientVersion)
@@ -756,7 +759,7 @@ private fun collectFromRenderer(
                                     }
                                 }
                                 if (jsonArray.length() > 0) {
-                                    sharedPref?.edit()?.putString("yt_cached_chips", jsonArray.toString())?.apply()
+                                    appPrefs?.edit()?.putString("yt_cached_chips", jsonArray.toString())?.apply()
                                 }
                             }
                         }
@@ -767,9 +770,9 @@ private fun collectFromRenderer(
             } else {
                 val tokenToUse = continuationTokens[requestData]
                 if (!tokenToUse.isNullOrBlank()) {
-                    val apiKey = savedApiKey ?: sharedPref?.getString("yt_api_key", null)
-                    val vData = savedVisitorData ?: sharedPref?.getString("yt_visitor_data", null) ?: ""
-                    val cVersion = savedClientVersion ?: sharedPref?.getString("yt_client_version", "2.20240725.01.00") ?: "2.20240725.01.00"
+                    val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
+                    val vData = savedVisitorData ?: appPrefs?.getString("yt_visitor_data", null) ?: ""
+                    val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", "2.20240725.01.00") ?: "2.20240725.01.00"
                     val apiUrl = if (requestData.contains("/results")) "$mainUrl/youtubei/v1/search?key=$apiKey" else "$mainUrl/youtubei/v1/browse?key=$apiKey"
                     val payload = mapOf(
                         "context" to mapOf(
@@ -842,7 +845,8 @@ private fun collectFromRenderer(
     }
 
     override suspend fun search(query: String, page: Int): SearchResponseList? {
-        val maxPages = sharedPref?.getInt("channel_pages_limit", 10) ?: 10
+        // ✅ UI 설정값 반영
+        val maxPages = appPrefs?.getInt("channel_pages_limit", 10) ?: 10
         if (page > maxPages) return newSearchResponseList(emptyList(), false)
 
         val results = mutableListOf<SearchResponse>()
@@ -856,7 +860,7 @@ private fun collectFromRenderer(
         var playlistMode = false
         var spParam = ""
 
-        val playlistTag = sharedPref?.getString("playlist_search_tag", "{p}") ?: "{p}"
+        val playlistTag = appPrefs?.getString("playlist_search_tag", "{p}") ?: "{p}"
         if (query.contains(playlistTag)) {
             actualQuery = query.replace(playlistTag, "").trim()
             playlistMode = true
@@ -993,7 +997,7 @@ private fun collectFromRenderer(
                 }
                 
                 val endpointUrl = safeGet(activeTab, "tabRenderer", "endpoint", "commandMetadata", "webCommandMetadata", "url") as? String
-                println("[YT_CHANNEL_DEBUG] 1차 파싱 결과 - 활성 탭 엔드포인트: $endpointUrl")
+                println("[YT_CHANNEL_DEBUG] 1차 파 파싱 결과 - 활성 탭 엔드포인트: $endpointUrl")
 
                 if (endpointUrl != null && !endpointUrl.endsWith("/videos")) {
                     val canonicalUrl = response.document.selectFirst("link[rel=canonical]")?.attr("href")
@@ -1080,7 +1084,6 @@ private fun collectFromRenderer(
                 fun extractVideosFromItems(items: List<*>, collectTo: MutableList<Episode>) {
                     println("[YT_CHANNEL_DEBUG] extractVideosFromItems() 호출됨. 분석할 아이템 개수: ${items.size}")
                     
-                    // 재귀 구조 평탄화(Flattening) 함수: 모든 Map 내부를 싹 다 까서 특정 키를 가진 객체들을 수집
                     fun findAllRenderers(obj: Any?, targetKeys: List<String>, results: MutableList<Map<*,*>>) {
                         when (obj) {
                             is Map<*, *> -> {
@@ -1112,6 +1115,10 @@ private fun collectFromRenderer(
                                 return@forEachIndexed
                             }
 
+                            if (map.containsKey("continuationItemRenderer")) {
+                                return@forEachIndexed
+                            }
+
                             val foundRenderers = mutableListOf<Map<*,*>>()
                             findAllRenderers(map, targetRendererKeys, foundRenderers)
 
@@ -1121,42 +1128,34 @@ private fun collectFromRenderer(
                             }
 
                             for (renderer in foundRenderers) {
-                                // 일반적인 비디오 렌더러 ID 추출
                                 var vidId = renderer["videoId"] as? String
                                 
-                                // lockupViewModel 계열의 ID 추출
                                 if (vidId.isNullOrBlank() && renderer.containsKey("contentId")) {
                                     vidId = renderer["contentId"] as? String
                                 }
-                                // reelItemRenderer 계열의 ID 추출
                                 if (vidId.isNullOrBlank()) {
                                     vidId = safeGet(renderer, "onTap", "innertubeCommand", "reelWatchEndpoint", "videoId") as? String
                                 }
 
                                 if (!vidId.isNullOrBlank()) {
-                                    // 1. 제목(Title) 추출: extractTitle 대신 더 강력한 getText 사용
                                     var vidTitle = getText(renderer["title"])
                                     if (vidTitle.isBlank()) vidTitle = getText(renderer["headline"])
                                     if (vidTitle.isBlank()) vidTitle = getText(renderer["shortBylineText"])
                                     if (vidTitle.isBlank()) vidTitle = getText(safeGet(renderer, "metadata", "lockupMetadataViewModel", "title"))
                                     if (vidTitle.isBlank()) vidTitle = "Video"
 
-                                    // 2. 썸네일(Thumbnail) 추출
                                     val thumb = getBestThumbnail(renderer["thumbnail"]) 
                                         ?: getBestThumbnail(safeGet(renderer, "contentImage", "image", "sources")) 
                                         ?: buildThumbnailFromId(vidId)
 
-                                    // 3. 메타데이터(조회수, 게시일자) 추출
                                     val metaList = mutableListOf<String>()
 
-                                    // (A) 구형 렌더러 방식 (videoRenderer 등)
                                     val legacyViews = getText(renderer["viewCountText"])
                                     if (legacyViews.isNotBlank()) metaList.add(formatViews(legacyViews))
 
                                     val legacyTime = getText(renderer["publishedTimeText"])
                                     if (legacyTime.isNotBlank()) metaList.add(legacyTime)
 
-                                    // (B) 신형 렌더러 방식 (lockupViewModel 등)
                                     if (metaList.isEmpty()) {
                                         val rows = safeGet(renderer, "metadata", "lockupMetadataViewModel", "metadata", "contentMetadataViewModel", "metadataRows") as? List<*>
                                         rows?.forEach { row ->
@@ -1164,11 +1163,10 @@ private fun collectFromRenderer(
                                             parts?.forEach { part ->
                                                 val text = getText(safeGet(part, "text"))
                                                 if (text.isNotBlank()) {
-                                                    // 주의: formatViews는 날짜를 넣으면 숫자만 남기는 부작용이 있으므로, 조회수 키워드가 있을 때만 적용
                                                     if (text.matches(Regex(".*(조회수|views|회|مشاهدة|[KMBkmb]).*"))) {
                                                         metaList.add(formatViews(text))
                                                     } else {
-                                                        metaList.add(text) // 게시일자 등은 원본 그대로 추가
+                                                        metaList.add(text)
                                                     }
                                                 }
                                             }
@@ -1182,7 +1180,6 @@ private fun collectFromRenderer(
                                     })
                                     println("[YT_CHANNEL_DEBUG] Item $index: 렌더러 파싱 성공 -> $vidTitle (ID: $vidId)")
                                     
-                                    // 한 아이템 내에서 여러 렌더러가 발견될 경우 첫 번째 것만 처리하고 다음 아이템으로 넘어감
                                     break 
                                 }
                             }
@@ -1238,7 +1235,8 @@ private fun collectFromRenderer(
                 println("[YT_CHANNEL_DEBUG] 페이지네이션 토큰 발견 여부: ${currentToken != null}")
 
                 var pagesFetchedLocal = 1
-                val maxPages = sharedPref?.getInt("channel_pages_limit", 10) ?: 10
+                // ✅ UI 설정값 반영
+                val maxPages = appPrefs?.getInt("channel_pages_limit", 10) ?: 10
 
                 while (!currentToken.isNullOrBlank() && pagesFetchedLocal < maxPages && !apiKey.isNullOrBlank()) {
                     try {
@@ -1249,8 +1247,8 @@ private fun collectFromRenderer(
                                 "client" to mapOf(
                                     "clientName" to "WEB",
                                     "clientVersion" to clientVersion,
-                                    "hl" to lang, // ✅ 누락되었던 언어 설정 추가
-                                    "gl" to if (lang == "ko") "KR" else "US", // ✅ 지역 설정 추가
+                                    "hl" to lang, // ✅ 언어 설정 반영
+                                    "gl" to if (lang == "ko") "KR" else "US", // ✅ 지역 설정 반영
                                     "visitorData" to (visitorData ?: ""),
                                     "platform" to "DESKTOP"
                                 )
@@ -1262,7 +1260,6 @@ private fun collectFromRenderer(
                         val continuationItems = findContinuationItemsRecursive(jsonResponse) ?: break
                         extractVideosFromItems(continuationItems, allEpisodes)
                         currentToken = findContinuationTokenFromItems(continuationItems)
-                        kotlinx.coroutines.delay((10).toLong())
                     } catch (e: Exception) {
                         break
                     }
@@ -1469,13 +1466,7 @@ private fun collectFromRenderer(
         val videoId = data.extractYoutubeId() ?: data
         val fullUrl = "https://www.youtube.com/watch?v=$videoId"
 
-        val context = AcraApplication.context
-        val playerType = if (context != null) {
-            val prefs = PreferenceManager.getDefaultSharedPreferences(context)
-            prefs.getString("youtube_player_type", "advanced")
-        } else {
-            "advanced"
-        }
+        val playerType = appPrefs?.getString("youtube_player_type", "advanced") ?: "advanced"
 
         var isLive = false
         var playerResponseText = ""
@@ -1486,8 +1477,8 @@ private fun collectFromRenderer(
                     "client" to mapOf(
                         "clientName" to "WEB",
                         "clientVersion" to "2.20240725.01.00",
-                        "hl" to "ko",
-                        "gl" to "KR"
+                        "hl" to lang,
+                        "gl" to if (lang == "ko") "KR" else "US"
                     )
                 ),
                 "videoId" to videoId
@@ -1546,8 +1537,8 @@ private fun collectFromRenderer(
                     "client" to mapOf(
                         "clientName" to "3",
                         "clientVersion" to "19.29.35",
-                        "hl" to "en",
-                        "gl" to "US"
+                        "hl" to lang,
+                        "gl" to if (lang == "ko") "KR" else "US"
                     )
                 ),
                 "videoId" to videoId
@@ -1582,17 +1573,6 @@ private fun collectFromRenderer(
                 return base + sep + params.map { "${it.key}=${URLEncoder.encode(it.value, "utf-8")}" }.joinToString("&")
             }
 
-            val ALL_LANGS = listOf(
-                "aa","ab","af","ak","am","ar","as","ay","az","ba","be","bg","bho","bn","bo","br","bs","ca","ceb","co","crs",
-                "cs","cy","da","de","dv","dz","ee","el","en","eo","es","et","eu","fa","fi","fil","fj","fo","fr","fy","ga",
-                "gaa","gd","gl","gn","gu","gv","ha","haw","he","hi","hmn","hr","ht","hu","hy","id","ig","is","it","iu","iw",
-                "ja","jv","ka","kha","kk","kl","km","kn","ko","kri","ku","ky","la","lb","lg","ln","lo","lt","lua","luo","lv",
-                "mfe","mg","mi","mk","ml","mn","mr","ms","mt","my","ne","new","nl","no","nso","ny","oc","om","or","os","pa",
-                "pam","pl","ps","pt","pt-BR","pt-PT","qu","rn","ro","ru","rw","sa","sd","sg","si","sk","sl","sm","sn","so","sq",
-                "sr","ss","st","su","sv","sw","ta","te","tg","th","ti","tk","tn","to","tr","ts","tt","tum","ug","uk","ur","uz",
-                "ve","vi","war","wo","xh","yi","yo","zh-Hans","zh-Hant","zu"
-            )
-
             try {
                 val videoId = data.extractYoutubeId() ?: run {
                     if (data.length == 11 && data.matches(Regex("[A-Za-z0-9_-]{11}"))) {
@@ -1606,7 +1586,7 @@ private fun collectFromRenderer(
                     "User-Agent" to safariUserAgent,
                     "Accept-Language" to "en-US,en;q=0.5"
                 )
-                val watchUrl = "$mainUrl/watch?v=$videoId&hl=en"
+                val watchUrl = "$mainUrl/watch?v=$videoId&hl=$lang"
 
                 val watchHtml = app.get(watchUrl, headers = safariHeaders).text
 
@@ -1635,8 +1615,8 @@ private fun collectFromRenderer(
                 }
 
                 val clientMap = mapOf(
-                    "hl" to "ko",
-                    "gl" to "KR",
+                    "hl" to lang,
+                    "gl" to if (lang == "ko") "KR" else "US",
                     "clientName" to "WEB",
                     "clientVersion" to clientVersion,
                     "userAgent" to safariUserAgent,
@@ -1656,7 +1636,7 @@ private fun collectFromRenderer(
                 if (!visitorData.isNullOrBlank()) postHeaders["X-Goog-Visitor-Id"] = visitorData
 
                 val cookieBuilder = StringBuilder()
-                val savedVis = sharedPref?.getString("VISITOR_INFO1_LIVE", null)
+                val savedVis = appPrefs?.getString("VISITOR_INFO1_LIVE", null)
                 if (!savedVis.isNullOrBlank()) {
                     cookieBuilder.append("VISITOR_INFO1_LIVE=$savedVis; ")
                 } else {
@@ -1667,14 +1647,14 @@ private fun collectFromRenderer(
                 var sapisidVal: String? = null
 
                 authKeys.forEach { key ->
-                    val value = sharedPref?.getString(key, null)
+                    val value = appPrefs?.getString(key, null)
                     if (!value.isNullOrBlank()) {
                         cookieBuilder.append("$key=$value; ")
                         if (key == "SAPISID") sapisidVal = value
                     }
                 }
 
-                cookieBuilder.append("PREF=f6=40000000&hl=en; CONSENT=YES+fx.456722336;")
+                cookieBuilder.append("PREF=f6=40000000&hl=$lang; CONSENT=YES+fx.456722336;")
                 postHeaders["Cookie"] = cookieBuilder.toString()
 
                 if (!sapisidVal.isNullOrBlank()) {
