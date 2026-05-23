@@ -884,89 +884,122 @@ class YoutubeProvider(
                             ?.apply()
                     }
 
-                    val initialData = extractYtInitialData(html)
-                    if (initialData != null) {
-                        // [하위 탭 정밀 대응 설계] 
-                        // GET 결과로 내려온 탭 배열 중 주소에 정의된 하위 탭 키워드(예: sportstab)가 매칭되는 대상 탐색
-                        val tabs = safeGet(initialData, "contents", "twoColumnBrowseResultsRenderer", "tabs") as? List<*>
-                        var targetTab: Map<*, *>? = null
-                        if (tabs != null) {
-                            for (tab in tabs) {
-                                val tabRenderer = (tab as? Map<*, *>)?.get("tabRenderer") as? Map<*, *> ?: continue
-                                val tabUrl = safeGet(tabRenderer, "endpoint", "commandMetadata", "webCommandMetadata", "url") as? String ?: ""
-                                if (tabUrl.isNotBlank()) {
-                                    val lastSegment = tabUrl.substringAfterLast("/").substringBefore("?")
-                                    if (lastSegment.isNotBlank() && requestData.contains(lastSegment)) {
-                                        targetTab = tabRenderer
-                                        break
-                                    }
-                                }
-                            }
-                        }
+                    // [하위 서브 탭 우회 설계] HTML에서 정식 channelId 고속 검출 및 ss=CMMG 등 매칭 검사
+                    val channelId = Regex("""<meta itemprop="channelId" content="([^"]+)"""").find(html)?.groupValues?.getOrNull(1)
+                        ?: requestData.substringAfter("/channel/").substringBefore("/")
+                    
+                    val hasSsParam = requestData.contains("ss=")
+                    var skipInitialDataProcess = false
 
-                        var skipInitialDataProcess = false
-                        // 세부 쿼리 파라미터(?ss= 등)를 지목한 주소인 경우 탭 리다이렉트(POST)를 차단하여 원본 하위 탭을 그대로 긁어오도록 조치
-                        val hasSubParams = requestData.contains("?")
-                        // 타겟 탭이 존재하나 현재 HTML 상에서 비활성화된 탭이며, 추가 하위 파라미터가 없을 때만 리다이렉트 수행
-                        if (targetTab != null && targetTab["selected"] != true && !hasSubParams) {
-                            val browseId = safeGet(targetTab, "endpoint", "browseEndpoint", "browseId") as? String
-                            val params = safeGet(targetTab, "endpoint", "browseEndpoint", "params") as? String
-                            println("[YT_DEBUG] Custom sub-tab detected: $browseId, params: $params. Fetching tab POST request...")
-                            if (!browseId.isNullOrBlank() && !savedApiKey.isNullOrBlank()) {
-                                val apiUrl = "$mainUrl/youtubei/v1/browse?key=$savedApiKey"
-                                val payload = mapOf(
-                                    "context" to mapOf(
-                                        "client" to mapOf(
-                                            "clientName" to "WEB",
-                                            "clientVersion" to (savedClientVersion ?: "2.20240725.01.00"),
-                                            "platform" to "DESKTOP",
-                                            "hl" to lang
-                                        )
-                                    ),
-                                    "browseId" to browseId,
-                                    "params" to params
+                    // 만약 주소에 ss=CMMG 같은 하위 섹션 지목 파라미터가 들어있는 경우 리다이렉트 우회용 API POST 직접 호출
+                    if (hasSsParam && !channelId.isNullOrBlank() && !savedApiKey.isNullOrBlank()) {
+                        val ssParam = requestData.substringAfter("ss=").substringBefore("&")
+                        println("[YT_DEBUG] Sub-tab 'ss=' param detected: $ssParam on channel: $channelId. Sending browse POST directly...")
+                        val apiUrl = "$mainUrl/youtubei/v1/browse?key=$savedApiKey"
+                        val payload = mapOf(
+                            "context" to mapOf(
+                                "client" to mapOf(
+                                    "clientName" to "WEB",
+                                    "clientVersion" to (savedClientVersion ?: "2.20240725.01.00"),
+                                    "platform" to "DESKTOP",
+                                    "hl" to lang
                                 )
-                                val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
-                                val postResponse = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
-                                if (postResponse != null) {
-                                    println("[YT_DEBUG] Custom sub-tab POST response success. Parsing...")
-                                    processRecursive(postResponse, results, seenIds, playlistMode = false)
-                                    nextContinuation = findTokenRecursive(postResponse)
-                                    println("[YT_DEBUG] Next continuation token from custom tab POST: $nextContinuation")
-                                    skipInitialDataProcess = true
-                                }
-                            }
+                            ),
+                            "browseId" to channelId,
+                            "params" to ssParam
+                        )
+                        val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
+                        val postResponse = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                        if (postResponse != null) {
+                            println("[YT_DEBUG] Sub-tab 'ss=' POST response success. Parsing...")
+                            processRecursive(postResponse, results, seenIds, playlistMode = false)
+                            nextContinuation = findTokenRecursive(postResponse)
+                            println("[YT_DEBUG] Next continuation token from sub-tab POST: $nextContinuation")
+                            skipInitialDataProcess = true
                         }
+                    }
 
-                        // 하위 탭 자가 Redirection을 타지 않은 일반적인 상황에서만 본문 HTML의 데이터를 기본 수집
-                        if (!skipInitialDataProcess) {
-                            if (requestData == "Home") {
-                                val chipBar = safeGet(initialData, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0, "tabRenderer", "content", "richGridRenderer", "header", "feedFilterChipBarRenderer", "contents") as? List<*>
-                                println("[YT_DEBUG] Home page tabs chipBar found: ${chipBar != null}")
-                                if (chipBar != null) {
-                                    val jsonArray = org.json.JSONArray()
-                                    for (chipItem in chipBar) {
-                                        val chipMap = (chipItem as? Map<*, *>)?.get("chipCloudChipRenderer") as? Map<*, *> ?: continue
-                                        val text = getText(chipMap["text"])
-                                        val token = safeGet(chipMap, "navigationEndpoint", "continuationCommand", "token") as? String
-                                        if (text.isNotBlank() && !token.isNullOrBlank()) {
-                                            val obj = org.json.JSONObject()
-                                            obj.put("name", text)
-                                            obj.put("token", token)
-                                            jsonArray.put(obj)
+                    if (!skipInitialDataProcess) {
+                        val initialData = extractYtInitialData(html)
+                        if (initialData != null) {
+                            // [하위 탭 기본 대응] 일반적인 카테고리 탭(예: /videos)에 대한 대응
+                            val tabs = safeGet(initialData, "contents", "twoColumnBrowseResultsRenderer", "tabs") as? List<*>
+                            var targetTab: Map<*, *>? = null
+                            if (tabs != null) {
+                                for (tab in tabs) {
+                                    val tabRenderer = (tab as? Map<*, *>)?.get("tabRenderer") as? Map<*, *> ?: continue
+                                    val tabUrl = safeGet(tabRenderer, "endpoint", "commandMetadata", "webCommandMetadata", "url") as? String ?: ""
+                                    if (tabUrl.isNotBlank()) {
+                                        val lastSegment = tabUrl.substringAfterLast("/").substringBefore("?")
+                                        if (lastSegment.isNotBlank() && requestData.contains(lastSegment)) {
+                                            targetTab = tabRenderer
+                                            break
                                         }
                                     }
-                                    if (jsonArray.length() > 0) {
-                                        appPrefs?.edit()?.putString("yt_cached_chips", jsonArray.toString())?.apply()
+                                }
+                            }
+
+                            var skipMainProcess = false
+                            val hasSubParams = requestData.contains("?")
+                            if (targetTab != null && targetTab["selected"] != true && !hasSubParams) {
+                                val browseId = safeGet(targetTab, "endpoint", "browseEndpoint", "browseId") as? String
+                                val params = safeGet(targetTab, "endpoint", "browseEndpoint", "params") as? String
+                                println("[YT_DEBUG] Custom sub-tab detected: $browseId, params: $params. Fetching tab POST request...")
+                                if (!browseId.isNullOrBlank() && !savedApiKey.isNullOrBlank()) {
+                                    val apiUrl = "$mainUrl/youtubei/v1/browse?key=$savedApiKey"
+                                    val payload = mapOf(
+                                        "context" to mapOf(
+                                            "client" to mapOf(
+                                                "clientName" to "WEB",
+                                                "clientVersion" to (savedClientVersion ?: "2.20240725.01.00"),
+                                                "platform" to "DESKTOP",
+                                                "hl" to lang
+                                            )
+                                        ),
+                                        "browseId" to browseId,
+                                        "params" to params
+                                    )
+                                    val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
+                                    val postResponse = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                                    if (postResponse != null) {
+                                        println("[YT_DEBUG] Custom sub-tab POST response success. Parsing...")
+                                        processRecursive(postResponse, results, seenIds, playlistMode = false)
+                                        nextContinuation = findTokenRecursive(postResponse)
+                                        println("[YT_DEBUG] Next continuation token from custom tab POST: $nextContinuation")
+                                        skipMainProcess = true
                                     }
                                 }
                             }
-                            processRecursive(initialData, results, seenIds, playlistMode = false)
-                            nextContinuation = findTokenRecursive(initialData)
-                            println("[YT_DEBUG] Next continuation from Home parsed: $nextContinuation")
+
+                            if (!skipMainProcess) {
+                                if (requestData == "Home") {
+                                    val chipBar = safeGet(initialData, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0, "tabRenderer", "content", "richGridRenderer", "header", "feedFilterChipBarRenderer", "contents") as? List<*>
+                                    println("[YT_DEBUG] Home page tabs chipBar found: ${chipBar != null}")
+                                    if (chipBar != null) {
+                                        val jsonArray = org.json.JSONArray()
+                                        for (chipItem in chipBar) {
+                                            val chipMap = (chipItem as? Map<*, *>)?.get("chipCloudChipRenderer") as? Map<*, *> ?: continue
+                                            val text = getText(chipMap["text"])
+                                            val token = safeGet(chipMap, "navigationEndpoint", "continuationCommand", "token") as? String
+                                            if (text.isNotBlank() && !token.isNullOrBlank()) {
+                                                val obj = org.json.JSONObject()
+                                                obj.put("name", text)
+                                                obj.put("token", token)
+                                                jsonArray.put(obj)
+                                            }
+                                        }
+                                        if (jsonArray.length() > 0) {
+                                            appPrefs?.edit()?.putString("yt_cached_chips", jsonArray.toString())?.apply()
+                                        }
+                                    }
+                                }
+                                processRecursive(initialData, results, seenIds, playlistMode = false)
+                                nextContinuation = findTokenRecursive(initialData)
+                                println("[YT_DEBUG] Next continuation from Home parsed: $nextContinuation")
+                            }
+                        } else {
+                            println("[YT_DEBUG] InitialData extraction was null.")
                         }
-                    } else {
-                        println("[YT_DEBUG] InitialData extraction was null.")
                     }
                 }
             } else {
@@ -1058,7 +1091,9 @@ class YoutubeProvider(
         saveContinuationToken(requestData, nextContinuation)
         println("[YT_DEBUG] getMainPage completed. Extracted count: ${results.size}, hasNext: ${!nextContinuation.isNullOrBlank()}")
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
-    }    
+    }
+                             
+                    
 
     override suspend fun search(query: String): List<SearchResponse> {
         return search(query, 1)?.items ?: emptyList()
