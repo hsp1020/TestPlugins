@@ -19,6 +19,9 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.PrintWriter
@@ -95,7 +98,7 @@ open class YoutubeExtractor : ExtractorApi() {
             // 컴파일 충돌 차단을 위해 가벼운 사설 OkHttpClient 단독 가동
             val localOkHttpClient = OkHttpClient.Builder()
                 .connectTimeout(5, java.util.concurrent.TimeUnit.SECONDS)
-                .readTimeout(20, java.util.concurrent.TimeUnit.SECONDS) // 다운로드 및 로컬 빌드를 가미하기 위해 읽기 타임아웃 확보
+                .readTimeout(45, java.util.concurrent.TimeUnit.SECONDS) // 2160p 대용량 다운로드 및 병합 시간을 위해 읽기 타임아웃 45초 확보
                 .build()
 
             val responseText = withContext(Dispatchers.IO) {
@@ -149,24 +152,29 @@ open class YoutubeExtractor : ExtractorApi() {
             // [추가] 사설 yt-dlp API 서버를 통해 고화질 원클릭 병합 링크 확보 시도
             // =================================================================
             println("[YT_DEBUG] 사설 yt-dlp API 서버를 통한 병합 주소 추출 시도")
-            val qualitiesToRequest = listOf("1080", "720")
-            for (q in qualitiesToRequest) {
-                val mergedUrl = getYtDlpMergedLink(youtubeWatchUrl, q)
-                if (!mergedUrl.isNullOrBlank()) {
-                    println("[YT_DEBUG] 사설 API로부터 병합 링크 획득 성공 -> ${q}p")
-                    builtLinks.add(
-                        newExtractorLink(
-                            "${this.name} (Direct Download)",
-                            "${q}p [Merged - Download]",
-                            mergedUrl,
-                            type = INFER_TYPE
-                        ) {
-                            this.referer = mainUrl
-                            this.quality = q.toIntOrNull() ?: 1080
-                        }
-                    )
-                }
+            val qualitiesToRequest = listOf("2160", "1080", "720")
+            
+            // 2160p 해상도가 추가됨에 따라, 전체 타임아웃(Read Timeout) 발생을 막기 위해 코루틴 병렬(Parallel) 추출 적용
+            val mergedLinks = coroutineScope {
+                qualitiesToRequest.map { q ->
+                    async {
+                        val mergedUrl = getYtDlpMergedLink(youtubeWatchUrl, q)
+                        if (!mergedUrl.isNullOrBlank()) {
+                            println("[YT_DEBUG] 사설 API로부터 병합 링크 획득 성공 -> ${q}p")
+                            newExtractorLink(
+                                "${this@YoutubeExtractor.name} (Direct Download)",
+                                "${q}p [Merged - Download]",
+                                mergedUrl,
+                                type = INFER_TYPE
+                            ) {
+                                this.referer = mainUrl
+                                this.quality = q.toIntOrNull() ?: 1080
+                            }
+                        } else null
+                    }
+                }.awaitAll().filterNotNull()
             }
+            builtLinks.addAll(mergedLinks)
 
             // =================================================================
             // [오리지널 복원] 기기 실시간 재생용 오리지널 NewPipe Extractor 분석 구동
