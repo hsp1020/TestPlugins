@@ -180,6 +180,8 @@ open class YoutubeExtractor : ExtractorApi() {
                                         ) {
                                             this.referer = mainUrl
                                             this.quality = video.height
+                                            // ✅ 403 에러 방지용 User-Agent 헤더 강제 주입
+                                            this.headers = mapOf("User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
                                         }
                                     )
                                 }
@@ -205,6 +207,8 @@ open class YoutubeExtractor : ExtractorApi() {
                         newExtractorLink(this.name, "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
                             this.referer = mainUrl
                             this.quality = mHeight
+                            // ✅ 403 에러 방지용 User-Agent 헤더 강제 주입
+                            this.headers = mapOf("User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
                         }
                     )
                 }
@@ -379,7 +383,7 @@ open class YoutubeExtractor : ExtractorApi() {
     }
 
     private fun escapeXml(url: String): String {
-        return url.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        return url.replace("&", "&amp;").replace("<", "&gt;")
     }
 
     private fun getMimeTypeFromUrl(url: String, isAudio: Boolean): String {
