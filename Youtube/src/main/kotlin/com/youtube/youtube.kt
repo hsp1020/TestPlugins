@@ -199,25 +199,40 @@ class YoutubeProvider(
         return Pair(channel, views)
     }
 
+    // ✅ 조회수 축약 로직 완벽 적용 (152,891회 -> 15만회)
     private fun formatViews(viewText: String?): String {
         if (viewText.isNullOrBlank()) return "N/A"
         var text = viewText.toString().trim()
         
         text = text.replace("조회수", "").replace("views", "").replace("مشاهدة", "").trim()
         
-        if (text.matches(Regex(".*[만천억회KMBkmb].*")) && text.length < 15) {
+        // '회'를 정규식에서 제거하여 "152,891회" 같은 텍스트가 아래의 포맷팅 로직으로 넘어가게 함
+        if (text.matches(Regex(".*[만억KMBkmb].*")) && text.length < 15) {
             return text
         }
         
         val digits = text.filter { it.isDigit() }
         if (digits.isBlank()) return text
+        
         return try {
             val v = digits.toLong()
-            when {
-                v < 1000 -> v.toString()
-                v < 1_000_000 -> String.format("%.1fK", v / 1000.0).replace(".0K", "K")
-                v < 1_000_000_000 -> String.format("%.1fM", v / 1_000_000.0).replace(".0M", "M")
-                else -> String.format("%.1fB", v / 1_000_000_000.0).replace(".0B", "B")
+            if (lang == "ko") {
+                // 한국어일 경우 유튜브 공식 축약 포맷 적용
+                when {
+                    v < 1000 -> "${v}회"
+                    v < 10000 -> String.format("%.1f천회", v / 1000.0).replace(".0천", "천")
+                    v < 100000 -> String.format("%.1f만회", v / 10000.0).replace(".0만", "만")
+                    v < 100000000 -> "${v / 10000}만회" // 10만 이상은 소수점 버림 (예: 15만회)
+                    else -> String.format("%.1f억회", v / 100000000.0).replace(".0억", "억")
+                }
+            } else {
+                // 글로벌(영어 등)일 경우 K, M, B 포맷 적용
+                when {
+                    v < 1000 -> v.toString()
+                    v < 1_000_000 -> String.format("%.1fK", v / 1000.0).replace(".0K", "K")
+                    v < 1_000_000_000 -> String.format("%.1fM", v / 1_000_000.0).replace(".0M", "M")
+                    else -> String.format("%.1fB", v / 1_000_000_000.0).replace(".0B", "B")
+                }
             }
         } catch (e: Exception) {
             text
@@ -679,8 +694,7 @@ private fun collectFromRenderer(
     private val continuationTokens = mutableMapOf<String, String>()
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        // ✅ UI에서 설정한 값을 정상적으로 읽어옵니다. (기본값 10)
-        val maxPages = appPrefs?.getInt("channel_pages_limit", 10) ?: 10
+        val maxPages = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
         if (page > maxPages) return newHomePageResponse(request, emptyList(), hasNext = false)
 
         val results = mutableListOf<SearchResponse>()
@@ -845,8 +859,7 @@ private fun collectFromRenderer(
     }
 
     override suspend fun search(query: String, page: Int): SearchResponseList? {
-        // ✅ UI 설정값 반영
-        val maxPages = appPrefs?.getInt("channel_pages_limit", 10) ?: 10
+        val maxPages = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
         if (page > maxPages) return newSearchResponseList(emptyList(), false)
 
         val results = mutableListOf<SearchResponse>()
@@ -997,7 +1010,7 @@ private fun collectFromRenderer(
                 }
                 
                 val endpointUrl = safeGet(activeTab, "tabRenderer", "endpoint", "commandMetadata", "webCommandMetadata", "url") as? String
-                println("[YT_CHANNEL_DEBUG] 1차 파 파싱 결과 - 활성 탭 엔드포인트: $endpointUrl")
+                println("[YT_CHANNEL_DEBUG] 1차 파싱 결과 - 활성 탭 엔드포인트: $endpointUrl")
 
                 if (endpointUrl != null && !endpointUrl.endsWith("/videos")) {
                     val canonicalUrl = response.document.selectFirst("link[rel=canonical]")?.attr("href")
@@ -1037,8 +1050,23 @@ private fun collectFromRenderer(
                     ?: getBestThumbnail(safeGet(header, "content", "pageHeaderViewModel", "image", "decoratedAvatarViewModel", "avatar", "avatarViewModel", "image"))
                     ?: response.document.selectFirst("meta[property=og:image]")?.attr("content")
 
-                val subscriberCount = extractTitle(safeGet(header, "subscriberCountText") as? Map<*, *>)
-                    ?: safeGet(header, "metadata", "pageHeaderViewModel", "metadata", "contentMetadataViewModel", "metadataRows", 1, "metadataParts", 0, "text", "content") as? String
+                // ✅ 구독자 수 N/A 해결: 배열을 순회하며 능동적으로 구독자 키워드 탐색
+                var subscriberCount = getText(safeGet(header, "subscriberCountText"))
+                if (subscriberCount.isBlank()) {
+                    val rows = safeGet(header, "content", "pageHeaderViewModel", "metadata", "contentMetadataViewModel", "metadataRows") as? List<*>
+                        ?: safeGet(header, "metadata", "pageHeaderViewModel", "metadata", "contentMetadataViewModel", "metadataRows") as? List<*>
+                    
+                    rows?.forEach { row ->
+                        val parts = safeGet(row, "metadataParts") as? List<*>
+                        parts?.forEach { part ->
+                            val text = getText(safeGet(part, "text"))
+                            if (text.matches(Regex(".*(구독자|subscribers|명|K|M|B|sub).*\\s*", RegexOption.IGNORE_CASE))) {
+                                subscriberCount = text
+                            }
+                        }
+                    }
+                }
+                if (subscriberCount.isBlank()) subscriberCount = "N/A"
 
                 val allEpisodes = mutableListOf<Episode>()
 
@@ -1235,8 +1263,7 @@ private fun collectFromRenderer(
                 println("[YT_CHANNEL_DEBUG] 페이지네이션 토큰 발견 여부: ${currentToken != null}")
 
                 var pagesFetchedLocal = 1
-                // ✅ UI 설정값 반영
-                val maxPages = appPrefs?.getInt("channel_pages_limit", 10) ?: 10
+                val maxPages = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
 
                 while (!currentToken.isNullOrBlank() && pagesFetchedLocal < maxPages && !apiKey.isNullOrBlank()) {
                     try {
@@ -1247,8 +1274,8 @@ private fun collectFromRenderer(
                                 "client" to mapOf(
                                     "clientName" to "WEB",
                                     "clientVersion" to clientVersion,
-                                    "hl" to lang, // ✅ 언어 설정 반영
-                                    "gl" to if (lang == "ko") "KR" else "US", // ✅ 지역 설정 반영
+                                    "hl" to lang,
+                                    "gl" to if (lang == "ko") "KR" else "US",
                                     "visitorData" to (visitorData ?: ""),
                                     "platform" to "DESKTOP"
                                 )
@@ -1267,7 +1294,7 @@ private fun collectFromRenderer(
 
                 return newTvSeriesLoadResponse(title, url, TvType.TvSeries, allEpisodes) {
                     this.posterUrl = poster
-                    this.plot = "Channel: $title\nSubscribers: ${subscriberCount ?: "N/A"}\nVideos Fetched: ${allEpisodes.size}"
+                    this.plot = "Channel: $title\nSubscribers: ${subscriberCount}\nVideos Fetched: ${allEpisodes.size}"
                     this.tags = listOf(title, "Channel")
                 }
 
