@@ -135,6 +135,16 @@ class YoutubeProvider(
         }
     }
 
+    private fun getSapisidHash(
+        sapisid: String,
+        origin: String = "https://www.youtube.com"
+    ): String {
+        val timestamp = (System.currentTimeMillis() / 1000).toString()
+        val msg = "$timestamp $sapisid $origin"
+        val hash = sha1(msg)
+        return "SAPISIDHASH ${timestamp}_$hash"
+    }
+    
     private fun getSavedContinuationToken(key: String): String? {
         val hashedKey = sha1(key)
         val token = appPrefs?.getString("cont_token_$hashedKey", null)
