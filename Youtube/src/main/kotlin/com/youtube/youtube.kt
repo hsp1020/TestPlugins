@@ -1208,6 +1208,39 @@ class YoutubeProvider(
 
                 val allEpisodes = mutableListOf<Episode>()
 
+                // ====== [여기서부터 추가] ======
+                fun findContinuationItemsRecursive(obj: Any?): List<*>? {
+                    when (obj) {
+                        is Map<*, *> -> {
+                            if (obj.containsKey("continuationItems")) return obj["continuationItems"] as? List<*>
+                            val keysToTry = listOf(
+                                "onResponseReceivedActions", 
+                                "onResponseReceivedEndpoints", 
+                                "onResponseReceivedCommands", 
+                                "onResponseReceivedResults", 
+                                "continuationContents"
+                            )
+                            for (k in keysToTry) {
+                                val v = obj[k]
+                                val r = findContinuationItemsRecursive(v)
+                                if (r != null) return r
+                            }
+                            for (v in obj.values) {
+                                val r = findContinuationItemsRecursive(v)
+                                if (r != null) return r
+                            }
+                        }
+                        is List<*> -> {
+                            for (i in obj) {
+                                val r = findContinuationItemsRecursive(i)
+                                if (r != null) return r
+                            }
+                        }
+                    }
+                    return null
+                }
+                // ====== [여기까지 추가] ======
+
                 fun extractVideosFromItems(items: List<*>, collectTo: MutableList<Episode>) {
                     println("[YT_CHANNEL_DEBUG] extractVideosFromItems() 호출됨. 분석할 아이템 개수: ${items.size}")
                     
