@@ -78,15 +78,14 @@ open class YoutubeExtractor : ExtractorApi() {
     )
 
     // =================================================================
-    // [수정 완료] Cobalt API v11 공식 문서의 명세 규격을 정확히 대입
+    // [수정 완료] app.okHttpClient 참조 교정 및 Nullable Type-safe 파싱 적용
     // =================================================================
     private suspend fun getCobaltMergedLink(videoUrl: String, quality: String): String? {
         val apiUrl = if (COBALT_API_URL.endsWith("/")) COBALT_API_URL else "$COBALT_API_URL/"
         return try {
-            // 공식 명세: filenamePattern이 아닌 filenameStyle이 올바른 규격입니다.
             val jsonString = "{\"url\":\"$videoUrl\",\"videoQuality\":\"$quality\",\"filenameStyle\":\"pretty\"}"
             
-            // 미디어 타입을 null로 대입하여 OkHttp 자체적으로 charset 수식어가 붙는 것을 우회
+            // 미디어 타입을 null로 대입하여 OkHttp 자체적으로 charset 수식어가 붙는 것을 방지
             val requestBody = jsonString.toRequestBody(null)
             
             val request = Request.Builder()
@@ -97,31 +96,32 @@ open class YoutubeExtractor : ExtractorApi() {
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
                 .build()
 
+            // 비동기 스레드(IO) 내에서 Requests의 okHttpClient를 직접 호출하여 안전하게 실행
             val responseText = withContext(Dispatchers.IO) {
-                app.client.newCall(request).execute().use { response ->
+                app.okHttpClient.newCall(request).execute().use { response ->
                     println("[YT_DEBUG] Cobalt API 응답 수신. 코드: ${response.code}")
                     if (response.isSuccessful) {
                         response.body?.string()
                     } else {
-                        println("[YT_DEBUG] Cobalt API 호출 실패. 에러 코드: ${response.code}, 내용: ${response.body?.string()}")
+                        val errBody = response.body?.string() ?: ""
+                        println("[YT_DEBUG] Cobalt API 호출 실패. 에러 코드: ${response.code}, 내용: $errBody")
                         null
                     }
                 }
             }
 
-            if (!responseText.isNullOrBlank()) {
-                val json = parseJson<Map<String, Any>>(responseText)
+            // ?.let 스코프 검사를 거쳐 컴파일러가 Nullable 타입 에러(Argument type mismatch)를 내지 않도록 엄격하게 문자열 확정
+            responseText?.takeIf { it.isNotBlank() }?.let { text ->
+                val json = parseJson<Map<String, Any>>(text)
                 val status = json["status"] as? String
                 
-                // 공식 명세: v11의 성공 상태값은 "stream"이 아니라 "tunnel" 또는 "redirect"입니다. (하위 호환을 위해 "stream"도 유지)
+                // 공식 명세: v11의 성공 상태값은 "tunnel" 또는 "redirect"입니다. (하위 호환을 위해 "stream"도 유지)
                 if (status == "tunnel" || status == "redirect" || status == "stream") {
                     json["url"] as? String
                 } else {
-                    println("[YT_DEBUG] Cobalt API 처리 상태 비정상: $status. 본문: $responseText")
+                    println("[YT_DEBUG] Cobalt API 처리 상태 비정상: $status. 본문: $text")
                     null
                 }
-            } else {
-                null
             }
         } catch (e: Exception) {
             println("[YT_DEBUG] Cobalt API ($apiUrl) 연동 중 치명적 예외 발생: ${e.message}")
