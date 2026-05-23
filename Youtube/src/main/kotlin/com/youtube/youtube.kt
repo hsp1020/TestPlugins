@@ -1065,6 +1065,8 @@ private fun collectFromRenderer(
                         }
                     }
                 }
+                // ✅ 추가된 로직: "구독자 " 또는 "subscribers " 글자를 깔끔하게 지워버림
+                subscriberCount = subscriberCount.replace(Regex("(구독자|subscribers?)\\s*", RegexOption.IGNORE_CASE), "").trim()
                 if (subscriberCount.isBlank()) subscriberCount = "N/A"
 
 
