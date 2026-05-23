@@ -930,11 +930,12 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val targetType = this.type ?: "movie"
             val metaUrl = "${provider.mainUrl.substringBefore("?")}/meta/$targetType/${this.id}.json"
 
-            // 제목(name)이 비어있으면 [대문자 타입] ID 형식으로 대체 이름을 생성합니다.
+            // 제목(name)이 비어있으면 [첫글자대문자 타입] ID 형식으로 대체 이름을 생성합니다.
             val fallbackName = if (!name.isNullOrBlank()) {
                 name
             } else {
-                "[${targetType.uppercase()}] $id"
+                val capitalizedType = targetType.replaceFirstChar { it.uppercase() }
+                "[$capitalizedType] $id"
             }
 
             return provider.newMovieSearchResponse(fallbackName, metaUrl, TvType.Others) { 
