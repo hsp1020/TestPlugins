@@ -414,7 +414,15 @@ class YoutubeProvider(
 
         val lockup = renderer.getMapKey("lockupViewModel")
         if (lockup != null) {
-            if (lockup.getString("contentType") == "LOCKUP_CONTENT_TYPE_PLAYLIST") {
+            // [추가] 1. 광고 차단을 위한 컨텐츠 타입 검사 코드 추가
+            val contentType = lockup.getString("contentType") ?: ""
+            if (contentType.contains("AD") || contentType.contains("SPONSORED") || contentType.contains("PROMOTED")) {
+                println("[YT_DEBUG] Skipping ad in lockupViewModel (contentType: $contentType)")
+                return null
+            }
+
+            // [변경] 2. 기존의 "LOCKUP_CONTENT_TYPE_PLAYLIST" 조건문을 간결하게 바꾼 형태
+            if (contentType == "LOCKUP_CONTENT_TYPE_PLAYLIST") {
                 val playlistId = lockup.getString("contentId")
                 if (!playlistId.isNullOrBlank() && seenIds.add(playlistId)) {
                     val title = lockup.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")
@@ -457,12 +465,16 @@ class YoutubeProvider(
                 ?: (lockup.getMapKey("content")?.getMapKey("videoRenderer")?.getString("videoId"))
 
             if (!videoId.isNullOrBlank() && seenIds.add(videoId)) {
-                var title = getText(
+                val title = getText(
                     lockup.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")
                         ?.getMapKey("title")
                 )
-                if (title.isEmpty()) title = "YouTube Video"
-                var (channel, views) = extractLockupMetadata(lockup)
+                // [변경] 3. 기본값 대체 대신, 빈 제목(광고/기타 노이즈) 발견 시 통째로 패스하도록 조건문 교체
+                if (title.isBlank()) {
+                    println("[YT_DEBUG] Skipping lockupViewModel $videoId due to empty title (likely an ad or empty placeholder)")
+                    return null
+                }
+                var (channel, views) = extractLockupMetadata(lockup)     
                 if (channel.isBlank()) {
                     val label = lockup.getMapKey("accessibility")?.getMapKey("accessibilityData")
                         ?.getString("label") ?: ""
