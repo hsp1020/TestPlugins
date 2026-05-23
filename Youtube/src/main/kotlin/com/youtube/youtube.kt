@@ -802,9 +802,11 @@ class YoutubeProvider(
         savedContinuationToken = null
     }
 
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         isSearchContext = false
         val rawRequestData = request.data
+        // 인계받은 요청 데이터를 안전하게 URL 디코딩 처리하여 일관된 키 및 토큰 포맷 확보
         val requestData = rawRequestData.urlDecode()
         println("[YT_DEBUG] getMainPage started. page: $page, requestData: $requestData (raw: $rawRequestData)")
         val maxPages = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
@@ -833,6 +835,7 @@ class YoutubeProvider(
                         val payload = mapOf(
                             "context" to mapOf(
                                 "client" to mapOf(
+                                    "visitorData" to (savedVisitorData ?: ""),
                                     "clientName" to "WEB",
                                     "clientVersion" to (savedClientVersion ?: "2.20240725.01.00"),
                                     "platform" to "DESKTOP",
@@ -964,20 +967,55 @@ class YoutubeProvider(
                         println("[YT_DEBUG] InitialData extraction was null.")
                     }
                 }
-            }
-        } else {
-            var tokenToUse = getSavedContinuationToken(requestData)
-            
-            // [자가치유 메커니즘] 세션이나 토큰 연결 고리가 유실된 경우 보정된 토큰으로 복원 시도
-            if (tokenToUse.isNullOrBlank()) {
-                println("[YT_DEBUG] Token to use is null/blank on page $page for $requestData. Fetching fallback continuation...")
-                val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
-                val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", "2.20240725.01.00") ?: "2.20240725.01.00"
+            } else {
+                var tokenToUse = getSavedContinuationToken(requestData)
+                
+                // [자가치유 메커니즘] 세션이나 토큰 연결 고리가 유실된 경우 보정된 토큰으로 복원 시도
+                if (tokenToUse.isNullOrBlank()) {
+                    println("[YT_DEBUG] Token to use is null/blank on page $page for $requestData. Fetching fallback continuation...")
+                    val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
+                    val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", "2.20240725.01.00") ?: "2.20240725.01.00"
 
-                if (isChip) {
-                    val rawToken = requestData.removePrefix("chip_")
-                    val apiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
-                    // 맞춤형 카테고리의 스크롤 안정성을 높이기 위해 payload context에서 visitorData 명시적 누락
+                    if (isChip) {
+                        val rawToken = requestData.removePrefix("chip_")
+                        val apiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
+                        // 맞춤형 카테고리의 스크롤 안정성을 높이기 위해 payload context에서 visitorData 명시적 누락
+                        val payload = mapOf(
+                            "context" to mapOf(
+                                "client" to mapOf(
+                                    "clientName" to "WEB", 
+                                    "clientVersion" to cVersion, 
+                                    "hl" to lang,
+                                    "platform" to "DESKTOP"
+                                )
+                            ),
+                            "continuation" to rawToken
+                        )
+                        val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
+                        val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                        if (response != null) {
+                            tokenToUse = findTokenRecursive(response)
+                            println("[YT_DEBUG] Fallback: Extracted next token from Chip page 1: $tokenToUse")
+                            saveContinuationToken(requestData, tokenToUse)
+                        }
+                    } else {
+                        val urlToGet = if(requestData == "Home") mainUrl else requestData
+                        val html = app.get(urlToGet, interceptor = ytInterceptor).text
+                        val initialData = extractYtInitialData(html)
+                        if (initialData != null) {
+                            tokenToUse = findTokenRecursive(initialData)
+                            println("[YT_DEBUG] Fallback: Extracted next token from Home/Custom page 1 HTML: $tokenToUse")
+                            saveContinuationToken(requestData, tokenToUse)
+                        }
+                    }
+                }
+
+                println("[YT_DEBUG] Loading page $page using token: $tokenToUse")
+                if (!tokenToUse.isNullOrBlank()) {
+                    val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
+                    val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", "2.20240725.01.00") ?: "2.20240725.01.00"
+                    val apiUrl = if (requestData.contains("/results")) "$mainUrl/youtubei/v1/search?key=$apiKey" else "$mainUrl/youtubei/v1/browse?key=$apiKey"
+                    // 개인화 카테고리의 Continuation 토큰 교차 검증 오류를 우회하기 위해 visitorData 필드를 생략한 페이로드 송신
                     val payload = mapOf(
                         "context" to mapOf(
                             "client" to mapOf(
@@ -987,65 +1025,29 @@ class YoutubeProvider(
                                 "platform" to "DESKTOP"
                             )
                         ),
-                        "continuation" to rawToken
+                        "continuation" to tokenToUse
                     )
+                    println("[YT_DEBUG] POST Page Continuation URL: $apiUrl")
+                    println("[YT_DEBUG] POST Page Continuation payload: $payload")
                     val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
                     val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                     if (response != null) {
-                        tokenToUse = findTokenRecursive(response)
-                        println("[YT_DEBUG] Fallback: Extracted next token from Chip page 1: $tokenToUse")
-                        saveContinuationToken(requestData, tokenToUse)
+                        println("[YT_DEBUG] Page Continuation response success. Keys: ${response.keys}")
+                        val actions = response["onResponseReceivedActions"] 
+                            ?: response["onResponseReceivedEndpoints"]
+                            ?: response["onResponseReceivedCommands"] 
+                            ?: response["continuationContents"] 
+                            ?: response
+                        processRecursive(actions, results, seenIds, playlistMode = false)
+                        nextContinuation = findTokenRecursive(response)
+                        println("[YT_DEBUG] Page Continuation next token: $nextContinuation")
+                    } else {
+                        println("[YT_DEBUG] Page Continuation response returned null.")
                     }
                 } else {
-                    val urlToGet = if(requestData == "Home") mainUrl else requestData
-                    val html = app.get(urlToGet, interceptor = ytInterceptor).text
-                    val initialData = extractYtInitialData(html)
-                    if (initialData != null) {
-                        tokenToUse = findTokenRecursive(initialData)
-                        println("[YT_DEBUG] Fallback: Extracted next token from Home/Custom page 1 HTML: $tokenToUse")
-                        saveContinuationToken(requestData, tokenToUse)
-                    }
+                    println("[YT_DEBUG] Page Continuation token was null/blank.")
                 }
             }
-
-            println("[YT_DEBUG] Loading page $page using token: $tokenToUse")
-            if (!tokenToUse.isNullOrBlank()) {
-                val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
-                val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", "2.20240725.01.00") ?: "2.20240725.01.00"
-                val apiUrl = if (requestData.contains("/results")) "$mainUrl/youtubei/v1/search?key=$apiKey" else "$mainUrl/youtubei/v1/browse?key=$apiKey"
-                // 개인화 카테고리의 Continuation 토큰 교차 검증 오류를 우회하기 위해 visitorData 필드를 생략한 페이로드 송신
-                val payload = mapOf(
-                    "context" to mapOf(
-                        "client" to mapOf(
-                            "clientName" to "WEB", 
-                            "clientVersion" to cVersion, 
-                            "hl" to lang,
-                            "platform" to "DESKTOP"
-                        )
-                    ),
-                    "continuation" to tokenToUse
-                )
-                println("[YT_DEBUG] POST Page Continuation URL: $apiUrl")
-                println("[YT_DEBUG] POST Page Continuation payload: $payload")
-                val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
-                val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
-                if (response != null) {
-                    println("[YT_DEBUG] Page Continuation response success. Keys: ${response.keys}")
-                    val actions = response["onResponseReceivedActions"] 
-                        ?: response["onResponseReceivedEndpoints"]
-                        ?: response["onResponseReceivedCommands"] 
-                        ?: response["continuationContents"] 
-                        ?: response
-                    processRecursive(actions, results, seenIds, playlistMode = false)
-                    nextContinuation = findTokenRecursive(response)
-                    println("[YT_DEBUG] Page Continuation next token: $nextContinuation")
-                } else {
-                    println("[YT_DEBUG] Page Continuation response returned null.")
-                }
-            } else {
-                println("[YT_DEBUG] Page Continuation token was null/blank.")
-            }
-        }
         } catch (e: Exception) { 
             println("[YT_DEBUG] getMainPage exception: ${e.message}")
             logError(e) 
