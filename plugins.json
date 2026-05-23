@@ -129,10 +129,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hexated/cloudstream-extensions-hexated/master/StremioX/icon.png",
-        "fileHash": "sha256-f0263fffcdf4eeb3862a4514e6791058186f5fbfc2e50dc423b3a86723b7a890",
+        "fileHash": "sha256-8f887da30e34bc2bdc52cce3a86f8bcd1dc3c9edd387bee9885527981e11fd8d",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 173501,
+        "fileSize": 174250,
         "status": 1,
         "language": "en",
         "authors": [
@@ -241,7 +241,7 @@
     },
     {
         "iconUrl": "https://upload.wikimedia.org/wikipedia/commons/thumb/0/09/YouTube_full-color_icon_%282017%29.svg/3840px-YouTube_full-color_icon_%282017%29.svg.png",
-        "fileHash": "sha256-f4eca7a42e9eec6a460defba341eacfefccaf336bf523e1ac0e8f72343685378",
+        "fileHash": "sha256-4ce40763e34a454f9ad693a803ba249f8697ca0cb17c961f5c93429508c470ca",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
         "fileSize": 152224,
