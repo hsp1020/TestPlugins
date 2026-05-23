@@ -1050,7 +1050,6 @@ private fun collectFromRenderer(
                     ?: getBestThumbnail(safeGet(header, "content", "pageHeaderViewModel", "image", "decoratedAvatarViewModel", "avatar", "avatarViewModel", "image"))
                     ?: response.document.selectFirst("meta[property=og:image]")?.attr("content")
 
-                // ✅ 구독자 수 N/A 해결: 배열을 순회하며 능동적으로 구독자 키워드 탐색
                 var subscriberCount = getText(safeGet(header, "subscriberCountText"))
                 if (subscriberCount.isBlank()) {
                     val rows = safeGet(header, "content", "pageHeaderViewModel", "metadata", "contentMetadataViewModel", "metadataRows") as? List<*>
@@ -1067,6 +1066,7 @@ private fun collectFromRenderer(
                     }
                 }
                 if (subscriberCount.isBlank()) subscriberCount = "N/A"
+
 
                 val allEpisodes = mutableListOf<Episode>()
 
