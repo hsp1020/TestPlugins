@@ -787,7 +787,6 @@ class YoutubeProvider(
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         isSearchContext = false
         val rawRequestData = request.data
-        // 인계받은 요청 데이터를 안전하게 URL 디코딩 처리하여 일관된 키 및 토큰 포맷 확보
         val requestData = rawRequestData.urlDecode()
         println("[YT_DEBUG] getMainPage started. page: $page, requestData: $requestData (raw: $rawRequestData)")
         val maxPages = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
@@ -816,7 +815,6 @@ class YoutubeProvider(
                         val payload = mapOf(
                             "context" to mapOf(
                                 "client" to mapOf(
-                                    "visitorData" to (savedVisitorData ?: ""),
                                     "clientName" to "WEB",
                                     "clientVersion" to (savedClientVersion ?: "2.20240725.01.00"),
                                     "platform" to "DESKTOP",
@@ -898,23 +896,22 @@ class YoutubeProvider(
             } else {
                 var tokenToUse = getSavedContinuationToken(requestData)
                 
-                // [자가치유 메커니즘] 세션이나 토큰 연결 고리가 완전 유실된 경우 디코딩된 정제 토큰으로 복원 시도
+                // [자가치유 메커니즘] 세션이나 토큰 연결 고리가 유실된 경우 보정된 토큰으로 복원 시도
                 if (tokenToUse.isNullOrBlank()) {
                     println("[YT_DEBUG] Token to use is null/blank on page $page for $requestData. Fetching fallback continuation...")
                     val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
-                    val vData = savedVisitorData ?: appPrefs?.getString("yt_visitor_data", null) ?: ""
                     val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", "2.20240725.01.00") ?: "2.20240725.01.00"
 
                     if (isChip) {
                         val rawToken = requestData.removePrefix("chip_")
                         val apiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
+                        // 맞춤형 카테고리의 스크롤 안정성을 높이기 위해 payload context에서 visitorData 명시적 누락
                         val payload = mapOf(
                             "context" to mapOf(
                                 "client" to mapOf(
                                     "clientName" to "WEB", 
                                     "clientVersion" to cVersion, 
                                     "hl" to lang,
-                                    "visitorData" to vData,
                                     "platform" to "DESKTOP"
                                 )
                             ),
@@ -942,16 +939,15 @@ class YoutubeProvider(
                 println("[YT_DEBUG] Loading page $page using token: $tokenToUse")
                 if (!tokenToUse.isNullOrBlank()) {
                     val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
-                    val vData = savedVisitorData ?: appPrefs?.getString("yt_visitor_data", null) ?: ""
                     val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", "2.20240725.01.00") ?: "2.20240725.01.00"
                     val apiUrl = if (requestData.contains("/results")) "$mainUrl/youtubei/v1/search?key=$apiKey" else "$mainUrl/youtubei/v1/browse?key=$apiKey"
+                    // 개인화 카테고리의 Continuation 토큰 교차 검증 오류를 우회하기 위해 visitorData 필드를 생략한 페이로드 송신
                     val payload = mapOf(
                         "context" to mapOf(
                             "client" to mapOf(
                                 "clientName" to "WEB", 
                                 "clientVersion" to cVersion, 
                                 "hl" to lang,
-                                "visitorData" to vData,
                                 "platform" to "DESKTOP"
                             )
                         ),
@@ -987,6 +983,7 @@ class YoutubeProvider(
         println("[YT_DEBUG] getMainPage completed. Extracted count: ${results.size}, hasNext: ${!nextContinuation.isNullOrBlank()}")
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
     }
+    
 
     override suspend fun search(query: String): List<SearchResponse> {
         return search(query, 1)?.items ?: emptyList()
@@ -2039,10 +2036,18 @@ class YoutubeProvider(
     }
 
     private fun String.urlDecode(): String {
-        return try {
-            java.net.URLDecoder.decode(this, "UTF-8")
-        } catch (e: Exception) {
-            this
+        var current = this
+        // 토큰 내부에 퍼센트 인코딩 기호(%)가 완전히 없어질 때까지 안전하게 반복 디코딩 수행
+        while (current.contains("%")) {
+            val decoded = try {
+                java.net.URLDecoder.decode(current, "UTF-8")
+            } catch (e: Exception) {
+                break
+            }
+            if (decoded == current) break
+            current = decoded
         }
+        return current
     }
+    
 }
