@@ -177,11 +177,11 @@ class YoutubeProvider(
                 parts?.forEach { part ->
                     val text = getText(part.getMapKey("text")) ?: ""
                     if (text.isNotBlank()) {
-                        // ✅ 한국어 조회수 키워드(조회수, 회) 매칭 추가
-                        if (text.matches(Regex(".*(\\d+[KMBkmb]|views|조회수|회|مشاهدة).*"))) {
+                        // ✅ 라이브 시청자 수 매칭용 키워드(시청, watching) 추가
+                        if (text.matches(Regex(".*(\\d+[KMBkmb]|views|조회수|회|시청|watching|مشاهدة).*"))) {
                             views = formatViews(text)
-                        // ✅ 한국어 상대 시간 키워드가 채널 이름으로 오인되는 것 방지
-                        } else if (!text.matches(Regex(".*(\\d+:\\d+|ago|قبل|전|시간|분|일|주|개월|년).*")) && text.length > 1 && !text.contains("•")) {
+                        // ✅ 라이브 키워드가 채널명으로 들어가는 것 차단
+                        } else if (!text.matches(Regex(".*(\\d+:\\d+|ago|قبل|전|시간|분|일|주|개월|년|시청|watching).*")) && text.length > 1 && !text.contains("•")) {
                             channel = text
                         }
                     }
@@ -207,8 +207,10 @@ class YoutubeProvider(
     private fun formatViews(viewText: String?): String {
         if (viewText.isNullOrBlank()) return "N/A"
         var text = viewText.toString().trim()
-        
-        text = text.replace("조회수", "").replace("views", "").replace("مشاهدة", "").trim()
+
+           text = text.replace("조회수", "").replace("views", "").replace("مشاهدة", "")
+                      .replace("시청 중", "").replace("시청중", "").replace("watching", "").trim()
+
         
         // '회'를 정규식에서 제거하여 "152,891회" 같은 텍스트가 아래의 포맷팅 로직으로 넘어가게 함
         if (text.matches(Regex(".*[만억KMBkmb].*")) && text.length < 15) {
@@ -282,7 +284,8 @@ private fun collectFromRenderer(
             ?: renderer.getMapKey("compactVideoRenderer")
             ?: renderer.getMapKey("gridVideoRenderer")
             // ✅ playlistPanelVideoRenderer를 탐색 대상에 추가
-            ?: renderer.getMapKey("playlistPanelVideoRenderer")
+            ?: renderer.getMapKey("playlistVideoRenderer")       // ✅ 일반 재생목록 비디오 추가
+            ?: renderer.getMapKey("playlistPanelVideoRenderer")  // ✅ 믹스 재생목록 비디오 추가
 
         if (videoData != null) {
             val videoId = videoData.getString("videoId")
@@ -602,6 +605,7 @@ private fun collectFromRenderer(
 
     private fun findTokenRecursive(data: Any?): String? {
         if (data is Map<*, *>) {
+            // [추출 로직 1]: 명시적 비디오 그리드 스크롤 렌더러 타겟팅
             val renderer = data["continuationItemRenderer"] as? Map<*, *>
             if (renderer != null) {
                 val endpoint = renderer["continuationEndpoint"] as? Map<*, *>
@@ -615,13 +619,14 @@ private fun collectFromRenderer(
                 }
             }
 
+            // [추출 로직 2]: 레거시 스크롤 컨테이너 타겟팅
             val nextData = data["nextContinuationData"] as? Map<*, *>
             if (nextData != null) {
                 val token = nextData["continuation"] as? String
                 if (!token.isNullOrBlank()) return token
             }
 
-            // ✅ 전체 null 반환 대신, 루프 내에서 칩 바 관련 키만 무시하고 계속 탐색하도록 수정
+            // ✅ 칩 바 브랜치만 안전하게 스킵하고 다른 데이터의 토큰은 끝까지 추적
             for ((k, v) in data) {
                 val keyStr = k as? String ?: continue
                 if (keyStr == "feedFilterChipBarRenderer" || 
@@ -1323,7 +1328,7 @@ private fun collectFromRenderer(
                 val header = safeGet(data, "header", "playlistHeaderRenderer") as? Map<*, *>
                 var title = extractTitle(safeGet(header, "title") as? Map<*, *>)
                 
-                // ✅ watch 페이지 기반의 믹스 플레이리스트 타이틀 동적 검색
+                // ✅ watch 페이지 기반의 믹스 플레이리스트 타이틀 동적 검색 추가
                 if (title.isNullOrBlank()) {
                     fun findMixTitle(obj: Any?): String? {
                         if (obj is Map<*, *>) {
@@ -1343,7 +1348,7 @@ private fun collectFromRenderer(
                     }
                     title = findMixTitle(data) ?: "YouTube Mix"
                 }
-                
+
                 val ownerObj = safeGet(header, "ownerText") as? Map<*, *>
                 val author = extractTitle(ownerObj) ?: "Unknown Channel"
                 val description = extractTitle(safeGet(header, "description") as? Map<*, *>)
@@ -1352,7 +1357,7 @@ private fun collectFromRenderer(
                 val tempSearchResponses = mutableListOf<SearchResponse>()
                 val seenPlaylistIds = mutableSetOf<String>()
 
-                processRecursive(data, tempSearchResponses, seenPlaylistIds, playlistMode = false)
+                processRecursive(data, tempSearchResponses, seenPlaylistIds, playlistMode = false)         
 
                 tempSearchResponses.forEachIndexed { index, res ->
                     if (res.url.contains("watch?v=")) {
