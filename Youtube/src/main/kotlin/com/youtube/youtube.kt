@@ -74,7 +74,9 @@ class YoutubeProvider(
         }
 
         override fun intercept(chain: Interceptor.Chain): Response {
-            val requestBuilder = chain.request().newBuilder()
+            val request = chain.request()
+            val urlStr = request.url.toString()
+            val requestBuilder = request.newBuilder()
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36")
 
             val cookieBuilder = StringBuilder()
@@ -86,14 +88,20 @@ class YoutubeProvider(
                 cookieBuilder.append("VISITOR_INFO1_LIVE=_Mk3UVhY40g; ")
             }
 
+            // [핵심 패치] 검색 요청인지 판별 (구글 검색기록 연동 차단)
+            val isSearchRequest = urlStr.contains("/results") || urlStr.contains("/v1/search")
+
             val authKeys = listOf("SID", "HSID", "SSID", "APISID", "SAPISID")
             var sapisidVal: String? = null
 
-            authKeys.forEach { key ->
-                val value = prefs?.getString(key, null)
-                if (!value.isNullOrBlank()) {
-                    cookieBuilder.append("$key=$value; ")
-                    if (key == "SAPISID") sapisidVal = value
+            // 검색 요청이 아닐 때만 사용자 인증 쿠키 주입
+            if (!isSearchRequest) {
+                authKeys.forEach { key ->
+                    val value = prefs?.getString(key, null)
+                    if (!value.isNullOrBlank()) {
+                        cookieBuilder.append("$key=$value; ")
+                        if (key == "SAPISID") sapisidVal = value
+                    }
                 }
             }
             
@@ -102,7 +110,8 @@ class YoutubeProvider(
             requestBuilder.addHeader("Cookie", cookieBuilder.toString())
             requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
 
-            if (!sapisidVal.isNullOrBlank()) {
+            // 검색 요청이 아니고 SAPISID 자격 증명이 존재할 때만 인증 헤더 최종 추가
+            if (!isSearchRequest && !sapisidVal.isNullOrBlank()) {
                 try {
                     val timestamp = (System.currentTimeMillis() / 1000).toString()
                     val origin = "https://www.youtube.com"
@@ -118,8 +127,8 @@ class YoutubeProvider(
 
             return chain.proceed(requestBuilder.build())
         }
-    }
-    
+
+           
     private val ytInterceptor = YouTubeInterceptor(this)
     private val safariUserAgent =
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
@@ -1230,16 +1239,30 @@ class YoutubeProvider(
         if (url.contains("/@") || url.contains("/channel/") || url.contains("/c/") || url.contains("/user/")) {
             println("[YT_DEBUG] Loading Channel path. url: $url")
             try {
-                var cleanUrl = url.substringBefore("?").removeSuffix("/")
-                val tabKeywords = listOf("/featured", "/shorts", "/streams", "/playlists", "/community", "/about", "/videos")
-                for (keyword in tabKeywords) {
-                    if (cleanUrl.endsWith(keyword)) {
-                        cleanUrl = cleanUrl.removeSuffix(keyword)
-                        break
+                val cleanUrl = url.substringBefore("?").removeSuffix("/")
+                val uriSegments = cleanUrl.substringAfter("://").split("/")
+                
+                // [핵심 패치] URL 세그먼트 깊이를 판별하여 이미 서브탭(sportstab, videos 등)이 선언되었는지 체크
+                val hasSubTab = if (uriSegments.size > 1) {
+                    val type = uriSegments[1]
+                    when {
+                        type.startsWith("@") -> uriSegments.size > 2
+                        type == "channel" -> uriSegments.size > 3
+                        type == "c" -> uriSegments.size > 3
+                        type == "user" -> uriSegments.size > 3
+                        else -> false
                     }
+                } else false
+
+                val channelUrl = if (hasSubTab) {
+                    // 이미 특정 탭이 지정되어 있다면 쿼리 파라미터(?ss=CMMG 등)까지 전부 보존하여 원본 URL 그대로 사용
+                    url
+                } else {
+                    // 순수 채널 주소만 있다면 VOD 수집을 위해 기본 /videos 경로 사용
+                    "$cleanUrl/videos"
                 }
-                val channelUrl = "$cleanUrl/videos"
-                println("[YT_DEBUG] 1차 채널 요청 URL: $channelUrl")
+                
+                println("[YT_DEBUG] 최종 채널 요청 URL: $channelUrl (hasSubTab: $hasSubTab)")
                 var response = app.get(channelUrl, interceptor = ytInterceptor)
                 var html = response.text
                 var data = extractYtInitialData(html)
