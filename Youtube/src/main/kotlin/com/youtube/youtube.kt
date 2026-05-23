@@ -11,49 +11,12 @@ import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import okhttp3.Interceptor
 import okhttp3.Response
 import java.net.URLEncoder
-import java.net.URLDecoder
 import java.util.regex.Pattern
 import com.lagradost.cloudstream3.AcraApplication
 import androidx.preference.PreferenceManager
 import com.lagradost.cloudstream3.ar.youtube.YoutubeProvider.Config.SLEEP_BETWEEN
 import kotlin.collections.remove
 import kotlin.text.get
-
-// ====== [파일 최상단 전역 헬퍼 함수 선언 - 중복 및 참조 오류 방지] ======
-private fun sha1(input: String): String {
-    return try {
-        val md = java.security.MessageDigest.getInstance("SHA-1")
-        val bytes = md.digest(input.toByteArray())
-        bytes.joinToString("") { "%02x".format(it) }
-    } catch (e: Exception) {
-        input.hashCode().toString()
-    }
-}
-
-private fun String.urlDecode(): String {
-    var current = this
-    while (current.contains("%")) {
-        val decoded = try {
-            URLDecoder.decode(current, "UTF-8")
-        } catch (e: Exception) {
-            break
-        }
-        if (decoded == current) break
-        current = decoded
-    }
-    return current
-}
-
-private fun getSapisidHash(
-    sapisid: String,
-    origin: String = "https://www.youtube.com"
-): String {
-    val timestamp = (System.currentTimeMillis() / 1000).toString()
-    val msg = "$timestamp $sapisid $origin"
-    val hash = sha1(msg)
-    return "SAPISIDHASH ${timestamp}_$hash"
-}
-// =====================================================================
 
 class YoutubeProvider(
     private val sharedPref: SharedPreferences? = null
@@ -96,6 +59,20 @@ class YoutubeProvider(
     class YouTubeInterceptor(private val provider: YoutubeProvider) : Interceptor {
         private val prefs get() = provider.appPrefs
 
+        private fun sha1(input: String): String {
+            val md = java.security.MessageDigest.getInstance("SHA-1")
+            val bytes = md.digest(input.toByteArray())
+            return bytes.joinToString("") { "%02x".format(it) }
+        }
+        
+        private fun String.urlDecode(): String {
+            return try {
+                java.net.URLDecoder.decode(this, "UTF-8")
+            } catch (e: Exception) {
+              this
+            }
+        }
+
         override fun intercept(chain: Interceptor.Chain): Response {
             val request = chain.request()
             val urlStr = request.url.toString()
@@ -111,13 +88,13 @@ class YoutubeProvider(
                 cookieBuilder.append("VISITOR_INFO1_LIVE=_Mk3UVhY40g; ")
             }
 
-            // 검색 요청 여부 검출 (개인 구글 계정 검색 기록 자동 연동 해제 패치)
+            // [핵심 패치] 검색 요청인지 판별 (구글 검색기록 연동 차단)
             val isSearchRequest = urlStr.contains("/results") || urlStr.contains("/v1/search")
 
             val authKeys = listOf("SID", "HSID", "SSID", "APISID", "SAPISID")
             var sapisidVal: String? = null
 
-            // 검색 요청이 아닐 때만 사용자 인증용 민감 쿠키 적용
+            // 검색 요청이 아닐 때만 사용자 인증 쿠키 주입
             if (!isSearchRequest) {
                 authKeys.forEach { key ->
                     val value = prefs?.getString(key, null)
@@ -133,12 +110,15 @@ class YoutubeProvider(
             requestBuilder.addHeader("Cookie", cookieBuilder.toString())
             requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
 
-            // 검색 요청이 아니고 SAPISID가 온전히 있을 때만 유효 인증 해시 추가
+            // 검색 요청이 아니고 SAPISID 자격 증명이 존재할 때만 인증 헤더 최종 추가
             if (!isSearchRequest && !sapisidVal.isNullOrBlank()) {
                 try {
-                    val hash = getSapisidHash(sapisidVal!!, "https://www.youtube.com")
-                    requestBuilder.addHeader("Authorization", hash)
-                    requestBuilder.addHeader("X-Origin", "https://www.youtube.com")
+                    val timestamp = (System.currentTimeMillis() / 1000).toString()
+                    val origin = "https://www.youtube.com"
+                    val msg = "$timestamp $sapisidVal $origin"
+                    val hash = sha1(msg)
+                    requestBuilder.addHeader("Authorization", "SAPISIDHASH ${timestamp}_$hash")
+                    requestBuilder.addHeader("X-Origin", origin)
                     requestBuilder.addHeader("X-Goog-AuthUser", "0")
                 } catch (e: Exception) {
                     logError(e)
@@ -147,8 +127,8 @@ class YoutubeProvider(
 
             return chain.proceed(requestBuilder.build())
         }
-    }
-    
+
+           
     private val ytInterceptor = YouTubeInterceptor(this)
     private val safariUserAgent =
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
@@ -162,6 +142,26 @@ class YoutubeProvider(
     private data class PlayerResponse(@JsonProperty("streamingData") val streamingData: StreamingData?)
     private data class StreamingData(@JsonProperty("hlsManifestUrl") val hlsManifestUrl: String?)
 
+    private fun sha1(input: String): String {
+        return try {
+            val md = java.security.MessageDigest.getInstance("SHA-1")
+            val bytes = md.digest(input.toByteArray())
+            bytes.joinToString("") { "%02x".format(it) }
+        } catch (e: Exception) {
+            input.hashCode().toString()
+        }
+    }
+
+    private fun getSapisidHash(
+        sapisid: String,
+        origin: String = "https://www.youtube.com"
+    ): String {
+        val timestamp = (System.currentTimeMillis() / 1000).toString()
+        val msg = "$timestamp $sapisid $origin"
+        val hash = sha1(msg)
+        return "SAPISIDHASH ${timestamp}_$hash"
+    }
+    
     private fun getSavedContinuationToken(key: String): String? {
         val hashedKey = sha1(key)
         val token = appPrefs?.getString("cont_token_$hashedKey", null)
@@ -217,7 +217,7 @@ class YoutubeProvider(
         return ""
     }
 
-    private fun extractLockupMetadata(lockup: Map<*, *>) : Pair<String, String> {
+    private fun extractLockupMetadata(lockup: Map<*, *>): Pair<String, String> {
         var channel = ""
         var views = ""
 
@@ -423,12 +423,14 @@ class YoutubeProvider(
 
         val lockup = renderer.getMapKey("lockupViewModel")
         if (lockup != null) {
+            // [추가] 1. 광고 차단을 위한 컨텐츠 타입 검사 코드 추가
             val contentType = lockup.getString("contentType") ?: ""
             if (contentType.contains("AD") || contentType.contains("SPONSORED") || contentType.contains("PROMOTED")) {
                 println("[YT_DEBUG] Skipping ad in lockupViewModel (contentType: $contentType)")
                 return null
             }
 
+            // [변경] 2. 기존의 "LOCKUP_CONTENT_TYPE_PLAYLIST" 조건문을 간결하게 바꾼 형태
             if (contentType == "LOCKUP_CONTENT_TYPE_PLAYLIST") {
                 val playlistId = lockup.getString("contentId")
                 if (!playlistId.isNullOrBlank() && seenIds.add(playlistId)) {
@@ -476,11 +478,19 @@ class YoutubeProvider(
                     lockup.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")
                         ?.getMapKey("title")
                 )
+                // [변경] 3. 기본값 대체 대신, 빈 제목(광고/기타 노이즈) 발견 시 통째로 패스하도록 조건문 교체
                 if (title.isBlank()) {
                     println("[YT_DEBUG] Skipping lockupViewModel $videoId due to empty title (likely an ad or empty placeholder)")
                     return null
                 }
-                var (channel, views) = extractLockupMetadata(lockup)
+                var (channel, views) = extractLockupMetadata(lockup)     
+                if (channel.isBlank()) {
+                    val label = lockup.getMapKey("accessibility")?.getMapKey("accessibilityData")
+                        ?.getString("label") ?: ""
+                    val match =
+                        Regex("(?:by|من|ع버|قناة)\\s+(.*?)\\s+(?:\\d|view|مشاهدة)").find(label)
+                    if (match != null) channel = match.groupValues[1].replace("Shorts", "").trim()
+                }
                 val isShorts = lockup.getMapKey("content")
                     ?.containsKey("shortsLockupViewModel") == true || lockup.toString()
                     .contains("reelWatchEndpoint")
@@ -907,7 +917,7 @@ class YoutubeProvider(
             } else {
                 var tokenToUse = getSavedContinuationToken(requestData)
                 
-                // [자가치유 메커니즘] 세션이나 토큰 연결 고리가 완전 유실된 경우 정제 토큰으로 복원 시도
+                // [자가치유 메커니즘] 세션이나 토큰 연결 고리가 유실된 경우 보정된 토큰으로 복원 시도
                 if (tokenToUse.isNullOrBlank()) {
                     println("[YT_DEBUG] Token to use is null/blank on page $page for $requestData. Fetching fallback continuation...")
                     val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
@@ -916,6 +926,7 @@ class YoutubeProvider(
                     if (isChip) {
                         val rawToken = requestData.removePrefix("chip_")
                         val apiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
+                        // 맞춤형 카테고리의 스크롤 안정성을 높이기 위해 payload context에서 visitorData 명시적 누락
                         val payload = mapOf(
                             "context" to mapOf(
                                 "client" to mapOf(
@@ -951,6 +962,7 @@ class YoutubeProvider(
                     val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
                     val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", "2.20240725.01.00") ?: "2.20240725.01.00"
                     val apiUrl = if (requestData.contains("/results")) "$mainUrl/youtubei/v1/search?key=$apiKey" else "$mainUrl/youtubei/v1/browse?key=$apiKey"
+                    // 개인화 카테고리의 Continuation 토큰 교차 검증 오류를 우회하기 위해 visitorData 필드를 생략한 페이로드 송신
                     val payload = mapOf(
                         "context" to mapOf(
                             "client" to mapOf(
@@ -993,6 +1005,7 @@ class YoutubeProvider(
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
     }
     
+
     override suspend fun search(query: String): List<SearchResponse> {
         return search(query, 1)?.items ?: emptyList()
     }
@@ -1226,10 +1239,10 @@ class YoutubeProvider(
         if (url.contains("/@") || url.contains("/channel/") || url.contains("/c/") || url.contains("/user/")) {
             println("[YT_DEBUG] Loading Channel path. url: $url")
             try {
-                val cleanUrl = url.substringBefore("?").removeSuffix("/")
+                var cleanUrl = url.substringBefore("?").removeSuffix("/")
                 val uriSegments = cleanUrl.substringAfter("://").split("/")
                 
-                // [핵심 패치] 서브탭 명시 지정 경로 크롤링 대응 (sportstab?ss=CMMG 등)
+                // [핵심 패치] URL 세그먼트 깊이를 판별하여 이미 서브탭(sportstab, videos 등)이 선언되었는지 체크
                 val hasSubTab = if (uriSegments.size > 1) {
                     val type = uriSegments[1]
                     when {
@@ -1242,10 +1255,13 @@ class YoutubeProvider(
                 } else false
 
                 val channelUrl = if (hasSubTab) {
+                    // 이미 특정 탭이 지정되어 있다면 쿼리 파라미터(?ss=CMMG 등)까지 전부 보존하여 원본 URL 그대로 사용
                     url
                 } else {
+                    // 순수 채널 주소만 있다면 VOD 수집을 위해 기본 /videos 경로 사용
                     "$cleanUrl/videos"
                 }
+                
                 println("[YT_DEBUG] 최종 채널 요청 URL: $channelUrl (hasSubTab: $hasSubTab)")
                 var response = app.get(channelUrl, interceptor = ytInterceptor)
                 var html = response.text
@@ -1260,7 +1276,7 @@ class YoutubeProvider(
                 val endpointUrl = safeGet(activeTab, "tabRenderer", "endpoint", "commandMetadata", "webCommandMetadata", "url") as? String
                 println("[YT_DEBUG] 1차 파싱 결과 - 활성 탭 엔드포인트: $endpointUrl")
 
-                if (endpointUrl != null && !endpointUrl.endsWith("/videos") && !hasSubTab) {
+                if (endpointUrl != null && !endpointUrl.endsWith("/videos")) {
                     val canonicalUrl = response.document.selectFirst("link[rel=canonical]")?.attr("href")
                     println("[YT_DEBUG] 자가치유 작동 - Canonical URL 파싱: $canonicalUrl")
                     if (!canonicalUrl.isNullOrBlank()) {
@@ -1484,9 +1500,23 @@ class YoutubeProvider(
                     }
                 }
                 
-                println("[YT_DEBUG] 추출된 초기 에피소드 덩어리 수: ${initialItems?.size ?: 0}")
+                println("[YT_CHANNEL_DEBUG] 추출된 초기 에피소드 덩어리 수: ${initialItems?.size ?: 0}")
                 if (initialItems != null) {
                     extractVideosFromItems(initialItems, allEpisodes)
+                }
+
+                fun findContinuationTokenFromItems(items: List<*>?): String? {
+                    if (items == null) return null
+                    for (it in items) {
+                        val m = it as? Map<*, *> ?: continue
+                        val token = safeGet(m, "continuationItemRenderer", "continuationEndpoint", "continuationCommand", "token") as? String
+                        if (!token.isNullOrBlank()) return token
+                        val token2 = safeGet(m, "continuationItemRenderer", "continuationEndpoint", "browseContinuationEndpoint", "token") as? String
+                        if (!token2.isNullOrBlank()) return token2
+                        val token3 = safeGet(m, "continuationItemRenderer", "continuationEndpoint", "token") as? String
+                        if (!token3.isNullOrBlank()) return token3
+                    }
+                    return null
                 }
 
                 var currentToken: String? = findContinuationTokenFromItems(initialItems)
@@ -1543,7 +1573,7 @@ class YoutubeProvider(
             try {
                 var targetUrl = url
                 if (url.contains("playlist?list=")) {
-                    val listId = url.substringAfter("list=").substringBefore("&").urlDecode()
+                    val listId = url.substringAfter("list=").substringBefore("&")
                     if (listId.startsWith("RD") || listId.startsWith("UL") || listId.startsWith("MM") || listId.startsWith("RDMM")) {
                         targetUrl = "$mainUrl/watch?list=$listId"
                         println("[YT_DEBUG] Rewrote Mix playlist URL to watch URL: $targetUrl")
@@ -1587,6 +1617,7 @@ class YoutubeProvider(
                     println("[YT_DEBUG] Title resolved from findMixTitle: $title")
                 }
 
+                // 앱 메인 화면의 규칙인 "믹스명 (믹스 재생목록)" 포맷과 무조건 동기화되도록 보강
                 if (url.contains("list=RD") || url.contains("list=MM") || url.contains("list=UL")) {
                     val finalTitle = title ?: "YouTube Mix"
                     title = if (!finalTitle.contains("믹스 재생목록")) {
@@ -1617,7 +1648,7 @@ class YoutubeProvider(
                 println("[YT_DEBUG] Playlist/Mix loading exception: ${e.message}")
                 logError(e)
             }
-        }
+        }          
 
         val videoId = url.extractYoutubeId() ?: throw ErrorLoadingException("Invalid YouTube URL")
         println("[YT_DEBUG] Loading normal video ID: $videoId")
@@ -2038,4 +2069,20 @@ class YoutubeProvider(
         val regex = Regex("""(?:v=|\/videos\/|embed\/|youtu\.be\/|shorts\/)([A-Za-z0-9_-]{11})""")
         return regex.find(this)?.groupValues?.getOrNull(1)
     }
+
+    private fun String.urlDecode(): String {
+        var current = this
+        // 토큰 내부에 퍼센트 인코딩 기호(%)가 완전히 없어질 때까지 안전하게 반복 디코딩 수행
+        while (current.contains("%")) {
+            val decoded = try {
+                java.net.URLDecoder.decode(current, "UTF-8")
+            } catch (e: Exception) {
+                break
+            }
+            if (decoded == current) break
+            current = decoded
+        }
+        return current
+    }
+    
 }
