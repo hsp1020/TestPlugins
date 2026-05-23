@@ -618,6 +618,19 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
         }
 
+        // ★ [추가] 링크 목록 맨 위에 롱프레스 전용 복사 링크 주입
+        val copyId = loadData.imdbId ?: loadData.id ?: ""
+        if (!copyId.isNullOrBlank()) {
+            wrappedCallback.invoke(
+                newExtractorLink(
+                    "Copy to clipboard",                   // Source 칼럼에 표시될 안내 텍스트
+                    "📋 Video ID: $copyId",               // 링크 명칭으로 ID 노출
+                    copyId,                              // 주소(URL) 필드에 ID 주입 (롱프레스 복사 시 이 값이 복사됩니다)
+                    ExtractorLinkType.VIDEO
+                )
+            )
+        }
+
         runAllAsync(
             {
                 runSuspendCatching {
