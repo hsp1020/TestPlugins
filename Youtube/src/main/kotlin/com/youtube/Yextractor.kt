@@ -150,34 +150,29 @@ open class YoutubeExtractor : ExtractorApi() {
             val seenUrls = java.util.Collections.synchronizedSet(mutableSetOf<String>())
             val youtubeWatchUrl = "https://www.youtube.com/watch?v=$videoId"
 
-            // 두 메인 작업(ytdip 로드 vs NewPipe 로드)을 비동기 병렬로 가동합니다.
+            // 두 메인 작업(ytdip 최고 화질 로드 vs NewPipe DASH 로드)을 비동기 병렬로 가동합니다.
             coroutineScope {
                 // =================================================================
-                // [작업 A] 사설 yt-dlp API 서버를 통한 고화질 병합 링크 확보 (비동기 병렬 실행)
+                // [작업 A] 사설 yt-dlp API 서버를 통한 단일 최고 화질 병합 링크 확보 (비동기 가동)
                 // =================================================================
                 launch(Dispatchers.IO) {
-                    println("[YT_DEBUG] 사설 yt-dlp API 서버를 통한 병합 주소 추출 시도")
-                    val qualitiesToRequest = listOf("2160", "1080", "720")
-                    qualitiesToRequest.map { q ->
-                        async {
-                            val mergedUrl = getYtDlpMergedLink(youtubeWatchUrl, q)
-                            if (!mergedUrl.isNullOrBlank()) {
-                                println("[YT_DEBUG] 사설 API로부터 병합 링크 획득 성공 -> ${q}p")
-                                // 💡 'this.name' 대신 바깥 클래스의 'name' 프로퍼티를 직접 사용해 컴파일러 스코프 에러를 방지합니다.
-                                val link = newExtractorLink(
-                                    "${name} (Direct Download)",
-                                    "${q}p [Merged - Download]",
-                                    mergedUrl,
-                                    type = INFER_TYPE
-                                ) {
-                                    this.referer = mainUrl
-                                    this.quality = q.toIntOrNull() ?: 1080
-                                }
-                                builtLinks.add(link)
-                                callback(link) // 💡 대기 없이 링크가 발견되는 즉시 앱 화면에 우선 전달합니다.
-                            }
+                    println("[YT_DEBUG] 사설 yt-dlp API 서버를 통한 최고 화질 병합 주소 추출 시도")
+                    // 중복 다운로드와 서버 과부하를 최소화하기 위해 최고 해상도(2160p 이하 최상) 1개만 요청합니다.
+                    val mergedUrl = getYtDlpMergedLink(youtubeWatchUrl, "2160")
+                    if (!mergedUrl.isNullOrBlank()) {
+                        println("[YT_DEBUG] 사설 API로부터 최고 화질 병합 링크 획득 성공")
+                        val link = newExtractorLink(
+                            "${name} (Direct Download)",
+                            "Best Quality [Merged - Download]",
+                            mergedUrl,
+                            type = INFER_TYPE
+                        ) {
+                            this.referer = mainUrl
+                            this.quality = 2160 // 정렬을 돕기 위한 최고 화질 수치 지정
                         }
-                    }.awaitAll()
+                        builtLinks.add(link)
+                        callback(link) // 대기 없이 완료되는 즉시 앱에 스트리밍 전달
+                    }
                 }
 
                 // =================================================================
@@ -268,7 +263,6 @@ open class YoutubeExtractor : ExtractorApi() {
 
                                         if (localLink != null) {
                                             val finalName = "${video.label} ($lang) ${video.label}"
-                                            // 💡 'this.name' 수동 호출을 'name'으로 우회하여 스코프 오류를 제거합니다.
                                             val sourceName = "${name} ($lang)"
 
                                             println("[YT_DEBUG] [getUrl] DASH 가상 링크 빌드 성공 -> 화질: ${video.label}, 언어: $lang, 가상 URL: $localLink")
@@ -307,7 +301,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         }
                         for ((mUrl, mLabel, mHeight) in muxedList) {
                             println("[YT_DEBUG] [getUrl] Legacy Muxed 링크 등록 -> 화질: $mHeight, 이름: $mLabel (Legacy)")
-                            // 💡 'this.name' 수동 호출을 'name'으로 변경하여 Unresolved Reference 오류를 방지합니다.
                             val link = newExtractorLink(name, "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
                                 this.referer = mainUrl
                                 this.quality = mHeight
