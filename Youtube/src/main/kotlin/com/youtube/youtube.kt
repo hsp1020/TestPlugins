@@ -22,7 +22,6 @@ class YoutubeProvider(
     private val sharedPref: SharedPreferences? = null
 ) : MainAPI() {
 
-    // ✅ 핵심 픽스: sharedPref가 null일 경우 앱의 전역 설정값을 강제로 끌어옵니다.
     val appPrefs: SharedPreferences?
         get() = sharedPref ?: AcraApplication.context?.let { PreferenceManager.getDefaultSharedPreferences(it) }
 
@@ -44,7 +43,6 @@ class YoutubeProvider(
     override var name = "YouTube"
     override val hasMainPage = true
     
-    // ✅ 동적으로 언어 설정을 읽어오도록 변경
     override var lang: String
         get() = appPrefs?.getString("youtube_language", "ko") ?: "ko"
         set(value) {}
@@ -58,8 +56,6 @@ class YoutubeProvider(
 
     private var isSearchContext = false
 
-
-    // ✅ Interceptor가 appPrefs를 정상적으로 참조하도록 구조 변경
     class YouTubeInterceptor(private val provider: YoutubeProvider) : Interceptor {
         private val prefs get() = provider.appPrefs
         
@@ -177,10 +173,8 @@ class YoutubeProvider(
                 parts?.forEach { part ->
                     val text = getText(part.getMapKey("text")) ?: ""
                     if (text.isNotBlank()) {
-                        // ✅ 라이브 시청자 수 매칭용 키워드(시청, watching) 추가
                         if (text.matches(Regex(".*(\\d+[KMBkmb]|views|조회수|회|시청|watching|مشاهدة).*"))) {
                             views = formatViews(text)
-                        // ✅ 라이브 키워드가 채널명으로 들어가는 것 차단
                         } else if (!text.matches(Regex(".*(\\d+:\\d+|ago|قبل|전|시간|분|일|주|개월|년|시청|watching).*")) && text.length > 1 && !text.contains("•")) {
                             channel = text
                         }
@@ -200,19 +194,14 @@ class YoutubeProvider(
 
         return Pair(channel, views)
     }
-    
-    
 
-    // ✅ 조회수 축약 로직 완벽 적용 (152,891회 -> 15만회)
     private fun formatViews(viewText: String?): String {
         if (viewText.isNullOrBlank()) return "N/A"
         var text = viewText.toString().trim()
 
-           text = text.replace("조회수", "").replace("views", "").replace("مشاهدة", "")
-                      .replace("시청 중", "").replace("시청중", "").replace("watching", "").trim()
+        text = text.replace("조회수", "").replace("views", "").replace("مشاهدة", "")
+                   .replace("시청 중", "").replace("시청중", "").replace("watching", "").trim()
 
-        
-        // '회'를 정규식에서 제거하여 "152,891회" 같은 텍스트가 아래의 포맷팅 로직으로 넘어가게 함
         if (text.matches(Regex(".*[만억KMBkmb].*")) && text.length < 15) {
             return text
         }
@@ -223,16 +212,14 @@ class YoutubeProvider(
         return try {
             val v = digits.toLong()
             if (lang == "ko") {
-                // 한국어일 경우 유튜브 공식 축약 포맷 적용
                 when {
                     v < 1000 -> "${v}회"
                     v < 10000 -> String.format("%.1f천회", v / 1000.0).replace(".0천", "천")
                     v < 100000 -> String.format("%.1f만회", v / 10000.0).replace(".0만", "만")
-                    v < 100000000 -> "${v / 10000}만회" // 10만 이상은 소수점 버림 (예: 15만회)
+                    v < 100000000 -> "${v / 10000}만회"
                     else -> String.format("%.1f억회", v / 100000000.0).replace(".0억", "억")
                 }
             } else {
-                // 글로벌(영어 등)일 경우 K, M, B 포맷 적용
                 when {
                     v < 1000 -> v.toString()
                     v < 1_000_000 -> String.format("%.1fK", v / 1000.0).replace(".0K", "K")
@@ -274,7 +261,7 @@ class YoutubeProvider(
         return "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
     }
 
-private fun collectFromRenderer(
+    private fun collectFromRenderer(
         renderer: Map<*, *>?,
         seenIds: MutableSet<String>
     ): SearchResponse? {
@@ -283,9 +270,8 @@ private fun collectFromRenderer(
         val videoData = renderer.getMapKey("videoRenderer")
             ?: renderer.getMapKey("compactVideoRenderer")
             ?: renderer.getMapKey("gridVideoRenderer")
-            // ✅ playlistPanelVideoRenderer를 탐색 대상에 추가
-            ?: renderer.getMapKey("playlistVideoRenderer")       // ✅ 일반 재생목록 비디오 추가
-            ?: renderer.getMapKey("playlistPanelVideoRenderer")  // ✅ 믹스 재생목록 비디오 추가
+            ?: renderer.getMapKey("playlistVideoRenderer")       
+            ?: renderer.getMapKey("playlistPanelVideoRenderer")  
 
         if (videoData != null) {
             val videoId = videoData.getString("videoId")
@@ -492,7 +478,6 @@ private fun collectFromRenderer(
         playlistMode: Boolean
     ) {
         if (data is Map<*, *>) {
-
             val extracted = collectFromRenderer(data, seenIds)
             if (extracted != null) {
                 if (!playlistMode || extracted.type == TvType.TvSeries) {
@@ -504,6 +489,11 @@ private fun collectFromRenderer(
             val keysToCheck = listOf(
                 "contents",
                 "items",
+                "continuationItems",
+                "onResponseReceivedActions",
+                "onResponseReceivedEndpoints",
+                "appendContinuationItemsAction",
+                "onResponseReceivedCommands",
                 "gridShelfViewModel",
                 "verticalListRenderer",
                 "horizontalListRenderer",
@@ -511,8 +501,7 @@ private fun collectFromRenderer(
                 "itemSectionRenderer",
                 "richShelfRenderer",
                 "reelShelfRenderer",
-                "appendContinuationItemsAction",
-                "onResponseReceivedCommands"
+                "richGridRenderer"
             )
             var foundContainer = false
             for (key in keysToCheck) {
@@ -568,30 +557,29 @@ private fun collectFromRenderer(
     }
 
     private fun extractYtInitialData(html: String): Map<String, Any>? {
-        val cleanedHtml = html.substringAfter("ytInitialData")
-        if (cleanedHtml == html) return null
-
-        val jsonStart = cleanedHtml.indexOf("{")
-        if (jsonStart == -1) return null
-
-        val possibleJson = cleanedHtml.substring(jsonStart)
-        val jsonString = extractBalancedJson(possibleJson) ?: return null
-
-        return try {
-            parseJson<Map<String, Any>>(jsonString)
-        } catch (e: Exception) {
-            val regex = Regex(
-                """(?:var ytInitialData|window\["ytInitialData"\])\s*=\s*(\{.*?\});\s*(?:</script>|window|var)""",
-                RegexOption.DOT_MATCHES_ALL
-            )
-            regex.find(html)?.groupValues?.getOrNull(1)?.let {
-                try {
-                    parseJson<Map<String, Any>>(it)
-                } catch (err: Exception) {
-                    null
+        var index = 0
+        while (true) {
+            val found = html.indexOf("ytInitialData", index)
+            if (found == -1) break
+            
+            val sub = html.substring(found, minOf(found + 100, html.length))
+            if (sub.contains("=") && (sub.contains("var") || sub.contains("window") || sub.trim().startsWith("ytInitialData"))) {
+                val braceIndex = html.indexOf("{", found)
+                if (braceIndex != -1 && braceIndex - found < 150) {
+                    val possibleJson = html.substring(braceIndex)
+                    val jsonString = extractBalancedJson(possibleJson)
+                    if (jsonString != null) {
+                        try {
+                            return parseJson<Map<String, Any>>(jsonString)
+                        } catch (_: Exception) {
+                            // parse error, try next match
+                        }
+                    }
                 }
             }
+            index = minOf(found + 13, html.length)
         }
+        return null
     }
 
     private fun findConfig(html: String, key: String): String? {
@@ -605,7 +593,6 @@ private fun collectFromRenderer(
 
     private fun findTokenRecursive(data: Any?): String? {
         if (data is Map<*, *>) {
-            // [추출 로직 1]: 명시적 비디오 그리드 스크롤 렌더러 타겟팅
             val renderer = data["continuationItemRenderer"] as? Map<*, *>
             if (renderer != null) {
                 val endpoint = renderer["continuationEndpoint"] as? Map<*, *>
@@ -619,14 +606,12 @@ private fun collectFromRenderer(
                 }
             }
 
-            // [추출 로직 2]: 레거시 스크롤 컨테이너 타겟팅
             val nextData = data["nextContinuationData"] as? Map<*, *>
             if (nextData != null) {
                 val token = nextData["continuation"] as? String
                 if (!token.isNullOrBlank()) return token
             }
 
-            // ✅ 칩 바 브랜치만 안전하게 스킵하고 다른 데이터의 토큰은 끝까지 추적
             for ((k, v) in data) {
                 val keyStr = k as? String ?: continue
                 if (keyStr == "feedFilterChipBarRenderer" || 
@@ -647,8 +632,7 @@ private fun collectFromRenderer(
         return null
     }
     
-
-        override val mainPage: List<MainPageData>
+    override val mainPage: List<MainPageData>
         get() {
             val list = mutableListOf<MainPageData>()
             val homeTitle = when(lang) {
@@ -681,7 +665,6 @@ private fun collectFromRenderer(
             return list
         }
 
-
     private fun getCustomHomepages(): List<CustomSection> {
         val json = appPrefs?.getString("custom_homepages_v3", "[]") ?: "[]"
         return try {
@@ -708,6 +691,7 @@ private fun collectFromRenderer(
     private val continuationTokens = mutableMapOf<String, String>()
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        isSearchContext = false
         val maxPages = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
         if (page > maxPages) return newHomePageResponse(request, emptyList(), hasNext = false)
 
@@ -741,12 +725,12 @@ private fun collectFromRenderer(
                             "continuation" to tokenToUse
                         )
                         
-        
                         val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
                         val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                         
                         if (response != null) {
                             val actions = response["onResponseReceivedActions"] 
+                                ?: response["onResponseReceivedEndpoints"]
                                 ?: response["onResponseReceivedCommands"] 
                                 ?: response["contents"] 
                                 ?: response
@@ -817,7 +801,11 @@ private fun collectFromRenderer(
                     val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
                     val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                     if (response != null) {
-                        val actions = response["onResponseReceivedActions"] ?: response["onResponseReceivedCommands"] ?: response["continuationContents"] ?: response
+                        val actions = response["onResponseReceivedActions"] 
+                            ?: response["onResponseReceivedEndpoints"]
+                            ?: response["onResponseReceivedCommands"] 
+                            ?: response["continuationContents"] 
+                            ?: response
                         processRecursive(actions, results, seenIds, playlistMode = false)
                         nextContinuation = findTokenRecursive(response)
                     }
@@ -834,7 +822,6 @@ private fun collectFromRenderer(
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
     }
     
-       
     fun findContinuationItemsRecursive(obj: Any?): List<*>? {
         when (obj) {
             is Map<*, *> -> {
@@ -842,8 +829,9 @@ private fun collectFromRenderer(
 
                 val keysToTry = listOf(
                     "onResponseReceivedActions",
-                    "onResponseReceivedCommands",
                     "onResponseReceivedEndpoints",
+                    "onResponseReceivedCommands",
+                    "onResponseReceivedResults",
                     "continuationContents"
                 )
                 for (k in keysToTry) {
@@ -929,7 +917,10 @@ private fun collectFromRenderer(
                     val response = app.post(apiUrl, json = payload, interceptor = ytInterceptor)
                         .parsedSafe<Map<String, Any>>()
                     if (response != null) {
-                        val actions = response["onResponseReceivedCommands"] ?: response
+                        val actions = response["onResponseReceivedActions"]
+                            ?: response["onResponseReceivedEndpoints"]
+                            ?: response["onResponseReceivedCommands"] 
+                            ?: response
                         processRecursive(actions, results, seenIds, playlistMode)
                         savedContinuationToken = findTokenRecursive(response)
                     }
@@ -972,6 +963,59 @@ private fun collectFromRenderer(
         return titleObject.getString("simpleText")
             ?: titleObject.getListKey("runs")?.joinToString("") { it.getString("text") ?: "" }
             ?: titleObject.getString("text")
+    }
+
+    private fun extractPlaylistEpisodes(data: Any?, seenIds: MutableSet<String>): List<Episode> {
+        val episodes = mutableListOf<Episode>()
+        
+        fun recurse(node: Any?) {
+            if (node is Map<*, *>) {
+                val playlistVideo = node["playlistVideoRenderer"] as? Map<*, *>
+                if (playlistVideo != null) {
+                    val videoId = playlistVideo.getString("videoId")
+                    if (!videoId.isNullOrBlank() && seenIds.add(videoId)) {
+                        val title = getText(playlistVideo["title"]) ?: "Video"
+                        val channel = getText(playlistVideo["shortBylineText"]) ?: ""
+                        val thumb = getBestThumbnail(playlistVideo["thumbnail"]) ?: buildThumbnailFromId(videoId)
+                        episodes.add(newEpisode("$mainUrl/watch?v=$videoId") {
+                            this.name = title
+                            this.episode = episodes.size + 1
+                            this.posterUrl = thumb
+                            this.description = channel
+                        })
+                    }
+                }
+                
+                val playlistPanelVideo = node["playlistPanelVideoRenderer"] as? Map<*, *>
+                if (playlistPanelVideo != null) {
+                    val videoId = playlistPanelVideo.getString("videoId")
+                    if (!videoId.isNullOrBlank() && seenIds.add(videoId)) {
+                        val title = getText(playlistPanelVideo["title"]) ?: "Video"
+                        val channel = getText(playlistPanelVideo["shortBylineText"]) ?: ""
+                        val thumb = getBestThumbnail(playlistPanelVideo["thumbnail"]) ?: buildThumbnailFromId(videoId)
+                        episodes.add(newEpisode("$mainUrl/watch?v=$videoId") {
+                            this.name = title
+                            this.episode = episodes.size + 1
+                            this.posterUrl = thumb
+                            this.description = channel
+                        })
+                    }
+                }
+                
+                for (value in node.values) {
+                    if (value is Map<*, *> || value is List<*>) {
+                        recurse(value)
+                    }
+                }
+            } else if (node is List<*>) {
+                for (item in node) {
+                    recurse(item)
+                }
+            }
+        }
+        
+        recurse(data)
+        return episodes
     }
 
     override suspend fun load(url: String): LoadResponse {
@@ -1079,51 +1123,10 @@ private fun collectFromRenderer(
                         }
                     }
                 }
-                // ✅ 추가된 로직: "구독자 " 또는 "subscribers " 글자를 깔끔하게 지워버림
                 subscriberCount = subscriberCount.replace(Regex("(구독자|subscribers?)\\s*", RegexOption.IGNORE_CASE), "").trim()
                 if (subscriberCount.isBlank()) subscriberCount = "N/A"
 
-
                 val allEpisodes = mutableListOf<Episode>()
-
-                fun findContinuationItemsRecursive(obj: Any?): List<*>? {
-                    when (obj) {
-                        is Map<*, *> -> {
-                            if (obj.containsKey("continuationItems")) return obj["continuationItems"] as? List<*>
-                            val keysToTry = listOf("onResponseReceivedActions", "onResponseReceivedCommands", "onResponseReceivedEndpoints", "continuationContents", "onResponseReceivedResults")
-                            for (k in keysToTry) {
-                                val v = obj[k]
-                                val r = findContinuationItemsRecursive(v)
-                                if (r != null) return r
-                            }
-                            for (v in obj.values) {
-                                val r = findContinuationItemsRecursive(v)
-                                if (r != null) return r
-                            }
-                        }
-                        is List<*> -> {
-                            for (i in obj) {
-                                val r = findContinuationItemsRecursive(i)
-                                if (r != null) return r
-                            }
-                        }
-                    }
-                    return null
-                }
-
-                fun findContinuationTokenFromItems(items: List<*>?): String? {
-                    if (items == null) return null
-                    for (it in items) {
-                        val m = it as? Map<*, *> ?: continue
-                        val token = safeGet(m, "continuationItemRenderer", "continuationEndpoint", "continuationCommand", "token") as? String
-                        if (!token.isNullOrBlank()) return token
-                        val token2 = safeGet(m, "continuationItemRenderer", "continuationEndpoint", "browseContinuationEndpoint", "token") as? String
-                        if (!token2.isNullOrBlank()) return token2
-                        val token3 = safeGet(m, "continuationItemRenderer", "continuationEndpoint", "token") as? String
-                        if (!token3.isNullOrBlank()) return token3
-                    }
-                    return null
-                }
 
                 fun extractVideosFromItems(items: List<*>, collectTo: MutableList<Episode>) {
                     println("[YT_CHANNEL_DEBUG] extractVideosFromItems() 호출됨. 분석할 아이템 개수: ${items.size}")
@@ -1271,6 +1274,20 @@ private fun collectFromRenderer(
                     extractVideosFromItems(initialItems, allEpisodes)
                 }
 
+                fun findContinuationTokenFromItems(items: List<*>?): String? {
+                    if (items == null) return null
+                    for (it in items) {
+                        val m = it as? Map<*, *> ?: continue
+                        val token = safeGet(m, "continuationItemRenderer", "continuationEndpoint", "continuationCommand", "token") as? String
+                        if (!token.isNullOrBlank()) return token
+                        val token2 = safeGet(m, "continuationItemRenderer", "continuationEndpoint", "browseContinuationEndpoint", "token") as? String
+                        if (!token2.isNullOrBlank()) return token2
+                        val token3 = safeGet(m, "continuationItemRenderer", "continuationEndpoint", "token") as? String
+                        if (!token3.isNullOrBlank()) return token3
+                    }
+                    return null
+                }
+
                 var currentToken: String? = findContinuationTokenFromItems(initialItems)
                 if (currentToken.isNullOrBlank()) {
                     val conts = findContinuationItemsRecursive(data)
@@ -1328,7 +1345,6 @@ private fun collectFromRenderer(
                 val header = safeGet(data, "header", "playlistHeaderRenderer") as? Map<*, *>
                 var title = extractTitle(safeGet(header, "title") as? Map<*, *>)
                 
-                // ✅ watch 페이지 기반의 믹스 플레이리스트 타이틀 동적 검색 추가
                 if (title.isNullOrBlank()) {
                     fun findMixTitle(obj: Any?): String? {
                         if (obj is Map<*, *>) {
@@ -1353,35 +1369,8 @@ private fun collectFromRenderer(
                 val author = extractTitle(ownerObj) ?: "Unknown Channel"
                 val description = extractTitle(safeGet(header, "description") as? Map<*, *>)
 
-                val episodes = mutableListOf<Episode>()
-                val tempSearchResponses = mutableListOf<SearchResponse>()
                 val seenPlaylistIds = mutableSetOf<String>()
-
-                processRecursive(data, tempSearchResponses, seenPlaylistIds, playlistMode = false)         
-
-                tempSearchResponses.forEachIndexed { index, res ->
-                    if (res.url.contains("watch?v=")) {
-                        episodes.add(newEpisode(res.url) {
-                            this.name = res.name.substringAfter("} ").trim()
-                            this.episode = index + 1
-                            this.posterUrl = res.posterUrl
-                        })
-                    }
-                }
-
-                if (episodes.isEmpty()) {
-                    val contents = safeGet(data, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0, "tabRenderer", "content", "sectionListRenderer", "contents") as? List<*>
-                    processRecursive(contents, tempSearchResponses, seenPlaylistIds, playlistMode = false)
-                    tempSearchResponses.forEachIndexed { index, res ->
-                        if (res.url.contains("watch?v=")) {
-                            episodes.add(newEpisode(res.url) {
-                                this.name = res.name.substringAfter("} ").trim()
-                                this.episode = index + 1
-                                this.posterUrl = res.posterUrl
-                            })
-                        }
-                    }
-                }
+                val episodes = extractPlaylistEpisodes(data, seenPlaylistIds)
 
                 val playlistPoster = episodes.firstOrNull()?.posterUrl ?: response.document.selectFirst("meta[property=og:image]")?.attr("content")
 
@@ -1585,8 +1574,6 @@ private fun collectFromRenderer(
 
         return true
     }
-
-
 
     private suspend fun loadLinksAdvanced(
         videoId: String,
