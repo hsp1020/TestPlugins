@@ -22,12 +22,9 @@ import java.util.concurrent.ConcurrentHashMap
 
 // [공통 아키텍처 브릿지] 교차 중복 코드 제거 및 유지보수 단일화를 위한 유틸리티
 object YoutubeUtils {
-    // 1. 유저 에이전트 문자열 상수의 완벽한 중앙 집중식 선언
     const val CHROME_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
     const val SAFARI_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
     const val IOS_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
-
-    // 2. 이너튜브 클라이언트 전용 중앙 상수 선언
     const val DEFAULT_CLIENT_VERSION = "2.20240725.01.00"
 
     private val sha1Digest = ThreadLocal.withInitial {
@@ -49,7 +46,6 @@ object YoutubeUtils {
         return sb.toString()
     }
 
-    // SAPISID 해시 생성 로직 단일 지점 이식
     fun getSapisidHash(sapisid: String, origin: String = "https://www.youtube.com"): String {
         val timestamp = (System.currentTimeMillis() / 1000).toString()
         val msg = "$timestamp $sapisid $origin"
@@ -57,7 +53,6 @@ object YoutubeUtils {
         return "SAPISIDHASH ${timestamp}_$hash"
     }
 
-    // 3. 완전히 파편화되어 동작하던 유사 쿠키 빌더 로직의 구조적 대통합
     fun buildCookiesAndExtractSapisid(prefs: SharedPreferences?, lang: String, fallbackVisitor: String): Pair<String, String?> {
         val cookieBuilder = java.lang.StringBuilder()
         val visitor = prefs?.getString("VISITOR_INFO1_LIVE", null)
@@ -80,7 +75,6 @@ object YoutubeUtils {
         return Pair(cookieBuilder.toString(), sapisidVal)
     }
 
-    // 4. 이미지 프록시(wsrv.nl) 파싱 및 URL 인코딩 중복 방지
     fun getProxiedPoster(poster: String?): String? {
         if (poster.isNullOrBlank()) return null
         return try {
@@ -186,9 +180,12 @@ class YoutubeProvider(
         private val homeShorts = mutableListOf<Episode>()
         private val searchShorts = mutableListOf<Episode>()
 
-        private val VIEW_REPLACE_REGEX = Regex("조회수|views|مشاهدة|시청 중|시청중|watching")
+        // 실시간 스트림 시청자 수 보존을 위해 필터 정규식에 명(시청자) 단위 추가 반영
+        private val VIEW_REPLACE_REGEX = Regex("조회수|views|مشاهدة|시청 중|시청중|watching|명|시청자")
         private val VIEW_FORMAT_REGEX = Regex(".*[천만억KMBkmb].*")
-        private val METADATA_VIEW_REGEX = Regex(".*(\\d+[KMBkmb]|views|조회수|회|시청|watching|مشاهدة).*")
+        
+        // 라이브 방송의 시청자수 파츠가 채널명을 오버라이드하지 못하도록 "명", "시청자", "مشاهد"(시청자) 추가 기재
+        private val METADATA_VIEW_REGEX = Regex(".*(\\d+[KMBkmb]|views|조회수|회|시청|watching|مشاهدة|명|시청자|مشاهد).*")
         private val METADATA_SKIP_REGEX = Regex(".*(\\d+:\\d+|ago|قبل|전|시간|분|일|주|개월|년|시청|watching).*")
         private val SUBSCRIBER_REGEX = Regex(".*(구독자|subscribers|명|K|M|B|sub).*\\s*", RegexOption.IGNORE_CASE)
         private val SUBSCRIBER_REPLACE_REGEX = Regex("(구독자|subscribers?)\\s*", RegexOption.IGNORE_CASE)
@@ -205,7 +202,7 @@ class YoutubeProvider(
             val isSearchRequest = urlStr.contains("/results") || urlStr.contains("/v1/search")
 
             val requestBuilder = request.newBuilder()
-                .header("User-Agent", YoutubeUtils.CHROME_USER_AGENT) // 통합 선언된 Chrome UA 연결
+                .header("User-Agent", YoutubeUtils.CHROME_USER_AGENT)
 
             val origReferer = request.header("Referer")
             if (origReferer != null && (origReferer.contains("/results") || origReferer.contains("/v1/search"))) {
@@ -213,7 +210,6 @@ class YoutubeProvider(
             }
 
             if (!isSearchRequest) {
-                // 중복 제거: 공통 함수를 활용한 쿠키 빌딩 및 SAPISID 추출 단일화
                 val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(prefs, provider.lang, "_Mk3UVhY40g")
                 requestBuilder.addHeader("Cookie", cookies)
                 requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
@@ -387,7 +383,6 @@ class YoutubeProvider(
         return collected
     }
 
-
     private fun extractLockupMetadata(lockup: Map<*, *>) : Pair<String, String> {
         var channel = ""
         var views = ""
@@ -401,10 +396,12 @@ class YoutubeProvider(
 
             val rawParts = extractPartsFromMetadataRows(rows) { formatViews(it) }
             rawParts.forEach { text ->
-                if (text.contains("회") || text.contains("시청") || text.contains("조회") || text.contains("views") || text.contains("watching")) {
+                // 라이브 방송 인지를 위해 "명", "시청자" 등 검출 로직 보강
+                if (text.contains("회") || text.contains("시청") || text.contains("조회") || 
+                    text.contains("views") || text.contains("watching") || 
+                    text.contains("명") || text.contains("시청자") || text.contains("مشاهد")) {
                     views = text
                 } else if (!METADATA_SKIP_REGEX.matches(text) && text.length > 1 && !text.contains("•")) {
-                    // ✅ 시간 정보 정규식(METADATA_SKIP_REGEX) 매칭 차단 필터 적용
                     channel = text
                 }
             }
@@ -422,15 +419,21 @@ class YoutubeProvider(
         return Pair(channel, views)
     }
 
-    
     private fun formatViews(viewText: String?): String {
         if (viewText.isNullOrBlank()) return "N/A"
         var text = viewText.trim()
+        
+        // "명", "시청자" 등이 있으면 라이브 스트림으로 감지
+        val isLive = text.contains("명") || text.contains("시청자") || text.contains("watching") || text.contains("시청 중")
 
         text = VIEW_REPLACE_REGEX.replace(text, "").trim()
 
         if (VIEW_FORMAT_REGEX.matches(text) && text.length < 15) {
-            return text
+            return if (isLive) {
+                if (lang == "ko") "${text}명" else "${text} watching"
+            } else {
+                if (lang == "ko") "${text}회" else text
+            }
         }
         
         val sb = java.lang.StringBuilder(text.length)
@@ -444,19 +447,21 @@ class YoutubeProvider(
         return try {
             val v = digits.toLong()
             if (lang == "ko") {
+                val suffix = if (isLive) "명" else "회"
                 when {
-                    v < 1000 -> "${v}회"
-                    v < 10000 -> String.format("%.1f천회", v / 1000.0).replace(".0천", "천")
-                    v < 100000 -> String.format("%.1f만회", v / 10000.0).replace(".0만", "만")
-                    v < 100000000 -> "${v / 10000}만회"
-                    else -> String.format("%.1f억회", v / 100000000.0).replace(".0억", "억")
+                    v < 1000 -> "$v$suffix"
+                    v < 10000 -> String.format("%.1f천$suffix", v / 1000.0).replace(".0천", "천")
+                    v < 100000 -> String.format("%.1f만$suffix", v / 10000.0).replace(".0만", "만")
+                    v < 100000000 -> "${v / 10000}만$suffix"
+                    else -> String.format("%.1f억$suffix", v / 100000000.0).replace(".0억", "억")
                 }
             } else {
+                val suffix = if (isLive) " watching" else ""
                 when {
-                    v < 1000 -> v.toString()
-                    v < 1_000_000 -> String.format("%.1fK", v / 1000.0).replace(".0K", "K")
-                    v < 1_000_000_000 -> String.format("%.1fM", v / 1_000_000.0).replace(".0M", "M")
-                    else -> String.format("%.1fB", v / 1_000_000_000.0).replace(".0B", "B")
+                    v < 1000 -> "$v$suffix"
+                    v < 1_000_000 -> String.format("%.1fK$suffix", v / 1000.0).replace(".0K", "K")
+                    v < 1_000_000_000 -> String.format("%.1fM$suffix", v / 1_000_000.0).replace(".0M", "M")
+                    else -> String.format("%.1fB$suffix", v / 1_000_000_000.0).replace(".0B", "B")
                 }
             }
         } catch (e: Exception) {
@@ -562,7 +567,8 @@ class YoutubeProvider(
                     })
                 }
 
-                val finalTitle = "#$episodeNum {$views} $title"
+                // [쇼츠 최적화] 채널명이 안 불려오는 경우 가독성을 보장하기 위해 {Short | 조회수} 포맷 적용
+                val finalTitle = "#$episodeNum {Short | $views} $title"
                 println("[YT_DEBUG] collectFromRenderer: extracted Shorts $videoId: $finalTitle")
                 return newMovieSearchResponse(finalTitle, finalUrl, TvType.Movie) {
                     this.posterUrl = poster
@@ -661,7 +667,8 @@ class YoutubeProvider(
                             this.episode = episodeNum
                         })
                     }
-                    finalTitle = "#$episodeNum [Shorts] {$views} $title"
+                    // [쇼츠 락업 최적화] 동일하게 {Short | 조회수} 구조화 적용
+                    finalTitle = "#$episodeNum [Shorts] {Short | $views} $title"
                     println("[YT_DEBUG] collectFromRenderer: extracted Shorts lockup $videoId: $finalTitle")
                     return newMovieSearchResponse(
                         finalTitle,
@@ -1650,7 +1657,6 @@ class YoutubeProvider(
                     if (items == null) return null
                     for (it in items) {
                         val m = it as? Map<*, *> ?: continue
-                        // 중복을 방지하기 위해 정교하게 작성된 재귀 함수로 추출 위임
                         val token = findTokenRecursive(m)
                         if (!token.isNullOrBlank()) return token
                     }
@@ -2088,7 +2094,7 @@ class YoutubeProvider(
                 }
 
                 val safariHeaders = mapOf(
-                    "User-Agent" to YoutubeUtils.SAFARI_USER_AGENT, // 통합 UA 참조
+                    "User-Agent" to YoutubeUtils.SAFARI_USER_AGENT, 
                     "Accept-Language" to "en-US,en;q=0.5"
                 )
                 val watchUrl = "$mainUrl/watch?v=$videoId&hl=$lang"
@@ -2140,7 +2146,6 @@ class YoutubeProvider(
                 postHeaders["X-Youtube-Client-Version"] = clientVersion
                 if (!visitorData.isNullOrBlank()) postHeaders["X-Goog-Visitor-Id"] = visitorData
 
-                // 중복 쿠키 빌딩 로직 제거 및 단일화 적용
                 val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(appPrefs, lang, "fzYjM8PCwjw")
                 postHeaders["Cookie"] = cookies
 
