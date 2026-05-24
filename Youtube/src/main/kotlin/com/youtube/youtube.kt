@@ -11,12 +11,11 @@ import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import okhttp3.Interceptor
 import okhttp3.Response
 import java.net.URLEncoder
+import java.net.URLDecoder
 import java.util.regex.Pattern
 import com.lagradost.cloudstream3.AcraApplication
 import androidx.preference.PreferenceManager
 import com.lagradost.cloudstream3.ar.youtube.YoutubeProvider.Config.SLEEP_BETWEEN
-import kotlin.collections.remove
-import kotlin.text.get
 
 class YoutubeProvider(
     private val sharedPref: SharedPreferences? = null
@@ -52,19 +51,29 @@ class YoutubeProvider(
     companion object {
         private val homeShorts = mutableListOf<Episode>()
         private val searchShorts = mutableListOf<Episode>()
+
+        // 무분별한 런타임 정규식 할당을 차단하기 위한 스태틱 사전 컴파일 정규식 목록
+        private val VIEW_REPLACE_REGEX = Regex("조회수|views|مشاهدة|시청 중|시청중|watching")
+        private val VIEW_FORMAT_REGEX = Regex(".*[천만억KMBkmb].*")
+        private val METADATA_VIEW_REGEX = Regex(".*(\\d+[KMBkmb]|views|조회수|회|시청|watching|مشاهدة).*")
+        private val METADATA_SKIP_REGEX = Regex(".*(\\d+:\\d+|ago|قبل|전|시간|분|일|주|개월|년|시청|watching).*")
+        private val SUBSCRIBER_REGEX = Regex(".*(구독자|subscribers|명|K|M|B|sub).*\\s*", RegexOption.IGNORE_CASE)
+        private val SUBSCRIBER_REPLACE_REGEX = Regex("(구독자|subscribers?)\\s*", RegexOption.IGNORE_CASE)
+        private val MIX_TITLE_REPLACE_KO = Regex("""\s*\(믹스\s*재생목록\)""", RegexOption.IGNORE_CASE)
+        private val MIX_TITLE_REPLACE_EN = Regex("""\s*\(Mix\s*Playlist\)""", RegexOption.IGNORE_CASE)
+        private val YT_ID_REGEX = Regex("""(?:v=|\/videos\/|embed\/|youtu\.be\/|shorts\/)([A-Za-z0-9_-]{11})""")
+
+        // SHA-1 해시 생성 시의 보안 프로바이더 탐색 및 GC 억제를 위한 스레드 로컬 버퍼 적용
+        private val sha1Digest = ThreadLocal.withInitial {
+            java.security.MessageDigest.getInstance("SHA-1")
+        }
     }
 
     private var isSearchContext = false
 
-    // ✅ Interceptor가 appPrefs를 정상적으로 참조하도록 구조 변경
+    // Interceptor가 appPrefs를 정상적으로 참조하도록 구성 유지
     class YouTubeInterceptor(private val provider: YoutubeProvider) : Interceptor {
         private val prefs get() = provider.appPrefs
-        
-        private fun sha1(input: String): String {
-            val md = java.security.MessageDigest.getInstance("SHA-1")
-            val bytes = md.digest(input.toByteArray())
-            return bytes.joinToString("") { "%02x".format(it) }
-        }
 
         override fun intercept(chain: Interceptor.Chain): Response {
             val request = chain.request()
@@ -75,12 +84,11 @@ class YoutubeProvider(
             val requestBuilder = request.newBuilder()
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36")
 
-            // [정밀 보완] 검색 페이지 레퍼러만 가두고, player API를 위한 개별 watch 주소 레퍼러는 원본 그대로 승인
+            // 검색 페이지 레퍼러만 가두고, player API를 위한 개별 watch 주소 레퍼러는 원본 그대로 승인
             val origReferer = request.header("Referer")
             if (origReferer != null && (origReferer.contains("/results") || origReferer.contains("/v1/search"))) {
                 requestBuilder.header("Referer", "https://www.youtube.com/")
             }
-    
 
             val cookieBuilder = StringBuilder()
             val visitor = prefs?.getString("VISITOR_INFO1_LIVE", null)
@@ -114,7 +122,7 @@ class YoutubeProvider(
                         val timestamp = (System.currentTimeMillis() / 1000).toString()
                         val origin = "https://www.youtube.com"
                         val msg = "$timestamp $sapisidVal $origin"
-                        val hash = sha1(msg)
+                        val hash = provider.sha1(msg)
                         requestBuilder.addHeader("Authorization", "SAPISIDHASH ${timestamp}_$hash")
                         requestBuilder.addHeader("X-Origin", origin)
                         requestBuilder.addHeader("X-Goog-AuthUser", "0")
@@ -145,13 +153,13 @@ class YoutubeProvider(
     @Suppress("PropertyName")
     private data class PlayerResponse(
         @JsonProperty("streamingData") val streamingData: StreamingData?,
-        @JsonProperty("playbackTracking") val playbackTracking: PlaybackTracking? // 🚀 트래킹 정보 필드 추가
+        @JsonProperty("playbackTracking") val playbackTracking: PlaybackTracking? // 트래킹 정보 필드
     )
     private data class StreamingData(
         @JsonProperty("hlsManifestUrl") val hlsManifestUrl: String?
     )
 
-    // 🚀 구글 트래킹에 필요한 파싱 구조체 신설
+    // 구글 트래킹에 필요한 파싱 구조체
     private data class PlaybackTracking(
         @JsonProperty("videostatsPlaybackUrl") val videostatsPlaybackUrl: TrackingUrl?,
         @JsonProperty("videostatsWatchtimeUrl") val videostatsWatchtimeUrl: TrackingUrl?
@@ -160,19 +168,22 @@ class YoutubeProvider(
         @JsonProperty("baseUrl") val baseUrl: String?
     )
 
-    
-
-    private fun sha1(input: String): String {
+    fun sha1(input: String): String {
         return try {
-            val md = java.security.MessageDigest.getInstance("SHA-1")
-            val bytes = md.digest(input.toByteArray())
-            bytes.joinToString("") { "%02x".format(it) }
+            val md = sha1Digest.get()
+            md.reset()
+            val bytes = md.digest(input.toByteArray(Charsets.UTF_8))
+            val sb = java.lang.StringBuilder(bytes.size * 2)
+            for (b in bytes) {
+                sb.append(String.format("%02x", b))
+            }
+            sb.toString()
         } catch (e: Exception) {
             input.hashCode().toString()
         }
     }
 
-private fun getSapisidHash(
+    private fun getSapisidHash(
         sapisid: String,
         origin: String = "https://www.youtube.com"
     ): String {
@@ -182,10 +193,6 @@ private fun getSapisidHash(
         return "SAPISIDHASH ${timestamp}_$hash"
     }
 
-    // ==========================================
-    // 🚀 [신규 추가] 재생 세션 트래킹 로직 영역 시작
-    // ==========================================
-    
     // 16자리 무작위 문자열(Client Playback Nonce, cpn) 생성
     private fun generateCpn(): String {
         val alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
@@ -239,10 +246,6 @@ private fun getSapisidHash(
             logError(e)
         }
     }
-
-    // ==========================================
-    // 🚀 [신규 추가] 재생 세션 트래킹 로직 영역 끝
-    // ==========================================
     
     private fun getSavedContinuationToken(key: String): String? {
         val hashedKey = sha1(key)
@@ -299,7 +302,7 @@ private fun getSapisidHash(
         return ""
     }
 
-    private fun extractLockupMetadata(lockup: Map<*, *>): Pair<String, String> {
+    private fun extractLockupMetadata(lockup: Map<*, *>) : Pair<String, String> {
         var channel = ""
         var views = ""
 
@@ -313,11 +316,11 @@ private fun getSapisidHash(
             rows?.forEach { row ->
                 val parts = row.getListKey("metadataParts")
                 parts?.forEach { part ->
-                    val text = getText(part.getMapKey("text")) ?: ""
+                    val text = getText(part.getMapKey("text"))
                     if (text.isNotBlank()) {
-                        if (text.matches(Regex(".*(\\d+[KMBkmb]|views|조회수|회|시청|watching|مشاهدة).*"))) {
+                        if (METADATA_VIEW_REGEX.matches(text)) {
                             views = formatViews(text)
-                        } else if (!text.matches(Regex(".*(\\d+:\\d+|ago|قبل|전|시간|분|일|주|개월|년|시청|watching).*")) && text.length > 1 && !text.contains("•")) {
+                        } else if (!METADATA_SKIP_REGEX.matches(text) && text.length > 1 && !text.contains("•")) {
                             channel = text
                         }
                     }
@@ -331,7 +334,7 @@ private fun getSapisidHash(
                 lockup.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")
                     ?.getMapKey("viewCount")
             )
-            if (!direct.isNullOrBlank()) views = formatViews(direct)
+            if (direct.isNotBlank()) views = formatViews(direct)
         }
 
         return Pair(channel, views)
@@ -339,16 +342,21 @@ private fun getSapisidHash(
 
     private fun formatViews(viewText: String?): String {
         if (viewText.isNullOrBlank()) return "N/A"
-        var text = viewText.toString().trim()
+        var text = viewText.trim()
 
-        text = text.replace("조회수", "").replace("views", "").replace("مشاهدة", "")
-                   .replace("시청 중", "").replace("시청중", "").replace("watching", "").trim()
+        text = VIEW_REPLACE_REGEX.replace(text, "").trim()
 
-        if (text.matches(Regex(".*[천만억KMBkmb].*")) && text.length < 15) {
+        if (VIEW_FORMAT_REGEX.matches(text) && text.length < 15) {
             return text
         }
         
-        val digits = text.filter { it.isDigit() }
+        // 고속 정수 필터 루프 적용으로 GC 유발 최소화
+        val sb = java.lang.StringBuilder(text.length)
+        for (i in 0 until text.length) {
+            val c = text[i]
+            if (c in '0'..'9') sb.append(c)
+        }
+        val digits = sb.toString()
         if (digits.isBlank()) return text
         
         return try {
@@ -505,25 +513,23 @@ private fun getSapisidHash(
 
         val lockup = renderer.getMapKey("lockupViewModel")
         if (lockup != null) {
-            // [추가] 1. 광고 차단을 위한 컨텐츠 타입 검사 코드 추가
             val contentType = lockup.getString("contentType") ?: ""
             if (contentType.contains("AD") || contentType.contains("SPONSORED") || contentType.contains("PROMOTED")) {
                 println("[YT_DEBUG] Skipping ad in lockupViewModel (contentType: $contentType)")
                 return null
             }
 
-            // [변경] 2. 기존의 "LOCKUP_CONTENT_TYPE_PLAYLIST" 조건문을 간결하게 바꾼 형태
             if (contentType == "LOCKUP_CONTENT_TYPE_PLAYLIST") {
                 val playlistId = lockup.getString("contentId")
                 if (!playlistId.isNullOrBlank() && seenIds.add(playlistId)) {
                     var title = lockup.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")
                         ?.getMapKey("title")?.getString("content") ?: "Playlist"
 
-                    // 🚀 [추가] 믹스 재생목록 타이틀에서 꼬리표 단어 깔끔히 정제
+                    // 정규식 할당 성능 최적화
                     if (playlistId.startsWith("RD") || playlistId.startsWith("UL") || playlistId.startsWith("MM") || playlistId.startsWith("RDMM")) {
-                        title = title.replace(Regex("""\s*\(믹스\s*재생목록\)""", RegexOption.IGNORE_CASE), "")
-                                     .replace(Regex("""\s*\(Mix\s*Playlist\)""", RegexOption.IGNORE_CASE), "")
-                                     .trim()
+                        title = MIX_TITLE_REPLACE_KO.replace(title, "")
+                        title = MIX_TITLE_REPLACE_EN.replace(title, "")
+                        title = title.trim()
                     }
 
                     val episodeCount =
@@ -568,7 +574,6 @@ private fun getSapisidHash(
                     lockup.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")
                         ?.getMapKey("title")
                 )
-                // [변경] 3. 기본값 대체 대신, 빈 제목(광고/기타 노이즈) 발견 시 통째로 패스하도록 조건문 교체
                 if (title.isBlank()) {
                     println("[YT_DEBUG] Skipping lockupViewModel $videoId due to empty title (likely an ad or empty placeholder)")
                     return null
@@ -715,7 +720,8 @@ private fun getSapisidHash(
         var braceCount = 0
         var inString = false
         var escape = false
-        for (i in input.indices) {
+        val len = input.length
+        for (i in 0 until len) {
             val char = input[i]
             if (escape) {
                 escape = false
@@ -746,6 +752,7 @@ private fun getSapisidHash(
     private fun extractYtInitialData(html: String): Map<String, Any>? {
         println("[YT_DEBUG] extractYtInitialData started. html length: ${html.length}")
         var index = 0
+        val htmlLen = html.length
         var matchCount = 0
         while (true) {
             val found = html.indexOf("ytInitialData", index)
@@ -756,9 +763,25 @@ private fun getSapisidHash(
             matchCount++
             println("[YT_DEBUG] Found 'ytInitialData' keyword occurrence at index: $found")
             
-            val sub = html.substring(found, minOf(found + 100, html.length))
-            println("[YT_DEBUG] Context context substring: '$sub'")
-            if (sub.contains("=") && (sub.contains("var") || sub.contains("window") || sub.trim().startsWith("ytInitialData"))) {
+            // 가볍고 정교한 컨텍스트 조건 판별 적용 (문자열 중복 할당 방지)
+            val contextEnd = minOf(found + 100, htmlLen)
+            var hasAssign = false
+            var hasVarOrWindow = false
+            
+            for (i in found until contextEnd) {
+                if (html[i] == '=') {
+                    hasAssign = true
+                    break
+                }
+            }
+            
+            if (html.indexOf("var", found, ignoreCase = false) in found until contextEnd ||
+                html.indexOf("window", found, ignoreCase = false) in found until contextEnd ||
+                html.startsWith("ytInitialData", found)) {
+                hasVarOrWindow = true
+            }
+
+            if (hasAssign && hasVarOrWindow) {
                 val braceIndex = html.indexOf("{", found)
                 println("[YT_DEBUG] Found braceIndex: $braceIndex")
                 if (braceIndex != -1 && braceIndex - found < 150) {
@@ -783,7 +806,7 @@ private fun getSapisidHash(
             } else {
                 println("[YT_DEBUG] Context does not look like variable assignment.")
             }
-            index = minOf(found + 13, html.length)
+            index = minOf(found + 13, htmlLen)
         }
         println("[YT_DEBUG] extractYtInitialData returning null.")
         return null
@@ -913,7 +936,6 @@ private fun getSapisidHash(
 
         try {
             if (page == 1) {
-                // saveContinuationToken(requestData, null)
                 if (isChip) {
                     savedApiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
                     savedVisitorData = savedVisitorData ?: appPrefs?.getString("yt_visitor_data", null)
@@ -1007,7 +1029,7 @@ private fun getSapisidHash(
             } else {
                 var tokenToUse = getSavedContinuationToken(requestData)
                 
-                // 🚀 [수정] 자가치유 메커니즘을 오직 'page == 2'에서 토큰이 유실되었을 때만 작동하도록 정밀 제어
+                // 자가치유 메커니즘: page 2 토큰 유실 시 작동 정밀 제어
                 if (tokenToUse.isNullOrBlank() && page == 2) { 
                     println("[YT_DEBUG] Token to use is null/blank on page $page for $requestData. Fetching fallback continuation...")
                     val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
@@ -1016,7 +1038,6 @@ private fun getSapisidHash(
                     if (isChip) {
                         val rawToken = requestData.removePrefix("chip_")
                         val apiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
-                        // 맞춤형 카테고리의 스크롤 안정성을 높이기 위해 payload context에서 visitorData 명시적 누락
                         val payload = mapOf(
                             "context" to mapOf(
                                 "client" to mapOf(
@@ -1052,7 +1073,6 @@ private fun getSapisidHash(
                     val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
                     val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", "2.20240725.01.00") ?: "2.20240725.01.00"
                     val apiUrl = if (requestData.contains("/results")) "$mainUrl/youtubei/v1/search?key=$apiKey" else "$mainUrl/youtubei/v1/browse?key=$apiKey"
-                    // 개인화 카테고리의 Continuation 토큰 교차 검증 오류를 우회하기 위해 visitorData 필드를 생략한 페이로드 송신
                     val payload = mapOf(
                         "context" to mapOf(
                             "client" to mapOf(
@@ -1399,13 +1419,13 @@ private fun getSapisidHash(
                         val parts = safeGet(row, "metadataParts") as? List<*>
                         parts?.forEach { part ->
                             val text = getText(safeGet(part, "text"))
-                            if (text.matches(Regex(".*(구독자|subscribers|명|K|M|B|sub).*\\s*", RegexOption.IGNORE_CASE))) {
+                            if (SUBSCRIBER_REGEX.matches(text)) {
                                 subscriberCount = text
                             }
                         }
                     }
                 }
-                subscriberCount = subscriberCount.replace(Regex("(구독자|subscribers?)\\s*", RegexOption.IGNORE_CASE), "").trim()
+                subscriberCount = SUBSCRIBER_REPLACE_REGEX.replace(subscriberCount, "").trim()
                 if (subscriberCount.isBlank()) subscriberCount = "N/A"
 
                 val allEpisodes = mutableListOf<Episode>()
@@ -1517,7 +1537,7 @@ private fun getSapisidHash(
                                             parts?.forEach { part ->
                                                 val text = getText(safeGet(part, "text"))
                                                 if (text.isNotBlank()) {
-                                                    if (text.matches(Regex(".*(조회수|views|회|مشاهدة|[KMBkmb]).*"))) {
+                                                    if (METADATA_VIEW_REGEX.matches(text)) {
                                                         metaList.add(formatViews(text))
                                                     } else {
                                                         metaList.add(text)
@@ -1693,14 +1713,11 @@ private fun getSapisidHash(
                     println("[YT_DEBUG] Title resolved from findMixTitle: $title")
                 }
 
-                // 🟢 이 자리에 아래 코드를 그대로 덮어씌웁니다.
-
                 val seenPlaylistIds = mutableSetOf<String>()
                 // 믹스 추가 로드를 위해 가변형(.toMutableList())으로 초기 로드
                 val episodes = extractPlaylistEpisodes(data, seenPlaylistIds).toMutableList()
                 println("[YT_DEBUG] Successfully parsed initial episodes count: ${episodes.size}")
 
-                // 🚀 [개선 1] 믹스 상세페이지 제목도 "믹스 - 원슈타인" 형태로 메인 피드와 완전히 일치되게 동적 역추적
                 val isMix = url.contains("list=RD") || url.contains("list=MM") || url.contains("list=UL")
                 if (isMix) {
                     val firstChannel = episodes.firstOrNull()?.description
@@ -1715,12 +1732,15 @@ private fun getSapisidHash(
                     }
                 }
 
-                // 불필요한 꼬리표 정제 작업 처리
-                title = title?.replace(Regex("""\s*\(믹스\s*재생목록\)""", RegexOption.IGNORE_CASE), "")
-                             ?.replace(Regex("""\s*\(Mix\s*Playlist\)""", RegexOption.IGNORE_CASE), "")
-                             ?.trim() ?: "YouTube Mix"
+                // 불필요한 믹스 타이틀 꼬리표 정제 (스태틱 정규식 활용)
+                if (title != null) {
+                    title = MIX_TITLE_REPLACE_KO.replace(title!!, "")
+                    title = MIX_TITLE_REPLACE_EN.replace(title!!, "")
+                    title = title!!.trim()
+                } else {
+                    title = "YouTube Mix"
+                }
 
-                // 🚀 [개선 2] 믹스 재생목록 내부 트래킹용 페이지네이션 전개 (/v1/next API 이용해 48개 이상 로드)
                 var currentToken = findTokenRecursive(data)
                 println("[YT_DEBUG] Mix playlist continuation token found: ${currentToken != null}")
 
@@ -1762,7 +1782,6 @@ private fun getSapisidHash(
                     }
                 }
 
-                // 🚀 [개선 3] 모든 에피소드의 시퀀스를 1번부터 차례대로 재조정 정렬
                 episodes.forEachIndexed { index, ep ->
                     ep.episode = index + 1
                 }
@@ -1774,7 +1793,7 @@ private fun getSapisidHash(
 
                 val playlistPoster = episodes.firstOrNull()?.posterUrl ?: response.document.selectFirst("meta[property=og:image]")?.attr("content")
 
-                return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+                return newTvSeriesLoadResponse(title ?: "YouTube Mix", url, TvType.TvSeries, episodes) {
                     this.posterUrl = playlistPoster
                     val finalDescription = if (description.isNullOrBlank()) "Channel: $author" else "Channel: $author\n\n$description"
                     this.plot = finalDescription
@@ -1789,7 +1808,7 @@ private fun getSapisidHash(
         val videoId = url.extractYoutubeId() ?: throw ErrorLoadingException("Invalid YouTube URL")
         println("[YT_DEBUG] Loading normal video ID: $videoId")
 
-        // 상세페이지 진입 시 홈 화면에서 눌러 들어갔음을 명시적으로 알려 시동 차단 우회
+        // 상세페이지 진입 시 홈 화면에서 리디렉션되었음을 알려 시동 차단 우회
         val headers = mapOf("Referer" to "https://www.youtube.com/")
         val response = app.get(url, headers = headers, interceptor = ytInterceptor)
         val html = response.text
@@ -1875,7 +1894,7 @@ private fun getSapisidHash(
         val filteredRecs = recommendations.filter { !it.url.contains("/shorts/") }
         println("[YT_DEBUG] Video metadata load complete. Title: $title, Recommendations count: ${filteredRecs.size}")
 
-        // 🚀 1. 동적 가상 플레이리스트(에피소드 목록) 생성
+        // 1. 동적 가상 플레이리스트(에피소드 목록) 생성
         val episodes = mutableListOf<Episode>()
         
         // 1-1. 현재 요청된 메인 비디오를 Episode 1로 최우선 배정
@@ -1886,7 +1905,7 @@ private fun getSapisidHash(
             this.description = channelName.ifBlank { "재생 중" }
         })
 
-        // 1-2. 추천 목록 중 재생할 수 없는 링크(채널 정보 등)는 제외하고 실제 재생 가능한 영상만 Episode 2부터 나열
+        // 1-2. 추천 목록 중 재생할 수 없는 링크는 제외하고 실제 재생 가능한 영상만 Episode 2부터 나열
         var epCount = 2
         filteredRecs.forEach { rec ->
             if (rec.url.contains("watch?v=") || rec.url.contains("/shorts/")) {
@@ -1898,7 +1917,7 @@ private fun getSapisidHash(
             }
         }
 
-        // 🚀 2. 기존 하단 추천 레이아웃과 데이터는 보존하되, 레이아웃 규격을 TvSeries로 변경하여 연속 재생 활성화
+        // 2. 레이아웃 규격을 TvSeries로 선언하여 연속 재생 기능 활성화
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
             this.posterUrl = poster
             this.plot = plot
@@ -1907,7 +1926,7 @@ private fun getSapisidHash(
                 this.tags = listOf(channelName)
             }
 
-            this.recommendations = filteredRecs // 기존 하단 추천 탭 로직 정상 유지
+            this.recommendations = filteredRecs 
         }
     }
 
@@ -1954,8 +1973,7 @@ private fun getSapisidHash(
         if (isLive) {
             loadExtractor(fullUrl, subtitleCallback, callback)
         } else {
-            // 🚀 [수정 지점] 일반 비디오 추출 직전 재생 트래킹 직접 트리거
-            // 추출 결과값 처리(Classic 또는 NewPipe Extractor)보다 먼저 동작하여 계정 인증 상태로 통계 서버에 안착시킵니다.
+            // 일반 비디오 추출 직전 재생 트래킹 직접 트리거
             if (playerResponseText.isNotBlank()) {
                 try {
                     val playerResponse = parseJson<PlayerResponse>(playerResponseText)
@@ -1993,8 +2011,6 @@ private fun getSapisidHash(
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val fullUrl = "https://www.youtube.com/watch?v=$videoId"
-
         try {
             val apiUrl = "$mainUrl/youtubei/v1/player"
             val payload = mapOf(
@@ -2008,18 +2024,13 @@ private fun getSapisidHash(
                 ),
                 "videoId" to videoId
             )
-            // 안드로이드 클라이언트 세션 플레이어에도 전용 시청 주소 레퍼러 이식
             val headers = mapOf("Referer" to "$mainUrl/watch?v=$videoId")
-            val responseText = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).text
-
+            app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).text
         } catch (e: Exception) {
-
+            // 예외 억제
         }
-
         return true
     }
-
-
 
     private suspend fun loadLinksClassic(
         data: String,
@@ -2034,11 +2045,6 @@ private fun getSapisidHash(
                     val end = minOf(i + max, text.length)
                     i = end
                 }
-            }
-
-            fun addParamsToUrl(base: String, params: Map<String, String>): String {
-                val sep = if (base.contains("?")) "&" else "?"
-                return base + sep + params.map { "${it.key}=${URLEncoder.encode(it.value, "utf-8")}" }.joinToString("&")
             }
 
             try {
@@ -2128,13 +2134,13 @@ private fun getSapisidHash(
                 if (!sapisidVal.isNullOrBlank()) {
                     try {
                         val origin = "https://www.youtube.com"
-                        val hash = getSapisidHash(sapisidVal!!, origin)
+                        val hash = getSapisidHash(sapisidVal, origin)
                         postHeaders["Authorization"] = hash
                         postHeaders["X-Origin"] = origin
                         postHeaders["Origin"] = origin
                         postHeaders["X-Goog-AuthUser"] = "0"
                     } catch (e: Exception) {
-
+                        // 예외 억제
                     }
                 }
 
@@ -2185,8 +2191,6 @@ private fun getSapisidHash(
 
                                 val resolution = parseM3u8Tag(infoLine, "RESOLUTION")
                                 val parsedHeight = resolution?.substringAfter("x")?.toIntOrNull() ?: 0
-                                
-
                                 val resolutionHeight = resolution?.substringAfter("x")?.plus("p") ?: ""
 
                                 val audioId = parseM3u8Tag(infoLine, "YT-EXT-AUDIO-CONTENT-ID")
@@ -2223,7 +2227,7 @@ private fun getSapisidHash(
                             }
                         }
                     } catch (e: Exception) {
-
+                        // HLS 스트림 파싱 에러 방지
                     }
 
                     return true
@@ -2244,23 +2248,23 @@ private fun getSapisidHash(
     }
 
     private fun String.extractYoutubeId(): String? {
-        val regex = Regex("""(?:v=|\/videos\/|embed\/|youtu\.be\/|shorts\/)([A-Za-z0-9_-]{11})""")
-        return regex.find(this)?.groupValues?.getOrNull(1)
+        return YT_ID_REGEX.find(this)?.groupValues?.getOrNull(1)
     }
 
     private fun String.urlDecode(): String {
         var current = this
-        // 토큰 내부에 퍼센트 인코딩 기호(%)가 완전히 없어질 때까지 안전하게 반복 디코딩 수행
-        while (current.contains("%")) {
+        var decodeCount = 0
+        while (current.contains('%') && decodeCount < 3) {
             val decoded = try {
-                java.net.URLDecoder.decode(current, "UTF-8")
+                URLDecoder.decode(current, "UTF-8")
             } catch (e: Exception) {
                 break
             }
             if (decoded == current) break
             current = decoded
+            decodeCount++
         }
         return current
     }
-    
 }
+
