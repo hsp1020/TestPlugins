@@ -123,7 +123,7 @@ object YoutubeUtils {
 
     fun extractYoutubeId(url: String): String? {
         return YT_ID_REGEX.find(url)?.groupValues?.getOrNull(1) ?: run {
-            if (url.length == 11 && url.matches(Regex("[A-Za-z0-9_-]{11}"))) {
+            if (url.length == 11 && url.matches(Regex("[A-Za-0-9_-]{11}"))) {
                 url
             } else {
                 null
@@ -151,7 +151,6 @@ object YoutubeUtils {
         return current
     }
 
-    // 🚀 [보완] JVM 제네릭 Erasure 형변환 캐스팅 문제를 예방하기 위한 원시 동적 탐색 헬퍼 브릿지
     fun getMapKeyFromAny(obj: Any?, key: String): Map<*, *>? {
         val map = obj as? Map<*, *> ?: return null
         val value = map[key] ?: map.entries.firstOrNull { (it.key as? String) == key }?.value
@@ -1299,7 +1298,7 @@ class YoutubeProvider(
                     )
                     println("[YT_DEBUG] Search Continuation POST url: $apiUrl")
                     println("[YT_DEBUG] Search Continuation POST payload: $payload")
-                    val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
+                     
                     val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor)
                         .parsedSafe<Map<String, Any>>()
                     if (response != null) {
@@ -1431,6 +1430,9 @@ class YoutubeProvider(
         var title: String = ""
         var author: String = ""
         var description: String = ""
+        var channelId: String = ""
+        var channelAvatar: String = ""
+        var subscriberCount: String = ""
     }
 
     private fun findPlaylistMetadataRecursive(obj: Any?, metadata: PlaylistMetadata) {
@@ -1539,6 +1541,24 @@ class YoutubeProvider(
                     metadata.author = a
                     println("[YT_DEBUG] [Recursive-Failsafe] Found direct playlist body. Author: '$a'")
                 }
+            }
+
+            // 🚀 [구독자 수 및 채널 부가 정보 수집] videoOwnerRenderer 노드가 감지되는 경우 구독자 수 및 추가 메타데이터 수집
+            val ownerRenderer = obj["videoOwnerRenderer"] as? Map<*, *>
+                ?: YoutubeUtils.getMapKeyFromAny(obj, "videoOwnerRenderer")
+            if (ownerRenderer != null) {
+                val sub = getText(ownerRenderer["subscriberCountText"] ?: YoutubeUtils.getMapKeyFromAny(ownerRenderer, "subscriberCountText"))
+                if (sub.isNotBlank()) metadata.subscriberCount = sub
+                
+                val avatar = YoutubeUtils.getBestThumbnail(ownerRenderer["thumbnail"] ?: YoutubeUtils.getMapKeyFromAny(ownerRenderer, "thumbnail"))
+                if (!avatar.isNullOrBlank()) metadata.channelAvatar = avatar
+                
+                val browseId = YoutubeUtils.getMapKeyFromAny(ownerRenderer, "navigationEndpoint")
+                    ?.let { YoutubeUtils.getMapKeyFromAny(it, "browseEndpoint") }
+                    ?.let { YoutubeUtils.getStringFromAny(it, "browseId") }
+                if (!browseId.isNullOrBlank()) metadata.channelId = browseId
+                
+                println("[YT_DEBUG] [Recursive] Found videoOwnerRenderer. SubCount: '$sub', Avatar: '$avatar', ChannelId: '$browseId'")
             }
 
             for (value in obj.values) {
@@ -1922,7 +1942,7 @@ class YoutubeProvider(
                 val data = extractYtInitialData(html) ?: throw ErrorLoadingException("Failed to extract playlist data")
                 println("[YT_DEBUG] Playlist initialData successfully parsed.")
 
-                // 디버깅 보완: 이너튜브 키 세트 추적 디버그 로그 배치
+                // 디버깅 보강: 이너튜브 키 세트 추적 디버그 로그 배치
                 println("[YT_DEBUG] [load] playlist_browse 시작됨. 데이터 탑레벨 키 세트: ${data.keys}")
                 if (data.containsKey("sidebar")) {
                     println("[YT_DEBUG] [load] 루트 레벨 sidebar 키 탐지됨")
@@ -1971,11 +1991,38 @@ class YoutubeProvider(
 
                 val playlistPoster = episodes.firstOrNull()?.posterUrl ?: response.document.selectFirst("meta[property=og:image]")?.attr("content")
 
+                // 🚀 [해결 2] 일반 동영상과 동일하게 플레이리스트 하단 추천목록 영역에 채널 카드 삽입
+                val recList = mutableListOf<SearchResponse>()
+                if (author.isNotBlank() && playlistMeta.channelId.isNotBlank()) {
+                    val cId = playlistMeta.channelId
+                    val channelUrlFull = if (cId.startsWith("UC") || cId.startsWith("@")) "$mainUrl/channel/$cId" else "$mainUrl/$cId"
+                    val channelCard = newMovieSearchResponse(
+                        "Channel: $author",
+                        channelUrlFull,
+                        TvType.Live
+                    ) {
+                        this.posterUrl = playlistMeta.channelAvatar
+                    }
+                    recList.add(channelCard)
+                    println("[YT_DEBUG] [load] Playlist channel recommendation card injected: '$author' (ID: $cId)")
+                }
+
                 return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
                     this.posterUrl = playlistPoster
-                    val finalDescription = if (description.isBlank()) "Channel: $author" else "Channel: $author\n\n$description"
+                    
+                    // 🚀 [해결 1] 획득한 구독자 수가 있다면 채널명 우측에 가독성 높게 바인딩
+                    val finalDescription = buildString {
+                        append("Channel: $author")
+                        if (playlistMeta.subscriberCount.isNotBlank()) {
+                            append(" (${playlistMeta.subscriberCount})")
+                        }
+                        if (description.isNotBlank()) {
+                            append("\n\n$description")
+                        }
+                    }
                     this.plot = finalDescription
                     this.tags = listOf(author)
+                    this.recommendations = recList // 추천목록 영역 바인딩
                 }
             } catch (e: Exception) {
                 println("[YT_DEBUG] Playlist/Mix loading exception: ${e.message}")
