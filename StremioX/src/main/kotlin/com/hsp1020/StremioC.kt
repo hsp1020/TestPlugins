@@ -324,7 +324,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
 
             // Double-Checked Locking 방식으로 원자성이 결여된 getOrPut을 완전히 구원 [4]
-            var mutex = cacheMutexes[key]
+            val mutex = cacheMutexes[key]
         
             return mutex.withLock {
                 globalPageCache[key]?.let { entry ->
