@@ -19,6 +19,7 @@ import java.io.InputStreamReader
 import java.io.PrintWriter
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 import java.util.Collections
@@ -205,7 +206,6 @@ open class YoutubeExtractor : ExtractorApi() {
                                         ) {
                                             this.referer = mainUrl
                                             this.quality = video.height
-                                            // 중복 제거: YoutubeUtils의 중앙 제어 헤더 적용
                                             this.headers = mapOf(
                                                 "User-Agent" to YoutubeUtils.IOS_USER_AGENT,
                                                 "Origin" to "https://www.youtube.com",
@@ -244,6 +244,20 @@ open class YoutubeExtractor : ExtractorApi() {
                         }
                     )
                 }
+
+                // 🚀 [추가 및 우회 이식] Cobalt 고화질 웹 다운로드 다이렉트 브릿지 링크 삽입
+                // 다운로드 소스 목록 상단에 고정 배치될 수 있도록 2160(4K) 화질 태그를 부여합니다.
+                builtLinks.add(
+                    newExtractorLink(
+                        source = "YouTube Downloader",
+                        name = "Cobalt Web Download (Up to 4K)",
+                        url = "https://qwkuns.me/#https://www.youtube.com/watch?v=$videoId",
+                        type = INFER_TYPE
+                    ) {
+                        this.quality = 2160 // 4K 화질 태그 부여
+                        this.referer = mainUrl
+                    }
+                )
 
                 ytVideos[videoId] = builtLinks.toList()
                 println("[YT_DEBUG] [getUrl] 전체 링크 정렬 및 저장 완료. 총 수집 링크 개수: ${builtLinks.size}")
@@ -435,7 +449,6 @@ open class YoutubeExtractor : ExtractorApi() {
 
     private fun getMimeTypeFromUrl(url: String, isAudio: Boolean): String {
         return try {
-            // 공통 urlDecode 메소드로 일체화
             val decoded = YoutubeUtils.urlDecode(url)
             if (decoded.contains("video/webm") || decoded.contains("audio/webm")) {
                 if (isAudio) "audio/webm" else "video/webm"
