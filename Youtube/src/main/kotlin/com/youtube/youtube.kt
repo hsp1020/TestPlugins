@@ -53,7 +53,6 @@ object YoutubeUtils {
         return "SAPISIDHASH ${timestamp}_$hash"
     }
 
-    // [보완] 검색기록 동기화 차단 및 차단 격리를 위해 isSearch 매개변수 도입
     fun buildCookiesAndExtractSapisid(
         prefs: SharedPreferences?, 
         lang: String, 
@@ -69,7 +68,6 @@ object YoutubeUtils {
         }
 
         var sapisidVal: String? = null
-        // 🚀 검색 요청이 아닐 때만 계정 고유 인증 키를 추가하여 검색 이력 연동 완전 차단
         if (!isSearch) {
             val authKeys = listOf("SID", "HSID", "SSID", "APISID", "SAPISID")
             authKeys.forEach { key ->
@@ -125,7 +123,7 @@ object YoutubeUtils {
 
     fun extractYoutubeId(url: String): String? {
         return YT_ID_REGEX.find(url)?.groupValues?.getOrNull(1) ?: run {
-            if (url.length == 11 && url.matches(Regex("[A-Za-z0-9_-]{11}"))) {
+            if (url.length == 11 && url.matches(Regex("[A-Za-0-9_-]{11}"))) {
                 url
             } else {
                 null
@@ -266,7 +264,6 @@ class YoutubeProvider(
                     }
                 }
             } else {
-                // 🚀 검색 시에는 계정 계정키가 전면 제외된 비개인화 쿠키만 전송하여 검색 기록 연동 철저히 차단
                 val (cookies, _) = YoutubeUtils.buildCookiesAndExtractSapisid(prefs, provider.lang, "_Mk3UVhY40g", isSearch = true)
                 requestBuilder.addHeader("Cookie", cookies)
                 requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
@@ -602,7 +599,6 @@ class YoutubeProvider(
                 val contextTag = if (isSearchContext) "&ctx=search" else "&ctx=home"
                 val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
 
-                // 🚀 [추가] 상세페이지(load) 출력용 메타데이터 (조회수) Episode.description에 보존 이식
                 val descText = if (views.isNotBlank()) "조회수: $views" else ""
                 if (currentList.none { it.data == finalUrl }) {
                     currentList.add(newEpisode(finalUrl) {
@@ -708,7 +704,6 @@ class YoutubeProvider(
                     val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
                     poster = "https://i.ytimg.com/vi/$videoId/oar2.jpg"
                     
-                    // 🚀 [추가] 락업(Lockup) 쇼츠 파싱 시에도 상세페이지 출력을 위한 메타데이터 보관
                     val descText = buildString {
                         if (channel.isNotBlank()) append("채널: $channel")
                         if (views.isNotBlank()) {
@@ -1298,7 +1293,7 @@ class YoutubeProvider(
                     )
                     println("[YT_DEBUG] Search Continuation POST url: $apiUrl")
                     println("[YT_DEBUG] Search Continuation POST payload: $payload")
-                    val response = app.post(apiUrl, json = payload, interceptor = ytInterceptor)
+                    val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor)
                         .parsedSafe<Map<String, Any>>()
                     if (response != null) {
                         println("[YT_DEBUG] Search Continuation response success. Keys: ${response.keys}")
@@ -1447,7 +1442,6 @@ class YoutubeProvider(
 
             val poster = currentEp?.posterUrl ?: YoutubeUtils.buildThumbnailFromId(videoId)
 
-            // 🚀 [해결 2] 선택한 숏스의 실제 타이틀과 메타데이터(조회수, 채널 등)를 추출하여 상세 페이지 타이틀 및 플롯으로 온전히 주입
             val shortTitle = currentEp?.name ?: "Shorts Video"
             val shortPlot = buildString {
                 append(shortTitle)
@@ -1797,11 +1791,12 @@ class YoutubeProvider(
                 val data = extractYtInitialData(html) ?: throw ErrorLoadingException("Failed to extract playlist data")
                 println("[YT_DEBUG] Playlist initialData successfully parsed.")
 
-                // 🚀 [해결 1] 일반 재생목록의 메타데이터(타이틀 및 생성 아티스트명)를 sidebar 계층으로부터 정밀 탐색하여 복원
+                // 🚀 [해결 1] 일반 재생목록(Playlist)과 믹스(Mix)의 메타데이터 완전 복원 및 병합 스캔
                 var playlistTitle: String? = null
                 var playlistAuthor: String? = null
                 var playlistDesc: String? = null
 
+                // [Case A] 표준 재생목록 화면 (playlist?list=PL...) -> sidebar 레이아웃 탐색
                 val sidebarItems = safeGet(data, "sidebar", "playlistSidebarRenderer", "items") as? List<*>
                 sidebarItems?.forEach { item ->
                     val m = item as? Map<*, *>
@@ -1816,6 +1811,21 @@ class YoutubeProvider(
                         if (owner != null) {
                             playlistAuthor = getText(owner["title"])
                         }
+                    }
+                }
+
+                // [Case B] Watch 재생 화면 (watch?v=...&list=PL...) -> playlistPanelRenderer 레이아웃 탐색
+                // 검색 결과에서 비디오 ID와 결합된 watch 주소로 진입 시 sidebar 노드가 없으므로, 플레이리스트 패널 노드에서 메타데이터를 정밀 파싱합니다.
+                val playlistPanel = safeGet(data, "contents", "twoColumnWatchNextResults", "playlist", "playlist", "playlistPanelRenderer") as? Map<*, *>
+                if (playlistPanel != null) {
+                    if (playlistTitle.isNullOrBlank()) {
+                        playlistTitle = getText(playlistPanel["titleText"])
+                            ?: getText(playlistPanel["title"])
+                    }
+                    if (playlistAuthor.isNullOrBlank()) {
+                        playlistAuthor = getText(playlistPanel["shortBylineText"])
+                            ?: getText(playlistPanel["longBylineText"])
+                            ?: getText(playlistPanel["ownerName"])
                     }
                 }
 
@@ -1834,7 +1844,7 @@ class YoutubeProvider(
 
                 println("[YT_DEBUG] Extracted playlist raw title: $title, author: $author")
                 
-                if (title.isBlank()) {
+                if (title.isBlank() || title == "YouTube Playlist") {
                     fun findMixTitle(obj: Any?): String? {
                         if (obj is Map<*, *>) {
                             val panel = obj["playlistPanelRenderer"] as? Map<*, *>
