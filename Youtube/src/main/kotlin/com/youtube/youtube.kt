@@ -75,11 +75,12 @@ class YoutubeProvider(
             val requestBuilder = request.newBuilder()
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36")
 
-            // [핵심 우회 패치] 검색을 통한 재생기록 누락을 방지하기 위해 Referer 헤더를 유튜브 메인 홈 주소로 강제 변조
+            // [정밀 보완] 검색 페이지 레퍼러만 가두고, player API를 위한 개별 watch 주소 레퍼러는 원본 그대로 승인
             val origReferer = request.header("Referer")
-            if (origReferer == null || origReferer.contains("/results")) {
+            if (origReferer != null && (origReferer.contains("/results") || origReferer.contains("/v1/search"))) {
                 requestBuilder.header("Referer", "https://www.youtube.com/")
             }
+    
 
             val cookieBuilder = StringBuilder()
             val visitor = prefs?.getString("VISITOR_INFO1_LIVE", null)
@@ -1642,10 +1643,11 @@ class YoutubeProvider(
         val videoId = url.extractYoutubeId() ?: throw ErrorLoadingException("Invalid YouTube URL")
         println("[YT_DEBUG] Loading normal video ID: $videoId")
 
-        val response = app.get(url, interceptor = ytInterceptor)
+        // 상세페이지 진입 시 홈 화면에서 눌러 들어갔음을 명시적으로 알려 시동 차단 우회
+        val headers = mapOf("Referer" to "https://www.youtube.com/")
+        val response = app.get(url, headers = headers, interceptor = ytInterceptor)
         val html = response.text
-        val data = extractYtInitialData(html)
-
+        
         var title = "YouTube Video"
         var plot = ""
         var poster = buildThumbnailFromId(videoId)
@@ -1764,7 +1766,9 @@ class YoutubeProvider(
                 ),
                 "videoId" to videoId
             )
-            playerResponseText = app.post(apiUrl, json = payload, interceptor = ytInterceptor).text
+            // 비디오 고유 시청 주소를 레퍼러로 정밀 지정하여 시청 기록 강제 활성화
+            val headers = mapOf("Referer" to "$mainUrl/watch?v=$videoId")
+            playerResponseText = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).text
             if (playerResponseText.isNotBlank()) {
                 val root = JSONObject(playerResponseText)
                 val videoDetails = root.optJSONObject("videoDetails")
@@ -1822,8 +1826,9 @@ class YoutubeProvider(
                 ),
                 "videoId" to videoId
             )
-
-            val responseText = app.post(apiUrl, json = payload, interceptor = ytInterceptor).text
+            // 안드로이드 클라이언트 세션 플레이어에도 전용 시청 주소 레퍼러 이식
+            val headers = mapOf("Referer" to "$mainUrl/watch?v=$videoId")
+            val responseText = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).text
 
         } catch (e: Exception) {
 
@@ -1831,6 +1836,8 @@ class YoutubeProvider(
 
         return true
     }
+
+
 
     private suspend fun loadLinksClassic(
         data: String,
