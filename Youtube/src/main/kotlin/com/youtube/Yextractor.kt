@@ -247,11 +247,11 @@ open class YoutubeExtractor : ExtractorApi() {
                 builtLinks.add(
                     newExtractorLink(
                         source = "YouTube Downloader",
-                        name = "Cobalt Web Download (4K)",
+                        name = "Cobalt Web Download(4K)",
                         url = "https://qwkuns.me/#https://www.youtube.com/watch?v=$videoId",
                         type = INFER_TYPE
                     ) {
-                        this.quality = 144
+                        this.quality = 2160
                         this.referer = mainUrl
                     }
                 )
@@ -260,11 +260,11 @@ open class YoutubeExtractor : ExtractorApi() {
                 builtLinks.add(
                     newExtractorLink(
                         source = "YouTube Downloader",
-                        name = "SOSYouTube Web Download (1080p)",
+                        name = "SOSYouTube Web Download(1080p)",
                         url = "https://www.sosyoutube.com/watch?v=$videoId",
                         type = INFER_TYPE
                     ) {
-                        this.quality = 144
+                        this.quality = 2160
                         this.referer = mainUrl
                     }
                 )
