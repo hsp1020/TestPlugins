@@ -16,7 +16,6 @@ import org.schabi.newpipe.extractor.services.youtube.linkHandler.YoutubeStreamLi
 import org.schabi.newpipe.extractor.stream.SubtitlesStream
 import java.io.BufferedReader
 import java.io.InputStreamReader
-import java.io.PrintWriter
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.UUID
@@ -66,6 +65,12 @@ open class YoutubeExtractor : ExtractorApi() {
         init {
             YoutubeStreamExtractor.setFetchIosClient(true)
         }
+
+        // 재생 세션이 새로 열릴 때(loadLinks) 정적 companion 영역의 캐시를 안전하게 해제하기 위한 타겟 헬퍼 함수
+        fun clearCache(videoId: String) {
+            ytVideos.remove(videoId)
+            ytVideosSubtitles.remove(videoId)
+        }
     }
 
     override fun getExtractorUrl(id: String): String {
@@ -101,8 +106,7 @@ open class YoutubeExtractor : ExtractorApi() {
         val videoId = YoutubeUtils.extractYoutubeId(cleanedUrl) ?: cleanedUrl
         println("[YT_DEBUG] [getUrl] 가공된 cleanedUrl: $cleanedUrl, 비디오 ID: $videoId")
 
-        ytVideos.remove(videoId)
-        ytVideosSubtitles.remove(videoId)
+        // 재생 진입(loadLinks) 단계에서 명시적으로 삭제가 수행되므로, 동일 재생 세션 내부 처리를 위해 기존 강제 캐시 삭제 코드는 제거되었습니다.
 
         val cachedLinks = ytVideos[videoId]
         if (cachedLinks.isNullOrEmpty()) {
@@ -350,7 +354,7 @@ open class YoutubeExtractor : ExtractorApi() {
         try {
             client.use { socket ->
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))
-                val output = PrintWriter(socket.getOutputStream(), true)
+                val os = socket.getOutputStream()
                 val line = reader.readLine()
                 if (line != null && line.startsWith("GET")) {
                     val parts = line.split(" ")
@@ -364,16 +368,24 @@ open class YoutubeExtractor : ExtractorApi() {
                         }
                         val content = manifestMap[path]
                         if (content != null) {
-                            output.println("HTTP/1.1 200 OK")
-                            output.println("Content-Type: application/dash+xml")
-                            output.println("Connection: close")
-                            output.println("Access-Control-Allow-Origin: *")
-                            output.println("")
-                            output.println(content)
+                            val bodyBytes = content.toByteArray(java.nio.charset.StandardCharsets.UTF_8)
+                            val headerBuilder = java.lang.StringBuilder()
+                            headerBuilder.append("HTTP/1.1 200 OK\r\n")
+                            headerBuilder.append("Content-Type: application/dash+xml\r\n")
+                            headerBuilder.append("Content-Length: ${bodyBytes.size}\r\n")
+                            headerBuilder.append("Connection: close\r\n")
+                            headerBuilder.append("Access-Control-Allow-Origin: *\r\n")
+                            headerBuilder.append("\r\n")
+
+                            val headerBytes = headerBuilder.toString().toByteArray(java.nio.charset.StandardCharsets.UTF_8)
+                            os.write(headerBytes)
+                            os.write(bodyBytes)
+                            os.flush()
                         } else {
                             println("[YT_DEBUG] [handleClient] 에러: 메모리에 매칭되는 가상 MPD가 없습니다. UUID: $path (404 반환)")
-                            output.println("HTTP/1.1 404 Not Found")
-                            output.println("")
+                            val errorResponse = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n"
+                            os.write(errorResponse.toByteArray(java.nio.charset.StandardCharsets.UTF_8))
+                            os.flush()
                         }
                     }
                 }
