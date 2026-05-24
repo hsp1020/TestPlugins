@@ -612,25 +612,33 @@ class YoutubeProvider(
                             ?.getMapKey("image")?.getListKey("sources")?.lastOrNull()
                             ?.getString("url")
 
-                    val finalTitle =
-                        if (episodeCount.isNotEmpty()) "$title ($episodeCount)" else title
-                    
+                    // 🚀 [씨드 비디오 ID 추출 엔진 탑재] 
+                    // onTap 혹은 navigationEndpoint 내에서 매칭 비디오 ID를 추적해 병합
+                    val watchEndpoint = lockup.getMapKey("onTap")?.getMapKey("innertubeCommand")?.getMapKey("watchEndpoint")
+                        ?: lockup.getMapKey("navigationEndpoint")?.getMapKey("watchEndpoint")
+                    val videoId = watchEndpoint?.getString("videoId")
+
+                    // v 파라미터가 존재하면 통합 URL인 watch?v=xxx&list=yyy 구조로 동적 변환
                     val targetPath = if (playlistId.startsWith("RD") || playlistId.startsWith("UL") || playlistId.startsWith("MM") || playlistId.startsWith("RDMM")) {
-                        "watch?list=$playlistId"
+                        if (!videoId.isNullOrBlank()) {
+                            "watch?v=$videoId&list=$playlistId"
+                        } else {
+                            "watch?list=$playlistId"
+                        }
                     } else {
                         "playlist?list=$playlistId"
                     }
 
-                    println("[YT_DEBUG] collectFromRenderer: extracted Playlist lockup $playlistId: $finalTitle (path: $targetPath)")
+                    println("[YT_DEBUG] collectFromRenderer: extracted Playlist lockup $playlistId: $title (path: $targetPath, seedVideo: $videoId)")
                     return newTvSeriesSearchResponse(
-                        finalTitle,
+                        if (episodeCount.isNotEmpty()) "$title ($episodeCount)" else title,
                         "$mainUrl/$targetPath",
                         TvType.TvSeries
                     ) {
                         this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
                     }
                 }
-            }
+            }        
 
             val videoId = lockup.getString("contentId")
                 ?: lockup.getMapKey("content")?.getString("videoId")
