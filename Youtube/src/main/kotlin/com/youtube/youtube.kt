@@ -1293,6 +1293,7 @@ class YoutubeProvider(
                     )
                     println("[YT_DEBUG] Search Continuation POST url: $apiUrl")
                     println("[YT_DEBUG] Search Continuation POST payload: $payload")
+                    val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
                     val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor)
                         .parsedSafe<Map<String, Any>>()
                     if (response != null) {
