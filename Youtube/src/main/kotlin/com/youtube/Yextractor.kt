@@ -9,7 +9,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.schemaStripRegex
-import com.lagradost.cloudstream3.ar.youtube.YoutubeUtils // 공통 아키텍처 유틸 임포트
+import com.lagradost.cloudstream3.ar.youtube.YoutubeUtils
 import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor
 import org.schabi.newpipe.extractor.services.youtube.linkHandler.YoutubeStreamLinkHandlerFactory
@@ -38,25 +38,29 @@ open class YoutubeExtractor : ExtractorApi() {
         private val ytVideos = ConcurrentHashMap<String, List<ExtractorLink>>()
         private val ytVideosSubtitles = ConcurrentHashMap<String, List<SubtitlesStream>>()
 
+        @Volatile
         private var activeServer: ServerSocket? = null
         private var serverPort: Int = 0
+        private val serverLock = Any()
 
+        // 2004 에러의 근본적 해결책: 캐시 상한치를 50개에서 1000개로 대폭 확장 (다국어 매핑 폭발에 대처)
         private val manifestMap: MutableMap<String, String> = Collections.synchronizedMap(
-            object : LinkedHashMap<String, String>(16, 0.75f, true) {
+            object : LinkedHashMap<String, String>(128, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
-                    return size > 50
+                    return size > 1000
                 }
             }
         )
 
+        // CallerRunsPolicy를 적용하여 가상 MPD 및 세그먼트 정체 시 패킷 폐기 방지 및 백프레셔 제어 보장
         private val serverExecutor = ThreadPoolExecutor(
             2, 
             8, 
             30L, 
             TimeUnit.SECONDS,
-            LinkedBlockingQueue(128),
+            LinkedBlockingQueue(256),
             ThreadFactory { r -> Thread(r, "YT-DASH-Server-Worker") },
-            ThreadPoolExecutor.DiscardOldestPolicy()
+            ThreadPoolExecutor.CallerRunsPolicy()
         )
 
         init {
@@ -94,7 +98,6 @@ open class YoutubeExtractor : ExtractorApi() {
     ) {
         println("[YT_DEBUG] [getUrl] 호출됨. 원본 URL: $url")
         val cleanedUrl = url.replace(schemaStripRegex, "")
-        
         val videoId = YoutubeUtils.extractYoutubeId(cleanedUrl) ?: cleanedUrl
         println("[YT_DEBUG] [getUrl] 가공된 cleanedUrl: $cleanedUrl, 비디오 ID: $videoId")
 
@@ -102,7 +105,7 @@ open class YoutubeExtractor : ExtractorApi() {
         ytVideosSubtitles.remove(videoId)
 
         val cachedLinks = ytVideos[videoId]
-        if (cachedLinks == null || cachedLinks.isEmpty()) {
+        if (cachedLinks.isNullOrEmpty()) {
             println("[YT_DEBUG] [getUrl] 분석을 진행합니다.")
             try {
                 println("[YT_DEBUG] [getUrl] NewPipe linkHandler에서 link 분석 시작")
@@ -177,7 +180,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 for (video in videoOnlyList) {
                     if (audiosByLanguage.isNotEmpty()) {
                         for ((lang, audios) in audiosByLanguage) {
-
                             val bestAudioForLang = if (video.mimeType.contains("webm")) {
                                 audios.sortedWith(compareByDescending<AudioInfo> { it.mimeType.contains("webm") }.thenByDescending { it.bitrate }).firstOrNull()
                             } else {
@@ -242,8 +244,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     )
                 }
 
-                // 🚀 [다중 고화질 웹 다운로드 포털 연동 보완]
-                // 1번: Cobalt (qwkuns.me 사설 인스턴스) - 4K 화질 슬롯(2160p)으로 최상단 노출
+                // 외부 고해상도 웹 다운로드 포털 연동 보완 로직 보존
                 builtLinks.add(
                     newExtractorLink(
                         source = "YouTube Downloader",
@@ -256,7 +257,6 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 )
 
-                // 3번: SOSYouTube (SSYouTube 우회 도메인) - FHD 화질 슬롯(1080p)으로 노출
                 builtLinks.add(
                     newExtractorLink(
                         source = "YouTube Downloader",
@@ -282,10 +282,6 @@ open class YoutubeExtractor : ExtractorApi() {
 
         val finalLinks: List<ExtractorLink> = ytVideos[videoId] ?: emptyList()
         println("[YT_DEBUG] [getUrl] 반환되는 최종 링크 리스트 개수: ${finalLinks.size}")
-        finalLinks.forEachIndexed { index, link ->
-            println("[YT_DEBUG]   -> [링크 #${index + 1}] 이름: '${link.name}', 화질: ${link.quality}p, 타입: ${link.type}, 주소: '${link.url.take(100)}'")
-        }
-
         finalLinks.forEach { callback(it) }
 
         val finalSubtitles: List<SubtitlesStream> = ytVideosSubtitles[videoId] ?: emptyList()
@@ -301,8 +297,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         url = "$url&fmt=srt"
                     }
                 }
-                val displayUrl = if (url.length > 120) url.substring(0, 120) else url
-                println("[YT_DEBUG]   -> [자막 트랙] 언어: $lang, 주소: $displayUrl...")
                 newSubtitleFile(lang, url)
             } catch (e: Exception) { 
                 println("[YT_DEBUG] [getUrl] 자막 처리 중 에러: ${e.message}")
@@ -311,66 +305,65 @@ open class YoutubeExtractor : ExtractorApi() {
         }.forEach { subtitleCallback(it) }
     }
 
-    @Synchronized
     private fun startServerIfNeeded() {
-        val server = activeServer
-        println("[YT_DEBUG] [startServerIfNeeded] 호출됨. activeServer 존재: ${server != null}, 닫힘 상태: ${server?.isClosed}")
-        if (server != null && !server.isClosed) {
-            println("[YT_DEBUG] [startServerIfNeeded] 기존 DASH 루프백 서버가 구동 중이므로 리스너 스레드 생성을 스킵합니다. (포트: $serverPort)")
-            return
-        }
-        try {
-            val newServer = ServerSocket(0)
-            activeServer = newServer
-            serverPort = newServer.localPort
-            println("[YT_DEBUG] [startServerIfNeeded] 가상 포트 $serverPort 에 리스너 바인딩 성공")
-            
-            thread(name = "YT-DASH-Server-Acceptor") {
-                println("[YT_DEBUG] [ServerSocket-Thread] accept() 대기 루프 스레드를 시작합니다.")
-                try {
-                    while (true) {
-                        val active = activeServer ?: break
-                        if (active.isClosed) break
-                        val client = active.accept()
-                        client.soTimeout = 5000 
-                        println("[YT_DEBUG] [ServerSocket-Thread] ExoPlayer로부터 로컬 서버로 미디어 요청 감지됨: ${client.remoteSocketAddress}")
-                        serverExecutor.execute { handleClient(client) }
-                    }
-                } catch (e: Exception) {
-                    println("[YT_DEBUG] [ServerSocket-Thread] accept() 대기 동작 중 오류 발생: ${e.message}")
-                }
+        synchronized(serverLock) {
+            val server = activeServer
+            if (server != null && !server.isClosed) {
+                println("[YT_DEBUG] [startServerIfNeeded] 기존 DASH 루프백 서버가 구동 중이므로 리스너 스레드 생성을 스킵합니다. (포트: $serverPort)")
+                return
             }
-        } catch (e: Exception) { 
-            println("[YT_DEBUG] [startServerIfNeeded] 서버 소켓 생성 실패 예외: ${e.message}")
-            logError(e) 
+            try {
+                val newServer = ServerSocket(0)
+                activeServer = newServer
+                serverPort = newServer.localPort
+                println("[YT_DEBUG] [startServerIfNeeded] 가상 포트 $serverPort 에 리스너 바인딩 성공")
+                
+                thread(name = "YT-DASH-Server-Acceptor") {
+                    println("[YT_DEBUG] [ServerSocket-Thread] accept() 대기 루프 스레드를 시작합니다.")
+                    try {
+                        while (true) {
+                            val active = activeServer ?: break
+                            if (active.isClosed) break
+                            val client = active.accept()
+                            client.soTimeout = 5000 
+                            serverExecutor.execute { handleClient(client) }
+                        }
+                    } catch (e: Exception) {
+                        println("[YT_DEBUG] [ServerSocket-Thread] accept() 대기 동작 중 오류 발생: ${e.message}")
+                    }
+                }
+            } catch (e: Exception) { 
+                println("[YT_DEBUG] [startServerIfNeeded] 서버 소켓 생성 실패 예외: ${e.message}")
+                logError(e) 
+            }
         }
     }
 
     private fun registerManifestAndGetUrl(xmlContent: String): String? {
-        println("[YT_DEBUG] [registerManifestAndGetUrl] 호출됨. 포트: $serverPort")
         if (serverPort == 0) return null
         val id = UUID.randomUUID().toString()
         manifestMap[id] = xmlContent
-        println("[YT_DEBUG] [registerManifestAndGetUrl] 가상 MPD 매니페스트 맵 등록 성공. UUID: $id, 주소: http://127.0.0.1:$serverPort/$id.mpd")
         return "http://127.0.0.1:$serverPort/$id.mpd"
     }
 
     private fun handleClient(client: Socket) {
-        println("[YT_DEBUG] [handleClient] 요청 연결 처리 시작: ${client.remoteSocketAddress}")
         try {
             client.use { socket ->
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))
                 val output = PrintWriter(socket.getOutputStream(), true)
                 val line = reader.readLine()
-                println("[YT_DEBUG] [handleClient] HTTP 요청: $line")
                 if (line != null && line.startsWith("GET")) {
                     val parts = line.split(" ")
                     if (parts.size > 1) {
-                        var path = parts[1].substring(1)
-                        if (path.endsWith(".mpd")) path = path.replace(".mpd", "")
+                        // 쿼리 매개변수(?) 및 불필요 경로를 정규화하여 안정적인 UUID 획득
+                        val cleanPath = parts[1].substringAfter("/").substringBefore("?")
+                        val path = if (cleanPath.endsWith(".mpd", ignoreCase = true)) {
+                            cleanPath.substring(0, cleanPath.length - 4)
+                        } else {
+                            cleanPath
+                        }
                         val content = manifestMap[path]
                         if (content != null) {
-                            println("[YT_DEBUG] [handleClient] 가상 MPD UUID($path)를 발견하여 DASH XML을 반환합니다. (XML 길이: ${content.length})")
                             output.println("HTTP/1.1 200 OK")
                             output.println("Content-Type: application/dash+xml")
                             output.println("Connection: close")
@@ -444,13 +437,16 @@ open class YoutubeExtractor : ExtractorApi() {
     }
 
     private fun escapeXml(url: String): String {
-        if (!url.contains('&') && !url.contains('<')) return url
+        if (!url.contains('&') && !url.contains('<') && !url.contains('>') && !url.contains('\'') && !url.contains('"')) return url
         val sb = java.lang.StringBuilder(url.length + 16)
         for (i in 0 until url.length) {
             val c = url[i]
             when (c) {
                 '&' -> sb.append("&amp;")
-                '<' -> sb.append("&gt;")
+                '<' -> sb.append("&lt;")
+                '>' -> sb.append("&gt;")
+                '\'' -> sb.append("&apos;")
+                '"' -> sb.append("&quot;")
                 else -> sb.append(c)
             }
         }
