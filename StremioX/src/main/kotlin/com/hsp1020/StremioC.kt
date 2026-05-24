@@ -467,14 +467,16 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         } else {
             val responseText = customSession.get(url).text
             try {
-                // Jackson Tree 구조로 변환하여 중복 파싱 및 무의미한 String-JSONObject 이중 매핑 방지
-                val mapper = com.lagradost.cloudstream3.utils.AppUtils.mapper
-                val rootNode = mapper.readTree(responseText)
-                val metaNode = rootNode.get("meta") ?: rootNode
-                mapper.treeToValue(metaNode, CatalogEntry::class.java) 
-                    ?: throw IllegalStateException("Metadata structure mismatch")
+                // 1차적으로 CatalogResponse 패키징 형태로 파싱 시도, 없을 경우 direct CatalogEntry로 시도
+                parseJson<CatalogResponse>(responseText).meta 
+                    ?: parseJson<CatalogEntry>(responseText)
             } catch (e: Exception) {
-                throw IllegalStateException("Metadata not found or parsing failed: $url", e)
+                // 둘 다 실패 시 최후의 폴백으로 JSONObject를 가볍게 사용하여 meta 노드 문자열만 파싱
+                runCatching {
+                    val json = JSONObject(responseText)
+                    val metaStr = json.optJSONObject("meta")?.toString() ?: responseText
+                    parseJson<CatalogEntry>(metaStr)
+                }.getOrNull() ?: throw IllegalStateException("Metadata not found or parsing failed: $url", e)
             }
         }
         
