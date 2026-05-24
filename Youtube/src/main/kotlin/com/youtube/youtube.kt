@@ -419,6 +419,7 @@ class YoutubeProvider(
         return Pair(channel, views)
     }
 
+
     private fun formatViews(viewText: String?): String {
         if (viewText.isNullOrBlank()) return "N/A"
         var text = viewText.trim()
@@ -428,11 +429,15 @@ class YoutubeProvider(
 
         text = VIEW_REPLACE_REGEX.replace(text, "").trim()
 
+        // [빌드 보완] 이미 "회" 또는 "명" 단위가 텍스트에 포함되어 있다면 중복으로 붙이지 않도록 방어 코드 추가
         if (VIEW_FORMAT_REGEX.matches(text) && text.length < 15) {
             return if (isLive) {
-                if (lang == "ko") "${text}명" else "${text} watching"
+                if (lang == "ko" && !text.contains("명")) "${text}명" 
+                else if (lang != "ko" && !text.contains("watching")) "${text} watching"
+                else text
             } else {
-                if (lang == "ko") "${text}회" else text
+                if (lang == "ko" && !text.contains("회")) "${text}회" 
+                else text
             }
         }
         
@@ -468,7 +473,7 @@ class YoutubeProvider(
             text
         }
     }
-
+    
     private fun getRawText(map: Map<*, *>?, key: String): String? {
         val obj = map?.getMapKey(key) ?: return null
         return obj.getString("simpleText")
