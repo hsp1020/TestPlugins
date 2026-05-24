@@ -9,6 +9,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.schemaStripRegex
+import com.lagradost.cloudstream3.ar.youtube.YoutubeUtils // 공통 아키텍처 유틸 임포트
 import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor
 import org.schabi.newpipe.extractor.services.youtube.linkHandler.YoutubeStreamLinkHandlerFactory
@@ -18,12 +19,11 @@ import java.io.InputStreamReader
 import java.io.PrintWriter
 import java.net.ServerSocket
 import java.net.Socket
-import java.net.URLDecoder
-import java.nio.charset.StandardCharsets // 호환성을 위해 JDK 표준 캐릭터셋 사용
+import java.nio.charset.StandardCharsets
 import java.util.UUID
 import java.util.Collections
 import java.util.LinkedHashMap
-import java.util.concurrent.ConcurrentHashMap // 1. 누락되었던 핵심 임포트 추가
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.LinkedBlockingQueue
@@ -42,7 +42,6 @@ open class YoutubeExtractor : ExtractorApi() {
         private var activeServer: ServerSocket? = null
         private var serverPort: Int = 0
 
-        // 메모리 누수 방지: 최대 50개의 가상 MPD만 유지하는 LRU 캐시 구조 (동기화 래핑)
         private val manifestMap: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(16, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
@@ -51,7 +50,6 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         )
 
-        // 스레드 무한 증식 제어를 위한 스레드 풀 구성
         private val serverExecutor = ThreadPoolExecutor(
             2, 
             8, 
@@ -61,9 +59,6 @@ open class YoutubeExtractor : ExtractorApi() {
             ThreadFactory { r -> Thread(r, "YT-DASH-Server-Worker") },
             ThreadPoolExecutor.DiscardOldestPolicy()
         )
-
-        // 403 에러 방지를 위한 iOS 클라이언트 전용 User-Agent
-        private const val IOS_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
 
         init {
             YoutubeStreamExtractor.setFetchIosClient(true)
@@ -100,14 +95,15 @@ open class YoutubeExtractor : ExtractorApi() {
     ) {
         println("[YT_DEBUG] [getUrl] 호출됨. 원본 URL: $url")
         val cleanedUrl = url.replace(schemaStripRegex, "")
-        val videoId = try { cleanedUrl.substringAfter("v=").substringBefore("&") } catch (e: Exception) { cleanedUrl }
+        
+        // 공통 유틸 적용: 비디오 ID 추출 통합
+        val videoId = YoutubeUtils.extractYoutubeId(cleanedUrl) ?: cleanedUrl
         println("[YT_DEBUG] [getUrl] 가공된 cleanedUrl: $cleanedUrl, 비디오 ID: $videoId")
 
         ytVideos.remove(videoId)
         ytVideosSubtitles.remove(videoId)
 
         val cachedLinks = ytVideos[videoId]
-        // 2. 확장 함수 충돌 방지를 위해 명시적 null 및 빈값 검사 수행
         if (cachedLinks == null || cachedLinks.isEmpty()) {
             println("[YT_DEBUG] [getUrl] 분석을 진행합니다.")
             try {
@@ -120,8 +116,6 @@ open class YoutubeExtractor : ExtractorApi() {
 
                 val durationSeconds = if (s.length > 0) s.length else 3600L
                 val builtLinks = mutableListOf<ExtractorLink>()
-                
-                // ConcurrentHashMap 임포트 추가로 완벽히 작동하는 키셋 뷰 선언
                 val seenUrls = ConcurrentHashMap.newKeySet<String>()
 
                 val videoOnlyList = (s.videoOnlyStreams ?: emptyList()).mapNotNull { vs ->
@@ -211,8 +205,9 @@ open class YoutubeExtractor : ExtractorApi() {
                                         ) {
                                             this.referer = mainUrl
                                             this.quality = video.height
+                                            // 중복 제거: YoutubeUtils의 중앙 제어 헤더 적용
                                             this.headers = mapOf(
-                                                "User-Agent" to IOS_USER_AGENT,
+                                                "User-Agent" to YoutubeUtils.IOS_USER_AGENT,
                                                 "Origin" to "https://www.youtube.com",
                                                 "Referer" to "https://www.youtube.com"
                                             )
@@ -242,7 +237,7 @@ open class YoutubeExtractor : ExtractorApi() {
                             this.referer = mainUrl
                             this.quality = mHeight
                             this.headers = mapOf(
-                                "User-Agent" to IOS_USER_AGENT,
+                                "User-Agent" to YoutubeUtils.IOS_USER_AGENT,
                                 "Origin" to "https://www.youtube.com",
                                 "Referer" to "https://www.youtube.com"
                             )
@@ -261,7 +256,6 @@ open class YoutubeExtractor : ExtractorApi() {
             println("[YT_DEBUG] [getUrl] 이미 캐시된 링크 리스트가 존재하여 캐시 데이터를 반환합니다.")
         }
 
-        // 3. 연쇄적 타입 추론 에러 차단을 위해 제네릭 타입을 명시적으로 지정
         val finalLinks: List<ExtractorLink> = ytVideos[videoId] ?: emptyList()
         println("[YT_DEBUG] [getUrl] 반환되는 최종 링크 리스트 개수: ${finalLinks.size}")
         finalLinks.forEachIndexed { index, link ->
@@ -270,7 +264,6 @@ open class YoutubeExtractor : ExtractorApi() {
 
         finalLinks.forEach { callback(it) }
 
-        // 4. 자막 리스트 역시 명시적 타입 지정을 적용하여 컴파일 안정성 보장
         val finalSubtitles: List<SubtitlesStream> = ytVideosSubtitles[videoId] ?: emptyList()
         println("[YT_DEBUG] [getUrl] 반환되는 최종 자막 개수: ${finalSubtitles.size}")
         finalSubtitles.mapNotNull { ss ->
@@ -284,7 +277,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         url = "$url&fmt=srt"
                     }
                 }
-                // 5. 오버로드 모호성을 차단하기 위해 CharSequence.take() 확장 함수 대신 JDK 표준 substring 사용
                 val displayUrl = if (url.length > 120) url.substring(0, 120) else url
                 println("[YT_DEBUG]   -> [자막 트랙] 언어: $lang, 주소: $displayUrl...")
                 newSubtitleFile(lang, url)
@@ -343,7 +335,6 @@ open class YoutubeExtractor : ExtractorApi() {
         println("[YT_DEBUG] [handleClient] 요청 연결 처리 시작: ${client.remoteSocketAddress}")
         try {
             client.use { socket ->
-                // JDK 표준 StandardCharsets 상수를 명시적으로 연결하여 문자셋 호환 장벽 해소
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))
                 val output = PrintWriter(socket.getOutputStream(), true)
                 val line = reader.readLine()
@@ -444,7 +435,8 @@ open class YoutubeExtractor : ExtractorApi() {
 
     private fun getMimeTypeFromUrl(url: String, isAudio: Boolean): String {
         return try {
-            val decoded = URLDecoder.decode(url, "UTF-8")
+            // 공통 urlDecode 메소드로 일체화
+            val decoded = YoutubeUtils.urlDecode(url)
             if (decoded.contains("video/webm") || decoded.contains("audio/webm")) {
                 if (isAudio) "audio/webm" else "video/webm"
             } else {
