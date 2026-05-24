@@ -19,9 +19,11 @@ import java.io.PrintWriter
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URLDecoder
+import java.nio.charset.StandardCharsets // 호환성을 위해 JDK 표준 캐릭터셋 사용
 import java.util.UUID
 import java.util.Collections
 import java.util.LinkedHashMap
+import java.util.concurrent.ConcurrentHashMap // 1. 누락되었던 핵심 임포트 추가
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.LinkedBlockingQueue
@@ -40,7 +42,7 @@ open class YoutubeExtractor : ExtractorApi() {
         private var activeServer: ServerSocket? = null
         private var serverPort: Int = 0
 
-        // 메모리 누수 방지: 최대 50개의 가상 MPD만 유지하는 LRU 캐시 구조로 변경 (동기화 래핑)
+        // 메모리 누수 방지: 최대 50개의 가상 MPD만 유지하는 LRU 캐시 구조 (동기화 래핑)
         private val manifestMap: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(16, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
@@ -49,7 +51,7 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         )
 
-        // 고성능 제한형 스레드 풀 구성을 통해 무분별한 스레드 생성 오버헤드 억제
+        // 스레드 무한 증식 제어를 위한 스레드 풀 구성
         private val serverExecutor = ThreadPoolExecutor(
             2, 
             8, 
@@ -105,7 +107,8 @@ open class YoutubeExtractor : ExtractorApi() {
         ytVideosSubtitles.remove(videoId)
 
         val cachedLinks = ytVideos[videoId]
-        if (cachedLinks.isNullOrEmpty()) {
+        // 2. 확장 함수 충돌 방지를 위해 명시적 null 및 빈값 검사 수행
+        if (cachedLinks == null || cachedLinks.isEmpty()) {
             println("[YT_DEBUG] [getUrl] 분석을 진행합니다.")
             try {
                 println("[YT_DEBUG] [getUrl] NewPipe linkHandler에서 link 분석 시작")
@@ -117,6 +120,8 @@ open class YoutubeExtractor : ExtractorApi() {
 
                 val durationSeconds = if (s.length > 0) s.length else 3600L
                 val builtLinks = mutableListOf<ExtractorLink>()
+                
+                // ConcurrentHashMap 임포트 추가로 완벽히 작동하는 키셋 뷰 선언
                 val seenUrls = ConcurrentHashMap.newKeySet<String>()
 
                 val videoOnlyList = (s.videoOnlyStreams ?: emptyList()).mapNotNull { vs ->
@@ -256,7 +261,8 @@ open class YoutubeExtractor : ExtractorApi() {
             println("[YT_DEBUG] [getUrl] 이미 캐시된 링크 리스트가 존재하여 캐시 데이터를 반환합니다.")
         }
 
-        val finalLinks = ytVideos[videoId] ?: emptyList()
+        // 3. 연쇄적 타입 추론 에러 차단을 위해 제네릭 타입을 명시적으로 지정
+        val finalLinks: List<ExtractorLink> = ytVideos[videoId] ?: emptyList()
         println("[YT_DEBUG] [getUrl] 반환되는 최종 링크 리스트 개수: ${finalLinks.size}")
         finalLinks.forEachIndexed { index, link ->
             println("[YT_DEBUG]   -> [링크 #${index + 1}] 이름: '${link.name}', 화질: ${link.quality}p, 타입: ${link.type}, 주소: '${link.url.take(100)}'")
@@ -264,7 +270,8 @@ open class YoutubeExtractor : ExtractorApi() {
 
         finalLinks.forEach { callback(it) }
 
-        val finalSubtitles = ytVideosSubtitles[videoId] ?: emptyList()
+        // 4. 자막 리스트 역시 명시적 타입 지정을 적용하여 컴파일 안정성 보장
+        val finalSubtitles: List<SubtitlesStream> = ytVideosSubtitles[videoId] ?: emptyList()
         println("[YT_DEBUG] [getUrl] 반환되는 최종 자막 개수: ${finalSubtitles.size}")
         finalSubtitles.mapNotNull { ss ->
             try {
@@ -277,7 +284,9 @@ open class YoutubeExtractor : ExtractorApi() {
                         url = "$url&fmt=srt"
                     }
                 }
-                println("[YT_DEBUG]   -> [자막 트랙] 언어: $lang, 주소: ${url.take(120)}...")
+                // 5. 오버로드 모호성을 차단하기 위해 CharSequence.take() 확장 함수 대신 JDK 표준 substring 사용
+                val displayUrl = if (url.length > 120) url.substring(0, 120) else url
+                println("[YT_DEBUG]   -> [자막 트랙] 언어: $lang, 주소: $displayUrl...")
                 newSubtitleFile(lang, url)
             } catch (e: Exception) { 
                 println("[YT_DEBUG] [getUrl] 자막 처리 중 에러: ${e.message}")
@@ -307,7 +316,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         val active = activeServer ?: break
                         if (active.isClosed) break
                         val client = active.accept()
-                        // 5초 타임아웃 주입으로 유령 커넥션에 의한 스레드 점유 원천 방지
                         client.soTimeout = 5000 
                         println("[YT_DEBUG] [ServerSocket-Thread] ExoPlayer로부터 로컬 서버로 미디어 요청 감지됨: ${client.remoteSocketAddress}")
                         serverExecutor.execute { handleClient(client) }
@@ -335,7 +343,8 @@ open class YoutubeExtractor : ExtractorApi() {
         println("[YT_DEBUG] [handleClient] 요청 연결 처리 시작: ${client.remoteSocketAddress}")
         try {
             client.use { socket ->
-                val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
+                // JDK 표준 StandardCharsets 상수를 명시적으로 연결하여 문자셋 호환 장벽 해소
+                val reader = BufferedReader(InputStreamReader(socket.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))
                 val output = PrintWriter(socket.getOutputStream(), true)
                 val line = reader.readLine()
                 println("[YT_DEBUG] [handleClient] HTTP 요청: $line")
@@ -374,7 +383,6 @@ open class YoutubeExtractor : ExtractorApi() {
         val cleanVideoUrl = escapeXml(video.url)
         val durationString = "PT${durationSec}S"
 
-        // 빌더 내부 가용 용량을 2048바이트로 선제 배정하여 메모리 할당 억제
         val sb = java.lang.StringBuilder(2048)
         sb.append("""<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011" type="static" minBufferTime="PT5.0S" mediaPresentationDuration="$durationString">""")
         sb.append("<Period>")
@@ -420,7 +428,6 @@ open class YoutubeExtractor : ExtractorApi() {
         return sb.toString()
     }
 
-    // 빈번한 replace 루틴을 인덱스 스캔 및 String 고속 처리 루프로 전환
     private fun escapeXml(url: String): String {
         if (!url.contains('&') && !url.contains('<')) return url
         val sb = java.lang.StringBuilder(url.length + 16)
