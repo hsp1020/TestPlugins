@@ -1,9 +1,12 @@
-// 버전 정보: v1.6 - 메타데이터 캐시 레이어(12시간 TTL) 도입 및 애니메이션 매핑 병렬화 극속 로딩 버전
+// 버전 정보: v1.7 - Jackson Tree Parser 통합 최적화, 클래스로더 고속 캐싱 및 스레드-세이프 동기화 보강 버전
 package com.hsp1020
 
 import android.content.Context
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import com.fasterxml.jackson.databind.JsonNode
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.Actor
@@ -63,7 +66,6 @@ import okhttp3.ConnectionPool
 import okhttp3.Dispatcher
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Protocol
-import org.json.JSONObject
 import java.net.URI
 import java.net.URLEncoder
 import java.util.Collections
@@ -92,6 +94,17 @@ private inline fun <T> lruSet(maxSize: Int): MutableSet<T> {
             return size > maxSize
         }
     }))
+}
+
+// Jackson용 고속 안전 타입 도우미 확장 함수
+private fun JsonNode?.textOrNull(): String? {
+    if (this == null || this.isNull) return null
+    return this.asText().takeIf { it.isNotBlank() && it != "null" }
+}
+
+private fun JsonNode?.intOrNull(): Int? {
+    if (this == null || this.isNull) return null
+    return this.asInt()
 }
 
 class StremioC(override var mainUrl: String, override var name: String) : MainAPI() {
@@ -169,8 +182,16 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         @Volatile private var hasSearchedStreamPlay = false
 
         @Volatile private var hasSyncedCineStreamSettings = false
+        
+        // 클래스로더 조회 비용을 제거하기 위한 동적 리플렉션 캐싱 [3]
+        @Volatile private var cachedClassLoader: ClassLoader? = null
 
-        // 메타데이터 초고속 다층형 메모리 캐시 저장소 구축 (용량 증가 없음, 가비지 제어)
+        // 대용량 데이터 로깅 전용 고속 Jackson 매퍼 사전 할당 [1]
+        private val jsonMapper: ObjectMapper by lazy {
+            jacksonObjectMapper()
+                .configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+        }
+
         private val tmdbDetailsCache = ConcurrentHashMap<String, Pair<TmdbDetailResponse, Long>>()
         private val tmdbSeasonCache = ConcurrentHashMap<String, Pair<TmdbSeasonDetail, Long>>()
         private val kitsuMetaCache = ConcurrentHashMap<String, Pair<String, Long>>()
@@ -200,7 +221,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     maxRequests = 70
                     maxRequestsPerHost = 40
                 })
-                .connectionPool(ConnectionPool(45, 1, TimeUnit.MINUTES))
+                .connectionPool(ConnectionPool(45, 15, TimeUnit.SECONDS)) // Keep-Alive 시간을 단축시켜 소켓 누출 제어 [5]
                 .build()
                 
             Requests(newClient).apply {
@@ -215,6 +236,16 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
 
         fun loadProviderDynamically(pluginKeyword: String, className: String): MainAPI? {
+            // 캐시된 클래스로더가 있다면 즉시 리턴하여 무거운 리플렉션 무력화 [3]
+            val loader = cachedClassLoader
+            if (loader != null) {
+                try {
+                    val clazz = loader.loadClass(className)
+                    return clazz.newInstance() as? MainAPI
+                } catch (e: Exception) {
+                    // 클래스로더 미일치 시 풀백 스캔 작동
+                }
+            }
             try {
                 val pmClass = Class.forName("com.lagradost.cloudstream3.plugins.PluginManager")
                 val pmInstance = pmClass.getField("INSTANCE").get(null)
@@ -243,6 +274,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
                 
                 if (foundLoader != null) {
+                    cachedClassLoader = foundLoader
                     val clazz = foundLoader.loadClass(className)
                     return clazz.newInstance() as? MainAPI
                 }
@@ -291,7 +323,14 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
             }
 
-            val mutex = cacheMutexes.getOrPut(key) { Mutex() }
+            // Double-Checked Locking 방식으로 원자성이 결여된 getOrPut을 완전히 구원 [4]
+            var mutex = cacheMutexes[key]
+            if (mutex == null) {
+                synchronized(cacheMutexes) {
+                    mutex = cacheMutexes.getOrPut(key) { Mutex() }
+                }
+            }
+
             return mutex.withLock {
                 globalPageCache[key]?.let { entry ->
                     return@withLock Pair(entry.first, entry.second)
@@ -444,10 +483,15 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                             catalogSkipState[catalogKey] = currentSkip + resultPair.second
                             val rowName = "${catalog.name ?: catalog.id} - $displayType"
                             
-                            val seenForThisCatalog = catalogSentIds.getOrPut(catalogKey) { 
-                                lruSet(500) 
+                            var seenForThisCatalog = catalogSentIds[catalogKey]
+                            if (seenForThisCatalog == null) {
+                                synchronized(catalogSentIds) {
+                                    seenForThisCatalog = catalogSentIds.getOrPut(catalogKey) { 
+                                        lruSet(500) 
+                                    }
+                                }
                             }
-                            val filteredItems = resultPair.first.filter { item -> seenForThisCatalog.add(item.extractPureId()) }
+                            val filteredItems = resultPair.first.filter { item -> seenForThisCatalog!!.add(item.extractPureId()) }
                             
                             HomePageList(rowName, filteredItems)
                         } else null
@@ -486,14 +530,13 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         } else {
             val responseText = customSession.get(url).text
             try {
-                parseJson<CatalogResponse>(responseText).meta 
-                    ?: parseJson<CatalogEntry>(responseText)
+                // 이중 Jackson 파싱 구조 및 JSONObject 변환 병목 전면 차단 [1]
+                val rootNode = jsonMapper.readTree(responseText)
+                val metaNode = rootNode.get("meta") ?: rootNode
+                jsonMapper.treeToValue(metaNode, CatalogEntry::class.java) 
+                    ?: throw IllegalStateException("Failed to bind JSON to CatalogEntry")
             } catch (e: Exception) {
-                runCatching {
-                    val json = JSONObject(responseText)
-                    val metaStr = json.optJSONObject("meta")?.toString() ?: responseText
-                    parseJson<CatalogEntry>(metaStr)
-                }.getOrNull() ?: throw IllegalStateException("Metadata not found or parsing failed: $url", e)
+                throw IllegalStateException("Metadata not found or parsing failed: $url", e)
             }
         }
         
@@ -514,41 +557,47 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             
             if (!kitsuRes.isNullOrBlank()) {
                 runSuspendCatching {
-                    val metaObj = JSONObject(kitsuRes).optJSONObject("meta")
-                    resolvedImdbId = metaObj?.optString("imdb_id")?.takeIf { it.startsWith("tt") }
-                    resolvedTmdbId = metaObj?.optString("tmdb_id")?.takeIf { it.isNotBlank() } ?: metaObj?.optInt("moviedb_id")?.takeIf { it > 0 }?.toString()
-                    
-                    fetchedAniListId = metaObj?.optInt("anilist_id")?.takeIf { it != 0 }
-                    fetchedMalId = metaObj?.optInt("mal_id")?.takeIf { it != 0 }
+                    val root = jsonMapper.readTree(kitsuRes)
+                    val metaObj = root.get("meta")
+                    if (metaObj != null) {
+                        resolvedImdbId = metaObj.get("imdb_id").textOrNull()?.takeIf { it.startsWith("tt") }
+                        resolvedTmdbId = metaObj.get("tmdb_id").textOrNull() 
+                            ?: metaObj.get("moviedb_id").intOrNull()?.takeIf { it > 0 }?.toString()
+                        
+                        fetchedAniListId = metaObj.get("anilist_id").intOrNull()
+                        fetchedMalId = metaObj.get("mal_id").intOrNull()
 
-                    metaObj?.optJSONArray("videos")?.let { arr ->
-                        val vids = mutableListOf<Video>()
-                        for (i in 0 until arr.length()) {
-                            val v = arr.optJSONObject(i)
-                            if (v != null) {
-                                runSuspendCatching {
-                                    val vid = Video(
-                                        id = v.optString("id").takeIf { it.isNotBlank() && it != "null" },
-                                        title = v.optString("title").takeIf { it.isNotBlank() && it != "null" },
-                                        name = v.optString("name").takeIf { it.isNotBlank() && it != "null" },
-                                        seasonNumber = v.optInt("season", 0).takeIf { it > 0 },
-                                        number = v.optInt("number", 0).takeIf { it > 0 },
-                                        episode = v.optInt("episode", 0).takeIf { it > 0 },
-                                        thumbnail = v.optString("thumbnail").takeIf { it.isNotBlank() && it != "null" },
-                                        overview = v.optString("overview").takeIf { it.isNotBlank() && it != "null" },
-                                        description = v.optString("description").takeIf { it.isNotBlank() && it != "null" },
-                                        firstAired = v.optString("firstAired").takeIf { it.isNotBlank() && it != "null" },
-                                        released = v.optString("released").takeIf { it.isNotBlank() && it != "null" },
-                                        tvdb_id = v.optInt("tvdb_id", 0).takeIf { it > 0 },
-                                        imdbSeason = v.optInt("imdbSeason", 0).takeIf { it > 0 },
-                                        imdbEpisode = v.optInt("imdbEpisode", 0).takeIf { it > 0 },
-                                        imdb_id = v.optString("imdb_id").takeIf { it.isNotBlank() && it != "null" }
-                                    )
-                                    vids.add(vid)
+                        metaObj.get("videos")?.let { arr ->
+                            if (arr.isArray) {
+                                val vids = mutableListOf<Video>()
+                                for (i in 0 until arr.size()) {
+                                    val v = arr.get(i)
+                                    if (v != null) {
+                                        runSuspendCatching {
+                                            val vid = Video(
+                                                id = v.get("id").textOrNull(),
+                                                title = v.get("title").textOrNull(),
+                                                name = v.get("name").textOrNull(),
+                                                seasonNumber = v.get("season").intOrNull()?.takeIf { it > 0 },
+                                                number = v.get("number").intOrNull()?.takeIf { it > 0 },
+                                                episode = v.get("episode").intOrNull()?.takeIf { it > 0 },
+                                                thumbnail = v.get("thumbnail").textOrNull(),
+                                                overview = v.get("overview").textOrNull(),
+                                                description = v.get("description").textOrNull(),
+                                                firstAired = v.get("firstAired").textOrNull(),
+                                                released = v.get("released").textOrNull(),
+                                                tvdb_id = v.get("tvdb_id").intOrNull()?.takeIf { it > 0 },
+                                                imdbSeason = v.get("imdbSeason").intOrNull()?.takeIf { it > 0 },
+                                                imdbEpisode = v.get("imdbEpisode").intOrNull()?.takeIf { it > 0 },
+                                                imdb_id = v.get("imdb_id").textOrNull()
+                                            )
+                                            vids.add(vid)
+                                        }
+                                    }
                                 }
+                                if (vids.isNotEmpty()) kitsuVideos = vids
                             }
                         }
-                        if (vids.isNotEmpty()) kitsuVideos = vids
                     }
                 }
             }
@@ -1038,7 +1087,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         ): FetchedTmdbData {
             var fetchedRecommendations: List<SearchResponse>? = null
             
-            // TMDB 상세 데이터 메모리 캐시 조회로 고속 기동
             val cacheKey = "${tmdbMediaType}_${tmdbIdStr}"
             val cached = tmdbDetailsCache[cacheKey]
             val detailRes = preFetchedDetail ?: if (cached != null && System.currentTimeMillis() - cached.second < METADATA_CACHE_TTL) {
@@ -1061,6 +1109,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
             coroutineScope {
                 val shouldFetchEpisodes = (!isMovie && targetVideos.isNullOrEmpty()) || (stremioType == "other" && !isMovie)
+                
+                // 불필요한 계층적 async 래퍼와 대기 지연 제거 [2]
                 val episodeDeferred = if (shouldFetchEpisodes) {
                     var requiredSeasons = targetVideos?.mapNotNull { it.seasonNumber }?.filter { it > 0 }?.distinct() ?: emptyList()
                     if (requiredSeasons.isEmpty()) {
@@ -1068,30 +1118,27 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         requiredSeasons = if (totalSeasons > 0) (1..totalSeasons).toList() else listOf(1)
                     }
                     
-                    async(Dispatchers.IO) {
-                        requiredSeasons.map { seasonNum ->
-                            async(Dispatchers.IO) {
-                                StremioC.networkSemaphore.withPermit {
-                                    withTimeoutOrNull(10000L) {
-                                        runSuspendCatching {
-                                            // 시즌 상세 데이터에 캐싱을 부여하여 순차 루프 병목 원천 제어
-                                            val seasonCacheKey = "${tmdbIdStr}_$seasonNum"
-                                            val cachedSeason = tmdbSeasonCache[seasonCacheKey]
-                                            val seasonRes = if (cachedSeason != null && System.currentTimeMillis() - cachedSeason.second < METADATA_CACHE_TTL) {
-                                                cachedSeason.first
-                                            } else {
-                                                val fetchedSeason = StremioC.customSession.get(provider.buildTmdbUrl("/tv/$tmdbIdStr/season/$seasonNum")).parsedSafe<TmdbSeasonDetail>()
-                                                if (fetchedSeason != null) {
-                                                    tmdbSeasonCache[seasonCacheKey] = Pair(fetchedSeason, System.currentTimeMillis())
-                                                }
-                                                fetchedSeason
+                    requiredSeasons.map { seasonNum ->
+                        async(Dispatchers.IO) {
+                            StremioC.networkSemaphore.withPermit {
+                                withTimeoutOrNull(10000L) {
+                                    runSuspendCatching {
+                                        val seasonCacheKey = "${tmdbIdStr}_$seasonNum"
+                                        val cachedSeason = tmdbSeasonCache[seasonCacheKey]
+                                        val seasonRes = if (cachedSeason != null && System.currentTimeMillis() - cachedSeason.second < METADATA_CACHE_TTL) {
+                                            cachedSeason.first
+                                        } else {
+                                            val fetchedSeason = StremioC.customSession.get(provider.buildTmdbUrl("/tv/$tmdbIdStr/season/$seasonNum")).parsedSafe<TmdbSeasonDetail>()
+                                            if (fetchedSeason != null) {
+                                                tmdbSeasonCache[seasonCacheKey] = Pair(fetchedSeason, System.currentTimeMillis())
                                             }
-                                            seasonRes?.episodes?.forEach { ep -> if (ep.episodeNumber != null) episodeTmdbMeta["${seasonNum}_${ep.episodeNumber}"] = ep }
+                                            fetchedSeason
                                         }
+                                        seasonRes?.episodes?.forEach { ep -> if (ep.episodeNumber != null) episodeTmdbMeta["${seasonNum}_${ep.episodeNumber}"] = ep }
                                     }
                                 }
                             }
-                        }.awaitAll()
+                        }
                     }
                 } else null
 
@@ -1105,7 +1152,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
 
                 val collectionParts = collectionDeferred.await()
-                episodeDeferred?.await()
+                episodeDeferred?.awaitAll() // 평탄화된 비동기 풀의 동시 자원 조율 완료
 
                 val tmdbRecs = detailRes.recommendations?.results ?: emptyList()
                 val finalCombinedMedia = (collectionParts + tmdbRecs)
@@ -1336,7 +1383,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             var finalMalId = fetchedMalId
             var finalAniId = fetchedAniListId
 
-            // Ani.zip 비동기 병렬 매핑을 최상단 구조로 변경하여 딜레이 감소
+            // Ani.zip 비동기 병렬 매핑 최적화 구조 가동 [1]
             val aniZipDeferred = if (isAnimeMedia && finalImdbId != null) {
                 async(Dispatchers.IO) {
                     val cacheKey = finalImdbId
@@ -1346,10 +1393,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     } else {
                         val fetchedZip = runSuspendCatching {
                             val mappingRes = StremioC.customSession.get("https://api.ani.zip/mappings?imdb_id=$finalImdbId", timeout = 5L).text
-                            if (mappingRes.contains("mal_id")) {
-                                val mappingJson = JSONObject(mappingRes).optJSONObject("mappings")
-                                val mal = mappingJson?.optInt("mal_id")?.takeIf { it > 0 }
-                                val ani = mappingJson?.optInt("anilist_id")?.takeIf { it > 0 }
+                            val node = jsonMapper.readTree(mappingRes)
+                            val mappings = node.get("mappings")
+                            if (mappings != null) {
+                                val mal = mappings.get("mal_id").intOrNull()?.takeIf { it > 0 }
+                                val ani = mappings.get("anilist_id").intOrNull()?.takeIf { it > 0 }
                                 Pair(mal, ani)
                             } else null
                         }.getOrNull()
