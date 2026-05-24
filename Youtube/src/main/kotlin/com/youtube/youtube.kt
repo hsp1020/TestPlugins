@@ -12,10 +12,144 @@ import okhttp3.Interceptor
 import okhttp3.Response
 import java.net.URLEncoder
 import java.net.URLDecoder
+import java.security.MessageDigest
+import java.nio.charset.StandardCharsets
 import java.util.regex.Pattern
 import com.lagradost.cloudstream3.AcraApplication
 import androidx.preference.PreferenceManager
 import com.lagradost.cloudstream3.ar.youtube.YoutubeProvider.Config.SLEEP_BETWEEN
+import java.util.concurrent.ConcurrentHashMap
+
+// [공통 아키텍처 브릿지] 교차 중복 코드 제거 및 유지보수 단일화를 위한 유틸리티
+object YoutubeUtils {
+    // 1. 유저 에이전트 문자열 상수의 완벽한 중앙 집중식 선언
+    const val CHROME_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
+    const val SAFARI_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
+    const val IOS_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
+
+    // 2. 이너튜브 클라이언트 전용 중앙 상수 선언
+    const val DEFAULT_CLIENT_VERSION = "2.20240725.01.00"
+
+    private val sha1Digest = ThreadLocal.withInitial {
+        MessageDigest.getInstance("SHA-1")
+    }
+
+    val YT_ID_REGEX = Regex("""(?:v=|\/videos\/|embed\/|youtu\.be\/|shorts\/)([A-Za-z0-9_-]{11})""")
+    val MIX_TITLE_REPLACE_KO = Regex("""\s*\(믹스\s*재생목록\)""", RegexOption.IGNORE_CASE)
+    val MIX_TITLE_REPLACE_EN = Regex("""\s*\(Mix\s*Playlist\)""", RegexOption.IGNORE_CASE)
+
+    fun sha1(input: String): String {
+        val md = sha1Digest.get()
+        md.reset()
+        val bytes = md.digest(input.toByteArray(StandardCharsets.UTF_8))
+        val sb = java.lang.StringBuilder(bytes.size * 2)
+        for (b in bytes) {
+            sb.append(String.format("%02x", b))
+        }
+        return sb.toString()
+    }
+
+    // SAPISID 해시 생성 로직 단일 지점 이식
+    fun getSapisidHash(sapisid: String, origin: String = "https://www.youtube.com"): String {
+        val timestamp = (System.currentTimeMillis() / 1000).toString()
+        val msg = "$timestamp $sapisid $origin"
+        val hash = sha1(msg)
+        return "SAPISIDHASH ${timestamp}_$hash"
+    }
+
+    // 3. 완전히 파편화되어 동작하던 유사 쿠키 빌더 로직의 구조적 대통합
+    fun buildCookiesAndExtractSapisid(prefs: SharedPreferences?, lang: String, fallbackVisitor: String): Pair<String, String?> {
+        val cookieBuilder = java.lang.StringBuilder()
+        val visitor = prefs?.getString("VISITOR_INFO1_LIVE", null)
+        if (!visitor.isNullOrBlank()) {
+            cookieBuilder.append("VISITOR_INFO1_LIVE=$visitor; ")
+        } else {
+            cookieBuilder.append("VISITOR_INFO1_LIVE=$fallbackVisitor; ")
+        }
+
+        val authKeys = listOf("SID", "HSID", "SSID", "APISID", "SAPISID")
+        var sapisidVal: String? = null
+        authKeys.forEach { key ->
+            val value = prefs?.getString(key, null)
+            if (!value.isNullOrBlank()) {
+                cookieBuilder.append("$key=$value; ")
+                if (key == "SAPISID") sapisidVal = value
+            }
+        }
+        cookieBuilder.append("PREF=f6=40000000&hl=$lang; CONSENT=YES+fx.456722336;")
+        return Pair(cookieBuilder.toString(), sapisidVal)
+    }
+
+    // 4. 이미지 프록시(wsrv.nl) 파싱 및 URL 인코딩 중복 방지
+    fun getProxiedPoster(poster: String?): String? {
+        if (poster.isNullOrBlank()) return null
+        return try {
+            "https://wsrv.nl/?url=${URLEncoder.encode(poster, "UTF-8")}&w=300&h=450&fit=contain&cbg=black"
+        } catch (e: Exception) {
+            poster
+        }
+    }
+
+    fun findConfig(html: String, key: String): String? {
+        return try {
+            Regex("\"$key\"\\s*:\\s*\"([^\"]+)\"").find(html)?.groupValues?.getOrNull(1)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    fun getBestThumbnail(thumbData: Any?): String? {
+        return try {
+            val thumbs = when (thumbData) {
+                is Map<*, *> -> (thumbData["thumbnails"] as? List<*>)
+                    ?: (thumbData["sources"] as? List<*>)
+                is List<*> -> thumbData
+                else -> null
+            }
+            val lastThumb = thumbs?.lastOrNull() as? Map<*, *>
+            var url = lastThumb?.get("url") as? String
+            if (url?.startsWith("//") == true) url = "https:$url"
+            url
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    fun buildThumbnailFromId(videoId: String?): String? {
+        if (videoId.isNullOrBlank()) return null
+        return "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
+    }
+
+    fun extractYoutubeId(url: String): String? {
+        return YT_ID_REGEX.find(url)?.groupValues?.getOrNull(1) ?: run {
+            if (url.length == 11 && url.matches(Regex("[A-Za-z0-9_-]{11}"))) {
+                url
+            } else {
+                null
+            }
+        }
+    }
+
+    fun cleanMixTitle(title: String): String {
+        return MIX_TITLE_REPLACE_EN.replace(MIX_TITLE_REPLACE_KO.replace(title, ""), "").trim()
+    }
+
+    fun urlDecode(input: String): String {
+        var current = input
+        var decodeCount = 0
+        while (current.contains('%') && decodeCount < 3) {
+            val decoded = try {
+                URLDecoder.decode(current, "UTF-8")
+            } catch (e: Exception) {
+                break
+            }
+            if (decoded == current) break
+            current = decoded
+            decodeCount++
+        }
+        return current
+    }
+}
 
 class YoutubeProvider(
     private val sharedPref: SharedPreferences? = null
@@ -52,88 +186,51 @@ class YoutubeProvider(
         private val homeShorts = mutableListOf<Episode>()
         private val searchShorts = mutableListOf<Episode>()
 
-        // 무분별한 런타임 정규식 할당을 차단하기 위한 스태틱 사전 컴파일 정규식 목록
         private val VIEW_REPLACE_REGEX = Regex("조회수|views|مشاهدة|시청 중|시청중|watching")
         private val VIEW_FORMAT_REGEX = Regex(".*[천만억KMBkmb].*")
         private val METADATA_VIEW_REGEX = Regex(".*(\\d+[KMBkmb]|views|조회수|회|시청|watching|مشاهدة).*")
         private val METADATA_SKIP_REGEX = Regex(".*(\\d+:\\d+|ago|قبل|전|시간|분|일|주|개월|년|시청|watching).*")
         private val SUBSCRIBER_REGEX = Regex(".*(구독자|subscribers|명|K|M|B|sub).*\\s*", RegexOption.IGNORE_CASE)
         private val SUBSCRIBER_REPLACE_REGEX = Regex("(구독자|subscribers?)\\s*", RegexOption.IGNORE_CASE)
-        private val MIX_TITLE_REPLACE_KO = Regex("""\s*\(믹스\s*재생목록\)""", RegexOption.IGNORE_CASE)
-        private val MIX_TITLE_REPLACE_EN = Regex("""\s*\(Mix\s*Playlist\)""", RegexOption.IGNORE_CASE)
-        private val YT_ID_REGEX = Regex("""(?:v=|\/videos\/|embed\/|youtu\.be\/|shorts\/)([A-Za-z0-9_-]{11})""")
-
-        // SHA-1 해시 생성 시의 보안 프로바이더 탐색 및 GC 억제를 위한 스레드 로컬 버퍼 적용
-        private val sha1Digest = ThreadLocal.withInitial {
-            java.security.MessageDigest.getInstance("SHA-1")
-        }
     }
 
     private var isSearchContext = false
 
-    // Interceptor가 appPrefs를 정상적으로 참조하도록 구성 유지
     class YouTubeInterceptor(private val provider: YoutubeProvider) : Interceptor {
         private val prefs get() = provider.appPrefs
 
         override fun intercept(chain: Interceptor.Chain): Response {
             val request = chain.request()
             val urlStr = request.url.toString()
-            // 검색 엔드포인트(/results 또는 /v1/search)를 감지하여 개인 쿠키 연동 차단 플래그 지정
             val isSearchRequest = urlStr.contains("/results") || urlStr.contains("/v1/search")
 
             val requestBuilder = request.newBuilder()
-                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36")
+                .header("User-Agent", YoutubeUtils.CHROME_USER_AGENT) // 통합 선언된 Chrome UA 연결
 
-            // 검색 페이지 레퍼러만 가두고, player API를 위한 개별 watch 주소 레퍼러는 원본 그대로 승인
             val origReferer = request.header("Referer")
             if (origReferer != null && (origReferer.contains("/results") || origReferer.contains("/v1/search"))) {
                 requestBuilder.header("Referer", "https://www.youtube.com/")
             }
 
-            val cookieBuilder = StringBuilder()
-            val visitor = prefs?.getString("VISITOR_INFO1_LIVE", null)
-
-            if (!visitor.isNullOrBlank()) {
-                cookieBuilder.append("VISITOR_INFO1_LIVE=$visitor; ")
-            } else {
-                cookieBuilder.append("VISITOR_INFO1_LIVE=_Mk3UVhY40g; ")
-            }
-
-            // 일반 요청(재생/메인홈 등)인 경우에만 계정 쿠키를 결합하고, 검색 요청일 경우 개인 계정 쿠키를 누락시켜 개인 검색기록 연동 차단
             if (!isSearchRequest) {
-                val authKeys = listOf("SID", "HSID", "SSID", "APISID", "SAPISID")
-                var sapisidVal: String? = null
-
-                authKeys.forEach { key ->
-                    val value = prefs?.getString(key, null)
-                    if (!value.isNullOrBlank()) {
-                        cookieBuilder.append("$key=$value; ")
-                        if (key == "SAPISID") sapisidVal = value
-                    }
-                }
-                
-                cookieBuilder.append("PREF=f6=40000000&hl=${provider.lang}; CONSENT=YES+fx.456722336;")
-
-                requestBuilder.addHeader("Cookie", cookieBuilder.toString())
+                // 중복 제거: 공통 함수를 활용한 쿠키 빌딩 및 SAPISID 추출 단일화
+                val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(prefs, provider.lang, "_Mk3UVhY40g")
+                requestBuilder.addHeader("Cookie", cookies)
                 requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
 
                 if (!sapisidVal.isNullOrBlank()) {
                     try {
-                        val timestamp = (System.currentTimeMillis() / 1000).toString()
-                        val origin = "https://www.youtube.com"
-                        val msg = "$timestamp $sapisidVal $origin"
-                        val hash = provider.sha1(msg)
-                        requestBuilder.addHeader("Authorization", "SAPISIDHASH ${timestamp}_$hash")
-                        requestBuilder.addHeader("X-Origin", origin)
+                        val authHeader = YoutubeUtils.getSapisidHash(sapisidVal)
+                        requestBuilder.addHeader("Authorization", authHeader)
+                        requestBuilder.addHeader("X-Origin", "https://www.youtube.com")
                         requestBuilder.addHeader("X-Goog-AuthUser", "0")
                     } catch (e: Exception) {
                         logError(e)
                     }
                 }
             } else {
-                // 검색 요청 시에는 비개인화 PREF 쿠키 및 일반 다크 테마/언어 설정 헤더만 송신
-                cookieBuilder.append("PREF=f6=40000000&hl=${provider.lang}; CONSENT=YES+fx.456722336;")
-                requestBuilder.addHeader("Cookie", cookieBuilder.toString())
+                val (cookies, _) = YoutubeUtils.buildCookiesAndExtractSapisid(prefs, provider.lang, "_Mk3UVhY40g")
+                requestBuilder.addHeader("Cookie", cookies)
                 requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
             }
 
@@ -142,8 +239,6 @@ class YoutubeProvider(
     }
     
     private val ytInterceptor = YouTubeInterceptor(this)
-    private val safariUserAgent =
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
 
     private var savedContinuationToken: String? = null
     private var savedVisitorData: String? = null
@@ -153,13 +248,12 @@ class YoutubeProvider(
     @Suppress("PropertyName")
     private data class PlayerResponse(
         @JsonProperty("streamingData") val streamingData: StreamingData?,
-        @JsonProperty("playbackTracking") val playbackTracking: PlaybackTracking? // 트래킹 정보 필드
+        @JsonProperty("playbackTracking") val playbackTracking: PlaybackTracking? 
     )
     private data class StreamingData(
         @JsonProperty("hlsManifestUrl") val hlsManifestUrl: String?
     )
 
-    // 구글 트래킹에 필요한 파싱 구조체
     private data class PlaybackTracking(
         @JsonProperty("videostatsPlaybackUrl") val videostatsPlaybackUrl: TrackingUrl?,
         @JsonProperty("videostatsWatchtimeUrl") val videostatsWatchtimeUrl: TrackingUrl?
@@ -168,38 +262,11 @@ class YoutubeProvider(
         @JsonProperty("baseUrl") val baseUrl: String?
     )
 
-    fun sha1(input: String): String {
-        return try {
-            val md = sha1Digest.get()
-            md.reset()
-            val bytes = md.digest(input.toByteArray(Charsets.UTF_8))
-            val sb = java.lang.StringBuilder(bytes.size * 2)
-            for (b in bytes) {
-                sb.append(String.format("%02x", b))
-            }
-            sb.toString()
-        } catch (e: Exception) {
-            input.hashCode().toString()
-        }
-    }
-
-    private fun getSapisidHash(
-        sapisid: String,
-        origin: String = "https://www.youtube.com"
-    ): String {
-        val timestamp = (System.currentTimeMillis() / 1000).toString()
-        val msg = "$timestamp $sapisid $origin"
-        val hash = sha1(msg)
-        return "SAPISIDHASH ${timestamp}_$hash"
-    }
-
-    // 16자리 무작위 문자열(Client Playback Nonce, cpn) 생성
     private fun generateCpn(): String {
         val alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
         return (1..16).map { alphabet.random() }.joinToString("")
     }
 
-    // s.youtube.com 트래킹 주소 파라미터 매핑 빌더
     private fun buildTrackingUrl(base: String, cpn: String, cmt: String, state: String?, realTime: String? = null): String {
         val uri = android.net.Uri.parse(base).buildUpon()
         uri.appendQueryParameter("cpn", cpn)
@@ -216,7 +283,6 @@ class YoutubeProvider(
         return uri.build().toString()
     }
 
-    // 유튜브 트래킹 서버로 차례대로 백그라운드 핑 전송
     private suspend fun triggerPlaybackTracking(playbackTracking: PlaybackTracking?, videoId: String) {
         val playbackBaseUrl = playbackTracking?.videostatsPlaybackUrl?.baseUrl
         val watchtimeBaseUrl = playbackTracking?.videostatsWatchtimeUrl?.baseUrl
@@ -230,12 +296,10 @@ class YoutubeProvider(
         println("[YT_DEBUG] Triggering playback tracking for videoId: $videoId with cpn: $cpn")
 
         try {
-            // 1. 재생 세션 초기화 등록 핑 전송 (현재 미디어 시간 0초)
             val playbackUrl = buildTrackingUrl(playbackBaseUrl, cpn, cmt = "0.000", state = null, realTime = "0")
             println("[YT_DEBUG] Pinging playbackUrl: $playbackUrl")
             app.get(playbackUrl, interceptor = ytInterceptor)
 
-            // 2. 가상의 5초 진행 시간 시청 갱신 핑 전송 (서버 시청 기록에 도장 찍기 수행)
             val watchtimeUrl = buildTrackingUrl(watchtimeBaseUrl, cpn, cmt = "5.000", state = "playing", realTime = "5")
             println("[YT_DEBUG] Pinging watchtimeUrl: $watchtimeUrl")
             app.get(watchtimeUrl, interceptor = ytInterceptor)
@@ -248,14 +312,14 @@ class YoutubeProvider(
     }
     
     private fun getSavedContinuationToken(key: String): String? {
-        val hashedKey = sha1(key)
+        val hashedKey = YoutubeUtils.sha1(key)
         val token = appPrefs?.getString("cont_token_$hashedKey", null)
         println("[YT_DEBUG] getSavedContinuationToken for key '$key' (hash: $hashedKey) -> '$token'")
         return token
     }
 
     private fun saveContinuationToken(key: String, token: String?) {
-        val hashedKey = sha1(key)
+        val hashedKey = YoutubeUtils.sha1(key)
         println("[YT_DEBUG] saveContinuationToken for key '$key' (hash: $hashedKey) -> '$token'")
         if (token.isNullOrBlank()) {
             appPrefs?.edit()?.remove("cont_token_$hashedKey")?.apply()
@@ -302,6 +366,27 @@ class YoutubeProvider(
         return ""
     }
 
+    private fun extractPartsFromMetadataRows(rows: List<*>?, viewFormatter: (String) -> String): List<String> {
+        val collected = mutableListOf<String>()
+        rows?.forEach { row ->
+            val rowMap = row as? Map<*, *> ?: return@forEach
+            val parts = (rowMap["metadataParts"] as? List<*>)
+                ?: (rowMap.entries.firstOrNull { (it.key as? String) == "metadataParts" }?.value as? List<*>)
+            parts?.forEach { part ->
+                val partMap = part as? Map<*, *> ?: return@forEach
+                val text = getText(partMap.getMapKey("text") ?: partMap["text"])
+                if (text.isNotBlank()) {
+                    if (METADATA_VIEW_REGEX.matches(text)) {
+                        collected.add(viewFormatter(text))
+                    } else {
+                        collected.add(text)
+                    }
+                }
+            }
+        }
+        return collected
+    }
+
     private fun extractLockupMetadata(lockup: Map<*, *>) : Pair<String, String> {
         var channel = ""
         var views = ""
@@ -313,17 +398,12 @@ class YoutubeProvider(
                 ?.getMapKey("contentMetadataViewModel")
                 ?.getListKey("metadataRows")
 
-            rows?.forEach { row ->
-                val parts = row.getListKey("metadataParts")
-                parts?.forEach { part ->
-                    val text = getText(part.getMapKey("text"))
-                    if (text.isNotBlank()) {
-                        if (METADATA_VIEW_REGEX.matches(text)) {
-                            views = formatViews(text)
-                        } else if (!METADATA_SKIP_REGEX.matches(text) && text.length > 1 && !text.contains("•")) {
-                            channel = text
-                        }
-                    }
+            val rawParts = extractPartsFromMetadataRows(rows) { formatViews(it) }
+            rawParts.forEach { text ->
+                if (text.contains("회") || text.contains("시청") || text.contains("조회") || text.contains("views") || text.contains("watching")) {
+                    views = text
+                } else if (text.length > 1 && !text.contains("•")) {
+                    channel = text
                 }
             }
         } catch (_: Exception) {
@@ -350,7 +430,6 @@ class YoutubeProvider(
             return text
         }
         
-        // 고속 정수 필터 루프 적용으로 GC 유발 최소화
         val sb = java.lang.StringBuilder(text.length)
         for (i in 0 until text.length) {
             val c = text[i]
@@ -388,29 +467,6 @@ class YoutubeProvider(
             ?: obj.getListKey("runs")?.firstOrNull()?.getString("text")
     }
 
-    private fun getBestThumbnail(thumbData: Any?): String? {
-        return try {
-            val thumbs = when (thumbData) {
-                is Map<*, *> -> (thumbData["thumbnails"] as? List<*>)
-                    ?: (thumbData["sources"] as? List<*>)
-
-                is List<*> -> thumbData
-                else -> null
-            }
-            val lastThumb = thumbs?.lastOrNull() as? Map<*, *>
-            var url = lastThumb?.get("url") as? String
-            if (url?.startsWith("//") == true) url = "https:$url"
-            url
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    private fun buildThumbnailFromId(videoId: String?): String? {
-        if (videoId.isNullOrBlank()) return null
-        return "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
-    }
-
     private fun collectFromRenderer(
         renderer: Map<*, *>?,
         seenIds: MutableSet<String>
@@ -434,8 +490,8 @@ class YoutubeProvider(
                 val views = formatViews(viewText)
                 val finalTitle =
                     if (channel.isNotBlank()) "{$channel | $views} $title" else "{$views} $title"
-                var poster = getBestThumbnail(videoData.getMapKey("thumbnail"))
-                if (poster.isNullOrBlank()) poster = buildThumbnailFromId(videoId)
+                var poster = YoutubeUtils.getBestThumbnail(videoData.getMapKey("thumbnail"))
+                if (poster.isNullOrBlank()) poster = YoutubeUtils.buildThumbnailFromId(videoId)
                 
                 println("[YT_DEBUG] collectFromRenderer: extracted Video $videoId: $finalTitle")
                 return newMovieSearchResponse(
@@ -443,7 +499,7 @@ class YoutubeProvider(
                     "$mainUrl/watch?v=$videoId",
                     TvType.Movie
                 ) {
-                    this.posterUrl = poster?.let { "https://wsrv.nl/?url=${java.net.URLEncoder.encode(it, "UTF-8")}&w=300&h=450&fit=contain&cbg=black" } ?: poster
+                    this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
                 }
             }
             return null
@@ -525,11 +581,8 @@ class YoutubeProvider(
                     var title = lockup.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")
                         ?.getMapKey("title")?.getString("content") ?: "Playlist"
 
-                    // 정규식 할당 성능 최적화
                     if (playlistId.startsWith("RD") || playlistId.startsWith("UL") || playlistId.startsWith("MM") || playlistId.startsWith("RDMM")) {
-                        title = MIX_TITLE_REPLACE_KO.replace(title, "")
-                        title = MIX_TITLE_REPLACE_EN.replace(title, "")
-                        title = title.trim()
+                        title = YoutubeUtils.cleanMixTitle(title)
                     }
 
                     val episodeCount =
@@ -560,7 +613,7 @@ class YoutubeProvider(
                         "$mainUrl/$targetPath",
                         TvType.TvSeries
                     ) {
-                        this.posterUrl = poster?.let { "https://wsrv.nl/?url=${java.net.URLEncoder.encode(it, "UTF-8")}&w=300&h=450&fit=contain&cbg=black" } ?: poster
+                        this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
                     }
                 }
             }
@@ -615,7 +668,7 @@ class YoutubeProvider(
                 } else {
                     finalTitle =
                         if (channel.isNotBlank()) "{$channel | $views} $title" else "{$views} $title"
-                    poster = getBestThumbnail(
+                    poster = YoutubeUtils.getBestThumbnail(
                         lockup.getMapKey("contentImage")?.getMapKey("image")?.getListKey("sources")
                     ) ?: "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
                     println("[YT_DEBUG] collectFromRenderer: extracted Video lockup $videoId: $finalTitle")
@@ -624,7 +677,7 @@ class YoutubeProvider(
                         "$mainUrl/watch?v=$videoId",
                         TvType.Movie
                     ) {
-                        this.posterUrl = "https://wsrv.nl/?url=${java.net.URLEncoder.encode(poster, "UTF-8")}&w=300&h=450&fit=contain&cbg=black"
+                        this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
                     }
                 }
             }
@@ -637,14 +690,14 @@ class YoutubeProvider(
                 val title = getText(channelData.getMapKey("title")) ?: "Channel"
                 val stats = (getText(channelData.getMapKey("videoCountText"))
                     ?: getText(channelData.getMapKey("subscriberCountText"))) ?: ""
-                val poster = getBestThumbnail(channelData.getMapKey("thumbnail"))
+                val poster = YoutubeUtils.getBestThumbnail(channelData.getMapKey("thumbnail"))
                 println("[YT_DEBUG] collectFromRenderer: extracted Channel $id: $title ($stats)")
                 return newMovieSearchResponse(
                     "$title ($stats)",
                     "$mainUrl/channel/$id",
                     TvType.Live
                 ) {
-                    this.posterUrl = poster?.let { "https://wsrv.nl/?url=${java.net.URLEncoder.encode(it, "UTF-8")}&w=300&h=450&fit=contain&cbg=black" } ?: poster
+                    this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
                 }
             }
         }
@@ -763,7 +816,6 @@ class YoutubeProvider(
             matchCount++
             println("[YT_DEBUG] Found 'ytInitialData' keyword occurrence at index: $found")
             
-            // 가볍고 정교한 컨텍스트 조건 판별 적용 (문자열 중복 할당 방지)
             val contextEnd = minOf(found + 100, htmlLen)
             var hasAssign = false
             var hasVarOrWindow = false
@@ -810,15 +862,6 @@ class YoutubeProvider(
         }
         println("[YT_DEBUG] extractYtInitialData returning null.")
         return null
-    }
-
-    private fun findConfig(html: String, key: String): String? {
-        return try {
-            val m = Regex("\"$key\"\\s*:\\s*\"([^\"]+)\"").find(html)
-            m?.groupValues?.getOrNull(1)
-        } catch (e: Exception) {
-            null
-        }
     }
 
     private fun findTokenRecursive(data: Any?): String? {
@@ -921,7 +964,7 @@ class YoutubeProvider(
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         isSearchContext = false
         val rawRequestData = request.data
-        val requestData = rawRequestData.urlDecode()
+        val requestData = YoutubeUtils.urlDecode(rawRequestData)
         println("[YT_DEBUG] getMainPage started. page: $page, requestData: $requestData (raw: $rawRequestData)")
         val maxPages = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
         if (page > maxPages) {
@@ -939,7 +982,7 @@ class YoutubeProvider(
                 if (isChip) {
                     savedApiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
                     savedVisitorData = savedVisitorData ?: appPrefs?.getString("yt_visitor_data", null)
-                    savedClientVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", "2.20240725.01.00")
+                    savedClientVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION)
                     val tokenToUse = requestData.removePrefix("chip_")
                     println("[YT_DEBUG] Chip category detected. tokenToUse: $tokenToUse")
 
@@ -949,7 +992,7 @@ class YoutubeProvider(
                             "context" to mapOf(
                                 "client" to mapOf(
                                     "clientName" to "WEB",
-                                    "clientVersion" to (savedClientVersion ?: "2.20240725.01.00"),
+                                    "clientVersion" to (savedClientVersion ?: YoutubeUtils.DEFAULT_CLIENT_VERSION),
                                     "platform" to "DESKTOP",
                                     "hl" to lang
                                 )
@@ -983,9 +1026,9 @@ class YoutubeProvider(
                     println("[YT_DEBUG] Loading standard page. targetUrl: $targetUrl")
                     val html = app.get(targetUrl, interceptor = ytInterceptor).text
                     
-                    savedApiKey = findConfig(html, "INNERTUBE_API_KEY") ?: savedApiKey
-                    savedVisitorData = findConfig(html, "VISITOR_DATA") ?: savedVisitorData
-                    savedClientVersion = findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: savedClientVersion ?: "2.20240725.01.00"
+                    savedApiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY") ?: savedApiKey
+                    savedVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA") ?: savedVisitorData
+                    savedClientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: savedClientVersion ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
                     
                     println("[YT_DEBUG] Config from HTML: apiKey=$savedApiKey, visitorData=$savedVisitorData, clientVersion=$savedClientVersion")
                     if (!savedApiKey.isNullOrBlank()) {
@@ -1029,11 +1072,10 @@ class YoutubeProvider(
             } else {
                 var tokenToUse = getSavedContinuationToken(requestData)
                 
-                // 자가치유 메커니즘: page 2 토큰 유실 시 작동 정밀 제어
                 if (tokenToUse.isNullOrBlank() && page == 2) { 
                     println("[YT_DEBUG] Token to use is null/blank on page $page for $requestData. Fetching fallback continuation...")
                     val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
-                    val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", "2.20240725.01.00") ?: "2.20240725.01.00"
+                    val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION) ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
 
                     if (isChip) {
                         val rawToken = requestData.removePrefix("chip_")
@@ -1071,7 +1113,7 @@ class YoutubeProvider(
                 println("[YT_DEBUG] Loading page $page using token: $tokenToUse")
                 if (!tokenToUse.isNullOrBlank()) {
                     val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
-                    val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", "2.20240725.01.00") ?: "2.20240725.01.00"
+                    val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION) ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
                     val apiUrl = if (requestData.contains("/results")) "$mainUrl/youtubei/v1/search?key=$apiKey" else "$mainUrl/youtubei/v1/browse?key=$apiKey"
                     val payload = mapOf(
                         "context" to mapOf(
@@ -1157,7 +1199,7 @@ class YoutubeProvider(
 
                 val regexKey = Regex(""""INNERTUBE_API_KEY":"([^"]+)"""")
                 savedApiKey = regexKey.find(html)?.groupValues?.get(1)
-                savedVisitorData = findConfig(html, "VISITOR_DATA")
+                savedVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA")
                 println("[YT_DEBUG] Search HTML parsed. apiKey=$savedApiKey, visitorData=$savedVisitorData")
 
                 val initialData = extractYtInitialData(html)
@@ -1268,7 +1310,7 @@ class YoutubeProvider(
                     if (!videoId.isNullOrBlank() && seenIds.add(videoId)) {
                         val title = getText(playlistVideo.getMapKey("title"))
                         val channel = getText(playlistVideo.getMapKey("shortBylineText"))
-                        val thumb = getBestThumbnail(playlistVideo.getMapKey("thumbnail")) ?: buildThumbnailFromId(videoId)
+                        val thumb = YoutubeUtils.getBestThumbnail(playlistVideo.getMapKey("thumbnail")) ?: YoutubeUtils.buildThumbnailFromId(videoId)
                         println("[YT_DEBUG] Adding playlist video: $title (ID: $videoId)")
                         episodes.add(newEpisode("$mainUrl/watch?v=$videoId") {
                             this.name = title
@@ -1286,7 +1328,7 @@ class YoutubeProvider(
                     if (!videoId.isNullOrBlank() && seenIds.add(videoId)) {
                         val title = getText(playlistPanelVideo.getMapKey("title"))
                         val channel = getText(playlistPanelVideo.getMapKey("shortBylineText"))
-                        val thumb = getBestThumbnail(playlistPanelVideo.getMapKey("thumbnail")) ?: buildThumbnailFromId(videoId)
+                        val thumb = YoutubeUtils.getBestThumbnail(playlistPanelVideo.getMapKey("thumbnail")) ?: YoutubeUtils.buildThumbnailFromId(videoId)
                         println("[YT_DEBUG] Adding playlist panel video: $title (ID: $videoId)")
                         episodes.add(newEpisode("$mainUrl/watch?v=$videoId") {
                             this.name = title
@@ -1320,24 +1362,24 @@ class YoutubeProvider(
     override suspend fun load(url: String): LoadResponse {
         println("[YT_DEBUG] load called. url: '$url'")
         if (url.contains("/shorts/")) {
-            val videoId = url.extractYoutubeId() ?: "video"
+            val videoId = YoutubeUtils.extractYoutubeId(url) ?: "video"
             println("[YT_DEBUG] Loading shorts. videoId: $videoId")
             val useSearchList = url.contains("&ctx=search")
             val sourceList = if (useSearchList) searchShorts else homeShorts
             val targetEpisodes = sourceList.toMutableList()
-            var currentEp = targetEpisodes.find { it.data.extractYoutubeId() == videoId }
+            var currentEp = targetEpisodes.find { YoutubeUtils.extractYoutubeId(it.data) == videoId }
 
             if (currentEp == null) {
                 val fallbackEp = newEpisode(url) {
                     this.name = "Shorts Video"
-                    this.posterUrl = buildThumbnailFromId(videoId)
+                    this.posterUrl = YoutubeUtils.buildThumbnailFromId(videoId)
                     this.episode = targetEpisodes.size + 1
                 }
                 targetEpisodes.add(0, fallbackEp)
                 currentEp = fallbackEp
             }
 
-            val poster = currentEp?.posterUrl ?: buildThumbnailFromId(videoId)
+            val poster = currentEp?.posterUrl ?: YoutubeUtils.buildThumbnailFromId(videoId)
 
             return newTvSeriesLoadResponse("Shorts Feed", url, TvType.TvSeries, targetEpisodes) {
                 this.posterUrl = poster
@@ -1393,9 +1435,9 @@ class YoutubeProvider(
                     }
                 }
 
-                val apiKey = findConfig(html, "INNERTUBE_API_KEY")
-                val clientVersion = findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: "2.20240725.01.00"
-                val visitorData = findConfig(html, "VISITOR_DATA")
+                val apiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY")
+                val clientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
+                val visitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA")
 
                 val header = safeGet(data, "header", "c4TabbedHeaderRenderer")
                     ?: safeGet(data, "header", "pageHeaderRenderer")
@@ -1406,8 +1448,8 @@ class YoutubeProvider(
                     ?: response.document.selectFirst("meta[property=og:title]")?.attr("content")
                     ?: "YouTube Channel"
 
-                val poster = getBestThumbnail(safeGet(header, "avatar"))
-                    ?: getBestThumbnail(safeGet(header, "content", "pageHeaderViewModel", "image", "decoratedAvatarViewModel", "avatar", "avatarViewModel", "image"))
+                val poster = YoutubeUtils.getBestThumbnail(safeGet(header, "avatar"))
+                    ?: YoutubeUtils.getBestThumbnail(safeGet(header, "content", "pageHeaderViewModel", "image", "decoratedAvatarViewModel", "avatar", "avatarViewModel", "image"))
                     ?: response.document.selectFirst("meta[property=og:image]")?.attr("content")
 
                 var subscriberCount = getText(safeGet(header, "subscriberCountText"))
@@ -1518,9 +1560,9 @@ class YoutubeProvider(
                                     if (vidTitle.isBlank()) vidTitle = getText(safeGet(renderer, "metadata", "lockupMetadataViewModel", "title"))
                                     if (vidTitle.isBlank()) vidTitle = "Video"
 
-                                    val thumb = getBestThumbnail(renderer["thumbnail"]) 
-                                        ?: getBestThumbnail(safeGet(renderer, "contentImage", "image", "sources")) 
-                                        ?: buildThumbnailFromId(vidId)
+                                    val thumb = YoutubeUtils.getBestThumbnail(renderer["thumbnail"]) 
+                                        ?: YoutubeUtils.getBestThumbnail(safeGet(renderer, "contentImage", "image", "sources")) 
+                                        ?: YoutubeUtils.buildThumbnailFromId(vidId)
 
                                     val metaList = mutableListOf<String>()
 
@@ -1605,12 +1647,9 @@ class YoutubeProvider(
                     if (items == null) return null
                     for (it in items) {
                         val m = it as? Map<*, *> ?: continue
-                        val token = safeGet(m, "continuationItemRenderer", "continuationEndpoint", "continuationCommand", "token") as? String
+                        // 중복을 방지하기 위해 정교하게 작성된 재귀 함수로 추출 위임
+                        val token = findTokenRecursive(m)
                         if (!token.isNullOrBlank()) return token
-                        val token2 = safeGet(m, "continuationItemRenderer", "continuationEndpoint", "browseContinuationEndpoint", "token") as? String
-                        if (!token2.isNullOrBlank()) return token2
-                        val token3 = safeGet(m, "continuationItemRenderer", "continuationEndpoint", "token") as? String
-                        if (!token3.isNullOrBlank()) return token3
                     }
                     return null
                 }
@@ -1714,7 +1753,6 @@ class YoutubeProvider(
                 }
 
                 val seenPlaylistIds = mutableSetOf<String>()
-                // 믹스 추가 로드를 위해 가변형(.toMutableList())으로 초기 로드
                 val episodes = extractPlaylistEpisodes(data, seenPlaylistIds).toMutableList()
                 println("[YT_DEBUG] Successfully parsed initial episodes count: ${episodes.size}")
 
@@ -1732,11 +1770,8 @@ class YoutubeProvider(
                     }
                 }
 
-                // 불필요한 믹스 타이틀 꼬리표 정제 (스태틱 정규식 활용)
                 if (title != null) {
-                    title = MIX_TITLE_REPLACE_KO.replace(title!!, "")
-                    title = MIX_TITLE_REPLACE_EN.replace(title!!, "")
-                    title = title!!.trim()
+                    title = YoutubeUtils.cleanMixTitle(title!!)
                 } else {
                     title = "YouTube Mix"
                 }
@@ -1745,9 +1780,9 @@ class YoutubeProvider(
                 println("[YT_DEBUG] Mix playlist continuation token found: ${currentToken != null}")
 
                 var pagesFetched = 1
-                val apiKey = findConfig(html, "INNERTUBE_API_KEY")
-                val clientVersion = findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: "2.20240725.01.00"
-                val visitorData = findConfig(html, "VISITOR_DATA")
+                val apiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY")
+                val clientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
+                val visitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA")
 
                 while (!currentToken.isNullOrBlank() && episodes.size < 48 && pagesFetched < 3 && !apiKey.isNullOrBlank()) {
                     try {
@@ -1805,10 +1840,9 @@ class YoutubeProvider(
             }
         }          
 
-        val videoId = url.extractYoutubeId() ?: throw ErrorLoadingException("Invalid YouTube URL")
+        val videoId = YoutubeUtils.extractYoutubeId(url) ?: throw ErrorLoadingException("Invalid YouTube URL")
         println("[YT_DEBUG] Loading normal video ID: $videoId")
 
-        // 상세페이지 진입 시 홈 화면에서 리디렉션되었음을 알려 시동 차단 우회
         val headers = mapOf("Referer" to "https://www.youtube.com/")
         val response = app.get(url, headers = headers, interceptor = ytInterceptor)
         val html = response.text
@@ -1816,7 +1850,7 @@ class YoutubeProvider(
         
         var title = "YouTube Video"
         var plot = ""
-        var poster = buildThumbnailFromId(videoId)
+        var poster = YoutubeUtils.buildThumbnailFromId(videoId)
 
         var channelName = ""
         var channelId = ""
@@ -1846,7 +1880,7 @@ class YoutubeProvider(
                     val owner = safeGet(secondary, "owner", "videoOwnerRenderer") as? Map<*, *>
                     if (owner != null) {
                         channelName = extractTitle(owner["title"] as? Map<*, *>) ?: ""
-                        channelAvatar = getBestThumbnail(owner["thumbnail"]) ?: ""
+                        channelAvatar = YoutubeUtils.getBestThumbnail(owner["thumbnail"]) ?: ""
                         channelId = safeGet(owner, "navigationEndpoint", "browseEndpoint", "browseId") as? String ?: ""
                         if (channelId.isEmpty()) {
                             val curl = safeGet(owner, "navigationEndpoint", "commandMetadata", "webCommandMetadata", "url") as? String
@@ -1894,10 +1928,8 @@ class YoutubeProvider(
         val filteredRecs = recommendations.filter { !it.url.contains("/shorts/") }
         println("[YT_DEBUG] Video metadata load complete. Title: $title, Recommendations count: ${filteredRecs.size}")
 
-        // 1. 동적 가상 플레이리스트(에피소드 목록) 생성
         val episodes = mutableListOf<Episode>()
         
-        // 1-1. 현재 요청된 메인 비디오를 Episode 1로 최우선 배정
         episodes.add(newEpisode(url) {
             this.name = title
             this.posterUrl = poster
@@ -1905,7 +1937,6 @@ class YoutubeProvider(
             this.description = channelName.ifBlank { "재생 중" }
         })
 
-        // 1-2. 추천 목록 중 재생할 수 없는 링크는 제외하고 실제 재생 가능한 영상만 Episode 2부터 나열
         var epCount = 2
         filteredRecs.forEach { rec ->
             if (rec.url.contains("watch?v=") || rec.url.contains("/shorts/")) {
@@ -1917,7 +1948,6 @@ class YoutubeProvider(
             }
         }
 
-        // 2. 레이아웃 규격을 TvSeries로 선언하여 연속 재생 기능 활성화
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
             this.posterUrl = poster
             this.plot = plot
@@ -1936,7 +1966,7 @@ class YoutubeProvider(
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val videoId = data.extractYoutubeId() ?: data
+        val videoId = YoutubeUtils.extractYoutubeId(data) ?: data
         val fullUrl = "https://www.youtube.com/watch?v=$videoId"
 
         val playerType = appPrefs?.getString("youtube_player_type", "advanced") ?: "advanced"
@@ -1949,14 +1979,13 @@ class YoutubeProvider(
                 "context" to mapOf(
                     "client" to mapOf(
                         "clientName" to "WEB",
-                        "clientVersion" to "2.20240725.01.00",
+                        "clientVersion" to YoutubeUtils.DEFAULT_CLIENT_VERSION,
                         "hl" to lang,
                         "gl" to if (lang == "ko") "KR" else "US"
                     )
                 ),
                 "videoId" to videoId
             )
-            // 비디오 고유 시청 주소를 레퍼러로 정밀 지정하여 시청 기록 강제 활성화
             val headers = mapOf("Referer" to "$mainUrl/watch?v=$videoId")
             playerResponseText = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).text
             if (playerResponseText.isNotBlank()) {
@@ -1973,7 +2002,6 @@ class YoutubeProvider(
         if (isLive) {
             loadExtractor(fullUrl, subtitleCallback, callback)
         } else {
-            // 일반 비디오 추출 직전 재생 트래킹 직접 트리거
             if (playerResponseText.isNotBlank()) {
                 try {
                     val playerResponse = parseJson<PlayerResponse>(playerResponseText)
@@ -2048,7 +2076,7 @@ class YoutubeProvider(
             }
 
             try {
-                val videoId = data.extractYoutubeId() ?: run {
+                val videoId = YoutubeUtils.extractYoutubeId(data) ?: run {
                     if (data.length == 11 && data.matches(Regex("[A-Za-z0-9_-]{11}"))) {
                         data
                     } else {
@@ -2057,7 +2085,7 @@ class YoutubeProvider(
                 }
 
                 val safariHeaders = mapOf(
-                    "User-Agent" to safariUserAgent,
+                    "User-Agent" to YoutubeUtils.SAFARI_USER_AGENT, // 통합 UA 참조
                     "Accept-Language" to "en-US,en;q=0.5"
                 )
                 val watchUrl = "$mainUrl/watch?v=$videoId&hl=$lang"
@@ -2079,10 +2107,10 @@ class YoutubeProvider(
                     return false
                 }
 
-                val apiKey = findConfig(ytcfgJsonString, "INNERTUBE_API_KEY")
+                val apiKey = YoutubeUtils.findConfig(ytcfgJsonString, "INNERTUBE_API_KEY")
                 val clientVersion =
-                    findConfig(ytcfgJsonString, "INNERTUBE_CLIENT_VERSION") ?: "2.20240725.01.00"
-                val visitorData = findConfig(ytcfgJsonString, "VISITOR_DATA")
+                    YoutubeUtils.findConfig(ytcfgJsonString, "INNERTUBE_CLIENT_VERSION") ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
+                val visitorData = YoutubeUtils.findConfig(ytcfgJsonString, "VISITOR_DATA")
 
                 if (apiKey.isNullOrBlank() || visitorData.isNullOrBlank()) {
                     return false
@@ -2093,7 +2121,7 @@ class YoutubeProvider(
                     "gl" to if (lang == "ko") "KR" else "US",
                     "clientName" to "WEB",
                     "clientVersion" to clientVersion,
-                    "userAgent" to safariUserAgent,
+                    "userAgent" to YoutubeUtils.SAFARI_USER_AGENT,
                     "visitorData" to visitorData,
                     "platform" to "DESKTOP"
                 )
@@ -2109,32 +2137,14 @@ class YoutubeProvider(
                 postHeaders["X-Youtube-Client-Version"] = clientVersion
                 if (!visitorData.isNullOrBlank()) postHeaders["X-Goog-Visitor-Id"] = visitorData
 
-                val cookieBuilder = StringBuilder()
-                val savedVis = appPrefs?.getString("VISITOR_INFO1_LIVE", null)
-                if (!savedVis.isNullOrBlank()) {
-                    cookieBuilder.append("VISITOR_INFO1_LIVE=$savedVis; ")
-                } else {
-                    cookieBuilder.append("VISITOR_INFO1_LIVE=fzYjM8PCwjw; ")
-                }
-
-                val authKeys = listOf("SID", "HSID", "SSID", "APISID", "SAPISID")
-                var sapisidVal: String? = null
-
-                authKeys.forEach { key ->
-                    val value = appPrefs?.getString(key, null)
-                    if (!value.isNullOrBlank()) {
-                        cookieBuilder.append("$key=$value; ")
-                        if (key == "SAPISID") sapisidVal = value
-                    }
-                }
-
-                cookieBuilder.append("PREF=f6=40000000&hl=$lang; CONSENT=YES+fx.456722336;")
-                postHeaders["Cookie"] = cookieBuilder.toString()
+                // 중복 쿠키 빌딩 로직 제거 및 단일화 적용
+                val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(appPrefs, lang, "fzYjM8PCwjw")
+                postHeaders["Cookie"] = cookies
 
                 if (!sapisidVal.isNullOrBlank()) {
                     try {
                         val origin = "https://www.youtube.com"
-                        val hash = getSapisidHash(sapisidVal, origin)
+                        val hash = YoutubeUtils.getSapisidHash(sapisidVal, origin)
                         postHeaders["Authorization"] = hash
                         postHeaders["X-Origin"] = origin
                         postHeaders["Origin"] = origin
@@ -2246,25 +2256,4 @@ class YoutubeProvider(
         return match?.groupValues?.get(2)?.ifBlank { null }
             ?: match?.groupValues?.get(3)?.ifBlank { null }
     }
-
-    private fun String.extractYoutubeId(): String? {
-        return YT_ID_REGEX.find(this)?.groupValues?.getOrNull(1)
-    }
-
-    private fun String.urlDecode(): String {
-        var current = this
-        var decodeCount = 0
-        while (current.contains('%') && decodeCount < 3) {
-            val decoded = try {
-                URLDecoder.decode(current, "UTF-8")
-            } catch (e: Exception) {
-                break
-            }
-            if (decoded == current) break
-            current = decoded
-            decodeCount++
-        }
-        return current
-    }
 }
-
