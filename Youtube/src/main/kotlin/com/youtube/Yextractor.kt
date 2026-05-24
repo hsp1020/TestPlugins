@@ -35,8 +35,9 @@ open class YoutubeExtractor : ExtractorApi() {
     override val name = "YouTube"
 
     companion object {
-        private val ytVideos = ConcurrentHashMap<String, List<ExtractorLink>>()
-        private val ytVideosSubtitles = ConcurrentHashMap<String, List<SubtitlesStream>>()
+        // Provider에서 직접 소거를 지원하도록 private 제약 해제
+        val ytVideos = ConcurrentHashMap<String, List<ExtractorLink>>()
+        val ytVideosSubtitles = ConcurrentHashMap<String, List<SubtitlesStream>>()
 
         @Volatile
         private var activeServer: ServerSocket? = null
@@ -88,7 +89,6 @@ open class YoutubeExtractor : ExtractorApi() {
         val language: String
     )
 
-    // 유튜브 GVS 검증용 동적 User-Agent 변환 처리
     private fun getMatchingUserAgent(streamUrl: String): String {
         val decoded = runCatching { YoutubeUtils.urlDecode(streamUrl) }.getOrDefault(streamUrl)
         return when {
@@ -115,7 +115,6 @@ open class YoutubeExtractor : ExtractorApi() {
         val videoId = YoutubeUtils.extractYoutubeId(cleanedUrl) ?: cleanedUrl
         println("[YT_DEBUG] [getUrl] 가공된 cleanedUrl: $cleanedUrl, 비디오 ID: $videoId")
 
-        // 수동 호출 시에만 캐시를 명시적으로 리프레시하도록 구조 변경하여 비효율적인 반복 로드 해결
         val cachedLinks = ytVideos[videoId]
         if (cachedLinks.isNullOrEmpty()) {
             println("[YT_DEBUG] [getUrl] 분석을 진행합니다.")
@@ -360,6 +359,7 @@ open class YoutubeExtractor : ExtractorApi() {
         return "http://127.0.0.1:$serverPort/$id.mpd"
     }
 
+    // 통신 안정성 고도화: 정확한 Content-Length 명시 및 바이너리 출력 구조 도입
     private fun handleClient(client: Socket) {
         try {
             client.use { socket ->
@@ -377,12 +377,16 @@ open class YoutubeExtractor : ExtractorApi() {
                         }
                         val content = manifestMap[path]
                         if (content != null) {
+                            val bytes = content.toByteArray(java.nio.charset.StandardCharsets.UTF_8)
                             output.println("HTTP/1.1 200 OK")
                             output.println("Content-Type: application/dash+xml")
+                            output.println("Content-Length: ${bytes.size}")
                             output.println("Connection: close")
                             output.println("Access-Control-Allow-Origin: *")
                             output.println("")
-                            output.println(content)
+                            output.flush()
+                            socket.getOutputStream().write(bytes)
+                            socket.getOutputStream().flush()
                         } else {
                             println("[YT_DEBUG] [handleClient] 에러: 메모리에 매칭되는 가상 MPD가 없습니다. UUID: $path (404 반환)")
                             output.println("HTTP/1.1 404 Not Found")
