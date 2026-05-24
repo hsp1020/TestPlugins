@@ -1,8 +1,9 @@
-// 버전 정보: v1.4 - 컴파일 구문 결손 복구 및 트래커 비필수 필드 완전 청소 고속 버전
+// 버전 정보: v1.5 - JSON 고속 단일 파싱 트리 구현, 전역 공유형 리플렉션 캐시 및 실시간 캐시 락 무중단 청소 버전
 package com.hsp1020
 
 import android.content.Context
 import com.fasterxml.jackson.annotation.JsonProperty
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.Actor
@@ -86,11 +87,11 @@ private fun String.cleanBaseUrl(): String {
 }
 
 private inline fun <T> lruSet(maxSize: Int): MutableSet<T> {
-    return Collections.newSetFromMap(object : java.util.LinkedHashMap<T, Boolean>(maxSize, 0.75f, true) {
+    return Collections.synchronizedSet(Collections.newSetFromMap(object : java.util.LinkedHashMap<T, Boolean>(maxSize, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<T, Boolean>): Boolean {
             return size > maxSize
         }
-    })
+    }))
 }
 
 class StremioC(override var mainUrl: String, override var name: String) : MainAPI() {
@@ -107,38 +108,36 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private val pageMutex = Mutex()
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
 
-    private var cachedCineStreamProvider: MainAPI? = null
-    private var hasSearchedCineStream = false
-
-    private var cachedStreamPlayProvider: MainAPI? = null
-    private var hasSearchedStreamPlay = false
-
-    @Volatile private var hasSyncedCineStreamSettings = false
-
-    @Synchronized
     private fun getCineStreamProvider(forceSearch: Boolean = false): MainAPI? {
         if (cachedCineStreamProvider != null) return cachedCineStreamProvider
         if (!forceSearch && hasSearchedCineStream) return null
-        hasSearchedCineStream = true
 
-        val provider = APIHolder.allProviders.find { it.name.equals("CineStream", true) }
-            ?: loadProviderDynamically("megix", "com.megix.CineStreamProvider")
-        
-        if (provider != null) cachedCineStreamProvider = provider
-        return provider
+        synchronized(StremioC::class.java) {
+            if (cachedCineStreamProvider != null) return cachedCineStreamProvider
+            hasSearchedCineStream = true
+
+            val provider = APIHolder.allProviders.find { it.name.equals("CineStream", true) }
+                ?: loadProviderDynamically("megix", "com.megix.CineStreamProvider")
+            
+            if (provider != null) cachedCineStreamProvider = provider
+            return provider
+        }
     }
 
-    @Synchronized
     private fun getStreamPlayProvider(forceSearch: Boolean = false): MainAPI? {
         if (cachedStreamPlayProvider != null) return cachedStreamPlayProvider
         if (!forceSearch && hasSearchedStreamPlay) return null
-        hasSearchedStreamPlay = true
 
-        val provider = APIHolder.allProviders.find { it.name.equals("StreamPlay", true) }
-            ?: loadProviderDynamically("phisher", "com.phisher98.StreamPlay")
-        
-        if (provider != null) cachedStreamPlayProvider = provider
-        return provider
+        synchronized(StremioC::class.java) {
+            if (cachedStreamPlayProvider != null) return cachedStreamPlayProvider
+            hasSearchedStreamPlay = true
+
+            val provider = APIHolder.allProviders.find { it.name.equals("StreamPlay", true) }
+                ?: loadProviderDynamically("phisher", "com.phisher98.StreamPlay")
+            
+            if (provider != null) cachedStreamPlayProvider = provider
+            return provider
+        }
     }
 
     companion object {
@@ -163,9 +162,20 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
         val networkSemaphore = Semaphore(35)
 
+        @Volatile private var cachedCineStreamProvider: MainAPI? = null
+        @Volatile private var hasSearchedCineStream = false
+
+        @Volatile private var cachedStreamPlayProvider: MainAPI? = null
+        @Volatile private var hasSearchedStreamPlay = false
+
+        @Volatile private var hasSyncedCineStreamSettings = false
+
         val customSession by lazy {
             val newClient = app.baseClient.newBuilder()
                 .protocols(listOf(Protocol.HTTP_1_1))
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(20, TimeUnit.SECONDS)
+                .writeTimeout(20, TimeUnit.SECONDS)
                 .dispatcher(Dispatcher().apply {
                     maxRequests = 70
                     maxRequestsPerHost = 40
@@ -252,6 +262,14 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
             globalPageCache[key]?.let { entry ->
                 return Pair(entry.first, entry.second)
+            }
+
+            // 가비지 축적을 원천적으로 제어하기 위해 락이 해제된 비활성 Mutex들을 주기적으로 안전하게 청소
+            if (cacheMutexes.size > 200) {
+                val activeKeys = globalPageCache.keys().asSequence().toSet()
+                cacheMutexes.entries.removeIf { (k, mutex) ->
+                    !activeKeys.contains(k) && !mutex.isLocked
+                }
             }
 
             val mutex = cacheMutexes.getOrPut(key) { Mutex() }
@@ -408,7 +426,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                             val rowName = "${catalog.name ?: catalog.id} - $displayType"
                             
                             val seenForThisCatalog = catalogSentIds.getOrPut(catalogKey) { 
-                                Collections.synchronizedSet(lruSet<String>(500))
+                                lruSet(500) // 기존의 이중 synchronized Wrapper를 제거하여 오버헤드 단축
                             }
                             val filteredItems = resultPair.first.filter { item -> seenForThisCatalog.add(item.extractPureId()) }
                             
@@ -449,10 +467,14 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         } else {
             val responseText = customSession.get(url).text
             try {
-                parseJson<CatalogResponse>(responseText).meta ?: throw Exception()
+                // Jackson Tree 구조로 변환하여 중복 파싱 및 무의미한 String-JSONObject 이중 매핑 방지
+                val mapper = com.lagradost.cloudstream3.utils.AppUtils.mapper
+                val rootNode = mapper.readTree(responseText)
+                val metaNode = rootNode.get("meta") ?: rootNode
+                mapper.treeToValue(metaNode, CatalogEntry::class.java) 
+                    ?: throw IllegalStateException("Metadata structure mismatch")
             } catch (e: Exception) {
-                JSONObject(responseText).optJSONObject("meta")?.toString()?.let { parseJson(it) }
-                    ?: throw IllegalStateException("Metadata not found: $url")
+                throw IllegalStateException("Metadata not found or parsing failed: $url", e)
             }
         }
         
@@ -618,14 +640,13 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
         }
 
-        // ★ [추가] 링크 목록 맨 위에 롱프레스 전용 복사 링크 주입
         val copyId = loadData.imdbId ?: loadData.id ?: ""
         if (!copyId.isNullOrBlank()) {
             wrappedCallback.invoke(
                 newExtractorLink(
-                    "Copy to clipboard",                   // Source 칼럼에 표시될 안내 텍스트
-                    "📋 Video ID: $copyId",               // 링크 명칭으로 ID 노출
-                    copyId,                              // 주소(URL) 필드에 ID 주입 (롱프레스 복사 시 이 값이 복사됩니다)
+                    "Copy to clipboard",
+                    "📋 Video ID: $copyId",
+                    copyId,
                     ExtractorLinkType.VIDEO
                 )
             )
@@ -680,7 +701,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     }
                 } catch (e: Exception) {}
             }
-            hasSyncedCineStreamSettings = true
+            hasSyncedCineStreamSettings = true // Companion 전역 공유 flag를 통해 I/O 반복 디스크 쓰기 병목 완벽 방어
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -834,6 +855,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
     }
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     data class LoadData(
         @JsonProperty("type") val type: String? = null, 
         @JsonProperty("id") val id: String? = null, 
@@ -858,9 +880,13 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         @JsonProperty("kitsuId") val kitsuId: String? = null
     )
     
+    @JsonIgnoreProperties(ignoreUnknown = true)
     private data class Manifest(val catalogs: List<Catalog>)
+    
+    @JsonIgnoreProperties(ignoreUnknown = true)
     private data class Extra(@JsonProperty("name") val name: String?, @JsonProperty("isRequired") val isRequired: Boolean? = false)
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     private data class Catalog(var name: String?, val id: String, val type: String?, val types: MutableList<String> = mutableListOf(), @JsonProperty("extra") val extra: List<Extra>? = null, @JsonProperty("extraSupported") val extraSupported: List<String>? = null) {
         init { if (type != null) types.add(type) }
 
@@ -879,13 +905,10 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 types.map { type ->
                     async(Dispatchers.IO) {
                         val path = "/catalog/${type}/${id}/search=${query.urlEncode()}.json"
-                        // 각 메타데이터에 어떤 타입(type)에서 가져왔는지 정보를 바인딩하여 쌍(Pair)으로 반환
                         fetchMetas(provider, path).map { it to type }
                     }
                 }.awaitAll().flatten()
             }
-            
-            // ID 단위로 중복을 제거한 뒤, 변환할 때 카탈로그명(name)과 타입(type)을 함께 전달합니다.
             return allMetasWithType.distinctBy { it.first.id }.map { (meta, type) ->
                 meta.toSearchResponse(provider, catalogName = name ?: id, typeName = type)
             }
@@ -906,12 +929,19 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
     }
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     private data class CatalogResponse(val metas: List<CatalogEntry>?, val meta: CatalogEntry?)
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     private data class Trailer(val source: String?, val type: String?)
+    
+    @JsonIgnoreProperties(ignoreUnknown = true)
     private data class TrailerStream(@JsonProperty("ytId") val ytId: String?, @JsonProperty("title") val title: String? = null)
+    
+    @JsonIgnoreProperties(ignoreUnknown = true)
     private data class Link(@JsonProperty("name") val name: String? = null, @JsonProperty("category") val category: String? = null, @JsonProperty("url") val url: String? = null)
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     private data class FetchedTmdbData(
         val fetchedTitle: String?, val fetchedOverview: String?, val fetchedLogo: String?,
         val fetchedTrailers: List<String>, val fetchedRecommendations: List<SearchResponse>?,
@@ -922,6 +952,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val fetchedEnglishTitle: String?
     )
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     private data class CatalogEntry(
         @JsonProperty("name") val name: String? = null, 
         @JsonProperty("id") val id: String, 
@@ -952,22 +983,16 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             val targetType = this.type ?: typeName ?: "movie"
             val metaUrl = "${provider.mainUrl.substringBefore("?")}/meta/$targetType/${this.id}.json"
 
-            // 1. 기본 본문 이름 결정 (제목이 있으면 제목을, 없으면 ID를 사용)
             val baseName = if (!name.isNullOrBlank()) {
                 name
             } else {
                 id
             }
 
-            // 2. 최종 결합 이름 결정
             val finalName = if (!catalogName.isNullOrBlank() && !typeName.isNullOrBlank()) {
-                // 검색 결과 화면인 경우: 중복 없이 깔끔하게 [카탈로그명-타입명] 제목/ID
-                // 예: 제목 있음 -> [Popular-Series] Naruto / 제목 없음 -> [Popular-Series] kitsu:1234
                 val capType = typeName.replaceFirstChar { it.uppercase() }
                 "[$catalogName-$capType] $baseName"
             } else {
-                // 메인 화면인 경우 기존 규칙 적용:
-                // 제목 있음 -> 제목 그대로 / 제목 없음 -> [타입명] ID (예: [Series] kitsu:1234)
                 if (!name.isNullOrBlank()) {
                     name
                 } else {
@@ -1104,7 +1129,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             )
         }
 
-        
         private fun processEpisodes(provider: StremioC, finalImdbId: String?, episodeTmdbMeta: Map<String, TmdbEpisode>, targetVideos: List<Video>?, type: String?, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, originalTitle: String?, englishTitle: String?, aniListId: Int?, malId: Int?, kitsuId: String?): List<Episode> {
             val videos = targetVideos ?: emptyList()
             val sortedVideos = videos.groupBy { Pair(it.seasonNumber ?: 0, it.episode ?: it.number ?: 0) }.flatMap { (_, group) -> group.sortedBy { it.title ?: it.name ?: "" } }
@@ -1351,6 +1375,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
     }
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     private data class Video(
         @JsonProperty("id") val id: String? = null,
         @JsonProperty("title") val title: String? = null,
@@ -1414,11 +1439,19 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
     }
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     private data class StreamsResponse(@JsonProperty("streams") val streams: List<Stream>)
+    
+    @JsonIgnoreProperties(ignoreUnknown = true)
     private data class Subtitle(@JsonProperty("url") val url: String?, @JsonProperty("lang") val lang: String?, @JsonProperty("lang_code") val lang_code: String?, @JsonProperty("id") val id: String?)
+    
+    @JsonIgnoreProperties(ignoreUnknown = true)
     private data class ProxyHeaders(@JsonProperty("request") val request: Map<String, String>?)
+    
+    @JsonIgnoreProperties(ignoreUnknown = true)
     private data class BehaviorHints(@JsonProperty("proxyHeaders") val proxyHeaders: ProxyHeaders?, @JsonProperty("headers") val headers: Map<String, String>?)
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     private data class Stream(
         @JsonProperty("name") val name: String?,
         @JsonProperty("title") val title: String?,
@@ -1454,23 +1487,37 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     }
 }
 
+@JsonIgnoreProperties(ignoreUnknown = true)
 private data class TraktRelatedIds(@JsonProperty("tmdb") val tmdb: Int?)
+
+@JsonIgnoreProperties(ignoreUnknown = true)
 private data class TraktRelatedItem(@JsonProperty("ids") val ids: TraktRelatedIds?)
+
+@JsonIgnoreProperties(ignoreUnknown = true)
 private data class SimklIds(@JsonProperty("tmdb") val tmdb: Int?, @JsonProperty("simkl") val simkl: Int?)
+
+@JsonIgnoreProperties(ignoreUnknown = true)
 private data class SimklRecItem(@JsonProperty("type") val type: String?, @JsonProperty("ids") val ids: SimklIds?)
+
+@JsonIgnoreProperties(ignoreUnknown = true)
 private data class SimklRecResponse(@JsonProperty("users_recommendations") val users_recommendations: List<SimklRecItem>?)
+
+@JsonIgnoreProperties(ignoreUnknown = true)
 private data class SimklDetailResponse(@JsonProperty("ids") val ids: SimklIds?)
 
+@JsonIgnoreProperties(ignoreUnknown = true)
 private data class TmdbFindResponse(
     @JsonProperty("movie_results") val movie_results: List<TmdbFindResult>? = null,
     @JsonProperty("tv_results") val tv_results: List<TmdbFindResult>? = null
 )
 
+@JsonIgnoreProperties(ignoreUnknown = true)
 private data class TmdbFindResult(
     @JsonProperty("id") val id: Int? = null,
     @JsonProperty("media_type") val media_type: String? = null
 )
 
+@JsonIgnoreProperties(ignoreUnknown = true)
 private data class TmdbCollection(
     @JsonProperty("id") val id: Int? = null,
     @JsonProperty("name") val name: String? = null,
@@ -1478,16 +1525,23 @@ private data class TmdbCollection(
     @JsonProperty("backdrop_path") val backdrop_path: String? = null
 )
 
+@JsonIgnoreProperties(ignoreUnknown = true)
 private data class TmdbCollectionDetail(
     @JsonProperty("id") val id: Int? = null,
     @JsonProperty("name") val name: String? = null,
     @JsonProperty("parts") val parts: List<TmdbMedia>? = null
 )
 
+@JsonIgnoreProperties(ignoreUnknown = true)
 private data class TmdbTranslations(@JsonProperty("translations") val translations: List<TmdbTranslationItem>?)
+
+@JsonIgnoreProperties(ignoreUnknown = true)
 private data class TmdbTranslationItem(@JsonProperty("iso_3166_1") val iso_3166_1: String?, @JsonProperty("iso_639_1") val iso_639_1: String?, @JsonProperty("data") val data: TmdbTranslationData?)
+
+@JsonIgnoreProperties(ignoreUnknown = true)
 private data class TmdbTranslationData(@JsonProperty("title") val title: String?, @JsonProperty("name") val name: String?, @JsonProperty("overview") val overview: String?)
 
+@JsonIgnoreProperties(ignoreUnknown = true)
 private data class TmdbDetailResponse(
     @JsonProperty("id") val id: Int? = null,
     @JsonProperty("number_of_seasons") val number_of_seasons: Int? = null,
@@ -1530,10 +1584,16 @@ private data class TmdbDetailResponse(
     }
 }
 
+@JsonIgnoreProperties(ignoreUnknown = true)
 private data class TmdbImages(@JsonProperty("logos") val logos: List<TmdbLogo>? = null)
+
+@JsonIgnoreProperties(ignoreUnknown = true)
 private data class TmdbLogo(@JsonProperty("file_path") val file_path: String? = null)
+
+@JsonIgnoreProperties(ignoreUnknown = true)
 private data class TmdbRecommendations(@JsonProperty("results") val results: List<TmdbMedia>? = null)
 
+@JsonIgnoreProperties(ignoreUnknown = true)
 private data class TmdbMedia(
     @JsonProperty("id") val id: Int? = null,
     @JsonProperty("name") val name: String? = null,
@@ -1548,19 +1608,41 @@ private data class TmdbMedia(
     @JsonProperty("first_air_date") val firstAirDate: String? = null
 )
 
+@JsonIgnoreProperties(ignoreUnknown = true)
 private data class TmdbReleaseDates(@JsonProperty("results") val results: List<TmdbReleaseDateResult>?)
+
+@JsonIgnoreProperties(ignoreUnknown = true)
 private data class TmdbReleaseDateResult(@JsonProperty("iso_3166_1") val iso_3166_1: String?, @JsonProperty("release_dates") val release_dates: List<TmdbReleaseDate>?)
+
+@JsonIgnoreProperties(ignoreUnknown = true)
 private data class TmdbReleaseDate(@JsonProperty("certification") val certification: String?)
+
+@JsonIgnoreProperties(ignoreUnknown = true)
 private data class TmdbContentRatings(@JsonProperty("results") val results: List<TmdbContentRatingResult>?)
+
+@JsonIgnoreProperties(ignoreUnknown = true)
 private data class TmdbContentRatingResult(@JsonProperty("iso_3166_1") val iso_3166_1: String?, @JsonProperty("rating") val rating: String?)
 
+@JsonIgnoreProperties(ignoreUnknown = true)
 private data class TmdbCredits(@JsonProperty("cast") val cast: List<TmdbCast>? = null, @JsonProperty("crew") val crew: List<TmdbCrew>? = null)
+
+@JsonIgnoreProperties(ignoreUnknown = true)
 private data class TmdbCast(@JsonProperty("name") val name: String?, @JsonProperty("original_name") val originalName: String?, @JsonProperty("character") val character: String?, @JsonProperty("profile_path") val profilePath: String?)
+
+@JsonIgnoreProperties(ignoreUnknown = true)
 private data class TmdbCrew(@JsonProperty("name") val name: String?, @JsonProperty("original_name") val originalName: String?, @JsonProperty("job") val job: String?, @JsonProperty("profile_path") val profilePath: String?)
 
+@JsonIgnoreProperties(ignoreUnknown = true)
 private data class TmdbSeasonDetail(@JsonProperty("episodes") val episodes: List<TmdbEpisode>? = null)
+
+@JsonIgnoreProperties(ignoreUnknown = true)
 private data class TmdbEpisode(@JsonProperty("name") val name: String?, @JsonProperty("overview") val overview: String?, @JsonProperty("episode_number") val episodeNumber: Int?, @JsonProperty("air_date") val airDate: String?, @JsonProperty("vote_average") val voteAverage: Double?, @JsonProperty("runtime") val runtime: Int?)
 
+@JsonIgnoreProperties(ignoreUnknown = true)
 data class Trailers(@JsonProperty("key") val key: String? = null, @JsonProperty("type") val type: String? = null, @JsonProperty("published_at") val publishedAt: String? = null)
+
+@JsonIgnoreProperties(ignoreUnknown = true)
 data class ResultsTrailer(@JsonProperty("results") val results: ArrayList<Trailers>? = arrayListOf())
+
+@JsonIgnoreProperties(ignoreUnknown = true)
 data class ExternalIds(@JsonProperty("imdb_id") val imdb_id: String? = null, @JsonProperty("tvdb_id") val tvdb_id: String? = null)
