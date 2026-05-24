@@ -1293,7 +1293,6 @@ class YoutubeProvider(
                     )
                     println("[YT_DEBUG] Search Continuation POST url: $apiUrl")
                     println("[YT_DEBUG] Search Continuation POST payload: $payload")
-                    val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
                     val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor)
                         .parsedSafe<Map<String, Any>>()
                     if (response != null) {
@@ -1419,6 +1418,71 @@ class YoutubeProvider(
         recurse(data)
         println("[YT_DEBUG] Finished extractPlaylistEpisodes. Extracted episodes: ${episodes.size}")
         return episodes
+    }
+
+    // 🚀 [보완] 일반 재생목록과 믹스 구조의 메타데이터 누락 방지를 위한 범용 재귀 탐색 엔진 탑재
+    private class PlaylistMetadata {
+        var title: String = ""
+        var author: String = ""
+        var description: String = ""
+    }
+
+    private fun findPlaylistMetadataRecursive(obj: Any?, metadata: PlaylistMetadata) {
+        if (obj == null) return
+        if (obj is Map<*, *>) {
+            // 1. playlistSidebarPrimaryInfoRenderer 구조 (일반 재생목록)
+            val primary = obj["playlistSidebarPrimaryInfoRenderer"] as? Map<*, *>
+            if (primary != null) {
+                val t = getText(primary["title"])
+                if (t.isNotBlank()) metadata.title = t
+                val d = getText(primary["description"])
+                if (d.isNotBlank()) metadata.description = d
+                println("[YT_DEBUG] [Recursive] Found playlistSidebarPrimaryInfoRenderer. Title: '$t'")
+            }
+
+            // 2. playlistSidebarSecondaryInfoRenderer 구조 (일반 재생목록 소유자)
+            val secondary = obj["playlistSidebarSecondaryInfoRenderer"] as? Map<*, *>
+            if (secondary != null) {
+                val owner = safeGet(secondary, "videoOwner", "videoOwnerRenderer") as? Map<*, *>
+                if (owner != null) {
+                    val a = getText(owner["title"])
+                    if (a.isNotBlank()) metadata.author = a
+                    println("[YT_DEBUG] [Recursive] Found playlistSidebarSecondaryInfoRenderer. Author: '$a'")
+                }
+            }
+
+            // 3. playlistHeaderRenderer 구조 (대체형/디자인 변경 재생목록)
+            val header = obj["playlistHeaderRenderer"] as? Map<*, *>
+            if (header != null) {
+                val t = extractTitle(header["title"] as? Map<*, *>)
+                if (!t.isNullOrBlank()) metadata.title = t
+                val a = extractTitle(header["ownerText"] as? Map<*, *>)
+                if (!a.isNullOrBlank()) metadata.author = a
+                val d = extractTitle(header["description"] as? Map<*, *>)
+                if (!d.isNullOrBlank()) metadata.description = d
+                println("[YT_DEBUG] [Recursive] Found playlistHeaderRenderer. Title: '$t', Author: '$a'")
+            }
+
+            // 4. playlistPanelRenderer 구조 (Watch 재생 화면 내 동적 재생목록)
+            val panel = obj["playlistPanelRenderer"] as? Map<*, *>
+            if (panel != null) {
+                val t = getText(panel["titleText"]) ?: getText(panel["title"])
+                if (t.isNotBlank()) metadata.title = t
+                val a = getText(panel["shortBylineText"]) ?: getText(panel["longBylineText"]) ?: getText(panel["ownerName"])
+                if (a.isNotBlank()) metadata.author = a
+                println("[YT_DEBUG] [Recursive] Found playlistPanelRenderer. Title: '$t', Author: '$a'")
+            }
+
+            for (value in obj.values) {
+                if (value is Map<*, *> || value is List<*>) {
+                    findPlaylistMetadataRecursive(value, metadata)
+                }
+            }
+        } else if (obj is List<*>) {
+            for (item in obj) {
+                findPlaylistMetadataRecursive(item, metadata)
+            }
+        }
     }
 
     override suspend fun load(url: String): LoadResponse {
@@ -1792,84 +1856,28 @@ class YoutubeProvider(
                 val data = extractYtInitialData(html) ?: throw ErrorLoadingException("Failed to extract playlist data")
                 println("[YT_DEBUG] Playlist initialData successfully parsed.")
 
-                // 🚀 [해결 1] 일반 재생목록(Playlist)과 믹스(Mix)의 메타데이터 완전 복원 및 병합 스캔
-                var playlistTitle: String? = null
-                var playlistAuthor: String? = null
-                var playlistDesc: String? = null
-
-                // [Case A] 표준 재생목록 화면 (playlist?list=PL...) -> sidebar 레이아웃 탐색
-                val sidebarItems = safeGet(data, "sidebar", "playlistSidebarRenderer", "items") as? List<*>
-                sidebarItems?.forEach { item ->
-                    val m = item as? Map<*, *>
-                    val primary = m?.get("playlistSidebarPrimaryInfoRenderer") as? Map<*, *>
-                    if (primary != null) {
-                        playlistTitle = getText(primary["title"])
-                        playlistDesc = getText(primary["description"])
-                    }
-                    val secondary = m?.get("playlistSidebarSecondaryInfoRenderer") as? Map<*, *>
-                    if (secondary != null) {
-                        val owner = safeGet(secondary, "videoOwner", "videoOwnerRenderer") as? Map<*, *>
-                        if (owner != null) {
-                            playlistAuthor = getText(owner["title"])
-                        }
-                    }
+                // 🚀 [디버그 프린트 보강] 요소 확인을 위한 정밀 디버그 로그 곳곳에 배치
+                println("[YT_DEBUG] [load] playlist_browse 시작됨. 데이터 탑레벨 키 세트: ${data.keys}")
+                if (data.containsKey("sidebar")) {
+                    println("[YT_DEBUG] [load] 루트 레벨 sidebar 키 탐지됨")
+                }
+                if (data.containsKey("header")) {
+                    println("[YT_DEBUG] [load] 루트 레벨 header 키 탐지됨")
+                }
+                if (data.containsKey("contents")) {
+                    val contentsObj = data["contents"] as? Map<*, *>
+                    println("[YT_DEBUG] [load] contents 키 탐지됨. 하위 키 목록: ${contentsObj?.keys}")
                 }
 
-                // [Case B] Watch 재생 화면 (watch?v=...&list=PL...) -> playlistPanelRenderer 레이아웃 탐색
-                // 검색 결과에서 비디오 ID와 결합된 watch 주소로 진입 시 sidebar 노드가 없으므로, 플레이리스트 패널 노드에서 메타데이터를 정밀 파싱합니다.
-                val playlistPanel = safeGet(data, "contents", "twoColumnWatchNextResults", "playlist", "playlist", "playlistPanelRenderer") as? Map<*, *>
-                if (playlistPanel != null) {
-                    if (playlistTitle.isNullOrBlank()) {
-                        playlistTitle = getText(playlistPanel["titleText"])
-                            ?: getText(playlistPanel["title"])
-                    }
-                    if (playlistAuthor.isNullOrBlank()) {
-                        playlistAuthor = getText(playlistPanel["shortBylineText"])
-                            ?: getText(playlistPanel["longBylineText"])
-                            ?: getText(playlistPanel["ownerName"])
-                    }
-                }
+                // 🚀 [해결] 이중 계층 구조를 완벽하게 정복하는 리커시브 탐색 실행
+                val playlistMeta = PlaylistMetadata()
+                findPlaylistMetadataRecursive(data, playlistMeta)
 
-                val header = safeGet(data, "header", "playlistHeaderRenderer") as? Map<*, *>
-                var title = extractTitle(safeGet(header, "title") as? Map<*, *>) 
-                    ?: playlistTitle
-                    ?: "YouTube Playlist"
+                var title = playlistMeta.title.ifBlank { "YouTube Playlist" }
+                var author = playlistMeta.author.ifBlank { "Unknown Channel" }
+                var description = playlistMeta.description
 
-                var author = extractTitle(safeGet(header, "ownerText") as? Map<*, *>) 
-                    ?: playlistAuthor 
-                    ?: "Unknown Channel"
-
-                var description = extractTitle(safeGet(header, "description") as? Map<*, *>) 
-                    ?: playlistDesc
-                    ?: ""
-
-                println("[YT_DEBUG] Extracted playlist raw title: $title, author: $author")
-                
-                if (title.isBlank() || title == "YouTube Playlist") {
-                    fun findMixTitle(obj: Any?): String? {
-                        if (obj is Map<*, *>) {
-                            val panel = obj["playlistPanelRenderer"] as? Map<*, *>
-                            if (panel != null) {
-                                val tText = getText(panel["titleText"])
-                                if (tText.isNotBlank()) return tText
-                                val t = getText(panel["title"])
-                                if (t.isNotBlank()) return t
-                            }
-                            for (v in obj.values) {
-                                val t = findMixTitle(v)
-                                if (t != null) return t
-                            }
-                        } else if (obj is List<*>) {
-                            for (i in obj) {
-                                val t = findMixTitle(i)
-                                if (t != null) return t
-                            }
-                        }
-                        return null
-                    }
-                    title = findMixTitle(data) ?: "YouTube Mix"
-                    println("[YT_DEBUG] Title resolved from findMixTitle: $title")
-                }
+                println("[YT_DEBUG] [load] 최종 파싱 완료된 메타데이터 결과 -> title: '$title', author: '$author', desc_len: ${description.length}")
 
                 val seenPlaylistIds = mutableSetOf<String>()
                 val episodes = extractPlaylistEpisodes(data, seenPlaylistIds).toMutableList()
