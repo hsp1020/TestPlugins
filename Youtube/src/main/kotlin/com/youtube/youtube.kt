@@ -123,7 +123,7 @@ object YoutubeUtils {
 
     fun extractYoutubeId(url: String): String? {
         return YT_ID_REGEX.find(url)?.groupValues?.getOrNull(1) ?: run {
-            if (url.length == 11 && url.matches(Regex("[A-Za-z0-9_-]{11}"))) {
+            if (url.length == 11 && url.matches(Regex("[A-Za-0-9_-]{11}"))) {
                 url
             } else {
                 null
@@ -1076,7 +1076,6 @@ class YoutubeProvider(
                             val actions = response["onResponseReceivedActions"] 
                                 ?: response["onResponseReceivedEndpoints"]
                                 ?: response["onResponseReceivedCommands"] 
-                                ?: response["contents"] 
                                 ?: response
                             processRecursive(actions, results, seenIds, playlistMode = false)
                             nextContinuation = findTokenRecursive(response)
@@ -1298,7 +1297,7 @@ class YoutubeProvider(
                     )
                     println("[YT_DEBUG] Search Continuation POST url: $apiUrl")
                     println("[YT_DEBUG] Search Continuation POST payload: $payload")
-                    val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
+                     
                     val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor)
                         .parsedSafe<Map<String, Any>>()
                     if (response != null) {
@@ -1429,6 +1428,7 @@ class YoutubeProvider(
     private class PlaylistMetadata {
         var title: String = ""
         var author: String = ""
+        var videoAuthor: String = ""
         var description: String = ""
         var channelId: String = ""
         var channelAvatar: String = ""
@@ -1524,7 +1524,7 @@ class YoutubeProvider(
                 if (!d.isNullOrBlank()) metadata.description = d
             }
 
-            // 🚀 [Failsafe 리커시브 매핑 추가] 
+            // [Failsafe 리커시브 매핑 추가] 
             // JVM 형변환 지우개 오류로 인해 렌더러 Wrapper 키("playlistPanelRenderer") 조회가 차단되거나 누락된 상태에서, 
             // 노드가 직접 재생목록 요소를 보유하고 있는 경우 Failsafe 역추출 적용
             if (keys.contains("playlistId") && (keys.contains("titleText") || keys.contains("title"))) {
@@ -1543,7 +1543,7 @@ class YoutubeProvider(
                 }
             }
 
-            // 🚀 [구독자 수 및 채널 부가 정보 수집] videoOwnerRenderer 노드가 감지되는 경우 구독자 수 및 추가 메타데이터 수집
+            // [구독자 수 및 채널 부가 정보 수집] videoOwnerRenderer 노드가 감지되는 경우 구독자 수 및 추가 메타데이터 수집
             val ownerRenderer = obj["videoOwnerRenderer"] as? Map<*, *>
                 ?: YoutubeUtils.getMapKeyFromAny(obj, "videoOwnerRenderer")
             if (ownerRenderer != null) {
@@ -1558,7 +1558,13 @@ class YoutubeProvider(
                     ?.let { YoutubeUtils.getStringFromAny(it, "browseId") }
                 if (!browseId.isNullOrBlank()) metadata.channelId = browseId
                 
-                println("[YT_DEBUG] [Recursive] Found videoOwnerRenderer. SubCount: '$sub', Avatar: '$avatar', ChannelId: '$browseId'")
+                // 실제 비디오 업로더의 공식 채널명을 수집하여 보존
+                val vAuth = getText(ownerRenderer["title"] ?: YoutubeUtils.getMapKeyFromAny(ownerRenderer, "title"))
+                if (vAuth.isNotBlank()) {
+                    metadata.videoAuthor = vAuth
+                }
+
+                println("[YT_DEBUG] [Recursive] Found videoOwnerRenderer. VideoAuthor: '$vAuth', SubCount: '$sub', Avatar: '$avatar', ChannelId: '$browseId'")
             }
 
             for (value in obj.values) {
@@ -1959,8 +1965,9 @@ class YoutubeProvider(
                 val playlistMeta = PlaylistMetadata()
                 findPlaylistMetadataRecursive(data, playlistMeta)
 
+                // 🚀 [해결] 실제 동영상 채널명(videoAuthor)이 수집되었다면 재생목록 큐레이터명 대신 실제 동영상 제공 채널명(tvN)을 우선 대입하여 메타데이터 불일치 방지
+                var author = playlistMeta.videoAuthor.ifBlank { playlistMeta.author }.ifBlank { "Unknown Channel" }
                 var title = playlistMeta.title.ifBlank { "YouTube Playlist" }
-                var author = playlistMeta.author.ifBlank { "Unknown Channel" }
                 var description = playlistMeta.description
 
                 println("[YT_DEBUG] [load] 최종 파싱 완료된 메타데이터 결과 -> title: '$title', author: '$author', desc_len: ${description.length}")
@@ -1991,7 +1998,7 @@ class YoutubeProvider(
 
                 val playlistPoster = episodes.firstOrNull()?.posterUrl ?: response.document.selectFirst("meta[property=og:image]")?.attr("content")
 
-                // 🚀 [해결 2] 일반 동영상과 동일하게 플레이리스트 하단 추천목록 영역에 채널 카드 삽입
+                // 🚀 [추가] 일반 동영상과 완전히 매칭되도록 플레이리스트 하단 추천목록 영역에 실제 동영상 채널(tvN) 전용 고유 채널 카드 삽입
                 val recList = mutableListOf<SearchResponse>()
                 if (author.isNotBlank() && playlistMeta.channelId.isNotBlank()) {
                     val cId = playlistMeta.channelId
@@ -2010,7 +2017,7 @@ class YoutubeProvider(
                 return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
                     this.posterUrl = playlistPoster
                     
-                    // 🚀 [해결 1] 획득한 구독자 수가 있다면 채널명 우측에 가독성 높게 바인딩
+                    // 🚀 [추가] 획득한 구독자 수가 있다면 채널명 우측에 예쁘게 바인딩
                     val finalDescription = buildString {
                         append("Channel: $author")
                         if (playlistMeta.subscriberCount.isNotBlank()) {
