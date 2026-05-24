@@ -145,13 +145,13 @@ class YoutubeProvider(
     @Suppress("PropertyName")
     private data class PlayerResponse(
         @JsonProperty("streamingData") val streamingData: StreamingData?,
-        @JsonProperty("playbackTracking") val playbackTracking: PlaybackTracking?,
-        @JsonProperty("playerConfig") val playerConfig: PlayerConfig? // 🚀 playerConfig 필드 추가
+        @JsonProperty("playbackTracking") val playbackTracking: PlaybackTracking? // 🚀 트래킹 정보 필드 추가
     )
     private data class StreamingData(
         @JsonProperty("hlsManifestUrl") val hlsManifestUrl: String?
     )
 
+    // 🚀 구글 트래킹에 필요한 파싱 구조체 신설
     private data class PlaybackTracking(
         @JsonProperty("videostatsPlaybackUrl") val videostatsPlaybackUrl: TrackingUrl?,
         @JsonProperty("videostatsWatchtimeUrl") val videostatsWatchtimeUrl: TrackingUrl?
@@ -160,13 +160,7 @@ class YoutubeProvider(
         @JsonProperty("baseUrl") val baseUrl: String?
     )
 
-    // 🚀 유튜브에서 보던 구간(이어보기 초 정보)을 역직렬화하는 구조체 추가
-    private data class PlayerConfig(
-        @JsonProperty("playbackStartConfig") val playbackStartConfig: PlaybackStartConfig?
-    )
-    private data class PlaybackStartConfig(
-        @JsonProperty("startSeconds") val startSeconds: Int?
-    )    
+    
 
     private fun sha1(input: String): String {
         return try {
@@ -215,11 +209,8 @@ private fun getSapisidHash(
         return uri.build().toString()
     }
 
-    private suspend fun triggerPlaybackTracking(
-        playbackTracking: PlaybackTracking?, 
-        playerConfig: PlayerConfig?, // 🚀 playerConfig 파라미터 추가 수용
-        videoId: String
-    ) {
+    // 유튜브 트래킹 서버로 차례대로 백그라운드 핑 전송
+    private suspend fun triggerPlaybackTracking(playbackTracking: PlaybackTracking?, videoId: String) {
         val playbackBaseUrl = playbackTracking?.videostatsPlaybackUrl?.baseUrl
         val watchtimeBaseUrl = playbackTracking?.videostatsWatchtimeUrl?.baseUrl
 
@@ -228,24 +219,21 @@ private fun getSapisidHash(
             return
         }
 
-        // 🚀 구글 서버 데이터 기준, 계정에 저장되어 있는 보던 시점(초 단위)을 안전하게 확보합니다. 없으면 0초부터 시작.
-        val startSecs = playerConfig?.playbackStartConfig?.startSeconds ?: 0
         val cpn = generateCpn()
-        println("[YT_DEBUG] Triggering playback tracking for videoId: $videoId with cpn: $cpn, startSecs: $startSecs")
+        println("[YT_DEBUG] Triggering playback tracking for videoId: $videoId with cpn: $cpn")
 
         try {
-            // 1. 재생 시작 지점 핑 (보던 시점 cmt 적용)
-            val playbackUrl = buildTrackingUrl(playbackBaseUrl, cpn, cmt = startSecs.toString(), state = null, realTime = "0")
+            // 1. 재생 세션 초기화 등록 핑 전송 (현재 미디어 시간 0초)
+            val playbackUrl = buildTrackingUrl(playbackBaseUrl, cpn, cmt = "0.000", state = null, realTime = "0")
             println("[YT_DEBUG] Pinging playbackUrl: $playbackUrl")
             app.get(playbackUrl, interceptor = ytInterceptor)
 
-            // 2. 진행 상태 갱신 핑 (기존 보던 지점 + 약 5초 더 본 상태로 갱신하여 기존 기록 보존 및 강제 도장찍기 실행)
-            val updatedCmt = (startSecs + 5).toString()
-            val watchtimeUrl = buildTrackingUrl(watchtimeBaseUrl, cpn, cmt = updatedCmt, state = "playing", realTime = "5")
+            // 2. 가상의 5초 진행 시간 시청 갱신 핑 전송 (서버 시청 기록에 도장 찍기 수행)
+            val watchtimeUrl = buildTrackingUrl(watchtimeBaseUrl, cpn, cmt = "5.000", state = "playing", realTime = "5")
             println("[YT_DEBUG] Pinging watchtimeUrl: $watchtimeUrl")
             app.get(watchtimeUrl, interceptor = ytInterceptor)
             
-            println("[YT_DEBUG] Playback tracking successfully triggered (Synced position: ${updatedCmt}s)")
+            println("[YT_DEBUG] Playback tracking successfully triggered and watch history synced.")
         } catch (e: Exception) {
             println("[YT_DEBUG] Failed to trigger playback tracking: ${e.message}")
             logError(e)
@@ -1879,8 +1867,7 @@ private fun getSapisidHash(
             if (playerResponseText.isNotBlank()) {
                 try {
                     val playerResponse = parseJson<PlayerResponse>(playerResponseText)
-                    // 🚀 playerResponse.playerConfig 인자를 두 번째 매개변수로 추가 전달합니다.
-                    triggerPlaybackTracking(playerResponse.playbackTracking, playerResponse.playerConfig, videoId)
+                    triggerPlaybackTracking(playerResponse.playbackTracking, videoId)
                 } catch (e: Exception) {
                     println("[YT_DEBUG] Error parsing playerResponse for tracking: ${e.message}")
                 }
