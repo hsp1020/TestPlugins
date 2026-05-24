@@ -1647,6 +1647,7 @@ class YoutubeProvider(
         val headers = mapOf("Referer" to "https://www.youtube.com/")
         val response = app.get(url, headers = headers, interceptor = ytInterceptor)
         val html = response.text
+        val data = extractYtInitialData(html)
         
         var title = "YouTube Video"
         var plot = ""
