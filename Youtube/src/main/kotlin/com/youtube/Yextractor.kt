@@ -35,15 +35,15 @@ open class YoutubeExtractor : ExtractorApi() {
     override val name = "YouTube"
 
     companion object {
-        // Provider에서 직접 소거를 지원하도록 private 제약 해제
-        val ytVideos = ConcurrentHashMap<String, List<ExtractorLink>>()
-        val ytVideosSubtitles = ConcurrentHashMap<String, List<SubtitlesStream>>()
+        private val ytVideos = ConcurrentHashMap<String, List<ExtractorLink>>()
+        private val ytVideosSubtitles = ConcurrentHashMap<String, List<SubtitlesStream>>()
 
         @Volatile
         private var activeServer: ServerSocket? = null
         private var serverPort: Int = 0
         private val serverLock = Any()
 
+        // 2004 에러의 근본적 해결책: 캐시 상한치를 50개에서 1000개로 대폭 확장 (다국어 매핑 폭발에 대처)
         private val manifestMap: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(128, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
@@ -52,6 +52,7 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         )
 
+        // CallerRunsPolicy를 적용하여 가상 MPD 및 세그먼트 정체 시 패킷 폐기 방지 및 백프레셔 제어 보장
         private val serverExecutor = ThreadPoolExecutor(
             2, 
             8, 
@@ -89,21 +90,6 @@ open class YoutubeExtractor : ExtractorApi() {
         val language: String
     )
 
-    private fun getMatchingUserAgent(streamUrl: String): String {
-        val decoded = runCatching { YoutubeUtils.urlDecode(streamUrl) }.getOrDefault(streamUrl)
-        return when {
-            decoded.contains("c=ANDROID") || decoded.contains("client=android") -> {
-                "com.google.android.youtube/19.17.34 (Linux; U; Android 11; ko_KR) gzip"
-            }
-            decoded.contains("c=WEB") || decoded.contains("client=web") -> {
-                YoutubeUtils.CHROME_USER_AGENT
-            }
-            else -> {
-                YoutubeUtils.IOS_USER_AGENT
-            }
-        }
-    }
-
     override suspend fun getUrl(
         url: String,
         referer: String?,
@@ -114,6 +100,9 @@ open class YoutubeExtractor : ExtractorApi() {
         val cleanedUrl = url.replace(schemaStripRegex, "")
         val videoId = YoutubeUtils.extractYoutubeId(cleanedUrl) ?: cleanedUrl
         println("[YT_DEBUG] [getUrl] 가공된 cleanedUrl: $cleanedUrl, 비디오 ID: $videoId")
+
+        ytVideos.remove(videoId)
+        ytVideosSubtitles.remove(videoId)
 
         val cachedLinks = ytVideos[videoId]
         if (cachedLinks.isNullOrEmpty()) {
@@ -205,10 +194,8 @@ open class YoutubeExtractor : ExtractorApi() {
                                 if (localLink != null) {
                                     val finalName = "${video.label} ($lang) ${video.label}"
                                     val sourceName = "${this.name} ($lang)"
-                                    
-                                    val targetUserAgent = getMatchingUserAgent(video.url)
 
-                                    println("[YT_DEBUG] [getUrl] DASH 가상 링크 빌드 성공 -> 화질: ${video.label}, 언어: $lang, 가상 URL: $localLink, UA: $targetUserAgent")
+                                    println("[YT_DEBUG] [getUrl] DASH 가상 링크 빌드 성공 -> 화질: ${video.label}, 언어: $lang, 가상 URL: $localLink")
                                     builtLinks.add(
                                         newExtractorLink(
                                             sourceName,
@@ -219,7 +206,7 @@ open class YoutubeExtractor : ExtractorApi() {
                                             this.referer = mainUrl
                                             this.quality = video.height
                                             this.headers = mapOf(
-                                                "User-Agent" to targetUserAgent,
+                                                "User-Agent" to YoutubeUtils.IOS_USER_AGENT,
                                                 "Origin" to "https://www.youtube.com",
                                                 "Referer" to "https://www.youtube.com"
                                             )
@@ -243,14 +230,13 @@ open class YoutubeExtractor : ExtractorApi() {
                     } catch (e: Exception) { null }
                 }
                 for ((mUrl, mLabel, mHeight) in muxedList) {
-                    val targetUserAgent = getMatchingUserAgent(mUrl)
-                    println("[YT_DEBUG] [getUrl] Legacy Muxed 링크 등록 -> 화질: $mHeight, 이름: $mLabel (Legacy), UA: $targetUserAgent")
+                    println("[YT_DEBUG] [getUrl] Legacy Muxed 링크 등록 -> 화질: $mHeight, 이름: $mLabel (Legacy)")
                     builtLinks.add(
                         newExtractorLink(this.name, "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
                             this.referer = mainUrl
                             this.quality = mHeight
                             this.headers = mapOf(
-                                "User-Agent" to targetUserAgent,
+                                "User-Agent" to YoutubeUtils.IOS_USER_AGENT,
                                 "Origin" to "https://www.youtube.com",
                                 "Referer" to "https://www.youtube.com"
                             )
@@ -258,6 +244,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     )
                 }
 
+                // 외부 고해상도 웹 다운로드 포털 연동 보완 로직 보존
                 builtLinks.add(
                     newExtractorLink(
                         source = "YouTube Downloader",
@@ -359,7 +346,6 @@ open class YoutubeExtractor : ExtractorApi() {
         return "http://127.0.0.1:$serverPort/$id.mpd"
     }
 
-    // 통신 안정성 고도화: 정확한 Content-Length 명시 및 바이너리 출력 구조 도입
     private fun handleClient(client: Socket) {
         try {
             client.use { socket ->
@@ -369,6 +355,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 if (line != null && line.startsWith("GET")) {
                     val parts = line.split(" ")
                     if (parts.size > 1) {
+                        // 쿼리 매개변수(?) 및 불필요 경로를 정규화하여 안정적인 UUID 획득
                         val cleanPath = parts[1].substringAfter("/").substringBefore("?")
                         val path = if (cleanPath.endsWith(".mpd", ignoreCase = true)) {
                             cleanPath.substring(0, cleanPath.length - 4)
@@ -377,16 +364,12 @@ open class YoutubeExtractor : ExtractorApi() {
                         }
                         val content = manifestMap[path]
                         if (content != null) {
-                            val bytes = content.toByteArray(java.nio.charset.StandardCharsets.UTF_8)
                             output.println("HTTP/1.1 200 OK")
                             output.println("Content-Type: application/dash+xml")
-                            output.println("Content-Length: ${bytes.size}")
                             output.println("Connection: close")
                             output.println("Access-Control-Allow-Origin: *")
                             output.println("")
-                            output.flush()
-                            socket.getOutputStream().write(bytes)
-                            socket.getOutputStream().flush()
+                            output.println(content)
                         } else {
                             println("[YT_DEBUG] [handleClient] 에러: 메모리에 매칭되는 가상 MPD가 없습니다. UUID: $path (404 반환)")
                             output.println("HTTP/1.1 404 Not Found")
