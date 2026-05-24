@@ -56,26 +56,31 @@ class YoutubeProvider(
 
     private var isSearchContext = false
 
+    // ✅ Interceptor가 appPrefs를 정상적으로 참조하도록 구조 변경
     class YouTubeInterceptor(private val provider: YoutubeProvider) : Interceptor {
         private val prefs get() = provider.appPrefs
-
+        
         private fun sha1(input: String): String {
             val md = java.security.MessageDigest.getInstance("SHA-1")
             val bytes = md.digest(input.toByteArray())
             return bytes.joinToString("") { "%02x".format(it) }
         }
-        
-        private fun String.urlDecode(): String {
-            return try {
-                java.net.URLDecoder.decode(this, "UTF-8")
-            } catch (e: Exception) {
-              this
-            }
-        }
 
         override fun intercept(chain: Interceptor.Chain): Response {
-            val requestBuilder = chain.request().newBuilder()
+            val request = chain.request()
+            val urlStr = request.url.toString()
+            // 검색 엔드포인트(/results 또는 /v1/search)를 감지하여 개인 쿠키 연동 차단 플래그 지정
+            val isSearchRequest = urlStr.contains("/results") || urlStr.contains("/v1/search")
+
+            val requestBuilder = request.newBuilder()
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36")
+
+            // [정밀 보완] 검색 페이지 레퍼러만 가두고, player API를 위한 개별 watch 주소 레퍼러는 원본 그대로 승인
+            val origReferer = request.header("Referer")
+            if (origReferer != null && (origReferer.contains("/results") || origReferer.contains("/v1/search"))) {
+                requestBuilder.header("Referer", "https://www.youtube.com/")
+            }
+    
 
             val cookieBuilder = StringBuilder()
             val visitor = prefs?.getString("VISITOR_INFO1_LIVE", null)
@@ -86,34 +91,42 @@ class YoutubeProvider(
                 cookieBuilder.append("VISITOR_INFO1_LIVE=_Mk3UVhY40g; ")
             }
 
-            val authKeys = listOf("SID", "HSID", "SSID", "APISID", "SAPISID")
-            var sapisidVal: String? = null
+            // 일반 요청(재생/메인홈 등)인 경우에만 계정 쿠키를 결합하고, 검색 요청일 경우 개인 계정 쿠키를 누락시켜 개인 검색기록 연동 차단
+            if (!isSearchRequest) {
+                val authKeys = listOf("SID", "HSID", "SSID", "APISID", "SAPISID")
+                var sapisidVal: String? = null
 
-            authKeys.forEach { key ->
-                val value = prefs?.getString(key, null)
-                if (!value.isNullOrBlank()) {
-                    cookieBuilder.append("$key=$value; ")
-                    if (key == "SAPISID") sapisidVal = value
+                authKeys.forEach { key ->
+                    val value = prefs?.getString(key, null)
+                    if (!value.isNullOrBlank()) {
+                        cookieBuilder.append("$key=$value; ")
+                        if (key == "SAPISID") sapisidVal = value
+                    }
                 }
-            }
-            
-            cookieBuilder.append("PREF=f6=40000000&hl=${provider.lang}; CONSENT=YES+fx.456722336;")
+                
+                cookieBuilder.append("PREF=f6=40000000&hl=${provider.lang}; CONSENT=YES+fx.456722336;")
 
-            requestBuilder.addHeader("Cookie", cookieBuilder.toString())
-            requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
+                requestBuilder.addHeader("Cookie", cookieBuilder.toString())
+                requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
 
-            if (!sapisidVal.isNullOrBlank()) {
-                try {
-                    val timestamp = (System.currentTimeMillis() / 1000).toString()
-                    val origin = "https://www.youtube.com"
-                    val msg = "$timestamp $sapisidVal $origin"
-                    val hash = sha1(msg)
-                    requestBuilder.addHeader("Authorization", "SAPISIDHASH ${timestamp}_$hash")
-                    requestBuilder.addHeader("X-Origin", origin)
-                    requestBuilder.addHeader("X-Goog-AuthUser", "0")
-                } catch (e: Exception) {
-                    logError(e)
+                if (!sapisidVal.isNullOrBlank()) {
+                    try {
+                        val timestamp = (System.currentTimeMillis() / 1000).toString()
+                        val origin = "https://www.youtube.com"
+                        val msg = "$timestamp $sapisidVal $origin"
+                        val hash = sha1(msg)
+                        requestBuilder.addHeader("Authorization", "SAPISIDHASH ${timestamp}_$hash")
+                        requestBuilder.addHeader("X-Origin", origin)
+                        requestBuilder.addHeader("X-Goog-AuthUser", "0")
+                    } catch (e: Exception) {
+                        logError(e)
+                    }
                 }
+            } else {
+                // 검색 요청 시에는 비개인화 PREF 쿠키 및 일반 다크 테마/언어 설정 헤더만 송신
+                cookieBuilder.append("PREF=f6=40000000&hl=${provider.lang}; CONSENT=YES+fx.456722336;")
+                requestBuilder.addHeader("Cookie", cookieBuilder.toString())
+                requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
             }
 
             return chain.proceed(requestBuilder.build())
@@ -130,22 +143,8 @@ class YoutubeProvider(
     private var savedClientVersion: String? = null
 
     @Suppress("PropertyName")
-    private data class PlayerResponse(
-        @JsonProperty("streamingData") val streamingData: StreamingData?,
-        @JsonProperty("playbackTracking") val playbackTracking: PlaybackTracking? // 🚀 트래킹 정보 필드 추가
-    )
-    private data class StreamingData(
-        @JsonProperty("hlsManifestUrl") val hlsManifestUrl: String?
-    )
-
-    // 🚀 구글 트래킹에 필요한 파싱 구조체 신설
-    private data class PlaybackTracking(
-        @JsonProperty("videostatsPlaybackUrl") val videostatsPlaybackUrl: TrackingUrl?,
-        @JsonProperty("videostatsWatchtimeUrl") val videostatsWatchtimeUrl: TrackingUrl?
-    )
-    private data class TrackingUrl(
-        @JsonProperty("baseUrl") val baseUrl: String?
-    )
+    private data class PlayerResponse(@JsonProperty("streamingData") val streamingData: StreamingData?)
+    private data class StreamingData(@JsonProperty("hlsManifestUrl") val hlsManifestUrl: String?)
 
     private fun sha1(input: String): String {
         return try {
@@ -166,68 +165,6 @@ class YoutubeProvider(
         val hash = sha1(msg)
         return "SAPISIDHASH ${timestamp}_$hash"
     }
-
-    // ==========================================
-    // 🚀 [신규 추가] 재생 세션 트래킹 로직 영역 시작
-    // ==========================================
-    
-    // 16자리 무작위 문자열(Client Playback Nonce, cpn) 생성
-    private fun generateCpn(): String {
-        val alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
-        return (1..16).map { alphabet.random() }.joinToString("")
-    }
-
-    // s.youtube.com 트래킹 주소 파라미터 매핑 빌더
-    private fun buildTrackingUrl(base: String, cpn: String, cmt: String, state: String?, realTime: String? = null): String {
-        val uri = android.net.Uri.parse(base).buildUpon()
-        uri.appendQueryParameter("cpn", cpn)
-        uri.appendQueryParameter("cmt", cmt)
-        uri.appendQueryParameter("ver", "2")
-        if (state != null) {
-            uri.appendQueryParameter("state", state)
-            uri.appendQueryParameter("st", "0.000")
-            uri.appendQueryParameter("et", cmt)
-        }
-        if (realTime != null) {
-            uri.appendQueryParameter("rt", realTime)
-        }
-        return uri.build().toString()
-    }
-
-    // 유튜브 트래킹 서버로 차례대로 백그라운드 핑 전송
-    private suspend fun triggerPlaybackTracking(playbackTracking: PlaybackTracking?, videoId: String) {
-        val playbackBaseUrl = playbackTracking?.videostatsPlaybackUrl?.baseUrl
-        val watchtimeBaseUrl = playbackTracking?.videostatsWatchtimeUrl?.baseUrl
-
-        if (playbackBaseUrl.isNullOrBlank() || watchtimeBaseUrl.isNullOrBlank()) {
-            println("[YT_DEBUG] playbackTracking base URLs are empty, skipping tracking")
-            return
-        }
-
-        val cpn = generateCpn()
-        println("[YT_DEBUG] Triggering playback tracking for videoId: $videoId with cpn: $cpn")
-
-        try {
-            // 1. 재생 세션 초기화 등록 핑 전송 (현재 미디어 시간 0초)
-            val playbackUrl = buildTrackingUrl(playbackBaseUrl, cpn, cmt = "0.000", state = null, realTime = "0")
-            println("[YT_DEBUG] Pinging playbackUrl: $playbackUrl")
-            app.get(playbackUrl, interceptor = ytInterceptor)
-
-            // 2. 가상의 5초 진행 시간 시청 갱신 핑 전송 (서버 시청 기록에 도장 찍기 수행)
-            val watchtimeUrl = buildTrackingUrl(watchtimeBaseUrl, cpn, cmt = "5.000", state = "playing", realTime = "5")
-            println("[YT_DEBUG] Pinging watchtimeUrl: $watchtimeUrl")
-            app.get(watchtimeUrl, interceptor = ytInterceptor)
-            
-            println("[YT_DEBUG] Playback tracking successfully triggered and watch history synced.")
-        } catch (e: Exception) {
-            println("[YT_DEBUG] Failed to trigger playback tracking: ${e.message}")
-            logError(e)
-        }
-    }
-
-    // ==========================================
-    // 🚀 [신규 추가] 재생 세션 트래킹 로직 영역 끝
-    // ==========================================
     
     private fun getSavedContinuationToken(key: String): String? {
         val hashedKey = sha1(key)
@@ -1706,10 +1643,12 @@ class YoutubeProvider(
         val videoId = url.extractYoutubeId() ?: throw ErrorLoadingException("Invalid YouTube URL")
         println("[YT_DEBUG] Loading normal video ID: $videoId")
 
-        val response = app.get(url, interceptor = ytInterceptor)
+        // 상세페이지 진입 시 홈 화면에서 눌러 들어갔음을 명시적으로 알려 시동 차단 우회
+        val headers = mapOf("Referer" to "https://www.youtube.com/")
+        val response = app.get(url, headers = headers, interceptor = ytInterceptor)
         val html = response.text
         val data = extractYtInitialData(html)
-
+        
         var title = "YouTube Video"
         var plot = ""
         var poster = buildThumbnailFromId(videoId)
@@ -1845,17 +1784,6 @@ class YoutubeProvider(
         if (isLive) {
             loadExtractor(fullUrl, subtitleCallback, callback)
         } else {
-            // 🚀 [수정 지점] 일반 비디오 추출 직전 재생 트래킹 직접 트리거
-            // 추출 결과값 처리(Classic 또는 NewPipe Extractor)보다 먼저 동작하여 계정 인증 상태로 통계 서버에 안착시킵니다.
-            if (playerResponseText.isNotBlank()) {
-                try {
-                    val playerResponse = parseJson<PlayerResponse>(playerResponseText)
-                    triggerPlaybackTracking(playerResponse.playbackTracking, videoId)
-                } catch (e: Exception) {
-                    println("[YT_DEBUG] Error parsing playerResponse for tracking: ${e.message}")
-                }
-            }
-
             var handled = false
             if (playerType == "classic") {
                 handled = loadLinksClassic(fullUrl, isCasting, subtitleCallback, callback)
@@ -1879,7 +1807,6 @@ class YoutubeProvider(
         return true
     }
 
-
     private suspend fun loadLinksAdvanced(
         videoId: String,
         subtitleCallback: (SubtitleFile) -> Unit,
@@ -1900,8 +1827,9 @@ class YoutubeProvider(
                 ),
                 "videoId" to videoId
             )
-
-            val responseText = app.post(apiUrl, json = payload, interceptor = ytInterceptor).text
+            // 안드로이드 클라이언트 세션 플레이어에도 전용 시청 주소 레퍼러 이식
+            val headers = mapOf("Referer" to "$mainUrl/watch?v=$videoId")
+            val responseText = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).text
 
         } catch (e: Exception) {
 
@@ -1909,6 +1837,8 @@ class YoutubeProvider(
 
         return true
     }
+
+
 
     private suspend fun loadLinksClassic(
         data: String,
