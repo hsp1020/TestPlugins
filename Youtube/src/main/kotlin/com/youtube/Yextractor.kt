@@ -250,11 +250,11 @@ open class YoutubeExtractor : ExtractorApi() {
                 builtLinks.add(
                     newExtractorLink(
                         source = "YouTube Downloader",
-                        name = "Cobalt Web Download (Up to 4K)",
+                        name = "Cobalt Web Download",
                         url = "https://qwkuns.me/#https://www.youtube.com/watch?v=$videoId",
                         type = INFER_TYPE
                     ) {
-                        this.quality = 2160 // 4K 화질 태그 부여
+                        this.quality = 144 // 4K 화질 태그 부여
                         this.referer = mainUrl
                     }
                 )
