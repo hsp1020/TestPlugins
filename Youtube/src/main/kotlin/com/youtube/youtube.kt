@@ -913,7 +913,7 @@ private fun getSapisidHash(
 
         try {
             if (page == 1) {
-                saveContinuationToken(requestData, null)
+                // saveContinuationToken(requestData, null)
                 if (isChip) {
                     savedApiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
                     savedVisitorData = savedVisitorData ?: appPrefs?.getString("yt_visitor_data", null)
@@ -1007,8 +1007,8 @@ private fun getSapisidHash(
             } else {
                 var tokenToUse = getSavedContinuationToken(requestData)
                 
-                // [자가치유 메커니즘] 세션이나 토큰 연결 고리가 유실된 경우 보정된 토큰으로 복원 시도
-                if (tokenToUse.isNullOrBlank()) {
+                // 🚀 [수정] 자가치유 메커니즘을 오직 'page == 2'에서 토큰이 유실되었을 때만 작동하도록 정밀 제어
+                if (tokenToUse.isNullOrBlank() && page == 2) { 
                     println("[YT_DEBUG] Token to use is null/blank on page $page for $requestData. Fetching fallback continuation...")
                     val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
                     val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", "2.20240725.01.00") ?: "2.20240725.01.00"
