@@ -75,6 +75,12 @@ class YoutubeProvider(
             val requestBuilder = request.newBuilder()
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36")
 
+            // [핵심 우회 패치] 검색을 통한 재생기록 누락을 방지하기 위해 Referer 헤더를 유튜브 메인 홈 주소로 강제 변조
+            val origReferer = request.header("Referer")
+            if (origReferer == null || origReferer.contains("/results")) {
+                requestBuilder.header("Referer", "https://www.youtube.com/")
+            }
+
             val cookieBuilder = StringBuilder()
             val visitor = prefs?.getString("VISITOR_INFO1_LIVE", null)
 
@@ -84,7 +90,7 @@ class YoutubeProvider(
                 cookieBuilder.append("VISITOR_INFO1_LIVE=_Mk3UVhY40g; ")
             }
 
-            // 일반 요청인 경우에만 계정 쿠키를 결합하고, 검색 요청일 경우 개인 계정 쿠키를 누락시켜 개인 기록 연동 방지
+            // 일반 요청(재생/메인홈 등)인 경우에만 계정 쿠키를 결합하고, 검색 요청일 경우 개인 계정 쿠키를 누락시켜 개인 검색기록 연동 차단
             if (!isSearchRequest) {
                 val authKeys = listOf("SID", "HSID", "SSID", "APISID", "SAPISID")
                 var sapisidVal: String? = null
