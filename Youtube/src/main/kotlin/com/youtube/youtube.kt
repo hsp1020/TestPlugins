@@ -151,17 +151,23 @@ object YoutubeUtils {
         return current
     }
 
-    // 🚀 [해결] 이너튜브 맵 키 유실 오류 방지를 위한 정적 equals 기반 탐색 헬퍼 브릿지 이식
+    // 🚀 [보완] JVM 제네릭 Erasure 형변환 캐스팅 문제를 예방하기 위한 원시 동적 탐색 헬퍼 브릿지
     fun getMapKeyFromAny(obj: Any?, key: String): Map<*, *>? {
         val map = obj as? Map<*, *> ?: return null
-        return (map[key] as? Map<*, *>) 
-            ?: (map.entries.firstOrNull { (it.key as? String) == key }?.value as? Map<*, *>)
+        val value = map[key] ?: map.entries.firstOrNull { (it.key as? String) == key }?.value
+        return value as? Map<*, *>
+    }
+
+    fun getListKeyFromAny(obj: Any?, key: String): List<*>? {
+        val map = obj as? Map<*, *> ?: return null
+        val value = map[key] ?: map.entries.firstOrNull { (it.key as? String) == key }?.value
+        return value as? List<*>
     }
 
     fun getStringFromAny(obj: Any?, key: String): String? {
         val map = obj as? Map<*, *> ?: return null
-        return (map[key] as? String) 
-            ?: (map.entries.firstOrNull { (it.key as? String) == key }?.value as? String)
+        val value = map[key] ?: map.entries.firstOrNull { (it.key as? String) == key }?.value
+        return value as? String ?: value?.toString()
     }
 
     fun extractUrlFromLockup(lockup: Map<*, *>?): String? {
@@ -387,10 +393,10 @@ class YoutubeProvider(
                 ?: obj.getString("text")
                 ?: obj.getString("content")
                 ?: obj.getString("label")
-                ?: obj.getListKey("runs")?.joinToString("") { run ->
+                ?: (obj.getListKey("runs") ?: YoutubeUtils.getListKeyFromAny(obj, "runs"))?.joinToString("") { run ->
                     when (run) {
                         is String -> run
-                        is Map<*, *> -> run.getString("text")
+                        is Map<*, *> -> (run["text"] as? String)
                             ?: run.getString("simpleText")
                             ?: ""
 
@@ -1430,24 +1436,39 @@ class YoutubeProvider(
     private fun findPlaylistMetadataRecursive(obj: Any?, metadata: PlaylistMetadata) {
         if (obj == null) return
         if (obj is Map<*, *>) {
-            // 1. playlistSidebarPrimaryInfoRenderer 구조
+            val keys = obj.keys.map { it.toString() }
+            
+            // 개발자 요소 트래킹 로그 전방위 배치
+            if (keys.contains("playlistId") || keys.contains("playlistPanelRenderer") || keys.contains("playlistSidebarPrimaryInfoRenderer")) {
+                println("[YT_DEBUG] [Recursive-Scan] 재생목록 핵심 키셋 식별: $keys")
+                for (k in keys) {
+                    val v = obj[k] ?: obj.entries.firstOrNull { it.key.toString() == k }?.value
+                    if (v is String || v is Number || v is Boolean) {
+                        println("[YT_DEBUG]   -> [$k] = '$v'")
+                    } else if (v is Map<*, *>) {
+                        println("[YT_DEBUG]   -> [$k] (Map, 서브 키 세트: ${v.keys})")
+                    }
+                }
+            }
+
+            // 1. playlistSidebarPrimaryInfoRenderer 구조 (일반 재생목록 정보)
             val primary = YoutubeUtils.getMapKeyFromAny(obj, "playlistSidebarPrimaryInfoRenderer")
             if (primary != null) {
-                val t = getText(YoutubeUtils.getMapKeyFromAny(primary, "title") ?: primary["title"])
+                val t = getText(primary["title"] ?: YoutubeUtils.getMapKeyFromAny(primary, "title"))
                 if (t.isNotBlank()) {
                     metadata.title = t
                     println("[YT_DEBUG] [Recursive] Found playlistSidebarPrimaryInfoRenderer. Title: '$t'")
                 }
-                val d = getText(YoutubeUtils.getMapKeyFromAny(primary, "description") ?: primary["description"])
+                val d = getText(primary["description"] ?: YoutubeUtils.getMapKeyFromAny(primary, "description"))
                 if (d.isNotBlank()) metadata.description = d
             }
 
-            // 2. playlistSidebarSecondaryInfoRenderer 구조
+            // 2. playlistSidebarSecondaryInfoRenderer 구조 (일반 재생목록 소유자 정보)
             val secondary = YoutubeUtils.getMapKeyFromAny(obj, "playlistSidebarSecondaryInfoRenderer")
             if (secondary != null) {
                 val owner = YoutubeUtils.getMapKeyFromAny(secondary, "videoOwner")?.let { YoutubeUtils.getMapKeyFromAny(it, "videoOwnerRenderer") }
                 if (owner != null) {
-                    val a = getText(YoutubeUtils.getMapKeyFromAny(owner, "title") ?: owner["title"])
+                    val a = getText(owner["title"] ?: YoutubeUtils.getMapKeyFromAny(owner, "title"))
                     if (a.isNotBlank()) {
                         metadata.author = a
                         println("[YT_DEBUG] [Recursive] Found playlistSidebarSecondaryInfoRenderer. Author: '$a'")
@@ -1455,41 +1476,41 @@ class YoutubeProvider(
                 }
             }
 
-            // 3. playlistHeaderRenderer 구조
+            // 3. playlistHeaderRenderer 구조 (대체용 사양)
             val header = YoutubeUtils.getMapKeyFromAny(obj, "playlistHeaderRenderer")
             if (header != null) {
-                val t = getText(YoutubeUtils.getMapKeyFromAny(header, "title") ?: header["title"])
+                val t = getText(header["title"] ?: YoutubeUtils.getMapKeyFromAny(header, "title"))
                 if (t.isNotBlank()) metadata.title = t
                 val ownerText = YoutubeUtils.getMapKeyFromAny(header, "ownerText")
                 if (ownerText != null) {
                     val a = getText(ownerText)
                     if (a.isNotBlank()) metadata.author = a
                 }
-                val d = getText(YoutubeUtils.getMapKeyFromAny(header, "description") ?: header["description"])
+                val d = getText(header["description"] ?: YoutubeUtils.getMapKeyFromAny(header, "description"))
                 if (d.isNotBlank()) metadata.description = d
                 println("[YT_DEBUG] [Recursive] Found playlistHeaderRenderer. Title: '${metadata.title}', Author: '${metadata.author}'")
             }
 
-            // 4. playlistPanelRenderer 구조 (Watch 재생 화면 내 동적 재생목록)
+            // 4. playlistPanelRenderer 구조 (Watch 화면 통합 재생목록)
             val panel = YoutubeUtils.getMapKeyFromAny(obj, "playlistPanelRenderer")
             if (panel != null) {
-                val t = getText(YoutubeUtils.getMapKeyFromAny(panel, "titleText") ?: panel["titleText"])
-                    .ifBlank { getText(YoutubeUtils.getMapKeyFromAny(panel, "title") ?: panel["title"]) }
+                val t = getText(panel["titleText"] ?: YoutubeUtils.getMapKeyFromAny(panel, "titleText"))
+                    .ifBlank { getText(panel["title"] ?: YoutubeUtils.getMapKeyFromAny(panel, "title")) }
                 if (t.isNotBlank()) {
                     metadata.title = t
                     println("[YT_DEBUG] [Recursive] Found playlistPanelRenderer. Title: '$t'")
                 }
                 
-                val a = getText(YoutubeUtils.getMapKeyFromAny(panel, "shortBylineText") ?: panel["shortBylineText"])
-                    .ifBlank { getText(YoutubeUtils.getMapKeyFromAny(panel, "longBylineText") ?: panel["longBylineText"]) }
-                    .ifBlank { getText(YoutubeUtils.getMapKeyFromAny(panel, "ownerName") ?: panel["ownerName"]) }
+                val a = getText(panel["shortBylineText"] ?: YoutubeUtils.getMapKeyFromAny(panel, "shortBylineText"))
+                    .ifBlank { getText(panel["longBylineText"] ?: YoutubeUtils.getMapKeyFromAny(panel, "longBylineText")) }
+                    .ifBlank { getText(panel["ownerName"] ?: YoutubeUtils.getMapKeyFromAny(panel, "ownerName")) }
                 if (a.isNotBlank()) {
                     metadata.author = a
                     println("[YT_DEBUG] [Recursive] Found playlistPanelRenderer. Author: '$a'")
                 }
             }
 
-            // 5. playlistMetadataRenderer 구조 (일부 단독 일반 재생목록)
+            // 5. playlistMetadataRenderer 구조 (일부 예외 단독 일반 재생목록)
             val metaRenderer = YoutubeUtils.getMapKeyFromAny(obj, "playlistMetadataRenderer")
             if (metaRenderer != null) {
                 val t = YoutubeUtils.getStringFromAny(metaRenderer, "title") ?: getText(YoutubeUtils.getMapKeyFromAny(metaRenderer, "title"))
@@ -1501,10 +1522,27 @@ class YoutubeProvider(
                 if (!d.isNullOrBlank()) metadata.description = d
             }
 
-            for (value in obj.values) {
-                if (value is Map<*, *> || value is List<*>) {
-                    findPlaylistMetadataRecursive(value, metadata)
+            // 🚀 [Failsafe 리커시브 매핑 추가] 
+            // JVM 형변환 지우개 오류로 인해 렌더러 Wrapper 키("playlistPanelRenderer") 조회가 차단되거나 누락된 상태에서, 
+            // 노드가 직접 재생목록 요소를 보유하고 있는 경우 Failsafe 역추출 적용
+            if (keys.contains("playlistId") && (keys.contains("titleText") || keys.contains("title"))) {
+                val t = getText(obj["titleText"] ?: YoutubeUtils.getMapKeyFromAny(obj, "titleText"))
+                    .ifBlank { getText(obj["title"] ?: YoutubeUtils.getMapKeyFromAny(obj, "title")) }
+                if (t.isNotBlank() && metadata.title.isBlank()) {
+                    metadata.title = t
+                    println("[YT_DEBUG] [Recursive-Failsafe] Found direct playlist body. Title: '$t'")
                 }
+                val a = getText(obj["shortBylineText"] ?: YoutubeUtils.getMapKeyFromAny(obj, "shortBylineText"))
+                    .ifBlank { getText(obj["longBylineText"] ?: YoutubeUtils.getMapKeyFromAny(obj, "longBylineText")) }
+                    .ifBlank { getText(obj["ownerName"] ?: YoutubeUtils.getMapKeyFromAny(obj, "ownerName")) }
+                if (a.isNotBlank() && metadata.author.isBlank()) {
+                    metadata.author = a
+                    println("[YT_DEBUG] [Recursive-Failsafe] Found direct playlist body. Author: '$a'")
+                }
+            }
+
+            for (value in obj.values) {
+                findPlaylistMetadataRecursive(value, metadata)
             }
         } else if (obj is List<*>) {
             for (item in obj) {
@@ -1884,7 +1922,7 @@ class YoutubeProvider(
                 val data = extractYtInitialData(html) ?: throw ErrorLoadingException("Failed to extract playlist data")
                 println("[YT_DEBUG] Playlist initialData successfully parsed.")
 
-                // 🚀 [디버그 프린트 보강] 요소 확인을 위한 정밀 디버그 로그 곳곳에 배치
+                // 디버깅 보완: 이너튜브 키 세트 추적 디버그 로그 배치
                 println("[YT_DEBUG] [load] playlist_browse 시작됨. 데이터 탑레벨 키 세트: ${data.keys}")
                 if (data.containsKey("sidebar")) {
                     println("[YT_DEBUG] [load] 루트 레벨 sidebar 키 탐지됨")
@@ -1897,7 +1935,7 @@ class YoutubeProvider(
                     println("[YT_DEBUG] [load] contents 키 탐지됨. 하위 키 목록: ${contentsObj?.keys}")
                 }
 
-                // 🚀 [해결] 이중 계층 구조를 완벽하게 정복하는 리커시브 탐색 실행
+                // 🚀 [보완] 리커시브 탐색 실행
                 val playlistMeta = PlaylistMetadata()
                 findPlaylistMetadataRecursive(data, playlistMeta)
 
