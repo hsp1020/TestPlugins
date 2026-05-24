@@ -15,12 +15,12 @@ import org.schabi.newpipe.extractor.services.youtube.linkHandler.YoutubeStreamLi
 import org.schabi.newpipe.extractor.stream.SubtitlesStream
 import java.io.BufferedReader
 import java.io.InputStreamReader
-import java.io.PrintWriter
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URLDecoder
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 
 open class YoutubeExtractor : ExtractorApi() {
@@ -29,8 +29,9 @@ open class YoutubeExtractor : ExtractorApi() {
     override val name = "YouTube"
 
     companion object {
-        private var ytVideos: MutableMap<String, List<ExtractorLink>> = mutableMapOf()
-        private var ytVideosSubtitles: MutableMap<String, List<SubtitlesStream>> = mutableMapOf()
+        // 경쟁 상태(Race Condition) 방지를 위해 스레드 세이프 맵으로 고도화
+        private val ytVideos = ConcurrentHashMap<String, List<ExtractorLink>>()
+        private val ytVideosSubtitles = ConcurrentHashMap<String, List<SubtitlesStream>>()
 
         private var activeServer: ServerSocket? = null
         private var serverPort: Int = 0
@@ -38,6 +39,14 @@ open class YoutubeExtractor : ExtractorApi() {
 
         // 403 에러 방지를 위한 iOS 클라이언트 전용 User-Agent
         private const val IOS_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
+
+        // 핫 스폿 내부 정규식 컴파일 최소화
+        private val FMT_REGEX = Regex("&fmt=[^&]+")
+
+        // 로컬 루프백 통신 전용 경량화 데몬 스레드 풀 할당 (원시 스레드 생성 누수 해결)
+        private val serverExecutor = Executors.newFixedThreadPool(4) { runnable ->
+            Thread(runnable, "YT-LocalServer-Worker").apply { isDaemon = true }
+        }
 
         init {
             YoutubeStreamExtractor.setFetchIosClient(true)
@@ -101,7 +110,6 @@ open class YoutubeExtractor : ExtractorApi() {
 
                         val label = buildVideoLabelNumber(vs)
                         val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
-                        
 
                         var mime = vs.format?.mimeType
                         if (mime.isNullOrEmpty()) mime = getMimeTypeFromUrl(streamUrl, false)
@@ -181,7 +189,6 @@ open class YoutubeExtractor : ExtractorApi() {
                                         ) {
                                             this.referer = mainUrl
                                             this.quality = video.height
-                                            // ✅ 1분 튕김 방지: iOS User-Agent 및 Origin 헤더 강제 주입
                                             this.headers = mapOf(
                                                 "User-Agent" to IOS_USER_AGENT,
                                                 "Origin" to "https://www.youtube.com",
@@ -212,7 +219,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         newExtractorLink(this.name, "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
                             this.referer = mainUrl
                             this.quality = mHeight
-                            // ✅ 1분 튕김 방지: iOS User-Agent 및 Origin 헤더 강제 주입
                             this.headers = mapOf(
                                 "User-Agent" to IOS_USER_AGENT,
                                 "Origin" to "https://www.youtube.com",
@@ -249,7 +255,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 var url = ss.content ?: ss.getUrl() ?: return@mapNotNull null
                 
                 if (url.startsWith("http")) {
-                    url = url.replace(Regex("&fmt=[^&]+"), "")
+                    url = url.replace(FMT_REGEX, "")
                     if (!url.contains("fmt=srt")) {
                         url = "$url&fmt=srt"
                     }
@@ -261,7 +267,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 null 
             }
         }?.forEach { subtitleCallback(it) }        
-        
     }
 
     @Synchronized
@@ -275,13 +280,13 @@ open class YoutubeExtractor : ExtractorApi() {
             activeServer = ServerSocket(0)
             serverPort = activeServer!!.localPort
             println("[YT_DEBUG] [startServerIfNeeded] 가상 포트 $serverPort 에 리스너 바인딩 성공")
-            thread {
+            thread(name = "YT-ServerSocket-Acceptor", isDaemon = true) {
                 println("[YT_DEBUG] [ServerSocket-Thread] accept() 대기 루프 스레드를 시작합니다.")
                 try {
                     while (activeServer != null && !activeServer!!.isClosed) {
                         val client = activeServer!!.accept()
                         println("[YT_DEBUG] [ServerSocket-Thread] ExoPlayer로부터 로컬 서버로 미디어 요청 감지됨: ${client.remoteSocketAddress}")
-                        thread { handleClient(client) }
+                        serverExecutor.submit { handleClient(client) }
                     }
                 } catch (e: Exception) {
                     println("[YT_DEBUG] [ServerSocket-Thread] accept() 대기 동작 중 오류 발생: ${e.message}")
@@ -305,9 +310,10 @@ open class YoutubeExtractor : ExtractorApi() {
     private fun handleClient(client: Socket) {
         println("[YT_DEBUG] [handleClient] 요청 연결 처리 시작: ${client.remoteSocketAddress}")
         try {
+            client.soTimeout = 5000 // Slow-loris 행 차단용 소켓 타임아웃
             client.use { socket ->
-                val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
-                val output = PrintWriter(socket.getOutputStream(), true)
+                val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
+                val output = java.io.BufferedWriter(java.io.OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8))
                 val line = reader.readLine()
                 println("[YT_DEBUG] [handleClient] HTTP 요청: $line")
                 if (line != null && line.startsWith("GET")) {
@@ -318,16 +324,17 @@ open class YoutubeExtractor : ExtractorApi() {
                         val content = manifestMap[path]
                         if (content != null) {
                             println("[YT_DEBUG] [handleClient] 가상 MPD UUID($path)를 발견하여 DASH XML을 반환합니다. (XML 길이: ${content.length})")
-                            output.println("HTTP/1.1 200 OK")
-                            output.println("Content-Type: application/dash+xml")
-                            output.println("Connection: close")
-                            output.println("Access-Control-Allow-Origin: *")
-                            output.println("")
-                            output.println(content)
+                            output.write("HTTP/1.1 200 OK\r\n")
+                            output.write("Content-Type: application/dash+xml\r\n")
+                            output.write("Connection: close\r\n")
+                            output.write("Access-Control-Allow-Origin: *\r\n")
+                            output.write("\r\n")
+                            output.write(content)
+                            output.flush()
                         } else {
                             println("[YT_DEBUG] [handleClient] 에러: 메모리에 매칭되는 가상 MPD가 없습니다. UUID: $path (404 반환)")
-                            output.println("HTTP/1.1 404 Not Found")
-                            output.println("")
+                            output.write("HTTP/1.1 404 Not Found\r\n\r\n")
+                            output.flush()
                         }
                     }
                 }
@@ -345,25 +352,24 @@ open class YoutubeExtractor : ExtractorApi() {
         val cleanVideoUrl = escapeXml(video.url)
         val durationString = "PT${durationSec}S"
 
-        val sb = StringBuilder()
-        sb.append("""<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011" type="static" minBufferTime="PT5.0S" mediaPresentationDuration="$durationString">""")
+        // trimIndent() 처리 단계의 런타임 연산을 완전히 제거하고, 버퍼링 빌더에 즉시 삽입 (메모리 확보 최적화)
+        val sb = StringBuilder(2048)
+        sb.append("<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" profiles=\"urn:mpeg:dash:profile:isoff-on-demand:2011\" type=\"static\" minBufferTime=\"PT5.0S\" mediaPresentationDuration=\"").append(durationString).append("\">")
         sb.append("<Period>")
 
         val vMime = video.mimeType
         val vCodecs = if (vMime.contains("webm")) "vp9" else "avc1.4d401f"
 
         val vSegmentBase = if (video.initRange != null && video.indexRange != null) {
-            """<SegmentBase indexRange="${video.indexRange}"><Initialization range="${video.initRange}" /></SegmentBase>"""
+            "<SegmentBase indexRange=\"${video.indexRange}\"><Initialization range=\"${video.initRange}\" /></SegmentBase>"
         } else ""
 
-        sb.append("""
-            <AdaptationSet mimeType="$vMime" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
-              <Representation id="video" bandwidth="4000000" width="0" height="${video.height}" codecs="$vCodecs">
-                <BaseURL>$cleanVideoUrl</BaseURL>
-                $vSegmentBase
-              </Representation>
-            </AdaptationSet>
-        """.trimIndent())
+        sb.append("<AdaptationSet mimeType=\"").append(vMime).append("\" subsegmentAlignment=\"true\" subsegmentStartsWithSAP=\"1\">")
+        sb.append("<Representation id=\"video\" bandwidth=\"4000000\" width=\"0\" height=\"").append(video.height).append("\" codecs=\"").append(vCodecs).append("\">")
+        sb.append("<BaseURL>").append(cleanVideoUrl).append("</BaseURL>")
+        sb.append(vSegmentBase)
+        sb.append("</Representation>")
+        sb.append("</AdaptationSet>")
 
         audioList.forEachIndexed { index, audio ->
             val cleanAudioUrl = escapeXml(audio.url)
@@ -372,17 +378,17 @@ open class YoutubeExtractor : ExtractorApi() {
             val aCodecs = if (aMime.contains("webm")) "opus" else "mp4a.40.2"
 
             val aSegmentBase = if (audio.initRange != null && audio.indexRange != null) {
-                """<SegmentBase indexRange="${audio.indexRange}"><Initialization range="${audio.initRange}" /></SegmentBase>"""
+                "<SegmentBase indexRange=\"${audio.indexRange}\"><Initialization range=\"${audio.initRange}\" /></SegmentBase>"
             } else ""
 
-            sb.append("""
-                <AdaptationSet mimeType="$aMime" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
-                  <Representation id="$audioId" bandwidth="${if(audio.bitrate>0) audio.bitrate else 128000}" codecs="$aCodecs">
-                    <BaseURL>$cleanAudioUrl</BaseURL>
-                    $aSegmentBase
-                  </Representation>
-                </AdaptationSet>
-            """.trimIndent())
+            val aBandwidth = if (audio.bitrate > 0) audio.bitrate else 128000
+
+            sb.append("<AdaptationSet mimeType=\"").append(aMime).append("\" subsegmentAlignment=\"true\" subsegmentStartsWithSAP=\"1\">")
+            sb.append("<Representation id=\"").append(audioId).append("\" bandwidth=\"").append(aBandwidth).append("\" codecs=\"").append(aCodecs).append("\">")
+            sb.append("<BaseURL>").append(cleanAudioUrl).append("</BaseURL>")
+            sb.append(aSegmentBase)
+            sb.append("</Representation>")
+            sb.append("</AdaptationSet>")
         }
 
         sb.append("</Period>")
@@ -391,18 +397,18 @@ open class YoutubeExtractor : ExtractorApi() {
     }
 
     private fun escapeXml(url: String): String {
+        if (!url.contains('&') && !url.contains('<')) return url
         return url.replace("&", "&amp;").replace("<", "&gt;")
     }
 
     private fun getMimeTypeFromUrl(url: String, isAudio: Boolean): String {
-        return try {
-            val decoded = URLDecoder.decode(url, "UTF-8")
-            if (decoded.contains("video/webm") || decoded.contains("audio/webm")) {
-                if (isAudio) "audio/webm" else "video/webm"
-            } else {
-                if (isAudio) "audio/mp4" else "video/mp4"
-            }
-        } catch (e: Exception) { if (isAudio) "audio/mp4" else "video/mp4" }
+        // 무겁고 가비지 수집을 동반하는 URLDecoder 전체 디코딩 연산을 회피하고 고속 검색 매칭 처리
+        val hasWebm = url.contains("webm", ignoreCase = true) || url.contains("video%2Fwebm", ignoreCase = true) || url.contains("audio%2Fwebm", ignoreCase = true)
+        return if (hasWebm) {
+            if (isAudio) "audio/webm" else "video/webm"
+        } else {
+            if (isAudio) "audio/mp4" else "video/mp4"
+        }
     }
 
     private fun buildVideoLabelNumber(vs: org.schabi.newpipe.extractor.stream.VideoStream): String {
