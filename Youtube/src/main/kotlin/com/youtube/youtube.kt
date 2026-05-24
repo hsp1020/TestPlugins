@@ -20,7 +20,6 @@ import androidx.preference.PreferenceManager
 import com.lagradost.cloudstream3.ar.youtube.YoutubeProvider.Config.SLEEP_BETWEEN
 import java.util.concurrent.ConcurrentHashMap
 
-// [공통 아키텍처 브릿지] 교차 중복 코드 제거 및 유지보수 단일화를 위한 유틸리티
 object YoutubeUtils {
     const val CHROME_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
     const val SAFARI_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
@@ -34,6 +33,9 @@ object YoutubeUtils {
     val YT_ID_REGEX = Regex("""(?:v=|\/videos\/|embed\/|youtu\.be\/|shorts\/)([A-Za-z0-9_-]{11})""")
     val MIX_TITLE_REPLACE_KO = Regex("""\s*\(믹스\s*재생목록\)""", RegexOption.IGNORE_CASE)
     val MIX_TITLE_REPLACE_EN = Regex("""\s*\(Mix\s*Playlist\)""", RegexOption.IGNORE_CASE)
+
+    // 동적 컴파일 Regex 부하를 줄이기 위한 내부 캐시
+    private val regexCache = ConcurrentHashMap<String, Regex>()
 
     fun sha1(input: String): String {
         val md = sha1Digest.get()
@@ -93,7 +95,10 @@ object YoutubeUtils {
 
     fun findConfig(html: String, key: String): String? {
         return try {
-            Regex("\"$key\"\\s*:\\s*\"([^\"]+)\"").find(html)?.groupValues?.getOrNull(1)
+            val regex = regexCache.computeIfAbsent(key) { k ->
+                Regex("\"$k\"\\s*:\\s*\"([^\"]+)\"")
+            }
+            regex.find(html)?.groupValues?.getOrNull(1)
         } catch (e: Exception) {
             null
         }
@@ -228,12 +233,16 @@ class YoutubeProvider(
         private val homeShorts = mutableListOf<Episode>()
         private val searchShorts = mutableListOf<Episode>()
 
+        // SharedPreferences 연속 I/O 병목을 해결하기 위한 인메모리 캐시 맵
+        private val continuationTokenCache = ConcurrentHashMap<String, String>()
+
         private val VIEW_REPLACE_REGEX = Regex("조회수|views|مشاهدة|시청 중|시청중|watching|명|시청자")
         private val VIEW_FORMAT_REGEX = Regex(".*[천만억KMBkmb].*")
         private val METADATA_VIEW_REGEX = Regex(".*(\\d+[KMBkmb]|views|조회수|회|시청|watching|مشاهدة|명|시청자|مشاهد).*")
         private val METADATA_SKIP_REGEX = Regex(".*(\\d+:\\d+|ago|قبل|전|시간|분|일|주|개월|년|시청|watching).*")
         private val SUBSCRIBER_REGEX = Regex(".*(구독자|subscribers|명|K|M|B|sub).*\\s*", RegexOption.IGNORE_CASE)
         private val SUBSCRIBER_REPLACE_REGEX = Regex("(구독자|subscribers?)\\s*", RegexOption.IGNORE_CASE)
+        private val API_KEY_EXTRACT_REGEX = Regex(""""INNERTUBE_API_KEY":"([^"]+)"""")
     }
 
     private var isSearchContext = false
@@ -354,7 +363,13 @@ class YoutubeProvider(
     
     private fun getSavedContinuationToken(key: String): String? {
         val hashedKey = YoutubeUtils.sha1(key)
+        val cached = continuationTokenCache[hashedKey]
+        if (cached != null) return cached
+        
         val token = appPrefs?.getString("cont_token_$hashedKey", null)
+        if (token != null) {
+            continuationTokenCache[hashedKey] = token
+        }
         println("[YT_DEBUG] getSavedContinuationToken for key '$key' (hash: $hashedKey) -> '$token'")
         return token
     }
@@ -363,9 +378,15 @@ class YoutubeProvider(
         val hashedKey = YoutubeUtils.sha1(key)
         println("[YT_DEBUG] saveContinuationToken for key '$key' (hash: $hashedKey) -> '$token'")
         if (token.isNullOrBlank()) {
-            appPrefs?.edit()?.remove("cont_token_$hashedKey")?.apply()
+            val removed = continuationTokenCache.remove(hashedKey)
+            if (removed != null) {
+                appPrefs?.edit()?.remove("cont_token_$hashedKey")?.apply()
+            }
         } else {
-            appPrefs?.edit()?.putString("cont_token_$hashedKey", token)?.apply()
+            val oldToken = continuationTokenCache.put(hashedKey, token)
+            if (oldToken != token) {
+                appPrefs?.edit()?.putString("cont_token_$hashedKey", token)?.apply()
+            }
         }
     }
 
@@ -778,7 +799,7 @@ class YoutubeProvider(
         playlistMode: Boolean,
         depth: Int = 0
     ) {
-        if (data == null) return
+        if (data == null || depth > 32) return // Stack Overflow 방지용 Depth 안전 보호막
         if (data is Map<*, *>) {
             if (depth < 3) {
                 println("[YT_DEBUG] processRecursive Map keys at depth $depth: ${data.keys.take(10)}")
@@ -1221,7 +1242,11 @@ class YoutubeProvider(
         println("[YT_DEBUG] getMainPage completed. Extracted count: ${results.size}, hasNext: ${!nextContinuation.isNullOrBlank()}")
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
     }
-    
+
+
+    // 정규식 오버헤드를 막기 위한 클래스 레벨 정적/인스턴스 캐시
+    private val m3u8TagRegexCache = ConcurrentHashMap<String, Regex>()
+    private val YTCFG_REGEX = Regex("""ytcfg\.set\(\s*(\{.*?\})\s*\)\s*;""", RegexOption.DOT_MATCHES_ALL)
 
     override suspend fun search(query: String): List<SearchResponse> {
         return search(query, 1)?.items ?: emptyList()
@@ -1262,8 +1287,8 @@ class YoutubeProvider(
                 println("[YT_DEBUG] Search GET url: $url")
                 val html = app.get(url, interceptor = ytInterceptor).text
 
-                val regexKey = Regex(""""INNERTUBE_API_KEY":"([^"]+)"""")
-                savedApiKey = regexKey.find(html)?.groupValues?.get(1)
+                // Part A에서 companion object에 기재된 정적 캐시 정규식을 활용하여 중복 컴파일 제거
+                savedApiKey = API_KEY_EXTRACT_REGEX.find(html)?.groupValues?.get(1)
                 savedVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA")
                 println("[YT_DEBUG] Search HTML parsed. apiKey=$savedApiKey, visitorData=$savedVisitorData")
 
@@ -1363,7 +1388,7 @@ class YoutubeProvider(
         println("[YT_DEBUG] Starting extractPlaylistEpisodes. data type: ${data?.javaClass?.name}")
         
         fun recurse(node: Any?, depth: Int = 0) {
-            if (node == null) return
+            if (node == null || depth > 32) return
             if (node is Map<*, *>) {
                 if (depth < 4) {
                     println("[YT_DEBUG] recurse Map keys at depth $depth: ${node.keys.take(10)}")
@@ -1435,12 +1460,11 @@ class YoutubeProvider(
         var subscriberCount: String = ""
     }
 
-    private fun findPlaylistMetadataRecursive(obj: Any?, metadata: PlaylistMetadata) {
-        if (obj == null) return
+    private fun findPlaylistMetadataRecursive(obj: Any?, metadata: PlaylistMetadata, depth: Int = 0) {
+        if (obj == null || depth > 32) return
         if (obj is Map<*, *>) {
             val keys = obj.keys.map { it.toString() }
             
-            // 개발자 요소 트래킹 로그 전방위 배치
             if (keys.contains("playlistId") || keys.contains("playlistPanelRenderer") || keys.contains("playlistSidebarPrimaryInfoRenderer")) {
                 println("[YT_DEBUG] [Recursive-Scan] 재생목록 핵심 키셋 식별: $keys")
                 for (k in keys) {
@@ -1453,7 +1477,6 @@ class YoutubeProvider(
                 }
             }
 
-            // 1. playlistSidebarPrimaryInfoRenderer 구조 (일반 재생목록 정보)
             val primary = YoutubeUtils.getMapKeyFromAny(obj, "playlistSidebarPrimaryInfoRenderer")
             if (primary != null) {
                 val t = getText(primary["title"] ?: YoutubeUtils.getMapKeyFromAny(primary, "title"))
@@ -1465,7 +1488,6 @@ class YoutubeProvider(
                 if (d.isNotBlank()) metadata.description = d
             }
 
-            // 2. playlistSidebarSecondaryInfoRenderer 구조 (일반 재생목록 소유자 정보)
             val secondary = YoutubeUtils.getMapKeyFromAny(obj, "playlistSidebarSecondaryInfoRenderer")
             if (secondary != null) {
                 val owner = YoutubeUtils.getMapKeyFromAny(secondary, "videoOwner")?.let { YoutubeUtils.getMapKeyFromAny(it, "videoOwnerRenderer") }
@@ -1478,7 +1500,6 @@ class YoutubeProvider(
                 }
             }
 
-            // 3. playlistHeaderRenderer 구조 (대체용 사양)
             val header = YoutubeUtils.getMapKeyFromAny(obj, "playlistHeaderRenderer")
             if (header != null) {
                 val t = getText(header["title"] ?: YoutubeUtils.getMapKeyFromAny(header, "title"))
@@ -1493,7 +1514,6 @@ class YoutubeProvider(
                 println("[YT_DEBUG] [Recursive] Found playlistHeaderRenderer. Title: '${metadata.title}', Author: '${metadata.author}'")
             }
 
-            // 4. playlistPanelRenderer 구조 (Watch 화면 통합 재생목록)
             val panel = YoutubeUtils.getMapKeyFromAny(obj, "playlistPanelRenderer")
             if (panel != null) {
                 val t = getText(panel["titleText"] ?: YoutubeUtils.getMapKeyFromAny(panel, "titleText"))
@@ -1512,7 +1532,6 @@ class YoutubeProvider(
                 }
             }
 
-            // 5. playlistMetadataRenderer 구조 (일부 예외 단독 일반 재생목록)
             val metaRenderer = YoutubeUtils.getMapKeyFromAny(obj, "playlistMetadataRenderer")
             if (metaRenderer != null) {
                 val t = YoutubeUtils.getStringFromAny(metaRenderer, "title") ?: getText(YoutubeUtils.getMapKeyFromAny(metaRenderer, "title"))
@@ -1524,9 +1543,6 @@ class YoutubeProvider(
                 if (!d.isNullOrBlank()) metadata.description = d
             }
 
-            // [Failsafe 리커시브 매핑 추가] 
-            // JVM 형변환 지우개 오류로 인해 렌더러 Wrapper 키("playlistPanelRenderer") 조회가 차단되거나 누락된 상태에서, 
-            // 노드가 직접 재생목록 요소를 보유하고 있는 경우 Failsafe 역추출 적용
             if (keys.contains("playlistId") && (keys.contains("titleText") || keys.contains("title"))) {
                 val t = getText(obj["titleText"] ?: YoutubeUtils.getMapKeyFromAny(obj, "titleText"))
                     .ifBlank { getText(obj["title"] ?: YoutubeUtils.getMapKeyFromAny(obj, "title")) }
@@ -1543,7 +1559,6 @@ class YoutubeProvider(
                 }
             }
 
-            // [구독자 수 및 채널 부가 정보 수집] videoOwnerRenderer 노드가 감지되는 경우 구독자 수 및 추가 메타데이터 수집
             val ownerRenderer = obj["videoOwnerRenderer"] as? Map<*, *>
                 ?: YoutubeUtils.getMapKeyFromAny(obj, "videoOwnerRenderer")
             if (ownerRenderer != null) {
@@ -1558,21 +1573,19 @@ class YoutubeProvider(
                     ?.let { YoutubeUtils.getStringFromAny(it, "browseId") }
                 if (!browseId.isNullOrBlank()) metadata.channelId = browseId
                 
-                // 실제 비디오 업로더의 공식 채널명을 수집하여 보존
                 val vAuth = getText(ownerRenderer["title"] ?: YoutubeUtils.getMapKeyFromAny(ownerRenderer, "title"))
                 if (vAuth.isNotBlank()) {
                     metadata.videoAuthor = vAuth
                 }
-
                 println("[YT_DEBUG] [Recursive] Found videoOwnerRenderer. VideoAuthor: '$vAuth', SubCount: '$sub', Avatar: '$avatar', ChannelId: '$browseId'")
             }
 
             for (value in obj.values) {
-                findPlaylistMetadataRecursive(value, metadata)
+                findPlaylistMetadataRecursive(value, metadata, depth + 1)
             }
         } else if (obj is List<*>) {
             for (item in obj) {
-                findPlaylistMetadataRecursive(item, metadata)
+                findPlaylistMetadataRecursive(item, metadata, depth + 1)
             }
         }
     }
@@ -1699,24 +1712,26 @@ class YoutubeProvider(
 
                 val allEpisodes = mutableListOf<Episode>()
 
-                fun findContinuationItemsRecursive(obj: Any?): List<*>? {
+                // stack overflow 방지 및 안전 무제한 깊이 재귀 해소
+                fun findContinuationItemsRecursive(obj: Any?, depth: Int = 0): List<*>? {
+                    if (obj == null || depth > 32) return null
                     when (obj) {
                         is Map<*, *> -> {
                             if (obj.containsKey("continuationItems")) return obj["continuationItems"] as? List<*>
                             val keysToTry = listOf("onResponseReceivedActions", "onResponseReceivedEndpoints", "onResponseReceivedCommands", "onResponseReceivedResults", "continuationContents")
                             for (k in keysToTry) {
                                 val v = obj[k]
-                                val r = findContinuationItemsRecursive(v)
+                                val r = findContinuationItemsRecursive(v, depth + 1)
                                 if (r != null) return r
                             }
                             for (v in obj.values) {
-                                val r = findContinuationItemsRecursive(v)
+                                val r = findContinuationItemsRecursive(v, depth + 1)
                                 if (r != null) return r
                             }
                         }
                         is List<*> -> {
                             for (i in obj) {
-                                val r = findContinuationItemsRecursive(i)
+                                val r = findContinuationItemsRecursive(i, depth + 1)
                                 if (r != null) return r
                             }
                         }
@@ -1727,7 +1742,8 @@ class YoutubeProvider(
                 fun extractVideosFromItems(items: List<*>, collectTo: MutableList<Episode>) {
                     println("[YT_CHANNEL_DEBUG] extractVideosFromItems() 호출됨. 분석할 아이템 개수: ${items.size}")
                     
-                    fun findAllRenderers(obj: Any?, targetKeys: List<String>, results: MutableList<Map<*,*>>) {
+                    fun findAllRenderers(obj: Any?, targetKeys: List<String>, results: MutableList<Map<*,*>>, depth: Int = 0) {
+                        if (obj == null || depth > 32) return
                         when (obj) {
                             is Map<*, *> -> {
                                 for (key in targetKeys) {
@@ -1737,12 +1753,12 @@ class YoutubeProvider(
                                     }
                                 }
                                 for (value in obj.values) {
-                                    findAllRenderers(value, targetKeys, results)
+                                    findAllRenderers(value, targetKeys, results, depth + 1)
                                 }
                             }
                             is List<*> -> {
                                 for (item in obj) {
-                                    findAllRenderers(item, targetKeys, results)
+                                    findAllRenderers(item, targetKeys, results, depth + 1)
                                 }
                             }
                         }
@@ -1888,9 +1904,9 @@ class YoutubeProvider(
                 println("[YT_DEBUG] 페이지네이션 토큰 발견 여부: ${currentToken != null}")
 
                 var pagesFetchedLocal = 1
-                val maxPages = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
+                val maxPagesLimit = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
 
-                while (!currentToken.isNullOrBlank() && pagesFetchedLocal < maxPages && !apiKey.isNullOrBlank()) {
+                while (!currentToken.isNullOrBlank() && pagesFetchedLocal < maxPagesLimit && !apiKey.isNullOrBlank()) {
                     try {
                         pagesFetchedLocal += 1
                         val apiUrl = "https://www.youtube.com/youtubei/v1/browse?key=$apiKey"
@@ -1948,7 +1964,6 @@ class YoutubeProvider(
                 val data = extractYtInitialData(html) ?: throw ErrorLoadingException("Failed to extract playlist data")
                 println("[YT_DEBUG] Playlist initialData successfully parsed.")
 
-                // 디버깅 보강: 이너튜브 키 세트 추적 디버그 로그 배치
                 println("[YT_DEBUG] [load] playlist_browse 시작됨. 데이터 탑레벨 키 세트: ${data.keys}")
                 if (data.containsKey("sidebar")) {
                     println("[YT_DEBUG] [load] 루트 레벨 sidebar 키 탐지됨")
@@ -1961,11 +1976,9 @@ class YoutubeProvider(
                     println("[YT_DEBUG] [load] contents 키 탐지됨. 하위 키 목록: ${contentsObj?.keys}")
                 }
 
-                // 🚀 [보완] 리커시브 탐색 실행
                 val playlistMeta = PlaylistMetadata()
                 findPlaylistMetadataRecursive(data, playlistMeta)
 
-                // 🚀 [해결] 실제 동영상 채널명(videoAuthor)이 수집되었다면 재생목록 큐레이터명 대신 실제 동영상 제공 채널명(tvN)을 우선 대입하여 메타데이터 불일치 방지
                 var author = playlistMeta.videoAuthor.ifBlank { playlistMeta.author }.ifBlank { "Unknown Channel" }
                 var title = playlistMeta.title.ifBlank { "YouTube Playlist" }
                 var description = playlistMeta.description
@@ -1998,7 +2011,6 @@ class YoutubeProvider(
 
                 val playlistPoster = episodes.firstOrNull()?.posterUrl ?: response.document.selectFirst("meta[property=og:image]")?.attr("content")
 
-                // 🚀 [추가] 일반 동영상과 완전히 매칭되도록 플레이리스트 하단 추천목록 영역에 실제 동영상 채널(tvN) 전용 고유 채널 카드 삽입
                 val recList = mutableListOf<SearchResponse>()
                 if (author.isNotBlank() && playlistMeta.channelId.isNotBlank()) {
                     val cId = playlistMeta.channelId
@@ -2017,7 +2029,6 @@ class YoutubeProvider(
                 return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
                     this.posterUrl = playlistPoster
                     
-                    // 🚀 [추가] 획득한 구독자 수가 있다면 채널명 우측에 예쁘게 바인딩
                     val finalDescription = buildString {
                         append("Channel: $author")
                         if (playlistMeta.subscriberCount.isNotBlank()) {
@@ -2029,7 +2040,7 @@ class YoutubeProvider(
                     }
                     this.plot = finalDescription
                     this.tags = listOf(author)
-                    this.recommendations = recList // 추천목록 영역 바인딩
+                    this.recommendations = recList
                 }
             } catch (e: Exception) {
                 println("[YT_DEBUG] Playlist/Mix loading exception: ${e.message}")
@@ -2290,9 +2301,7 @@ class YoutubeProvider(
                 val watchHtml = app.get(watchUrl, headers = safariHeaders).text
 
                 val ytcfgJsonString = try {
-                    val regex =
-                        Regex("""ytcfg\.set\(\s*(\{.*?\})\s*\)\s*;""", RegexOption.DOT_MATCHES_ALL)
-                    val m = regex.find(watchHtml)
+                    val m = YTCFG_REGEX.find(watchHtml)
                     m?.groupValues?.getOrNull(1)
                         ?: watchHtml.substringAfter("ytcfg.set(", "").substringBefore(");")
                             .takeIf { it.trim().startsWith("{") }
@@ -2447,9 +2456,16 @@ class YoutubeProvider(
         }
 
     private fun parseM3u8Tag(tag: String, key: String): String? {
-        val regex = Regex("""$key=("([^"]*)"|([^,]*))""")
+        val regex = m3u8TagRegexCache.computeIfAbsent(key) { k ->
+            Regex("""$k=("([^"]*)"|([^,]*))""")
+        }
         val match = regex.find(tag)
         return match?.groupValues?.get(2)?.ifBlank { null }
             ?: match?.groupValues?.get(3)?.ifBlank { null }
     }
 }
+
+
+
+
+    
