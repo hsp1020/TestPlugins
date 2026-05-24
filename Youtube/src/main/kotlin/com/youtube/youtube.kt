@@ -19,6 +19,7 @@ import com.lagradost.cloudstream3.AcraApplication
 import androidx.preference.PreferenceManager
 import com.lagradost.cloudstream3.ar.youtube.YoutubeProvider.Config.SLEEP_BETWEEN
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.coroutines.cancellation.CancellationException
 
 object YoutubeUtils {
     const val CHROME_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
@@ -34,7 +35,6 @@ object YoutubeUtils {
     val MIX_TITLE_REPLACE_KO = Regex("""\s*\(믹스\s*재생목록\)""", RegexOption.IGNORE_CASE)
     val MIX_TITLE_REPLACE_EN = Regex("""\s*\(Mix\s*Playlist\)""", RegexOption.IGNORE_CASE)
 
-    // 동적 컴파일 Regex 부하를 줄이기 위한 내부 캐시
     private val regexCache = ConcurrentHashMap<String, Regex>()
 
     fun sha1(input: String): String {
@@ -233,7 +233,6 @@ class YoutubeProvider(
         private val homeShorts = mutableListOf<Episode>()
         private val searchShorts = mutableListOf<Episode>()
 
-        // SharedPreferences 연속 I/O 병목을 해결하기 위한 인메모리 캐시 맵
         private val continuationTokenCache = ConcurrentHashMap<String, String>()
 
         private val VIEW_REPLACE_REGEX = Regex("조회수|views|مشاهدة|시청 중|시청중|watching|명|시청자")
@@ -799,7 +798,7 @@ class YoutubeProvider(
         playlistMode: Boolean,
         depth: Int = 0
     ) {
-        if (data == null || depth > 32) return // Stack Overflow 방지용 Depth 안전 보호막
+        if (data == null || depth > 32) return 
         if (data is Map<*, *>) {
             if (depth < 3) {
                 println("[YT_DEBUG] processRecursive Map keys at depth $depth: ${data.keys.take(10)}")
@@ -1101,6 +1100,7 @@ class YoutubeProvider(
                             processRecursive(actions, results, seenIds, playlistMode = false)
                             nextContinuation = findTokenRecursive(response)
                             println("[YT_DEBUG] Next continuation extracted: $nextContinuation")
+                            saveContinuationToken(requestData, nextContinuation) // 성공 블록 내부에서만 토큰 보존
                         } else {
                             println("[YT_DEBUG] Chip response returned null.")
                         }
@@ -1151,6 +1151,7 @@ class YoutubeProvider(
                         processRecursive(initialData, results, seenIds, playlistMode = false)
                         nextContinuation = findTokenRecursive(initialData)
                         println("[YT_DEBUG] Next continuation from Home parsed: $nextContinuation")
+                        saveContinuationToken(requestData, nextContinuation) // 성공 블록 내부에서만 토큰 보존
                     } else {
                         println("[YT_DEBUG] InitialData extraction was null.")
                     }
@@ -1226,6 +1227,7 @@ class YoutubeProvider(
                         processRecursive(actions, results, seenIds, playlistMode = false)
                         nextContinuation = findTokenRecursive(response)
                         println("[YT_DEBUG] Page Continuation next token: $nextContinuation")
+                        saveContinuationToken(requestData, nextContinuation) // 성공 블록 내부에서만 토큰 보존
                     } else {
                         println("[YT_DEBUG] Page Continuation response returned null.")
                     }
@@ -1233,20 +1235,17 @@ class YoutubeProvider(
                     println("[YT_DEBUG] Page Continuation token was null/blank.")
                 }
             }
+        } catch (e: CancellationException) {
+            println("[YT_DEBUG] getMainPage Coroutine Cancelled safely. key: $requestData")
+            throw e // 코루틴 취소 예외는 반드시 다시 던져서 좀비 스레드를 방지하고 코루틴 세션을 안전하게 종료함
         } catch (e: Exception) { 
             println("[YT_DEBUG] getMainPage exception: ${e.message}")
             logError(e) 
         }
 
-        saveContinuationToken(requestData, nextContinuation)
         println("[YT_DEBUG] getMainPage completed. Extracted count: ${results.size}, hasNext: ${!nextContinuation.isNullOrBlank()}")
-        return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
+        return HomePageResponse(results, !nextContinuation.isNullOrBlank())
     }
-
-
-    // 정규식 오버헤드를 막기 위한 클래스 레벨 정적/인스턴스 캐시
-    private val m3u8TagRegexCache = ConcurrentHashMap<String, Regex>()
-    private val YTCFG_REGEX = Regex("""ytcfg\.set\(\s*(\{.*?\})\s*\)\s*;""", RegexOption.DOT_MATCHES_ALL)
 
     override suspend fun search(query: String): List<SearchResponse> {
         return search(query, 1)?.items ?: emptyList()
@@ -1287,7 +1286,6 @@ class YoutubeProvider(
                 println("[YT_DEBUG] Search GET url: $url")
                 val html = app.get(url, interceptor = ytInterceptor).text
 
-                // Part A에서 companion object에 기재된 정적 캐시 정규식을 활용하여 중복 컴파일 제거
                 savedApiKey = API_KEY_EXTRACT_REGEX.find(html)?.groupValues?.get(1)
                 savedVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA")
                 println("[YT_DEBUG] Search HTML parsed. apiKey=$savedApiKey, visitorData=$savedVisitorData")
@@ -1296,7 +1294,7 @@ class YoutubeProvider(
                 if (initialData != null) {
                     processRecursive(initialData, results, seenIds, playlistMode)
                     savedContinuationToken = findTokenRecursive(initialData)
-                    saveContinuationToken("search_token", savedContinuationToken)
+                    saveContinuationToken("search_token", savedContinuationToken) // 성공적인 추출 완료 시에만 토큰 커밋
                     println("[YT_DEBUG] Search page 1 next token: $savedContinuationToken")
                 } else {
                     println("[YT_DEBUG] Search page 1 initialData is null.")
@@ -1333,7 +1331,7 @@ class YoutubeProvider(
                             ?: response
                         processRecursive(actions, results, seenIds, playlistMode)
                         savedContinuationToken = findTokenRecursive(response)
-                        saveContinuationToken("search_token", savedContinuationToken)
+                        saveContinuationToken("search_token", savedContinuationToken) // 성공 블록 내부에서만 토큰 보존
                         println("[YT_DEBUG] Search Continuation next token: $savedContinuationToken")
                     } else {
                         println("[YT_DEBUG] Search Continuation response is null.")
@@ -1344,6 +1342,8 @@ class YoutubeProvider(
             }
             println("[YT_DEBUG] Search page completed. Extracted size: ${results.size}")
             return newSearchResponseList(results, !getSavedContinuationToken("search_token").isNullOrBlank())
+        } catch (e: CancellationException) {
+            throw e // 코루틴 취소 예외 발생 시 다른 메서드로 상방 투척하여 좀비 스레드 생성 방지
         } catch (e: Exception) {
             println("[YT_DEBUG] Search page exception: ${e.message}")
             return newSearchResponseList(emptyList(), false)
@@ -1577,6 +1577,7 @@ class YoutubeProvider(
                 if (vAuth.isNotBlank()) {
                     metadata.videoAuthor = vAuth
                 }
+
                 println("[YT_DEBUG] [Recursive] Found videoOwnerRenderer. VideoAuthor: '$vAuth', SubCount: '$sub', Avatar: '$avatar', ChannelId: '$browseId'")
             }
 
@@ -1712,7 +1713,6 @@ class YoutubeProvider(
 
                 val allEpisodes = mutableListOf<Episode>()
 
-                // stack overflow 방지 및 안전 무제한 깊이 재귀 해소
                 fun findContinuationItemsRecursive(obj: Any?, depth: Int = 0): List<*>? {
                     if (obj == null || depth > 32) return null
                     when (obj) {
@@ -1928,6 +1928,8 @@ class YoutubeProvider(
                         val continuationItems = findContinuationItemsRecursive(jsonResponse) ?: break
                         extractVideosFromItems(continuationItems, allEpisodes)
                         currentToken = findContinuationTokenFromItems(continuationItems)
+                    } catch (e: CancellationException) {
+                        throw e // cancellation 예외 전파 보장
                     } catch (e: Exception) {
                         break
                     }
@@ -1939,6 +1941,8 @@ class YoutubeProvider(
                     this.tags = listOf(title, "Channel")
                 }
 
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 println("[YT_DEBUG] Channel load exception: ${e.message}")
                 logError(e)
@@ -1963,18 +1967,6 @@ class YoutubeProvider(
                 
                 val data = extractYtInitialData(html) ?: throw ErrorLoadingException("Failed to extract playlist data")
                 println("[YT_DEBUG] Playlist initialData successfully parsed.")
-
-                println("[YT_DEBUG] [load] playlist_browse 시작됨. 데이터 탑레벨 키 세트: ${data.keys}")
-                if (data.containsKey("sidebar")) {
-                    println("[YT_DEBUG] [load] 루트 레벨 sidebar 키 탐지됨")
-                }
-                if (data.containsKey("header")) {
-                    println("[YT_DEBUG] [load] 루트 레벨 header 키 탐지됨")
-                }
-                if (data.containsKey("contents")) {
-                    val contentsObj = data["contents"] as? Map<*, *>
-                    println("[YT_DEBUG] [load] contents 키 탐지됨. 하위 키 목록: ${contentsObj?.keys}")
-                }
 
                 val playlistMeta = PlaylistMetadata()
                 findPlaylistMetadataRecursive(data, playlistMeta)
@@ -2023,7 +2015,6 @@ class YoutubeProvider(
                         this.posterUrl = playlistMeta.channelAvatar
                     }
                     recList.add(channelCard)
-                    println("[YT_DEBUG] [load] Playlist channel recommendation card injected: '$author' (ID: $cId)")
                 }
 
                 return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
@@ -2042,6 +2033,8 @@ class YoutubeProvider(
                     this.tags = listOf(author)
                     this.recommendations = recList
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 println("[YT_DEBUG] Playlist/Mix loading exception: ${e.message}")
                 logError(e)
@@ -2068,7 +2061,6 @@ class YoutubeProvider(
         val seenRecIds = mutableSetOf<String>()
 
         if (data != null) {
-            println("[YT_DEBUG] Video initialData parsed successfully. Extraction starting.")
             val resultsContents = safeGet(data, "contents", "twoColumnWatchNextResults", "results", "results", "contents") as? List<*>
 
             resultsContents?.forEach { item ->
@@ -2112,7 +2104,6 @@ class YoutubeProvider(
             }
 
         } else {
-            println("[YT_DEBUG] Video initialData was null. Falling back to meta tags.")
             val doc = response.document
             title = doc.selectFirst("meta[property=og:title]")?.attr("content") ?: title
             poster = doc.selectFirst("meta[property=og:image]")?.attr("content") ?: poster
@@ -2203,6 +2194,8 @@ class YoutubeProvider(
                     isLive = true
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             logError(e)
         }
@@ -2214,6 +2207,8 @@ class YoutubeProvider(
                 try {
                     val playerResponse = parseJson<PlayerResponse>(playerResponseText)
                     triggerPlaybackTracking(playerResponse.playbackTracking, videoId)
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     println("[YT_DEBUG] Error parsing playerResponse for tracking: ${e.message}")
                 }
@@ -2262,6 +2257,8 @@ class YoutubeProvider(
             )
             val headers = mapOf("Referer" to "$mainUrl/watch?v=$videoId")
             app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).text
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             // 예외 억제
         }
@@ -2449,6 +2446,8 @@ class YoutubeProvider(
                 } else {
                     return false
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 logError(e)
                 return false
@@ -2464,8 +2463,3 @@ class YoutubeProvider(
             ?: match?.groupValues?.get(3)?.ifBlank { null }
     }
 }
-
-
-
-
-    
