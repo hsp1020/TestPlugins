@@ -53,7 +53,13 @@ object YoutubeUtils {
         return "SAPISIDHASH ${timestamp}_$hash"
     }
 
-    fun buildCookiesAndExtractSapisid(prefs: SharedPreferences?, lang: String, fallbackVisitor: String): Pair<String, String?> {
+    // [보완] 검색기록 동기화 차단 및 차단 격리를 위해 isSearch 매개변수 도입
+    fun buildCookiesAndExtractSapisid(
+        prefs: SharedPreferences?, 
+        lang: String, 
+        fallbackVisitor: String,
+        isSearch: Boolean = false
+    ): Pair<String, String?> {
         val cookieBuilder = java.lang.StringBuilder()
         val visitor = prefs?.getString("VISITOR_INFO1_LIVE", null)
         if (!visitor.isNullOrBlank()) {
@@ -62,13 +68,16 @@ object YoutubeUtils {
             cookieBuilder.append("VISITOR_INFO1_LIVE=$fallbackVisitor; ")
         }
 
-        val authKeys = listOf("SID", "HSID", "SSID", "APISID", "SAPISID")
         var sapisidVal: String? = null
-        authKeys.forEach { key ->
-            val value = prefs?.getString(key, null)
-            if (!value.isNullOrBlank()) {
-                cookieBuilder.append("$key=$value; ")
-                if (key == "SAPISID") sapisidVal = value
+        // 🚀 검색 요청이 아닐 때만 계정 고유 인증 키를 추가하여 검색 이력 연동 완전 차단
+        if (!isSearch) {
+            val authKeys = listOf("SID", "HSID", "SSID", "APISID", "SAPISID")
+            authKeys.forEach { key ->
+                val value = prefs?.getString(key, null)
+                if (!value.isNullOrBlank()) {
+                    cookieBuilder.append("$key=$value; ")
+                    if (key == "SAPISID") sapisidVal = value
+                }
             }
         }
         cookieBuilder.append("PREF=f6=40000000&hl=$lang; CONSENT=YES+fx.456722336;")
@@ -156,20 +165,16 @@ object YoutubeUtils {
             ?: (map.entries.firstOrNull { (it.key as? String) == key }?.value as? String)
     }
 
-    // 🚀 [씨드 비디오 무손실 보존 엔진] 중첩 구조 하단부까지 추적하여 원본 URL 및 파라미터 완벽 역추적
     fun extractUrlFromLockup(lockup: Map<*, *>?): String? {
         if (lockup == null) return null
-        // 1단계: 다양한 내비게이션 이벤트가 저장된 뎁스별 커맨드 오브젝트 식별
         val command = getMapKeyFromAny(lockup, "onTap")?.let { getMapKeyFromAny(it, "innertubeCommand") }
             ?: getMapKeyFromAny(lockup, "rendererContext")?.let { getMapKeyFromAny(it, "commandContext") }?.let { getMapKeyFromAny(it, "onTap") }?.let { getMapKeyFromAny(it, "innertubeCommand") }
             ?: getMapKeyFromAny(lockup, "itemPlayback")?.let { getMapKeyFromAny(it, "inlinePlayerData") }?.let { getMapKeyFromAny(it, "onSelect") }?.let { getMapKeyFromAny(it, "innertubeCommand") }
             ?: getMapKeyFromAny(lockup, "navigationEndpoint")
         
-        // 2단계: 유튜브 서버가 생성해둔 v 파라미터가 병합된 완성형 오리지널 주소 갈취
         val webCommandUrl = getMapKeyFromAny(command, "commandMetadata")?.let { getMapKeyFromAny(it, "webCommandMetadata") }?.let { getStringFromAny(it, "url") }
         if (!webCommandUrl.isNullOrBlank()) return webCommandUrl
 
-        // 3단계: 주소 정보가 존재하지 않을 시 watchEndpoint 수동 역조립
         val watch = getMapKeyFromAny(command, "watchEndpoint") ?: command
         val videoId = getStringFromAny(watch, "videoId")
         val playlistId = getStringFromAny(watch, "playlistId")
@@ -246,7 +251,7 @@ class YoutubeProvider(
             }
 
             if (!isSearchRequest) {
-                val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(prefs, provider.lang, "_Mk3UVhY40g")
+                val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(prefs, provider.lang, "_Mk3UVhY40g", isSearch = false)
                 requestBuilder.addHeader("Cookie", cookies)
                 requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
 
@@ -261,7 +266,8 @@ class YoutubeProvider(
                     }
                 }
             } else {
-                val (cookies, _) = YoutubeUtils.buildCookiesAndExtractSapisid(prefs, provider.lang, "_Mk3UVhY40g")
+                // 🚀 검색 시에는 계정 계정키가 전면 제외된 비개인화 쿠키만 전송하여 검색 기록 연동 철저히 차단
+                val (cookies, _) = YoutubeUtils.buildCookiesAndExtractSapisid(prefs, provider.lang, "_Mk3UVhY40g", isSearch = true)
                 requestBuilder.addHeader("Cookie", cookies)
                 requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
             }
@@ -484,7 +490,7 @@ class YoutubeProvider(
         return try {
             val v = digits.toLong()
             if (lang == "ko") {
-                val suffix = if (isLive) "명" else "회"
+                val suffix = if (isLive) { "명" } else { "회" }
                 when {
                     v < 1000 -> "$v$suffix"
                     v < 10000 -> String.format("%.1f천$suffix", v / 1000.0).replace(".0천", "천")
@@ -596,11 +602,14 @@ class YoutubeProvider(
                 val contextTag = if (isSearchContext) "&ctx=search" else "&ctx=home"
                 val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
 
+                // 🚀 [추가] 상세페이지(load) 출력용 메타데이터 (조회수) Episode.description에 보존 이식
+                val descText = if (views.isNotBlank()) "조회수: $views" else ""
                 if (currentList.none { it.data == finalUrl }) {
                     currentList.add(newEpisode(finalUrl) {
                         this.name = title
                         this.posterUrl = poster
                         this.episode = episodeNum
+                        this.description = descText
                     })
                 }
 
@@ -643,7 +652,6 @@ class YoutubeProvider(
                             ?.getMapKey("image")?.getListKey("sources")?.lastOrNull()
                             ?.getString("url")
 
-                    // 🚀 [해결] 고도화된 내비게이션 주소 정밀 추출 엔진 도입
                     val extractedUrl = YoutubeUtils.extractUrlFromLockup(lockup)
                     val targetPath = if (!extractedUrl.isNullOrBlank()) {
                         extractedUrl.removePrefix("/")
@@ -699,11 +707,21 @@ class YoutubeProvider(
                     val contextTag = if (isSearchContext) "&ctx=search" else "&ctx=home"
                     val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
                     poster = "https://i.ytimg.com/vi/$videoId/oar2.jpg"
+                    
+                    // 🚀 [추가] 락업(Lockup) 쇼츠 파싱 시에도 상세페이지 출력을 위한 메타데이터 보관
+                    val descText = buildString {
+                        if (channel.isNotBlank()) append("채널: $channel")
+                        if (views.isNotBlank()) {
+                            if (isNotEmpty()) append(" • ")
+                            append("조회수: $views")
+                        }
+                    }
                     if (currentList.none { it.data == finalUrl }) {
                         currentList.add(newEpisode(finalUrl) {
                             this.name = title
                             this.posterUrl = poster
                             this.episode = episodeNum
+                            this.description = descText
                         })
                     }
                     finalTitle = "#$episodeNum [Shorts] {Short | $views} $title"
@@ -1429,10 +1447,20 @@ class YoutubeProvider(
 
             val poster = currentEp?.posterUrl ?: YoutubeUtils.buildThumbnailFromId(videoId)
 
-            return newTvSeriesLoadResponse("Shorts Feed", url, TvType.TvSeries, targetEpisodes) {
+            // 🚀 [해결 2] 선택한 숏스의 실제 타이틀과 메타데이터(조회수, 채널 등)를 추출하여 상세 페이지 타이틀 및 플롯으로 온전히 주입
+            val shortTitle = currentEp?.name ?: "Shorts Video"
+            val shortPlot = buildString {
+                append(shortTitle)
+                val desc = currentEp?.description
+                if (!desc.isNullOrBlank()) {
+                    append("\n\n$desc")
+                }
+            }
+
+            return newTvSeriesLoadResponse(shortTitle, url, TvType.TvSeries, targetEpisodes) {
                 this.posterUrl = poster
-                this.plot = "قائمة تشغيل تلقائية من الشورت스 (${targetEpisodes.size} فيديو)"
-                this.tags = listOf("Shorts", "Feed")
+                this.plot = shortPlot
+                this.tags = listOf("Shorts")
             }
         }
 
@@ -1769,11 +1797,44 @@ class YoutubeProvider(
                 val data = extractYtInitialData(html) ?: throw ErrorLoadingException("Failed to extract playlist data")
                 println("[YT_DEBUG] Playlist initialData successfully parsed.")
 
+                // 🚀 [해결 1] 일반 재생목록의 메타데이터(타이틀 및 생성 아티스트명)를 sidebar 계층으로부터 정밀 탐색하여 복원
+                var playlistTitle: String? = null
+                var playlistAuthor: String? = null
+                var playlistDesc: String? = null
+
+                val sidebarItems = safeGet(data, "sidebar", "playlistSidebarRenderer", "items") as? List<*>
+                sidebarItems?.forEach { item ->
+                    val m = item as? Map<*, *>
+                    val primary = m?.get("playlistSidebarPrimaryInfoRenderer") as? Map<*, *>
+                    if (primary != null) {
+                        playlistTitle = getText(primary["title"])
+                        playlistDesc = getText(primary["description"])
+                    }
+                    val secondary = m?.get("playlistSidebarSecondaryInfoRenderer") as? Map<*, *>
+                    if (secondary != null) {
+                        val owner = safeGet(secondary, "videoOwner", "videoOwnerRenderer") as? Map<*, *>
+                        if (owner != null) {
+                            playlistAuthor = getText(owner["title"])
+                        }
+                    }
+                }
+
                 val header = safeGet(data, "header", "playlistHeaderRenderer") as? Map<*, *>
-                var title = extractTitle(safeGet(header, "title") as? Map<*, *>)
-                println("[YT_DEBUG] Extracted playlist raw title: $title")
+                var title = extractTitle(safeGet(header, "title") as? Map<*, *>) 
+                    ?: playlistTitle
+                    ?: "YouTube Playlist"
+
+                var author = extractTitle(safeGet(header, "ownerText") as? Map<*, *>) 
+                    ?: playlistAuthor 
+                    ?: "Unknown Channel"
+
+                var description = extractTitle(safeGet(header, "description") as? Map<*, *>) 
+                    ?: playlistDesc
+                    ?: ""
+
+                println("[YT_DEBUG] Extracted playlist raw title: $title, author: $author")
                 
-                if (title.isNullOrBlank()) {
+                if (title.isBlank()) {
                     fun findMixTitle(obj: Any?): String? {
                         if (obj is Map<*, *>) {
                             val panel = obj["playlistPanelRenderer"] as? Map<*, *>
@@ -1812,72 +1873,22 @@ class YoutubeProvider(
                         } else {
                             "Mix - $firstChannel"
                         }
-                    } else if (title.isNullOrBlank() || title.contains("YouTube Mix") || title.contains("믹스")) {
+                    } else if (title.contains("YouTube Mix") || title.contains("믹스")) {
                         title = "YouTube Mix"
                     }
                 }
 
-                if (title != null) {
-                    title = YoutubeUtils.cleanMixTitle(title!!)
-                } else {
-                    title = "YouTube Mix"
-                }
-
-                var currentToken = findTokenRecursive(data)
-                println("[YT_DEBUG] Mix playlist continuation token found: ${currentToken != null}")
-
-                var pagesFetched = 1
-                val apiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY")
-                val clientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
-                val visitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA")
-
-                while (!currentToken.isNullOrBlank() && episodes.size < 48 && pagesFetched < 3 && !apiKey.isNullOrBlank()) {
-                    try {
-                        pagesFetched += 1
-                        val apiUrl = "https://www.youtube.com/youtubei/v1/next?key=$apiKey"
-                        val payload = mapOf(
-                            "context" to mapOf(
-                                "client" to mapOf(
-                                    "clientName" to "WEB",
-                                    "clientVersion" to clientVersion,
-                                    "hl" to lang,
-                                    "gl" to if (lang == "ko") "KR" else "US",
-                                    "visitorData" to (visitorData ?: ""),
-                                    "platform" to "DESKTOP"
-                                )
-                            ),
-                            "continuation" to currentToken
-                        )
-                        val headers = mapOf("X-Youtube-Client-Name" to "WEB", "X-Youtube-Client-Version" to clientVersion)
-                        val jsonResponse = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
-                        if (jsonResponse == null) break
-                        
-                        val nextBatch = extractPlaylistEpisodes(jsonResponse, seenPlaylistIds)
-                        if (nextBatch.isEmpty()) break
-                        
-                        episodes.addAll(nextBatch)
-                        currentToken = findTokenRecursive(jsonResponse)
-                        println("[YT_DEBUG] Loaded continuation page $pagesFetched. Total episodes: ${episodes.size}")
-                    } catch (e: Exception) {
-                        println("[YT_DEBUG] Error loading mix continuation: ${e.message}")
-                        break
-                    }
-                }
+                title = YoutubeUtils.cleanMixTitle(title)
 
                 episodes.forEachIndexed { index, ep ->
                     ep.episode = index + 1
                 }
 
-                val ownerObj = safeGet(header, "ownerText") as? Map<*, *>
-                val author = extractTitle(ownerObj) ?: "Unknown Channel"
-                val description = extractTitle(safeGet(header, "description") as? Map<*, *>)
-                println("[YT_DEBUG] Author: $author, Description: $description")
-
                 val playlistPoster = episodes.firstOrNull()?.posterUrl ?: response.document.selectFirst("meta[property=og:image]")?.attr("content")
 
-                return newTvSeriesLoadResponse(title ?: "YouTube Mix", url, TvType.TvSeries, episodes) {
+                return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
                     this.posterUrl = playlistPoster
-                    val finalDescription = if (description.isNullOrBlank()) "Channel: $author" else "Channel: $author\n\n$description"
+                    val finalDescription = if (description.isBlank()) "Channel: $author" else "Channel: $author\n\n$description"
                     this.plot = finalDescription
                     this.tags = listOf(author)
                 }
@@ -2184,7 +2195,7 @@ class YoutubeProvider(
                 postHeaders["X-Youtube-Client-Version"] = clientVersion
                 if (!visitorData.isNullOrBlank()) postHeaders["X-Goog-Visitor-Id"] = visitorData
 
-                val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(appPrefs, lang, "fzYjM8PCwjw")
+                val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(appPrefs, lang, "fzYjM8PCwjw", isSearch = false)
                 postHeaders["Cookie"] = cookies
 
                 if (!sapisidVal.isNullOrBlank()) {
