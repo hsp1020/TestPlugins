@@ -714,6 +714,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     copyId,
                     ExtractorLinkType.VIDEO
                 )
+                {
+                        this.quality = 2160
+                    }
             )
         }
 
