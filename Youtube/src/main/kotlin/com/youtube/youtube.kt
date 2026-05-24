@@ -143,6 +143,45 @@ object YoutubeUtils {
         }
         return current
     }
+
+    private fun getMapKeyFromAny(obj: Any?, key: String): Map<*, *>? {
+        val map = obj as? Map<*, *> ?: return null
+        return (map[key] as? Map<*, *>) 
+            ?: (map.entries.firstOrNull { (it.key as? String) == key }?.value as? Map<*, *>)
+    }
+
+    private fun getStringFromAny(obj: Any?, key: String): String? {
+        val map = obj as? Map<*, *> ?: return null
+        return (map[key] as? String) 
+            ?: (map.entries.firstOrNull { (it.key as? String) == key }?.value as? String)
+    }
+
+    // 🚀 [씨드 비디오 무손실 보존 엔진] 중첩 구조 하단부까지 추적하여 원본 URL 및 파라미터 완벽 역추적
+    fun extractUrlFromLockup(lockup: Map<*, *>?): String? {
+        if (lockup == null) return null
+        // 1단계: 다양한 내비게이션 이벤트가 저장된 뎁스별 커맨드 오브젝트 식별
+        val command = getMapKeyFromAny(lockup, "onTap")?.let { getMapKeyFromAny(it, "innertubeCommand") }
+            ?: getMapKeyFromAny(lockup, "rendererContext")?.let { getMapKeyFromAny(it, "commandContext") }?.let { getMapKeyFromAny(it, "onTap") }?.let { getMapKeyFromAny(it, "innertubeCommand") }
+            ?: getMapKeyFromAny(lockup, "itemPlayback")?.let { getMapKeyFromAny(it, "inlinePlayerData") }?.let { getMapKeyFromAny(it, "onSelect") }?.let { getMapKeyFromAny(it, "innertubeCommand") }
+            ?: getMapKeyFromAny(lockup, "navigationEndpoint")
+        
+        // 2단계: 유튜브 서버가 생성해둔 v 파라미터가 병합된 완성형 오리지널 주소 갈취
+        val webCommandUrl = getMapKeyFromAny(command, "commandMetadata")?.let { getMapKeyFromAny(it, "webCommandMetadata") }?.let { getStringFromAny(it, "url") }
+        if (!webCommandUrl.isNullOrBlank()) return webCommandUrl
+
+        // 3단계: 주소 정보가 존재하지 않을 시 watchEndpoint 수동 역조립
+        val watch = getMapKeyFromAny(command, "watchEndpoint") ?: command
+        val videoId = getStringFromAny(watch, "videoId")
+        val playlistId = getStringFromAny(watch, "playlistId")
+        if (!playlistId.isNullOrBlank()) {
+            return if (!videoId.isNullOrBlank()) {
+                "/watch?v=$videoId&list=$playlistId"
+            } else {
+                "/watch?list=$playlistId"
+            }
+        }
+        return null
+    }
 }
 
 class YoutubeProvider(
@@ -180,11 +219,8 @@ class YoutubeProvider(
         private val homeShorts = mutableListOf<Episode>()
         private val searchShorts = mutableListOf<Episode>()
 
-        // 실시간 스트림 시청자 수 보존을 위해 필터 정규식에 명(시청자) 단위 추가 반영
         private val VIEW_REPLACE_REGEX = Regex("조회수|views|مشاهدة|시청 중|시청중|watching|명|시청자")
         private val VIEW_FORMAT_REGEX = Regex(".*[천만억KMBkmb].*")
-        
-        // 라이브 방송의 시청자수 파츠가 채널명을 오버라이드하지 못하도록 "명", "시청자", "مشاهد"(시청자) 추가 기재
         private val METADATA_VIEW_REGEX = Regex(".*(\\d+[KMBkmb]|views|조회수|회|시청|watching|مشاهدة|명|시청자|مشاهد).*")
         private val METADATA_SKIP_REGEX = Regex(".*(\\d+:\\d+|ago|قبل|전|시간|분|일|주|개월|년|시청|watching).*")
         private val SUBSCRIBER_REGEX = Regex(".*(구독자|subscribers|명|K|M|B|sub).*\\s*", RegexOption.IGNORE_CASE)
@@ -396,7 +432,6 @@ class YoutubeProvider(
 
             val rawParts = extractPartsFromMetadataRows(rows) { formatViews(it) }
             rawParts.forEach { text ->
-                // 라이브 방송 인지를 위해 "명", "시청자" 등 검출 로직 보강
                 if (text.contains("회") || text.contains("시청") || text.contains("조회") || 
                     text.contains("views") || text.contains("watching") || 
                     text.contains("명") || text.contains("시청자") || text.contains("مشاهد")) {
@@ -419,17 +454,14 @@ class YoutubeProvider(
         return Pair(channel, views)
     }
 
-
     private fun formatViews(viewText: String?): String {
         if (viewText.isNullOrBlank()) return "N/A"
         var text = viewText.trim()
         
-        // "명", "시청자" 등이 있으면 라이브 스트림으로 감지
         val isLive = text.contains("명") || text.contains("시청자") || text.contains("watching") || text.contains("시청 중")
 
         text = VIEW_REPLACE_REGEX.replace(text, "").trim()
 
-        // [빌드 보완] 이미 "회" 또는 "명" 단위가 텍스트에 포함되어 있다면 중복으로 붙이지 않도록 방어 코드 추가
         if (VIEW_FORMAT_REGEX.matches(text) && text.length < 15) {
             return if (isLive) {
                 if (lang == "ko" && !text.contains("명")) "${text}명" 
@@ -473,7 +505,7 @@ class YoutubeProvider(
             text
         }
     }
-    
+
     private fun getRawText(map: Map<*, *>?, key: String): String? {
         val obj = map?.getMapKey(key) ?: return null
         return obj.getString("simpleText")
@@ -572,7 +604,6 @@ class YoutubeProvider(
                     })
                 }
 
-                // [쇼츠 최적화] 채널명이 안 불려오는 경우 가독성을 보장하기 위해 {Short | 조회수} 포맷 적용
                 val finalTitle = "#$episodeNum {Short | $views} $title"
                 println("[YT_DEBUG] collectFromRenderer: extracted Shorts $videoId: $finalTitle")
                 return newMovieSearchResponse(finalTitle, finalUrl, TvType.Movie) {
@@ -612,24 +643,19 @@ class YoutubeProvider(
                             ?.getMapKey("image")?.getListKey("sources")?.lastOrNull()
                             ?.getString("url")
 
-                    // 🚀 [씨드 비디오 ID 추출 엔진 탑재] 
-                    // onTap 혹은 navigationEndpoint 내에서 매칭 비디오 ID를 추적해 병합
-                    val watchEndpoint = lockup.getMapKey("onTap")?.getMapKey("innertubeCommand")?.getMapKey("watchEndpoint")
-                        ?: lockup.getMapKey("navigationEndpoint")?.getMapKey("watchEndpoint")
-                    val videoId = watchEndpoint?.getString("videoId")
-
-                    // v 파라미터가 존재하면 통합 URL인 watch?v=xxx&list=yyy 구조로 동적 변환
-                    val targetPath = if (playlistId.startsWith("RD") || playlistId.startsWith("UL") || playlistId.startsWith("MM") || playlistId.startsWith("RDMM")) {
-                        if (!videoId.isNullOrBlank()) {
-                            "watch?v=$videoId&list=$playlistId"
-                        } else {
-                            "watch?list=$playlistId"
-                        }
+                    // 🚀 [해결] 고도화된 내비게이션 주소 정밀 추출 엔진 도입
+                    val extractedUrl = YoutubeUtils.extractUrlFromLockup(lockup)
+                    val targetPath = if (!extractedUrl.isNullOrBlank()) {
+                        extractedUrl.removePrefix("/")
                     } else {
-                        "playlist?list=$playlistId"
+                        if (playlistId.startsWith("RD") || playlistId.startsWith("UL") || playlistId.startsWith("MM") || playlistId.startsWith("RDMM")) {
+                            "watch?list=$playlistId"
+                        } else {
+                            "playlist?list=$playlistId"
+                        }
                     }
 
-                    println("[YT_DEBUG] collectFromRenderer: extracted Playlist lockup $playlistId: $title (path: $targetPath, seedVideo: $videoId)")
+                    println("[YT_DEBUG] collectFromRenderer: extracted Playlist lockup $playlistId: $title (path: $targetPath, extractedUrl: $extractedUrl)")
                     return newTvSeriesSearchResponse(
                         if (episodeCount.isNotEmpty()) "$title ($episodeCount)" else title,
                         "$mainUrl/$targetPath",
@@ -638,7 +664,7 @@ class YoutubeProvider(
                         this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
                     }
                 }
-            }        
+            }
 
             val videoId = lockup.getString("contentId")
                 ?: lockup.getMapKey("content")?.getString("videoId")
@@ -680,7 +706,6 @@ class YoutubeProvider(
                             this.episode = episodeNum
                         })
                     }
-                    // [쇼츠 락업 최적화] 동일하게 {Short | 조회수} 구조화 적용
                     finalTitle = "#$episodeNum [Shorts] {Short | $views} $title"
                     println("[YT_DEBUG] collectFromRenderer: extracted Shorts lockup $videoId: $finalTitle")
                     return newMovieSearchResponse(
