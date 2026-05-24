@@ -123,7 +123,7 @@ object YoutubeUtils {
 
     fun extractYoutubeId(url: String): String? {
         return YT_ID_REGEX.find(url)?.groupValues?.getOrNull(1) ?: run {
-            if (url.length == 11 && url.matches(Regex("[A-Za-0-9_-]{11}"))) {
+            if (url.length == 11 && url.matches(Regex("[A-Za-z0-9_-]{11}"))) {
                 url
             } else {
                 null
