@@ -47,7 +47,7 @@ class YoutubeProvider(
         get() = appPrefs?.getString("youtube_language", "ko") ?: "ko"
         set(value) {}
         
-    override val supportedTypes = setOf(TvType.Movie, TvType.Live)
+    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Live)
 
     companion object {
         private val homeShorts = mutableListOf<Episode>()
@@ -1807,7 +1807,31 @@ private fun getSapisidHash(
         val filteredRecs = recommendations.filter { !it.url.contains("/shorts/") }
         println("[YT_DEBUG] Video metadata load complete. Title: $title, Recommendations count: ${filteredRecs.size}")
 
-        return newMovieLoadResponse(title, url, TvType.Movie, videoId) {
+        // 🚀 1. 동적 가상 플레이리스트(에피소드 목록) 생성
+        val episodes = mutableListOf<Episode>()
+        
+        // 1-1. 현재 요청된 메인 비디오를 Episode 1로 최우선 배정
+        episodes.add(newEpisode(url) {
+            this.name = title
+            this.posterUrl = poster
+            this.episode = 1
+            this.description = channelName.ifBlank { "재생 중" }
+        })
+
+        // 1-2. 추천 목록 중 재생할 수 없는 링크(채널 정보 등)는 제외하고 실제 재생 가능한 영상만 Episode 2부터 나열
+        var epCount = 2
+        filteredRecs.forEach { rec ->
+            if (rec.url.contains("watch?v=") || rec.url.contains("/shorts/")) {
+                episodes.add(newEpisode(rec.url) {
+                    this.name = rec.name
+                    this.posterUrl = rec.posterUrl
+                    this.episode = epCount++
+                })
+            }
+        }
+
+        // 🚀 2. 기존 하단 추천 레이아웃과 데이터는 보존하되, 레이아웃 규격을 TvSeries로 변경하여 연속 재생 활성화
+        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
             this.posterUrl = poster
             this.plot = plot
 
@@ -1815,7 +1839,7 @@ private fun getSapisidHash(
                 this.tags = listOf(channelName)
             }
 
-            this.recommendations = filteredRecs
+            this.recommendations = filteredRecs // 기존 하단 추천 탭 로직 정상 유지
         }
     }
 
