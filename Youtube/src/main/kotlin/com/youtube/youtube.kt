@@ -143,8 +143,24 @@ class YoutubeProvider(
     private var savedClientVersion: String? = null
 
     @Suppress("PropertyName")
-    private data class PlayerResponse(@JsonProperty("streamingData") val streamingData: StreamingData?)
-    private data class StreamingData(@JsonProperty("hlsManifestUrl") val hlsManifestUrl: String?)
+    private data class PlayerResponse(
+        @JsonProperty("streamingData") val streamingData: StreamingData?,
+        @JsonProperty("playbackTracking") val playbackTracking: PlaybackTracking? // 🚀 트래킹 정보 필드 추가
+    )
+    private data class StreamingData(
+        @JsonProperty("hlsManifestUrl") val hlsManifestUrl: String?
+    )
+
+    // 🚀 구글 트래킹에 필요한 파싱 구조체 신설
+    private data class PlaybackTracking(
+        @JsonProperty("videostatsPlaybackUrl") val videostatsPlaybackUrl: TrackingUrl?,
+        @JsonProperty("videostatsWatchtimeUrl") val videostatsWatchtimeUrl: TrackingUrl?
+    )
+    private data class TrackingUrl(
+        @JsonProperty("baseUrl") val baseUrl: String?
+    )
+
+    
 
     private fun sha1(input: String): String {
         return try {
@@ -156,7 +172,7 @@ class YoutubeProvider(
         }
     }
 
-    private fun getSapisidHash(
+private fun getSapisidHash(
         sapisid: String,
         origin: String = "https://www.youtube.com"
     ): String {
@@ -165,6 +181,68 @@ class YoutubeProvider(
         val hash = sha1(msg)
         return "SAPISIDHASH ${timestamp}_$hash"
     }
+
+    // ==========================================
+    // 🚀 [신규 추가] 재생 세션 트래킹 로직 영역 시작
+    // ==========================================
+    
+    // 16자리 무작위 문자열(Client Playback Nonce, cpn) 생성
+    private fun generateCpn(): String {
+        val alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+        return (1..16).map { alphabet.random() }.joinToString("")
+    }
+
+    // s.youtube.com 트래킹 주소 파라미터 매핑 빌더
+    private fun buildTrackingUrl(base: String, cpn: String, cmt: String, state: String?, realTime: String? = null): String {
+        val uri = android.net.Uri.parse(base).buildUpon()
+        uri.appendQueryParameter("cpn", cpn)
+        uri.appendQueryParameter("cmt", cmt)
+        uri.appendQueryParameter("ver", "2")
+        if (state != null) {
+            uri.appendQueryParameter("state", state)
+            uri.appendQueryParameter("st", "0.000")
+            uri.appendQueryParameter("et", cmt)
+        }
+        if (realTime != null) {
+            uri.appendQueryParameter("rt", realTime)
+        }
+        return uri.build().toString()
+    }
+
+    // 유튜브 트래킹 서버로 차례대로 백그라운드 핑 전송
+    private suspend fun triggerPlaybackTracking(playbackTracking: PlaybackTracking?, videoId: String) {
+        val playbackBaseUrl = playbackTracking?.videostatsPlaybackUrl?.baseUrl
+        val watchtimeBaseUrl = playbackTracking?.videostatsWatchtimeUrl?.baseUrl
+
+        if (playbackBaseUrl.isNullOrBlank() || watchtimeBaseUrl.isNullOrBlank()) {
+            println("[YT_DEBUG] playbackTracking base URLs are empty, skipping tracking")
+            return
+        }
+
+        val cpn = generateCpn()
+        println("[YT_DEBUG] Triggering playback tracking for videoId: $videoId with cpn: $cpn")
+
+        try {
+            // 1. 재생 세션 초기화 등록 핑 전송 (현재 미디어 시간 0초)
+            val playbackUrl = buildTrackingUrl(playbackBaseUrl, cpn, cmt = "0.000", state = null, realTime = "0")
+            println("[YT_DEBUG] Pinging playbackUrl: $playbackUrl")
+            app.get(playbackUrl, interceptor = ytInterceptor)
+
+            // 2. 가상의 5초 진행 시간 시청 갱신 핑 전송 (서버 시청 기록에 도장 찍기 수행)
+            val watchtimeUrl = buildTrackingUrl(watchtimeBaseUrl, cpn, cmt = "5.000", state = "playing", realTime = "5")
+            println("[YT_DEBUG] Pinging watchtimeUrl: $watchtimeUrl")
+            app.get(watchtimeUrl, interceptor = ytInterceptor)
+            
+            println("[YT_DEBUG] Playback tracking successfully triggered and watch history synced.")
+        } catch (e: Exception) {
+            println("[YT_DEBUG] Failed to trigger playback tracking: ${e.message}")
+            logError(e)
+        }
+    }
+
+    // ==========================================
+    // 🚀 [신규 추가] 재생 세션 트래킹 로직 영역 끝
+    // ==========================================
     
     private fun getSavedContinuationToken(key: String): String? {
         val hashedKey = sha1(key)
@@ -1784,6 +1862,17 @@ class YoutubeProvider(
         if (isLive) {
             loadExtractor(fullUrl, subtitleCallback, callback)
         } else {
+            // 🚀 [수정 지점] 일반 비디오 추출 직전 재생 트래킹 직접 트리거
+            // 추출 결과값 처리(Classic 또는 NewPipe Extractor)보다 먼저 동작하여 계정 인증 상태로 통계 서버에 안착시킵니다.
+            if (playerResponseText.isNotBlank()) {
+                try {
+                    val playerResponse = parseJson<PlayerResponse>(playerResponseText)
+                    triggerPlaybackTracking(playerResponse.playbackTracking, videoId)
+                } catch (e: Exception) {
+                    println("[YT_DEBUG] Error parsing playerResponse for tracking: ${e.message}")
+                }
+            }
+
             var handled = false
             if (playerType == "classic") {
                 handled = loadLinksClassic(fullUrl, isCasting, subtitleCallback, callback)
@@ -1805,8 +1894,8 @@ class YoutubeProvider(
         }
 
         return true
-    }
-
+    }    
+    
     private suspend fun loadLinksAdvanced(
         videoId: String,
         subtitleCallback: (SubtitleFile) -> Unit,
