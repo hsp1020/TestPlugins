@@ -387,6 +387,7 @@ class YoutubeProvider(
         return collected
     }
 
+
     private fun extractLockupMetadata(lockup: Map<*, *>) : Pair<String, String> {
         var channel = ""
         var views = ""
@@ -402,7 +403,8 @@ class YoutubeProvider(
             rawParts.forEach { text ->
                 if (text.contains("회") || text.contains("시청") || text.contains("조회") || text.contains("views") || text.contains("watching")) {
                     views = text
-                } else if (text.length > 1 && !text.contains("•")) {
+                } else if (!METADATA_SKIP_REGEX.matches(text) && text.length > 1 && !text.contains("•")) {
+                    // ✅ 시간 정보 정규식(METADATA_SKIP_REGEX) 매칭 차단 필터 적용
                     channel = text
                 }
             }
@@ -420,6 +422,7 @@ class YoutubeProvider(
         return Pair(channel, views)
     }
 
+    
     private fun formatViews(viewText: String?): String {
         if (viewText.isNullOrBlank()) return "N/A"
         var text = viewText.trim()
