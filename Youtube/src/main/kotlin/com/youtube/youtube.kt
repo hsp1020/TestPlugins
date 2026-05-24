@@ -2163,6 +2163,7 @@ class YoutubeProvider(
         }
     }
 
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -2171,6 +2172,10 @@ class YoutubeProvider(
     ): Boolean {
         val videoId = YoutubeUtils.extractYoutubeId(data) ?: data
         val fullUrl = "https://www.youtube.com/watch?v=$videoId"
+
+        // [최적화 적용]: 플레이어 진입 시점에 이전 재생의 죽은 포트와 만료된 서명 캐시를 강제 삭제
+        println("[YT_DEBUG] [loadLinks] 새로운 재생 진입 감지. 비디오 ID [$videoId] 캐시 무효화 실행.")
+        com.youtube.YoutubeExtractor.clearCache(videoId)
 
         val playerType = appPrefs?.getString("youtube_player_type", "advanced") ?: "advanced"
 
