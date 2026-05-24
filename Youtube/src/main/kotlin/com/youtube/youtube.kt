@@ -56,31 +56,26 @@ class YoutubeProvider(
 
     private var isSearchContext = false
 
-    // ✅ Interceptor가 appPrefs를 정상적으로 참조하도록 구조 변경
     class YouTubeInterceptor(private val provider: YoutubeProvider) : Interceptor {
         private val prefs get() = provider.appPrefs
-        
+
         private fun sha1(input: String): String {
             val md = java.security.MessageDigest.getInstance("SHA-1")
             val bytes = md.digest(input.toByteArray())
             return bytes.joinToString("") { "%02x".format(it) }
         }
+        
+        private fun String.urlDecode(): String {
+            return try {
+                java.net.URLDecoder.decode(this, "UTF-8")
+            } catch (e: Exception) {
+              this
+            }
+        }
 
         override fun intercept(chain: Interceptor.Chain): Response {
-            val request = chain.request()
-            val urlStr = request.url.toString()
-            // 검색 엔드포인트(/results 또는 /v1/search)를 감지하여 개인 쿠키 연동 차단 플래그 지정
-            val isSearchRequest = urlStr.contains("/results") || urlStr.contains("/v1/search")
-
-            val requestBuilder = request.newBuilder()
+            val requestBuilder = chain.request().newBuilder()
                 .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36")
-
-            // [정밀 보완] 검색 페이지 레퍼러만 가두고, player API를 위한 개별 watch 주소 레퍼러는 원본 그대로 승인
-            val origReferer = request.header("Referer")
-            if (origReferer != null && (origReferer.contains("/results") || origReferer.contains("/v1/search"))) {
-                requestBuilder.header("Referer", "https://www.youtube.com/")
-            }
-    
 
             val cookieBuilder = StringBuilder()
             val visitor = prefs?.getString("VISITOR_INFO1_LIVE", null)
@@ -91,42 +86,34 @@ class YoutubeProvider(
                 cookieBuilder.append("VISITOR_INFO1_LIVE=_Mk3UVhY40g; ")
             }
 
-            // 일반 요청(재생/메인홈 등)인 경우에만 계정 쿠키를 결합하고, 검색 요청일 경우 개인 계정 쿠키를 누락시켜 개인 검색기록 연동 차단
-            if (!isSearchRequest) {
-                val authKeys = listOf("SID", "HSID", "SSID", "APISID", "SAPISID")
-                var sapisidVal: String? = null
+            val authKeys = listOf("SID", "HSID", "SSID", "APISID", "SAPISID")
+            var sapisidVal: String? = null
 
-                authKeys.forEach { key ->
-                    val value = prefs?.getString(key, null)
-                    if (!value.isNullOrBlank()) {
-                        cookieBuilder.append("$key=$value; ")
-                        if (key == "SAPISID") sapisidVal = value
-                    }
+            authKeys.forEach { key ->
+                val value = prefs?.getString(key, null)
+                if (!value.isNullOrBlank()) {
+                    cookieBuilder.append("$key=$value; ")
+                    if (key == "SAPISID") sapisidVal = value
                 }
-                
-                cookieBuilder.append("PREF=f6=40000000&hl=${provider.lang}; CONSENT=YES+fx.456722336;")
+            }
+            
+            cookieBuilder.append("PREF=f6=40000000&hl=${provider.lang}; CONSENT=YES+fx.456722336;")
 
-                requestBuilder.addHeader("Cookie", cookieBuilder.toString())
-                requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
+            requestBuilder.addHeader("Cookie", cookieBuilder.toString())
+            requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
 
-                if (!sapisidVal.isNullOrBlank()) {
-                    try {
-                        val timestamp = (System.currentTimeMillis() / 1000).toString()
-                        val origin = "https://www.youtube.com"
-                        val msg = "$timestamp $sapisidVal $origin"
-                        val hash = sha1(msg)
-                        requestBuilder.addHeader("Authorization", "SAPISIDHASH ${timestamp}_$hash")
-                        requestBuilder.addHeader("X-Origin", origin)
-                        requestBuilder.addHeader("X-Goog-AuthUser", "0")
-                    } catch (e: Exception) {
-                        logError(e)
-                    }
+            if (!sapisidVal.isNullOrBlank()) {
+                try {
+                    val timestamp = (System.currentTimeMillis() / 1000).toString()
+                    val origin = "https://www.youtube.com"
+                    val msg = "$timestamp $sapisidVal $origin"
+                    val hash = sha1(msg)
+                    requestBuilder.addHeader("Authorization", "SAPISIDHASH ${timestamp}_$hash")
+                    requestBuilder.addHeader("X-Origin", origin)
+                    requestBuilder.addHeader("X-Goog-AuthUser", "0")
+                } catch (e: Exception) {
+                    logError(e)
                 }
-            } else {
-                // 검색 요청 시에는 비개인화 PREF 쿠키 및 일반 다크 테마/언어 설정 헤더만 송신
-                cookieBuilder.append("PREF=f6=40000000&hl=${provider.lang}; CONSENT=YES+fx.456722336;")
-                requestBuilder.addHeader("Cookie", cookieBuilder.toString())
-                requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
             }
 
             return chain.proceed(requestBuilder.build())
@@ -1643,12 +1630,10 @@ class YoutubeProvider(
         val videoId = url.extractYoutubeId() ?: throw ErrorLoadingException("Invalid YouTube URL")
         println("[YT_DEBUG] Loading normal video ID: $videoId")
 
-        // 상세페이지 진입 시 홈 화면에서 눌러 들어갔음을 명시적으로 알려 시동 차단 우회
-        val headers = mapOf("Referer" to "https://www.youtube.com/")
-        val response = app.get(url, headers = headers, interceptor = ytInterceptor)
+        val response = app.get(url, interceptor = ytInterceptor)
         val html = response.text
         val data = extractYtInitialData(html)
-        
+
         var title = "YouTube Video"
         var plot = ""
         var poster = buildThumbnailFromId(videoId)
@@ -1767,9 +1752,7 @@ class YoutubeProvider(
                 ),
                 "videoId" to videoId
             )
-            // 비디오 고유 시청 주소를 레퍼러로 정밀 지정하여 시청 기록 강제 활성화
-            val headers = mapOf("Referer" to "$mainUrl/watch?v=$videoId")
-            playerResponseText = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).text
+            playerResponseText = app.post(apiUrl, json = payload, interceptor = ytInterceptor).text
             if (playerResponseText.isNotBlank()) {
                 val root = JSONObject(playerResponseText)
                 val videoDetails = root.optJSONObject("videoDetails")
@@ -1827,9 +1810,8 @@ class YoutubeProvider(
                 ),
                 "videoId" to videoId
             )
-            // 안드로이드 클라이언트 세션 플레이어에도 전용 시청 주소 레퍼러 이식
-            val headers = mapOf("Referer" to "$mainUrl/watch?v=$videoId")
-            val responseText = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).text
+
+            val responseText = app.post(apiUrl, json = payload, interceptor = ytInterceptor).text
 
         } catch (e: Exception) {
 
@@ -1837,8 +1819,6 @@ class YoutubeProvider(
 
         return true
     }
-
-
 
     private suspend fun loadLinksClassic(
         data: String,
