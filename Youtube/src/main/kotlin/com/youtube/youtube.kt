@@ -618,7 +618,7 @@ class YoutubeProvider(
                 val finalTitle = "#$episodeNum {Short | $views} $title"
                 println("[YT_DEBUG] collectFromRenderer: extracted Shorts $videoId: $finalTitle")
                 return newMovieSearchResponse(finalTitle, finalUrl, TvType.Movie) {
-                    this.posterUrl = poster
+                    this.posterUrl = YoutubeUtils.getProxiedPoster(poster) // ✅ 프록시 래핑 적용
                 }
             }
         }
@@ -731,7 +731,7 @@ class YoutubeProvider(
                         finalTitle,
                         finalUrl,
                         TvType.Movie
-                    ) { this.posterUrl = poster }
+                    ) { this.posterUrl = YoutubeUtils.getProxiedPoster(poster) } // ✅ 프록시 래핑 적용
                 } else {
                     finalTitle =
                         if (channel.isNotBlank()) "{$channel | $views} $title" else "{$views} $title"
