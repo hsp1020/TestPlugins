@@ -344,7 +344,7 @@ private fun getSapisidHash(
         text = text.replace("조회수", "").replace("views", "").replace("مشاهدة", "")
                    .replace("시청 중", "").replace("시청중", "").replace("watching", "").trim()
 
-        if (text.matches(Regex(".*[만억KMBkmb].*")) && text.length < 15) {
+        if (text.matches(Regex(".*[천만억KMBkmb].*")) && text.length < 15) {
             return text
         }
         
