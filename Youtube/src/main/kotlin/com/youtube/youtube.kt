@@ -516,8 +516,16 @@ private fun getSapisidHash(
             if (contentType == "LOCKUP_CONTENT_TYPE_PLAYLIST") {
                 val playlistId = lockup.getString("contentId")
                 if (!playlistId.isNullOrBlank() && seenIds.add(playlistId)) {
-                    val title = lockup.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")
+                    var title = lockup.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")
                         ?.getMapKey("title")?.getString("content") ?: "Playlist"
+
+                    // 🚀 [추가] 믹스 재생목록 타이틀에서 꼬리표 단어 깔끔히 정제
+                    if (playlistId.startsWith("RD") || playlistId.startsWith("UL") || playlistId.startsWith("MM") || playlistId.startsWith("RDMM")) {
+                        title = title.replace(Regex("""\s*\(믹스\s*재생목록\)""", RegexOption.IGNORE_CASE), "")
+                                     .replace(Regex("""\s*\(Mix\s*Playlist\)""", RegexOption.IGNORE_CASE), "")
+                                     .trim()
+                    }
+
                     val episodeCount =
                         lockup.getMapKey("contentImage")?.getMapKey("collectionThumbnailViewModel")
                             ?.getMapKey("primaryThumbnail")?.getMapKey("thumbnailViewModel")
@@ -1685,24 +1693,84 @@ private fun getSapisidHash(
                     println("[YT_DEBUG] Title resolved from findMixTitle: $title")
                 }
 
-                // 앱 메인 화면의 규칙인 "믹스명 (믹스 재생목록)" 포맷과 무조건 동기화되도록 보강
-                if (url.contains("list=RD") || url.contains("list=MM") || url.contains("list=UL")) {
-                    val finalTitle = title ?: "YouTube Mix"
-                    title = if (!finalTitle.contains("믹스 재생목록")) {
-                        "$finalTitle (믹스 재생목록)"
-                    } else {
-                        finalTitle
+                // 🟢 이 자리에 아래 코드를 그대로 덮어씌웁니다.
+
+                val seenPlaylistIds = mutableSetOf<String>()
+                // 믹스 추가 로드를 위해 가변형(.toMutableList())으로 초기 로드
+                val episodes = extractPlaylistEpisodes(data, seenPlaylistIds).toMutableList()
+                println("[YT_DEBUG] Successfully parsed initial episodes count: ${episodes.size}")
+
+                // 🚀 [개선 1] 믹스 상세페이지 제목도 "믹스 - 원슈타인" 형태로 메인 피드와 완전히 일치되게 동적 역추적
+                val isMix = url.contains("list=RD") || url.contains("list=MM") || url.contains("list=UL")
+                if (isMix) {
+                    val firstChannel = episodes.firstOrNull()?.description
+                    if (!firstChannel.isNullOrBlank()) {
+                        title = if (lang == "ko") {
+                            "믹스 - $firstChannel"
+                        } else {
+                            "Mix - $firstChannel"
+                        }
+                    } else if (title.isNullOrBlank() || title.contains("YouTube Mix") || title.contains("믹스")) {
+                        title = "YouTube Mix"
                     }
+                }
+
+                // 불필요한 꼬리표 정제 작업 처리
+                title = title?.replace(Regex("""\s*\(믹스\s*재생목록\)""", RegexOption.IGNORE_CASE), "")
+                             ?.replace(Regex("""\s*\(Mix\s*Playlist\)""", RegexOption.IGNORE_CASE), "")
+                             ?.trim() ?: "YouTube Mix"
+
+                // 🚀 [개선 2] 믹스 재생목록 내부 트래킹용 페이지네이션 전개 (/v1/next API 이용해 48개 이상 로드)
+                var currentToken = findTokenRecursive(data)
+                println("[YT_DEBUG] Mix playlist continuation token found: ${currentToken != null}")
+
+                var pagesFetched = 1
+                val apiKey = findConfig(html, "INNERTUBE_API_KEY")
+                val clientVersion = findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: "2.20240725.01.00"
+                val visitorData = findConfig(html, "VISITOR_DATA")
+
+                while (!currentToken.isNullOrBlank() && episodes.size < 48 && pagesFetched < 3 && !apiKey.isNullOrBlank()) {
+                    try {
+                        pagesFetched += 1
+                        val apiUrl = "https://www.youtube.com/youtubei/v1/next?key=$apiKey"
+                        val payload = mapOf(
+                            "context" to mapOf(
+                                "client" to mapOf(
+                                    "clientName" to "WEB",
+                                    "clientVersion" to clientVersion,
+                                    "hl" to lang,
+                                    "gl" to if (lang == "ko") "KR" else "US",
+                                    "visitorData" to (visitorData ?: ""),
+                                    "platform" to "DESKTOP"
+                                )
+                            ),
+                            "continuation" to currentToken
+                        )
+                        val headers = mapOf("X-Youtube-Client-Name" to "WEB", "X-Youtube-Client-Version" to clientVersion)
+                        val jsonResponse = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                        if (jsonResponse == null) break
+                        
+                        val nextBatch = extractPlaylistEpisodes(jsonResponse, seenPlaylistIds)
+                        if (nextBatch.isEmpty()) break
+                        
+                        episodes.addAll(nextBatch)
+                        currentToken = findTokenRecursive(jsonResponse)
+                        println("[YT_DEBUG] Loaded continuation page $pagesFetched. Total episodes: ${episodes.size}")
+                    } catch (e: Exception) {
+                        println("[YT_DEBUG] Error loading mix continuation: ${e.message}")
+                        break
+                    }
+                }
+
+                // 🚀 [개선 3] 모든 에피소드의 시퀀스를 1번부터 차례대로 재조정 정렬
+                episodes.forEachIndexed { index, ep ->
+                    ep.episode = index + 1
                 }
 
                 val ownerObj = safeGet(header, "ownerText") as? Map<*, *>
                 val author = extractTitle(ownerObj) ?: "Unknown Channel"
                 val description = extractTitle(safeGet(header, "description") as? Map<*, *>)
                 println("[YT_DEBUG] Author: $author, Description: $description")
-
-                val seenPlaylistIds = mutableSetOf<String>()
-                val episodes = extractPlaylistEpisodes(data, seenPlaylistIds)
-                println("[YT_DEBUG] Successfully parsed episodes count: ${episodes.size}")
 
                 val playlistPoster = episodes.firstOrNull()?.posterUrl ?: response.document.selectFirst("meta[property=og:image]")?.attr("content")
 
