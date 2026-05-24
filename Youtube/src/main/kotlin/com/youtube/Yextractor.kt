@@ -19,8 +19,6 @@ import java.io.InputStreamReader
 import java.io.PrintWriter
 import java.net.ServerSocket
 import java.net.Socket
-import java.net.URLDecoder
-import java.nio.charset.StandardCharsets
 import java.util.UUID
 import java.util.Collections
 import java.util.LinkedHashMap
@@ -97,7 +95,6 @@ open class YoutubeExtractor : ExtractorApi() {
         println("[YT_DEBUG] [getUrl] 호출됨. 원본 URL: $url")
         val cleanedUrl = url.replace(schemaStripRegex, "")
         
-        // 공통 유틸 적용: 비디오 ID 추출 통합
         val videoId = YoutubeUtils.extractYoutubeId(cleanedUrl) ?: cleanedUrl
         println("[YT_DEBUG] [getUrl] 가공된 cleanedUrl: $cleanedUrl, 비디오 ID: $videoId")
 
@@ -245,16 +242,29 @@ open class YoutubeExtractor : ExtractorApi() {
                     )
                 }
 
-                // 🚀 [추가 및 우회 이식] Cobalt 고화질 웹 다운로드 다이렉트 브릿지 링크 삽입
-                // 다운로드 소스 목록 상단에 고정 배치될 수 있도록 2160(4K) 화질 태그를 부여합니다.
+                // 🚀 [다중 고화질 웹 다운로드 포털 연동 보완]
+                // 1번: Cobalt (qwkuns.me 사설 인스턴스) - 4K 화질 슬롯(2160p)으로 최상단 노출
                 builtLinks.add(
                     newExtractorLink(
                         source = "YouTube Downloader",
-                        name = "Cobalt Web Download",
+                        name = "Cobalt Web Download (4K)",
                         url = "https://qwkuns.me/#https://www.youtube.com/watch?v=$videoId",
                         type = INFER_TYPE
                     ) {
-                        this.quality = 144 // 4K 화질 태그 부여
+                        this.quality = 144
+                        this.referer = mainUrl
+                    }
+                )
+
+                // 3번: SOSYouTube (SSYouTube 우회 도메인) - FHD 화질 슬롯(1080p)으로 노출
+                builtLinks.add(
+                    newExtractorLink(
+                        source = "YouTube Downloader",
+                        name = "SOSYouTube Web Download (1080p)",
+                        url = "https://www.sosyoutube.com/watch?v=$videoId",
+                        type = INFER_TYPE
+                    ) {
+                        this.quality = 144
                         this.referer = mainUrl
                     }
                 )
