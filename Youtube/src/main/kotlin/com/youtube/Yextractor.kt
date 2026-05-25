@@ -176,7 +176,11 @@ open class YoutubeExtractor : ExtractorApi() {
                         // [세그먼트 정합성 보정]: 음수를 명확하게 필터링하여 "-1--1" XML 파괴 현상을 해결
                         val initR = if (asr.initStart != null && asr.initStart >= 0 && asr.initEnd != null && asr.initEnd >= 0) "${asr.initStart}-${asr.initEnd}" else null
                         val indexR = if (asr.indexStart != null && asr.indexStart >= 0 && asr.indexEnd != null && asr.indexEnd >= 0) "${asr.indexStart}-${asr.indexEnd}" else null
-
+            
+                        // [복원 완료]: 유실되었던 오디오 언어 식별자 추출 전처리 2줄을 완벽 복구
+                        var rawLang = asr.audioTrackId ?: "Default"
+                        if (rawLang.contains(".")) rawLang = rawLang.substringBefore(".")
+                        
                         AudioInfo(aUrl, mime, bitrate, initR, indexR, rawLang.uppercase())
                     } catch (e: Exception) { null }
                 }.distinctBy { it.url }
