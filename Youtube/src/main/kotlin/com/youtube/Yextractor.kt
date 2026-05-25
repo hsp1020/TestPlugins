@@ -3,6 +3,10 @@ package com.youtube
 import android.annotation.SuppressLint
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.WebChromeClient
+import android.webkit.ConsoleMessage
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceError
 import androidx.preference.PreferenceManager
 import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.SubtitleFile
@@ -39,7 +43,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
-// [컴파일 해결]: Mutex 확장 함수 'withLock' 임포트 추가
 import kotlinx.coroutines.sync.withLock
 
 open class YoutubeExtractor : ExtractorApi() {
@@ -76,112 +79,116 @@ open class YoutubeExtractor : ExtractorApi() {
             ThreadPoolExecutor.CallerRunsPolicy()
         )
 
-        private const val EMBED_URL = "https://www.youtube.com/embed/aqz-KE-bpKQ?autoplay=1&mute=1"
-
         init {
             YoutubeStreamExtractor.setFetchIosClient(true)
 
             YoutubeStreamExtractor.setPoTokenProvider(object : PoTokenProvider {
                 override fun getWebClientPoToken(videoId: String?): PoTokenResult? {
-                    println("[YT_DEBUG] [getWebClientPoToken] 웹 클라이언트 poToken 요구. 비디오 ID: $videoId")
+                    println("[YT_DEBUG] [Telemetry] getWebClientPoToken requested. Video ID: $videoId on Thread [${Thread.currentThread().name}]")
                     return getPoTokenResultForVideo(videoId)
                 }
 
                 override fun getWebEmbedClientPoToken(videoId: String?): PoTokenResult? {
-                    println("[YT_DEBUG] [getWebEmbedClientPoToken] 임베드 poToken 요구. 비디오 ID: $videoId")
+                    println("[YT_DEBUG] [Telemetry] getWebEmbedClientPoToken requested. Video ID: $videoId on Thread [${Thread.currentThread().name}]")
                     return getPoTokenResultForVideo(videoId)
                 }
 
                 override fun getAndroidClientPoToken(videoId: String?): PoTokenResult? {
-                    println("[YT_DEBUG] [getAndroidClientPoToken] 안드로이드 클라이언트 poToken 요구. 비디오 ID: $videoId")
+                    println("[YT_DEBUG] [Telemetry] getAndroidClientPoToken requested. Video ID: $videoId on Thread [${Thread.currentThread().name}]")
                     return getPoTokenResultForVideo(videoId)
                 }
 
                 override fun getIosClientPoToken(videoId: String?): PoTokenResult? {
-                    println("[YT_DEBUG] [getIosClientPoToken] iOS 클라이언트 poToken 요구. 비디오 ID: $videoId")
+                    println("[YT_DEBUG] [Telemetry] getIosClientPoToken requested. Video ID: $videoId on Thread [${Thread.currentThread().name}]")
                     return getPoTokenResultForVideo(videoId)
                 }
             })
         }
 
         fun clearCache(videoId: String) {
+            println("[YT_DEBUG] [Telemetry] clearCache triggered for Video ID: $videoId")
             ytVideos.remove(videoId)
             ytVideosSubtitles.remove(videoId)
         }
 
         private fun getPoTokenResultForVideo(videoId: String?): PoTokenResult? {
-            val cached = getCachedTokens()
+            val id = videoId ?: "aqz-KE-bpKQ"
+            val cached = getCachedTokens(id)
             if (cached != null) {
-                println("[YT_DEBUG] [setPoTokenProvider] 캐시된 poToken 적용. 비디오: [$videoId]")
+                println("[YT_DEBUG] [Telemetry] Cache HIT for video: [$id]. poToken: ${cached.first.take(15)}..., visitorData: ${cached.second.take(15)}")
                 return PoTokenResult(cached.first, "", "")
             }
 
-            println("[YT_DEBUG] [setPoTokenProvider] 캐시 무효화. WebView 가상 자가발전(Locking) 진입.")
-            // [컴파일 해결]: 명시적 타입 지정을 적용하여 추론 실패 및 스마트캐스트 컴파일 에러 해결
+            println("[YT_DEBUG] [Telemetry] Cache MISS for video: [$id]. Entering Thread-Safe Mutex Lock.")
             val generated: Triple<String, String, String?>? = kotlinx.coroutines.runBlocking {
                 tokenMutex.withLock {
-                    val doubleCheck = getCachedTokens()
+                    val doubleCheck = getCachedTokens(id)
                     if (doubleCheck != null) {
+                        println("[YT_DEBUG] [Telemetry] Mutex Double-Check HIT for video: [$id]")
                         doubleCheck
                     } else {
-                        getPoTokenAndVisitor()
+                        println("[YT_DEBUG] [Telemetry] Spawning WebView Attestation Sandbox for video: [$id]")
+                        getPoTokenAndVisitor(id)
                     }
                 }
             }
 
             return if (generated != null) {
-                println("[YT_DEBUG] [setPoTokenProvider] 새로 취득한 poToken이 비디오 [$videoId]에 최종 정상 바인딩됩니다. 토큰 값: ${generated.first.take(15)}...")
+                println("[YT_DEBUG] [Telemetry] Final Binding success. poToken: ${generated.first.take(20)}... bound to Video [$id]")
                 PoTokenResult(generated.first, "", "")
             } else {
-                println("[YT_DEBUG] [setPoTokenProvider] poToken 획득 실패. 일반 우회 모드 시도.")
+                println("[YT_DEBUG] [Telemetry] Attestation Sandboxing failed completely for video [$id]. Proceeding with bare request.")
                 null
             }
         }
 
-        private fun getCachedTokens(): Triple<String, String, String?>? {
+        private fun getCachedTokens(videoId: String): Triple<String, String, String?>? {
             val context = AcraApplication.context ?: return null
             val prefs = PreferenceManager.getDefaultSharedPreferences(context)
-            val poToken = prefs.getString("yt_cached_potoken", null)
-            val visitorData = prefs.getString("yt_cached_visitor_data", null)
-            val cookieStr = prefs.getString("yt_cached_cookie", null)
-            val timestamp = prefs.getLong("yt_potoken_timestamp", 0L)
+            val poToken = prefs.getString("yt_cached_potoken_$videoId", null)
+            val visitorData = prefs.getString("yt_cached_visitor_data_$videoId", null)
+            val cookieStr = prefs.getString("yt_cached_cookie_$videoId", null)
+            val timestamp = prefs.getLong("yt_potoken_timestamp_$videoId", 0L)
 
             if (poToken.isNullOrBlank() || visitorData.isNullOrBlank()) {
                 return null
             }
 
             val elapsed = System.currentTimeMillis() - timestamp
+            val remainingSec = (3 * 3600 * 1000 - elapsed) / 1000
             if (elapsed > 3 * 3600 * 1000) { 
-                println("[YT_DEBUG] [getCachedTokens] 캐시 토큰 유효 시간 만료.")
+                println("[YT_DEBUG] [Telemetry] Cached token expired for video: [$videoId]. Elapsed: ${elapsed / 1000}s")
                 return null
             }
 
+            println("[YT_DEBUG] [Telemetry] Cache Valid. Remaining: ${remainingSec}s for video: [$videoId]")
             return Triple(poToken, visitorData, cookieStr)
         }
 
-        private fun saveCachedTokens(poToken: String, visitorData: String, cookieStr: String?) {
+        private fun saveCachedTokens(videoId: String, poToken: String, visitorData: String, cookieStr: String?) {
             val context = AcraApplication.context ?: return
             val prefs = PreferenceManager.getDefaultSharedPreferences(context)
             val now = System.currentTimeMillis()
             
+            println("[YT_DEBUG] [Telemetry] Saving Generated Attestation. Video: [$videoId], poToken: ${poToken.take(15)}..., visitorData: ${visitorData.take(15)}")
             val editor = prefs.edit()
-                .putString("yt_cached_potoken", poToken)
-                .putString("yt_cached_visitor_data", visitorData)
-                .putLong("yt_potoken_timestamp", now)
+                .putString("yt_cached_potoken_$videoId", poToken)
+                .putString("yt_cached_visitor_data_$videoId", visitorData)
+                .putLong("yt_potoken_timestamp_$videoId", now)
                 
             if (!cookieStr.isNullOrBlank()) {
-                editor.putString("yt_cached_cookie", cookieStr)
+                editor.putString("yt_cached_cookie_$videoId", cookieStr)
                 
                 val visitorInfoLive = extractCookieValue(cookieStr, "VISITOR_INFO1_LIVE")
                 if (!visitorInfoLive.isNullOrBlank()) {
                     editor.putString("VISITOR_INFO1_LIVE", visitorInfoLive)
-                    println("[YT_DEBUG] [saveCachedTokens] VISITOR_INFO1_LIVE 동기화 성공: $visitorInfoLive")
+                    println("[YT_DEBUG] [Telemetry] Syncing VISITOR_INFO1_LIVE Cookie: $visitorInfoLive")
                 }
                 
                 val ysc = extractCookieValue(cookieStr, "YSC")
                 if (!ysc.isNullOrBlank()) {
                     editor.putString("YSC", ysc)
-                    println("[YT_DEBUG] [saveCachedTokens] YSC 세션 동기화 성공: $ysc")
+                    println("[YT_DEBUG] [Telemetry] Syncing YSC Cookie: $ysc")
                 }
             }
             editor.apply()
@@ -199,9 +206,15 @@ open class YoutubeExtractor : ExtractorApi() {
             return null
         }
 
-        private suspend fun getPoTokenAndVisitor(): Triple<String, String, String?>? = withContext(Dispatchers.Main) {
+        // ES5 호환 구문으로 재작성된 초강력 Fetch/XHR Interceptor 및 Polling Fallback 하이브리드 엔진
+        private suspend fun getPoTokenAndVisitor(videoId: String): Triple<String, String, String?>? = withContext(Dispatchers.Main) {
             val context = AcraApplication.context ?: return@withContext null
-            println("[YT_DEBUG] [getPoTokenAndVisitor] Headless WebView 로드 준비. 대상 URL: $EMBED_URL")
+            val embedUrl = "https://www.youtube.com/embed/$videoId?autoplay=1&mute=1"
+            val startTime = System.currentTimeMillis()
+            println("[YT_DEBUG] [Telemetry] Starting WebView attestation sandboxing.")
+            println("[YT_DEBUG] [Telemetry] Target Video ID: $videoId")
+            println("[YT_DEBUG] [Telemetry] Embed Sandbox URL: $embedUrl")
+            println("[YT_DEBUG] [Telemetry] Device User-Agent: ${YoutubeUtils.CHROME_USER_AGENT}")
 
             suspendCancellableCoroutine { continuation ->
                 val webView = WebView(context)
@@ -213,10 +226,33 @@ open class YoutubeExtractor : ExtractorApi() {
                     if (!isCompleted) {
                         isCompleted = true
                         pollRunnable?.let { handler.removeCallbacks(it) }
+                        val duration = System.currentTimeMillis() - startTime
+                        println("[YT_DEBUG] [Telemetry] WebView Attestation finished in ${duration}ms. Success: ${res != null}")
                         if (continuation.isActive) {
                             continuation.resume(res)
                         }
                         webView.destroy()
+                    }
+                }
+
+                // JS-to-Kotlin 브릿지 인터페이스 설계
+                class PoTokenBridge {
+                    @android.webkit.JavascriptInterface
+                    fun onPoTokenFound(token: String, visitor: String, url: String) {
+                        android.os.Handler(android.os.Looper.getMainLooper()).post {
+                            if (isCompleted) return@post
+                            println("[YT_DEBUG] [Telemetry] [Bridge-Callback] Success! poToken intercepted via JS Hook.")
+                            println("[YT_DEBUG] [Telemetry] [Bridge-Callback] Captured Token: ${token.take(20)}...")
+                            println("[YT_DEBUG] [Telemetry] [Bridge-Callback] Captured Visitor: $visitor")
+                            println("[YT_DEBUG] [Telemetry] [Bridge-Callback] Source URL: $url")
+                            
+                            val cookieManager = android.webkit.CookieManager.getInstance()
+                            val cookieStr = cookieManager.getCookie(embedUrl)
+                            println("[YT_DEBUG] [Telemetry] [Bridge-Callback] Captured Cookies: $cookieStr")
+                            
+                            saveCachedTokens(videoId, token, visitor, cookieStr)
+                            safeResume(Triple(token, visitor, cookieStr))
+                        }
                     }
                 }
 
@@ -228,75 +264,135 @@ open class YoutubeExtractor : ExtractorApi() {
                     settings.mediaPlaybackRequiresUserGesture = false 
                     settings.userAgentString = YoutubeUtils.CHROME_USER_AGENT
 
+                    // 자바스크립트 인터페이스 브릿지 연결
+                    addJavascriptInterface(PoTokenBridge(), "PoTokenBridge")
+
+                    // 상세 WebView 내부 Console 디버거 가동
+                    webChromeClient = object : WebChromeClient() {
+                        override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+                            consoleMessage?.let {
+                                println("[YT_DEBUG] [WebView-Console] [${it.messageLevel()}] ${it.message()} (Source: ${it.sourceId()}:${it.lineNumber()})")
+                            }
+                            return true
+                        }
+                    }
+
+                    // 300ms 간격 Polling Fallback 로직 준비
                     pollRunnable = object : Runnable {
                         override fun run() {
                             if (isCompleted) return
 
-                            evaluateJavascript(
-                                "(function() { " +
-                                "  try { " +
-                                "    var poToken = null; " +
-                                "    var visitorData = null; " +
-                                "    var playerResponse = window.ytInitialPlayerResponse; " +
-                                "    if (playerResponse) { " +
-                                "      poToken = playerResponse.serviceIntegrityDimensions?.poToken || playerResponse.streamingData?.poToken; " +
-                                "      visitorData = playerResponse.responseContext?.visitorData; " +
-                                "    } " +
-                                "    if (!poToken || !visitorData) { " +
-                                "      var args = window.ytplayer?.config?.args; " +
-                                "      if (args) { " +
-                                "        var rawResponse = args.raw_player_response ? (typeof args.raw_player_response === 'string' ? JSON.parse(args.raw_player_response) : args.raw_player_response) : (args.player_response ? JSON.parse(args.player_response) : null); " +
-                                "        if (rawResponse) { " +
-                                "          poToken = poToken || rawResponse.serviceIntegrityDimensions?.poToken || rawResponse.streamingData?.poToken; " +
-                                "          visitorData = visitorData || rawResponse.responseContext?.visitorData; " +
-                                "        } " +
-                                "        visitorData = visitorData || args.visitor_data; " +
-                                "      } " +
-                                "    } " +
-                                "    if (!poToken || !visitorData) { " +
-                                "      var bootstrapResponse = window.ytplayer?.bootstrapPlayerResponse; " +
-                                "      if (bootstrapResponse) { " +
-                                "        poToken = poToken || bootstrapResponse.serviceIntegrityDimensions?.poToken || bootstrapResponse.streamingData?.poToken; " +
-                                "        visitorData = visitorData || bootstrapResponse.responseContext?.visitorData; " +
-                                "      } " +
-                                "    } " +
-                                "    if (!poToken || !visitorData) { " +
-                                "      if (window.ytcfg && typeof window.ytcfg.get === 'function') { " +
-                                "        var ytcfgPlayerResponse = window.ytcfg.get('PLAYER_VARS')?.embedded_player_response || window.ytcfg.get('PLAYER_RESPONSE'); " +
-                                "        if (ytcfgPlayerResponse) { " +
-                                "          var parsedYtcfg = typeof ytcfgPlayerResponse === 'string' ? JSON.parse(ytcfgPlayerResponse) : ytcfgPlayerResponse; " +
-                                "          poToken = poToken || parsedYtcfg.serviceIntegrityDimensions?.poToken || parsedYtcfg.streamingData?.poToken; " +
-                                "          visitorData = visitorData || parsedYtcfg.responseContext?.visitorData; " +
-                                "        } " +
-                                "        visitorData = visitorData || window.ytcfg.get('VISITOR_DATA'); " +
-                                "      } " +
-                                "    } " +
-                                "    if (!poToken) { " +
-                                "      var scripts = document.getElementsByTagName('script'); " +
-                                "      for (var i = 0; i < scripts.length; i++) { " +
-                                "        var text = scripts[i].textContent || scripts[i].innerText || ''; " +
-                                "        if (text.indexOf('poToken') !== -1) { " +
-                                "          var m = text.match(/\"poToken\"\\s*:\\s*\"([^\"]+)\"/); " +
-                                "          if (m) poToken = m[1]; " +
-                                "          var v = text.match(/\"visitorData\"\\s*:\\s*\"([^\"]+)\"/); " +
-                                "          if (v) visitorData = visitorData || v[1]; " +
-                                "        } " +
-                                "      } " +
-                                "    } " +
-                                "    if (poToken && visitorData) { " +
-                                "      return JSON.stringify({poToken: poToken, visitorData: visitorData}); " +
-                                "    } " +
-                                "    return JSON.stringify({ " +
-                                "      error: '대기 중... ' + " +
-                                "             'ytInitialPlayerResponse: ' + (!!window.ytInitialPlayerResponse) + ', ' + " +
-                                "             'ytplayer.config: ' + (!!window.ytplayer?.config) + ', ' + " +
-                                "             'ytcfg: ' + (!!window.ytcfg) " +
-                                "    }); " +
-                                "  } catch(e) { " +
-                                "    return JSON.stringify({error: 'JS 에러: ' + e.message}); " +
-                                "  } " +
-                                "})();"
-                            ) { jsonResult ->
+                            val pollingScript = """
+                                (function() {
+                                    try {
+                                        var poToken = null;
+                                        var visitorData = null;
+                                        
+                                        var pr = window.ytInitialPlayerResponse;
+                                        if (pr) {
+                                            if (pr.serviceIntegrityDimensions && pr.serviceIntegrityDimensions.poToken) {
+                                                poToken = pr.serviceIntegrityDimensions.poToken;
+                                            }
+                                            if (!poToken && pr.streamingData && pr.streamingData.poToken) {
+                                                poToken = pr.streamingData.poToken;
+                                            }
+                                            if (pr.responseContext && pr.responseContext.visitorData) {
+                                                visitorData = pr.responseContext.visitorData;
+                                            }
+                                        }
+                                        
+                                        if ((!poToken || !visitorData) && window.ytplayer) {
+                                            var config = window.ytplayer.config;
+                                            if (config && config.args) {
+                                                var args = config.args;
+                                                var raw = args.raw_player_response;
+                                                var parsed = null;
+                                                if (raw) {
+                                                    parsed = (typeof raw === 'string') ? JSON.parse(raw) : raw;
+                                                } else if (args.player_response) {
+                                                    parsed = JSON.parse(args.player_response);
+                                                }
+                                                if (parsed) {
+                                                    if (!poToken && parsed.serviceIntegrityDimensions && parsed.serviceIntegrityDimensions.poToken) {
+                                                        poToken = parsed.serviceIntegrityDimensions.poToken;
+                                                    }
+                                                    if (!poToken && parsed.streamingData && parsed.streamingData.poToken) {
+                                                        poToken = parsed.streamingData.poToken;
+                                                    }
+                                                    if (!visitorData && parsed.responseContext && parsed.responseContext.visitorData) {
+                                                        visitorData = parsed.responseContext.visitorData;
+                                                    }
+                                                }
+                                                if (!visitorData && args.visitor_data) {
+                                                    visitorData = args.visitor_data;
+                                                }
+                                            }
+                                        }
+                                        
+                                        if ((!poToken || !visitorData) && window.ytplayer) {
+                                            var bpr = window.ytplayer.bootstrapPlayerResponse;
+                                            if (bpr) {
+                                                if (!poToken && bpr.serviceIntegrityDimensions && bpr.serviceIntegrityDimensions.poToken) {
+                                                    poToken = bpr.serviceIntegrityDimensions.poToken;
+                                                }
+                                                if (!poToken && bpr.streamingData && bpr.streamingData.poToken) {
+                                                    poToken = bpr.streamingData.poToken;
+                                                }
+                                                if (!visitorData && bpr.responseContext && bpr.responseContext.visitorData) {
+                                                    visitorData = bpr.responseContext.visitorData;
+                                                }
+                                            }
+                                        }
+                                        
+                                        if ((!poToken || !visitorData) && window.ytcfg && typeof window.ytcfg.get === 'function') {
+                                            var cfgPr = window.ytcfg.get('PLAYER_VARS');
+                                            var embeddedPr = cfgPr ? cfgPr.embedded_player_response : null;
+                                            var pr2 = embeddedPr || window.ytcfg.get('PLAYER_RESPONSE');
+                                            if (pr2) {
+                                                var parsedCfg = (typeof pr2 === 'string') ? JSON.parse(pr2) : pr2;
+                                                if (!poToken && parsedCfg.serviceIntegrityDimensions && parsedCfg.serviceIntegrityDimensions.poToken) {
+                                                    poToken = parsedCfg.serviceIntegrityDimensions.poToken;
+                                                }
+                                                if (!poToken && parsedCfg.streamingData && parsedCfg.streamingData.poToken) {
+                                                    poToken = parsedCfg.streamingData.poToken;
+                                                }
+                                                if (!visitorData && parsedCfg.responseContext && parsedCfg.responseContext.visitorData) {
+                                                    visitorData = parsedCfg.responseContext.visitorData;
+                                                }
+                                            }
+                                            if (!visitorData) {
+                                                visitorData = window.ytcfg.get('VISITOR_DATA');
+                                            }
+                                        }
+                                        
+                                        if (!poToken) {
+                                            var scripts = document.getElementsByTagName('script');
+                                            for (var i = 0; i < scripts.length; i++) {
+                                                var text = scripts[i].textContent || scripts[i].innerText || '';
+                                                if (text.indexOf('poToken') !== -1) {
+                                                    var m = text.match(/\"poToken\"\\s*:\\s*\"([^\"]+)\"/);
+                                                    if (m) poToken = m[1];
+                                                    var v = text.match(/\"visitorData\"\\s*:\\s*\"([^\"]+)\"/);
+                                                    if (v) visitorData = visitorData || v[1];
+                                                }
+                                            }
+                                        }
+
+                                        if (poToken) {
+                                            return JSON.stringify({ poToken: poToken, visitorData: visitorData || "" });
+                                        }
+                                        return JSON.stringify({
+                                            error: 'Wait... ytInitialPlayerResponse: ' + (!!window.ytInitialPlayerResponse) + 
+                                                   ', ytplayer.config: ' + (!!(window.ytplayer && window.ytplayer.config)) + 
+                                                   ', ytcfg: ' + (!!window.ytcfg)
+                                        });
+                                    } catch(e) {
+                                        return JSON.stringify({ error: 'Exception in polling: ' + e.message });
+                                    }
+                                })()
+                            """.trimIndent()
+
+                            evaluateJavascript(pollingScript) { jsonResult ->
                                 if (isCompleted) return@evaluateJavascript
 
                                 if (jsonResult != null && jsonResult != "null" && jsonResult.isNotBlank()) {
@@ -308,17 +404,18 @@ open class YoutubeExtractor : ExtractorApi() {
                                             val poToken = json.optString("poToken")
                                             val visitorData = json.optString("visitorData")
 
-                                            if (poToken.isNotBlank() && visitorData.isNotBlank()) {
-                                                println("[YT_DEBUG] [getPoTokenAndVisitor] 가상 자가발전 성공!")
+                                            if (poToken.isNotBlank()) {
+                                                println("[YT_DEBUG] [Telemetry] [Polling-Fallback] Success! Captured via Window Polling.")
                                                 val cookieManager = android.webkit.CookieManager.getInstance()
-                                                val cookieStr = cookieManager.getCookie(EMBED_URL)
-                                                saveCachedTokens(poToken, visitorData, cookieStr)
+                                                val cookieStr = cookieManager.getCookie(embedUrl)
+                                                
+                                                saveCachedTokens(videoId, poToken, visitorData, cookieStr)
                                                 safeResume(Triple(poToken, visitorData, cookieStr))
                                                 return@evaluateJavascript
                                             }
                                         }
                                     } catch (e: Exception) {
-                                        println("[YT_DEBUG] [getPoTokenAndVisitor] 결과 파싱 에러: ${e.message}")
+                                        // 무의미한 에러 로그 방지
                                     }
                                 }
                                 handler.postDelayed(this, 300)
@@ -326,35 +423,159 @@ open class YoutubeExtractor : ExtractorApi() {
                         }
                     }
 
+                    // Network Interception 후킹 스크립트 주입 로직
+                    val injectJsHooks = {
+                        val hookScript = """
+                            (function() {
+                                if (window._poTokenHookInjected) {
+                                    console.log("[JS_HOOK] Interceptor already active.");
+                                    return;
+                                }
+                                window._poTokenHookInjected = true;
+                                console.log("[JS_HOOK] Injecting Fetch/XHR Interceptors now...");
+
+                                function scanObjectForPoToken(obj) {
+                                    if (!obj) return null;
+                                    if (typeof obj === 'string') {
+                                        if (obj.length > 80 && obj.length < 200 && (obj.startsWith('M') || obj.startsWith('AO'))) {
+                                            return obj;
+                                        }
+                                        return null;
+                                    }
+                                    if (typeof obj === 'object') {
+                                        for (var key in obj) {
+                                            if (obj.hasOwnProperty(key)) {
+                                                if (key === 'poToken' || key === 'rolloutToken') {
+                                                    if (typeof obj[key] === 'string' && obj[key].length > 50) {
+                                                        return obj[key];
+                                                    }
+                                                }
+                                                var found = scanObjectForPoToken(obj[key]);
+                                                if (found) return found;
+                                            }
+                                        }
+                                    }
+                                    return null;
+                                }
+
+                                function checkPayload(body, url) {
+                                    if (!body) return;
+                                    try {
+                                        var parsed = null;
+                                        if (typeof body === 'string') {
+                                            parsed = JSON.parse(body);
+                                        } else {
+                                            parsed = body;
+                                        }
+                                        if (parsed) {
+                                            var token = scanObjectForPoToken(parsed);
+                                            var visitorData = null;
+                                            if (parsed.context && parsed.context.client) {
+                                                visitorData = parsed.context.client.visitorData;
+                                            }
+                                            if (token) {
+                                                console.log("[JS_HOOK] Success! Captured poToken: " + token.substring(0, 15) + "..., visitorData: " + visitorData);
+                                                if (window.PoTokenBridge) {
+                                                    window.PoTokenBridge.onPoTokenFound(token, visitorData || "", url || "");
+                                                }
+                                            }
+                                        }
+                                    } catch (e) {
+                                        console.log("[JS_HOOK] JSON payload scan issue: " + e.message);
+                                    }
+                                }
+
+                                // Hook XMLHttpRequest.send
+                                var rawOpen = XMLHttpRequest.prototype.open;
+                                XMLHttpRequest.prototype.open = function(method, url) {
+                                    this._url = url;
+                                    return rawOpen.apply(this, arguments);
+                                };
+
+                                var rawSend = XMLHttpRequest.prototype.send;
+                                XMLHttpRequest.prototype.send = function(body) {
+                                    if (this._url && (this._url.indexOf('v1/player') !== -1 || this._url.indexOf('youtubei/v1/player') !== -1)) {
+                                        console.log("[JS_HOOK] XHR Payload intercepted. Endpoint: " + this._url);
+                                        checkPayload(body, this._url);
+                                    }
+                                    return rawSend.apply(this, arguments);
+                                };
+
+                                // Hook Fetch
+                                var rawFetch = window.fetch;
+                                window.fetch = function(input, init) {
+                                    var url = (typeof input === 'string') ? input : (input && input.url);
+                                    if (url && (url.indexOf('v1/player') !== -1 || url.indexOf('youtubei/v1/player') !== -1)) {
+                                        console.log("[JS_HOOK] Fetch Payload intercepted. Endpoint: " + url);
+                                        if (init && init.body) {
+                                            checkPayload(init.body, url);
+                                        }
+                                    }
+                                    return rawFetch.apply(this, arguments);
+                                };
+
+                                console.log("[JS_HOOK] Flow hook injection completed.");
+                            })();
+                        """.trimIndent()
+                        evaluateJavascript(hookScript, null)
+                    }
+
                     webViewClient = object : WebViewClient() {
+                        override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                            println("[YT_DEBUG] [Telemetry] [onPageStarted] Loading: $url. Injecting hook script.")
+                            injectJsHooks()
+                        }
+
                         override fun onPageFinished(view: WebView?, url: String?) {
-                            println("[YT_DEBUG] [getPoTokenAndVisitor] 웹뷰 로딩 완료. 강제 재생 주입 수행.")
+                            println("[YT_DEBUG] [Telemetry] [onPageFinished] Loading done: $url. Sync-injecting hook and play trigger.")
+                            injectJsHooks()
                             
+                            // 자동 재생 보완 강제 텐션 주입
                             evaluateJavascript(
-                                "(function() { " +
-                                "  var v = document.querySelector('video'); " +
-                                "  if (v) { v.play(); } " +
-                                "  var btn = document.querySelector('.ytp-play-button'); " +
-                                "  if (btn) { btn.click(); } " +
-                                "})();", null
+                                """
+                                    (function() {
+                                        console.log("[YT_PLAY_TRIGGER] Initializing play overrides...");
+                                        var v = document.querySelector('video');
+                                        if (v) {
+                                            v.play().then(function() { console.log("[YT_PLAY_TRIGGER] Auto-play successfully triggered."); })
+                                            .catch(function(err) { console.log("[YT_PLAY_TRIGGER] Auto-play block bypassed via click simulation."); });
+                                        }
+                                        var btn = document.querySelector('.ytp-play-button');
+                                        if (btn) {
+                                            btn.click();
+                                            console.log("[YT_PLAY_TRIGGER] Player button clicked.");
+                                        }
+                                    })();
+                                """.trimIndent(), null
                             )
                             pollRunnable?.let { handler.post(it) }
                         }
+
+                        override fun onLoadResource(view: WebView?, url: String?) {
+                            if (url != null && (url.contains("player") || url.contains("jnn") || url.contains("botguard") || url.contains("googleapis"))) {
+                                println("[YT_DEBUG] [Telemetry] [onLoadResource] Intercepted resource loading: $url")
+                            }
+                        }
+
+                        override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                            println("[YT_DEBUG] [Telemetry] [onReceivedError] Failed request: ${request?.url}, Error: ${error?.description} (Code: ${error?.errorCode})")
+                        }
                     }
 
+                    // 12초 타임아웃
                     handler.postDelayed({
                         if (!isCompleted) {
-                            println("[YT_DEBUG] [getPoTokenAndVisitor] 타임아웃(12초) 도달. 우회 재생 지시.")
+                            println("[YT_DEBUG] [Telemetry] WebView sandbox attestation TIMEOUT (12s). Falling back.")
                             safeResume(null)
                         }
                     }, 12000)
                 }
 
-                webView.loadUrl(EMBED_URL)
+                webView.loadUrl(embedUrl)
 
                 continuation.invokeOnCancellation {
                     android.os.Handler(android.os.Looper.getMainLooper()).post {
-                        println("[YT_DEBUG] [getPoTokenAndVisitor] 태스크 중단 수신. 자원 즉시 해제.")
+                        println("[YT_DEBUG] [Telemetry] Sandbox cancellation requested. Releasing web resources.")
                         safeResume(null)
                     }
                 }
