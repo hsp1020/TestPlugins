@@ -211,9 +211,10 @@ open class YoutubeExtractor : ExtractorApi() {
 
         private suspend fun getPoTokenAndVisitor(videoId: String): Triple<String, String, String?>? = withContext(Dispatchers.Main) {
             val context = AcraApplication.context ?: return@withContext null
+            // [최종 마스터 우회]: 데스크톱 Watch 페이지 주소로 우회하여 'embedder.identity.denied'를 완벽 회피
             val targetUrl = "https://www.youtube.com/watch?v=$videoId"
             val startTime = System.currentTimeMillis()
-            println("[YT_DEBUG] [Telemetry] Starting WebView attestation sandboxing on Mobile Watch Page.")
+            println("[YT_DEBUG] [Telemetry] Starting WebView attestation sandboxing on Desktop Watch Page.")
             println("[YT_DEBUG] [Telemetry] Target URL: $targetUrl")
 
             suspendCancellableCoroutine { continuation ->
@@ -259,9 +260,10 @@ open class YoutubeExtractor : ExtractorApi() {
                     settings.databaseEnabled = true
                     settings.mediaPlaybackRequiresUserGesture = false 
                     
-                    val defaultUa = settings.userAgentString
-                    println("[YT_DEBUG] [Telemetry] [UA_Check] Using Genuine Default Mobile WebView UA: $defaultUa")
+                    // [데스크톱 동치화]: 데스크톱 Chrome UA를 강제 주입하여 난독화되지 않은 표준 데스크톱 플레이어를 호출합니다.
+                    settings.userAgentString = YoutubeUtils.CHROME_USER_AGENT
                     
+                    // 이미지 미로딩으로 페이지 분석 대역폭 부하 원천 제거
                     settings.loadsImagesAutomatically = false
 
                     addJavascriptInterface(PoTokenBridge(), "PoTokenBridge")
@@ -429,12 +431,16 @@ open class YoutubeExtractor : ExtractorApi() {
                                 window._poTokenHookInjected = true;
                                 console.log("[JS_HOOK] Injecting Fetch/XHR Interceptors and Active Ad-Skipper...");
 
+                                // [데스크톱 전용 강력형 광고 스킵 엔진]
+                                // 200ms 주기로 재생 비디오 엘리먼트를 체크하여, 유튜브 광고 유닛이 가동되거나 
+                                // 스킵 버튼 슬롯이 활성화될 경우 0.1초 이내에 비디오의 시간을 종료 시점으로 강제 타임랩스하고
+                                // 스킵 버튼을 프로그래밍 방식으로 마우스 클릭 처리하여 동영상 광고 재생 시도를 박멸합니다.
                                 var skipAd = function() {
                                     var video = document.querySelector('video');
                                     var adShowing = document.querySelector('.ad-showing, .ytp-ad-player-overlay, .ytp-ad-player-overlay-instream-info, .ytp-ad-overlay-container, .ytp-ad-persistent-progress-bar');
                                     var skipBtn = document.querySelector('.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-ad-skip-button-slot, .ytp-ad-skip-button-container');
                                     if ((adShowing || skipBtn) && video) {
-                                        console.log("[AD_SKIP] Ad detected! Force-skipping...");
+                                        console.log("[AD_SKIP] Desktop ad detected! Force-skipping...");
                                         if (video.duration && isFinite(video.duration)) {
                                             video.currentTime = video.duration;
                                         } else {
@@ -442,6 +448,7 @@ open class YoutubeExtractor : ExtractorApi() {
                                         }
                                         if (skipBtn) {
                                             skipBtn.click();
+                                            console.log("[AD_SKIP] Skip button clicked.");
                                         }
                                     }
                                 };
@@ -534,24 +541,6 @@ open class YoutubeExtractor : ExtractorApi() {
                     webViewClient = object : WebViewClient() {
                         override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                             val urlStr = request?.url?.toString() ?: return null
-                            
-                            // [물리적 우회 핵심]: 동영상이 실제 로드되어 재생을 시작하면, poToken은 비디오 스트림 주소(videoplayback)의 
-                            // pot 쿼리 파라미터에 반드시 포함됩니다. 이 스트리밍 요청 주소를 직접 가로채 0.1초 만에 토큰을 회수합니다.
-                            if (urlStr.contains("videoplayback") && urlStr.contains("pot=")) {
-                                val potToken = request.url.getQueryParameter("pot")
-                                if (!potToken.isNullOrBlank()) {
-                                    println("[YT_DEBUG] [Telemetry] [shouldInterceptRequest] SUCCESS! poToken captured from videoplayback URL: $potToken")
-                                    val cookieManager = android.webkit.CookieManager.getInstance()
-                                    val cookieStr = cookieManager.getCookie(targetUrl)
-                                    
-                                    // 메인 스레드 안전 루틴을 위한 비동기 처리
-                                    android.os.Handler(android.os.Looper.getMainLooper()).post {
-                                        saveCachedTokens(videoId, potToken, "", cookieStr)
-                                        safeResume(Triple(potToken, "", cookieStr))
-                                    }
-                                }
-                            }
-
                             if (urlStr.contains(".png") || urlStr.contains(".jpg") || urlStr.contains(".jpeg") || 
                                 urlStr.contains(".woff") || urlStr.contains(".ttf") || urlStr.contains(".css") ||
                                 urlStr.contains("googleads") || urlStr.contains("doubleclick") || urlStr.contains("adservice")) {
@@ -643,7 +632,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     }, 12000)
                 }
 
-                // 공식 Watch 페이지 주소 진입
+                // 확실하게 데스크톱 watch 주소 진입
                 webView.loadUrl(targetUrl)
 
                 continuation.invokeOnCancellation {
@@ -990,7 +979,7 @@ open class YoutubeExtractor : ExtractorApi() {
             val aCodecs = if (aMime.contains("webm")) "opus" else "mp4a.40.2"
 
             val aSegmentBase = if (audio.initRange != null && audio.indexRange != null) {
-                """<SegmentBase indexRange="${audio.indexRange}"><Initialization range="${audio.initRange}" /></SegmentBase>"""
+                """<SegmentBase indexRange="${audio.initRange}"><Initialization range="${audio.initRange}" /></SegmentBase>"""
             } else ""
 
             sb.append("""
