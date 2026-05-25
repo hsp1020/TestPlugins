@@ -71,7 +71,6 @@ open class YoutubeExtractor : ExtractorApi() {
         private var serverPort: Int = 0
         private val serverLock = Any()
 
-        // [컴파일 해결]: 가상 DASH 서버용 자원 manifestMap 컴패니언 객체 원상 복구
         private val manifestMap: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(128, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
@@ -80,7 +79,6 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         )
 
-        // [컴파일 해결]: 가상 DASH 서버용 자원 serverExecutor 컴패니언 객체 원상 복구
         private val serverExecutor = ThreadPoolExecutor(
             2, 
             8, 
@@ -217,7 +215,7 @@ open class YoutubeExtractor : ExtractorApi() {
                                             sourceName,
                                             finalName,
                                             localLink,
-                                            type = ExtractorLinkType.DASH
+                                            type = ExtExtractorLinkType.DASH
                                         ) {
                                             this.referer = mainUrl
                                             this.quality = video.height
@@ -542,6 +540,7 @@ class PoTokenWebView private constructor(
         }
 
         // [Asset 격리 해결]: HTML 파일을 에셋 대신 raw string으로 하드코딩 주입
+        // [수정완료]: 최하단에 PoTokenWebView.downloadAndRunBotguard() 호출을 추가하여 웹뷰 로드 즉시 트리깅
         val html = """
             <!DOCTYPE html>
             <html lang="en"><head><title></title><script>
@@ -606,6 +605,9 @@ class PoTokenWebView private constructor(
                 if (!(result instanceof Uint8Array)) throw new Error('ODM:Invalid');
                 return result;
             }
+            
+            // 페이지 가상 로드 완료 시 즉시 코틀린 API 연동 트리깅 가동
+            PoTokenWebView.downloadAndRunBotguard();
             </script></head><body></body></html>
         """.trimIndent()
 
