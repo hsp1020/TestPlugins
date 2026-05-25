@@ -235,9 +235,7 @@ class YoutubeProvider(
 
         private val continuationTokenCache = ConcurrentHashMap<String, String>()
 
-        // YTCFG 및 m3u8 태그 정규식 인스턴스를 정적 영역으로 완전히 이격 (컴파일 레퍼런스 누수 해결)
         private val YTCFG_REGEX = Regex("""ytcfg\.set\(\s*(\{.*?\})\s*\)\s*;""", RegexOption.DOT_MATCHES_ALL)
-        private val m3u8TagRegexCache = ConcurrentHashMap<String, Regex>()
 
         private val VIEW_REPLACE_REGEX = Regex("조회수|views|مشاهدة|시청 중|시청중|watching|명|시청자")
         private val VIEW_FORMAT_REGEX = Regex(".*[천만억KMBkmb].*")
@@ -1104,7 +1102,7 @@ class YoutubeProvider(
                             processRecursive(actions, results, seenIds, playlistMode = false)
                             nextContinuation = findTokenRecursive(response)
                             println("[YT_DEBUG] Next continuation extracted: $nextContinuation")
-                            saveContinuationToken(requestData, nextContinuation) // 성공적인 응답 완료 시에만 정상 보존
+                            saveContinuationToken(requestData, nextContinuation)
                         } else {
                             println("[YT_DEBUG] Chip response returned null.")
                         }
@@ -1155,7 +1153,7 @@ class YoutubeProvider(
                         processRecursive(initialData, results, seenIds, playlistMode = false)
                         nextContinuation = findTokenRecursive(initialData)
                         println("[YT_DEBUG] Next continuation from Home parsed: $nextContinuation")
-                        saveContinuationToken(requestData, nextContinuation) // 성공적인 응답 완료 시에만 정상 보존
+                        saveContinuationToken(requestData, nextContinuation)
                     } else {
                         println("[YT_DEBUG] InitialData extraction was null.")
                     }
@@ -1231,7 +1229,7 @@ class YoutubeProvider(
                         processRecursive(actions, results, seenIds, playlistMode = false)
                         nextContinuation = findTokenRecursive(response)
                         println("[YT_DEBUG] Page Continuation next token: $nextContinuation")
-                        saveContinuationToken(requestData, nextContinuation) // 성공 블록 내부에서만 토큰 보존
+                        saveContinuationToken(requestData, nextContinuation)
                     } else {
                         println("[YT_DEBUG] Page Continuation response returned null.")
                     }
@@ -1248,7 +1246,6 @@ class YoutubeProvider(
         }
 
         println("[YT_DEBUG] getMainPage completed. Extracted count: ${results.size}, hasNext: ${!nextContinuation.isNullOrBlank()}")
-        // 해결 완료: Deprecated된 HomePageResponse 생성자를 폐기하고 newHomePageResponse 도우미를 연동하여 컴파일 오류 원천 수정
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
     }
 
@@ -2170,9 +2167,7 @@ class YoutubeProvider(
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val videoId = YoutubeUtils.extractYoutubeId(data) ?: data
-        val fullUrl = "https://www.youtube.com/watch?v=$videoId"
-
-        val playerType = appPrefs?.getString("youtube_player_type", "advanced") ?: "advanced"
+        val fullUrl = "$mainUrl/watch?v=$videoId&hl=$lang"
 
         var isLive = false
         var playerResponseText = ""
@@ -2204,9 +2199,7 @@ class YoutubeProvider(
             logError(e)
         }
 
-        if (isLive) {
-            loadExtractor(fullUrl, subtitleCallback, callback)
-        } else {
+        if (!isLive) {
             if (playerResponseText.isNotBlank()) {
                 try {
                     val playerResponse = parseJson<PlayerResponse>(playerResponseText)
@@ -2218,252 +2211,9 @@ class YoutubeProvider(
                 }
             }
 
-            var handled = false
-            if (playerType == "classic") {
-                handled = loadLinksClassic(fullUrl, isCasting, subtitleCallback, callback)
-            }
-            
-            if (!handled) {
-                var advancedLinksCount = 0
-                com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback) {
-                    advancedLinksCount++
-                    callback(it)
-                }
-
-                if (advancedLinksCount == 0) {
-                    loadExtractor(fullUrl, subtitleCallback, callback)
-                } else {
-                    loadLinksAdvanced(videoId, subtitleCallback) { }
-                }
-            }
+            com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback) { }
         }
 
-        return true
-    }    
-    
-    private suspend fun loadLinksAdvanced(
-        videoId: String,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        try {
-            val apiUrl = "$mainUrl/youtubei/v1/player"
-            val payload = mapOf(
-                "context" to mapOf(
-                    "client" to mapOf(
-                        "clientName" to "3",
-                        "clientVersion" to "19.29.35",
-                        "hl" to lang,
-                        "gl" to if (lang == "ko") "KR" else "US"
-                    )
-                ),
-                "videoId" to videoId
-            )
-            val headers = mapOf("Referer" to "$mainUrl/watch?v=$videoId")
-            app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).text
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            // 예외 억제
-        }
-        return true
-    }
-
-    private suspend fun loadLinksClassic(
-        data: String,
-        isCasting: Boolean,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
-            fun logLarge(tag: String, text: String) {
-                var i = 0
-                val max = 4000
-                while (i < text.length) {
-                    val end = minOf(i + max, text.length)
-                    i = end
-                }
-            }
-
-            try {
-                val videoId = YoutubeUtils.extractYoutubeId(data) ?: run {
-                    if (data.length == 11 && data.matches(Regex("[A-Za-z0-9_-]{11}"))) {
-                        data
-                    } else {
-                        return false
-                    }
-                }
-
-                val safariHeaders = mapOf(
-                    "User-Agent" to YoutubeUtils.SAFARI_USER_AGENT, 
-                    "Accept-Language" to "en-US,en;q=0.5"
-                )
-                val watchUrl = "$mainUrl/watch?v=$videoId&hl=$lang"
-
-                val watchHtml = app.get(watchUrl, headers = safariHeaders).text
-
-                val ytcfgJsonString = try {
-                    val m = YTCFG_REGEX.find(watchHtml)
-                    m?.groupValues?.getOrNull(1)
-                        ?: watchHtml.substringAfter("ytcfg.set(", "").substringBefore(");")
-                            .takeIf { it.trim().startsWith("{") }
-                } catch (e: Exception) {
-                    null
-                }
-
-                if (ytcfgJsonString.isNullOrBlank()) {
-                    return false
-                }
-
-                val apiKey = YoutubeUtils.findConfig(ytcfgJsonString, "INNERTUBE_API_KEY")
-                val clientVersion =
-                    YoutubeUtils.findConfig(ytcfgJsonString, "INNERTUBE_CLIENT_VERSION") ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
-                val visitorData = YoutubeUtils.findConfig(ytcfgJsonString, "VISITOR_DATA")
-
-                if (apiKey.isNullOrBlank() || visitorData.isNullOrBlank()) {
-                    return false
-                }
-
-                val clientMap = mapOf(
-                    "hl" to lang,
-                    "gl" to if (lang == "ko") "KR" else "US",
-                    "clientName" to "WEB",
-                    "clientVersion" to clientVersion,
-                    "userAgent" to YoutubeUtils.SAFARI_USER_AGENT,
-                    "visitorData" to visitorData,
-                    "platform" to "DESKTOP"
-                )
-                val finalContext = mapOf("client" to clientMap)
-                val payload = mapOf("context" to finalContext, "videoId" to videoId)
-
-                val apiUrl = "$mainUrl/youtubei/v1/player?key=$apiKey"
-
-                val postHeaders = mutableMapOf<String, String>()
-                postHeaders.putAll(safariHeaders)
-                postHeaders["Content-Type"] = "application/json"
-                postHeaders["X-Youtube-Client-Name"] = "WEB"
-                postHeaders["X-Youtube-Client-Version"] = clientVersion
-                if (!visitorData.isNullOrBlank()) postHeaders["X-Goog-Visitor-Id"] = visitorData
-
-                val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(appPrefs, lang, "fzYjM8PCwjw", isSearch = false)
-                postHeaders["Cookie"] = cookies
-
-                if (!sapisidVal.isNullOrBlank()) {
-                    try {
-                        val origin = "https://www.youtube.com"
-                        val hash = YoutubeUtils.getSapisidHash(sapisidVal, origin)
-                        postHeaders["Authorization"] = hash
-                        postHeaders["X-Origin"] = origin
-                        postHeaders["Origin"] = origin
-                        postHeaders["X-Goog-AuthUser"] = "0"
-                    } catch (e: Exception) {
-                        // 예외 억제
-                    }
-                }
-
-                val responseText = app.post(apiUrl, headers = postHeaders, json = payload).text
-                logLarge(name, "PLAYER API Response (first 55k chars):\n${responseText.take(55000)}")
-
-                val playerResponse = try {
-                    parseJson<PlayerResponse>(responseText)
-                } catch (e: Exception) {
-                    null
-                }
-
-                if (playerResponse == null) {
-                    return false
-                }
-
-                val hlsUrl = playerResponse.streamingData?.hlsManifestUrl
-                if (!hlsUrl.isNullOrBlank()) {
-                    callback(
-                        newExtractorLink(this.name, "M3U AUTO", hlsUrl) {
-                            this.referer = mainUrl
-                            this.quality = Qualities.Unknown.value
-                        }
-                    )
-
-                    try {
-                        val masterM3u8 = app.get(hlsUrl, referer = mainUrl).text
-                        val lines = masterM3u8.lines()
-
-                        lines.filter { it.startsWith("#EXT-X-MEDIA") && it.contains("TYPE=SUBTITLES") }
-                            .forEach { line ->
-                                val subUri = parseM3u8Tag(line, "URI")
-                                val subName = parseM3u8Tag(line, "NAME")
-                                val subLang = parseM3u8Tag(line, "LANGUAGE")
-
-                                if (subUri != null) {
-                                    val displayName = subName ?: subLang ?: "Subtitle (HLS)"
-                                    subtitleCallback(SubtitleFile(displayName, subUri))
-                                }
-                            }
-
-                        lines.forEachIndexed { index, line ->
-                            if (line.startsWith("#EXT-X-STREAM-INF")) {
-                                val infoLine = line
-                                val urlLine =
-                                    lines.getOrNull(index + 1)?.takeIf { it.startsWith("http") }
-                                        ?: return@forEachIndexed
-
-                                val resolution = parseM3u8Tag(infoLine, "RESOLUTION")
-                                val parsedHeight = resolution?.substringAfter("x")?.toIntOrNull() ?: 0
-                                val resolutionHeight = resolution?.substringAfter("x")?.plus("p") ?: ""
-
-                                val audioId = parseM3u8Tag(infoLine, "YT-EXT-AUDIO-CONTENT-ID")
-                                val lang = audioId?.substringBefore('.')?.uppercase()
-
-                                val ytTags = parseM3u8Tag(infoLine, "YT-EXT-XTAGS")
-                                val audioType = when {
-                                    ytTags?.contains("dubbed") == true -> "Dubbed"
-                                    ytTags?.contains("original") == true -> "Original"
-                                    else -> null
-                                }
-
-                                val nameBuilder = StringBuilder()
-                                nameBuilder.append(resolutionHeight)
-                                if (lang != null) {
-                                    nameBuilder.append(" ($lang")
-                                    if (audioType != null) {
-                                        nameBuilder.append(" - $audioType")
-                                    }
-                                    nameBuilder.append(")")
-                                }
-
-                                val streamName = nameBuilder.toString().trim()
-                                val sourceProviderName = if (lang != null) "${this.name} ($lang)" else this.name
-
-                                if (streamName.isNotBlank()) {
-                                    callback(
-                                        newExtractorLink(sourceProviderName, streamName, urlLine) {
-                                            this.referer = mainUrl
-                                            this.quality = getQualityFromName(resolutionHeight)
-                                        }
-                                    )
-                                }
-                            }
-                        }
-                    } catch (e: Exception) {
-                        // HLS 스트림 파싱 에러 방지
-                    }
-
-                    return true
-                } else {
-                    return false
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                logError(e)
-                return false
-            }
-        }
-
-    private fun parseM3u8Tag(tag: String, key: String): String? {
-        val regex = m3u8TagRegexCache.computeIfAbsent(key) { k ->
-            Regex("""$k=("([^"]*)"|([^,]*))""")
-        }
-        val match = regex.find(tag)
-        return match?.groupValues?.get(2)?.ifBlank { null }
-            ?: match?.groupValues?.get(3)?.ifBlank { null }
+        return loadExtractor(fullUrl, subtitleCallback, callback)
     }
 }
