@@ -2211,21 +2211,22 @@ class YoutubeProvider(
                 }
             }
 
-            var advancedLinksCount = 0
+            // 1. 고화질 DASH 추출기 무조건 실행
             com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback) {
-                advancedLinksCount++
                 callback(it)
             }
 
-            if (advancedLinksCount == 0) {
-                loadExtractor(fullUrl, subtitleCallback, callback)
-            } else {
-                loadLinksAdvanced(videoId, subtitleCallback) { }
-            }
+            // 2. DASH 링크 확보 여부(0개인지)와 상관없이 내장 Extractor도 무조건 추가 실행
+            loadExtractor(fullUrl, subtitleCallback, callback)
+
+            // 보조 모바일 앱 시뮬레이션 워밍업 유지
+            loadLinksAdvanced(videoId, subtitleCallback) { }
         }
 
         return true
-    }    
+    }
+
+
     
     private suspend fun loadLinksAdvanced(
         videoId: String,
