@@ -241,10 +241,10 @@
     },
     {
         "iconUrl": "https://upload.wikimedia.org/wikipedia/commons/thumb/0/09/YouTube_full-color_icon_%282017%29.svg/3840px-YouTube_full-color_icon_%282017%29.svg.png",
-        "fileHash": "sha256-aacd5ebbe104d33dffe88cf9ce7dda4276c9ebe6d03d9fb1b40b12a8bdeff361",
+        "fileHash": "sha256-adc4664535e9d9f24ea54ba510839dee0b06148fe43d75ea7ca2f0adf62770ca",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 183779,
+        "fileSize": 183734,
         "status": 1,
         "authors": [
             "hsp1020"
