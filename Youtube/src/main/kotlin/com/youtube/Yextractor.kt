@@ -174,7 +174,7 @@ open class YoutubeExtractor : ExtractorApi() {
         }
 
         /**
-         * 안드로이드 메인 스레드 안전 루프를 이용한 Headless WebView 구동 및 BotGuard 토큰 파싱 메서드
+         * 안드로이드 메인 스레드 안전 루프 및 폴링 스케줄러를 적용한 무정지 poToken 획득 루틴
          */
         private suspend fun getPoTokenAndVisitor(): Pair<String, String>? = withContext(Dispatchers.Main) {
             val context = AcraApplication.context ?: return@withContext null
@@ -182,86 +182,145 @@ open class YoutubeExtractor : ExtractorApi() {
 
             suspendCancellableCoroutine { continuation ->
                 val webView = WebView(context)
+                var isCompleted = false
 
                 webView.apply {
                     @SuppressLint("SetJavaScriptEnabled")
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
+                    // 실제 웹 환경 브라우저와 동치되도록 UA를 수립해 유튜브 시크릿 스크립트 실행 정밀도를 확보합니다.
+                    settings.userAgentString = YoutubeUtils.CHROME_USER_AGENT
 
-                    webViewClient = object : WebViewClient() {
-                        override fun onPageFinished(view: WebView?, url: String?) {
-                            println("[YT_DEBUG] [getPoTokenAndVisitor] WebView 페이지 렌더링 완료. window.ytplayer 내부 구성 객체 추출을 개시합니다.")
-                            // 다중 경로 가로채기 및 실패 원인 상세 진단용 자바스크립트 가로채기 엔진 구동
+                    val handler = android.os.Handler(android.os.Looper.getMainLooper())
+                    var pollRunnable: Runnable? = null
+
+                    // 대기 상태와 중복 콜백 방지를 위한 메인 소멸 처리부
+                    val safeResume = { res: Pair<String, String>? ->
+                        if (!isCompleted) {
+                            isCompleted = true
+                            pollRunnable?.let { handler.removeCallbacks(it) }
+                            if (continuation.isActive) {
+                                continuation.resume(res)
+                            }
+                            webView.destroy()
+                        }
+                    }
+
+                    // 300ms 간격으로 유튜브 엔진의 활성화 인스턴스를 스캔하는 고성능 폴러 실행
+                    pollRunnable = object : Runnable {
+                        override fun run() {
+                            if (isCompleted) return
+
+                            // 모던, 레거시, 임베드 등 유튜브 전역 영역을 통째로 관통하는 강인한 토큰 챌린지 추적 자바스크립트
                             evaluateJavascript(
                                 "(function() { " +
                                 "  try { " +
-                                "    var args = window.ytplayer?.config?.args; " +
-                                "    if (!args) return JSON.stringify({error: 'window.ytplayer.config.args 객체가 소스에 존재하지 않습니다.'}); " +
-                                "    var playerResponse = args.raw_player_response; " +
-                                "    if (!playerResponse && args.player_response) { " +
-                                "      playerResponse = JSON.parse(args.player_response); " +
+                                "    var poToken = null; " +
+                                "    var visitorData = null; " +
+                                "    var playerResponse = window.ytInitialPlayerResponse; " +
+                                "    if (playerResponse) { " +
+                                "      poToken = playerResponse.serviceIntegrityDimensions?.poToken || playerResponse.streamingData?.poToken; " +
+                                "      visitorData = playerResponse.responseContext?.visitorData; " +
                                 "    } " +
-                                "    if (!playerResponse) return JSON.stringify({error: 'player_response를 파싱하지 못했습니다.'}); " +
-                                "    var poToken = playerResponse?.serviceIntegrityDimensions?.poToken || playerResponse?.streamingData?.poToken; " +
-                                "    var visitor = args.visitor_data || playerResponse?.responseContext?.visitorData; " +
-                                "    if (!poToken) return JSON.stringify({error: '인증용 poToken 식별자가 누락되었습니다.'}); " +
-                                "    if (!visitor) return JSON.stringify({error: '인증용 visitorData 식별자가 누락되었습니다.'}); " +
-                                "    return JSON.stringify({poToken: poToken, visitorData: visitor}); " +
+                                "    if (!poToken || !visitorData) { " +
+                                "      var args = window.ytplayer?.config?.args; " +
+                                "      if (args) { " +
+                                "        var rawResponse = args.raw_player_response ? (typeof args.raw_player_response === 'string' ? JSON.parse(args.raw_player_response) : args.raw_player_response) : (args.player_response ? JSON.parse(args.player_response) : null); " +
+                                "        if (rawResponse) { " +
+                                "          poToken = poToken || rawResponse.serviceIntegrityDimensions?.poToken || rawResponse.streamingData?.poToken; " +
+                                "          visitorData = visitorData || rawResponse.responseContext?.visitorData; " +
+                                "        } " +
+                                "        visitorData = visitorData || args.visitor_data; " +
+                                "      } " +
+                                "    } " +
+                                "    if (!poToken || !visitorData) { " +
+                                "      var bootstrapResponse = window.ytplayer?.bootstrapPlayerResponse; " +
+                                "      if (bootstrapResponse) { " +
+                                "        poToken = poToken || bootstrapResponse.serviceIntegrityDimensions?.poToken || bootstrapResponse.streamingData?.poToken; " +
+                                "        visitorData = visitorData || bootstrapResponse.responseContext?.visitorData; " +
+                                "      } " +
+                                "    } " +
+                                "    if (!poToken || !visitorData) { " +
+                                "      if (window.ytcfg && typeof window.ytcfg.get === 'function') { " +
+                                "        var ytcfgPlayerResponse = window.ytcfg.get('PLAYER_VARS')?.embedded_player_response || window.ytcfg.get('PLAYER_RESPONSE'); " +
+                                "        if (ytcfgPlayerResponse) { " +
+                                "          var parsedYtcfg = typeof ytcfgPlayerResponse === 'string' ? JSON.parse(ytcfgPlayerResponse) : ytcfgPlayerResponse; " +
+                                "          poToken = poToken || parsedYtcfg.serviceIntegrityDimensions?.poToken || parsedYtcfg.streamingData?.poToken; " +
+                                "          visitorData = visitorData || parsedYtcfg.responseContext?.visitorData; " +
+                                "        } " +
+                                "        visitorData = visitorData || window.ytcfg.get('VISITOR_DATA'); " +
+                                "      } " +
+                                "    } " +
+                                "    if (poToken && visitorData) { " +
+                                "      return JSON.stringify({poToken: poToken, visitorData: visitorData}); " +
+                                "    } " +
+                                "    return JSON.stringify({ " +
+                                "      error: '대기 중... ' + " +
+                                "             'ytInitialPlayerResponse: ' + (!!window.ytInitialPlayerResponse) + ', ' + " +
+                                "             'ytplayer.config: ' + (!!window.ytplayer?.config) + ', ' + " +
+                                "             'ytcfg: ' + (!!window.ytcfg) " +
+                                "    }); " +
                                 "  } catch(e) { " +
-                                "    return JSON.stringify({error: '자바스크립트 실행 중 치명적 예외 발생: ' + e.message}); " +
+                                "    return JSON.stringify({error: 'JS 에러: ' + e.message}); " +
                                 "  } " +
                                 "})();"
                             ) { jsonResult ->
-                                println("[YT_DEBUG] [getPoTokenAndVisitor] 웹뷰 자바스크립트 엔진 평가 결과 원본 수신: $jsonResult")
+                                if (isCompleted) return@evaluateJavascript
+
                                 if (jsonResult != null && jsonResult != "null" && jsonResult.isNotBlank()) {
                                     try {
                                         val cleanedJson = jsonResult.replace("\\\"", "\"").removePrefix("\"").removeSuffix("\"")
                                         val json = JSONObject(cleanedJson)
 
                                         if (json.has("error")) {
-                                            println("[YT_DEBUG] [getPoTokenAndVisitor] 자가발전 엔진 내부 에러 발견: ${json.getString("error")}")
-                                            if (continuation.isActive) continuation.resume(null)
-                                            destroy()
-                                            return@evaluateJavascript
-                                        }
-
-                                        val poToken = json.optString("poToken")
-                                        val visitorData = json.optString("visitorData")
-
-                                        if (poToken.isNotBlank() && visitorData.isNotBlank()) {
-                                            println("[YT_DEBUG] [getPoTokenAndVisitor] 미디어 인증 토큰을 정상적으로 뽑아냈습니다. poToken: ${poToken.take(15)}...")
-                                            saveCachedTokens(poToken, visitorData)
-                                            if (continuation.isActive) {
-                                                continuation.resume(Pair(poToken, visitorData))
+                                            val err = json.getString("error")
+                                            // 불필요한 대기 스팸 로그를 방지하고 실제 치명적 분석 장애만 필터링합니다.
+                                            if (!err.startsWith("대기 중...")) {
+                                                println("[YT_DEBUG] [getPoTokenAndVisitor] 폴링 검출 동작 중 에러 감지: $err")
                                             }
-                                            destroy()
                                         } else {
-                                            println("[YT_DEBUG] [getPoTokenAndVisitor] 파싱 실패: 토큰 값이 비어있습니다.")
-                                            if (continuation.isActive) continuation.resume(null)
-                                            destroy()
+                                            val poToken = json.optString("poToken")
+                                            val visitorData = json.optString("visitorData")
+
+                                            if (poToken.isNotBlank() && visitorData.isNotBlank()) {
+                                                println("[YT_DEBUG] [getPoTokenAndVisitor] [자가발전 완수] 정상 poToken 및 visitorData 획득 성공!")
+                                                saveCachedTokens(poToken, visitorData)
+                                                safeResume(Pair(poToken, visitorData))
+                                                return@evaluateJavascript
+                                            }
                                         }
                                     } catch (e: Exception) {
-                                        println("[YT_DEBUG] [getPoTokenAndVisitor] 웹뷰 결과 파싱 예외 발생: ${e.message}")
-                                        if (continuation.isActive) continuation.resume(null)
-                                        destroy()
+                                        println("[YT_DEBUG] [getPoTokenAndVisitor] 가상 스케줄러 결과 파싱 실패: ${e.message}")
                                     }
-                                } else {
-                                    println("[YT_DEBUG] [getPoTokenAndVisitor] 수신된 웹뷰 결과가 유효하지 않습니다.")
-                                    if (continuation.isActive) continuation.resume(null)
-                                    destroy()
                                 }
+                                // 조건이 구비되지 않은 경우 300ms 이후 재스캔을 예약합니다.
+                                handler.postDelayed(this, 300)
                             }
                         }
                     }
+
+                    webViewClient = object : WebViewClient() {
+                        override fun onPageFinished(view: WebView?, url: String?) {
+                            println("[YT_DEBUG] [getPoTokenAndVisitor] WebView HTML 수집 및 기본 뼈대 준비 완료. 동적 스케줄러를 개시합니다.")
+                            pollRunnable.let { handler.post(it) }
+                        }
+                    }
+
+                    // 저사양 시스템 셋톱박스 및 네트워크 락 방지용 8초 데드 타임아웃
+                    handler.postDelayed({
+                        if (!isCompleted) {
+                            println("[YT_DEBUG] [getPoTokenAndVisitor] 실시간 토큰 발행 임계치(8초) 도달. 타임아웃으로 재생을 우회합니다.")
+                            safeResume(null)
+                        }
+                    }, 8000)
                 }
 
                 webView.loadUrl(EMBED_URL)
 
                 continuation.invokeOnCancellation {
-                    // 비정상 취소 동작 시 UI 메인 루퍼 핸들러를 경유한 안전 소멸 보장
                     android.os.Handler(android.os.Looper.getMainLooper()).post {
-                        println("[YT_DEBUG] [getPoTokenAndVisitor] 태스크 취소 감지. 자원 정리를 위해 웹뷰 소멸을 실행합니다.")
-                        webView.destroy()
+                        println("[YT_DEBUG] [getPoTokenAndVisitor] 태스크 중단 지시 수신. 스케줄러 강제 소멸을 수행합니다.")
+                        safeResume(null)
                     }
                 }
             }
