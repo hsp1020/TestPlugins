@@ -24,9 +24,11 @@ import kotlin.coroutines.cancellation.CancellationException
 object YoutubeUtils {
     const val CHROME_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
     const val SAFARI_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
-    const val IOS_USER_AGENT = "com.google.ios.youtube/19.29.35 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X; en_US)"
+    
+    // [통일 적용]: 실제 iOS 앱 버전인 19.29.1 규격과 디바이스 정보 정합성을 일치화합니다.
+    const val IOS_USER_AGENT = "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X; en_US)"
     const val DEFAULT_CLIENT_VERSION = "2.20240725.01.00"
-
+    
     private val sha1Digest = ThreadLocal.withInitial {
         MessageDigest.getInstance("SHA-1")
     }
@@ -259,7 +261,12 @@ class YoutubeProvider(
             val isSearchRequest = urlStr.contains("/results") || urlStr.contains("/v1/search")
 
             val requestBuilder = request.newBuilder()
-                .header("User-Agent", YoutubeUtils.CHROME_USER_AGENT)
+
+            // [통일 적용]: 요청 헤더에 이미 특정 User-Agent(DASH/Native 재생용 등)가 명시되어 있다면,
+            // 기본값인 데스크톱 크롬 UA로 덮어쓰지 않고 기존 앱 UA를 그대로 보존합니다.
+            if (request.header("User-Agent").isNullOrBlank()) {
+                requestBuilder.header("User-Agent", YoutubeUtils.CHROME_USER_AGENT)
+            }
 
             val origReferer = request.header("Referer")
             if (origReferer != null && (origReferer.contains("/results") || origReferer.contains("/v1/search"))) {
@@ -2245,7 +2252,7 @@ class YoutubeProvider(
 
         return true
     }    
-    
+
     private suspend fun loadLinksAdvanced(
         videoId: String,
         subtitleCallback: (SubtitleFile) -> Unit,
@@ -2256,15 +2263,22 @@ class YoutubeProvider(
             val payload = mapOf(
                 "context" to mapOf(
                     "client" to mapOf(
-                        "clientName" to "3",
-                        "clientVersion" to "19.29.35",
+                        "clientName" to "IOS",
+                        "clientVersion" to "19.29.1",
                         "hl" to lang,
-                        "gl" to if (lang == "ko") "KR" else "US"
+                        "gl" to if (lang == "ko") "KR" else "US",
+                        "deviceMake" to "Apple",
+                        "deviceModel" to "iPhone16,2",
+                        "osName" to "iPhone",
+                        "osVersion" to "17.5.1"
                     )
                 ),
                 "videoId" to videoId
             )
-            val headers = mapOf("Referer" to "$mainUrl/watch?v=$videoId")
+            val headers = mapOf(
+                "Referer" to "$mainUrl/watch?v=$videoId",
+                "User-Agent" to YoutubeUtils.IOS_USER_AGENT
+            )
             app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).text
         } catch (e: CancellationException) {
             throw e
