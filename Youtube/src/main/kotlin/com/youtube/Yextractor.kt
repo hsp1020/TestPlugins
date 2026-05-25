@@ -43,7 +43,7 @@ open class YoutubeExtractor : ExtractorApi() {
         private var serverPort: Int = 0
         private val serverLock = Any()
 
-        // 2004 에러의 근본적 해결책: 캐시 상한치를 50개에서 1000개로 대폭 확장 (다국어 매핑 폭발에 대처)
+        // 2004 에러 해결을 위해 캐시 상한을 1000개로 대폭 확장
         private val manifestMap: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(128, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
@@ -52,7 +52,7 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         )
 
-        // CallerRunsPolicy를 적용하여 가상 MPD 및 세그먼트 정체 시 패킷 폐기 방지 및 백프레셔 제어 보장
+        // 가상 MPD 및 세그먼트 처리를 위한 스레드 풀
         private val serverExecutor = ThreadPoolExecutor(
             2, 
             8, 
@@ -218,33 +218,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
 
-                val muxedList = (s.videoStreams ?: emptyList()).mapNotNull { vs ->
-                    try {
-                        val mUrl = vs.content ?: return@mapNotNull null
-                        if (!seenUrls.add(mUrl)) return@mapNotNull null
-                        val label = buildVideoLabelNumber(vs)
-                        val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
-                        
-                        println("[YT_DEBUG] [getUrl] Legacy Muxed 비디오 스트림 수집 완료 -> 화질: ${height}p, URL: ${mUrl.take(60)}...")
-                        Triple(mUrl, label, height)
-                    } catch (e: Exception) { null }
-                }
-                for ((mUrl, mLabel, mHeight) in muxedList) {
-                    println("[YT_DEBUG] [getUrl] Legacy Muxed 링크 등록 -> 화질: $mHeight, 이름: $mLabel (Legacy)")
-                    builtLinks.add(
-                        newExtractorLink(this.name, "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
-                            this.referer = mainUrl
-                            this.quality = mHeight
-                            this.headers = mapOf(
-                                "User-Agent" to YoutubeUtils.IOS_USER_AGENT,
-                                "Origin" to "https://www.youtube.com",
-                                "Referer" to "https://www.youtube.com"
-                            )
-                        }
-                    )
-                }
-
-                // 외부 고해상도 웹 다운로드 포털 연동 보완 로직 보존
+                // 외부 다운로드 포털 연동 로직
                 builtLinks.add(
                     newExtractorLink(
                         source = "YouTube Downloader",
@@ -309,7 +283,7 @@ open class YoutubeExtractor : ExtractorApi() {
         synchronized(serverLock) {
             val server = activeServer
             if (server != null && !server.isClosed) {
-                println("[YT_DEBUG] [startServerIfNeeded] 기존 DASH 루프백 서버가 구동 중이므로 리스너 스레드 생성을 스킵합니다. (포트: $serverPort)")
+                println("[YT_DEBUG] [startServerIfNeeded] 기존 DASH 루프백 서버 구동 중 (포트: $serverPort)")
                 return
             }
             try {
@@ -319,7 +293,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 println("[YT_DEBUG] [startServerIfNeeded] 가상 포트 $serverPort 에 리스너 바인딩 성공")
                 
                 thread(name = "YT-DASH-Server-Acceptor") {
-                    println("[YT_DEBUG] [ServerSocket-Thread] accept() 대기 루프 스레드를 시작합니다.")
+                    println("[YT_DEBUG] [ServerSocket-Thread] accept() 대기 루프 스레드 시작")
                     try {
                         while (true) {
                             val active = activeServer ?: break
@@ -329,11 +303,11 @@ open class YoutubeExtractor : ExtractorApi() {
                             serverExecutor.execute { handleClient(client) }
                         }
                     } catch (e: Exception) {
-                        println("[YT_DEBUG] [ServerSocket-Thread] accept() 대기 동작 중 오류 발생: ${e.message}")
+                        println("[YT_DEBUG] [ServerSocket-Thread] accept() 대기 동작 중 오류: ${e.message}")
                     }
                 }
             } catch (e: Exception) { 
-                println("[YT_DEBUG] [startServerIfNeeded] 서버 소켓 생성 실패 예외: ${e.message}")
+                println("[YT_DEBUG] [startServerIfNeeded] 서버 소켓 생성 실패: ${e.message}")
                 logError(e) 
             }
         }
@@ -355,7 +329,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 if (line != null && line.startsWith("GET")) {
                     val parts = line.split(" ")
                     if (parts.size > 1) {
-                        // 쿼리 매개변수(?) 및 불필요 경로를 정규화하여 안정적인 UUID 획득
                         val cleanPath = parts[1].substringAfter("/").substringBefore("?")
                         val path = if (cleanPath.endsWith(".mpd", ignoreCase = true)) {
                             cleanPath.substring(0, cleanPath.length - 4)
@@ -371,7 +344,7 @@ open class YoutubeExtractor : ExtractorApi() {
                             output.println("")
                             output.println(content)
                         } else {
-                            println("[YT_DEBUG] [handleClient] 에러: 메모리에 매칭되는 가상 MPD가 없습니다. UUID: $path (404 반환)")
+                            println("[YT_DEBUG] [handleClient] 에러: 매칭되는 가상 MPD 없음. UUID: $path (404 반환)")
                             output.println("HTTP/1.1 404 Not Found")
                             output.println("")
                         }
@@ -379,7 +352,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
             }
         } catch (e: Exception) {
-            println("[YT_DEBUG] [handleClient] 소켓 데이터 스트림 처리 중 예외: ${e.message}")
+            println("[YT_DEBUG] [handleClient] 소켓 데이터 처리 중 예외: ${e.message}")
         }
     }
 
