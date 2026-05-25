@@ -210,7 +210,7 @@ open class YoutubeExtractor : ExtractorApi() {
                                             this.referer = mainUrl
                                             this.quality = video.height
                                             this.headers = mapOf(
-                                                "User-Agent" to YoutubeUtils.IOS_USER_AGENT,
+                                                "User-Agent" to YoutubeUtils.CHROME_USER_AGENT,
                                                 "Origin" to "https://www.youtube.com",
                                                 "Referer" to "https://www.youtube.com"
                                             )
@@ -240,7 +240,7 @@ open class YoutubeExtractor : ExtractorApi() {
                             this.referer = mainUrl
                             this.quality = mHeight
                             this.headers = mapOf(
-                                "User-Agent" to YoutubeUtils.IOS_USER_AGENT,
+                                "User-Agent" to YoutubeUtils.CHROME_USER_AGENT,
                                 "Origin" to "https://www.youtube.com",
                                 "Referer" to "https://www.youtube.com"
                             )
