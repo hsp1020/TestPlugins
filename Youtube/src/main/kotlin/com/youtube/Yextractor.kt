@@ -71,7 +71,7 @@ open class YoutubeExtractor : ExtractorApi() {
             TimeUnit.SECONDS,
             LinkedBlockingQueue(256),
             ThreadFactory { r -> Thread(r, "YT-DASH-Server-Worker") },
-            ThreadPoolExecutor.Companion.CallerRunsPolicy()
+            ThreadPoolExecutor.CallerRunsPolicy()
         )
 
         private const val EMBED_URL = "https://www.youtube.com/embed/aqz-KE-bpKQ"
@@ -82,26 +82,24 @@ open class YoutubeExtractor : ExtractorApi() {
 
             // [최종 구축본 적용]: 1분 시점의 403 Forbidden 에러를 방어하는 정식 무결성 토큰 프로바이더 장착
             YoutubeStreamExtractor.setPoTokenProvider(object : PoTokenProvider {
-                override fun getPoToken(videoId: String?): PoTokenResult? {
-                    println("[YT_DEBUG] [setPoTokenProvider] 뉴파이프 추출기가 비디오 [$videoId]에 적용할 poToken을 호출 중입니다.")
-                    val cached = getCachedTokens()
-                    if (cached != null) {
-                        println("[YT_DEBUG] [setPoTokenProvider] 캐시된 poToken이 비디오 [$videoId]에 성공적으로 적용됩니다. 토큰 값: ${cached.first.take(15)}...")
-                        return PoTokenResult(cached.first)
-                    }
+                override fun getWebClientPoToken(videoId: String?): PoTokenResult? {
+                    println("[YT_DEBUG] [getWebClientPoToken] 웹 클라이언트 용 poToken 요구. 비디오 ID: $videoId")
+                    return getPoTokenResultForVideo(videoId)
+                }
 
-                    println("[YT_DEBUG] [setPoTokenProvider] 사용 가능한 캐시 토큰이 없어 가상 웹뷰 실시간 자가발전을 대기 처리(Blocking)합니다.")
-                    val generated = kotlinx.coroutines.runBlocking {
-                        getPoTokenAndVisitor()
-                    }
+                override fun getWebEmbedClientPoToken(videoId: String?): PoTokenResult? {
+                    println("[YT_DEBUG] [getWebEmbedClientPoToken] 웹 임베드 용 poToken 요구. 비디오 ID: $videoId")
+                    return getPoTokenResultForVideo(videoId)
+                }
 
-                    return if (generated != null) {
-                        println("[YT_DEBUG] [setPoTokenProvider] 새로 취득한 poToken이 비디오 [$videoId]에 최종 정상 바인딩됩니다. 토큰 값: ${generated.first.take(15)}...")
-                        PoTokenResult(generated.first)
-                    } else {
-                        println("[YT_DEBUG] [setPoTokenProvider] 실시간 poToken 생성 루틴이 완전히 무산되었습니다. 비디오 [$videoId]에 토큰 없이 재생을 시도합니다.")
-                        null
-                    }
+                override fun getAndroidClientPoToken(videoId: String?): PoTokenResult? {
+                    println("[YT_DEBUG] [getAndroidClientPoToken] 안드로이드 클라이언트 용 poToken 요구. 비디오 ID: $videoId")
+                    return getPoTokenResultForVideo(videoId)
+                }
+
+                override fun getIosClientPoToken(videoId: String?): PoTokenResult? {
+                    println("[YT_DEBUG] [getIosClientPoToken] iOS 클라이언트 용 poToken 요구. 비디오 ID: $videoId")
+                    return getPoTokenResultForVideo(videoId)
                 }
             })
         }
@@ -110,6 +108,28 @@ open class YoutubeExtractor : ExtractorApi() {
         fun clearCache(videoId: String) {
             ytVideos.remove(videoId)
             ytVideosSubtitles.remove(videoId)
+        }
+
+        // 특정 플랫폼의 요청을 일괄 수용하여 캐시 대조 혹은 실시간 가상 웹뷰 생성을 분기하는 최종 헬퍼 함수
+        private fun getPoTokenResultForVideo(videoId: String?): PoTokenResult? {
+            val cached = getCachedTokens()
+            if (cached != null) {
+                println("[YT_DEBUG] [setPoTokenProvider] 캐시된 poToken이 비디오 [$videoId]에 정상 적용됩니다. 토큰 값: ${cached.first.take(15)}...")
+                return PoTokenResult(cached.first, "", "")
+            }
+
+            println("[YT_DEBUG] [setPoTokenProvider] 캐시가 유효하지 않아 실시간 웹뷰 자가발전(Blocking)을 통해 신규 토큰을 획득합니다.")
+            val generated = kotlinx.coroutines.runBlocking {
+                getPoTokenAndVisitor()
+            }
+
+            return if (generated != null) {
+                println("[YT_DEBUG] [setPoTokenProvider] 새로 취득한 poToken이 비디오 [$videoId]에 최종 정상 바인딩됩니다. 토큰 값: ${generated.first.take(15)}...")
+                PoTokenResult(generated.first, "", "")
+            } else {
+                println("[YT_DEBUG] [setPoTokenProvider] 실시간 poToken 생성 루틴이 완전히 무산되었습니다. 비디오 [$videoId]에 토큰 없이 재생을 시도합니다.")
+                null
+            }
         }
 
         // SharedPreferences 캐시 유효성 획득 및 시간 정합성 프린트 헬퍼 함수
