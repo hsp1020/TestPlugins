@@ -1,6 +1,5 @@
 package com.youtube
 
-
 import android.annotation.SuppressLint
 import android.content.Context
 import android.webkit.WebView
@@ -920,7 +919,6 @@ private fun base64ToU8(base64: String): String {
     return newUint8Array(decoded)
 }
 
-// [유튜브 특화형 점(.) -> 이퀄(=) 복원 디코더]
 private fun base64ToByteArray(base64: String): ByteArray {
     val base64Mod = base64
         .replace('-', '+')
@@ -985,8 +983,10 @@ object PoTokenProviderImpl : PoTokenProvider {
     }
 
     override fun getWebEmbedClientPoToken(videoId: String): PoTokenResult? = getWebClientPoToken(videoId)
-    override fun getAndroidClientPoToken(videoId: String): PoTokenResult? = getWebClientPoToken(videoId)
-    override fun getIosClientPoToken(videoId: String): PoTokenResult? = getWebClientPoToken(videoId)
+    // [보정 완료]: 모바일 클라이언트(Android/iOS) 전용 poToken 수집을 명확하게 null 처리하여 
+    // NewPipeExtractor 내부의 Web-client 폴백 재생 라인이 정상 가동되도록 유도 (mismatch 오류 영구 격리)
+    override fun getAndroidClientPoToken(videoId: String): PoTokenResult? = null
+    override fun getIosClientPoToken(videoId: String): PoTokenResult? = null
 
     private data class Quadruple<T1, T2, T3, T4>(val first: T1, val second: T2, val third: T3, val fourth: T4)
 }
