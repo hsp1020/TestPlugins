@@ -1,5 +1,10 @@
 package com.youtube
 
+import android.annotation.SuppressLint
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import androidx.preference.PreferenceManager
+import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.newSubtitleFile
@@ -14,6 +19,9 @@ import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor
 import org.schabi.newpipe.extractor.services.youtube.linkHandler.YoutubeStreamLinkHandlerFactory
 import org.schabi.newpipe.extractor.stream.SubtitlesStream
+import org.schabi.newpipe.extractor.services.youtube.PoTokenProvider
+import org.schabi.newpipe.extractor.services.youtube.PoTokenResult
+import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.ServerSocket
@@ -27,6 +35,10 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ThreadFactory
 import kotlin.concurrent.thread
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlin.coroutines.resume
 
 open class YoutubeExtractor : ExtractorApi() {
     override val mainUrl = "https://www.youtube.com"
@@ -59,17 +71,136 @@ open class YoutubeExtractor : ExtractorApi() {
             TimeUnit.SECONDS,
             LinkedBlockingQueue(256),
             ThreadFactory { r -> Thread(r, "YT-DASH-Server-Worker") },
-            ThreadPoolExecutor.CallerRunsPolicy()
+            ThreadPoolExecutor.Companion.CallerRunsPolicy()
         )
 
+        private const val EMBED_URL = "https://www.youtube.com/embed/aqz-KE-bpKQ"
+
         init {
+            // iOS 공식 앱 클라이언트 파싱 기본 활성화
             YoutubeStreamExtractor.setFetchIosClient(true)
+
+            // [최종 구축본 적용]: 1분 시점의 403 Forbidden 에러를 방어하는 정식 무결성 토큰 프로바이더 장착
+            YoutubeStreamExtractor.setPoTokenProvider(object : PoTokenProvider {
+                override fun getPoToken(videoId: String?): PoTokenResult? {
+                    val cached = getCachedTokens()
+                    if (cached != null) {
+                        println("[YT_DEBUG] 유효한 캐시 poToken을 반환합니다. poToken: ${cached.first.take(15)}...")
+                        return PoTokenResult(cached.first)
+                    }
+
+                    println("[YT_DEBUG] poToken 캐시가 비어있거나 만료되어 가상 웹뷰 자가발전을 수행합니다.")
+                    val generated = kotlinx.coroutines.runBlocking {
+                        getPoTokenAndVisitor()
+                    }
+
+                    return if (generated != null) {
+                        println("[YT_DEBUG] 실시간 poToken 생성 완료 및 동기화 성공. poToken: ${generated.first.take(15)}...")
+                        PoTokenResult(generated.first)
+                    } else {
+                        println("[YT_DEBUG] 실시간 poToken 획득 실패. 예외 우회를 시도합니다.")
+                        null
+                    }
+                }
+            })
         }
 
         // 재생 세션이 새로 열릴 때(loadLinks) 정적 companion 영역의 캐시를 안전하게 해제하기 위한 타겟 헬퍼 함수
         fun clearCache(videoId: String) {
             ytVideos.remove(videoId)
             ytVideosSubtitles.remove(videoId)
+        }
+
+        // SharedPreferences 캐시 유효성 획득 헬퍼 함수 (유효기간: 3시간 설정)
+        private fun getCachedTokens(): Pair<String, String>? {
+            val context = AcraApplication.context ?: return null
+            val prefs = PreferenceManager.getDefaultSharedPreferences(context)
+            val poToken = prefs.getString("yt_cached_potoken", null) ?: return null
+            val visitorData = prefs.getString("yt_cached_visitor_data", null) ?: return null
+            val timestamp = prefs.getLong("yt_potoken_timestamp", 0L)
+
+            if (System.currentTimeMillis() - timestamp > 3 * 3600 * 1000) {
+                return null // 3시간 만료 기준 충족 시 리턴 폐기
+            }
+            return Pair(poToken, visitorData)
+        }
+
+        // SharedPreferences 캐시 데이터 저장 헬퍼 함수
+        private fun saveCachedTokens(poToken: String, visitorData: String) {
+            val context = AcraApplication.context ?: return
+            val prefs = PreferenceManager.getDefaultSharedPreferences(context)
+            prefs.edit()
+                .putString("yt_cached_potoken", poToken)
+                .putString("yt_cached_visitor_data", visitorData)
+                .putLong("yt_potoken_timestamp", System.currentTimeMillis())
+                .apply()
+        }
+
+        /**
+         * 안드로이드 메인 스레드 안전 루프를 이용한 Headless WebView 구동 및 BotGuard 토큰 파싱 메서드
+         */
+        private suspend fun getPoTokenAndVisitor(): Pair<String, String>? = withContext(Dispatchers.Main) {
+            val context = AcraApplication.context ?: return@withContext null
+
+            suspendCancellableCoroutine { continuation ->
+                val webView = WebView(context)
+
+                webView.apply {
+                    @SuppressLint("SetJavaScriptEnabled")
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+
+                    webViewClient = object : WebViewClient() {
+                        override fun onPageFinished(view: WebView?, url: String?) {
+                            // 다중 경로 가로채기를 포함한 강인한 자바스크립트 가로채기 엔진 구동
+                            evaluateJavascript(
+                                "(function() { " +
+                                "  try { " +
+                                "    var args = window.ytplayer?.config?.args; " +
+                                "    if (!args) return null; " +
+                                "    var playerResponse = args.raw_player_response || JSON.parse(args.player_response); " +
+                                "    var poToken = playerResponse?.serviceIntegrityDimensions?.poToken || playerResponse?.streamingData?.poToken; " +
+                                "    var visitor = args.visitor_data || playerResponse?.responseContext?.visitorData; " +
+                                "    if (poToken && visitor) { " +
+                                "      return JSON.stringify({poToken: poToken, visitorData: visitor}); " +
+                                "    } " +
+                                "  } catch(e) {} " +
+                                "  return null; " +
+                                "})();"
+                            ) { jsonResult ->
+                                if (jsonResult != null && jsonResult != "null" && jsonResult.isNotBlank()) {
+                                    try {
+                                        val cleanedJson = jsonResult.replace("\\\"", "\"").removePrefix("\"").removeSuffix("\"")
+                                        val json = JSONObject(cleanedJson)
+                                        val poToken = json.optString("poToken")
+                                        val visitorData = json.optString("visitorData")
+
+                                        if (poToken.isNotBlank() && visitorData.isNotBlank()) {
+                                            saveCachedTokens(poToken, visitorData)
+                                            if (continuation.isActive) {
+                                                continuation.resume(Pair(poToken, visitorData))
+                                            }
+                                            destroy()
+                                        }
+                                    } catch (e: Exception) {
+                                        if (continuation.isActive) continuation.resume(null)
+                                        destroy()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                webView.loadUrl(EMBED_URL)
+
+                continuation.invokeOnCancellation {
+                    // 비정상 취소 동작 시 UI 메인 루퍼 핸들러를 경유한 안전 소멸 보장
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        webView.destroy()
+                    }
+                }
+            }
         }
     }
 
