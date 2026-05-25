@@ -337,25 +337,18 @@ class YoutubeProvider(
         val watchtimeBaseUrl = playbackTracking?.videostatsWatchtimeUrl?.baseUrl
 
         if (playbackBaseUrl.isNullOrBlank() || watchtimeBaseUrl.isNullOrBlank()) {
-            println("[YT_DEBUG] playbackTracking base URLs are empty, skipping tracking")
             return
         }
 
         val cpn = generateCpn()
-        println("[YT_DEBUG] Triggering playback tracking for videoId: $videoId with cpn: $cpn")
 
         try {
             val playbackUrl = buildTrackingUrl(playbackBaseUrl, cpn, cmt = "0.000", state = null, realTime = "0")
-            println("[YT_DEBUG] Pinging playbackUrl: $playbackUrl")
             app.get(playbackUrl, interceptor = ytInterceptor)
 
             val watchtimeUrl = buildTrackingUrl(watchtimeBaseUrl, cpn, cmt = "5.000", state = "playing", realTime = "5")
-            println("[YT_DEBUG] Pinging watchtimeUrl: $watchtimeUrl")
             app.get(watchtimeUrl, interceptor = ytInterceptor)
-            
-            println("[YT_DEBUG] Playback tracking successfully triggered and watch history synced.")
         } catch (e: Exception) {
-            println("[YT_DEBUG] Failed to trigger playback tracking: ${e.message}")
             logError(e)
         }
     }
@@ -2016,8 +2009,6 @@ class YoutubeProvider(
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val videoId = YoutubeUtils.extractYoutubeId(data) ?: data
-        
-        // 403 에러의 원인이었던 파라미터(&hl=ko)를 제거하고 순정 URL 사용
         val safeUrl = "https://www.youtube.com/watch?v=$videoId"
 
         var isLive = false
@@ -2052,7 +2043,6 @@ class YoutubeProvider(
         }
 
         if (!isLive) {
-            // 원상복구: 정상 작동하던 시청 기록(Playback Tracking) 로직 유지
             if (playerResponseText.isNotBlank()) {
                 try {
                     val playerResponse = AppUtils.parseJson<PlayerResponse>(playerResponseText)
@@ -2063,12 +2053,8 @@ class YoutubeProvider(
                     logError(e)
                 }
             }
-
-            // 다국어 자막만 추출하는 순수 자막 추출기 호출
-            com.youtube.YoutubeSubtitleExtractor.extract(safeUrl, subtitleCallback)
         }
 
-        // 모범 케이스(user.kt)와 동일하게 앱 내장 코어 추출기 호출 (403 에러 원천 차단)
         return loadExtractor(safeUrl, subtitleCallback, callback)
     }
 }
