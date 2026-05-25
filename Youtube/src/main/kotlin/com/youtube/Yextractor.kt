@@ -92,37 +92,64 @@ open class YoutubeExtractor : ExtractorApi() {
         )
 
         init {
+            println("[YT_DEBUG] [Extractor-Companion] static init 블록 시작됨.")
             YoutubeStreamExtractor.setFetchIosClient(true)
             YoutubeStreamExtractor.setPoTokenProvider(PoTokenProviderImpl)
+            
+            // [웜스타트 감지 로그]: 앱 부팅 및 세션 유입 단계에서 백그라운드 웜업 상태 파악
+            GlobalScope.launch(Dispatchers.Main) {
+                println("[YT_DEBUG] [Extractor-Companion] 비동기 웜스타트 코루틴이 메인 디스패처에서 가동되었습니다.")
+                try {
+                    AcraApplication.context?.let {
+                        println("[YT_DEBUG] [Extractor-Companion] PoTokenProviderImpl.preInitialize() 비차단식 사전 호출 시도")
+                        PoTokenProviderImpl.preInitialize(it)
+                    } ?: println("[YT_DEBUG] [Extractor-Companion] 경고: AcraApplication.context가 null 상태입니다.")
+                } catch (e: Exception) {
+                    println("[YT_DEBUG] [Extractor-Companion] 웜스타트 초기 기동 중 예외 감지: ${e.message}")
+                    e.printStackTrace()
+                }
+            }
         }
 
         fun clearCache(videoId: String) {
-            println("[YT_DEBUG] [Telemetry] clearCache triggered for Video ID: $videoId")
+            println("[YT_DEBUG] [Companion-Cache] 캐시 무효화 요청 수신. 비디오 ID: $videoId")
             ytVideos.remove(videoId)
             ytVideosSubtitles.remove(videoId)
         }
 
-        // [세그먼트 프록시 바인딩 고도화]: ExoPlayer가 보낸 비디오 조각 요청을 타겟 UA로 우회 전송하는 허브
         fun getProxyUrl(realUrl: String, userAgent: String): String {
-            if (serverPort == 0) return realUrl
+            if (serverPort == 0) {
+                println("[YT_DEBUG] [Proxy-Url] 경고: serverPort가 아직 0입니다. 프록시 바인딩을 건너뛰고 원본 주소를 반환합니다.")
+                return realUrl
+            }
             return try {
                 val encodedUrl = java.net.URLEncoder.encode(realUrl, "UTF-8")
                 val encodedUa = java.net.URLEncoder.encode(userAgent, "UTF-8")
-                "http://127.0.0.1:$serverPort/proxy?url=$encodedUrl&ua=$encodedUa"
+                val proxyUrl = "http://127.0.0.1:$serverPort/proxy?url=$encodedUrl&ua=$encodedUa"
+                println("[YT_DEBUG] [Proxy-Url] 프록시 우회 주소 생성 완료 (크기: ${proxyUrl.length} 자)")
+                proxyUrl
             } catch (e: Exception) {
+                println("[YT_DEBUG] [Proxy-Url] 인코딩 예외 발생: ${e.message}. 원본 주소를 우회 없이 주입합니다.")
                 realUrl
             }
         }
 
-        // [로컬 프록시 연결 및 비디오 파이프라인 수립]: Range 헤더 보존 및 유튜브 403 대응 핵심 구현체
         private fun handleProxyRequest(requestPath: String, clientHeaders: Map<String, String>, os: java.io.OutputStream) {
+            println("[YT_DEBUG] [Proxy-Handler] 비디오 세그먼트 요청 가로채기 성공. 경로: $requestPath")
+            println("[YT_DEBUG] [Proxy-Handler] 플레이어(ExoPlayer) 전달 원본 헤더 목록: $clientHeaders")
             var conn: HttpURLConnection? = null
             try {
                 val uri = android.net.Uri.parse("http://127.0.0.1$requestPath")
-                val rawUrl = uri.getQueryParameter("url") ?: return
+                val rawUrl = uri.getQueryParameter("url")
+                if (rawUrl == null) {
+                    println("[YT_DEBUG] [Proxy-Handler] 오류: 프록시 주소에 'url' 필드가 유실되었습니다.")
+                    return
+                }
                 val userAgent = uri.getQueryParameter("ua") ?: YoutubeUtils.CHROME_USER_AGENT
+                println("[YT_DEBUG] [Proxy-Handler] 해석된 대상 목적지 주소: ${rawUrl.take(120)}...")
+                println("[YT_DEBUG] [Proxy-Handler] 매칭된 정합성 User-Agent: '$userAgent'")
 
-                // ExoPlayer가 덧붙인 range, index 등 원본 식별 인자 재조립
+                // 플레이어가 덧붙인 추가 쿼리 파라미터가 있다면 재결합 처리
                 var finalUrlStr = rawUrl
                 uri.queryParameterNames.forEach { key ->
                     if (key != "url" && key != "ua") {
@@ -133,6 +160,7 @@ open class YoutubeExtractor : ExtractorApi() {
                         }
                     }
                 }
+                println("[YT_DEBUG] [Proxy-Handler] 최종 조립된 전송 목적지 CDN URL: $finalUrlStr")
 
                 val url = URL(finalUrlStr)
                 conn = url.openConnection() as HttpURLConnection
@@ -143,24 +171,27 @@ open class YoutubeExtractor : ExtractorApi() {
                 conn.setRequestProperty("Origin", "https://www.youtube.com")
                 conn.setRequestProperty("Referer", "https://www.youtube.com")
 
-                // 클라이언트(ExoPlayer)의 Range 헤더가 존재하면 전송 요청에 바인딩
+                // 탐색(Seek) 요청 처리를 위해 플레이어 측 Range 헤더 동기화
                 val rangeHeader = clientHeaders["range"]
                 if (!rangeHeader.isNullOrBlank()) {
                     conn.setRequestProperty("Range", rangeHeader)
+                    println("[YT_DEBUG] [Proxy-Handler] Range 헤더 동기화 완료: $rangeHeader")
                 }
 
+                println("[YT_DEBUG] [Proxy-Handler] 유튜브 CDN 서버에 아웃바운드 소켓 접속을 수립합니다.")
                 val responseCode = conn.responseCode
                 val responseMessage = conn.responseMessage ?: "OK"
+                println("[YT_DEBUG] [Proxy-Handler] 유튜브 CDN 응답 수신 완료 -> 코드: $responseCode, 메시지: $responseMessage")
 
                 if (responseCode >= 400) {
-                    println("[YT_DEBUG] [Proxy] Error response from YouTube CDN: $responseCode")
+                    println("[YT_DEBUG] [Proxy-Handler] 오류: 유튜브 CDN이 에러 상태코드를 반환했습니다. 스트림 차단 가능성 존재.")
                     val errorResponse = "HTTP/1.1 $responseCode $responseMessage\r\nConnection: close\r\n\r\n"
                     os.write(errorResponse.toByteArray(java.nio.charset.StandardCharsets.UTF_8))
                     os.flush()
                     return
                 }
 
-                // HTTP 1.1 응답 프레임 빌드 (206 Partial Content 상태 지원 보정 완료)
+                // 프록시 응답 헤더 재조립 및 동기화
                 val headerBuilder = java.lang.StringBuilder()
                 headerBuilder.append("HTTP/1.1 $responseCode $responseMessage\r\n")
 
@@ -187,17 +218,21 @@ open class YoutubeExtractor : ExtractorApi() {
                 os.write(headerBuilder.toString().toByteArray(java.nio.charset.StandardCharsets.UTF_8))
                 os.flush()
 
-                // 데이터 스트림 전송 파이프라인
+                println("[YT_DEBUG] [Proxy-Handler] 플레이어 측 소켓으로 데이터 파이프라인 전송을 개시합니다.")
+                var totalBytesTransferred = 0L
                 conn.inputStream.use { input ->
-                    val buffer = ByteArray(32768) // 고대역폭 지원용 버퍼 최적화
+                    val buffer = ByteArray(32768)
                     var bytesRead: Int
                     while (input.read(buffer).also { bytesRead = it } != -1) {
                         os.write(buffer, 0, bytesRead)
+                        totalBytesTransferred += bytesRead
                     }
                 }
                 os.flush()
+                println("[YT_DEBUG] [Proxy-Handler] 데이터 전송 완료. 총 전송 바이트: $totalBytesTransferred bytes")
             } catch (e: Exception) {
-                println("[YT_DEBUG] [Proxy] Proxy error: ${e.message}")
+                println("[YT_DEBUG] [Proxy-Handler] 세그먼트 중계 중 예외 발생: ${e.message}")
+                e.printStackTrace()
                 try {
                     val errorResponse = "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n"
                     os.write(errorResponse.toByteArray(java.nio.charset.StandardCharsets.UTF_8))
@@ -205,26 +240,33 @@ open class YoutubeExtractor : ExtractorApi() {
                 } catch (_: Exception) {}
             } finally {
                 conn?.disconnect()
+                println("[YT_DEBUG] [Proxy-Handler] 리소스가 폐쇄되었습니다.")
             }
         }
 
         private fun handleClient(client: Socket) {
+            println("[YT_DEBUG] [Loopback-Server] 새로운 클라이언트 세션 소켓이 진입했습니다. 주소: ${client.remoteSocketAddress}")
             try {
                 client.use { socket ->
                     val reader = BufferedReader(InputStreamReader(socket.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))
                     val os = socket.getOutputStream()
                     val firstLine = reader.readLine()
+                    println("[YT_DEBUG] [Loopback-Server] HTTP 요청 라인: '$firstLine'")
                     if (firstLine != null && firstLine.startsWith("GET")) {
                         val parts = firstLine.split(" ")
                         if (parts.size > 1) {
                             val requestPath = parts[1]
+                            println("[YT_DEBUG] [Loopback-Server] 분석 대상 경로: $requestPath")
 
-                            // 헤더 파싱 및 역직렬화
+                            // HTTP 요청 헤더 매핑
                             val clientHeaders = mutableMapOf<String, String>()
                             var headerLine: String?
                             while (reader.readLine().also { headerLine = it } != null) {
                                 val currentLine = headerLine ?: break
-                                if (currentLine.isBlank()) break
+                                if (currentLine.isBlank()) {
+                                    println("[YT_DEBUG] [Loopback-Server] HTTP 헤더 수집 완료.")
+                                    break
+                                }
                                 val colonIndex = currentLine.indexOf(':')
                                 if (colonIndex != -1) {
                                     val name = currentLine.substring(0, colonIndex).trim().lowercase()
@@ -234,16 +276,20 @@ open class YoutubeExtractor : ExtractorApi() {
                             }
 
                             if (requestPath.startsWith("/proxy")) {
+                                println("[YT_DEBUG] [Loopback-Server] '/proxy' 매핑을 감지하여 중계 핸들러로 라우팅합니다.")
                                 handleProxyRequest(requestPath, clientHeaders, os)
                             } else {
+                                println("[YT_DEBUG] [Loopback-Server] '/proxy' 외의 일반 요청을 수신했습니다. 매니페스트(MPD) 파싱을 진행합니다.")
                                 val cleanPath = requestPath.substringAfter("/").substringBefore("?")
                                 val path = if (cleanPath.endsWith(".mpd", ignoreCase = true)) {
                                     cleanPath.substring(0, cleanPath.length - 4)
                                 } else {
                                     cleanPath
                                 }
+                                println("[YT_DEBUG] [Loopback-Server] 캐시 맵에서 키를 조회합니다: '$path'")
                                 val content = manifestMap[path]
                                 if (content != null) {
+                                    println("[YT_DEBUG] [Loopback-Server] 매칭되는 MPD 소스가 발견되었습니다. 크기: ${content.length} 자")
                                     val bodyBytes = content.toByteArray(java.nio.charset.StandardCharsets.UTF_8)
                                     val headerBuilder = java.lang.StringBuilder()
                                     headerBuilder.append("HTTP/1.1 200 OK\r\n")
@@ -257,7 +303,9 @@ open class YoutubeExtractor : ExtractorApi() {
                                     os.write(headerBytes)
                                     os.write(bodyBytes)
                                     os.flush()
+                                    println("[YT_DEBUG] [Loopback-Server] MPD 응답 스트림이 안전하게 전송되었습니다.")
                                 } else {
+                                    println("[YT_DEBUG] [Loopback-Server] 오류: 매니페스트 캐시가 존재하지 않습니다. UUID: '$path' (404 반환)")
                                     val errorResponse = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n"
                                     os.write(errorResponse.toByteArray(java.nio.charset.StandardCharsets.UTF_8))
                                     os.flush()
@@ -267,7 +315,8 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
             } catch (e: Exception) {
-                println("[YT_DEBUG] [handleClient] 소켓 예외 발생: ${e.message}")
+                println("[YT_DEBUG] [Loopback-Server] 소켓 세션 처리 중 예외: ${e.message}")
+                e.printStackTrace()
             }
         }
     }
@@ -294,23 +343,30 @@ open class YoutubeExtractor : ExtractorApi() {
         val language: String
     )
 
+    // [데드락 완화 처리]: getUrl의 모든 처리를 Dispatchers.IO 영역으로 격리하여 메인 UI 스레드 정지 현상을 예방
     override suspend fun getUrl(
         url: String,
         referer: String?,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
-    ) {
-        println("[YT_DEBUG] [getUrl] 호출됨. 원본 URL: $url")
+    ) = withContext(Dispatchers.IO) {
+        val currentThreadName = Thread.currentThread().name
+        println("[YT_DEBUG] [getUrl] 진입 완료. 비동기 백그라운드 스레드명: $currentThreadName")
+        println("[YT_DEBUG] [getUrl] 호출인자 - url: '$url'")
         val cleanedUrl = url.replace(schemaStripRegex, "")
         val videoId = YoutubeUtils.extractYoutubeId(cleanedUrl) ?: cleanedUrl
+        println("[YT_DEBUG] [getUrl] 식별된 비디오 ID: $videoId")
 
         val cachedLinks = ytVideos[videoId]
         if (cachedLinks.isNullOrEmpty()) {
-            println("[YT_DEBUG] [getUrl] 분석을 진행합니다.")
+            println("[YT_DEBUG] [getUrl] 로컬 비디오 캐시가 없으므로 네트워크 파싱을 전개합니다.")
             try {
                 val link = YoutubeStreamLinkHandlerFactory.getInstance().fromUrl(cleanedUrl)
                 val s = object : YoutubeStreamExtractor(ServiceList.YouTube, link) {}
+                
+                println("[YT_DEBUG] [getUrl] s.fetchPage() 네트워크 분석기 동작을 호출합니다.")
                 s.fetchPage()
+                println("[YT_DEBUG] [getUrl] s.fetchPage() 파싱 동작 성공완료.")
 
                 val durationSeconds = if (s.length > 0) s.length else 3600L
                 val builtLinks = mutableListOf<ExtractorLink>()
@@ -333,6 +389,7 @@ open class YoutubeExtractor : ExtractorApi() {
                         StreamInfo(streamUrl, mime, height, label, initR, indexR)
                     } catch (e: Exception) { null }
                 }.distinctBy { it.height }
+                println("[YT_DEBUG] [getUrl] 비디오 단독 트랙 파싱 성공 수량: ${videoOnlyList.size}")
 
                 val audioInfoList = (s.audioStreams ?: emptyList()).mapNotNull { asr ->
                     try {
@@ -350,18 +407,21 @@ open class YoutubeExtractor : ExtractorApi() {
                         AudioInfo(aUrl, mime, bitrate, initR, indexR, rawLang.uppercase())
                     } catch (e: Exception) { null }
                 }.distinctBy { it.url }
+                println("[YT_DEBUG] [getUrl] 오디오 단독 트랙 파싱 성공 수량: ${audioInfoList.size}")
 
                 val audiosByLanguage = audioInfoList.groupBy { it.language }
 
                 try {
                     val subs = s.subtitlesDefault?.filterNotNull() ?: emptyList()
                     ytVideosSubtitles[videoId] = subs
+                    println("[YT_DEBUG] [getUrl] 연동 자막 트랙 개수: ${subs.size}")
                 } catch (e: Exception) {
-                    println("[YT_DEBUG] [getUrl] 자막 파싱 에러: ${e.message}")
+                    println("[YT_DEBUG] [getUrl] 자막 파싱 예외: ${e.message}")
                 }
 
                 startServerIfNeeded()
 
+                println("[YT_DEBUG] [getUrl] DASH 가상 매니페스트(.mpd) 컴파일 및 캐시 등록 처리를 시작합니다.")
                 for (video in videoOnlyList) {
                     if (audiosByLanguage.isNotEmpty()) {
                         for ((lang, audios) in audiosByLanguage) {
@@ -382,10 +442,8 @@ open class YoutubeExtractor : ExtractorApi() {
 
                                     val streamUa = if (video.url.contains("&c=ANDROID")) {
                                         "com.google.android.youtube/19.29.1 (Linux; U; Android 11; en_US)"
-                                    } else if (video.url.contains("&c=IOS")) {
-                                        YoutubeUtils.IOS_USER_AGENT
                                     } else {
-                                        YoutubeUtils.CHROME_USER_AGENT
+                                        "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X; en_US)"
                                     }
 
                                     builtLinks.add(
@@ -422,13 +480,10 @@ open class YoutubeExtractor : ExtractorApi() {
                 for ((mUrl, mLabel, mHeight) in muxedList) {
                     val streamUa = if (mUrl.contains("&c=ANDROID")) {
                         "com.google.android.youtube/19.29.1 (Linux; U; Android 11; en_US)"
-                    } else if (mUrl.contains("&c=IOS")) {
-                        YoutubeUtils.IOS_USER_AGENT
                     } else {
-                        YoutubeUtils.CHROME_USER_AGENT
+                        "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X; en_US)"
                     }
 
-                    // 레거시 프로그레시브 스트림 또한 403 차단 회피용으로 프록시 우회 매핑
                     val proxiedUrl = getProxyUrl(mUrl, streamUa)
 
                     builtLinks.add(
@@ -469,10 +524,15 @@ open class YoutubeExtractor : ExtractorApi() {
                 )
 
                 ytVideos[videoId] = builtLinks.toList()
+                println("[YT_DEBUG] [getUrl] 비디오 파싱 처리 완료. 수집 링크 수량: ${builtLinks.size} 개")
 
             } catch (e: Exception) { 
+                println("[YT_DEBUG] [getUrl] 비디오 트랙 수집 중 예외 터짐: ${e.message}")
+                e.printStackTrace()
                 logError(e) 
             }
+        } else {
+            println("[YT_DEBUG] [getUrl] 캐시된 비디오 세션이 존재하여 신속하게 캐시로부터 리턴합니다.")
         }
 
         val finalLinks: List<ExtractorLink> = ytVideos[videoId] ?: emptyList()
@@ -501,16 +561,17 @@ open class YoutubeExtractor : ExtractorApi() {
         synchronized(serverLock) {
             val server = activeServer
             if (server != null && !server.isClosed) {
+                println("[YT_DEBUG] [startServerIfNeeded] 로컬 소켓 서버가 이미 포트 $serverPort 에 바인딩되어 동작 중입니다.")
                 return
             }
             try {
                 val newServer = ServerSocket(0)
                 activeServer = newServer
                 serverPort = newServer.localPort
-                println("[YT_DEBUG] [startServerIfNeeded] 가상 포트 $serverPort 리스너 바인 성공")
+                println("[YT_DEBUG] [startServerIfNeeded] 포트 $serverPort 에 리스너 소켓 바인딩을 성공했습니다.")
                 
                 thread(name = "YT-DASH-Server-Acceptor") {
-                    println("[YT_DEBUG] [ServerSocket-Thread] accept() 대기 시작.")
+                    println("[YT_DEBUG] [ServerSocket-Thread] 수락(accept) 대기 가상 루프 가동.")
                     try {
                         val active = activeServer
                         if (active != null) {
@@ -521,7 +582,7 @@ open class YoutubeExtractor : ExtractorApi() {
                             }
                         }
                     } catch (e: Exception) {
-                        println("[YT_DEBUG] [ServerSocket-Thread] accept() 도중 오류 발생: ${e.message}")
+                        println("[YT_DEBUG] [ServerSocket-Thread] 수락 대기 동작 루프 중단 예외: ${e.message}")
                     } finally {
                         synchronized(serverLock) {
                             try {
@@ -530,10 +591,11 @@ open class YoutubeExtractor : ExtractorApi() {
                             activeServer = null
                             serverPort = 0
                         }
-                        println("[YT_DEBUG] [ServerSocket-Thread] 리스너 중단 및 포트 가상화 초기화.")
+                        println("[YT_DEBUG] [ServerSocket-Thread] 소켓 수락 루프가 완전히 종료되었습니다.")
                     }
                 }
             } catch (e: Exception) { 
+                println("[YT_DEBUG] [startServerIfNeeded] 소켓 리스너 빌드 도중 치명적 예외: ${e.message}")
                 logError(e) 
             }
         }
@@ -543,6 +605,7 @@ open class YoutubeExtractor : ExtractorApi() {
         if (serverPort == 0) return null
         val id = UUID.randomUUID().toString()
         manifestMap[id] = xmlContent
+        println("[YT_DEBUG] [Manifest-Register] 가상 MPD 생성 완료. ID: '$id', XML 크기: ${xmlContent.length} 자")
         return "http://127.0.0.1:$serverPort/$id.mpd"
     }
 
@@ -551,13 +614,10 @@ open class YoutubeExtractor : ExtractorApi() {
         audioList: List<AudioInfo>,
         durationSec: Long
     ): String {
-        // 비디오 클라이언트 타입에 맞는 정품 UA 바인딩
         val videoUa = if (video.url.contains("&c=ANDROID")) {
             "com.google.android.youtube/19.29.1 (Linux; U; Android 11; en_US)"
-        } else if (video.url.contains("&c=IOS")) {
-            YoutubeUtils.IOS_USER_AGENT
         } else {
-            YoutubeUtils.CHROME_USER_AGENT
+            "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X; en_US)"
         }
         val proxiedVideoUrl = escapeXml(getProxyUrl(video.url, videoUa))
         val durationString = "PT${durationSec}S"
@@ -585,10 +645,8 @@ open class YoutubeExtractor : ExtractorApi() {
         audioList.forEachIndexed { index, audio ->
             val audioUa = if (audio.url.contains("&c=ANDROID")) {
                 "com.google.android.youtube/19.29.1 (Linux; U; Android 11; en_US)"
-            } else if (audio.url.contains("&c=IOS")) {
-                YoutubeUtils.IOS_USER_AGENT
             } else {
-                YoutubeUtils.CHROME_USER_AGENT
+                "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X; en_US)"
             }
             val proxiedAudioUrl = escapeXml(getProxyUrl(audio.url, audioUa))
             val audioId = "audio_$index"
@@ -672,6 +730,7 @@ class PoTokenWebView private constructor(
         private const val JS_INTERFACE = "PoTokenWebView"
 
         suspend fun newPoTokenGenerator(context: Context): PoTokenGenerator = withContext(Dispatchers.Main) {
+            println("[YT_DEBUG] [PoTokenWebView] newPoTokenGenerator() 메인 스레드 호출 시작.")
             val potWv = PoTokenWebView(context)
             potWv.initialize()
             potWv
@@ -680,12 +739,13 @@ class PoTokenWebView private constructor(
 
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun initialize() {
+        println("[YT_DEBUG] [PoTokenWebView] initialize() 내부 초기설정 진입.")
         val settings = webView.settings
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
         settings.databaseEnabled = true
         settings.userAgentString = USER_AGENT
-        settings.blockNetworkLoads = true // 로컬 연산이므로 네트워크 로딩 방지
+        settings.blockNetworkLoads = true // 로컬 내부 연산만 허용하여 샌드박스 보안 강화
 
         webView.addJavascriptInterface(this, JS_INTERFACE)
 
@@ -693,15 +753,13 @@ class PoTokenWebView private constructor(
             override fun onConsoleMessage(m: ConsoleMessage): Boolean {
                 if (m.message().contains("Uncaught")) {
                     val fmt = "\"${m.message()}\", source: ${m.sourceId()} (${m.lineNumber()})"
-                    println("[YT_DEBUG] [PoTokenWebView] Broken WebView: $fmt")
+                    println("[YT_DEBUG] [PoTokenWebView] 웹뷰 자바스크립트 uncaught 예외 감지: $fmt")
                     initContinuation?.resumeWith(Result.failure(Exception("WebView Broken: $fmt")))
                 }
                 return super.onConsoleMessage(m)
             }
         }
 
-        // [Asset 격리 해결]: HTML 파일을 에셋 대신 raw string으로 하드코딩 주입
-        // [CORS 보안 해결]: 가상 전역 유연성 바인딩 문법 교정 완료
         val html = """
             <!DOCTYPE html>
             <html lang="en"><head><title></title><script>
@@ -747,8 +805,6 @@ class PoTokenWebView private constructor(
             }
             function runBotGuard(challengeData) {
                 const js = challengeData.interpreterJavascript.privateDoNotAccessOrElseSafeScriptWrappedValue;
-                
-                // [DOM 주입 최적화]: VM 격리 우회를 위한 공식 DOM Script Injector로 리액션 구조 전환
                 if (js) { 
                     if (!document.getElementById(challengeData.interpreterHash)) {
                         const script = document.createElement('script');
@@ -778,14 +834,13 @@ class PoTokenWebView private constructor(
                 if (!(result instanceof Uint8Array)) throw new Error('ODM:Invalid');
                 return result;
             }
-            
-            // 페이지 가상 로드 완료 시 즉시 코틀린 API 연동 트리깅 가동
             PoTokenWebView.downloadAndRunBotguard();
             </script></head><body></body></html>
         """.trimIndent()
 
         suspendCancellableCoroutine<Unit> { cont ->
             initContinuation = cont
+            println("[YT_DEBUG] [PoTokenWebView] 웹뷰 데이터 렌더링 호출을 전개합니다.")
             webView.loadDataWithBaseURL("https://www.youtube.com", html, "text/html", "utf-8", null)
         }
     }
@@ -793,13 +848,15 @@ class PoTokenWebView private constructor(
     @SuppressLint("SetJavaScriptEnabled")
     @JavascriptInterface
     fun downloadAndRunBotguard() {
+        println("[YT_DEBUG] [PoTokenWebView] [JS-Callback] downloadAndRunBotguard() 가 샌드박스로부터 트리거되었습니다.")
         GlobalScope.launch(Dispatchers.IO) {
             try {
-                println("[YT_DEBUG] [PoTokenWebView] downloadAndRunBotguard() called. Fetching challenge...")
+                println("[YT_DEBUG] [PoTokenWebView] BotGuard JNN API Create를 호출합니다.")
                 val responseBody = makeBotguardServiceRequest(
                     "https://www.youtube.com/api/jnn/v1/Create",
                     "[ \"$REQUEST_KEY\" ]"
                 )
+                println("[YT_DEBUG] [PoTokenWebView] JNN Create 호출 성공. 응답 문자 크기: ${responseBody.length} 자")
                 
                 val parsedChallengeData = parseChallengeData(responseBody)
                 val base64Challenge = android.util.Base64.encodeToString(
@@ -808,7 +865,7 @@ class PoTokenWebView private constructor(
                 )
                 
                 withContext(Dispatchers.Main) {
-                    println("[YT_DEBUG] [PoTokenWebView] Injecting descrambled JSON into WebView execution frame...")
+                    println("[YT_DEBUG] [PoTokenWebView] 웹뷰 컨텍스트 내의 자바스크립트 VM 엔진을 구동합니다.")
                     webView.evaluateJavascript(
                         """try {
                             var data = JSON.parse(decodeURIComponent(escape(atob('$base64Challenge'))));
@@ -825,7 +882,7 @@ class PoTokenWebView private constructor(
                     )
                 }
             } catch (e: Exception) {
-                println("[YT_DEBUG] [PoTokenWebView] Error in downloadAndRunBotguard: ${e.message}")
+                println("[YT_DEBUG] [PoTokenWebView] downloadAndRunBotguard 진행 중 예외 발생: ${e.message}")
                 e.printStackTrace()
                 withContext(Dispatchers.Main) {
                     initContinuation?.resumeWith(Result.failure(e))
@@ -836,30 +893,33 @@ class PoTokenWebView private constructor(
 
     @JavascriptInterface
     fun onJsInitializationError(error: String) {
-        println("[YT_DEBUG] [PoTokenWebView] JS Initialization Error from WebView engine: $error")
+        println("[YT_DEBUG] [PoTokenWebView] [JS-Callback] 웹뷰 JS 구동 중 실패 피드백 수신: $error")
         initContinuation?.resumeWith(Result.failure(Exception("JS Init Error: $error")))
     }
 
     @JavascriptInterface
     fun onRunBotguardResult(botguardResponse: String) {
+        println("[YT_DEBUG] [PoTokenWebView] [JS-Callback] BotGuard 응답 수신 성공. 응답 캡슐 크기: ${botguardResponse.length} 자")
         GlobalScope.launch(Dispatchers.IO) {
             try {
-                println("[YT_DEBUG] [PoTokenWebView] onRunBotguardResult() received from VM execution. Generating integrityToken...")
+                println("[YT_DEBUG] [PoTokenWebView] BotGuard JNN API GenerateIT를 전송하여 무결성을 증명합니다.")
                 val responseBody = makeBotguardServiceRequest(
                     "https://www.youtube.com/api/jnn/v1/GenerateIT",
                     "[ \"$REQUEST_KEY\", \"$botguardResponse\" ]"
                 )
+                println("[YT_DEBUG] [PoTokenWebView] GenerateIT 호출 성공.")
                 
                 val (integrityToken, expirationTimeInSeconds) = parseIntegrityTokenData(responseBody)
                 expirationInstant = Instant.now().plusSeconds(expirationTimeInSeconds - 600)
+                println("[YT_DEBUG] [PoTokenWebView] 무결성 토큰 만료시간 동기화 완료: ${expirationInstant}")
 
                 withContext(Dispatchers.Main) {
                     webView.evaluateJavascript("this.integrityToken = $integrityToken", null)
-                    println("[YT_DEBUG] [PoTokenWebView] Attestation success! Resuming initContinuation...")
+                    println("[YT_DEBUG] [PoTokenWebView] 샌드박스 기기증명 처리가 비차단 방식으로 복개되었습니다.")
                     initContinuation?.resume(Unit)
                 }
             } catch (e: Exception) {
-                println("[YT_DEBUG] [PoTokenWebView] Error in onRunBotguardResult: ${e.message}")
+                println("[YT_DEBUG] [PoTokenWebView] onRunBotguardResult 처리 중 예외 발생: ${e.message}")
                 e.printStackTrace()
                 withContext(Dispatchers.Main) {
                     initContinuation?.resumeWith(Result.failure(e))
@@ -869,6 +929,7 @@ class PoTokenWebView private constructor(
     }
 
     override suspend fun generatePoToken(identifier: String): String = withContext(Dispatchers.Main) {
+        println("[YT_DEBUG] [PoTokenWebView] 비디오 식별자에 묶인 poToken 연산 시도. 식별 인자: '$identifier'")
         val u8Identifier = stringToU8(identifier)
         suspendCancellableCoroutine { cont ->
             poTokenContinuations[identifier] = cont
@@ -893,7 +954,7 @@ class PoTokenWebView private constructor(
 
     @JavascriptInterface
     fun onObtainPoTokenError(identifier: String, error: String) {
-        println("[YT_DEBUG] [PoTokenWebView] obtainPoToken generation failed for identifier: $identifier, details: $error")
+        println("[YT_DEBUG] [PoTokenWebView] [JS-Callback] poToken 연동 파괴 수신. 식별 인자: '$identifier', 오류: $error")
         poTokenContinuations.remove(identifier)?.resumeWith(Result.failure(Exception(error)))
     }
 
@@ -901,30 +962,36 @@ class PoTokenWebView private constructor(
     fun onObtainPoTokenResult(identifier: String, poTokenU8: String) {
         try {
             val poToken = u8ToBase64(poTokenU8)
-            println("[YT_DEBUG] [PoTokenWebView] obtainPoToken generated successfully for identifier: $identifier, size: ${poToken.length}")
+            println("[YT_DEBUG] [PoTokenWebView] [JS-Callback] poToken 발급 최종 완료. 크기: ${poToken.length} 자")
             poTokenContinuations.remove(identifier)?.resume(poToken)
         } catch (t: Throwable) {
-            println("[YT_DEBUG] [PoTokenWebView] Error decoding u8ToBase64 for identifier: $identifier, details: ${t.message}")
+            println("[YT_DEBUG] [PoTokenWebView] [JS-Callback] poToken 디코딩 및 역직렬화 중 파괴: ${t.message}")
             poTokenContinuations.remove(identifier)?.resumeWith(Result.failure(t))
         }
     }
 
     override fun isExpired(): Boolean {
-        return Instant.now().isAfter(expirationInstant)
+        val expired = Instant.now().isAfter(expirationInstant)
+        if (expired) {
+            println("[YT_DEBUG] [PoTokenWebView] 현재 증명된 토큰 세션이 만료되었습니다.")
+        }
+        return expired
     }
 
     override fun close() {
+        println("[YT_DEBUG] [PoTokenWebView] 샌드박스 리소스 해제를 시작합니다.")
         android.os.Handler(android.os.Looper.getMainLooper()).post {
             webView.clearHistory()
             webView.clearCache(true)
             webView.loadUrl("about:blank")
             webView.onPause()
             webView.destroy()
+            println("[YT_DEBUG] [PoTokenWebView] 웹뷰 해제 완료.")
         }
     }
 
     private fun makeBotguardServiceRequest(urlStr: String, data: String): String {
-        println("[YT_DEBUG] [PoTokenWebView] [NetRequest] Executing POST request to $urlStr with payload: $data")
+        println("[YT_DEBUG] [PoTokenWebView-Net] POST 아웃바운드 시도: $urlStr")
         val url = URL(urlStr)
         val conn = url.openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
@@ -941,42 +1008,26 @@ class PoTokenWebView private constructor(
             os.write(data.toByteArray(StandardCharsets.UTF_8))
         }
         val httpCode = conn.responseCode
-        println("[YT_DEBUG] [PoTokenWebView] [NetRequest] Server responded with HTTP code: $httpCode")
+        println("[YT_DEBUG] [PoTokenWebView-Net] HTTP 응답 결과 코드: $httpCode")
         if (httpCode != 200) {
             val errText = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
-            println("[YT_DEBUG] [PoTokenWebView] [NetRequest] HTTP Error logs: $errText")
+            println("[YT_DEBUG] [PoTokenWebView-Net] 전송 에러 페이로드: $errText")
             throw Exception("HTTP Error from BotGuard Service: $httpCode, details: $errText")
         }
         val res = conn.inputStream.bufferedReader().use { it.readText() }
-        println("[YT_DEBUG] [PoTokenWebView] [NetRequest] POST request successfully retrieved, payload size: ${res.length}")
+        println("[YT_DEBUG] [PoTokenWebView-Net] 수집 완료 데이터 크기: ${res.length} 자")
         return res
     }
 }
 
-// [바이너리 데이터 정합성 해석 어댑터 - 디버깅 로그 극대화]
 fun parseChallengeData(rawChallengeData: String): String {
-    println("[YT_DEBUG] [Telemetry] [parseChallengeData] Raw payload input size: ${rawChallengeData.length}")
+    println("[YT_DEBUG] [Telemetry-Decoder] parseChallengeData() 인입 데이터 크기: ${rawChallengeData.length}")
     val scrambled = JSONArray(rawChallengeData)
-    println("[YT_DEBUG] [Telemetry] [parseChallengeData] Scrambled JSONArray parsed. Length: ${scrambled.length()}")
-    for (i in 0 until scrambled.length()) {
-        val type = scrambled.opt(i)?.javaClass?.name ?: "null"
-        println("[YT_DEBUG] [Telemetry] [parseChallengeData] scrambled[$i] type: $type, length (if string): ${scrambled.optString(i).length}")
-    }
-
     val challengeData = if (scrambled.length() > 1 && scrambled.optString(1).isNotEmpty()) {
-        println("[YT_DEBUG] [Telemetry] [parseChallengeData] Scrambled challenge string detected at index 1. Decrypting...")
         val descrambled = descramble(scrambled.getString(1))
-        println("[YT_DEBUG] [Telemetry] [parseChallengeData] Descrambled string parsed, resulting size: ${descrambled.length}")
         JSONArray(descrambled)
     } else {
-        println("[YT_DEBUG] [Telemetry] [parseChallengeData] Challenge array is already plaintext. Fetching index 0 directly...")
         scrambled.getJSONArray(0)
-    }
-
-    println("[YT_DEBUG] [Telemetry] [parseChallengeData] Extracted challengeData JSONArray size: ${challengeData.length()}")
-    for (i in 0 until challengeData.length()) {
-        val type = challengeData.opt(i)?.javaClass?.name ?: "null"
-        println("[YT_DEBUG] [Telemetry] [parseChallengeData] challengeData[$i] type: $type, content snippet: ${challengeData.optString(i).take(100)}")
     }
 
     val messageId = challengeData.getString(0)
@@ -1009,7 +1060,7 @@ fun parseChallengeData(rawChallengeData: String): String {
         }
     }
 
-    println("[YT_DEBUG] [Telemetry] [parseChallengeData] Challenge parsed successfully: messageId=$messageId, globalName=$globalName, hasSafeScript=${privateDoNotAccessOrElseSafeScriptWrappedValue != null}")
+    println("[YT_DEBUG] [Telemetry-Decoder] Challenge 파싱 완료 -> messageId: $messageId, globalName: $globalName")
 
     val out = JSONObject()
     out.put("messageId", messageId)
@@ -1026,7 +1077,6 @@ fun parseChallengeData(rawChallengeData: String): String {
 }
 
 fun parseIntegrityTokenData(rawIntegrityTokenData: String): Pair<String, Long> {
-    println("[YT_DEBUG] [Telemetry] [parseIntegrityTokenData] Parsing Raw GenerateIT Payload: $rawIntegrityTokenData")
     val integrityTokenData = JSONArray(rawIntegrityTokenData)
     return base64ToU8(integrityTokenData.getString(0)) to integrityTokenData.getLong(1)
 }
@@ -1073,20 +1123,52 @@ object PoTokenProviderImpl : PoTokenProvider {
     private var webPoTokenStreamingPot: String? = null
     private var webPoTokenGenerator: PoTokenGenerator? = null
 
+    // [데드락 및 진입 레이턴시 해결]: 재생 진입 전 사전 웜스타트 연산 처리 및 락 해제
+    fun preInitialize(context: Context) {
+        synchronized(lock) {
+            if (webPoTokenGenerator != null && !webPoTokenGenerator!!.isExpired()) {
+                println("[YT_DEBUG] [PoTokenProviderImpl] 사전 기동 상태 검증: 이미 발급 세션이 활성화되어 있으므로 바이패스합니다.")
+                return
+            }
+            println("[YT_DEBUG] [PoTokenProviderImpl] 웜스타트 초기 기동을 백그라운드 세션에 등록합니다.")
+            val prefs = PreferenceManager.getDefaultSharedPreferences(context)
+            val savedVisitor = prefs.getString("yt_visitor_data", null) ?: "CgptdWpfa0NXZ2tfdyi28vS0Bg"
+            webPoTokenVisitorData = savedVisitor
+
+            GlobalScope.launch(Dispatchers.Main) {
+                try {
+                    println("[YT_DEBUG] [PoTokenProviderImpl] 웜스타트용 PoTokenWebView 샌드박스를 구성합니다.")
+                    val generator = PoTokenWebView.newPoTokenGenerator(context)
+                    println("[YT_DEBUG] [PoTokenProviderImpl] 웜스타트 샌드박스 초기설정 수립 완료. 사전 poToken을 인출합니다.")
+                    val streamingPot = generator.generatePoToken(savedVisitor)
+                    synchronized(lock) {
+                        webPoTokenGenerator = generator
+                        webPoTokenStreamingPot = streamingPot
+                    }
+                    println("[YT_DEBUG] [PoTokenProviderImpl] 웜스타트 완료 -> visitorData: $savedVisitor, streamingPot: ${streamingPot.take(15)}...")
+                } catch (e: Exception) {
+                    println("[YT_DEBUG] [PoTokenProviderImpl] 웜스타트 사전 증명 단계 중 예외: ${e.message}")
+                    e.printStackTrace()
+                }
+            }
+        }
+    }
+
     override fun getWebClientPoToken(videoId: String): PoTokenResult? {
         try {
             return getWebClientPoToken(videoId, forceRecreate = false)
         } catch (e: Exception) {
-            println("[YT_DEBUG] [PoTokenProviderImpl] Failed to obtain poToken: ${e.message}")
+            println("[YT_DEBUG] [PoTokenProviderImpl] poToken 최종 인출 억제실패: ${e.message}")
             return null
         }
     }
 
     private fun getWebClientPoToken(videoId: String, forceRecreate: Boolean): PoTokenResult {
+        println("[YT_DEBUG] [PoTokenProviderImpl] getWebClientPoToken() 최종 요청 수신. 타겟 비디오 ID: $videoId, 강제 재구동 옵션: $forceRecreate")
         val (generator, visitorData, streamingPot, hasBeenRecreated) = synchronized(lock) {
             val shouldRecreate = webPoTokenGenerator == null || forceRecreate || webPoTokenGenerator!!.isExpired()
             if (shouldRecreate) {
-                println("[YT_DEBUG] [PoTokenProviderImpl] Recreating PoTokenGenerator Sandbox...")
+                println("[YT_DEBUG] [PoTokenProviderImpl] 웜스타트 누락 혹은 유실로 신규 샌드박스를 현시점 동기 생성합니다. (약간의 대기 지연이 발생할 수 있음)")
                 val prefs = PreferenceManager.getDefaultSharedPreferences(AcraApplication.context!!)
                 val savedVisitor = prefs.getString("yt_visitor_data", null) ?: "CgptdWpfa0NXZ2tfdyi28vS0Bg"
                 
@@ -1104,6 +1186,7 @@ object PoTokenProviderImpl : PoTokenProvider {
             Quadruple(webPoTokenGenerator!!, webPoTokenVisitorData!!, webPoTokenStreamingPot!!, shouldRecreate)
         }
 
+        println("[YT_DEBUG] [PoTokenProviderImpl] 비디오 결합형 챌린지 생성을 개시합니다.")
         val playerPot = try {
             kotlinx.coroutines.runBlocking {
                 generator.generatePoToken(videoId)
@@ -1112,12 +1195,12 @@ object PoTokenProviderImpl : PoTokenProvider {
             if (hasBeenRecreated) {
                 throw throwable
             } else {
-                println("[YT_DEBUG] [PoTokenProviderImpl] Attestation failed, retrying forceRecreate...")
+                println("[YT_DEBUG] [PoTokenProviderImpl] 세션 유효성 만료로 인한 에러 감지. 신규 샌드박스로 강제 재시도합니다.")
                 return getWebClientPoToken(videoId, forceRecreate = true)
             }
         }
 
-        println("[YT_DEBUG] [PoTokenProviderImpl] Attestation SUCCESS! PlayerPot: ${playerPot.take(15)}..., StreamingPot: ${streamingPot.take(15)}...")
+        println("[YT_DEBUG] [PoTokenProviderImpl] 유튜브 전역 기기 무결성 증명 성공. PlayerPot: ${playerPot.take(15)}...")
         return PoTokenResult(visitorData, playerPot, streamingPot)
     }
 
