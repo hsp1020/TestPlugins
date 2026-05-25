@@ -630,7 +630,7 @@ open class YoutubeExtractor : ExtractorApi() {
         val vCodecs = if (vMime.contains("webm")) "vp9" else "avc1.4d401f"
 
         val vSegmentBase = if (video.initRange != null && video.indexRange != null) {
-            """<SegmentBase indexRange="${video.indexRange}"><Initialization range="${video.indexRange}" /></SegmentBase>"""
+            """<SegmentBase indexRange="${video.indexRange}"><Initialization range="${video.initRange}" /></SegmentBase>"""
         } else ""
 
         sb.append("""
@@ -654,7 +654,7 @@ open class YoutubeExtractor : ExtractorApi() {
             val aCodecs = if (aMime.contains("webm")) "opus" else "mp4a.40.2"
 
             val aSegmentBase = if (audio.initRange != null && audio.indexRange != null) {
-                """<SegmentBase indexRange="${audio.initRange}"><Initialization range="${audio.initRange}" /></SegmentBase>"""
+                """<SegmentBase indexRange="${audio.indexRange}"><Initialization range="${audio.initRange}" /></SegmentBase>"""
             } else ""
 
             sb.append("""
