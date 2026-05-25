@@ -71,8 +71,6 @@ open class YoutubeExtractor : ExtractorApi() {
         private var serverPort: Int = 0
         private val serverLock = Any()
 
-        private val tokenMutex = kotlinx.coroutines.sync.Mutex()
-
         private val manifestMap: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(128, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
@@ -145,11 +143,7 @@ open class YoutubeExtractor : ExtractorApi() {
             var conn: HttpURLConnection? = null
             try {
                 val uri = android.net.Uri.parse("http://127.0.0.1$requestPath")
-                val rawUrl = uri.getQueryParameter("url")
-                if (rawUrl == null) {
-                    android.util.Log.e("YT_DEBUG", "[Proxy-Handler] 오류: 프록시 주소에 'url' 필드가 없습니다.")
-                    return
-                }
+                val rawUrl = uri.getQueryParameter("url") ?: return
                 val userAgent = uri.getQueryParameter("ua") ?: YoutubeUtils.CHROME_USER_AGENT
                 val visitorData = uri.getQueryParameter("vd") ?: ""
 
@@ -167,11 +161,20 @@ open class YoutubeExtractor : ExtractorApi() {
 
                 // [403 에러 완치 핵심 1]: ExoPlayer의 Range 헤더를 유튜브가 요구하는 &range= 파라미터로 강제 변환
                 val rangeHeader = clientHeaders["range"]
-                if (!rangeHeader.isNullOrBlank() && !finalUrlStr.contains("&range=") && !finalUrlStr.contains("?range=")) {
+                var rangeStart = ""
+                var rangeEnd = ""
+
+                if (!rangeHeader.isNullOrBlank()) {
                     val rangeVal = rangeHeader.replace("bytes=", "").trim()
-                    val separator = if (finalUrlStr.contains("?")) "&" else "?"
-                    finalUrlStr += "${separator}range=$rangeVal"
-                    android.util.Log.d("YT_DEBUG", "[Proxy-Handler] 구간 이동(Seek) 감지 -> Range 파라미터 변환 완료: $rangeVal")
+                    val parts = rangeVal.split("-")
+                    rangeStart = parts.getOrNull(0) ?: ""
+                    rangeEnd = parts.getOrNull(1) ?: ""
+                    
+                    if (!finalUrlStr.contains("&range=") && !finalUrlStr.contains("?range=")) {
+                        val separator = if (finalUrlStr.contains("?")) "&" else "?"
+                        finalUrlStr += "${separator}range=$rangeVal"
+                        android.util.Log.d("YT_DEBUG", "[Proxy-Handler] 구간 이동(Seek) 파라미터 변환 완료: &range=$rangeVal")
+                    }
                 }
 
                 // SABR 우회용 파라미터 추가
@@ -191,16 +194,13 @@ open class YoutubeExtractor : ExtractorApi() {
                 conn.setRequestProperty("Origin", "https://www.youtube.com")
                 conn.setRequestProperty("Referer", "https://www.youtube.com")
 
-                // [403 에러 완치 핵심 2]: poToken 검증을 통과하기 위해 X-Goog-Visitor-Id 헤더 주입
                 if (visitorData.isNotBlank()) {
                     conn.setRequestProperty("X-Goog-Visitor-Id", visitorData)
                     conn.setRequestProperty("Cookie", "VISITOR_INFO1_LIVE=$visitorData")
-                    android.util.Log.d("YT_DEBUG", "[Proxy-Handler] poToken 검증용 Visitor ID 주입 완료: $visitorData")
                 }
 
-                if (!rangeHeader.isNullOrBlank()) {
-                    conn.setRequestProperty("Range", rangeHeader)
-                }
+                // [416 에러 완치 핵심]: URL에 &range=를 넣었으므로, HTTP 헤더에는 Range를 절대 넣지 않는다! (이중 슬라이싱 방지)
+                // conn.setRequestProperty("Range", rangeHeader) <-- 이 줄을 완전히 삭제함
 
                 val responseCode = conn.responseCode
                 val responseMessage = conn.responseMessage ?: "OK"
@@ -214,17 +214,45 @@ open class YoutubeExtractor : ExtractorApi() {
                     return
                 }
 
-                val headerBuilder = java.lang.StringBuilder()
-                headerBuilder.append("HTTP/1.1 $responseCode $responseMessage\r\n")
+                // [ExoPlayer 기만 전술]: 유튜브는 URL 파라미터로 잘랐기 때문에 200 OK를 반환할 수 있음. 
+                // 하지만 ExoPlayer는 206 Partial Content를 기대하므로 프록시가 가짜로 206으로 변환해줌.
+                val proxyResponseCode = if (!rangeHeader.isNullOrBlank() && responseCode == 200) 206 else responseCode
+                val proxyResponseMessage = if (proxyResponseCode == 206) "Partial Content" else responseMessage
 
+                val headerBuilder = java.lang.StringBuilder()
+                headerBuilder.append("HTTP/1.1 $proxyResponseCode $proxyResponseMessage\r\n")
+
+                var hasContentRange = false
                 conn.headerFields.forEach { (key, values) ->
                     if (key != null) {
                         val lowerKey = key.lowercase()
                         if (lowerKey != "connection" && lowerKey != "transfer-encoding" && lowerKey != "keep-alive") {
                             headerBuilder.append("$key: ${values.joinToString(", ")}\r\n")
+                            if (lowerKey == "content-range") hasContentRange = true
                         }
                     }
                 }
+
+                // ExoPlayer를 위한 가짜 Content-Range 헤더 주입
+                if (!rangeHeader.isNullOrBlank() && !hasContentRange) {
+                    val contentLength = conn.contentLengthLong
+                    var startByte = 0L
+                    try { startByte = rangeStart.toLong() } catch (e: Exception) {}
+                    
+                    val endByteStr = if (rangeEnd.isNotBlank()) {
+                        rangeEnd
+                    } else if (contentLength > 0) {
+                        (startByte + contentLength - 1).toString()
+                    } else {
+                        ""
+                    }
+                    
+                    if (endByteStr.isNotBlank()) {
+                        headerBuilder.append("Content-Range: bytes $startByte-$endByteStr/*\r\n")
+                        android.util.Log.d("YT_DEBUG", "[Proxy-Handler] ExoPlayer용 가짜 Content-Range 헤더 생성: bytes $startByte-$endByteStr/*")
+                    }
+                }
+
                 headerBuilder.append("Access-Control-Allow-Origin: *\r\n")
                 headerBuilder.append("Connection: close\r\n")
                 headerBuilder.append("\r\n")
