@@ -71,6 +71,8 @@ open class YoutubeExtractor : ExtractorApi() {
         private var serverPort: Int = 0
         private val serverLock = Any()
 
+        private val tokenMutex = kotlinx.coroutines.sync.Mutex()
+
         private val manifestMap: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(128, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
@@ -585,7 +587,18 @@ class PoTokenWebView private constructor(
             }
             function runBotGuard(challengeData) {
                 const js = challengeData.interpreterJavascript.privateDoNotAccessOrElseSafeScriptWrappedValue;
-                if (js) { new Function(js)(); } else throw new Error('Could not load VM');
+                
+                // [DOM 주입 최적화]: VM 격리 우회를 위한 공식 DOM Script Injector로 리액션 구조 전환
+                if (js) { 
+                    if (!document.getElementById(challengeData.interpreterHash)) {
+                        const script = document.createElement('script');
+                        script.type = 'text/javascript';
+                        script.id = challengeData.interpreterHash;
+                        script.textContent = js;
+                        document.head.appendChild(script);
+                    }
+                } else throw new Error('Could not load VM');
+                
                 const webPoSignalOutput = [];
                 return loadBotGuard({
                     globalName: challengeData.globalName, globalObj: this, program: challengeData.program
@@ -790,15 +803,15 @@ fun parseChallengeData(rawChallengeData: String): String {
         println("[YT_DEBUG] [Telemetry] [parseChallengeData] scrambled[$i] type: $type, length (if string): ${scrambled.optString(i).length}")
     }
 
-    // [NewPipe 사양 완전 대조]: scrambled 인덱스 1에 문자열 형식의 암호 데이터가 위치하면 해독하고, 그렇지 않으면 인덱스 1의 JSONArray를 챌린지로 대조
+    // [NewPipe 사양 완전 대조]: scrambled 인덱스 1에 문자열 형식의 암호 데이터가 위치하면 해독하고, 그렇지 않으면 인덱스 0의 JSONArray를 챌린지로 대조
     val challengeData = if (scrambled.length() > 1 && scrambled.optString(1).isNotEmpty()) {
         println("[YT_DEBUG] [Telemetry] [parseChallengeData] Scrambled challenge string detected at index 1. Decrypting...")
         val descrambled = descramble(scrambled.getString(1))
         println("[YT_DEBUG] [Telemetry] [parseChallengeData] Descrambled string parsed, resulting size: ${descrambled.length}")
         JSONArray(descrambled)
     } else {
-        println("[YT_DEBUG] [Telemetry] [parseChallengeData] Challenge array is already plaintext. Fetching index 1 directly...")
-        scrambled.getJSONArray(1)
+        println("[YT_DEBUG] [Telemetry] [parseChallengeData] Challenge array is already plaintext. Fetching index 0 directly...")
+        scrambled.getJSONArray(0)
     }
 
     println("[YT_DEBUG] [Telemetry] [parseChallengeData] Extracted challengeData JSONArray size: ${challengeData.length()}")
