@@ -211,6 +211,15 @@ open class YoutubeExtractor : ExtractorApi() {
                                     val finalName = "${video.label} ($lang) ${video.label}"
                                     val sourceName = "${this.name} ($lang)"
 
+                                    // [공식 교정]: 스트림 주소가 안드로이드 클라이언트 주소일 때와 아닐 때의 헤더 매핑 분기화 구현 완료
+                                    val streamUa = if (video.url.contains("&c=ANDROID")) {
+                                        "com.google.android.youtube/19.29.1 (Linux; U; Android 11; en_US)"
+                                    } else if (video.url.contains("&c=IOS")) {
+                                        YoutubeUtils.IOS_USER_AGENT
+                                    } else {
+                                        YoutubeUtils.CHROME_USER_AGENT
+                                    }
+
                                     builtLinks.add(
                                         newExtractorLink(
                                             sourceName,
@@ -220,9 +229,8 @@ open class YoutubeExtractor : ExtractorApi() {
                                         ) {
                                             this.referer = mainUrl
                                             this.quality = video.height
-                                            // [교정완료]: poToken 수집용 Web Chrome UA와 헤더를 일치화시켜 403 차단 전면 잠금 해제
                                             this.headers = mapOf(
-                                                "User-Agent" to YoutubeUtils.CHROME_USER_AGENT,
+                                                "User-Agent" to streamUa,
                                                 "Origin" to "https://www.youtube.com",
                                                 "Referer" to "https://www.youtube.com"
                                             )
@@ -244,13 +252,21 @@ open class YoutubeExtractor : ExtractorApi() {
                     } catch (e: Exception) { null }
                 }
                 for ((mUrl, mLabel, mHeight) in muxedList) {
+                    // [공식 교정]: 레거시 단일 스트림도 동일하게 UA 서명 정합성 분기 주입
+                    val streamUa = if (mUrl.contains("&c=ANDROID")) {
+                        "com.google.android.youtube/19.29.1 (Linux; U; Android 11; en_US)"
+                    } else if (mUrl.contains("&c=IOS")) {
+                        YoutubeUtils.IOS_USER_AGENT
+                    } else {
+                        YoutubeUtils.CHROME_USER_AGENT
+                    }
+
                     builtLinks.add(
                         newExtractorLink(this.name, "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
                             this.referer = mainUrl
                             this.quality = mHeight
-                            // [교정완료]: poToken 수집용 Web Chrome UA와 헤더를 일치화시켜 403 차단 전면 잠금 해제
                             this.headers = mapOf(
-                                "User-Agent" to YoutubeUtils.CHROME_USER_AGENT,
+                                "User-Agent" to streamUa,
                                 "Origin" to "https://www.youtube.com",
                                 "Referer" to "https://www.youtube.com"
                             )
