@@ -95,6 +95,41 @@ open class YoutubeExtractor : ExtractorApi() {
         val language: String
     )
 
+    // 발급된 googlevideo.com의 클라이언트 종류 파라미터(&c=)를 동적으로 감지하여 위장 헤더를 세팅하는 헬퍼 메서드
+    private fun getHeadersForUrl(url: String): Map<String, String> {
+        val decoded = try {
+            java.net.URLDecoder.decode(url, "UTF-8")
+        } catch (e: Exception) {
+            url
+        }
+        return when {
+            decoded.contains("c=ANDROID") -> {
+                // 안드로이드 앱 클라이언트 주소인 경우: Origin, Referer를 미전송하여 위반 필터 통과 유도
+                mapOf(
+                    "User-Agent" to "Dalvik/2.1.0 (Linux; U; Android 14)",
+                    "Accept" to "*/*",
+                    "Connection" to "keep-alive"
+                )
+            }
+            decoded.contains("c=IOS") -> {
+                // iOS 앱 클라이언트 주소인 경우: Origin, Referer 미전송 및 전용 iOS 앱 위장 에이전트 주입
+                mapOf(
+                    "User-Agent" to "com.google.ios.youtube/19.29.35 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X; en_US)",
+                    "Accept" to "*/*",
+                    "Connection" to "keep-alive"
+                )
+            }
+            else -> {
+                // WEB 혹은 기타 범용 웹 브라우저 클라이언트 형태인 경우
+                mapOf(
+                    "User-Agent" to YoutubeUtils.CHROME_USER_AGENT,
+                    "Origin" to "https://www.youtube.com",
+                    "Referer" to "https://www.youtube.com"
+                )
+            }
+        }
+    }
+
     override suspend fun getUrl(
         url: String,
         referer: String?,
@@ -105,8 +140,6 @@ open class YoutubeExtractor : ExtractorApi() {
         val cleanedUrl = url.replace(schemaStripRegex, "")
         val videoId = YoutubeUtils.extractYoutubeId(cleanedUrl) ?: cleanedUrl
         println("[YT_DEBUG] [getUrl] 가공된 cleanedUrl: $cleanedUrl, 비디오 ID: $videoId")
-
-        // 재생 진입(loadLinks) 단계에서 명시적으로 삭제가 수행되므로, 동일 재생 세션 내부 처리를 위해 기존 강제 캐시 삭제 코드는 제거되었습니다.
 
         val cachedLinks = ytVideos[videoId]
         if (cachedLinks.isNullOrEmpty()) {
@@ -198,6 +231,9 @@ open class YoutubeExtractor : ExtractorApi() {
                                 if (localLink != null) {
                                     val finalName = "${video.label} ($lang) ${video.label}"
                                     val sourceName = "${this.name} ($lang)"
+                                    
+                                    // 대안 수립: 비디오 원본 주소를 파싱하여 동적으로 안전 헤더 매핑
+                                    val streamHeaders = getHeadersForUrl(video.url)
 
                                     println("[YT_DEBUG] [getUrl] DASH 가상 링크 빌드 성공 -> 화질: ${video.label}, 언어: $lang, 가상 URL: $localLink")
                                     builtLinks.add(
@@ -209,11 +245,7 @@ open class YoutubeExtractor : ExtractorApi() {
                                         ) {
                                             this.referer = mainUrl
                                             this.quality = video.height
-                                            this.headers = mapOf(
-                                                "User-Agent" to YoutubeUtils.CHROME_USER_AGENT,
-                                                "Origin" to "https://www.youtube.com",
-                                                "Referer" to "https://www.youtube.com"
-                                            )
+                                            this.headers = streamHeaders
                                         }
                                     )
                                 }
@@ -235,15 +267,12 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
                 for ((mUrl, mLabel, mHeight) in muxedList) {
                     println("[YT_DEBUG] [getUrl] Legacy Muxed 링크 등록 -> 화질: $mHeight, 이름: $mLabel (Legacy)")
+                    val mHeaders = getHeadersForUrl(mUrl)
                     builtLinks.add(
                         newExtractorLink(this.name, "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
                             this.referer = mainUrl
                             this.quality = mHeight
-                            this.headers = mapOf(
-                                "User-Agent" to YoutubeUtils.CHROME_USER_AGENT,
-                                "Origin" to "https://www.youtube.com",
-                                "Referer" to "https://www.youtube.com"
-                            )
+                            this.headers = mHeaders
                         }
                     )
                 }
@@ -433,52 +462,52 @@ open class YoutubeExtractor : ExtractorApi() {
                 """<SegmentBase indexRange="${audio.indexRange}"><Initialization range="${audio.initRange}" /></SegmentBase>"""
             } else ""
 
-            sb.append("""
-                <AdaptationSet mimeType="$aMime" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
-                  <Representation id="$audioId" bandwidth="${if(audio.bitrate>0) audio.bitrate else 128000}" codecs="$aCodecs">
-                    <BaseURL>$cleanAudioUrl</BaseURL>
-                    $aSegmentBase
-                  </Representation>
-                </AdaptationSet>
-            """.trimIndent())
-        }
+                    sb.append("""
+                        <AdaptationSet mimeType="$aMime" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
+                          <Representation id="$audioId" bandwidth="${if(audio.bitrate>0) audio.bitrate else 128000}" codecs="$aCodecs">
+                            <BaseURL>$cleanAudioUrl</BaseURL>
+                            $aSegmentBase
+                          </Representation>
+                        </AdaptationSet>
+                    """.trimIndent())
+                }
 
-        sb.append("</Period>")
-        sb.append("</MPD>")
-        return sb.toString()
-    }
+                sb.append("</Period>")
+                sb.append("</MPD>")
+                return sb.toString()
+            }
 
-    private fun escapeXml(url: String): String {
-        if (!url.contains('&') && !url.contains('<') && !url.contains('>') && !url.contains('\'') && !url.contains('"')) return url
-        val sb = java.lang.StringBuilder(url.length + 16)
-        for (i in 0 until url.length) {
-            val c = url[i]
-            when (c) {
-                '&' -> sb.append("&amp;")
-                '<' -> sb.append("&lt;")
-                '>' -> sb.append("&gt;")
-                '\'' -> sb.append("&apos;")
-                '"' -> sb.append("&quot;")
-                else -> sb.append(c)
+            private fun escapeXml(url: String): String {
+                if (!url.contains('&') && !url.contains('<') && !url.contains('>') && !url.contains('\'') && !url.contains('"')) return url
+                val sb = java.lang.StringBuilder(url.length + 16)
+                for (i in 0 until url.length) {
+                    val c = url[i]
+                    when (c) {
+                        '&' -> sb.append("&amp;")
+                        '<' -> sb.append("&lt;")
+                        '>' -> sb.append("&gt;")
+                        '\'' -> sb.append("&apos;")
+                        '"' -> sb.append("&quot;")
+                        else -> sb.append(c)
+                    }
+                }
+                return sb.toString()
+            }
+
+            private fun getMimeTypeFromUrl(url: String, isAudio: Boolean): String {
+                return try {
+                    val decoded = YoutubeUtils.urlDecode(url)
+                    if (decoded.contains("video/webm") || decoded.contains("audio/webm")) {
+                        if (isAudio) "audio/webm" else "video/webm"
+                    } else {
+                        if (isAudio) "audio/mp4" else "video/mp4"
+                    }
+                } catch (e: Exception) { if (isAudio) "audio/mp4" else "video/mp4" }
+            }
+
+            private fun buildVideoLabelNumber(vs: org.schabi.newpipe.extractor.stream.VideoStream): String {
+                val height = runCatching { vs.height }.getOrNull() ?: 0
+                if (height > 0) return height.toString()
+                return "video"
             }
         }
-        return sb.toString()
-    }
-
-    private fun getMimeTypeFromUrl(url: String, isAudio: Boolean): String {
-        return try {
-            val decoded = YoutubeUtils.urlDecode(url)
-            if (decoded.contains("video/webm") || decoded.contains("audio/webm")) {
-                if (isAudio) "audio/webm" else "video/webm"
-            } else {
-                if (isAudio) "audio/mp4" else "video/mp4"
-            }
-        } catch (e: Exception) { if (isAudio) "audio/mp4" else "video/mp4" }
-    }
-
-    private fun buildVideoLabelNumber(vs: org.schabi.newpipe.extractor.stream.VideoStream): String {
-        val height = runCatching { vs.height }.getOrNull() ?: 0
-        if (height > 0) return height.toString()
-        return "video"
-    }
-}
