@@ -214,7 +214,6 @@ open class YoutubeExtractor : ExtractorApi() {
             println("[YT_DEBUG] [Telemetry] Starting WebView attestation sandboxing.")
             println("[YT_DEBUG] [Telemetry] Target Video ID: $videoId")
             println("[YT_DEBUG] [Telemetry] Embed Sandbox URL: $embedUrl")
-            println("[YT_DEBUG] [Telemetry] Device User-Agent: ${YoutubeUtils.CHROME_USER_AGENT}")
 
             suspendCancellableCoroutine { continuation ->
                 val webView = WebView(context)
@@ -261,7 +260,11 @@ open class YoutubeExtractor : ExtractorApi() {
                     settings.domStorageEnabled = true
                     settings.databaseEnabled = true
                     settings.mediaPlaybackRequiresUserGesture = false 
-                    settings.userAgentString = YoutubeUtils.CHROME_USER_AGENT
+                    
+                    // [정합성 불일치 해결]: 인위적인 Desktop UA 강제 주입을 완전히 제거하고 순정 모바일 WebView UA를 사용하여
+                    // X-Requested-With 안드로이드 앱 헤더와의 불일치로 생기는 'embedder.identity.denied' 필터를 통과합니다.
+                    val defaultUa = settings.userAgentString
+                    println("[YT_DEBUG] [Telemetry] [UA_Check] Default Mobile Webkit UA: $defaultUa")
 
                     addJavascriptInterface(PoTokenBridge(), "PoTokenBridge")
 
@@ -528,7 +531,6 @@ open class YoutubeExtractor : ExtractorApi() {
                                     (function() {
                                         console.log("[YT_PLAY_TRIGGER] Initializing play overrides...");
                                         
-                                        // strict-origin 레퍼러 정책 강제 적용 주입
                                         var meta = document.createElement('meta');
                                         meta.name = 'referrer';
                                         meta.content = 'strict-origin-when-cross-origin';
@@ -562,7 +564,7 @@ open class YoutubeExtractor : ExtractorApi() {
                         }
                     }
 
-                    // 12초 타임아웃 처리 및 심층 디버그용 자바스크립트 진단 스캔 작동
+                    // 12초 타임아웃 발생 시 샌드박스 내부 디버그 전용 보고서 강제 덤프
                     handler.postDelayed({
                         if (!isCompleted) {
                             println("[YT_DEBUG] [Telemetry] WebView sandbox attestation TIMEOUT (12s). Triggering deep diagnostic scan...")
@@ -624,7 +626,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     }, 12000)
                 }
 
-                // [근본 해결]: loadUrl 호출 시, 검증을 통과하도록 명시적인 'Referer' 및 'Origin' 헤더 주입 로드
+                // 유튜브 레퍼러 헤더 주입 로드 수행
                 val extraHeaders = mapOf(
                     "Referer" to "https://www.youtube.com/",
                     "Origin" to "https://www.youtube.com"
