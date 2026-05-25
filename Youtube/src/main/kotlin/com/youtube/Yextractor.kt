@@ -101,6 +101,175 @@ open class YoutubeExtractor : ExtractorApi() {
             ytVideos.remove(videoId)
             ytVideosSubtitles.remove(videoId)
         }
+
+        // [세그먼트 프록시 바인딩 고도화]: ExoPlayer가 보낸 비디오 조각 요청을 타겟 UA로 우회 전송하는 허브
+        fun getProxyUrl(realUrl: String, userAgent: String): String {
+            if (serverPort == 0) return realUrl
+            return try {
+                val encodedUrl = java.net.URLEncoder.encode(realUrl, "UTF-8")
+                val encodedUa = java.net.URLEncoder.encode(userAgent, "UTF-8")
+                "http://127.0.0.1:$serverPort/proxy?url=$encodedUrl&ua=$encodedUa"
+            } catch (e: Exception) {
+                realUrl
+            }
+        }
+
+        // [로컬 프록시 연결 및 비디오 파이프라인 수립]: Range 헤더 보존 및 유튜브 403 대응 핵심 구현체
+        private fun handleProxyRequest(requestPath: String, clientHeaders: Map<String, String>, os: java.io.OutputStream) {
+            var conn: HttpURLConnection? = null
+            try {
+                val uri = android.net.Uri.parse("http://127.0.0.1$requestPath")
+                val rawUrl = uri.getQueryParameter("url") ?: return
+                val userAgent = uri.getQueryParameter("ua") ?: YoutubeUtils.CHROME_USER_AGENT
+
+                // ExoPlayer가 덧붙인 range, index 등 원본 식별 인자 재조립
+                var finalUrlStr = rawUrl
+                uri.queryParameterNames.forEach { key ->
+                    if (key != "url" && key != "ua") {
+                        val values = uri.getQueryParameters(key)
+                        values.forEach { value ->
+                            val separator = if (finalUrlStr.contains("?")) "&" else "?"
+                            finalUrlStr += "$separator$key=${java.net.URLEncoder.encode(value, "UTF-8")}"
+                        }
+                    }
+                }
+
+                val url = URL(finalUrlStr)
+                conn = url.openConnection() as HttpURLConnection
+                conn.requestMethod = "GET"
+                conn.connectTimeout = 8000
+                conn.readTimeout = 8000
+                conn.setRequestProperty("User-Agent", userAgent)
+                conn.setRequestProperty("Origin", "https://www.youtube.com")
+                conn.setRequestProperty("Referer", "https://www.youtube.com")
+
+                // 클라이언트(ExoPlayer)의 Range 헤더가 존재하면 전송 요청에 바인딩
+                val rangeHeader = clientHeaders["range"]
+                if (!rangeHeader.isNullOrBlank()) {
+                    conn.setRequestProperty("Range", rangeHeader)
+                }
+
+                val responseCode = conn.responseCode
+                val responseMessage = conn.responseMessage ?: "OK"
+
+                if (responseCode >= 400) {
+                    println("[YT_DEBUG] [Proxy] Error response from YouTube CDN: $responseCode")
+                    val errorResponse = "HTTP/1.1 $responseCode $responseMessage\r\nConnection: close\r\n\r\n"
+                    os.write(errorResponse.toByteArray(java.nio.charset.StandardCharsets.UTF_8))
+                    os.flush()
+                    return
+                }
+
+                // HTTP 1.1 응답 프레임 빌드 (206 Partial Content 상태 지원 보정 완료)
+                val headerBuilder = java.lang.StringBuilder()
+                headerBuilder.append("HTTP/1.1 $responseCode $responseMessage\r\n")
+
+                val contentType = conn.contentType
+                if (contentType != null) {
+                    headerBuilder.append("Content-Type: $contentType\r\n")
+                }
+                val contentLength = conn.contentLengthLong
+                if (contentLength > 0) {
+                    headerBuilder.append("Content-Length: $contentLength\r\n")
+                }
+                val acceptRanges = conn.getHeaderField("Accept-Ranges")
+                if (acceptRanges != null) {
+                    headerBuilder.append("Accept-Ranges: $acceptRanges\r\n")
+                }
+                val contentRange = conn.getHeaderField("Content-Range")
+                if (contentRange != null) {
+                    headerBuilder.append("Content-Range: $contentRange\r\n")
+                }
+                headerBuilder.append("Access-Control-Allow-Origin: *\r\n")
+                headerBuilder.append("Connection: close\r\n")
+                headerBuilder.append("\r\n")
+
+                os.write(headerBuilder.toString().toByteArray(java.nio.charset.StandardCharsets.UTF_8))
+                os.flush()
+
+                // 데이터 스트림 전송 파이프라인
+                conn.inputStream.use { input ->
+                    val buffer = ByteArray(32768) // 고대역폭 지원용 버퍼 최적화
+                    var bytesRead: Int
+                    while (input.read(buffer).also { bytesRead = it } != -1) {
+                        os.write(buffer, 0, bytesRead)
+                    }
+                }
+                os.flush()
+            } catch (e: Exception) {
+                println("[YT_DEBUG] [Proxy] Proxy error: ${e.message}")
+                try {
+                    val errorResponse = "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n"
+                    os.write(errorResponse.toByteArray(java.nio.charset.StandardCharsets.UTF_8))
+                    os.flush()
+                } catch (_: Exception) {}
+            } finally {
+                conn?.disconnect()
+            }
+        }
+
+        private fun handleClient(client: Socket) {
+            try {
+                client.use { socket ->
+                    val reader = BufferedReader(InputStreamReader(socket.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))
+                    val os = socket.getOutputStream()
+                    val firstLine = reader.readLine()
+                    if (firstLine != null && firstLine.startsWith("GET")) {
+                        val parts = firstLine.split(" ")
+                        if (parts.size > 1) {
+                            val requestPath = parts[1]
+
+                            // 헤더 파싱 및 역직렬화
+                            val clientHeaders = mutableMapOf<String, String>()
+                            var headerLine: String?
+                            while (reader.readLine().also { headerLine = it } != null) {
+                                val currentLine = headerLine ?: break
+                                if (currentLine.isBlank()) break
+                                val colonIndex = currentLine.indexOf(':')
+                                if (colonIndex != -1) {
+                                    val name = currentLine.substring(0, colonIndex).trim().lowercase()
+                                    val value = currentLine.substring(colonIndex + 1).trim()
+                                    clientHeaders[name] = value
+                                }
+                            }
+
+                            if (requestPath.startsWith("/proxy")) {
+                                handleProxyRequest(requestPath, clientHeaders, os)
+                            } else {
+                                val cleanPath = requestPath.substringAfter("/").substringBefore("?")
+                                val path = if (cleanPath.endsWith(".mpd", ignoreCase = true)) {
+                                    cleanPath.substring(0, cleanPath.length - 4)
+                                } else {
+                                    cleanPath
+                                }
+                                val content = manifestMap[path]
+                                if (content != null) {
+                                    val bodyBytes = content.toByteArray(java.nio.charset.StandardCharsets.UTF_8)
+                                    val headerBuilder = java.lang.StringBuilder()
+                                    headerBuilder.append("HTTP/1.1 200 OK\r\n")
+                                    headerBuilder.append("Content-Type: application/dash+xml\r\n")
+                                    headerBuilder.append("Content-Length: ${bodyBytes.size}\r\n")
+                                    headerBuilder.append("Connection: close\r\n")
+                                    headerBuilder.append("Access-Control-Allow-Origin: *\r\n")
+                                    headerBuilder.append("\r\n")
+
+                                    val headerBytes = headerBuilder.toString().toByteArray(java.nio.charset.StandardCharsets.UTF_8)
+                                    os.write(headerBytes)
+                                    os.write(bodyBytes)
+                                    os.flush()
+                                } else {
+                                    val errorResponse = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n"
+                                    os.write(errorResponse.toByteArray(java.nio.charset.StandardCharsets.UTF_8))
+                                    os.flush()
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                println("[YT_DEBUG] [handleClient] 소켓 예외 발생: ${e.message}")
+            }
+        }
     }
 
     override fun getExtractorUrl(id: String): String {
@@ -158,7 +327,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         var mime = vs.format?.mimeType
                         if (mime.isNullOrEmpty()) mime = getMimeTypeFromUrl(streamUrl, false)
 
-                        // [세그먼트 정합성 보정]: 음수를 명확하게 필터링하여 "-1--1" XML 파괴 현상을 해결
                         val initR = if (vs.initStart != null && vs.initStart >= 0 && vs.initEnd != null && vs.initEnd >= 0) "${vs.initStart}-${vs.initEnd}" else null
                         val indexR = if (vs.indexStart != null && vs.indexStart >= 0 && vs.indexEnd != null && vs.indexEnd >= 0) "${vs.indexStart}-${vs.indexEnd}" else null
 
@@ -173,11 +341,9 @@ open class YoutubeExtractor : ExtractorApi() {
                         var mime = asr.format?.mimeType
                         if (mime.isNullOrEmpty()) mime = getMimeTypeFromUrl(aUrl, true)
 
-                        // [세그먼트 정합성 보정]: 음수를 명확하게 필터링하여 "-1--1" XML 파괴 현상을 해결
                         val initR = if (asr.initStart != null && asr.initStart >= 0 && asr.initEnd != null && asr.initEnd >= 0) "${asr.initStart}-${asr.initEnd}" else null
                         val indexR = if (asr.indexStart != null && asr.indexStart >= 0 && asr.indexEnd != null && asr.indexEnd >= 0) "${asr.indexStart}-${asr.indexEnd}" else null
             
-                        // [복원 완료]: 유실되었던 오디오 언어 식별자 추출 전처리 2줄을 완벽 복구
                         var rawLang = asr.audioTrackId ?: "Default"
                         if (rawLang.contains(".")) rawLang = rawLang.substringBefore(".")
                         
@@ -214,7 +380,6 @@ open class YoutubeExtractor : ExtractorApi() {
                                     val finalName = "${video.label} ($lang) ${video.label}"
                                     val sourceName = "${this.name} ($lang)"
 
-                                    // [정합성 교정]: 스트림 주소가 안드로이드 클라이언트 주소일 때와 아닐 때의 헤더 매핑 분기화
                                     val streamUa = if (video.url.contains("&c=ANDROID")) {
                                         "com.google.android.youtube/19.29.1 (Linux; U; Android 11; en_US)"
                                     } else if (video.url.contains("&c=IOS")) {
@@ -263,8 +428,11 @@ open class YoutubeExtractor : ExtractorApi() {
                         YoutubeUtils.CHROME_USER_AGENT
                     }
 
+                    // 레거시 프로그레시브 스트림 또한 403 차단 회피용으로 프록시 우회 매핑
+                    val proxiedUrl = getProxyUrl(mUrl, streamUa)
+
                     builtLinks.add(
-                        newExtractorLink(this.name, "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
+                        newExtractorLink(this.name, "$mLabel (Legacy)", proxiedUrl, type = INFER_TYPE) {
                             this.referer = mainUrl
                             this.quality = mHeight
                             this.headers = mapOf(
@@ -378,55 +546,20 @@ open class YoutubeExtractor : ExtractorApi() {
         return "http://127.0.0.1:$serverPort/$id.mpd"
     }
 
-    private fun handleClient(client: Socket) {
-        try {
-            client.use { socket ->
-                val reader = BufferedReader(InputStreamReader(socket.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))
-                val os = socket.getOutputStream()
-                val line = reader.readLine()
-                if (line != null && line.startsWith("GET")) {
-                    val parts = line.split(" ")
-                    if (parts.size > 1) {
-                        val cleanPath = parts[1].substringAfter("/").substringBefore("?")
-                        val path = if (cleanPath.endsWith(".mpd", ignoreCase = true)) {
-                            cleanPath.substring(0, cleanPath.length - 4)
-                        } else {
-                            cleanPath
-                        }
-                        val content = manifestMap[path]
-                        if (content != null) {
-                            val bodyBytes = content.toByteArray(java.nio.charset.StandardCharsets.UTF_8)
-                            val headerBuilder = java.lang.StringBuilder()
-                            headerBuilder.append("HTTP/1.1 200 OK\r\n")
-                            headerBuilder.append("Content-Type: application/dash+xml\r\n")
-                            headerBuilder.append("Content-Length: ${bodyBytes.size}\r\n")
-                            headerBuilder.append("Connection: close\r\n")
-                            headerBuilder.append("Access-Control-Allow-Origin: *\r\n")
-                            headerBuilder.append("\r\n")
-
-                            val headerBytes = headerBuilder.toString().toByteArray(java.nio.charset.StandardCharsets.UTF_8)
-                            os.write(headerBytes)
-                            os.write(bodyBytes)
-                            os.flush()
-                        } else {
-                            val errorResponse = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n"
-                            os.write(errorResponse.toByteArray(java.nio.charset.StandardCharsets.UTF_8))
-                            os.flush()
-                        }
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            println("[YT_DEBUG] [handleClient] 소켓 예외 발생: ${e.message}")
-        }
-    }
-
     private fun buildDashManifestXml(
         video: StreamInfo,
         audioList: List<AudioInfo>,
         durationSec: Long
     ): String {
-        val cleanVideoUrl = escapeXml(video.url)
+        // 비디오 클라이언트 타입에 맞는 정품 UA 바인딩
+        val videoUa = if (video.url.contains("&c=ANDROID")) {
+            "com.google.android.youtube/19.29.1 (Linux; U; Android 11; en_US)"
+        } else if (video.url.contains("&c=IOS")) {
+            YoutubeUtils.IOS_USER_AGENT
+        } else {
+            YoutubeUtils.CHROME_USER_AGENT
+        }
+        val proxiedVideoUrl = escapeXml(getProxyUrl(video.url, videoUa))
         val durationString = "PT${durationSec}S"
 
         val sb = java.lang.StringBuilder(2048)
@@ -443,14 +576,21 @@ open class YoutubeExtractor : ExtractorApi() {
         sb.append("""
             <AdaptationSet mimeType="$vMime" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
               <Representation id="video" bandwidth="4000000" width="0" height="${video.height}" codecs="$vCodecs">
-                <BaseURL>$cleanVideoUrl</BaseURL>
+                <BaseURL>$proxiedVideoUrl</BaseURL>
                 $vSegmentBase
               </Representation>
             </AdaptationSet>
         """.trimIndent())
 
         audioList.forEachIndexed { index, audio ->
-            val cleanAudioUrl = escapeXml(audio.url)
+            val audioUa = if (audio.url.contains("&c=ANDROID")) {
+                "com.google.android.youtube/19.29.1 (Linux; U; Android 11; en_US)"
+            } else if (audio.url.contains("&c=IOS")) {
+                YoutubeUtils.IOS_USER_AGENT
+            } else {
+                YoutubeUtils.CHROME_USER_AGENT
+            }
+            val proxiedAudioUrl = escapeXml(getProxyUrl(audio.url, audioUa))
             val audioId = "audio_$index"
             val aMime = audio.mimeType
             val aCodecs = if (aMime.contains("webm")) "opus" else "mp4a.40.2"
@@ -462,7 +602,7 @@ open class YoutubeExtractor : ExtractorApi() {
             sb.append("""
                 <AdaptationSet mimeType="$aMime" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
                   <Representation id="$audioId" bandwidth="${if(audio.bitrate>0) audio.bitrate else 128000}" codecs="$aCodecs">
-                    <BaseURL>$cleanAudioUrl</BaseURL>
+                    <BaseURL>$proxiedAudioUrl</BaseURL>
                     $aSegmentBase
                   </Representation>
                 </AdaptationSet>
@@ -823,7 +963,6 @@ fun parseChallengeData(rawChallengeData: String): String {
         println("[YT_DEBUG] [Telemetry] [parseChallengeData] scrambled[$i] type: $type, length (if string): ${scrambled.optString(i).length}")
     }
 
-    // [NewPipe 사양 완전 대조]: scrambled 인덱스 1에 문자열 형식의 암호 데이터가 위치하면 해독하고, 그렇지 않으면 인덱스 0의 JSONArray를 챌린지로 대조
     val challengeData = if (scrambled.length() > 1 && scrambled.optString(1).isNotEmpty()) {
         println("[YT_DEBUG] [Telemetry] [parseChallengeData] Scrambled challenge string detected at index 1. Decrypting...")
         val descrambled = descramble(scrambled.getString(1))
@@ -846,8 +985,6 @@ fun parseChallengeData(rawChallengeData: String): String {
     val globalName = challengeData.getString(5)
     val clientExperimentsStateBlob = challengeData.getString(7)
 
-    // [중대한 타입 오류 해결]: JSONObject.NULL(클래스 JSONObject${"$"}Null)이 문자열 "null"로 추출되어 
-    // 실제 소스코드가 아닌 글자 "null"만 전송되어 발생하던 'VM not found' 현상 해결
     val arr1 = challengeData.optJSONArray(1)
     var privateDoNotAccessOrElseSafeScriptWrappedValue: String? = null
     if (arr1 != null) {
@@ -985,8 +1122,8 @@ object PoTokenProviderImpl : PoTokenProvider {
     }
 
     override fun getWebEmbedClientPoToken(videoId: String): PoTokenResult? = null
-    override fun getAndroidClientPoToken(videoId: String): PoTokenResult? = null //  정상 교정 완료 (null 반환)
-    override fun getIosClientPoToken(videoId: String): PoTokenResult? = null     //  정상 교정 완료 (null 반환)
+    override fun getAndroidClientPoToken(videoId: String): PoTokenResult? = null 
+    override fun getIosClientPoToken(videoId: String): PoTokenResult? = null     
 
     private data class Quadruple<T1, T2, T3, T4>(val first: T1, val second: T2, val third: T3, val fourth: T4)
 }
