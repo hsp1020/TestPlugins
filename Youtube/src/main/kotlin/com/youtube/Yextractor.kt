@@ -617,22 +617,25 @@ class PoTokenWebView private constructor(
         }
     }
 
+    @SuppressLint("SetJavaScriptEnabled")
     @JavascriptInterface
     fun downloadAndRunBotguard() {
         GlobalScope.launch(Dispatchers.IO) {
             try {
+                println("[YT_DEBUG] [PoTokenWebView] downloadAndRunBotguard() called. Fetching challenge...")
                 val responseBody = makeBotguardServiceRequest(
                     "https://www.youtube.com/api/jnn/v1/Create",
                     "[ \"$REQUEST_KEY\" ]"
                 )
+                
                 val parsedChallengeData = parseChallengeData(responseBody)
-                // [정합성 파괴 해결]: 복잡한 난독화 VM 자바스크립트가 웹뷰 전이 시 특수문자 더블 이스케이프로 깨지는 현상을 
-                // 방지하기 위해 코틀린에서 무결성 Base64로 1차 봉인하여 웹뷰 내부에서 안전 복원 실행
                 val base64Challenge = android.util.Base64.encodeToString(
                     parsedChallengeData.toByteArray(StandardCharsets.UTF_8), 
                     android.util.Base64.NO_WRAP
                 )
+                
                 withContext(Dispatchers.Main) {
+                    println("[YT_DEBUG] [PoTokenWebView] Injecting descrambled JSON into WebView execution frame...")
                     webView.evaluateJavascript(
                         """try {
                             var data = JSON.parse(decodeURIComponent(escape(atob('$base64Challenge'))));
@@ -649,6 +652,8 @@ class PoTokenWebView private constructor(
                     )
                 }
             } catch (e: Exception) {
+                println("[YT_DEBUG] [PoTokenWebView] Error in downloadAndRunBotguard: ${e.message}")
+                e.printStackTrace()
                 withContext(Dispatchers.Main) {
                     initContinuation?.resumeWith(Result.failure(e))
                 }
@@ -658,6 +663,7 @@ class PoTokenWebView private constructor(
 
     @JavascriptInterface
     fun onJsInitializationError(error: String) {
+        println("[YT_DEBUG] [PoTokenWebView] JS Initialization Error from WebView engine: $error")
         initContinuation?.resumeWith(Result.failure(Exception("JS Init Error: $error")))
     }
 
@@ -665,18 +671,23 @@ class PoTokenWebView private constructor(
     fun onRunBotguardResult(botguardResponse: String) {
         GlobalScope.launch(Dispatchers.IO) {
             try {
+                println("[YT_DEBUG] [PoTokenWebView] onRunBotguardResult() received from VM execution. Generating integrityToken...")
                 val responseBody = makeBotguardServiceRequest(
                     "https://www.youtube.com/api/jnn/v1/GenerateIT",
                     "[ \"$REQUEST_KEY\", \"$botguardResponse\" ]"
                 )
+                
                 val (integrityToken, expirationTimeInSeconds) = parseIntegrityTokenData(responseBody)
                 expirationInstant = Instant.now().plusSeconds(expirationTimeInSeconds - 600)
 
                 withContext(Dispatchers.Main) {
                     webView.evaluateJavascript("this.integrityToken = $integrityToken", null)
+                    println("[YT_DEBUG] [PoTokenWebView] Attestation success! Resuming initContinuation...")
                     initContinuation?.resume(Unit)
                 }
             } catch (e: Exception) {
+                println("[YT_DEBUG] [PoTokenWebView] Error in onRunBotguardResult: ${e.message}")
+                e.printStackTrace()
                 withContext(Dispatchers.Main) {
                     initContinuation?.resumeWith(Result.failure(e))
                 }
@@ -709,6 +720,7 @@ class PoTokenWebView private constructor(
 
     @JavascriptInterface
     fun onObtainPoTokenError(identifier: String, error: String) {
+        println("[YT_DEBUG] [PoTokenWebView] obtainPoToken generation failed for identifier: $identifier, details: $error")
         poTokenContinuations.remove(identifier)?.resumeWith(Result.failure(Exception(error)))
     }
 
@@ -716,8 +728,10 @@ class PoTokenWebView private constructor(
     fun onObtainPoTokenResult(identifier: String, poTokenU8: String) {
         try {
             val poToken = u8ToBase64(poTokenU8)
+            println("[YT_DEBUG] [PoTokenWebView] obtainPoToken generated successfully for identifier: $identifier, size: ${poToken.length}")
             poTokenContinuations.remove(identifier)?.resume(poToken)
         } catch (t: Throwable) {
+            println("[YT_DEBUG] [PoTokenWebView] Error decoding u8ToBase64 for identifier: $identifier, details: ${t.message}")
             poTokenContinuations.remove(identifier)?.resumeWith(Result.failure(t))
         }
     }
@@ -737,10 +751,13 @@ class PoTokenWebView private constructor(
     }
 
     private fun makeBotguardServiceRequest(urlStr: String, data: String): String {
+        println("[YT_DEBUG] [PoTokenWebView] [NetRequest] Executing POST request to $urlStr with payload: $data")
         val url = URL(urlStr)
         val conn = url.openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
         conn.doOutput = true
+        conn.connectTimeout = 5000
+        conn.readTimeout = 5000
         conn.setRequestProperty("User-Agent", USER_AGENT)
         conn.setRequestProperty("Accept", "application/json")
         conn.setRequestProperty("Content-Type", "application/json+protobuf")
@@ -751,20 +768,43 @@ class PoTokenWebView private constructor(
             os.write(data.toByteArray(StandardCharsets.UTF_8))
         }
         val httpCode = conn.responseCode
+        println("[YT_DEBUG] [PoTokenWebView] [NetRequest] Server responded with HTTP code: $httpCode")
         if (httpCode != 200) {
-            throw Exception("HTTP Error from BotGuard Service: $httpCode")
+            val errText = conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
+            println("[YT_DEBUG] [PoTokenWebView] [NetRequest] HTTP Error logs: $errText")
+            throw Exception("HTTP Error from BotGuard Service: $httpCode, details: $errText")
         }
-        return conn.inputStream.bufferedReader().use { it.readText() }
+        val res = conn.inputStream.bufferedReader().use { it.readText() }
+        println("[YT_DEBUG] [PoTokenWebView] [NetRequest] POST request successfully retrieved, payload size: ${res.length}")
+        return res
     }
 }
 
+// [바이너리 데이터 정합성 해석 어댑터 - 디버깅 로그 극대화]
 fun parseChallengeData(rawChallengeData: String): String {
+    println("[YT_DEBUG] [Telemetry] [parseChallengeData] Raw payload input size: ${rawChallengeData.length}")
     val scrambled = JSONArray(rawChallengeData)
+    println("[YT_DEBUG] [Telemetry] [parseChallengeData] Scrambled JSONArray parsed. Length: ${scrambled.length()}")
+    for (i in 0 until scrambled.length()) {
+        val type = scrambled.opt(i)?.javaClass?.name ?: "null"
+        println("[YT_DEBUG] [Telemetry] [parseChallengeData] scrambled[$i] type: $type, length (if string): ${scrambled.optString(i).length}")
+    }
+
+    // [NewPipe 사양 완전 대조]: scrambled 인덱스 1에 문자열 형식의 암호 데이터가 위치하면 해독하고, 그렇지 않으면 인덱스 1의 JSONArray를 챌린지로 대조
     val challengeData = if (scrambled.length() > 1 && scrambled.optString(1).isNotEmpty()) {
+        println("[YT_DEBUG] [Telemetry] [parseChallengeData] Scrambled challenge string detected at index 1. Decrypting...")
         val descrambled = descramble(scrambled.getString(1))
+        println("[YT_DEBUG] [Telemetry] [parseChallengeData] Descrambled string parsed, resulting size: ${descrambled.length}")
         JSONArray(descrambled)
     } else {
-        scrambled.getJSONArray(0)
+        println("[YT_DEBUG] [Telemetry] [parseChallengeData] Challenge array is already plaintext. Fetching index 1 directly...")
+        scrambled.getJSONArray(1)
+    }
+
+    println("[YT_DEBUG] [Telemetry] [parseChallengeData] Extracted challengeData JSONArray size: ${challengeData.length()}")
+    for (i in 0 until challengeData.length()) {
+        val type = challengeData.opt(i)?.javaClass?.name ?: "null"
+        println("[YT_DEBUG] [Telemetry] [parseChallengeData] challengeData[$i] type: $type, content snippet: ${challengeData.optString(i).take(100)}")
     }
 
     val messageId = challengeData.getString(0)
@@ -797,6 +837,8 @@ fun parseChallengeData(rawChallengeData: String): String {
         }
     }
 
+    println("[YT_DEBUG] [Telemetry] [parseChallengeData] Challenge parsed successfully: messageId=$messageId, globalName=$globalName, hasSafeScript=${privateDoNotAccessOrElseSafeScriptWrappedValue != null}")
+
     val out = JSONObject()
     out.put("messageId", messageId)
     val interpreterJs = JSONObject()
@@ -812,6 +854,7 @@ fun parseChallengeData(rawChallengeData: String): String {
 }
 
 fun parseIntegrityTokenData(rawIntegrityTokenData: String): Pair<String, Long> {
+    println("[YT_DEBUG] [Telemetry] [parseIntegrityTokenData] Parsing Raw GenerateIT Payload: $rawIntegrityTokenData")
     val integrityTokenData = JSONArray(rawIntegrityTokenData)
     return base64ToU8(integrityTokenData.getString(0)) to integrityTokenData.getLong(1)
 }
@@ -833,16 +876,28 @@ fun u8ToBase64(poToken: String): String {
 }
 
 private fun descramble(scrambledChallenge: String): String {
-    val decoded = android.util.Base64.decode(scrambledChallenge.replace('-', '+').replace('_', '/'), android.util.Base64.DEFAULT)
+    // [유튜브 Base64 MOD 완전 보정]: 점(.)을 이퀄(=)로 복원하는 전처리 누락 버그 해결 완료
+    val decoded = base64ToByteArray(scrambledChallenge)
     val descrambledBytes = decoded.map { (it + 97).toByte() }.toByteArray()
     return String(descrambledBytes, StandardCharsets.UTF_8)
 }
 
 private fun base64ToU8(base64: String): String {
-    val decoded = android.util.Base64.decode(base64.replace('-', '+').replace('_', '/'), android.util.Base64.DEFAULT)
+    // [유튜브 Base64 MOD 완전 보정]: 점(.)을 이퀄(=)로 복원하는 전처리 누락 버그 해결 완료
+    val decoded = base64ToByteArray(base64)
     return newUint8Array(decoded)
 }
 
+// [유튜브 특화형 점(.) -> 이퀄(=) 복원 디코더]
+private fun base64ToByteArray(base64: String): ByteArray {
+    val base64Mod = base64
+        .replace('-', '+')
+        .replace('_', '/')
+        .replace('.', '=')
+    return android.util.Base64.decode(base64Mod, android.util.Base64.DEFAULT)
+}
+
+// [NewPipe 사양의 PoTokenProvider 수집 연동 모듈]
 object PoTokenProviderImpl : PoTokenProvider {
     private val lock = Any()
     private var webPoTokenVisitorData: String? = null
