@@ -92,27 +92,28 @@ open class YoutubeExtractor : ExtractorApi() {
         )
 
         init {
-            // [고화질 누락 완치]: iOS 클라이언트 조회를 활성화하여 1080p/4K DASH 트랙을 정상 추출합니다.
+            android.util.Log.d("YT_DEBUG", "[Extractor-Companion] static init 블록 시작됨.")
             YoutubeStreamExtractor.setFetchIosClient(true)
             YoutubeStreamExtractor.setPoTokenProvider(PoTokenProviderImpl)
             
             GlobalScope.launch(Dispatchers.Main) {
+                android.util.Log.d("YT_DEBUG", "[Extractor-Companion] 비동기 웜스타트 코루틴 가동.")
                 try {
                     AcraApplication.context?.let {
                         PoTokenProviderImpl.preInitialize(it)
                     }
                 } catch (e: Exception) {
-                    e.printStackTrace()
+                    android.util.Log.e("YT_DEBUG", "[Extractor-Companion] 웜스타트 예외: ${e.message}")
                 }
             }
         }
 
         fun clearCache(videoId: String) {
+            android.util.Log.d("YT_DEBUG", "[Companion-Cache] 캐시 무효화 요청 수신. 비디오 ID: $videoId")
             ytVideos.remove(videoId)
             ytVideosSubtitles.remove(videoId)
         }
 
-        // [UA 정합성 매핑기]: 스트림의 출처(c 파라미터)에 100% 일치하는 정품 UA를 동적으로 반환합니다.
         fun getStreamUa(url: String): String {
             return when {
                 url.contains("c=ANDROID") -> "com.google.android.youtube/19.29.1 (Linux; U; Android 11; en_US)"
@@ -123,26 +124,38 @@ open class YoutubeExtractor : ExtractorApi() {
         }
 
         fun getProxyUrl(realUrl: String, userAgent: String): String {
-            if (serverPort == 0) return realUrl
+            if (serverPort == 0) {
+                android.util.Log.w("YT_DEBUG", "[Proxy-Url] 경고: serverPort가 0입니다. 원본 주소 반환.")
+                return realUrl
+            }
             return try {
                 val encodedUrl = java.net.URLEncoder.encode(realUrl, "UTF-8")
                 val encodedUa = java.net.URLEncoder.encode(userAgent, "UTF-8")
-                "http://127.0.0.1:$serverPort/proxy?url=$encodedUrl&ua=$encodedUa"
+                val vd = PoTokenProviderImpl.getVisitorData()
+                val encodedVd = java.net.URLEncoder.encode(vd, "UTF-8")
+                "http://127.0.0.1:$serverPort/proxy?url=$encodedUrl&ua=$encodedUa&vd=$encodedVd"
             } catch (e: Exception) {
+                android.util.Log.e("YT_DEBUG", "[Proxy-Url] 인코딩 예외: ${e.message}")
                 realUrl
             }
         }
 
         private fun handleProxyRequest(requestPath: String, clientHeaders: Map<String, String>, os: java.io.OutputStream) {
+            android.util.Log.d("YT_DEBUG", "[Proxy-Handler] 세그먼트 요청 가로채기 성공. 경로: $requestPath")
             var conn: HttpURLConnection? = null
             try {
                 val uri = android.net.Uri.parse("http://127.0.0.1$requestPath")
-                val rawUrl = uri.getQueryParameter("url") ?: return
+                val rawUrl = uri.getQueryParameter("url")
+                if (rawUrl == null) {
+                    android.util.Log.e("YT_DEBUG", "[Proxy-Handler] 오류: 프록시 주소에 'url' 필드가 없습니다.")
+                    return
+                }
                 val userAgent = uri.getQueryParameter("ua") ?: YoutubeUtils.CHROME_USER_AGENT
+                val visitorData = uri.getQueryParameter("vd") ?: ""
 
                 val extraParams = java.lang.StringBuilder()
                 uri.queryParameterNames.forEach { key ->
-                    if (key != "url" && key != "ua") {
+                    if (key != "url" && key != "ua" && key != "vd") {
                         val values = uri.getQueryParameters(key)
                         values.forEach { value ->
                             val separator = if (extraParams.isEmpty() && !rawUrl.contains("?")) "?" else "&"
@@ -150,28 +163,51 @@ open class YoutubeExtractor : ExtractorApi() {
                         }
                     }
                 }
-                val finalUrlStr = rawUrl + extraParams.toString()
+                var finalUrlStr = rawUrl + extraParams.toString()
+
+                // [403 에러 완치 핵심 1]: ExoPlayer의 Range 헤더를 유튜브가 요구하는 &range= 파라미터로 강제 변환
+                val rangeHeader = clientHeaders["range"]
+                if (!rangeHeader.isNullOrBlank() && !finalUrlStr.contains("&range=") && !finalUrlStr.contains("?range=")) {
+                    val rangeVal = rangeHeader.replace("bytes=", "").trim()
+                    val separator = if (finalUrlStr.contains("?")) "&" else "?"
+                    finalUrlStr += "${separator}range=$rangeVal"
+                    android.util.Log.d("YT_DEBUG", "[Proxy-Handler] 구간 이동(Seek) 감지 -> Range 파라미터 변환 완료: $rangeVal")
+                }
+
+                // SABR 우회용 파라미터 추가
+                if (!finalUrlStr.contains("&alr=") && !finalUrlStr.contains("?alr=")) {
+                    val separator = if (finalUrlStr.contains("?")) "&" else "?"
+                    finalUrlStr += "${separator}alr=yes"
+                }
+
+                android.util.Log.d("YT_DEBUG", "[Proxy-Handler] 최종 조립된 유튜브 CDN 요청 URL: $finalUrlStr")
 
                 val url = URL(finalUrlStr)
                 conn = url.openConnection() as HttpURLConnection
                 conn.requestMethod = "GET"
-                conn.connectTimeout = 8000
-                conn.readTimeout = 8000
-                
-                // [핵심]: 프록시가 유튜브 서버와 통신할 때 완벽한 정품 UA로 위장합니다.
+                conn.connectTimeout = 10000
+                conn.readTimeout = 10000
                 conn.setRequestProperty("User-Agent", userAgent)
                 conn.setRequestProperty("Origin", "https://www.youtube.com")
                 conn.setRequestProperty("Referer", "https://www.youtube.com")
 
-                val rangeHeader = clientHeaders["range"]
+                // [403 에러 완치 핵심 2]: poToken 검증을 통과하기 위해 X-Goog-Visitor-Id 헤더 주입
+                if (visitorData.isNotBlank()) {
+                    conn.setRequestProperty("X-Goog-Visitor-Id", visitorData)
+                    conn.setRequestProperty("Cookie", "VISITOR_INFO1_LIVE=$visitorData")
+                    android.util.Log.d("YT_DEBUG", "[Proxy-Handler] poToken 검증용 Visitor ID 주입 완료: $visitorData")
+                }
+
                 if (!rangeHeader.isNullOrBlank()) {
                     conn.setRequestProperty("Range", rangeHeader)
                 }
 
                 val responseCode = conn.responseCode
                 val responseMessage = conn.responseMessage ?: "OK"
+                android.util.Log.d("YT_DEBUG", "[Proxy-Handler] 유튜브 CDN 응답 코드: $responseCode $responseMessage")
 
                 if (responseCode >= 400) {
+                    android.util.Log.e("YT_DEBUG", "[Proxy-Handler] 치명적 오류: 유튜브 CDN이 $responseCode 에러를 반환했습니다!")
                     val errorResponse = "HTTP/1.1 $responseCode $responseMessage\r\nConnection: close\r\n\r\n"
                     os.write(errorResponse.toByteArray(java.nio.charset.StandardCharsets.UTF_8))
                     os.flush()
@@ -196,15 +232,19 @@ open class YoutubeExtractor : ExtractorApi() {
                 os.write(headerBuilder.toString().toByteArray(java.nio.charset.StandardCharsets.UTF_8))
                 os.flush()
 
+                var totalBytesTransferred = 0L
                 conn.inputStream.use { input ->
-                    val buffer = ByteArray(32768)
+                    val buffer = ByteArray(65536)
                     var bytesRead: Int
                     while (input.read(buffer).also { bytesRead = it } != -1) {
                         os.write(buffer, 0, bytesRead)
+                        totalBytesTransferred += bytesRead
                     }
                 }
                 os.flush()
+                android.util.Log.d("YT_DEBUG", "[Proxy-Handler] 스트림 전송 완료. 총 바이트: $totalBytesTransferred")
             } catch (e: Exception) {
+                android.util.Log.e("YT_DEBUG", "[Proxy-Handler] 세그먼트 중계 중 예외 발생: ${e.message}")
                 try {
                     val errorResponse = "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n"
                     os.write(errorResponse.toByteArray(java.nio.charset.StandardCharsets.UTF_8))
@@ -273,7 +313,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
             } catch (e: Exception) {
-                // Ignore socket exceptions
+                android.util.Log.e("YT_DEBUG", "[Loopback-Server] 소켓 예외 발생: ${e.message}")
             }
         }
     }
@@ -306,6 +346,7 @@ open class YoutubeExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) = withContext(Dispatchers.IO) {
+        android.util.Log.d("YT_DEBUG", "[getUrl] 호출됨. 원본 URL: $url")
         val cleanedUrl = url.replace(schemaStripRegex, "")
         val videoId = YoutubeUtils.extractYoutubeId(cleanedUrl) ?: cleanedUrl
 
@@ -317,6 +358,7 @@ open class YoutubeExtractor : ExtractorApi() {
             try {
                 val link = YoutubeStreamLinkHandlerFactory.getInstance().fromUrl(cleanedUrl)
                 val s = object : YoutubeStreamExtractor(ServiceList.YouTube, link) {}
+                android.util.Log.d("YT_DEBUG", "[getUrl] 네트워크 분석기 동작 호출")
                 s.fetchPage()
 
                 val durationSeconds = if (s.length > 0) s.length else 3600L
@@ -358,6 +400,8 @@ open class YoutubeExtractor : ExtractorApi() {
                     } catch (e: Exception) { null }
                 }.distinctBy { it.url }
 
+                android.util.Log.d("YT_DEBUG", "[getUrl] 파싱된 비디오 트랙 수: ${videoOnlyList.size}, 오디오 트랙 수: ${audioInfoList.size}")
+
                 val sortedVideoOnlyList = videoOnlyList.sortedWith(
                     compareByDescending<StreamInfo> { it.url.contains("pot=") || it.url.contains("c=WEB") }
                 )
@@ -371,7 +415,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     val subs = s.subtitlesDefault?.filterNotNull() ?: emptyList()
                     ytVideosSubtitles[videoId] = subs
                 } catch (e: Exception) {
-                    // Ignore subtitle parse errors
+                    android.util.Log.e("YT_DEBUG", "[getUrl] 자막 파싱 에러: ${e.message}")
                 }
 
                 startServerIfNeeded()
@@ -468,8 +512,10 @@ open class YoutubeExtractor : ExtractorApi() {
                 )
 
                 ytVideos[videoId] = builtLinks.toList()
+                android.util.Log.d("YT_DEBUG", "[getUrl] 파싱 완료. 수집된 링크 수: ${builtLinks.size}")
 
             } catch (e: Exception) { 
+                android.util.Log.e("YT_DEBUG", "[getUrl] 파싱 중 에러: ${e.message}")
                 logError(e) 
             }
         }
@@ -506,6 +552,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 val newServer = ServerSocket(0)
                 activeServer = newServer
                 serverPort = newServer.localPort
+                android.util.Log.d("YT_DEBUG", "[startServerIfNeeded] 로컬 프록시 서버 포트 $serverPort 에 바인딩 됨.")
                 
                 thread(name = "YT-DASH-Server-Acceptor") {
                     try {
@@ -518,7 +565,7 @@ open class YoutubeExtractor : ExtractorApi() {
                             }
                         }
                     } catch (e: Exception) {
-                        // Ignore thread interrupt
+                        android.util.Log.e("YT_DEBUG", "[ServerSocket-Thread] 수락 대기 중단: ${e.message}")
                     } finally {
                         synchronized(serverLock) {
                             try {
@@ -1012,6 +1059,10 @@ object PoTokenProviderImpl : PoTokenProvider {
     private var webPoTokenStreamingPot: String? = null
     private var webPoTokenGenerator: PoTokenGenerator? = null
 
+    fun getVisitorData(): String {
+        return webPoTokenVisitorData ?: "CgptdWpfa0NXZ2tfdyi28vS0Bg"
+    }
+
     fun preInitialize(context: Context) {
         synchronized(lock) {
             if (webPoTokenGenerator != null && !webPoTokenGenerator!!.isExpired()) {
@@ -1029,8 +1080,9 @@ object PoTokenProviderImpl : PoTokenProvider {
                         webPoTokenGenerator = generator
                         webPoTokenStreamingPot = streamingPot
                     }
+                    android.util.Log.d("YT_DEBUG", "[PoTokenProviderImpl] 사전 웜업 및 토큰 발급 완료.")
                 } catch (e: Exception) {
-                    e.printStackTrace()
+                    android.util.Log.e("YT_DEBUG", "[PoTokenProviderImpl] 웜업 예외: ${e.message}")
                 }
             }
         }
