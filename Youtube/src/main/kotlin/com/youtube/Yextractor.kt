@@ -56,8 +56,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
             }
 
-            // 2. 403 에러 방지용 NewPipe 직접 추출 (Muxed Streams - 720p/360p)
-            // 코어 추출기가 403을 뱉을 때를 대비한 완벽한 백업 링크 제공
+            // 2. 403 에러 방지용 NewPipe 직접 추출 (Muxed Streams - 720p/360p 백업)
             val muxedList = s.videoStreams ?: emptyList()
             muxedList.forEach { vs ->
                 try {
@@ -65,15 +64,16 @@ open class YoutubeExtractor : ExtractorApi() {
                     val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
                     val label = if (height > 0) "${height}p" else "Video"
                     
+                    // 수정된 부분: referer와 quality를 중괄호 {} 내부로 이동
                     callback(
                         newExtractorLink(
-                            source = "YouTube (NewPipe)",
-                            name = "YouTube $label",
-                            url = mUrl,
-                            referer = "https://www.youtube.com/",
-                            quality = height,
+                            "YouTube (NewPipe)",
+                            "YouTube $label",
+                            mUrl,
                             type = INFER_TYPE
                         ) {
+                            this.referer = "https://www.youtube.com/"
+                            this.quality = height
                             this.headers = mapOf(
                                 "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36",
                                 "Origin" to "https://www.youtube.com"
