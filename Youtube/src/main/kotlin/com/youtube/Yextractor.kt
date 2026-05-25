@@ -92,58 +92,52 @@ open class YoutubeExtractor : ExtractorApi() {
         )
 
         init {
-            println("[YT_DEBUG] [Extractor-Companion] static init 블록 시작됨.")
-            // [모바일 우회 활성화]: Android 및 iOS 클라이언트 수집을 활성화하여 기기 증명 연계를 복구합니다.
+            // [고화질 누락 완치]: iOS 클라이언트 조회를 활성화하여 1080p/4K DASH 트랙을 정상 추출합니다.
             YoutubeStreamExtractor.setFetchIosClient(true)
             YoutubeStreamExtractor.setPoTokenProvider(PoTokenProviderImpl)
             
             GlobalScope.launch(Dispatchers.Main) {
-                println("[YT_DEBUG] [Extractor-Companion] 비동기 웜스타트 코루틴이 메인 디스패처에서 가동되었습니다.")
                 try {
                     AcraApplication.context?.let {
-                        println("[YT_DEBUG] [Extractor-Companion] PoTokenProviderImpl.preInitialize() 비차단식 사전 호출 시도")
                         PoTokenProviderImpl.preInitialize(it)
-                    } ?: println("[YT_DEBUG] [Extractor-Companion] 경고: AcraApplication.context가 null 상태입니다.")
+                    }
                 } catch (e: Exception) {
-                    println("[YT_DEBUG] [Extractor-Companion] 웜스타트 초기 기동 중 예외 감지: ${e.message}")
                     e.printStackTrace()
                 }
             }
         }
 
         fun clearCache(videoId: String) {
-            println("[YT_DEBUG] [Companion-Cache] 캐시 무효화 요청 수신. 비디오 ID: $videoId")
             ytVideos.remove(videoId)
             ytVideosSubtitles.remove(videoId)
         }
 
-        fun getProxyUrl(realUrl: String, userAgent: String): String {
-            if (serverPort == 0) {
-                println("[YT_DEBUG] [Proxy-Url] 경고: serverPort가 아직 0입니다. 프록시 바인딩을 건너뛰고 원본 주소를 반환합니다.")
-                return realUrl
+        // [UA 정합성 매핑기]: 스트림의 출처(c 파라미터)에 100% 일치하는 정품 UA를 동적으로 반환합니다.
+        fun getStreamUa(url: String): String {
+            return when {
+                url.contains("c=ANDROID") -> "com.google.android.youtube/19.29.1 (Linux; U; Android 11; en_US)"
+                url.contains("c=IOS") -> "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X; en_US)"
+                url.contains("c=TVHTML5") -> "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.142 Safari/537.36; SmartTv"
+                else -> YoutubeUtils.CHROME_USER_AGENT
             }
+        }
+
+        fun getProxyUrl(realUrl: String, userAgent: String): String {
+            if (serverPort == 0) return realUrl
             return try {
                 val encodedUrl = java.net.URLEncoder.encode(realUrl, "UTF-8")
                 val encodedUa = java.net.URLEncoder.encode(userAgent, "UTF-8")
-                val proxyUrl = "http://127.0.0.1:$serverPort/proxy?url=$encodedUrl&ua=$encodedUa"
-                println("[YT_DEBUG] [Proxy-Url] 프록시 우회 주소 생성 완료 (크기: ${proxyUrl.length} 자)")
-                proxyUrl
+                "http://127.0.0.1:$serverPort/proxy?url=$encodedUrl&ua=$encodedUa"
             } catch (e: Exception) {
-                println("[YT_DEBUG] [Proxy-Url] 인코딩 예외 발생: ${e.message}. 원본 주소를 우회 없이 주입합니다.")
                 realUrl
             }
         }
 
         private fun handleProxyRequest(requestPath: String, clientHeaders: Map<String, String>, os: java.io.OutputStream) {
-            println("[YT_DEBUG] [Proxy-Handler] 비디오 세그먼트 요청 가로채기 성공. 경로: $requestPath")
             var conn: HttpURLConnection? = null
             try {
                 val uri = android.net.Uri.parse("http://127.0.0.1$requestPath")
-                val rawUrl = uri.getQueryParameter("url")
-                if (rawUrl == null) {
-                    println("[YT_DEBUG] [Proxy-Handler] 오류: 프록시 주소에 'url' 필드가 유실되었습니다.")
-                    return
-                }
+                val rawUrl = uri.getQueryParameter("url") ?: return
                 val userAgent = uri.getQueryParameter("ua") ?: YoutubeUtils.CHROME_USER_AGENT
 
                 val extraParams = java.lang.StringBuilder()
@@ -157,13 +151,14 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
                 val finalUrlStr = rawUrl + extraParams.toString()
-                println("[YT_DEBUG] [Proxy-Handler] 최종 조립된 전송 목적지 CDN URL: $finalUrlStr")
 
                 val url = URL(finalUrlStr)
                 conn = url.openConnection() as HttpURLConnection
                 conn.requestMethod = "GET"
                 conn.connectTimeout = 8000
                 conn.readTimeout = 8000
+                
+                // [핵심]: 프록시가 유튜브 서버와 통신할 때 완벽한 정품 UA로 위장합니다.
                 conn.setRequestProperty("User-Agent", userAgent)
                 conn.setRequestProperty("Origin", "https://www.youtube.com")
                 conn.setRequestProperty("Referer", "https://www.youtube.com")
@@ -177,7 +172,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 val responseMessage = conn.responseMessage ?: "OK"
 
                 if (responseCode >= 400) {
-                    println("[YT_DEBUG] [Proxy-Handler] 오류: 유튜브 CDN이 에러 상태코드를 반환했습니다. 상태코드: $responseCode")
                     val errorResponse = "HTTP/1.1 $responseCode $responseMessage\r\nConnection: close\r\n\r\n"
                     os.write(errorResponse.toByteArray(java.nio.charset.StandardCharsets.UTF_8))
                     os.flush()
@@ -211,8 +205,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
                 os.flush()
             } catch (e: Exception) {
-                println("[YT_DEBUG] [Proxy-Handler] 세그먼트 중계 중 예외 발생: ${e.message}")
-                e.printStackTrace()
                 try {
                     val errorResponse = "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n"
                     os.write(errorResponse.toByteArray(java.nio.charset.StandardCharsets.UTF_8))
@@ -281,8 +273,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
             } catch (e: Exception) {
-                println("[YT_DEBUG] [Loopback-Server] 소켓 예외 발생: ${e.message}")
-                e.printStackTrace()
+                // Ignore socket exceptions
             }
         }
     }
@@ -367,7 +358,6 @@ open class YoutubeExtractor : ExtractorApi() {
                     } catch (e: Exception) { null }
                 }.distinctBy { it.url }
 
-                // [무결성 인증 우위 정렬]: pot 파라미터가 확보된 WEB 클라이언트 스트림을 최상위로 강제 정렬
                 val sortedVideoOnlyList = videoOnlyList.sortedWith(
                     compareByDescending<StreamInfo> { it.url.contains("pot=") || it.url.contains("c=WEB") }
                 )
@@ -381,7 +371,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     val subs = s.subtitlesDefault?.filterNotNull() ?: emptyList()
                     ytVideosSubtitles[videoId] = subs
                 } catch (e: Exception) {
-                    println("[YT_DEBUG] [getUrl] 자막 파싱 에러: ${e.message}")
+                    // Ignore subtitle parse errors
                 }
 
                 startServerIfNeeded()
@@ -403,12 +393,7 @@ open class YoutubeExtractor : ExtractorApi() {
                                 if (localLink != null) {
                                     val finalName = "${video.label} ($lang) ${video.label}"
                                     val sourceName = "$extractorName ($lang)"
-
-                                    val streamUa = if (video.url.contains("&c=ANDROID")) {
-                                        "com.google.android.youtube/19.29.1 (Linux; U; Android 11; en_US)"
-                                    } else {
-                                        "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X; en_US)"
-                                    }
+                                    val streamUa = getStreamUa(video.url)
 
                                     builtLinks.add(
                                         newExtractorLink(
@@ -442,12 +427,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     } catch (e: Exception) { null }
                 }
                 for ((mUrl, mLabel, mHeight) in muxedList) {
-                    val streamUa = if (mUrl.contains("&c=ANDROID")) {
-                        "com.google.android.youtube/19.29.1 (Linux; U; Android 11; en_US)"
-                    } else {
-                        "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X; en_US)"
-                    }
-
+                    val streamUa = getStreamUa(mUrl)
                     val proxiedUrl = getProxyUrl(mUrl, streamUa)
 
                     builtLinks.add(
@@ -538,7 +518,7 @@ open class YoutubeExtractor : ExtractorApi() {
                             }
                         }
                     } catch (e: Exception) {
-                        println("[YT_DEBUG] [ServerSocket-Thread] 수락 대기 동작 루프 중단 예외: ${e.message}")
+                        // Ignore thread interrupt
                     } finally {
                         synchronized(serverLock) {
                             try {
@@ -567,11 +547,7 @@ open class YoutubeExtractor : ExtractorApi() {
         audioList: List<AudioInfo>,
         durationSec: Long
     ): String {
-        val videoUa = if (video.url.contains("&c=ANDROID")) {
-            "com.google.android.youtube/19.29.1 (Linux; U; Android 11; en_US)"
-        } else {
-            "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X; en_US)"
-        }
+        val videoUa = getStreamUa(video.url)
         val proxiedVideoUrl = escapeXml(getProxyUrl(video.url, videoUa))
         val durationString = "PT${durationSec}S"
 
@@ -596,11 +572,7 @@ open class YoutubeExtractor : ExtractorApi() {
         """.trimIndent())
 
         audioList.forEachIndexed { index, audio ->
-            val audioUa = if (audio.url.contains("&c=ANDROID")) {
-                "com.google.android.youtube/19.29.1 (Linux; U; Android 11; en_US)"
-            } else {
-                "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X; en_US)"
-            }
+            val audioUa = getStreamUa(audio.url)
             val proxiedAudioUrl = escapeXml(getProxyUrl(audio.url, audioUa))
             val audioId = "audio_$index"
             val aMime = audio.mimeType
@@ -703,9 +675,7 @@ class PoTokenWebView private constructor(
         webView.webChromeClient = object : WebChromeClient() {
             override fun onConsoleMessage(m: ConsoleMessage): Boolean {
                 if (m.message().contains("Uncaught")) {
-                    val fmt = "\"${m.message()}\", source: ${m.sourceId()} (${m.lineNumber()})"
-                    println("[YT_DEBUG] [PoTokenWebView] 웹뷰 자바스크립트 uncaught 예외 감지: $fmt")
-                    initContinuation?.resumeWith(Result.failure(Exception("WebView Broken: $fmt")))
+                    initContinuation?.resumeWith(Result.failure(Exception("WebView Broken: ${m.message()}")))
                 }
                 return super.onConsoleMessage(m)
             }
@@ -1036,7 +1006,6 @@ private fun base64ToByteArray(base64: String): ByteArray {
     return android.util.Base64.decode(base64Mod, android.util.Base64.DEFAULT)
 }
 
-// [NewPipe 사양의 PoTokenProvider 수집 연동 모듈]
 object PoTokenProviderImpl : PoTokenProvider {
     private val lock = Any()
     private var webPoTokenVisitorData: String? = null
@@ -1112,17 +1081,8 @@ object PoTokenProviderImpl : PoTokenProvider {
     }
 
     override fun getWebEmbedClientPoToken(videoId: String): PoTokenResult? = null
-
-    // [모바일 우회 증명 수립]: 안드로이드 및 iOS 클라이언트 기기 증명 누락으로 고화질 트랙이 숨겨지는(Hide) 현상을 원천 방지
-    override fun getAndroidClientPoToken(videoId: String): PoTokenResult? {
-        println("[YT_DEBUG] [PoTokenProviderImpl] getAndroidClientPoToken() 가 $videoId 에 대해 호출되었습니다. WEB 토큰을 공유 매핑합니다.")
-        return getWebClientPoToken(videoId)
-    }
-
-    override fun getIosClientPoToken(videoId: String): PoTokenResult? {
-        println("[YT_DEBUG] [PoTokenProviderImpl] getIosClientPoToken() 가 $videoId 에 대해 호출되었습니다. WEB 토큰을 공유 매핑합니다.")
-        return getWebClientPoToken(videoId)
-    }
+    override fun getAndroidClientPoToken(videoId: String): PoTokenResult? = null 
+    override fun getIosClientPoToken(videoId: String): PoTokenResult? = null     
 
     private data class Quadruple<T1, T2, T3, T4>(val first: T1, val second: T2, val third: T3, val fourth: T4)
 }
