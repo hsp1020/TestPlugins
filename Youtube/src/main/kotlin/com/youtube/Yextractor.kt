@@ -92,7 +92,7 @@ open class YoutubeExtractor : ExtractorApi() {
         )
 
         init {
-            YoutubeStreamExtractor.setFetchIosClient(true)
+            YoutubeStreamExtractor.setFetchIosClient(false)
             YoutubeStreamExtractor.setPoTokenProvider(PoTokenProviderImpl)
         }
 
@@ -158,8 +158,9 @@ open class YoutubeExtractor : ExtractorApi() {
                         var mime = vs.format?.mimeType
                         if (mime.isNullOrEmpty()) mime = getMimeTypeFromUrl(streamUrl, false)
 
-                        val initR = if (vs.initStart != null && vs.initEnd != null) "${vs.initStart}-${vs.initEnd}" else null
-                        val indexR = if (vs.indexStart != null && vs.indexEnd != null) "${vs.indexStart}-${vs.indexEnd}" else null
+                        // [세그먼트 정합성 패치]: 음수를 필터링하여 "-1--1" XML 파괴 현상을 해결
+                        val initR = if (vs.initStart != null && vs.initStart >= 0 && vs.initEnd != null && vs.initEnd >= 0) "${vs.initStart}-${vs.initEnd}" else null
+                        val indexR = if (vs.indexStart != null && vs.indexStart >= 0 && vs.indexEnd != null && vs.indexEnd >= 0) "${vs.indexStart}-${vs.indexEnd}" else null
 
                         StreamInfo(streamUrl, mime, height, label, initR, indexR)
                     } catch (e: Exception) { null }
@@ -172,11 +173,9 @@ open class YoutubeExtractor : ExtractorApi() {
                         var mime = asr.format?.mimeType
                         if (mime.isNullOrEmpty()) mime = getMimeTypeFromUrl(aUrl, true)
 
-                        val initR = if (asr.initStart != null && asr.initEnd != null) "${asr.initStart}-${asr.initEnd}" else null
-                        val indexR = if (asr.indexStart != null && asr.indexEnd != null) "${asr.indexStart}-${asr.indexEnd}" else null
-
-                        var rawLang = asr.audioTrackId ?: "Default"
-                        if (rawLang.contains(".")) rawLang = rawLang.substringBefore(".")
+                        // [세그먼트 정합성 패치]: 음수를 필터링하여 "-1--1" XML 파괴 현상을 해결
+                        val initR = if (asr.initStart != null && asr.initStart >= 0 && asr.initEnd != null && asr.initEnd >= 0) "${asr.initStart}-${asr.initEnd}" else null
+                        val indexR = if (asr.indexStart != null && asr.indexStart >= 0 && asr.indexEnd != null && asr.indexEnd >= 0) "${asr.indexStart}-${asr.indexEnd}" else null
 
                         AudioInfo(aUrl, mime, bitrate, initR, indexR, rawLang.uppercase())
                     } catch (e: Exception) { null }
@@ -211,14 +210,8 @@ open class YoutubeExtractor : ExtractorApi() {
                                     val finalName = "${video.label} ($lang) ${video.label}"
                                     val sourceName = "${this.name} ($lang)"
 
-                                    // [공식 교정]: 스트림 주소가 안드로이드 클라이언트 주소일 때와 아닐 때의 헤더 매핑 분기화 구현 완료
-                                    val streamUa = if (video.url.contains("&c=ANDROID")) {
-                                        "com.google.android.youtube/19.29.1 (Linux; U; Android 11; en_US)"
-                                    } else if (video.url.contains("&c=IOS")) {
-                                        YoutubeUtils.IOS_USER_AGENT
-                                    } else {
-                                        YoutubeUtils.CHROME_USER_AGENT
-                                    }
+                                    // [정합성 보정]: 순정 안드로이드 수집 형식이므로 이에 무결하게 동치하는 안드로이드 정품 웹뷰 User-Agent 주입
+                                    val streamUa = "com.google.android.youtube/19.29.1 (Linux; U; Android 11; en_US)"
 
                                     builtLinks.add(
                                         newExtractorLink(
@@ -252,14 +245,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     } catch (e: Exception) { null }
                 }
                 for ((mUrl, mLabel, mHeight) in muxedList) {
-                    // [공식 교정]: 레거시 단일 스트림도 동일하게 UA 서명 정합성 분기 주입
-                    val streamUa = if (mUrl.contains("&c=ANDROID")) {
-                        "com.google.android.youtube/19.29.1 (Linux; U; Android 11; en_US)"
-                    } else if (mUrl.contains("&c=IOS")) {
-                        YoutubeUtils.IOS_USER_AGENT
-                    } else {
-                        YoutubeUtils.CHROME_USER_AGENT
-                    }
+                    val streamUa = "com.google.android.youtube/19.29.1 (Linux; U; Android 11; en_US)"
 
                     builtLinks.add(
                         newExtractorLink(this.name, "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
@@ -983,10 +969,8 @@ object PoTokenProviderImpl : PoTokenProvider {
     }
 
     override fun getWebEmbedClientPoToken(videoId: String): PoTokenResult? = getWebClientPoToken(videoId)
-    // [보정 완료]: 모바일 클라이언트(Android/iOS) 전용 poToken 수집을 명확하게 null 처리하여 
-    // NewPipeExtractor 내부의 Web-client 폴백 재생 라인이 정상 가동되도록 유도 (mismatch 오류 영구 격리)
-    override fun getAndroidClientPoToken(videoId: String): PoTokenResult? = null
-    override fun getIosClientPoToken(videoId: String): PoTokenResult? = null
+    override fun getAndroidClientPoToken(videoId: String): PoTokenResult? = getWebClientPoToken(videoId)
+    override fun getIosClientPoToken(videoId: String): PoTokenResult? = getWebClientPoToken(videoId)
 
     private data class Quadruple<T1, T2, T3, T4>(val first: T1, val second: T2, val third: T3, val fourth: T4)
 }
