@@ -211,8 +211,6 @@ open class YoutubeExtractor : ExtractorApi() {
 
         private suspend fun getPoTokenAndVisitor(videoId: String): Triple<String, String, String?>? = withContext(Dispatchers.Main) {
             val context = AcraApplication.context ?: return@withContext null
-            
-            // [Watch 우회 해결완료]: 명시적으로 모바일 Watch 본 주소로 우회하여 임베더 차단(missing.referrer, identity.denied) 원천 무력화
             val targetUrl = "https://www.youtube.com/watch?v=$videoId"
             val startTime = System.currentTimeMillis()
             println("[YT_DEBUG] [Telemetry] Starting WebView attestation sandboxing on Mobile Watch Page.")
@@ -261,11 +259,9 @@ open class YoutubeExtractor : ExtractorApi() {
                     settings.databaseEnabled = true
                     settings.mediaPlaybackRequiresUserGesture = false 
                     
-                    // 정합성 지문 일치를 위한 순정 안드로이드 모바일 User-Agent 사용
                     val defaultUa = settings.userAgentString
                     println("[YT_DEBUG] [Telemetry] [UA_Check] Using Genuine Default Mobile WebView UA: $defaultUa")
                     
-                    // 속도 향상을 위한 이미지 미로딩 처리
                     settings.loadsImagesAutomatically = false
 
                     addJavascriptInterface(PoTokenBridge(), "PoTokenBridge")
@@ -433,8 +429,6 @@ open class YoutubeExtractor : ExtractorApi() {
                                 window._poTokenHookInjected = true;
                                 console.log("[JS_HOOK] Injecting Fetch/XHR Interceptors and Active Ad-Skipper...");
 
-                                // [광고 무력화 핵심]: 모바일 Watch 페이지 진입 시 강제로 트랙킹되는 동영상 광고를 감지하여
-                                // 0.2초 이내에 강제 고속 전진(Fast-forward) 및 Skip 버튼 기계식 클릭을 실행하는 강력한 모듈 탑재
                                 var skipAd = function() {
                                     var video = document.querySelector('video');
                                     var adShowing = document.querySelector('.ad-showing, .ytp-ad-player-overlay, .ytp-ad-player-overlay-instream-info, .ytp-ad-overlay-container, .ytp-ad-persistent-progress-bar');
@@ -540,6 +534,24 @@ open class YoutubeExtractor : ExtractorApi() {
                     webViewClient = object : WebViewClient() {
                         override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                             val urlStr = request?.url?.toString() ?: return null
+                            
+                            // [물리적 우회 핵심]: 동영상이 실제 로드되어 재생을 시작하면, poToken은 비디오 스트림 주소(videoplayback)의 
+                            // pot 쿼리 파라미터에 반드시 포함됩니다. 이 스트리밍 요청 주소를 직접 가로채 0.1초 만에 토큰을 회수합니다.
+                            if (urlStr.contains("videoplayback") && urlStr.contains("pot=")) {
+                                val potToken = request.url.getQueryParameter("pot")
+                                if (!potToken.isNullOrBlank()) {
+                                    println("[YT_DEBUG] [Telemetry] [shouldInterceptRequest] SUCCESS! poToken captured from videoplayback URL: $potToken")
+                                    val cookieManager = android.webkit.CookieManager.getInstance()
+                                    val cookieStr = cookieManager.getCookie(targetUrl)
+                                    
+                                    // 메인 스레드 안전 루틴을 위한 비동기 처리
+                                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                        saveCachedTokens(videoId, potToken, "", cookieStr)
+                                        safeResume(Triple(potToken, "", cookieStr))
+                                    }
+                                }
+                            }
+
                             if (urlStr.contains(".png") || urlStr.contains(".jpg") || urlStr.contains(".jpeg") || 
                                 urlStr.contains(".woff") || urlStr.contains(".ttf") || urlStr.contains(".css") ||
                                 urlStr.contains("googleads") || urlStr.contains("doubleclick") || urlStr.contains("adservice")) {
@@ -570,7 +582,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         }
                     }
 
-                    // 12초 타임아웃
                     handler.postDelayed({
                         if (!isCompleted) {
                             println("[YT_DEBUG] [Telemetry] WebView sandbox attestation TIMEOUT (12s). Triggering deep diagnostic scan...")
@@ -632,7 +643,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     }, 12000)
                 }
 
-                // [최종 해결]: embedUrl이 아닌 실제 watch 페이지 주소(targetUrl)로 웹뷰 기동을 확실히 일치화시킵니다.
+                // 공식 Watch 페이지 주소 진입
                 webView.loadUrl(targetUrl)
 
                 continuation.invokeOnCancellation {
