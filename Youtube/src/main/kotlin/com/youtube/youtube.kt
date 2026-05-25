@@ -2017,8 +2017,8 @@ class YoutubeProvider(
     ): Boolean {
         val videoId = YoutubeUtils.extractYoutubeId(data) ?: data
         
-        // 1. 타 개발자 코드 벤치마킹: hl 파라미터 제거 및 youtube.com 도메인 사용 (403 에러 원천 차단)
-        val safeUrl = "https://youtube.com/watch?v=$videoId"
+        // 403 에러의 원인이었던 파라미터(&hl=ko)를 제거하고 순정 URL 사용
+        val safeUrl = "https://www.youtube.com/watch?v=$videoId"
 
         var isLive = false
         var playerResponseText = ""
@@ -2035,7 +2035,7 @@ class YoutubeProvider(
                 ),
                 "videoId" to videoId
             )
-            val headers = mapOf("Referer" to "$mainUrl/watch?v=$videoId")
+            val headers = mapOf("Referer" to safeUrl)
             playerResponseText = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).text
             
             if (playerResponseText.isNotBlank()) {
@@ -2052,6 +2052,7 @@ class YoutubeProvider(
         }
 
         if (!isLive) {
+            // 원상복구: 정상 작동하던 시청 기록(Playback Tracking) 로직 유지
             if (playerResponseText.isNotBlank()) {
                 try {
                     val playerResponse = AppUtils.parseJson<PlayerResponse>(playerResponseText)
@@ -2063,11 +2064,11 @@ class YoutubeProvider(
                 }
             }
 
-            // 2. Yextractor 호출: 다국어 자막 추출 및 403 대비용 안정적인 NewPipe Muxed 링크(720p) 백업 제공
-            com.youtube.YoutubeExtractor().getUrl(safeUrl, null, subtitleCallback, callback)
+            // 다국어 자막만 추출하는 순수 자막 추출기 호출
+            com.youtube.YoutubeSubtitleExtractor.extract(safeUrl, subtitleCallback)
         }
 
-        // 3. 앱 내장 코어 추출기 호출 (타 개발자 코드와 동일한 형태 적용하여 403 에러 해결)
+        // 모범 케이스(user.kt)와 동일하게 앱 내장 코어 추출기 호출 (403 에러 원천 차단)
         return loadExtractor(safeUrl, subtitleCallback, callback)
     }
 }
