@@ -1,12 +1,11 @@
 package com.youtube
 
 import com.lagradost.cloudstream3.SubtitleFile
-import com.lagradost.cloudstream3.mvvm.logError
+import com.lagradost.cloudstream3.newAudioFile
 import com.lagradost.cloudstream3.newSubtitleFile
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
-import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.schemaStripRegex
 import org.schabi.newpipe.extractor.ServiceList
@@ -33,31 +32,26 @@ open class CustomYoutubeExtractor : ExtractorApi() {
         val videoId = extractYouTubeId(url)
         val watchUrl = "$mainUrl/watch?v=$videoId"
 
-        try {
-            // 본진 코어 앱과 100% 동일하게 StreamInfo 1회 호출 (403, 2004 에러 원천 차단)
-            val info = StreamInfo.getInfo(watchUrl)
+        val info = StreamInfo.getInfo(watchUrl)
 
-            val isLive =
-                info.streamType == StreamType.LIVE_STREAM
-                        || info.streamType == StreamType.AUDIO_LIVE_STREAM
-                        || info.streamType == StreamType.POST_LIVE_STREAM
-                        || info.streamType == StreamType.POST_LIVE_AUDIO_STREAM
+        val isLive =
+            info.streamType == StreamType.LIVE_STREAM
+                    || info.streamType == StreamType.AUDIO_LIVE_STREAM
+                    || info.streamType == StreamType.POST_LIVE_STREAM
+                    || info.streamType == StreamType.POST_LIVE_AUDIO_STREAM
 
-            if (isLive && info.hlsUrl != null) {
-                callback(
-                    newExtractorLink(
-                        source = name,
-                        name = "YouTube Live",
-                        url = info.hlsUrl
-                    ) {
-                        type = ExtractorLinkType.M3U8
-                    }
-                )
-            } else {
-                processVideo(info, subtitleCallback, callback)
-            }
-        } catch (e: Exception) {
-            logError(e)
+        if (isLive && info.hlsUrl != null) {
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = "YouTube Live",
+                    url = info.hlsUrl
+                ) {
+                    type = ExtractorLinkType.M3U8
+                }
+            )
+        } else {
+            processVideo(info, subtitleCallback, callback)
         }
     }
 
@@ -73,7 +67,7 @@ open class CustomYoutubeExtractor : ExtractorApi() {
 
         if (videoStreams.isEmpty() && muxedStreams.isEmpty()) return false
 
-        // 1. 영상+오디오 통합본 (Muxed) 백업 추출
+        // 1. Muxed Streams (영상+음성 통합본) 추출
         muxedStreams.forEach { video ->
             val vUrl = video.content ?: return@forEach
             callback(
@@ -87,7 +81,7 @@ open class CustomYoutubeExtractor : ExtractorApi() {
             )
         }
 
-        // 2. 비디오 링크 단 1개에 모든 언어의 오디오를 쓸어 담습니다 (링크 과부하 방지)
+        // 2. 💡 [질문자님 해법 적용] 비디오 링크 단 1개에 모든 언어의 오디오 트랙을 이름표와 함께 주입
         videoStreams.forEach { video ->
             val vUrl = video.content ?: return@forEach
             callback(
@@ -98,32 +92,29 @@ open class CustomYoutubeExtractor : ExtractorApi() {
                 ) {
                     quality = video.height ?: 0
                     
-                    // 🔥 [혁신적인 해결책] 코어의 newAudioFile() 깡통 함수를 우회하여,
-                    // AudioFile 객체를 직접 생성하면서 언어 이름(langName)을 완벽하게 주입합니다!
+                    // NewPipe에서 오디오 언어 정보를 가져와 newAudioFile(주소, 이름) 형태로 이름 파라미터에 직접 꽂아줍니다.
                     audioTracks = audioStreams.mapNotNull { audio ->
                         val aUrl = audio.content ?: return@mapNotNull null
                         
-                        // 한국어 번역 우선, 없으면 유튜브 원본 디스플레이 이름 사용
-                        val langName = audio.audioLocale?.getDisplayLanguage(Locale.KOREAN) 
+                        // 한국어 번역 우선 매핑
+                        val displayName = audio.audioLocale?.getDisplayLanguage(Locale.KOREAN) 
                             ?: audio.audioLocale?.displayName 
                             ?: audio.audioTrackId 
                             ?: "Audio"
-                            
-                        // 빌드 에러를 막고 und 버그를 잡는 핵심 객체 생성
-                        com.lagradost.cloudstream3.AudioFile(aUrl, langName)
+
+                        // 위치 기반 인자로 안전하게 (주소, 이름) 전달하여 und 버그 해결 및 컴파일 에러 해결
+                        newAudioFile(aUrl, displayName)
                     }
                 }
             )
         }
 
-        // 3. 자막 추출 (다국어 유지)
+        // 3. 자막 처리 로직 (위치 기반 인자로 컴파일 안전성 확보)
         info.subtitles.orEmpty().forEach { subtitle ->
             val subUrl = subtitle.content ?: return@forEach
+            val langName = subtitle.displayLanguageName ?: subtitle.languageTag ?: "Unknown"
             subtitleCallback(
-                newSubtitleFile(
-                    lang = subtitle.displayLanguageName ?: subtitle.languageTag ?: "Unknown",
-                    url = subUrl
-                )
+                newSubtitleFile(langName, subUrl)
             )
         }
 
