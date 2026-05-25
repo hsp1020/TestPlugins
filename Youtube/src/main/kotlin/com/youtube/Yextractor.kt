@@ -5,9 +5,8 @@ import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.newSubtitleFile
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.INFER_TYPE
-import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.schemaStripRegex
+import com.lagradost.cloudstream3.ar.youtube.YoutubeUtils
 import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor
 import org.schabi.newpipe.extractor.services.youtube.linkHandler.YoutubeStreamLinkHandlerFactory
@@ -15,7 +14,7 @@ import org.schabi.newpipe.extractor.services.youtube.linkHandler.YoutubeStreamLi
 open class YoutubeExtractor : ExtractorApi() {
     override val mainUrl = "https://www.youtube.com"
     override val requiresReferer = false
-    override val name = "YouTube"
+    override val name = "YouTube (Subtitles Only)"
 
     init {
         YoutubeStreamExtractor.setFetchIosClient(true)
@@ -31,21 +30,25 @@ open class YoutubeExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
+        println("[YT_DEBUG] [getUrl] 자막 전용 추출기 호출됨. 원본 URL: $url")
         val cleanedUrl = url.replace(schemaStripRegex, "")
         
         try {
+            // NewPipe 라이브러리를 활용하여 영상의 모든 자막(다국어 포함)을 추출 (기존 자막 언어 구현 유지)
             val link = YoutubeStreamLinkHandlerFactory.getInstance().fromUrl(cleanedUrl)
             val s = object : YoutubeStreamExtractor(ServiceList.YouTube, link) {}
             s.fetchPage()
 
-            // 1. 자막 추출 (다국어 유지)
             val subs = s.subtitlesDefault?.filterNotNull() ?: emptyList()
+            println("[YT_DEBUG] [getUrl] 수집된 자막 트랙 개수: ${subs.size}")
+
             subs.forEach { ss ->
                 try {
                     val lang = ss.locale?.language ?: return@forEach
                     var subUrl = ss.content ?: ss.getUrl() ?: return@forEach
                     
                     if (subUrl.startsWith("http")) {
+                        // 자막 포맷을 Cloudstream 호환성이 높은 srt로 강제 변경
                         subUrl = subUrl.replace(Regex("&fmt=[^&]+"), "")
                         if (!subUrl.contains("fmt=srt")) {
                             subUrl = "$subUrl&fmt=srt"
@@ -53,37 +56,15 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                     subtitleCallback(newSubtitleFile(lang, subUrl))
                 } catch (e: Exception) { 
+                    println("[YT_DEBUG] [getUrl] 개별 자막 처리 중 에러: ${e.message}")
                 }
             }
-
-            // 2. 403 에러 방지용 NewPipe 직접 추출 (Muxed Streams - 720p/360p 백업)
-            val muxedList = s.videoStreams ?: emptyList()
-            muxedList.forEach { vs ->
-                try {
-                    val mUrl = vs.content ?: return@forEach
-                    val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
-                    val label = if (height > 0) "${height}p" else "Video"
-                    
-                    // 수정된 부분: referer와 quality를 중괄호 {} 내부로 이동
-                    callback(
-                        newExtractorLink(
-                            "YouTube (NewPipe)",
-                            "YouTube $label",
-                            mUrl,
-                            type = INFER_TYPE
-                        ) {
-                            this.referer = "https://www.youtube.com/"
-                            this.quality = height
-                            this.headers = mapOf(
-                                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36",
-                                "Origin" to "https://www.youtube.com"
-                            )
-                        }
-                    )
-                } catch (e: Exception) { 
-                }
-            }
+            
+            // 주의: 로컬 DASH 서버 및 영상 스트림(비디오/오디오) 병합 추출 로직은
+            // 앱 자체 내장 추출기 사용을 위해 의도적으로 완전히 제거되었습니다.
+            
         } catch (e: Exception) { 
+            println("[YT_DEBUG] [getUrl] NewPipe 자막 분석 도중 에러가 감지되었습니다: ${e.message}")
             logError(e) 
         }
     }
