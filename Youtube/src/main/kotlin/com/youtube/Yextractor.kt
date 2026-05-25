@@ -1,6 +1,7 @@
 package com.youtube
 
 import com.lagradost.cloudstream3.SubtitleFile
+import com.lagradost.cloudstream3.newAudioFile
 import com.lagradost.cloudstream3.newSubtitleFile
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -60,42 +61,75 @@ open class CustomYoutubeExtractor : ExtractorApi() {
     ): Boolean {
 
         val videoStreams = info.videoOnlyStreams.orEmpty()
-        if (videoStreams.isEmpty()) return false
-
         val audioStreams = info.audioStreams.orEmpty()
+        val muxedStreams = info.videoStreams.orEmpty()
 
-        videoStreams.forEach { video ->
+        if (videoStreams.isEmpty() && muxedStreams.isEmpty()) return false
+
+        // 1. 영상+오디오 통합본 백업 (Muxed)
+        muxedStreams.forEach { video ->
+            val vUrl = video.content ?: return@forEach
             callback(
                 newExtractorLink(
                     source = name,
-                    name = "YouTube ${normalizeCodec(video.codec)}",
-                    url = video.content ?: return@forEach
+                    name = "YouTube ${normalizeCodec(video.codec)} (Muxed)",
+                    url = vUrl
                 ) {
                     quality = video.height ?: 0
-                    
-                    // 🔥 빌드 에러 및 und 버그 최종 해결 파트
-                    // newAudioFile 대신 newExtractorLink를 직접 사용하여 name 파라미터에 언어를 강제로 주입합니다.
-                    audioTracks = audioStreams.map { audio ->
-                        val displayName = audio.audioLocale?.getDisplayLanguage(Locale.KOREAN) 
-                            ?: audio.audioLocale?.displayName 
-                            ?: audio.audioTrackId 
-                            ?: "Audio"
-                            
-                        newExtractorLink(
-                            source = name,
-                            name = displayName,
-                            url = audio.content ?: ""
-                        ) {}
-                    }
                 }
             )
         }
 
+        // 2. 🔥 오디오 언어별로 각각 독립된 서버(ExtractorLink)를 콜백으로 날려줍니다!
+        videoStreams.forEach { video ->
+            val vUrl = video.content ?: return@forEach
+            val height = video.height ?: 0
+            val codecName = normalizeCodec(video.codec)
+
+            if (audioStreams.isEmpty()) {
+                callback(
+                    newExtractorLink(
+                        source = name,
+                        name = "YouTube $codecName",
+                        url = vUrl
+                    ) {
+                        quality = height
+                    }
+                )
+            } else {
+                // 오디오 스트림(언어) 개수만큼 서버 선택 링크를 증식시킵니다.
+                audioStreams.forEach { audio ->
+                    val aUrl = audio.content ?: return@forEach
+                    
+                    // 언어 정보 가져오기 (한국어 번역 우선)
+                    val displayName = audio.audioLocale?.getDisplayLanguage(Locale.KOREAN) 
+                        ?: audio.audioLocale?.displayName 
+                        ?: audio.audioTrackId 
+                        ?: "Audio"
+
+                    // source 에 언어를 달아주어 사용자가 서버 목록에서 언어를 바로 고르게 합니다.
+                    callback(
+                        newExtractorLink(
+                            source = "$name ($displayName)", 
+                            name = "YouTube $codecName",
+                            url = vUrl
+                        ) {
+                            quality = height
+                            // 코어의 한계(URL만 받음)를 지키면서 해당 언어의 오디오 1개만 주입합니다.
+                            audioTracks = listOf(newAudioFile(aUrl))
+                        }
+                    )
+                }
+            }
+        }
+
+        // 3. 자막 처리
         info.subtitles.orEmpty().forEach { subtitle ->
+            val subUrl = subtitle.content ?: return@forEach
             subtitleCallback(
                 newSubtitleFile(
                     lang = subtitle.displayLanguageName ?: subtitle.languageTag ?: "Unknown",
-                    url = subtitle.content ?: return@forEach
+                    url = subUrl
                 )
             )
         }
