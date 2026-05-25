@@ -39,6 +39,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
+// [컴파일 해결]: Mutex 확장 함수 'withLock' 임포트 추가
+import kotlinx.coroutines.sync.withLock
 
 open class YoutubeExtractor : ExtractorApi() {
     override val mainUrl = "https://www.youtube.com"
@@ -54,7 +56,6 @@ open class YoutubeExtractor : ExtractorApi() {
         private var serverPort: Int = 0
         private val serverLock = Any()
 
-        // 2004 에러 복구를 위한 전역 뮤텍스(Mutex) 잠금
         private val tokenMutex = kotlinx.coroutines.sync.Mutex()
 
         private val manifestMap: MutableMap<String, String> = Collections.synchronizedMap(
@@ -75,7 +76,6 @@ open class YoutubeExtractor : ExtractorApi() {
             ThreadPoolExecutor.CallerRunsPolicy()
         )
 
-        // 자동 실행 쿼리 매개변수를 수렴하여 BotGuard 트리거 환경 최적화
         private const val EMBED_URL = "https://www.youtube.com/embed/aqz-KE-bpKQ?autoplay=1&mute=1"
 
         init {
@@ -117,16 +117,20 @@ open class YoutubeExtractor : ExtractorApi() {
             }
 
             println("[YT_DEBUG] [setPoTokenProvider] 캐시 무효화. WebView 가상 자가발전(Locking) 진입.")
-            val generated = kotlinx.coroutines.runBlocking {
+            // [컴파일 해결]: 명시적 타입 지정을 적용하여 추론 실패 및 스마트캐스트 컴파일 에러 해결
+            val generated: Triple<String, String, String?>? = kotlinx.coroutines.runBlocking {
                 tokenMutex.withLock {
                     val doubleCheck = getCachedTokens()
-                    if (doubleCheck != null) return@withLock doubleCheck
-                    getPoTokenAndVisitor()
+                    if (doubleCheck != null) {
+                        doubleCheck
+                    } else {
+                        getPoTokenAndVisitor()
+                    }
                 }
             }
 
             return if (generated != null) {
-                println("[YT_DEBUG] [setPoTokenProvider] 신규 poToken 취득 성공 -> 비디오: [$videoId]")
+                println("[YT_DEBUG] [setPoTokenProvider] 새로 취득한 poToken이 비디오 [$videoId]에 최종 정상 바인딩됩니다. 토큰 값: ${generated.first.take(15)}...")
                 PoTokenResult(generated.first, "", "")
             } else {
                 println("[YT_DEBUG] [setPoTokenProvider] poToken 획득 실패. 일반 우회 모드 시도.")
@@ -147,7 +151,7 @@ open class YoutubeExtractor : ExtractorApi() {
             }
 
             val elapsed = System.currentTimeMillis() - timestamp
-            if (elapsed > 3 * 3600 * 1000) { // 3시간 캐시 유효성
+            if (elapsed > 3 * 3600 * 1000) { 
                 println("[YT_DEBUG] [getCachedTokens] 캐시 토큰 유효 시간 만료.")
                 return null
             }
@@ -168,14 +172,12 @@ open class YoutubeExtractor : ExtractorApi() {
             if (!cookieStr.isNullOrBlank()) {
                 editor.putString("yt_cached_cookie", cookieStr)
                 
-                // VISITOR_INFO1_LIVE 쿠키 추출 및 SharedPreferences 동기화
                 val visitorInfoLive = extractCookieValue(cookieStr, "VISITOR_INFO1_LIVE")
                 if (!visitorInfoLive.isNullOrBlank()) {
                     editor.putString("VISITOR_INFO1_LIVE", visitorInfoLive)
                     println("[YT_DEBUG] [saveCachedTokens] VISITOR_INFO1_LIVE 동기화 성공: $visitorInfoLive")
                 }
                 
-                // YSC 세션 토큰 추출 및 SharedPreferences 동기화
                 val ysc = extractCookieValue(cookieStr, "YSC")
                 if (!ysc.isNullOrBlank()) {
                     editor.putString("YSC", ysc)
@@ -197,7 +199,6 @@ open class YoutubeExtractor : ExtractorApi() {
             return null
         }
 
-        // 미디어 플레이 제스처 제한 무효화 스케줄러가 장착된 Headless WebView
         private suspend fun getPoTokenAndVisitor(): Triple<String, String, String?>? = withContext(Dispatchers.Main) {
             val context = AcraApplication.context ?: return@withContext null
             println("[YT_DEBUG] [getPoTokenAndVisitor] Headless WebView 로드 준비. 대상 URL: $EMBED_URL")
@@ -224,8 +225,6 @@ open class YoutubeExtractor : ExtractorApi() {
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
                     settings.databaseEnabled = true
-                    
-                    // [핵심 변경]: 미디어 재생 시 사용자 제스처 요건을 비활성화하여 embed 비디오 자동 재생 보장
                     settings.mediaPlaybackRequiresUserGesture = false 
                     settings.userAgentString = YoutubeUtils.CHROME_USER_AGENT
 
@@ -331,7 +330,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         override fun onPageFinished(view: WebView?, url: String?) {
                             println("[YT_DEBUG] [getPoTokenAndVisitor] 웹뷰 로딩 완료. 강제 재생 주입 수행.")
                             
-                            // 자동 재생 비활성화 브라우저에 대비한 플레이 Trigger 주입
                             evaluateJavascript(
                                 "(function() { " +
                                 "  var v = document.querySelector('video'); " +
@@ -344,7 +342,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         }
                     }
 
-                    // 저사양 스마트 TV 셋톱박스 및 네트워크 지연에 대처하도록 타임아웃을 12초로 확장
                     handler.postDelayed({
                         if (!isCompleted) {
                             println("[YT_DEBUG] [getPoTokenAndVisitor] 타임아웃(12초) 도달. 우회 재생 지시.")
@@ -519,7 +516,6 @@ open class YoutubeExtractor : ExtractorApi() {
                     )
                 }
 
-                // 외부 4K 포털 예비 트랙 등록 유지
                 builtLinks.add(
                     newExtractorLink(
                         source = "YouTube Downloader",
@@ -599,7 +595,6 @@ open class YoutubeExtractor : ExtractorApi() {
                     } catch (e: Exception) {
                         println("[YT_DEBUG] [ServerSocket-Thread] accept() 도중 오류 발생: ${e.message}")
                     } finally {
-                        // [자가치유]: 스레드 종료 시 소켓 자원을 완벽하게 파괴하고 무효화하여 데드락 리스크 차단
                         synchronized(serverLock) {
                             try {
                                 activeServer?.close()
