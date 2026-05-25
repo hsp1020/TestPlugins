@@ -2055,6 +2055,10 @@ class YoutubeProvider(
             }
         }
 
-        return loadExtractor(safeUrl, subtitleCallback, callback)
+        // 🔥 본진 코어 앱의 고장난 loadExtractor() 대신 
+        // 오디오 트랙 버그를 완벽히 고친 플러그인 내장 CustomYoutubeExtractor를 직접 실행합니다!
+        com.youtube.CustomYoutubeExtractor().getUrl(safeUrl, null, subtitleCallback, callback)
+        
+        return true
     }
-}
+        
