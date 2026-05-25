@@ -7,6 +7,7 @@ import android.webkit.WebChromeClient
 import android.webkit.ConsoleMessage
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceError
+import android.webkit.JavascriptInterface
 import androidx.preference.PreferenceManager
 import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.SubtitleFile
@@ -206,7 +207,6 @@ open class YoutubeExtractor : ExtractorApi() {
             return null
         }
 
-        // ES5 호환 구문으로 재작성된 초강력 Fetch/XHR Interceptor 및 Polling Fallback 하이브리드 엔진
         private suspend fun getPoTokenAndVisitor(videoId: String): Triple<String, String, String?>? = withContext(Dispatchers.Main) {
             val context = AcraApplication.context ?: return@withContext null
             val embedUrl = "https://www.youtube.com/embed/$videoId?autoplay=1&mute=1"
@@ -235,9 +235,8 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
 
-                // JS-to-Kotlin 브릿지 인터페이스 설계
                 class PoTokenBridge {
-                    @android.webkit.JavascriptInterface
+                    @JavascriptInterface
                     fun onPoTokenFound(token: String, visitor: String, url: String) {
                         android.os.Handler(android.os.Looper.getMainLooper()).post {
                             if (isCompleted) return@post
@@ -264,10 +263,8 @@ open class YoutubeExtractor : ExtractorApi() {
                     settings.mediaPlaybackRequiresUserGesture = false 
                     settings.userAgentString = YoutubeUtils.CHROME_USER_AGENT
 
-                    // 자바스크립트 인터페이스 브릿지 연결
                     addJavascriptInterface(PoTokenBridge(), "PoTokenBridge")
 
-                    // 상세 WebView 내부 Console 디버거 가동
                     webChromeClient = object : WebChromeClient() {
                         override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
                             consoleMessage?.let {
@@ -277,7 +274,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         }
                     }
 
-                    // 300ms 간격 Polling Fallback 로직 준비
                     pollRunnable = object : Runnable {
                         override fun run() {
                             if (isCompleted) return
@@ -415,7 +411,7 @@ open class YoutubeExtractor : ExtractorApi() {
                                             }
                                         }
                                     } catch (e: Exception) {
-                                        // 무의미한 에러 로그 방지
+                                        // 무시
                                     }
                                 }
                                 handler.postDelayed(this, 300)
@@ -423,7 +419,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         }
                     }
 
-                    // Network Interception 후킹 스크립트 주입 로직
                     val injectJsHooks = {
                         val hookScript = """
                             (function() {
@@ -485,7 +480,6 @@ open class YoutubeExtractor : ExtractorApi() {
                                     }
                                 }
 
-                                // Hook XMLHttpRequest.send
                                 var rawOpen = XMLHttpRequest.prototype.open;
                                 XMLHttpRequest.prototype.open = function(method, url) {
                                     this._url = url;
@@ -501,7 +495,6 @@ open class YoutubeExtractor : ExtractorApi() {
                                     return rawSend.apply(this, arguments);
                                 };
 
-                                // Hook Fetch
                                 var rawFetch = window.fetch;
                                 window.fetch = function(input, init) {
                                     var url = (typeof input === 'string') ? input : (input && input.url);
@@ -530,15 +523,22 @@ open class YoutubeExtractor : ExtractorApi() {
                             println("[YT_DEBUG] [Telemetry] [onPageFinished] Loading done: $url. Sync-injecting hook and play trigger.")
                             injectJsHooks()
                             
-                            // 자동 재생 보완 강제 텐션 주입
                             evaluateJavascript(
                                 """
                                     (function() {
                                         console.log("[YT_PLAY_TRIGGER] Initializing play overrides...");
+                                        
+                                        // strict-origin 레퍼러 정책 강제 적용 주입
+                                        var meta = document.createElement('meta');
+                                        meta.name = 'referrer';
+                                        meta.content = 'strict-origin-when-cross-origin';
+                                        document.getElementsByTagName('head')[0].appendChild(meta);
+                                        console.log("[YT_PLAY_TRIGGER] strict-origin-when-cross-origin Referrer Meta Tag Injected.");
+
                                         var v = document.querySelector('video');
                                         if (v) {
                                             v.play().then(function() { console.log("[YT_PLAY_TRIGGER] Auto-play successfully triggered."); })
-                                            .catch(function(err) { console.log("[YT_PLAY_TRIGGER] Auto-play block bypassed via click simulation."); });
+                                            .catch(function(err) { console.log("[YT_PLAY_TRIGGER] Auto-play blocked: " + err.message); });
                                         }
                                         var btn = document.querySelector('.ytp-play-button');
                                         if (btn) {
@@ -562,16 +562,74 @@ open class YoutubeExtractor : ExtractorApi() {
                         }
                     }
 
-                    // 12초 타임아웃
+                    // 12초 타임아웃 처리 및 심층 디버그용 자바스크립트 진단 스캔 작동
                     handler.postDelayed({
                         if (!isCompleted) {
-                            println("[YT_DEBUG] [Telemetry] WebView sandbox attestation TIMEOUT (12s). Falling back.")
-                            safeResume(null)
+                            println("[YT_DEBUG] [Telemetry] WebView sandbox attestation TIMEOUT (12s). Triggering deep diagnostic scan...")
+                            
+                            val diagnosticScript = """
+                                (function() {
+                                    var logs = [];
+                                    logs.push("========= ATTESTATION TIMEOUT DIAGNOSTIC REPORT =========");
+                                    logs.push("Page Title: " + document.title);
+                                    logs.push("Current URL: " + window.location.href);
+                                    logs.push("ytInitialPlayerResponse exists: " + (!!window.ytInitialPlayerResponse));
+                                    if (window.ytInitialPlayerResponse) {
+                                        logs.push("  - Keys: " + Object.keys(window.ytInitialPlayerResponse).join(", "));
+                                        var pr = window.ytInitialPlayerResponse;
+                                        var sid = pr.serviceIntegrityDimensions || {};
+                                        logs.push("  - serviceIntegrityDimensions exists: " + (!!pr.serviceIntegrityDimensions));
+                                        logs.push("  - poToken in SID: " + (!!sid.poToken));
+                                        var sd = pr.streamingData || {};
+                                        logs.push("  - streamingData exists: " + (!!pr.streamingData));
+                                        logs.push("  - poToken in streamingData: " + (!!sd.poToken));
+                                    }
+                                    logs.push("ytplayer exists: " + (!!window.ytplayer));
+                                    if (window.ytplayer) {
+                                        logs.push("  - config exists: " + (!!window.ytplayer.config));
+                                        if (window.ytplayer.config) {
+                                            logs.push("  - config.args exists: " + (!!window.ytplayer.config.args));
+                                        }
+                                        logs.push("  - bootstrapPlayerResponse exists: " + (!!window.ytplayer.bootstrapPlayerResponse));
+                                    }
+                                    logs.push("ytcfg exists: " + (!!window.ytcfg));
+                                    if (window.ytcfg && typeof window.ytcfg.get === 'function') {
+                                        logs.push("  - PLAYER_RESPONSE exists: " + (!!window.ytcfg.get('PLAYER_RESPONSE')));
+                                        logs.push("  - PLAYER_VARS exists: " + (!!window.ytcfg.get('PLAYER_VARS')));
+                                        logs.push("  - VISITOR_DATA: " + window.ytcfg.get('VISITOR_DATA'));
+                                    }
+                                    logs.push("Cookies on page: " + document.cookie);
+                                    logs.push("Video elements on page: " + document.getElementsByTagName('video').length);
+                                    if (document.getElementsByTagName('video').length > 0) {
+                                        var v = document.getElementsByTagName('video')[0];
+                                        logs.push("  - src: " + v.src);
+                                        logs.push("  - paused: " + v.paused);
+                                        logs.push("  - currentTime: " + v.currentTime);
+                                        logs.push("  - error code: " + (v.error ? v.error.code : "none"));
+                                    }
+                                    var errorScreen = document.querySelector('.ytp-error');
+                                    if (errorScreen) {
+                                        logs.push("VISIBLE PLAYER ERROR: " + errorScreen.innerText);
+                                    }
+                                    console.log(logs.join("\n"));
+                                    return logs.join("\n");
+                                })();
+                            """.trimIndent()
+                            
+                            evaluateJavascript(diagnosticScript) { diagnosticResult ->
+                                println("[YT_DEBUG] [Telemetry] Timeout diagnostic scan dumped to console.")
+                                safeResume(null)
+                            }
                         }
                     }, 12000)
                 }
 
-                webView.loadUrl(embedUrl)
+                // [근본 해결]: loadUrl 호출 시, 검증을 통과하도록 명시적인 'Referer' 및 'Origin' 헤더 주입 로드
+                val extraHeaders = mapOf(
+                    "Referer" to "https://www.youtube.com/",
+                    "Origin" to "https://www.youtube.com"
+                )
+                webView.loadUrl(embedUrl, extraHeaders)
 
                 continuation.invokeOnCancellation {
                     android.os.Handler(android.os.Looper.getMainLooper()).post {
