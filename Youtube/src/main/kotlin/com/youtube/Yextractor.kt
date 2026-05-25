@@ -183,6 +183,20 @@ open class YoutubeExtractor : ExtractorApi() {
             suspendCancellableCoroutine { continuation ->
                 val webView = WebView(context)
                 var isCompleted = false
+                val handler = android.os.Handler(android.os.Looper.getMainLooper())
+                var pollRunnable: Runnable? = null
+
+                // [가시성 해결]: 스코프를 바깥으로 확장하여, 웹뷰 내부 핸들러와 외부 코루틴 취소 리스너 모두가 safeResume에 무결하게 접근합니다.
+                val safeResume = { res: Pair<String, String>? ->
+                    if (!isCompleted) {
+                        isCompleted = true
+                        pollRunnable?.let { handler.removeCallbacks(it) }
+                        if (continuation.isActive) {
+                            continuation.resume(res)
+                        }
+                        webView.destroy()
+                    }
+                }
 
                 webView.apply {
                     @SuppressLint("SetJavaScriptEnabled")
@@ -190,21 +204,6 @@ open class YoutubeExtractor : ExtractorApi() {
                     settings.domStorageEnabled = true
                     // 실제 웹 환경 브라우저와 동치되도록 UA를 수립해 유튜브 시크릿 스크립트 실행 정밀도를 확보합니다.
                     settings.userAgentString = YoutubeUtils.CHROME_USER_AGENT
-
-                    val handler = android.os.Handler(android.os.Looper.getMainLooper())
-                    var pollRunnable: Runnable? = null
-
-                    // 대기 상태와 중복 콜백 방지를 위한 메인 소멸 처리부
-                    val safeResume = { res: Pair<String, String>? ->
-                        if (!isCompleted) {
-                            isCompleted = true
-                            pollRunnable?.let { handler.removeCallbacks(it) }
-                            if (continuation.isActive) {
-                                continuation.resume(res)
-                            }
-                            webView.destroy()
-                        }
-                    }
 
                     // 300ms 간격으로 유튜브 엔진의 활성화 인스턴스를 스캔하는 고성능 폴러 실행
                     pollRunnable = object : Runnable {
@@ -302,7 +301,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     webViewClient = object : WebViewClient() {
                         override fun onPageFinished(view: WebView?, url: String?) {
                             println("[YT_DEBUG] [getPoTokenAndVisitor] WebView HTML 수집 및 기본 뼈대 준비 완료. 동적 스케줄러를 개시합니다.")
-                            pollRunnable.let { handler.post(it) }
+                            pollRunnable?.let { handler.post(it) }
                         }
                     }
 
