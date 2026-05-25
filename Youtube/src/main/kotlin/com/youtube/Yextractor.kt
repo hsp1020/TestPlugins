@@ -209,15 +209,14 @@ open class YoutubeExtractor : ExtractorApi() {
             return null
         }
 
-        // 공식 Watch 페이지 로드 및 초정밀 데이터 스쿼시(Squeezing) 최적화 엔진
+        // 경량 임베드 샌드박스 + 지문 일치화 모바일 UA 크로스오버 가속화 엔진
         private suspend fun getPoTokenAndVisitor(videoId: String): Triple<String, String, String?>? = withContext(Dispatchers.Main) {
             val context = AcraApplication.context ?: return@withContext null
-            // [Watch 우회 적용]: embed 대신 실제 watch 페이지로 우회하여 embedder.identity.denied 보안 필터 우회
-            val targetUrl = "https://www.youtube.com/watch?v=$videoId"
+            // [최종 진화형 경량 우회]: 대용량 광고가 활성화되는 watch 대신 무광고 embed 주소 사용
+            val embedUrl = "https://www.youtube.com/embed/$videoId?autoplay=1&mute=1"
             val startTime = System.currentTimeMillis()
-            println("[YT_DEBUG] [Telemetry] Starting WebView attestation sandboxing on watch page.")
-            println("[YT_DEBUG] [Telemetry] Target URL: $targetUrl")
-            println("[YT_DEBUG] [Telemetry] Impersonating Desktop Chrome to invoke Innertube Web Client...")
+            println("[YT_DEBUG] [Telemetry] Starting WebView attestation sandboxing on ad-free embed page.")
+            println("[YT_DEBUG] [Telemetry] Target URL: $embedUrl")
 
             suspendCancellableCoroutine { continuation ->
                 val webView = WebView(context)
@@ -247,7 +246,7 @@ open class YoutubeExtractor : ExtractorApi() {
                             println("[YT_DEBUG] [Telemetry] [Bridge-Callback] Captured Visitor: $visitor")
                             
                             val cookieManager = android.webkit.CookieManager.getInstance()
-                            val cookieStr = cookieManager.getCookie(targetUrl)
+                            val cookieStr = cookieManager.getCookie(embedUrl)
                             
                             saveCachedTokens(videoId, token, visitor, cookieStr)
                             safeResume(Triple(token, visitor, cookieStr))
@@ -262,9 +261,12 @@ open class YoutubeExtractor : ExtractorApi() {
                     settings.databaseEnabled = true
                     settings.mediaPlaybackRequiresUserGesture = false 
                     
-                    // 데스크톱 Chrome 환경을 정밀 위장하여 고성능 BotGuard 분석기 유도
-                    settings.userAgentString = YoutubeUtils.CHROME_USER_AGENT
-                    // 저사양 하드웨어 및 데이터 소모 절감을 위해 이미지 렌더링 즉시 기각
+                    // [대조 지문 일치화]: 앱 패키지 헤더(X-Requested-With)와 정합성을 100% 동치시켜
+                    // 'embedder.identity.denied' 필터를 통과하도록 모바일 순정 WebView UA를 채용합니다.
+                    val defaultUa = settings.userAgentString
+                    println("[YT_DEBUG] [Telemetry] [UA_Check] Using Genuine Default Mobile Webkit UA: $defaultUa")
+                    
+                    // 속도 극대화 리소스 필터 가동
                     settings.loadsImagesAutomatically = false
 
                     addJavascriptInterface(PoTokenBridge(), "PoTokenBridge")
@@ -407,7 +409,7 @@ open class YoutubeExtractor : ExtractorApi() {
                                             if (poToken.isNotBlank()) {
                                                 println("[YT_DEBUG] [Telemetry] [Polling-Fallback] Success! Captured via Window Polling.")
                                                 val cookieManager = android.webkit.CookieManager.getInstance()
-                                                val cookieStr = cookieManager.getCookie(targetUrl)
+                                                val cookieStr = cookieManager.getCookie(embedUrl)
                                                 
                                                 saveCachedTokens(videoId, poToken, visitorData, cookieStr)
                                                 safeResume(Triple(poToken, visitorData, cookieStr))
@@ -517,8 +519,6 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
 
                     webViewClient = object : WebViewClient() {
-                        // [초고속 최적화]: 비디오 스트림 세그먼트, 이미지, 웹폰트, 광고 등 불필요한 중량 리소스를 
-                        // 웹뷰 네트워크 입구에서 즉각 가로채 0바이트 공백 파일로 기각해 90% 이상의 데이터 절감 및 속도 극대화 달성
                         override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                             val urlStr = request?.url?.toString() ?: return null
                             if (urlStr.contains(".png") || urlStr.contains(".jpg") || urlStr.contains(".jpeg") || 
@@ -537,6 +537,31 @@ open class YoutubeExtractor : ExtractorApi() {
                         override fun onPageFinished(view: WebView?, url: String?) {
                             println("[YT_DEBUG] [Telemetry] [onPageFinished] Loading done: $url. Sync-injecting hook.")
                             injectJsHooks()
+                            
+                            evaluateJavascript(
+                                """
+                                    (function() {
+                                        console.log("[YT_PLAY_TRIGGER] Initializing play overrides...");
+                                        
+                                        var meta = document.createElement('meta');
+                                        meta.name = 'referrer';
+                                        meta.content = 'strict-origin-when-cross-origin';
+                                        document.getElementsByTagName('head')[0].appendChild(meta);
+                                        console.log("[YT_PLAY_TRIGGER] strict-origin-when-cross-origin Referrer Meta Tag Injected.");
+
+                                        var v = document.querySelector('video');
+                                        if (v) {
+                                            v.play().then(function() { console.log("[YT_PLAY_TRIGGER] Auto-play successfully triggered."); })
+                                            .catch(function(err) { console.log("[YT_PLAY_TRIGGER] Auto-play blocked: " + err.message); });
+                                        }
+                                        var btn = document.querySelector('.ytp-play-button');
+                                        if (btn) {
+                                            btn.click();
+                                            console.log("[YT_PLAY_TRIGGER] Player button clicked.");
+                                        }
+                                    })();
+                                """.trimIndent(), null
+                            )
                             pollRunnable?.let { handler.post(it) }
                         }
 
@@ -551,7 +576,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         }
                     }
 
-                    // 12초 타임아웃 발생 시 샌드박스 내부 디버그 전용 보고서 강제 덤프
                     handler.postDelayed({
                         if (!isCompleted) {
                             println("[YT_DEBUG] [Telemetry] WebView sandbox attestation TIMEOUT (12s). Triggering deep diagnostic scan...")
@@ -613,8 +637,12 @@ open class YoutubeExtractor : ExtractorApi() {
                     }, 12000)
                 }
 
-                // 공식 Watch 도메인은 별도 레퍼러/오리진 헤더 검증 필요 없이 브라우저 본연의 상태로 부드럽게 로드
-                webView.loadUrl(targetUrl)
+                // 모바일 레퍼러 헤더 주입 로드 수행
+                val extraHeaders = mapOf(
+                    "Referer" to "https://www.youtube.com/",
+                    "Origin" to "https://www.youtube.com"
+                )
+                webView.loadUrl(embedUrl, extraHeaders)
 
                 continuation.invokeOnCancellation {
                     android.os.Handler(android.os.Looper.getMainLooper()).post {
