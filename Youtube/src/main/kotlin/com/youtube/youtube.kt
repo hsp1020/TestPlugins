@@ -235,8 +235,6 @@ class YoutubeProvider(
 
         private val continuationTokenCache = ConcurrentHashMap<String, String>()
 
-        private val YTCFG_REGEX = Regex("""ytcfg\.set\(\s*(\{.*?\})\s*\)\s*;""", RegexOption.DOT_MATCHES_ALL)
-
         private val VIEW_REPLACE_REGEX = Regex("조회수|views|مشاهدة|시청 중|시청중|watching|명|시청자")
         private val VIEW_FORMAT_REGEX = Regex(".*[천만억KMBkmb].*")
         private val METADATA_VIEW_REGEX = Regex(".*(\\d+[KMBkmb]|views|조회수|회|시청|watching|مشاهدة|명|시청자|مشاهد).*")
@@ -371,13 +369,11 @@ class YoutubeProvider(
         if (token != null) {
             continuationTokenCache[hashedKey] = token
         }
-        println("[YT_DEBUG] getSavedContinuationToken for key '$key' (hash: $hashedKey) -> '$token'")
         return token
     }
 
     private fun saveContinuationToken(key: String, token: String?) {
         val hashedKey = YoutubeUtils.sha1(key)
-        println("[YT_DEBUG] saveContinuationToken for key '$key' (hash: $hashedKey) -> '$token'")
         if (token.isNullOrBlank()) {
             val removed = continuationTokenCache.remove(hashedKey)
             if (removed != null) {
@@ -569,7 +565,6 @@ class YoutubeProvider(
                 var poster = YoutubeUtils.getBestThumbnail(videoData.getMapKey("thumbnail"))
                 if (poster.isNullOrBlank()) poster = YoutubeUtils.buildThumbnailFromId(videoId)
                 
-                println("[YT_DEBUG] collectFromRenderer: extracted Video $videoId: $finalTitle")
                 return newMovieSearchResponse(
                     finalTitle,
                     "$mainUrl/watch?v=$videoId",
@@ -638,7 +633,6 @@ class YoutubeProvider(
                 }
 
                 val finalTitle = "#$episodeNum {Short | $views} $title"
-                println("[YT_DEBUG] collectFromRenderer: extracted Shorts $videoId: $finalTitle")
                 return newMovieSearchResponse(finalTitle, finalUrl, TvType.Movie) {
                     this.posterUrl = poster
                 }
@@ -649,7 +643,6 @@ class YoutubeProvider(
         if (lockup != null) {
             val contentType = lockup.getString("contentType") ?: ""
             if (contentType.contains("AD") || contentType.contains("SPONSORED") || contentType.contains("PROMOTED")) {
-                println("[YT_DEBUG] Skipping ad in lockupViewModel (contentType: $contentType)")
                 return null
             }
 
@@ -687,7 +680,6 @@ class YoutubeProvider(
                         }
                     }
 
-                    println("[YT_DEBUG] collectFromRenderer: extracted Playlist lockup $playlistId: $title (path: $targetPath, extractedUrl: $extractedUrl)")
                     return newTvSeriesSearchResponse(
                         if (episodeCount.isNotEmpty()) "$title ($episodeCount)" else title,
                         "$mainUrl/$targetPath",
@@ -708,7 +700,6 @@ class YoutubeProvider(
                         ?.getMapKey("title")
                 )
                 if (title.isBlank()) {
-                    println("[YT_DEBUG] Skipping lockupViewModel $videoId due to empty title (likely an ad or empty placeholder)")
                     return null
                 }
                 var (channel, views) = extractLockupMetadata(lockup)     
@@ -748,7 +739,6 @@ class YoutubeProvider(
                         })
                     }
                     finalTitle = "#$episodeNum [Shorts] {Short | $views} $title"
-                    println("[YT_DEBUG] collectFromRenderer: extracted Shorts lockup $videoId: $finalTitle")
                     return newMovieSearchResponse(
                         finalTitle,
                         finalUrl,
@@ -760,7 +750,6 @@ class YoutubeProvider(
                     poster = YoutubeUtils.getBestThumbnail(
                         lockup.getMapKey("contentImage")?.getMapKey("image")?.getListKey("sources")
                     ) ?: "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
-                    println("[YT_DEBUG] collectFromRenderer: extracted Video lockup $videoId: $finalTitle")
                     return newMovieSearchResponse(
                         finalTitle,
                         "$mainUrl/watch?v=$videoId",
@@ -780,7 +769,6 @@ class YoutubeProvider(
                 val stats = (getText(channelData.getMapKey("videoCountText"))
                     ?: getText(channelData.getMapKey("subscriberCountText"))) ?: ""
                 val poster = YoutubeUtils.getBestThumbnail(channelData.getMapKey("thumbnail"))
-                println("[YT_DEBUG] collectFromRenderer: extracted Channel $id: $title ($stats)")
                 return newMovieSearchResponse(
                     "$title ($stats)",
                     "$mainUrl/channel/$id",
@@ -802,12 +790,8 @@ class YoutubeProvider(
     ) {
         if (data == null || depth > 32) return 
         if (data is Map<*, *>) {
-            if (depth < 3) {
-                println("[YT_DEBUG] processRecursive Map keys at depth $depth: ${data.keys.take(10)}")
-            }
             val extracted = collectFromRenderer(data, seenIds)
             if (extracted != null) {
-                println("[YT_DEBUG] processRecursive successfully extracted item: ${extracted.name} (${extracted.url})")
                 if (!playlistMode || extracted.type == TvType.TvSeries) {
                     outList.add(extracted)
                 }
@@ -834,9 +818,6 @@ class YoutubeProvider(
             var foundContainer = false
             for (key in keysToCheck) {
                 if (data.containsKey(key)) {
-                    if (depth < 3) {
-                        println("[YT_DEBUG] processRecursive traversing key: '$key'")
-                    }
                     processRecursive(data[key], outList, seenIds, playlistMode, depth + 1)
                     foundContainer = true
                 }
@@ -849,9 +830,6 @@ class YoutubeProvider(
                 }
             }
         } else if (data is List<*>) {
-            if (depth < 3) {
-                println("[YT_DEBUG] processRecursive List size: ${data.size} at depth $depth")
-            }
             for (item in data) {
                 processRecursive(item, outList, seenIds, playlistMode, depth + 1)
             }
@@ -892,18 +870,13 @@ class YoutubeProvider(
     }
 
     private fun extractYtInitialData(html: String): Map<String, Any>? {
-        println("[YT_DEBUG] extractYtInitialData started. html length: ${html.length}")
         var index = 0
         val htmlLen = html.length
-        var matchCount = 0
         while (true) {
             val found = html.indexOf("ytInitialData", index)
             if (found == -1) {
-                println("[YT_DEBUG] No more ytInitialData found. matchCount: $matchCount")
                 break
             }
-            matchCount++
-            println("[YT_DEBUG] Found 'ytInitialData' keyword occurrence at index: $found")
             
             val contextEnd = minOf(found + 100, htmlLen)
             var hasAssign = false
@@ -924,29 +897,18 @@ class YoutubeProvider(
 
             if (hasAssign && hasVarOrWindow) {
                 val braceIndex = html.indexOf("{", found)
-                println("[YT_DEBUG] Found braceIndex: $braceIndex")
                 if (braceIndex != -1 && braceIndex - found < 150) {
                     val possibleJson = html.substring(braceIndex)
-                    println("[YT_DEBUG] Extracting balanced JSON starting at $braceIndex...")
                     val jsonString = extractBalancedJson(possibleJson)
                     if (jsonString != null) {
-                        println("[YT_DEBUG] Balanced JSON extracted successfully. Length: ${jsonString.length}")
                         try {
                             val parsed = parseJson<Map<String, Any>>(jsonString)
-                            println("[YT_DEBUG] JSON parsed successfully!")
                             return parsed
                         } catch (e: Exception) {
-                            println("[YT_DEBUG] JSON parsing failed: ${e.message}")
                         }
-                    } else {
-                        println("[YT_DEBUG] Balanced JSON extraction returned null.")
-                    }
-                } else {
-                    println("[YT_DEBUG] Brace index not found or too far from ytInitialData.")
-                }
-            } else {
-                println("[YT_DEBUG] Context does not look like variable assignment.")
-            }
+                    } 
+                } 
+            } 
             index = minOf(found + 13, htmlLen)
         }
         return null
@@ -1053,10 +1015,8 @@ class YoutubeProvider(
         isSearchContext = false
         val rawRequestData = request.data
         val requestData = YoutubeUtils.urlDecode(rawRequestData)
-        println("[YT_DEBUG] getMainPage started. page: $page, requestData: $requestData (raw: $rawRequestData)")
         val maxPages = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
         if (page > maxPages) {
-            println("[YT_DEBUG] Page $page exceeds limits. Returning empty.")
             return newHomePageResponse(request, emptyList(), hasNext = false)
         }
 
@@ -1072,7 +1032,6 @@ class YoutubeProvider(
                     savedVisitorData = savedVisitorData ?: appPrefs?.getString("yt_visitor_data", null)
                     savedClientVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION)
                     val tokenToUse = requestData.removePrefix("chip_")
-                    println("[YT_DEBUG] Chip category detected. tokenToUse: $tokenToUse")
 
                     if (!savedApiKey.isNullOrBlank()) {
                         val apiUrl = "$mainUrl/youtubei/v1/browse?key=$savedApiKey"
@@ -1088,37 +1047,27 @@ class YoutubeProvider(
                             "continuation" to tokenToUse
                         )
                         
-                        println("[YT_DEBUG] POST Chip apiUrl: $apiUrl")
-                        println("[YT_DEBUG] POST Chip payload: $payload")
                         val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
                         val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                         
                         if (response != null) {
-                            println("[YT_DEBUG] Chip response success. Keys: ${response.keys}")
                             val actions = response["onResponseReceivedActions"] 
                                 ?: response["onResponseReceivedEndpoints"]
                                 ?: response["onResponseReceivedCommands"] 
                                 ?: response
                             processRecursive(actions, results, seenIds, playlistMode = false)
                             nextContinuation = findTokenRecursive(response)
-                            println("[YT_DEBUG] Next continuation extracted: $nextContinuation")
                             saveContinuationToken(requestData, nextContinuation)
-                        } else {
-                            println("[YT_DEBUG] Chip response returned null.")
-                        }
-                    } else {
-                        println("[YT_DEBUG] savedApiKey is null. Cannot query Chip API.")
-                    }
+                        } 
+                    } 
                 } else {
                     val targetUrl = if(requestData == "Home") mainUrl else requestData
-                    println("[YT_DEBUG] Loading standard page. targetUrl: $targetUrl")
                     val html = app.get(targetUrl, interceptor = ytInterceptor).text
                     
                     savedApiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY") ?: savedApiKey
                     savedVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA") ?: savedVisitorData
                     savedClientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: savedClientVersion ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
                     
-                    println("[YT_DEBUG] Config from HTML: apiKey=$savedApiKey, visitorData=$savedVisitorData, clientVersion=$savedClientVersion")
                     if (!savedApiKey.isNullOrBlank()) {
                         appPrefs?.edit()
                             ?.putString("yt_api_key", savedApiKey)
@@ -1131,7 +1080,6 @@ class YoutubeProvider(
                     if (initialData != null) {
                         if (requestData == "Home") {
                             val chipBar = safeGet(initialData, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0, "tabRenderer", "content", "richGridRenderer", "header", "feedFilterChipBarRenderer", "contents") as? List<*>
-                            println("[YT_DEBUG] Home page tabs chipBar found: ${chipBar != null}")
                             if (chipBar != null) {
                                 val jsonArray = org.json.JSONArray()
                                 for (chipItem in chipBar) {
@@ -1152,17 +1100,13 @@ class YoutubeProvider(
                         }
                         processRecursive(initialData, results, seenIds, playlistMode = false)
                         nextContinuation = findTokenRecursive(initialData)
-                        println("[YT_DEBUG] Next continuation from Home parsed: $nextContinuation")
                         saveContinuationToken(requestData, nextContinuation)
-                    } else {
-                        println("[YT_DEBUG] InitialData extraction was null.")
-                    }
+                    } 
                 }
             } else {
                 var tokenToUse = getSavedContinuationToken(requestData)
                 
                 if (tokenToUse.isNullOrBlank() && page == 2) { 
-                    println("[YT_DEBUG] Token to use is null/blank on page $page for $requestData. Fetching fallback continuation...")
                     val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
                     val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION) ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
 
@@ -1184,7 +1128,6 @@ class YoutubeProvider(
                         val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                         if (response != null) {
                             tokenToUse = findTokenRecursive(response)
-                            println("[YT_DEBUG] Fallback: Extracted next token from Chip page 1: $tokenToUse")
                             saveContinuationToken(requestData, tokenToUse)
                         }
                     } else {
@@ -1193,13 +1136,11 @@ class YoutubeProvider(
                         val initialData = extractYtInitialData(html)
                         if (initialData != null) {
                             tokenToUse = findTokenRecursive(initialData)
-                            println("[YT_DEBUG] Fallback: Extracted next token from Home/Custom page 1 HTML: $tokenToUse")
                             saveContinuationToken(requestData, tokenToUse)
                         }
                     }
                 }
 
-                println("[YT_DEBUG] Loading page $page using token: $tokenToUse")
                 if (!tokenToUse.isNullOrBlank()) {
                     val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
                     val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION) ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
@@ -1215,12 +1156,9 @@ class YoutubeProvider(
                         ),
                         "continuation" to tokenToUse
                     )
-                    println("[YT_DEBUG] POST Page Continuation URL: $apiUrl")
-                    println("[YT_DEBUG] POST Page Continuation payload: $payload")
                     val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
                     val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                     if (response != null) {
-                        println("[YT_DEBUG] Page Continuation response success. Keys: ${response.keys}")
                         val actions = response["onResponseReceivedActions"] 
                             ?: response["onResponseReceivedEndpoints"]
                             ?: response["onResponseReceivedCommands"] 
@@ -1228,24 +1166,16 @@ class YoutubeProvider(
                             ?: response
                         processRecursive(actions, results, seenIds, playlistMode = false)
                         nextContinuation = findTokenRecursive(response)
-                        println("[YT_DEBUG] Page Continuation next token: $nextContinuation")
                         saveContinuationToken(requestData, nextContinuation)
-                    } else {
-                        println("[YT_DEBUG] Page Continuation response returned null.")
-                    }
-                } else {
-                    println("[YT_DEBUG] Page Continuation token was null/blank.")
-                }
+                    } 
+                } 
             }
         } catch (e: CancellationException) {
-            println("[YT_DEBUG] getMainPage Coroutine Cancelled safely. key: $requestData")
             throw e 
         } catch (e: Exception) { 
-            println("[YT_DEBUG] getMainPage exception: ${e.message}")
             logError(e) 
         }
 
-        println("[YT_DEBUG] getMainPage completed. Extracted count: ${results.size}, hasNext: ${!nextContinuation.isNullOrBlank()}")
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
     }
 
@@ -1254,10 +1184,8 @@ class YoutubeProvider(
     }
 
     override suspend fun search(query: String, page: Int): SearchResponseList? {
-        println("[YT_DEBUG] search called. query: '$query', page: $page")
         val maxPages = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
         if (page > maxPages) {
-            println("[YT_DEBUG] Search page $page exceeds limits. Returning empty.")
             return newSearchResponseList(emptyList(), false)
         }
 
@@ -1278,32 +1206,25 @@ class YoutubeProvider(
             playlistMode = true
             spParam = "&sp=EgIQAw%3D%3D"
         }
-        println("[YT_DEBUG] Search target. actualQuery: '$actualQuery', playlistMode: $playlistMode")
 
         try {
             if (page == 1) {
                 saveContinuationToken("search_token", null)
                 val encoded = URLEncoder.encode(actualQuery, "utf-8")
                 val url = "$mainUrl/results?search_query=$encoded$spParam"
-                println("[YT_DEBUG] Search GET url: $url")
                 val html = app.get(url, interceptor = ytInterceptor).text
 
                 savedApiKey = API_KEY_EXTRACT_REGEX.find(html)?.groupValues?.get(1)
                 savedVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA")
-                println("[YT_DEBUG] Search HTML parsed. apiKey=$savedApiKey, visitorData=$savedVisitorData")
 
                 val initialData = extractYtInitialData(html)
                 if (initialData != null) {
                     processRecursive(initialData, results, seenIds, playlistMode)
                     savedContinuationToken = findTokenRecursive(initialData)
                     saveContinuationToken("search_token", savedContinuationToken) 
-                    println("[YT_DEBUG] Search page 1 next token: $savedContinuationToken")
-                } else {
-                    println("[YT_DEBUG] Search page 1 initialData is null.")
-                }
+                } 
             } else {
                 val tokenToUse = getSavedContinuationToken("search_token")
-                println("[YT_DEBUG] Search continuation page $page. token: $tokenToUse")
                 if (!tokenToUse.isNullOrBlank()) {
                     val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
                     val vData = savedVisitorData ?: appPrefs?.getString("yt_visitor_data", null) ?: ""
@@ -1320,13 +1241,10 @@ class YoutubeProvider(
                         ),
                         "continuation" to tokenToUse
                     )
-                    println("[YT_DEBUG] Search Continuation POST url: $apiUrl")
-                    println("[YT_DEBUG] Search Continuation POST payload: $payload")
                     val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl) 
                     val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor)
                         .parsedSafe<Map<String, Any>>()
                     if (response != null) {
-                        println("[YT_DEBUG] Search Continuation response success. Keys: ${response.keys}")
                         val actions = response["onResponseReceivedActions"]
                             ?: response["onResponseReceivedEndpoints"]
                             ?: response["onResponseReceivedCommands"] 
@@ -1334,20 +1252,13 @@ class YoutubeProvider(
                         processRecursive(actions, results, seenIds, playlistMode)
                         savedContinuationToken = findTokenRecursive(response)
                         saveContinuationToken("search_token", savedContinuationToken) 
-                        println("[YT_DEBUG] Search Continuation next token: $savedContinuationToken")
-                    } else {
-                        println("[YT_DEBUG] Search Continuation response is null.")
-                    }
-                } else {
-                    println("[YT_DEBUG] Search Continuation variables are missing.")
-                }
+                    } 
+                } 
             }
-            println("[YT_DEBUG] Search page completed. Extracted size: ${results.size}")
             return newSearchResponseList(results, !getSavedContinuationToken("search_token").isNullOrBlank())
         } catch (e: CancellationException) {
             throw e 
         } catch (e: Exception) {
-            println("[YT_DEBUG] Search page exception: ${e.message}")
             return newSearchResponseList(emptyList(), false)
         }
     }
@@ -1387,24 +1298,18 @@ class YoutubeProvider(
 
     private fun extractPlaylistEpisodes(data: Any?, seenIds: MutableSet<String>): List<Episode> {
         val episodes = mutableListOf<Episode>()
-        println("[YT_DEBUG] Starting extractPlaylistEpisodes. data type: ${data?.javaClass?.name}")
         
         fun recurse(node: Any?, depth: Int = 0) {
             if (node == null || depth > 32) return
             if (node is Map<*, *>) {
-                if (depth < 4) {
-                    println("[YT_DEBUG] recurse Map keys at depth $depth: ${node.keys.take(10)}")
-                }
                 
                 val playlistVideo = node.getMapKey("playlistVideoRenderer")
                 if (playlistVideo != null) {
                     val videoId = playlistVideo.getString("videoId")
-                    println("[YT_DEBUG] Found playlistVideoRenderer. videoId: $videoId")
                     if (!videoId.isNullOrBlank() && seenIds.add(videoId)) {
                         val title = getText(playlistVideo.getMapKey("title"))
                         val channel = getText(playlistVideo.getMapKey("shortBylineText"))
                         val thumb = YoutubeUtils.getBestThumbnail(playlistVideo.getMapKey("thumbnail")) ?: YoutubeUtils.buildThumbnailFromId(videoId)
-                        println("[YT_DEBUG] Adding playlist video: $title (ID: $videoId)")
                         episodes.add(newEpisode("$mainUrl/watch?v=$videoId") {
                             this.name = title
                             this.episode = episodes.size + 1
@@ -1417,12 +1322,10 @@ class YoutubeProvider(
                 val playlistVideoPanel = node.getMapKey("playlistPanelVideoRenderer")
                 if (playlistVideoPanel != null) {
                     val videoId = playlistVideoPanel.getString("videoId")
-                    println("[YT_DEBUG] Found playlistPanelVideoRenderer. videoId: $videoId")
                     if (!videoId.isNullOrBlank() && seenIds.add(videoId)) {
                         val title = getText(playlistVideoPanel.getMapKey("title"))
                         val channel = getText(playlistVideoPanel.getMapKey("shortBylineText"))
                         val thumb = YoutubeUtils.getBestThumbnail(playlistVideoPanel.getMapKey("thumbnail")) ?: YoutubeUtils.buildThumbnailFromId(videoId)
-                        println("[YT_DEBUG] Adding playlist panel video: $title (ID: $videoId)")
                         episodes.add(newEpisode("$mainUrl/watch?v=$videoId") {
                             this.name = title
                             this.episode = episodes.size + 1
@@ -1438,9 +1341,6 @@ class YoutubeProvider(
                     }
                 }
             } else if (node is List<*>) {
-                if (depth < 4) {
-                    println("[YT_DEBUG] recurse List size: ${node.size} at depth $depth")
-                }
                 for (item in node) {
                     recurse(item, depth + 1)
                 }
@@ -1448,7 +1348,6 @@ class YoutubeProvider(
         }
         
         recurse(data)
-        println("[YT_DEBUG] Finished extractPlaylistEpisodes. Extracted episodes: ${episodes.size}")
         return episodes
     }
 
@@ -1466,25 +1365,12 @@ class YoutubeProvider(
         if (obj == null || depth > 32) return
         if (obj is Map<*, *>) {
             val keys = obj.keys.map { it.toString() }
-            
-            if (keys.contains("playlistId") || keys.contains("playlistPanelRenderer") || keys.contains("playlistSidebarPrimaryInfoRenderer")) {
-                println("[YT_DEBUG] [Recursive-Scan] 재생목록 핵심 키셋 식별: $keys")
-                for (k in keys) {
-                    val v = obj[k] ?: obj.entries.firstOrNull { it.key.toString() == k }?.value
-                    if (v is String || v is Number || v is Boolean) {
-                        println("[YT_DEBUG]   -> [$k] = '$v'")
-                    } else if (v is Map<*, *>) {
-                        println("[YT_DEBUG]   -> [$k] (Map, 서브 키 세트: ${v.keys})")
-                    }
-                }
-            }
 
             val primary = YoutubeUtils.getMapKeyFromAny(obj, "playlistSidebarPrimaryInfoRenderer")
             if (primary != null) {
                 val t = getText(primary["title"] ?: YoutubeUtils.getMapKeyFromAny(primary, "title"))
                 if (t.isNotBlank()) {
                     metadata.title = t
-                    println("[YT_DEBUG] [Recursive] Found playlistSidebarPrimaryInfoRenderer. Title: '$t'")
                 }
                 val d = getText(primary["description"] ?: YoutubeUtils.getMapKeyFromAny(primary, "description"))
                 if (d.isNotBlank()) metadata.description = d
@@ -1497,7 +1383,6 @@ class YoutubeProvider(
                     val a = getText(owner["title"] ?: YoutubeUtils.getMapKeyFromAny(owner, "title"))
                     if (a.isNotBlank()) {
                         metadata.author = a
-                        println("[YT_DEBUG] [Recursive] Found playlistSidebarSecondaryInfoRenderer. Author: '$a'")
                     }
                 }
             }
@@ -1513,7 +1398,6 @@ class YoutubeProvider(
                 }
                 val d = getText(header["description"] ?: YoutubeUtils.getMapKeyFromAny(header, "description"))
                 if (d.isNotBlank()) metadata.description = d
-                println("[YT_DEBUG] [Recursive] Found playlistHeaderRenderer. Title: '${metadata.title}', Author: '${metadata.author}'")
             }
 
             val panel = YoutubeUtils.getMapKeyFromAny(obj, "playlistPanelRenderer")
@@ -1522,7 +1406,6 @@ class YoutubeProvider(
                     .ifBlank { getText(panel["title"] ?: YoutubeUtils.getMapKeyFromAny(panel, "title")) }
                 if (t.isNotBlank()) {
                     metadata.title = t
-                    println("[YT_DEBUG] [Recursive] Found playlistPanelRenderer. Title: '$t'")
                 }
                 
                 val a = getText(panel["shortBylineText"] ?: YoutubeUtils.getMapKeyFromAny(panel, "shortBylineText"))
@@ -1530,7 +1413,6 @@ class YoutubeProvider(
                     .ifBlank { getText(panel["ownerName"] ?: YoutubeUtils.getMapKeyFromAny(panel, "ownerName")) }
                 if (a.isNotBlank()) {
                     metadata.author = a
-                    println("[YT_DEBUG] [Recursive] Found playlistPanelRenderer. Author: '$a'")
                 }
             }
 
@@ -1539,7 +1421,6 @@ class YoutubeProvider(
                 val t = YoutubeUtils.getStringFromAny(metaRenderer, "title") ?: getText(YoutubeUtils.getMapKeyFromAny(metaRenderer, "title"))
                 if (!t.isNullOrBlank()) {
                     metadata.title = t
-                    println("[YT_DEBUG] [Recursive] Found playlistMetadataRenderer. Title: '$t'")
                 }
                 val d = YoutubeUtils.getStringFromAny(metaRenderer, "description") ?: getText(YoutubeUtils.getMapKeyFromAny(metaRenderer, "description"))
                 if (!d.isNullOrBlank()) metadata.description = d
@@ -1550,14 +1431,12 @@ class YoutubeProvider(
                     .ifBlank { getText(obj["title"] ?: YoutubeUtils.getMapKeyFromAny(obj, "title")) }
                 if (t.isNotBlank() && metadata.title.isBlank()) {
                     metadata.title = t
-                    println("[YT_DEBUG] [Recursive-Failsafe] Found direct playlist body. Title: '$t'")
                 }
                 val a = getText(obj["shortBylineText"] ?: YoutubeUtils.getMapKeyFromAny(obj, "shortBylineText"))
                     .ifBlank { getText(obj["longBylineText"] ?: YoutubeUtils.getMapKeyFromAny(obj, "longBylineText")) }
                     .ifBlank { getText(obj["ownerName"] ?: YoutubeUtils.getMapKeyFromAny(obj, "ownerName")) }
                 if (a.isNotBlank() && metadata.author.isBlank()) {
                     metadata.author = a
-                    println("[YT_DEBUG] [Recursive-Failsafe] Found direct playlist body. Author: '$a'")
                 }
             }
 
@@ -1579,7 +1458,6 @@ class YoutubeProvider(
                 if (vAuth.isNotBlank()) {
                     metadata.videoAuthor = vAuth
                 }
-                println("[YT_DEBUG] [Recursive] Found videoOwnerRenderer. VideoAuthor: '$vAuth', SubCount: '$sub', Avatar: '$avatar', ChannelId: '$browseId'")
             }
 
             for (value in obj.values) {
@@ -1593,10 +1471,8 @@ class YoutubeProvider(
     }
 
     override suspend fun load(url: String): LoadResponse {
-        println("[YT_DEBUG] load called. url: '$url'")
         if (url.contains("/shorts/")) {
             val videoId = YoutubeUtils.extractYoutubeId(url) ?: "video"
-            println("[YT_DEBUG] Loading shorts. videoId: $videoId")
             val useSearchList = url.contains("&ctx=search")
             val sourceList = if (useSearchList) searchShorts else homeShorts
             val targetEpisodes = sourceList.toMutableList()
@@ -1631,7 +1507,6 @@ class YoutubeProvider(
         }
 
         if (url.contains("/@") || url.contains("/channel/") || url.contains("/c/") || url.contains("/user/")) {
-            println("[YT_DEBUG] Loading Channel path. url: $url")
             try {
                 var cleanUrl = url.substringBefore("?").removeSuffix("/")
                 val tabKeywords = listOf("/featured", "/shorts", "/streams", "/playlists", "/community", "/about", "/videos")
@@ -1642,7 +1517,6 @@ class YoutubeProvider(
                     }
                 }
                 val channelUrl = "$cleanUrl/videos"
-                println("[YT_DEBUG] 1차 채널 요청 URL: $channelUrl")
                 var response = app.get(channelUrl, interceptor = ytInterceptor)
                 var html = response.text
                 var data = extractYtInitialData(html)
@@ -1654,25 +1528,19 @@ class YoutubeProvider(
                 }
                 
                 val endpointUrl = safeGet(activeTab, "tabRenderer", "endpoint", "commandMetadata", "webCommandMetadata", "url") as? String
-                println("[YT_DEBUG] 1차 파싱 결과 - 활성 탭 엔드포인트: $endpointUrl")
 
                 if (endpointUrl != null && !endpointUrl.endsWith("/videos")) {
                     val canonicalUrl = response.document.selectFirst("link[rel=canonical]")?.attr("href")
-                    println("[YT_DEBUG] 자가치유 작동 - Canonical URL 파싱: $canonicalUrl")
                     if (!canonicalUrl.isNullOrBlank()) {
                         val cleanCanonical = canonicalUrl.substringBefore("?").removeSuffix("/")
                         if (!cleanCanonical.endsWith("/videos")) {
                             val targetUrl = "$cleanCanonical/videos"
-                            println("[YT_DEBUG] 2차 채널 핸들 URL 재요청 시작: $targetUrl")
                             response = app.get(targetUrl, interceptor = ytInterceptor)
                             html = response.text
                             val newData = extractYtInitialData(html)
                             if (newData != null) {
                                 data = newData
-                                println("[YT_DEBUG] 2차 채널 데이터 파싱 성공")
-                            } else {
-                                println("[YT_DEBUG] 2차 채널 데이터 파싱 실패 (null)")
-                            }
+                            } 
                         }
                     }
                 }
@@ -1741,7 +1609,6 @@ class YoutubeProvider(
                 }
 
                 fun extractVideosFromItems(items: List<*>, collectTo: MutableList<Episode>) {
-                    println("[YT_CHANNEL_DEBUG] extractVideosFromItems() 호출됨. 분석할 아이템 개수: ${items.size}")
                     
                     fun findAllRenderers(obj: Any?, targetKeys: List<String>, results: MutableList<Map<*,*>>, depth: Int = 0) {
                         if (obj == null || depth > 32) return
@@ -1771,7 +1638,6 @@ class YoutubeProvider(
                         try {
                             val map = item as? Map<*, *>
                             if (map == null) {
-                                println("[YT_CHANNEL_DEBUG] Item $index: Map이 아님 (타입: ${item?.javaClass?.name})")
                                 return@forEachIndexed
                             }
 
@@ -1783,7 +1649,6 @@ class YoutubeProvider(
                             findAllRenderers(map, targetRendererKeys, foundRenderers)
 
                             if (foundRenderers.isEmpty()) {
-                                println("[YT_CHANNEL_DEBUG] Item $index: 인식 가능한 비디오 렌더러를 깊은 탐색으로도 찾지 못함. (최상위 키 목록: ${map.keys})")
                                 return@forEachIndexed
                             }
 
@@ -1838,16 +1703,13 @@ class YoutubeProvider(
                                         this.posterUrl = thumb
                                         this.description = metaList.joinToString(" • ")
                                     })
-                                    println("[YT_CHANNEL_DEBUG] Item $index: 렌더러 파싱 성공 -> $vidTitle (ID: $vidId)")
                                     
                                     break 
                                 }
                             }
                         } catch (e: Exception) {
-                            println("[YT_CHANNEL_DEBUG] Item $index 파싱 중 깊은 탐색 에러 발생: ${e.message}")
                         }
                     }
-                    println("[YT_CHANNEL_DEBUG] 총 파싱 완료된 에피소드 수: ${collectTo.size}")
                 }
 
                 var initialItems: List<*>? = null
@@ -1882,7 +1744,6 @@ class YoutubeProvider(
                     }
                 }
                 
-                println("[YT_CHANNEL_DEBUG] 추출된 초기 에피소드 덩어리 수: ${initialItems?.size ?: 0}")
                 if (initialItems != null) {
                     extractVideosFromItems(initialItems, allEpisodes)
                 }
@@ -1902,7 +1763,6 @@ class YoutubeProvider(
                     val conts = findContinuationItemsRecursive(data)
                     currentToken = findContinuationTokenFromItems(conts)
                 }
-                println("[YT_DEBUG] 페이지네이션 토큰 발견 여부: ${currentToken != null}")
 
                 var pagesFetchedLocal = 1
                 val maxPagesLimit = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
@@ -1945,29 +1805,24 @@ class YoutubeProvider(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                println("[YT_DEBUG] Channel load exception: ${e.message}")
                 logError(e)
             }
         }
 
         if (url.contains("list=")) {
-            println("[YT_DEBUG] Loading Playlist/Mix endpoint. url: $url")
             try {
                 var targetUrl = url
                 if (url.contains("playlist?list=")) {
                     val listId = url.substringAfter("list=").substringBefore("&")
                     if (listId.startsWith("RD") || listId.startsWith("UL") || listId.startsWith("MM") || listId.startsWith("RDMM")) {
                         targetUrl = "$mainUrl/watch?list=$listId"
-                        println("[YT_DEBUG] Rewrote Mix playlist URL to watch URL: $targetUrl")
                     }
                 }
 
                 val response = app.get(targetUrl, interceptor = ytInterceptor)
                 val html = response.text
-                println("[YT_DEBUG] Playlist page request success. HTML size: ${html.length}")
                 
                 val data = extractYtInitialData(html) ?: throw ErrorLoadingException("Failed to extract playlist data")
-                println("[YT_DEBUG] Playlist initialData successfully parsed.")
 
                 val playlistMeta = PlaylistMetadata()
                 findPlaylistMetadataRecursive(data, playlistMeta)
@@ -1976,11 +1831,8 @@ class YoutubeProvider(
                 var title = playlistMeta.title.ifBlank { "YouTube Playlist" }
                 var description = playlistMeta.description
 
-                println("[YT_DEBUG] [load] 최종 파싱 완료된 메타데이터 결과 -> title: '$title', author: '$author', desc_len: ${description.length}")
-
                 val seenPlaylistIds = mutableSetOf<String>()
                 val episodes = extractPlaylistEpisodes(data, seenPlaylistIds).toMutableList()
-                println("[YT_DEBUG] Successfully parsed initial episodes count: ${episodes.size}")
 
                 val isMix = url.contains("list=RD") || url.contains("list=MM") || url.contains("list=UL")
                 if (isMix) {
@@ -2037,13 +1889,11 @@ class YoutubeProvider(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                println("[YT_DEBUG] Playlist/Mix loading exception: ${e.message}")
                 logError(e)
             }
         }          
 
         val videoId = YoutubeUtils.extractYoutubeId(url) ?: throw ErrorLoadingException("Invalid YouTube URL")
-        println("[YT_DEBUG] Loading normal video ID: $videoId")
 
         val headers = mapOf("Referer" to "https://www.youtube.com/")
         val response = app.get(url, headers = headers, interceptor = ytInterceptor)
@@ -2126,7 +1976,6 @@ class YoutubeProvider(
         }
 
         val filteredRecs = recommendations.filter { !it.url.contains("/shorts/") }
-        println("[YT_DEBUG] Video metadata load complete. Title: $title, Recommendations count: ${filteredRecs.size}")
 
         val episodes = mutableListOf<Episode>()
         
@@ -2167,7 +2016,9 @@ class YoutubeProvider(
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val videoId = YoutubeUtils.extractYoutubeId(data) ?: data
-        val fullUrl = "$mainUrl/watch?v=$videoId&hl=$lang"
+        
+        // 1. 타 개발자 코드 벤치마킹: hl 파라미터 제거 및 youtube.com 도메인 사용 (403 에러 원천 차단)
+        val safeUrl = "https://youtube.com/watch?v=$videoId"
 
         var isLive = false
         var playerResponseText = ""
@@ -2186,8 +2037,9 @@ class YoutubeProvider(
             )
             val headers = mapOf("Referer" to "$mainUrl/watch?v=$videoId")
             playerResponseText = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).text
+            
             if (playerResponseText.isNotBlank()) {
-                val root = JSONObject(playerResponseText)
+                val root = org.json.JSONObject(playerResponseText)
                 val videoDetails = root.optJSONObject("videoDetails")
                 if (videoDetails != null && videoDetails.optBoolean("isLive", false)) {
                     isLive = true
@@ -2202,18 +2054,113 @@ class YoutubeProvider(
         if (!isLive) {
             if (playerResponseText.isNotBlank()) {
                 try {
-                    val playerResponse = parseJson<PlayerResponse>(playerResponseText)
+                    val playerResponse = AppUtils.parseJson<PlayerResponse>(playerResponseText)
                     triggerPlaybackTracking(playerResponse.playbackTracking, videoId)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    println("[YT_DEBUG] Error parsing playerResponse for tracking: ${e.message}")
+                    logError(e)
                 }
             }
 
-            com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback) { }
+            // 2. Yextractor 호출: 다국어 자막 추출 및 403 대비용 안정적인 NewPipe Muxed 링크(720p) 백업 제공
+            com.youtube.YoutubeExtractor().getUrl(safeUrl, null, subtitleCallback, callback)
         }
 
-        return loadExtractor(fullUrl, subtitleCallback, callback)
+        // 3. 앱 내장 코어 추출기 호출 (타 개발자 코드와 동일한 형태 적용하여 403 에러 해결)
+        return loadExtractor(safeUrl, subtitleCallback, callback)
+    }
+}
+
+2. Yextractor.kt 전체 코드
+
+package com.youtube
+
+import com.lagradost.cloudstream3.SubtitleFile
+import com.lagradost.cloudstream3.mvvm.logError
+import com.lagradost.cloudstream3.newSubtitleFile
+import com.lagradost.cloudstream3.utils.ExtractorApi
+import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.INFER_TYPE
+import com.lagradost.cloudstream3.utils.newExtractorLink
+import com.lagradost.cloudstream3.utils.schemaStripRegex
+import org.schabi.newpipe.extractor.ServiceList
+import org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor
+import org.schabi.newpipe.extractor.services.youtube.linkHandler.YoutubeStreamLinkHandlerFactory
+
+open class YoutubeExtractor : ExtractorApi() {
+    override val mainUrl = "https://www.youtube.com"
+    override val requiresReferer = false
+    override val name = "YouTube"
+
+    init {
+        YoutubeStreamExtractor.setFetchIosClient(true)
+    }
+
+    override fun getExtractorUrl(id: String): String {
+        return "$mainUrl/watch?v=$id"
+    }
+
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val cleanedUrl = url.replace(schemaStripRegex, "")
+        
+        try {
+            val link = YoutubeStreamLinkHandlerFactory.getInstance().fromUrl(cleanedUrl)
+            val s = object : YoutubeStreamExtractor(ServiceList.YouTube, link) {}
+            s.fetchPage()
+
+            // 1. 자막 추출 (다국어 유지)
+            val subs = s.subtitlesDefault?.filterNotNull() ?: emptyList()
+            subs.forEach { ss ->
+                try {
+                    val lang = ss.locale?.language ?: return@forEach
+                    var subUrl = ss.content ?: ss.getUrl() ?: return@forEach
+                    
+                    if (subUrl.startsWith("http")) {
+                        subUrl = subUrl.replace(Regex("&fmt=[^&]+"), "")
+                        if (!subUrl.contains("fmt=srt")) {
+                            subUrl = "$subUrl&fmt=srt"
+                        }
+                    }
+                    subtitleCallback(newSubtitleFile(lang, subUrl))
+                } catch (e: Exception) { 
+                }
+            }
+
+            // 2. 403 에러 방지용 NewPipe 직접 추출 (Muxed Streams - 720p/360p)
+            // 코어 추출기가 403을 뱉을 때를 대비한 완벽한 백업 링크 제공
+            val muxedList = s.videoStreams ?: emptyList()
+            muxedList.forEach { vs ->
+                try {
+                    val mUrl = vs.content ?: return@forEach
+                    val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
+                    val label = if (height > 0) "${height}p" else "Video"
+                    
+                    callback(
+                        newExtractorLink(
+                            source = "YouTube (NewPipe)",
+                            name = "YouTube $label",
+                            url = mUrl,
+                            referer = "https://www.youtube.com/",
+                            quality = height,
+                            type = INFER_TYPE
+                        ) {
+                            this.headers = mapOf(
+                                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36",
+                                "Origin" to "https://www.youtube.com"
+                            )
+                        }
+                    )
+                } catch (e: Exception) { 
+                }
+            }
+        } catch (e: Exception) { 
+            logError(e) 
+        }
     }
 }
