@@ -96,7 +96,7 @@ open class YoutubeExtractor : ExtractorApi() {
             YoutubeStreamExtractor.setFetchIosClient(true)
             YoutubeStreamExtractor.setPoTokenProvider(PoTokenProviderImpl)
             
-            // [웜스타트 감지 로그]: 앱 부팅 및 세션 유입 단계에서 백그라운드 웜업 상태 파악
+            // [0초 즉시 기동용 비동기 웜스타트]: 앱이 켜질 때 메인 루퍼 스레드를 간섭하지 않고 웹뷰 샌드박스를 사전 웜업
             GlobalScope.launch(Dispatchers.Main) {
                 println("[YT_DEBUG] [Extractor-Companion] 비동기 웜스타트 코루틴이 메인 디스패처에서 가동되었습니다.")
                 try {
@@ -149,17 +149,18 @@ open class YoutubeExtractor : ExtractorApi() {
                 println("[YT_DEBUG] [Proxy-Handler] 해석된 대상 목적지 주소: ${rawUrl.take(120)}...")
                 println("[YT_DEBUG] [Proxy-Handler] 매칭된 정합성 User-Agent: '$userAgent'")
 
-                // 플레이어가 덧붙인 추가 쿼리 파라미터가 있다면 재결합 처리
-                var finalUrlStr = rawUrl
+                // [클로저 캡처 정적 빌더 적용]: StringBuilder를 통해 캡처 변조 컴파일 오류 완벽 격리
+                val extraParams = java.lang.StringBuilder()
                 uri.queryParameterNames.forEach { key ->
                     if (key != "url" && key != "ua") {
                         val values = uri.getQueryParameters(key)
                         values.forEach { value ->
-                            val separator = if (finalUrlStr.contains("?")) "&" else "?"
-                            finalUrlStr += "$separator$key=${java.net.URLEncoder.encode(value, "UTF-8")}"
+                            val separator = if (extraParams.isEmpty() && !rawUrl.contains("?")) "?" else "&"
+                            extraParams.append(separator).append(key).append("=").append(java.net.URLEncoder.encode(value, "UTF-8"))
                         }
                     }
                 }
+                val finalUrlStr = rawUrl + extraParams.toString()
                 println("[YT_DEBUG] [Proxy-Handler] 최종 조립된 전송 목적지 CDN URL: $finalUrlStr")
 
                 val url = URL(finalUrlStr)
@@ -357,6 +358,10 @@ open class YoutubeExtractor : ExtractorApi() {
         val videoId = YoutubeUtils.extractYoutubeId(cleanedUrl) ?: cleanedUrl
         println("[YT_DEBUG] [getUrl] 식별된 비디오 ID: $videoId")
 
+        // [this 컨텍스트 정적 캐싱 수집]: CoroutineScope 수신 객체 변조로 인한 언리졸브드 레퍼런스(name) 해제
+        val extractorName = this@YoutubeExtractor.name
+        val extractorMainUrl = this@YoutubeExtractor.mainUrl
+
         val cachedLinks = ytVideos[videoId]
         if (cachedLinks.isNullOrEmpty()) {
             println("[YT_DEBUG] [getUrl] 로컬 비디오 캐시가 없으므로 네트워크 파싱을 전개합니다.")
@@ -438,7 +443,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
                                 if (localLink != null) {
                                     val finalName = "${video.label} ($lang) ${video.label}"
-                                    val sourceName = "${this.name} ($lang)"
+                                    val sourceName = "$extractorName ($lang)"
 
                                     val streamUa = if (video.url.contains("&c=ANDROID")) {
                                         "com.google.android.youtube/19.29.1 (Linux; U; Android 11; en_US)"
@@ -453,7 +458,7 @@ open class YoutubeExtractor : ExtractorApi() {
                                             localLink,
                                             type = ExtractorLinkType.DASH
                                         ) {
-                                            this.referer = mainUrl
+                                            this.referer = extractorMainUrl
                                             this.quality = video.height
                                             this.headers = mapOf(
                                                 "User-Agent" to streamUa,
@@ -487,8 +492,8 @@ open class YoutubeExtractor : ExtractorApi() {
                     val proxiedUrl = getProxyUrl(mUrl, streamUa)
 
                     builtLinks.add(
-                        newExtractorLink(this.name, "$mLabel (Legacy)", proxiedUrl, type = INFER_TYPE) {
-                            this.referer = mainUrl
+                        newExtractorLink(extractorName, "$mLabel (Legacy)", proxiedUrl, type = INFER_TYPE) {
+                            this.referer = extractorMainUrl
                             this.quality = mHeight
                             this.headers = mapOf(
                                 "User-Agent" to streamUa,
@@ -507,7 +512,7 @@ open class YoutubeExtractor : ExtractorApi() {
                         type = INFER_TYPE
                     ) {
                         this.quality = 2160
-                        this.referer = mainUrl
+                        this.referer = extractorMainUrl
                     }
                 )
 
@@ -519,7 +524,7 @@ open class YoutubeExtractor : ExtractorApi() {
                         type = INFER_TYPE
                     ) {
                         this.quality = 2160
-                        this.referer = mainUrl
+                        this.referer = extractorMainUrl
                     }
                 )
 
@@ -591,7 +596,6 @@ open class YoutubeExtractor : ExtractorApi() {
                             activeServer = null
                             serverPort = 0
                         }
-                        println("[YT_DEBUG] [ServerSocket-Thread] 소켓 수락 루프가 완전히 종료되었습니다.")
                     }
                 }
             } catch (e: Exception) { 
