@@ -1,4 +1,3 @@
-
 package com.lagradost.cloudstream3.ar.youtube
 
 import org.json.JSONObject
@@ -756,7 +755,7 @@ class YoutubeProvider(
                     ) { this.posterUrl = poster }
                 } else {
                     finalTitle =
-                        if (channel.isNotBlank()) {views.isNotBlank() && channel.isNotBlank() -> "{$channel | $views} $title"; else -> "{$views} $title"}
+                        if (channel.isNotBlank()) "{$channel | $views} $title" else "{$views} $title"
                     poster = YoutubeUtils.getBestThumbnail(
                         lockup.getMapKey("contentImage")?.getMapKey("image")?.getListKey("sources")
                     ) ?: "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
