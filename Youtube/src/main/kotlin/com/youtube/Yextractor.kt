@@ -826,12 +826,14 @@ fun parseChallengeData(rawChallengeData: String): String {
     val globalName = challengeData.getString(5)
     val clientExperimentsStateBlob = challengeData.getString(7)
 
+    // [중대한 타입 오류 해결]: JSONObject.NULL(클래스 JSONObject${"$"}Null)이 문자열 "null"로 추출되어 
+    // 실제 소스코드가 아닌 글자 "null"만 전송되어 발생하던 'VM not found' 현상 해결
     val arr1 = challengeData.optJSONArray(1)
     var privateDoNotAccessOrElseSafeScriptWrappedValue: String? = null
     if (arr1 != null) {
         for (i in 0 until arr1.length()) {
-            val item = arr1.optString(i)
-            if (!item.isNullOrBlank()) {
+            val item = arr1.opt(i)
+            if (item is String) {
                 privateDoNotAccessOrElseSafeScriptWrappedValue = item
                 break
             }
@@ -842,8 +844,8 @@ fun parseChallengeData(rawChallengeData: String): String {
     var privateDoNotAccessOrElseTrustedResourceUrlWrappedValue: String? = null
     if (arr2 != null) {
         for (i in 0 until arr2.length()) {
-            val item = arr2.optString(i)
-            if (!item.isNullOrBlank()) {
+            val item = arr2.opt(i)
+            if (item is String) {
                 privateDoNotAccessOrElseTrustedResourceUrlWrappedValue = item
                 break
             }
@@ -889,19 +891,16 @@ fun u8ToBase64(poToken: String): String {
 }
 
 private fun descramble(scrambledChallenge: String): String {
-    // [유튜브 Base64 MOD 완전 보정]: 점(.)을 이퀄(=)로 복원하는 전처리 누락 버그 해결 완료
     val decoded = base64ToByteArray(scrambledChallenge)
     val descrambledBytes = decoded.map { (it + 97).toByte() }.toByteArray()
     return String(descrambledBytes, StandardCharsets.UTF_8)
 }
 
 private fun base64ToU8(base64: String): String {
-    // [유튜브 Base64 MOD 완전 보정]: 점(.)을 이퀄(=)로 복원하는 전처리 누락 버그 해결 완료
     val decoded = base64ToByteArray(base64)
     return newUint8Array(decoded)
 }
 
-// [유튜브 특화형 점(.) -> 이퀄(=) 복원 디코더]
 private fun base64ToByteArray(base64: String): ByteArray {
     val base64Mod = base64
         .replace('-', '+')
