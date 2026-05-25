@@ -224,7 +224,7 @@ open class YoutubeExtractor : ExtractorApi() {
                                             sourceName,
                                             finalName,
                                             localLink,
-                                            type = ExtExtractorLinkType.DASH
+                                            type = ExtractorLinkType.DASH
                                         ) {
                                             this.referer = mainUrl
                                             this.quality = video.height
