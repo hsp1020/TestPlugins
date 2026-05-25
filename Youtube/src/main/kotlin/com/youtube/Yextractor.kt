@@ -25,7 +25,7 @@ open class CustomYoutubeExtractor : ExtractorApi() {
         val videoId = extractYouTubeId(url)
         val watchUrl = "$mainUrl/watch?v=$videoId"
 
-        // 🔥 본진 코어 앱과 100% 동일한 방식(StreamInfo)으로 1번만 안전하게 호출합니다. (403 에러 절대 없음)
+        // 본진 코어 앱과 100% 동일한 방식(StreamInfo)으로 1번만 안전하게 호출합니다. (403 에러 절대 없음)
         val info = StreamInfo.getInfo(watchUrl)
 
         val isLive =
@@ -56,52 +56,80 @@ open class CustomYoutubeExtractor : ExtractorApi() {
     ): Boolean {
 
         val videoStreams = info.videoOnlyStreams.orEmpty()
-        if (videoStreams.isEmpty()) return false
-
         val audioStreams = info.audioStreams.orEmpty()
+        val muxedStreams = info.videoStreams.orEmpty()
 
-        videoStreams.forEach { video ->
+        if (videoStreams.isEmpty() && muxedStreams.isEmpty()) return false
+
+        // 1. Muxed Streams (영상+음성 통합본 백업)
+        muxedStreams.forEach { video ->
+            val url = video.content ?: return@forEach
             callback(
                 newExtractorLink(
                     source = name,
-                    name = "YouTube ${normalizeCodec(video.codec)}",
-                    url = video.content
+                    name = "YouTube ${normalizeCodec(video.codec)} (Muxed)",
+                    url = url
                 ) {
-                    quality = video.height
-                    
-                    // 💡 [버그 수정] 본진 코어의 깡통 매핑을 버리고 다국어 언어 정보를 제대로 매핑합니다!
-                    audioTracks = audioStreams.map { audio ->
-                        val langCode = audio.audioLocale?.language ?: audio.audioTrackId ?: "und"
-                        // 한국어 우선 번역을 시도하고, 실패 시 원래 디스플레이 이름 사용
-                        val displayName = audio.audioLocale?.getDisplayLanguage(Locale.KOREAN) 
-                            ?: audio.audioLocale?.displayName 
-                            ?: audio.audioTrackId 
-                            ?: "Audio"
-
-                        newAudioFile(
-                            url = audio.content,
-                            name = displayName,
-                            lang = langCode
-                        )
-                    }
+                    quality = video.height ?: 0
                 }
             )
         }
 
-        // 💡 자막 역시 본진 로직을 그대로 사용하되, 완벽하게 콜백으로 넘겨줍니다.
-        info.subtitles.forEach { subtitle ->
+        // 2. 💡 [핵심 버그 수정] 오디오 언어별로 각각 독립된 ExtractorLink를 생성합니다!
+        videoStreams.forEach { video ->
+            val url = video.content ?: return@forEach
+            val height = video.height ?: 0
+            val codecName = normalizeCodec(video.codec)
+
+            if (audioStreams.isEmpty()) {
+                callback(
+                    newExtractorLink(
+                        source = name,
+                        name = "YouTube $codecName",
+                        url = url
+                    ) {
+                        quality = height
+                    }
+                )
+            } else {
+                audioStreams.forEach { audio ->
+                    val audioUrl = audio.content ?: return@forEach
+                    
+                    // 언어 정보 가져오기 (한국어 번역 우선)
+                    val langName = audio.audioLocale?.getDisplayLanguage(Locale.KOREAN) 
+                        ?: audio.audioLocale?.displayName 
+                        ?: audio.audioTrackId 
+                        ?: "Audio"
+
+                    // source 속성에 언어를 달아주면, 사용자가 링크 선택창에서 직관적으로 "YouTube (한국어)" 를 고를 수 있습니다!
+                    callback(
+                        newExtractorLink(
+                            source = "$name ($langName)",
+                            name = "YouTube $codecName",
+                            url = url
+                        ) {
+                            quality = height
+                            // 깡통 newAudioFile 의 한계를 회피하여, 선택된 언어의 오디오 1개만 주입
+                            audioTracks = listOf(newAudioFile(audioUrl))
+                        }
+                    )
+                }
+            }
+        }
+
+        // 3. 자막 처리 로직
+        info.subtitles.orEmpty().forEach { subtitle ->
+            val subUrl = subtitle.content ?: return@forEach
             subtitleCallback(
                 newSubtitleFile(
                     lang = subtitle.displayLanguageName ?: subtitle.languageTag ?: "Unknown",
-                    url = subtitle.content
+                    url = subUrl
                 )
             )
         }
 
         return true
     }
-
-    // ---------------- HELPERS ----------------
 
     private fun extractYouTubeId(url: String): String {
         val regex = Regex(
@@ -113,9 +141,7 @@ open class CustomYoutubeExtractor : ExtractorApi() {
 
     private fun normalizeCodec(codec: String?): String {
         if (codec.isNullOrBlank()) return ""
-
         val c = codec.lowercase()
-
         return when {
             c.startsWith("av01") -> "AV1"
             c.startsWith("vp9") -> "VP9"
