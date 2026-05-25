@@ -1,6 +1,7 @@
 package com.youtube
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.webkit.WebChromeClient
@@ -69,6 +70,26 @@ open class YoutubeExtractor : ExtractorApi() {
         private var activeServer: ServerSocket? = null
         private var serverPort: Int = 0
         private val serverLock = Any()
+
+        // [컴파일 해결]: 가상 DASH 서버용 자원 manifestMap 컴패니언 객체 원상 복구
+        private val manifestMap: MutableMap<String, String> = Collections.synchronizedMap(
+            object : LinkedHashMap<String, String>(128, 0.75f, true) {
+                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
+                    return size > 1000
+                }
+            }
+        )
+
+        // [컴파일 해결]: 가상 DASH 서버용 자원 serverExecutor 컴패니언 객체 원상 복구
+        private val serverExecutor = ThreadPoolExecutor(
+            2, 
+            8, 
+            30L, 
+            TimeUnit.SECONDS,
+            LinkedBlockingQueue(256),
+            ThreadFactory { r -> Thread(r, "YT-DASH-Server-Worker") },
+            ThreadPoolExecutor.CallerRunsPolicy()
+        )
 
         init {
             YoutubeStreamExtractor.setFetchIosClient(true)
@@ -699,7 +720,8 @@ class PoTokenWebView private constructor(
     }
 
     override fun close() {
-        android.os.Handler(Looper.getMainLooper()).post {
+        // [컴파일 해결]: Looper의 완전 경로를 사용하여 미스 해소
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
             webView.clearHistory()
             webView.clearCache(true)
             webView.loadUrl("about:blank")
