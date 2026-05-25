@@ -91,7 +91,6 @@ open class YoutubeExtractor : ExtractorApi() {
 
         init {
             YoutubeStreamExtractor.setFetchIosClient(true)
-            // [최종 연동 완료]: 순정 NewPipe 앱 사양의 PoTokenProviderImpl 인스턴스를 Extractor에 직접 이식
             YoutubeStreamExtractor.setPoTokenProvider(PoTokenProviderImpl)
         }
 
@@ -540,12 +539,13 @@ class PoTokenWebView private constructor(
         }
 
         // [Asset 격리 해결]: HTML 파일을 에셋 대신 raw string으로 하드코딩 주입
-        // [수정완료]: 최하단에 PoTokenWebView.downloadAndRunBotguard() 호출을 추가하여 웹뷰 로드 즉시 트리깅
+        // [CORS 보안 해결]: 가상 전역 유연성 바인딩 문법 교정 완료
         val html = """
             <!DOCTYPE html>
             <html lang="en"><head><title></title><script>
             function loadBotGuard(challengeData) {
-                this.vm = this[challengeData.globalName];
+                var globalObj = typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : this);
+                this.vm = (this && this[challengeData.globalName]) || globalObj[challengeData.globalName];
                 this.program = challengeData.program;
                 this.vmFunctions = {};
                 this.syncSnapshotFunction = null;
@@ -619,7 +619,6 @@ class PoTokenWebView private constructor(
 
     @JavascriptInterface
     fun downloadAndRunBotguard() {
-        // [Rx Java 우회]: 백그라운드 코루틴 발송으로 순정 gRPC API 호출 완수
         GlobalScope.launch(Dispatchers.IO) {
             try {
                 val responseBody = makeBotguardServiceRequest(
@@ -627,10 +626,16 @@ class PoTokenWebView private constructor(
                     "[ \"$REQUEST_KEY\" ]"
                 )
                 val parsedChallengeData = parseChallengeData(responseBody)
+                // [정합성 파괴 해결]: 복잡한 난독화 VM 자바스크립트가 웹뷰 전이 시 특수문자 더블 이스케이프로 깨지는 현상을 
+                // 방지하기 위해 코틀린에서 무결성 Base64로 1차 봉인하여 웹뷰 내부에서 안전 복원 실행
+                val base64Challenge = android.util.Base64.encodeToString(
+                    parsedChallengeData.toByteArray(StandardCharsets.UTF_8), 
+                    android.util.Base64.NO_WRAP
+                )
                 withContext(Dispatchers.Main) {
                     webView.evaluateJavascript(
                         """try {
-                            data = $parsedChallengeData
+                            var data = JSON.parse(decodeURIComponent(escape(atob('$base64Challenge'))));
                             runBotGuard(data).then(function (result) {
                                 this.webPoSignalOutput = result.webPoSignalOutput
                                 $JS_INTERFACE.onRunBotguardResult(result.botguardResponse)
@@ -722,7 +727,6 @@ class PoTokenWebView private constructor(
     }
 
     override fun close() {
-        // [컴파일 해결]: Looper의 완전 경로를 사용하여 미스 해소
         android.os.Handler(android.os.Looper.getMainLooper()).post {
             webView.clearHistory()
             webView.clearCache(true)
@@ -732,7 +736,6 @@ class PoTokenWebView private constructor(
         }
     }
 
-    // [다운로더 독립화]: 자바 순정 HTTP 전송 체계로 BotGuard API 연계 완벽 구성
     private fun makeBotguardServiceRequest(urlStr: String, data: String): String {
         val url = URL(urlStr)
         val conn = url.openConnection() as HttpURLConnection
@@ -755,7 +758,6 @@ class PoTokenWebView private constructor(
     }
 }
 
-// [바이너리 데이터 정합성 해석 어댑터]
 fun parseChallengeData(rawChallengeData: String): String {
     val scrambled = JSONArray(rawChallengeData)
     val challengeData = if (scrambled.length() > 1 && scrambled.optString(1).isNotEmpty()) {
@@ -841,7 +843,6 @@ private fun base64ToU8(base64: String): String {
     return newUint8Array(decoded)
 }
 
-// [NewPipe 사양의 PoTokenProvider 수집 연동 모듈]
 object PoTokenProviderImpl : PoTokenProvider {
     private val lock = Any()
     private var webPoTokenVisitorData: String? = null
