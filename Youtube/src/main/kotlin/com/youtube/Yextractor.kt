@@ -91,6 +91,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
         init {
             android.util.Log.d("YT_DEBUG", "[Extractor-Companion] static init 블록 시작됨.")
+            // 고화질 DASH 트랙 추출을 위해 iOS 클라이언트 조회 활성화
             YoutubeStreamExtractor.setFetchIosClient(true)
             YoutubeStreamExtractor.setPoTokenProvider(PoTokenProviderImpl)
             
@@ -121,8 +122,7 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         }
 
-        // [지능형 분기 추가]: isDash 파라미터를 추가하여 DASH와 Legacy 스트림을 구분합니다.
-        fun getProxyUrl(realUrl: String, userAgent: String, isDash: Boolean): String {
+        fun getProxyUrl(realUrl: String, userAgent: String): String {
             if (serverPort == 0) {
                 android.util.Log.w("YT_DEBUG", "[Proxy-Url] 경고: serverPort가 0입니다. 원본 주소 반환.")
                 return realUrl
@@ -132,8 +132,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 val encodedUa = java.net.URLEncoder.encode(userAgent, "UTF-8")
                 val vd = PoTokenProviderImpl.getVisitorData()
                 val encodedVd = java.net.URLEncoder.encode(vd, "UTF-8")
-                val dashFlag = if (isDash) "1" else "0"
-                "http://127.0.0.1:$serverPort/proxy?url=$encodedUrl&ua=$encodedUa&vd=$encodedVd&dash=$dashFlag"
+                "http://127.0.0.1:$serverPort/proxy?url=$encodedUrl&ua=$encodedUa&vd=$encodedVd"
             } catch (e: Exception) {
                 android.util.Log.e("YT_DEBUG", "[Proxy-Url] 인코딩 예외: ${e.message}")
                 realUrl
@@ -148,11 +147,10 @@ open class YoutubeExtractor : ExtractorApi() {
                 val rawUrl = uri.getQueryParameter("url") ?: return
                 val userAgent = uri.getQueryParameter("ua") ?: YoutubeUtils.CHROME_USER_AGENT
                 val visitorData = uri.getQueryParameter("vd") ?: ""
-                val isDash = uri.getQueryParameter("dash") == "1"
 
                 val extraParams = java.lang.StringBuilder()
                 uri.queryParameterNames.forEach { key ->
-                    if (key != "url" && key != "ua" && key != "vd" && key != "dash") {
+                    if (key != "url" && key != "ua" && key != "vd") {
                         val values = uri.getQueryParameters(key)
                         values.forEach { value ->
                             val separator = if (extraParams.isEmpty() && !rawUrl.contains("?")) "?" else "&"
@@ -160,35 +158,9 @@ open class YoutubeExtractor : ExtractorApi() {
                         }
                     }
                 }
-                var finalUrlStr = rawUrl + extraParams.toString()
-
-                val rangeHeader = clientHeaders["range"]
-                var rangeStart = ""
-                var rangeEnd = ""
-
-                // [416 에러 완치]: DASH 스트림은 URL 변조, Legacy 스트림은 HTTP 헤더 유지로 완벽 분리
-                if (!rangeHeader.isNullOrBlank()) {
-                    if (isDash) {
-                        val rangeVal = rangeHeader.replace("bytes=", "").trim()
-                        val parts = rangeVal.split("-")
-                        rangeStart = parts.getOrNull(0) ?: ""
-                        rangeEnd = parts.getOrNull(1) ?: ""
-                        
-                        if (!finalUrlStr.contains("&range=") && !finalUrlStr.contains("?range=")) {
-                            val separator = if (finalUrlStr.contains("?")) "&" else "?"
-                            finalUrlStr += "${separator}range=$rangeVal"
-                            android.util.Log.d("YT_DEBUG", "[Proxy-Handler] DASH 스트림 구간 이동 -> 파라미터 변환 완료: &range=$rangeVal")
-                        }
-                    } else {
-                        android.util.Log.d("YT_DEBUG", "[Proxy-Handler] Legacy 스트림 구간 이동 -> HTTP Range 헤더 유지: $rangeHeader")
-                    }
-                }
-
-                if (isDash && !finalUrlStr.contains("&alr=") && !finalUrlStr.contains("?alr=")) {
-                    val separator = if (finalUrlStr.contains("?")) "&" else "?"
-                    finalUrlStr += "${separator}alr=yes"
-                }
-
+                
+                // URL 변조(&range=)를 완전히 제거하고 순정 URL만 사용합니다.
+                val finalUrlStr = rawUrl + extraParams.toString()
                 android.util.Log.d("YT_DEBUG", "[Proxy-Handler] 최종 조립된 유튜브 CDN 요청 URL: $finalUrlStr")
 
                 val url = URL(finalUrlStr)
@@ -196,18 +168,24 @@ open class YoutubeExtractor : ExtractorApi() {
                 conn.requestMethod = "GET"
                 conn.connectTimeout = 10000
                 conn.readTimeout = 10000
+                
+                // [핵심 1]: 완벽한 정품 User-Agent 위장
                 conn.setRequestProperty("User-Agent", userAgent)
                 conn.setRequestProperty("Origin", "https://www.youtube.com")
                 conn.setRequestProperty("Referer", "https://www.youtube.com")
 
+                // [핵심 2]: 완벽한 신분증(Visitor ID) 주입
                 if (visitorData.isNotBlank()) {
                     conn.setRequestProperty("X-Goog-Visitor-Id", visitorData)
                     conn.setRequestProperty("Cookie", "VISITOR_INFO1_LIVE=$visitorData")
+                    android.util.Log.d("YT_DEBUG", "[Proxy-Handler] Visitor ID 주입 완료: $visitorData")
                 }
 
-                // Legacy 스트림일 경우에만 HTTP Range 헤더 전송
-                if (!isDash && !rangeHeader.isNullOrBlank()) {
+                // [핵심 3]: ExoPlayer의 순정 HTTP Range 헤더를 그대로 전송 (403 에러 안 터짐)
+                val rangeHeader = clientHeaders["range"]
+                if (!rangeHeader.isNullOrBlank()) {
                     conn.setRequestProperty("Range", rangeHeader)
+                    android.util.Log.d("YT_DEBUG", "[Proxy-Handler] HTTP Range 헤더 정상 전송: $rangeHeader")
                 }
 
                 val responseCode = conn.responseCode
@@ -222,44 +200,18 @@ open class YoutubeExtractor : ExtractorApi() {
                     return
                 }
 
-                // DASH의 경우 URL 파라미터로 잘랐으므로 200 OK가 오지만, ExoPlayer를 위해 206으로 기만
-                val proxyResponseCode = if (isDash && !rangeHeader.isNullOrBlank() && responseCode == 200) 206 else responseCode
-                val proxyResponseMessage = if (proxyResponseCode == 206) "Partial Content" else responseMessage
-
+                // 유튜브 서버가 준 응답 헤더를 가짜 조작 없이 그대로 ExoPlayer에 포워딩
                 val headerBuilder = java.lang.StringBuilder()
-                headerBuilder.append("HTTP/1.1 $proxyResponseCode $proxyResponseMessage\r\n")
+                headerBuilder.append("HTTP/1.1 $responseCode $responseMessage\r\n")
 
-                var hasContentRange = false
                 conn.headerFields.forEach { (key, values) ->
                     if (key != null) {
                         val lowerKey = key.lowercase()
                         if (lowerKey != "connection" && lowerKey != "transfer-encoding" && lowerKey != "keep-alive") {
                             headerBuilder.append("$key: ${values.joinToString(", ")}\r\n")
-                            if (lowerKey == "content-range") hasContentRange = true
                         }
                     }
                 }
-
-                // DASH 스트림을 위한 가짜 Content-Range 헤더 주입
-                if (isDash && !rangeHeader.isNullOrBlank() && !hasContentRange) {
-                    val contentLength = conn.contentLengthLong
-                    var startByte = 0L
-                    try { startByte = rangeStart.toLong() } catch (e: Exception) {}
-                    
-                    val endByteStr = if (rangeEnd.isNotBlank()) {
-                        rangeEnd
-                    } else if (contentLength > 0) {
-                        (startByte + contentLength - 1).toString()
-                    } else {
-                        ""
-                    }
-                    
-                    if (endByteStr.isNotBlank()) {
-                        headerBuilder.append("Content-Range: bytes $startByte-$endByteStr/*\r\n")
-                        android.util.Log.d("YT_DEBUG", "[Proxy-Handler] ExoPlayer용 가짜 Content-Range 헤더 생성: bytes $startByte-$endByteStr/*")
-                    }
-                }
-
                 headerBuilder.append("Access-Control-Allow-Origin: *\r\n")
                 headerBuilder.append("Connection: close\r\n")
                 headerBuilder.append("\r\n")
@@ -279,7 +231,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 os.flush()
                 android.util.Log.d("YT_DEBUG", "[Proxy-Handler] 스트림 전송 완료. 총 바이트: $totalBytesTransferred")
             } catch (e: Exception) {
-                // Broken pipe 등 정상적인 소켓 끊김은 에러 로그 도배 방지
+                // 정상적인 소켓 끊김(구간 이동 시)은 에러로 취급하지 않음
                 if (e.message?.contains("Broken pipe") == true || e.message?.contains("Connection reset") == true) {
                     android.util.Log.d("YT_DEBUG", "[Proxy-Handler] 플레이어가 소켓을 정상적으로 닫았습니다 (구간 이동/화질 전환).")
                 } else {
@@ -512,8 +464,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
                 for ((mUrl, mLabel, mHeight) in muxedList) {
                     val streamUa = getStreamUa(mUrl)
-                    // Legacy 스트림이므로 isDash = false 전달
-                    val proxiedUrl = getProxyUrl(mUrl, streamUa, false)
+                    val proxiedUrl = getProxyUrl(mUrl, streamUa)
 
                     builtLinks.add(
                         newExtractorLink(extractorName, "$mLabel (Legacy)", proxiedUrl, type = INFER_TYPE) {
@@ -636,8 +587,7 @@ open class YoutubeExtractor : ExtractorApi() {
         durationSec: Long
     ): String {
         val videoUa = getStreamUa(video.url)
-        // DASH 스트림이므로 isDash = true 전달
-        val proxiedVideoUrl = escapeXml(getProxyUrl(video.url, videoUa, true))
+        val proxiedVideoUrl = escapeXml(getProxyUrl(video.url, videoUa))
         val durationString = "PT${durationSec}S"
 
         val sb = java.lang.StringBuilder(2048)
@@ -662,8 +612,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
         audioList.forEachIndexed { index, audio ->
             val audioUa = getStreamUa(audio.url)
-            // DASH 스트림이므로 isDash = true 전달
-            val proxiedAudioUrl = escapeXml(getProxyUrl(audio.url, audioUa, true))
+            val proxiedAudioUrl = escapeXml(getProxyUrl(audio.url, audioUa))
             val audioId = "audio_$index"
             val aMime = audio.mimeType
             val aCodecs = if (aMime.contains("webm")) "opus" else "mp4a.40.2"
@@ -1175,7 +1124,7 @@ object PoTokenProviderImpl : PoTokenProvider {
         return PoTokenResult(visitorData, playerPot, streamingPot)
     }
 
-    // [403 에러 완치 핵심 2]: iOS와 Android 클라이언트 요청에도 WEB에서 발급받은 합법적인 poToken을 똑같이 주입합니다.
+    // iOS와 Android 스트림에도 WEB에서 발급받은 합법적인 poToken을 똑같이 주입합니다.
     override fun getWebEmbedClientPoToken(videoId: String): PoTokenResult? = getWebClientPoToken(videoId, false)
     override fun getAndroidClientPoToken(videoId: String): PoTokenResult? = getWebClientPoToken(videoId, false)
     override fun getIosClientPoToken(videoId: String): PoTokenResult? = getWebClientPoToken(videoId, false)
