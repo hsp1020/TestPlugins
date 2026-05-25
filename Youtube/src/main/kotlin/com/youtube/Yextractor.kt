@@ -54,7 +54,9 @@ open class YoutubeExtractor : ExtractorApi() {
         private var serverPort: Int = 0
         private val serverLock = Any()
 
-        // 2004 에러의 근본적 해결책: 캐시 상한치를 50개에서 1000개로 대폭 확장 (다국어 매핑 폭발에 대처)
+        // 2004 에러 복구를 위한 전역 뮤텍스(Mutex) 잠금
+        private val tokenMutex = kotlinx.coroutines.sync.Mutex()
+
         private val manifestMap: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(128, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
@@ -63,7 +65,6 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         )
 
-        // CallerRunsPolicy를 적용하여 가상 MPD 및 세그먼트 정체 시 패킷 폐기 방지 및 백프레셔 제어 보장
         private val serverExecutor = ThreadPoolExecutor(
             2, 
             8, 
@@ -74,111 +75,132 @@ open class YoutubeExtractor : ExtractorApi() {
             ThreadPoolExecutor.CallerRunsPolicy()
         )
 
-        private const val EMBED_URL = "https://www.youtube.com/embed/aqz-KE-bpKQ"
+        // 자동 실행 쿼리 매개변수를 수렴하여 BotGuard 트리거 환경 최적화
+        private const val EMBED_URL = "https://www.youtube.com/embed/aqz-KE-bpKQ?autoplay=1&mute=1"
 
         init {
-            // iOS 공식 앱 클라이언트 파싱 기본 활성화
             YoutubeStreamExtractor.setFetchIosClient(true)
 
-            // [최종 구축본 적용]: 1분 시점의 403 Forbidden 에러를 방어하는 정식 무결성 토큰 프로바이더 장착
             YoutubeStreamExtractor.setPoTokenProvider(object : PoTokenProvider {
                 override fun getWebClientPoToken(videoId: String?): PoTokenResult? {
-                    println("[YT_DEBUG] [getWebClientPoToken] 웹 클라이언트 용 poToken 요구. 비디오 ID: $videoId")
+                    println("[YT_DEBUG] [getWebClientPoToken] 웹 클라이언트 poToken 요구. 비디오 ID: $videoId")
                     return getPoTokenResultForVideo(videoId)
                 }
 
                 override fun getWebEmbedClientPoToken(videoId: String?): PoTokenResult? {
-                    println("[YT_DEBUG] [getWebEmbedClientPoToken] 웹 임베드 용 poToken 요구. 비디오 ID: $videoId")
+                    println("[YT_DEBUG] [getWebEmbedClientPoToken] 임베드 poToken 요구. 비디오 ID: $videoId")
                     return getPoTokenResultForVideo(videoId)
                 }
 
                 override fun getAndroidClientPoToken(videoId: String?): PoTokenResult? {
-                    println("[YT_DEBUG] [getAndroidClientPoToken] 안드로이드 클라이언트 용 poToken 요구. 비디오 ID: $videoId")
+                    println("[YT_DEBUG] [getAndroidClientPoToken] 안드로이드 클라이언트 poToken 요구. 비디오 ID: $videoId")
                     return getPoTokenResultForVideo(videoId)
                 }
 
                 override fun getIosClientPoToken(videoId: String?): PoTokenResult? {
-                    println("[YT_DEBUG] [getIosClientPoToken] iOS 클라이언트 용 poToken 요구. 비디오 ID: $videoId")
+                    println("[YT_DEBUG] [getIosClientPoToken] iOS 클라이언트 poToken 요구. 비디오 ID: $videoId")
                     return getPoTokenResultForVideo(videoId)
                 }
             })
         }
 
-        // 재생 세션이 새로 열릴 때(loadLinks) 정적 companion 영역의 캐시를 안전하게 해제하기 위한 타겟 헬퍼 함수
         fun clearCache(videoId: String) {
             ytVideos.remove(videoId)
             ytVideosSubtitles.remove(videoId)
         }
 
-        // 특정 플랫폼의 요청을 일괄 수용하여 캐시 대조 혹은 실시간 가상 웹뷰 생성을 분기하는 최종 헬퍼 함수
         private fun getPoTokenResultForVideo(videoId: String?): PoTokenResult? {
             val cached = getCachedTokens()
             if (cached != null) {
-                println("[YT_DEBUG] [setPoTokenProvider] 캐시된 poToken이 비디오 [$videoId]에 정상 적용됩니다. 토큰 값: ${cached.first.take(15)}...")
+                println("[YT_DEBUG] [setPoTokenProvider] 캐시된 poToken 적용. 비디오: [$videoId]")
                 return PoTokenResult(cached.first, "", "")
             }
 
-            println("[YT_DEBUG] [setPoTokenProvider] 캐시가 유효하지 않아 실시간 웹뷰 자가발전(Blocking)을 통해 신규 토큰을 획득합니다.")
+            println("[YT_DEBUG] [setPoTokenProvider] 캐시 무효화. WebView 가상 자가발전(Locking) 진입.")
             val generated = kotlinx.coroutines.runBlocking {
-                getPoTokenAndVisitor()
+                tokenMutex.withLock {
+                    val doubleCheck = getCachedTokens()
+                    if (doubleCheck != null) return@withLock doubleCheck
+                    getPoTokenAndVisitor()
+                }
             }
 
             return if (generated != null) {
-                println("[YT_DEBUG] [setPoTokenProvider] 새로 취득한 poToken이 비디오 [$videoId]에 최종 정상 바인딩됩니다. 토큰 값: ${generated.first.take(15)}...")
+                println("[YT_DEBUG] [setPoTokenProvider] 신규 poToken 취득 성공 -> 비디오: [$videoId]")
                 PoTokenResult(generated.first, "", "")
             } else {
-                println("[YT_DEBUG] [setPoTokenProvider] 실시간 poToken 생성 루틴이 완전히 무산되었습니다. 비디오 [$videoId]에 토큰 없이 재생을 시도합니다.")
+                println("[YT_DEBUG] [setPoTokenProvider] poToken 획득 실패. 일반 우회 모드 시도.")
                 null
             }
         }
 
-        // SharedPreferences 캐시 유효성 획득 및 시간 정합성 프린트 헬퍼 함수
-        private fun getCachedTokens(): Pair<String, String>? {
+        private fun getCachedTokens(): Triple<String, String, String?>? {
             val context = AcraApplication.context ?: return null
             val prefs = PreferenceManager.getDefaultSharedPreferences(context)
             val poToken = prefs.getString("yt_cached_potoken", null)
             val visitorData = prefs.getString("yt_cached_visitor_data", null)
+            val cookieStr = prefs.getString("yt_cached_cookie", null)
             val timestamp = prefs.getLong("yt_potoken_timestamp", 0L)
 
             if (poToken.isNullOrBlank() || visitorData.isNullOrBlank()) {
-                println("[YT_DEBUG] [getCachedTokens] 기존에 저장된 캐시 토큰 세트가 존재하지 않습니다.")
                 return null
             }
 
             val elapsed = System.currentTimeMillis() - timestamp
-            val remainingSec = (3 * 3600 * 1000 - elapsed) / 1000
-            
-            if (elapsed > 3 * 3600 * 1000) {
-                println("[YT_DEBUG] [getCachedTokens] 캐시 토큰 유효기한 만료 감지 (경과 시간: ${elapsed / 1000}초, 유효한 한계시간: 10800초)")
+            if (elapsed > 3 * 3600 * 1000) { // 3시간 캐시 유효성
+                println("[YT_DEBUG] [getCachedTokens] 캐시 토큰 유효 시간 만료.")
                 return null
             }
 
-            val expDate = java.util.Date(timestamp + 3 * 3600 * 1000)
-            println("[YT_DEBUG] [getCachedTokens] 신선한 캐시 발견. 유효 남은시간: ${remainingSec}초 (만료 시각: $expDate)")
-            return Pair(poToken, visitorData)
+            return Triple(poToken, visitorData, cookieStr)
         }
 
-        // SharedPreferences 캐시 데이터 저장 및 유효기한 타임스탬프 계산 헬퍼 함수
-        private fun saveCachedTokens(poToken: String, visitorData: String) {
+        private fun saveCachedTokens(poToken: String, visitorData: String, cookieStr: String?) {
             val context = AcraApplication.context ?: return
             val prefs = PreferenceManager.getDefaultSharedPreferences(context)
             val now = System.currentTimeMillis()
-            prefs.edit()
+            
+            val editor = prefs.edit()
                 .putString("yt_cached_potoken", poToken)
                 .putString("yt_cached_visitor_data", visitorData)
                 .putLong("yt_potoken_timestamp", now)
-                .apply()
-            
-            val expDate = java.util.Date(now + 3 * 3600 * 1000)
-            println("[YT_DEBUG] [saveCachedTokens] 토큰 영구 캐싱 성공. poToken: ${poToken.take(15)}..., visitorData: ${visitorData.take(15)}..., 캐시 등록 시간: ${java.util.Date(now)}, 만료 예정 시간: $expDate")
+                
+            if (!cookieStr.isNullOrBlank()) {
+                editor.putString("yt_cached_cookie", cookieStr)
+                
+                // VISITOR_INFO1_LIVE 쿠키 추출 및 SharedPreferences 동기화
+                val visitorInfoLive = extractCookieValue(cookieStr, "VISITOR_INFO1_LIVE")
+                if (!visitorInfoLive.isNullOrBlank()) {
+                    editor.putString("VISITOR_INFO1_LIVE", visitorInfoLive)
+                    println("[YT_DEBUG] [saveCachedTokens] VISITOR_INFO1_LIVE 동기화 성공: $visitorInfoLive")
+                }
+                
+                // YSC 세션 토큰 추출 및 SharedPreferences 동기화
+                val ysc = extractCookieValue(cookieStr, "YSC")
+                if (!ysc.isNullOrBlank()) {
+                    editor.putString("YSC", ysc)
+                    println("[YT_DEBUG] [saveCachedTokens] YSC 세션 동기화 성공: $ysc")
+                }
+            }
+            editor.apply()
         }
 
-        /**
-         * 안드로이드 메인 스레드 안전 루프 및 폴링 스케줄러를 적용한 무정지 poToken 획득 루틴
-         */
-        private suspend fun getPoTokenAndVisitor(): Pair<String, String>? = withContext(Dispatchers.Main) {
+        private fun extractCookieValue(cookieStr: String?, cookieName: String): String? {
+            if (cookieStr.isNullOrBlank()) return null
+            val cookies = cookieStr.split(";")
+            for (c in cookies) {
+                val trimmed = c.trim()
+                if (trimmed.startsWith("$cookieName=")) {
+                    return trimmed.substringAfter("=")
+                }
+            }
+            return null
+        }
+
+        // 미디어 플레이 제스처 제한 무효화 스케줄러가 장착된 Headless WebView
+        private suspend fun getPoTokenAndVisitor(): Triple<String, String, String?>? = withContext(Dispatchers.Main) {
             val context = AcraApplication.context ?: return@withContext null
-            println("[YT_DEBUG] [getPoTokenAndVisitor] Headless WebView 컴파일 준비 및 인증용 로드 시작. 대상 URL: $EMBED_URL")
+            println("[YT_DEBUG] [getPoTokenAndVisitor] Headless WebView 로드 준비. 대상 URL: $EMBED_URL")
 
             suspendCancellableCoroutine { continuation ->
                 val webView = WebView(context)
@@ -186,8 +208,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 val handler = android.os.Handler(android.os.Looper.getMainLooper())
                 var pollRunnable: Runnable? = null
 
-                // [가시성 해결]: 스코프를 바깥으로 확장하여, 웹뷰 내부 핸들러와 외부 코루틴 취소 리스너 모두가 safeResume에 무결하게 접근합니다.
-                val safeResume = { res: Pair<String, String>? ->
+                val safeResume = { res: Triple<String, String, String?>? ->
                     if (!isCompleted) {
                         isCompleted = true
                         pollRunnable?.let { handler.removeCallbacks(it) }
@@ -202,15 +223,16 @@ open class YoutubeExtractor : ExtractorApi() {
                     @SuppressLint("SetJavaScriptEnabled")
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
-                    // 실제 웹 환경 브라우저와 동치되도록 UA를 수립해 유튜브 시크릿 스크립트 실행 정밀도를 확보합니다.
+                    settings.databaseEnabled = true
+                    
+                    // [핵심 변경]: 미디어 재생 시 사용자 제스처 요건을 비활성화하여 embed 비디오 자동 재생 보장
+                    settings.mediaPlaybackRequiresUserGesture = false 
                     settings.userAgentString = YoutubeUtils.CHROME_USER_AGENT
 
-                    // 300ms 간격으로 유튜브 엔진의 활성화 인스턴스를 스캔하는 고성능 폴러 실행
                     pollRunnable = object : Runnable {
                         override fun run() {
                             if (isCompleted) return
 
-                            // 모던, 레거시, 임베드 등 유튜브 전역 영역을 통째로 관통하는 강인한 토큰 챌린지 추적 자바스크립트
                             evaluateJavascript(
                                 "(function() { " +
                                 "  try { " +
@@ -250,6 +272,18 @@ open class YoutubeExtractor : ExtractorApi() {
                                 "        visitorData = visitorData || window.ytcfg.get('VISITOR_DATA'); " +
                                 "      } " +
                                 "    } " +
+                                "    if (!poToken) { " +
+                                "      var scripts = document.getElementsByTagName('script'); " +
+                                "      for (var i = 0; i < scripts.length; i++) { " +
+                                "        var text = scripts[i].textContent || scripts[i].innerText || ''; " +
+                                "        if (text.indexOf('poToken') !== -1) { " +
+                                "          var m = text.match(/\"poToken\"\\s*:\\s*\"([^\"]+)\"/); " +
+                                "          if (m) poToken = m[1]; " +
+                                "          var v = text.match(/\"visitorData\"\\s*:\\s*\"([^\"]+)\"/); " +
+                                "          if (v) visitorData = visitorData || v[1]; " +
+                                "        } " +
+                                "      } " +
+                                "    } " +
                                 "    if (poToken && visitorData) { " +
                                 "      return JSON.stringify({poToken: poToken, visitorData: visitorData}); " +
                                 "    } " +
@@ -271,28 +305,23 @@ open class YoutubeExtractor : ExtractorApi() {
                                         val cleanedJson = jsonResult.replace("\\\"", "\"").removePrefix("\"").removeSuffix("\"")
                                         val json = JSONObject(cleanedJson)
 
-                                        if (json.has("error")) {
-                                            val err = json.getString("error")
-                                            // 불필요한 대기 스팸 로그를 방지하고 실제 치명적 분석 장애만 필터링합니다.
-                                            if (!err.startsWith("대기 중...")) {
-                                                println("[YT_DEBUG] [getPoTokenAndVisitor] 폴링 검출 동작 중 에러 감지: $err")
-                                            }
-                                        } else {
+                                        if (!json.has("error")) {
                                             val poToken = json.optString("poToken")
                                             val visitorData = json.optString("visitorData")
 
                                             if (poToken.isNotBlank() && visitorData.isNotBlank()) {
-                                                println("[YT_DEBUG] [getPoTokenAndVisitor] [자가발전 완수] 정상 poToken 및 visitorData 획득 성공!")
-                                                saveCachedTokens(poToken, visitorData)
-                                                safeResume(Pair(poToken, visitorData))
+                                                println("[YT_DEBUG] [getPoTokenAndVisitor] 가상 자가발전 성공!")
+                                                val cookieManager = android.webkit.CookieManager.getInstance()
+                                                val cookieStr = cookieManager.getCookie(EMBED_URL)
+                                                saveCachedTokens(poToken, visitorData, cookieStr)
+                                                safeResume(Triple(poToken, visitorData, cookieStr))
                                                 return@evaluateJavascript
                                             }
                                         }
                                     } catch (e: Exception) {
-                                        println("[YT_DEBUG] [getPoTokenAndVisitor] 가상 스케줄러 결과 파싱 실패: ${e.message}")
+                                        println("[YT_DEBUG] [getPoTokenAndVisitor] 결과 파싱 에러: ${e.message}")
                                     }
                                 }
-                                // 조건이 구비되지 않은 경우 300ms 이후 재스캔을 예약합니다.
                                 handler.postDelayed(this, 300)
                             }
                         }
@@ -300,25 +329,35 @@ open class YoutubeExtractor : ExtractorApi() {
 
                     webViewClient = object : WebViewClient() {
                         override fun onPageFinished(view: WebView?, url: String?) {
-                            println("[YT_DEBUG] [getPoTokenAndVisitor] WebView HTML 수집 및 기본 뼈대 준비 완료. 동적 스케줄러를 개시합니다.")
+                            println("[YT_DEBUG] [getPoTokenAndVisitor] 웹뷰 로딩 완료. 강제 재생 주입 수행.")
+                            
+                            // 자동 재생 비활성화 브라우저에 대비한 플레이 Trigger 주입
+                            evaluateJavascript(
+                                "(function() { " +
+                                "  var v = document.querySelector('video'); " +
+                                "  if (v) { v.play(); } " +
+                                "  var btn = document.querySelector('.ytp-play-button'); " +
+                                "  if (btn) { btn.click(); } " +
+                                "})();", null
+                            )
                             pollRunnable?.let { handler.post(it) }
                         }
                     }
 
-                    // 저사양 시스템 셋톱박스 및 네트워크 락 방지용 8초 데드 타임아웃
+                    // 저사양 스마트 TV 셋톱박스 및 네트워크 지연에 대처하도록 타임아웃을 12초로 확장
                     handler.postDelayed({
                         if (!isCompleted) {
-                            println("[YT_DEBUG] [getPoTokenAndVisitor] 실시간 토큰 발행 임계치(8초) 도달. 타임아웃으로 재생을 우회합니다.")
+                            println("[YT_DEBUG] [getPoTokenAndVisitor] 타임아웃(12초) 도달. 우회 재생 지시.")
                             safeResume(null)
                         }
-                    }, 8000)
+                    }, 12000)
                 }
 
                 webView.loadUrl(EMBED_URL)
 
                 continuation.invokeOnCancellation {
                     android.os.Handler(android.os.Looper.getMainLooper()).post {
-                        println("[YT_DEBUG] [getPoTokenAndVisitor] 태스크 중단 지시 수신. 스케줄러 강제 소멸을 수행합니다.")
+                        println("[YT_DEBUG] [getPoTokenAndVisitor] 태스크 중단 수신. 자원 즉시 해제.")
                         safeResume(null)
                     }
                 }
@@ -359,18 +398,13 @@ open class YoutubeExtractor : ExtractorApi() {
         val videoId = YoutubeUtils.extractYoutubeId(cleanedUrl) ?: cleanedUrl
         println("[YT_DEBUG] [getUrl] 가공된 cleanedUrl: $cleanedUrl, 비디오 ID: $videoId")
 
-        // 재생 진입(loadLinks) 단계에서 명시적으로 삭제가 수행되므로, 동일 재생 세션 내부 처리를 위해 기존 강제 캐시 삭제 코드는 제거되었습니다.
-
         val cachedLinks = ytVideos[videoId]
         if (cachedLinks.isNullOrEmpty()) {
             println("[YT_DEBUG] [getUrl] 분석을 진행합니다.")
             try {
-                println("[YT_DEBUG] [getUrl] NewPipe linkHandler에서 link 분석 시작")
                 val link = YoutubeStreamLinkHandlerFactory.getInstance().fromUrl(cleanedUrl)
                 val s = object : YoutubeStreamExtractor(ServiceList.YouTube, link) {}
-                println("[YT_DEBUG] [getUrl] s.fetchPage() 네트워크 호출 시작 (무결성 토큰 적용 단계)")
                 s.fetchPage()
-                println("[YT_DEBUG] [getUrl] s.fetchPage() 추출 프로세스 완료. 제목: '${s.name}', 길이: ${s.length}초")
 
                 val durationSeconds = if (s.length > 0) s.length else 3600L
                 val builtLinks = mutableListOf<ExtractorLink>()
@@ -390,14 +424,9 @@ open class YoutubeExtractor : ExtractorApi() {
                         val initR = if (vs.initStart != null && vs.initEnd != null) "${vs.initStart}-${vs.initEnd}" else null
                         val indexR = if (vs.indexStart != null && vs.indexEnd != null) "${vs.indexStart}-${vs.indexEnd}" else null
 
-                        println("[YT_DEBUG] [getUrl] DASH 비디오 스트림 파싱 성공 -> 화질: ${height}p, 포맷: $mime, URL: ${streamUrl.take(60)}...")
                         StreamInfo(streamUrl, mime, height, label, initR, indexR)
-                    } catch (e: Exception) { 
-                        println("[YT_DEBUG] [getUrl] DASH 비디오 파싱 중 오류 발생: ${e.message}")
-                        null 
-                    }
+                    } catch (e: Exception) { null }
                 }.distinctBy { it.height }
-                println("[YT_DEBUG] [getUrl] 최종 수집된 DASH 비디오 스트림 개수: ${videoOnlyList.size}")
 
                 val audioInfoList = (s.audioStreams ?: emptyList()).mapNotNull { asr ->
                     try {
@@ -412,28 +441,21 @@ open class YoutubeExtractor : ExtractorApi() {
                         var rawLang = asr.audioTrackId ?: "Default"
                         if (rawLang.contains(".")) rawLang = rawLang.substringBefore(".")
 
-                        println("[YT_DEBUG] [getUrl] DASH 오디오 스트림 파싱 성공 -> 언어: $rawLang, 전송률: $bitrate, 포맷: $mime, URL: ${aUrl.take(60)}...")
                         AudioInfo(aUrl, mime, bitrate, initR, indexR, rawLang.uppercase())
-                    } catch (e: Exception) { 
-                        println("[YT_DEBUG] [getUrl] DASH 오디오 파싱 중 오류 발생: ${e.message}")
-                        null 
-                    }
+                    } catch (e: Exception) { null }
                 }.distinctBy { it.url }
-                println("[YT_DEBUG] [getUrl] 최종 수집된 DASH 오디오 스트림 개수: ${audioInfoList.size}")
 
                 val audiosByLanguage = audioInfoList.groupBy { it.language }
 
                 try {
                     val subs = s.subtitlesDefault?.filterNotNull() ?: emptyList()
                     ytVideosSubtitles[videoId] = subs
-                    println("[YT_DEBUG] [getUrl] 자막 트랙 개수: ${subs.size}")
                 } catch (e: Exception) {
-                    println("[YT_DEBUG] [getUrl] 자막 파싱 중 예외 발생: ${e.message}")
+                    println("[YT_DEBUG] [getUrl] 자막 파싱 에러: ${e.message}")
                 }
 
                 startServerIfNeeded()
 
-                println("[YT_DEBUG] [getUrl] DASH 가상 XML 생성 루프를 시작합니다.")
                 for (video in videoOnlyList) {
                     if (audiosByLanguage.isNotEmpty()) {
                         for ((lang, audios) in audiosByLanguage) {
@@ -452,7 +474,6 @@ open class YoutubeExtractor : ExtractorApi() {
                                     val finalName = "${video.label} ($lang) ${video.label}"
                                     val sourceName = "${this.name} ($lang)"
 
-                                    println("[YT_DEBUG] [getUrl] DASH 가상 링크 빌드 성공 -> 화질: ${video.label}, 언어: $lang, 가상 URL: $localLink")
                                     builtLinks.add(
                                         newExtractorLink(
                                             sourceName,
@@ -481,13 +502,10 @@ open class YoutubeExtractor : ExtractorApi() {
                         if (!seenUrls.add(mUrl)) return@mapNotNull null
                         val label = buildVideoLabelNumber(vs)
                         val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
-                        
-                        println("[YT_DEBUG] [getUrl] Legacy Muxed 비디오 스트림 수집 완료 -> 화질: ${height}p, URL: ${mUrl.take(60)}...")
                         Triple(mUrl, label, height)
                     } catch (e: Exception) { null }
                 }
                 for ((mUrl, mLabel, mHeight) in muxedList) {
-                    println("[YT_DEBUG] [getUrl] Legacy Muxed 링크 등록 -> 화질: $mHeight, 이름: $mLabel (Legacy)")
                     builtLinks.add(
                         newExtractorLink(this.name, "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
                             this.referer = mainUrl
@@ -501,7 +519,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     )
                 }
 
-                // 외부 고해상도 웹 다운로드 포털 연동 보완 로직 보존
+                // 외부 4K 포털 예비 트랙 등록 유지
                 builtLinks.add(
                     newExtractorLink(
                         source = "YouTube Downloader",
@@ -527,22 +545,16 @@ open class YoutubeExtractor : ExtractorApi() {
                 )
 
                 ytVideos[videoId] = builtLinks.toList()
-                println("[YT_DEBUG] [getUrl] 전체 링크 정렬 및 저장 완료. 총 수집 링크 개수: ${builtLinks.size}")
 
             } catch (e: Exception) { 
-                println("[YT_DEBUG] [getUrl] NewPipe Extractor 분석 도중 에러가 감지되었습니다: ${e.message}")
                 logError(e) 
             }
-        } else {
-            println("[YT_DEBUG] [getUrl] 이미 캐시된 링크 리스트가 존재하여 캐시 데이터를 반환합니다.")
         }
 
         val finalLinks: List<ExtractorLink> = ytVideos[videoId] ?: emptyList()
-        println("[YT_DEBUG] [getUrl] 반환되는 최종 링크 리스트 개수: ${finalLinks.size}")
         finalLinks.forEach { callback(it) }
 
         val finalSubtitles: List<SubtitlesStream> = ytVideosSubtitles[videoId] ?: emptyList()
-        println("[YT_DEBUG] [getUrl] 반환되는 최종 자막 개수: ${finalSubtitles.size}")
         finalSubtitles.mapNotNull { ss ->
             try {
                 val lang = ss.locale?.language ?: return@mapNotNull null
@@ -556,7 +568,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
                 newSubtitleFile(lang, url)
             } catch (e: Exception) { 
-                println("[YT_DEBUG] [getUrl] 자막 처리 중 에러: ${e.message}")
                 null 
             }
         }.forEach { subtitleCallback(it) }
@@ -566,31 +577,40 @@ open class YoutubeExtractor : ExtractorApi() {
         synchronized(serverLock) {
             val server = activeServer
             if (server != null && !server.isClosed) {
-                println("[YT_DEBUG] [startServerIfNeeded] 기존 DASH 루프백 서버가 구동 중이므로 리스너 스레드 생성을 스킵합니다. (포트: $serverPort)")
                 return
             }
             try {
                 val newServer = ServerSocket(0)
                 activeServer = newServer
                 serverPort = newServer.localPort
-                println("[YT_DEBUG] [startServerIfNeeded] 가상 포트 $serverPort 에 리스너 바인딩 성공")
+                println("[YT_DEBUG] [startServerIfNeeded] 가상 포트 $serverPort 리스너 바인딩 성공")
                 
                 thread(name = "YT-DASH-Server-Acceptor") {
-                    println("[YT_DEBUG] [ServerSocket-Thread] accept() 대기 루프 스레드를 시작합니다.")
+                    println("[YT_DEBUG] [ServerSocket-Thread] accept() 대기 시작.")
                     try {
-                        while (true) {
-                            val active = activeServer ?: break
-                            if (active.isClosed) break
-                            val client = active.accept()
-                            client.soTimeout = 5000 
-                            serverExecutor.execute { handleClient(client) }
+                        val active = activeServer
+                        if (active != null) {
+                            while (!active.isClosed) {
+                                val client = active.accept()
+                                client.soTimeout = 5000 
+                                serverExecutor.execute { handleClient(client) }
+                            }
                         }
                     } catch (e: Exception) {
-                        println("[YT_DEBUG] [ServerSocket-Thread] accept() 대기 동작 중 오류 발생: ${e.message}")
+                        println("[YT_DEBUG] [ServerSocket-Thread] accept() 도중 오류 발생: ${e.message}")
+                    } finally {
+                        // [자가치유]: 스레드 종료 시 소켓 자원을 완벽하게 파괴하고 무효화하여 데드락 리스크 차단
+                        synchronized(serverLock) {
+                            try {
+                                activeServer?.close()
+                            } catch (_: Exception) {}
+                            activeServer = null
+                            serverPort = 0
+                        }
+                        println("[YT_DEBUG] [ServerSocket-Thread] 리스너 중단 및 포트 가상화 초기화.")
                     }
                 }
             } catch (e: Exception) { 
-                println("[YT_DEBUG] [startServerIfNeeded] 서버 소켓 생성 실패 예외: ${e.message}")
                 logError(e) 
             }
         }
@@ -612,7 +632,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 if (line != null && line.startsWith("GET")) {
                     val parts = line.split(" ")
                     if (parts.size > 1) {
-                        // 쿼리 매개변수(?) 및 불필요 경로를 정규화하여 안정적인 UUID 획득
                         val cleanPath = parts[1].substringAfter("/").substringBefore("?")
                         val path = if (cleanPath.endsWith(".mpd", ignoreCase = true)) {
                             cleanPath.substring(0, cleanPath.length - 4)
@@ -635,7 +654,6 @@ open class YoutubeExtractor : ExtractorApi() {
                             os.write(bodyBytes)
                             os.flush()
                         } else {
-                            println("[YT_DEBUG] [handleClient] 에러: 메모리에 매칭되는 가상 MPD가 없습니다. UUID: $path (404 반환)")
                             val errorResponse = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n"
                             os.write(errorResponse.toByteArray(java.nio.charset.StandardCharsets.UTF_8))
                             os.flush()
@@ -644,7 +662,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
             }
         } catch (e: Exception) {
-            println("[YT_DEBUG] [handleClient] 소켓 데이터 스트림 처리 중 예외: ${e.message}")
+            println("[YT_DEBUG] [handleClient] 소켓 예외 발생: ${e.message}")
         }
     }
 
