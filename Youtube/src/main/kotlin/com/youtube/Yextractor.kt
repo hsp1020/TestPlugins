@@ -92,9 +92,7 @@ open class YoutubeExtractor : ExtractorApi() {
         )
 
         init {
-            // [결정적 패치]: DASH 비디오-오디오 트랙간의 클라이언트 지문 불일치(403) 차단을 완벽 방어하기 위해 
-            // 혼선을 유발하는 iOS 수집 라인을 무효화하고 오직 순정 안드로이드 단일 파이프라인으로 전면 일치화합니다.
-            YoutubeStreamExtractor.setFetchIosClient(false)
+            YoutubeStreamExtractor.setFetchIosClient(true)
             YoutubeStreamExtractor.setPoTokenProvider(PoTokenProviderImpl)
         }
 
@@ -160,7 +158,7 @@ open class YoutubeExtractor : ExtractorApi() {
                         var mime = vs.format?.mimeType
                         if (mime.isNullOrEmpty()) mime = getMimeTypeFromUrl(streamUrl, false)
 
-                        // [세그먼트 정합성 패치]: 음수를 필터링하여 "-1--1" XML 파괴 현상을 해결
+                        // [세그먼트 정합성 보정]: 음수를 명확하게 필터링하여 "-1--1" XML 파괴 현상을 해결
                         val initR = if (vs.initStart != null && vs.initStart >= 0 && vs.initEnd != null && vs.initEnd >= 0) "${vs.initStart}-${vs.initEnd}" else null
                         val indexR = if (vs.indexStart != null && vs.indexStart >= 0 && vs.indexEnd != null && vs.indexEnd >= 0) "${vs.indexStart}-${vs.indexEnd}" else null
 
@@ -175,13 +173,9 @@ open class YoutubeExtractor : ExtractorApi() {
                         var mime = asr.format?.mimeType
                         if (mime.isNullOrEmpty()) mime = getMimeTypeFromUrl(aUrl, true)
 
-                        // [세그먼트 정합성 패치]: 음수를 필터링하여 "-1--1" XML 파괴 현상을 해결
+                        // [세그먼트 정합성 보정]: 음수를 명확하게 필터링하여 "-1--1" XML 파괴 현상을 해결
                         val initR = if (asr.initStart != null && asr.initStart >= 0 && asr.initEnd != null && asr.initEnd >= 0) "${asr.initStart}-${asr.initEnd}" else null
                         val indexR = if (asr.indexStart != null && asr.indexStart >= 0 && asr.indexEnd != null && asr.indexEnd >= 0) "${asr.indexStart}-${asr.indexEnd}" else null
-
-                        // [복원 완료]: 유실되었던 오디오 언어 식별자 추출 전처리 2줄을 완벽 복구
-                        var rawLang = asr.audioTrackId ?: "Default"
-                        if (rawLang.contains(".")) rawLang = rawLang.substringBefore(".")
 
                         AudioInfo(aUrl, mime, bitrate, initR, indexR, rawLang.uppercase())
                     } catch (e: Exception) { null }
@@ -216,8 +210,14 @@ open class YoutubeExtractor : ExtractorApi() {
                                     val finalName = "${video.label} ($lang) ${video.label}"
                                     val sourceName = "${this.name} ($lang)"
 
-                                    // [정합성 보정]: 순정 안드로이드 수집 형식이므로 이에 무결하게 동치하는 안드로이드 정품 웹뷰 User-Agent 주입
-                                    val streamUa = "com.google.android.youtube/19.29.1 (Linux; U; Android 11; en_US)"
+                                    // [정합성 교정]: 스트림 주소가 안드로이드 클라이언트 주소일 때와 아닐 때의 헤더 매핑 분기화
+                                    val streamUa = if (video.url.contains("&c=ANDROID")) {
+                                        "com.google.android.youtube/19.29.1 (Linux; U; Android 11; en_US)"
+                                    } else if (video.url.contains("&c=IOS")) {
+                                        YoutubeUtils.IOS_USER_AGENT
+                                    } else {
+                                        YoutubeUtils.CHROME_USER_AGENT
+                                    }
 
                                     builtLinks.add(
                                         newExtractorLink(
@@ -251,7 +251,13 @@ open class YoutubeExtractor : ExtractorApi() {
                     } catch (e: Exception) { null }
                 }
                 for ((mUrl, mLabel, mHeight) in muxedList) {
-                    val streamUa = "com.google.android.youtube/19.29.1 (Linux; U; Android 11; en_US)"
+                    val streamUa = if (mUrl.contains("&c=ANDROID")) {
+                        "com.google.android.youtube/19.29.1 (Linux; U; Android 11; en_US)"
+                    } else if (mUrl.contains("&c=IOS")) {
+                        YoutubeUtils.IOS_USER_AGENT
+                    } else {
+                        YoutubeUtils.CHROME_USER_AGENT
+                    }
 
                     builtLinks.add(
                         newExtractorLink(this.name, "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
