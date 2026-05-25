@@ -28,11 +28,15 @@ import org.schabi.newpipe.extractor.stream.SubtitlesStream
 import org.schabi.newpipe.extractor.services.youtube.PoTokenProvider
 import org.schabi.newpipe.extractor.services.youtube.PoTokenResult
 import org.json.JSONObject
+import org.json.JSONArray
 import java.io.BufferedReader
 import java.io.ByteArrayInputStream
 import java.io.InputStreamReader
+import java.io.Closeable
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.URL
+import java.net.HttpURLConnection
 import java.util.UUID
 import java.util.Collections
 import java.util.LinkedHashMap
@@ -41,12 +45,16 @@ import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ThreadFactory
+import java.time.Instant
 import kotlin.concurrent.thread
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.launch
 import kotlin.coroutines.resume
 import kotlinx.coroutines.sync.withLock
+import java.nio.charset.StandardCharsets
 
 open class YoutubeExtractor : ExtractorApi() {
     override val mainUrl = "https://www.youtube.com"
@@ -62,531 +70,16 @@ open class YoutubeExtractor : ExtractorApi() {
         private var serverPort: Int = 0
         private val serverLock = Any()
 
-        private val tokenMutex = kotlinx.coroutines.sync.Mutex()
-
-        private val manifestMap: MutableMap<String, String> = Collections.synchronizedMap(
-            object : LinkedHashMap<String, String>(128, 0.75f, true) {
-                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
-                    return size > 1000
-                }
-            }
-        )
-
-        private val serverExecutor = ThreadPoolExecutor(
-            2, 
-            8, 
-            30L, 
-            TimeUnit.SECONDS,
-            LinkedBlockingQueue(256),
-            ThreadFactory { r -> Thread(r, "YT-DASH-Server-Worker") },
-            ThreadPoolExecutor.CallerRunsPolicy()
-        )
-
         init {
             YoutubeStreamExtractor.setFetchIosClient(true)
-
-            YoutubeStreamExtractor.setPoTokenProvider(object : PoTokenProvider {
-                override fun getWebClientPoToken(videoId: String?): PoTokenResult? {
-                    println("[YT_DEBUG] [Telemetry] getWebClientPoToken requested. Video ID: $videoId")
-                    return getPoTokenResultForVideo(videoId)
-                }
-
-                override fun getWebEmbedClientPoToken(videoId: String?): PoTokenResult? {
-                    println("[YT_DEBUG] [Telemetry] getWebEmbedClientPoToken requested. Video ID: $videoId")
-                    return getPoTokenResultForVideo(videoId)
-                }
-
-                override fun getAndroidClientPoToken(videoId: String?): PoTokenResult? {
-                    println("[YT_DEBUG] [Telemetry] getAndroidClientPoToken requested. Video ID: $videoId")
-                    return getPoTokenResultForVideo(videoId)
-                }
-
-                override fun getIosClientPoToken(videoId: String?): PoTokenResult? {
-                    println("[YT_DEBUG] [Telemetry] getIosClientPoToken requested. Video ID: $videoId")
-                    return getPoTokenResultForVideo(videoId)
-                }
-            })
+            // [최종 연동 완료]: 순정 NewPipe 앱 사양의 PoTokenProviderImpl 인스턴스를 Extractor에 직접 이식
+            YoutubeStreamExtractor.setPoTokenProvider(PoTokenProviderImpl)
         }
 
         fun clearCache(videoId: String) {
             println("[YT_DEBUG] [Telemetry] clearCache triggered for Video ID: $videoId")
             ytVideos.remove(videoId)
             ytVideosSubtitles.remove(videoId)
-        }
-
-        private fun getPoTokenResultForVideo(videoId: String?): PoTokenResult? {
-            val id = videoId ?: "aqz-KE-bpKQ"
-            val cached = getCachedTokens(id)
-            if (cached != null) {
-                println("[YT_DEBUG] [Telemetry] Cache HIT for video: [$id]. poToken: ${cached.first.take(15)}...")
-                // [교정완료]: 생성자 규격 불일치 버그 수정 (visitorData, playerRequestPoToken, streamingDataPoToken)
-                return PoTokenResult(cached.second, cached.first, cached.first)
-            }
-
-            println("[YT_DEBUG] [Telemetry] Cache MISS for video: [$id]. Entering Thread-Safe Mutex Lock.")
-            val generated: Triple<String, String, String?>? = kotlinx.coroutines.runBlocking {
-                tokenMutex.withLock {
-                    val doubleCheck = getCachedTokens(id)
-                    if (doubleCheck != null) {
-                        println("[YT_DEBUG] [Telemetry] Mutex Double-Check HIT for video: [$id]")
-                        doubleCheck
-                    } else {
-                        println("[YT_DEBUG] [Telemetry] Spawning WebView Attestation Sandbox for video: [$id]")
-                        getPoTokenAndVisitor(id)
-                    }
-                }
-            }
-
-            return if (generated != null) {
-                println("[YT_DEBUG] [Telemetry] Final Binding success. poToken: ${generated.first.take(20)}... bound to Video [$id]")
-                // [교정완료]: 생성자 규격 불일치 버그 수정 (visitorData, playerRequestPoToken, streamingDataPoToken)
-                val visitor = if (generated.second.isNotBlank()) generated.second else "CgptdWpfa0NXZ2tfdyi28vS0Bg"
-                PoTokenResult(visitor, generated.first, generated.first)
-            } else {
-                println("[YT_DEBUG] [Telemetry] Attestation Sandboxing failed completely for video [$id]. Proceeding with bare request.")
-                null
-            }
-        }
-
-        private fun getCachedTokens(videoId: String): Triple<String, String, String?>? {
-            val context = AcraApplication.context ?: return null
-            val prefs = PreferenceManager.getDefaultSharedPreferences(context)
-            val poToken = prefs.getString("yt_cached_potoken_$videoId", null)
-            val visitorData = prefs.getString("yt_cached_visitor_data_$videoId", null)
-            val cookieStr = prefs.getString("yt_cached_cookie_$videoId", null)
-            val timestamp = prefs.getLong("yt_potoken_timestamp_$videoId", 0L)
-
-            if (poToken.isNullOrBlank() || visitorData.isNullOrBlank()) {
-                return null
-            }
-
-            val elapsed = System.currentTimeMillis() - timestamp
-            val remainingSec = (3 * 3600 * 1000 - elapsed) / 1000
-            if (elapsed > 3 * 3600 * 1000) { 
-                println("[YT_DEBUG] [Telemetry] Cached token expired for video: [$videoId]. Elapsed: ${elapsed / 1000}s")
-                return null
-            }
-
-            println("[YT_DEBUG] [Telemetry] Cache Valid. Remaining: ${remainingSec}s for video: [$videoId]")
-            return Triple(poToken, visitorData, cookieStr)
-        }
-
-        private fun saveCachedTokens(videoId: String, poToken: String, visitorData: String, cookieStr: String?) {
-            val context = AcraApplication.context ?: return
-            val prefs = PreferenceManager.getDefaultSharedPreferences(context)
-            val now = System.currentTimeMillis()
-            
-            println("[YT_DEBUG] [Telemetry] Saving Generated Attestation. Video: [$videoId], poToken: ${poToken.take(15)}..., visitorData: ${visitorData.take(15)}")
-            val editor = prefs.edit()
-                .putString("yt_cached_potoken_$videoId", poToken)
-                .putString("yt_cached_visitor_data_$videoId", visitorData)
-                .putLong("yt_potoken_timestamp_$videoId", now)
-                
-            if (!cookieStr.isNullOrBlank()) {
-                editor.putString("yt_cached_cookie_$videoId", cookieStr)
-                
-                val visitorInfoLive = extractCookieValue(cookieStr, "VISITOR_INFO1_LIVE")
-                if (!visitorInfoLive.isNullOrBlank()) {
-                    editor.putString("VISITOR_INFO1_LIVE", visitorInfoLive)
-                    println("[YT_DEBUG] [Telemetry] Syncing VISITOR_INFO1_LIVE Cookie: $visitorInfoLive")
-                }
-                
-                val ysc = extractCookieValue(cookieStr, "YSC")
-                if (!ysc.isNullOrBlank()) {
-                    editor.putString("YSC", ysc)
-                    println("[YT_DEBUG] [Telemetry] Syncing YSC Cookie: $ysc")
-                }
-            }
-            editor.apply()
-        }
-
-        private fun extractCookieValue(cookieStr: String?, cookieName: String): String? {
-            if (cookieStr.isNullOrBlank()) return null
-            val cookies = cookieStr.split(";")
-            for (c in cookies) {
-                val trimmed = c.trim()
-                if (trimmed.startsWith("$cookieName=")) {
-                    return trimmed.substringAfter("=")
-                }
-            }
-            return null
-        }
-
-        private suspend fun getPoTokenAndVisitor(videoId: String): Triple<String, String, String?>? = withContext(Dispatchers.Main) {
-            val context = AcraApplication.context ?: return@withContext null
-            val targetUrl = "https://www.youtube.com/watch?v=$videoId"
-            val startTime = System.currentTimeMillis()
-            println("[YT_DEBUG] [Telemetry] Starting WebView attestation sandboxing on Mobile Watch Page.")
-            println("[YT_DEBUG] [Telemetry] Target URL: $targetUrl")
-
-            suspendCancellableCoroutine { continuation ->
-                val webView = WebView(context)
-                var isCompleted = false
-                val handler = android.os.Handler(android.os.Looper.getMainLooper())
-                var pollRunnable: Runnable? = null
-
-                val safeResume = { res: Triple<String, String, String?>? ->
-                    if (!isCompleted) {
-                        isCompleted = true
-                        pollRunnable?.let { handler.removeCallbacks(it) }
-                        val duration = System.currentTimeMillis() - startTime
-                        println("[YT_DEBUG] [Telemetry] WebView Attestation finished in ${duration}ms. Success: ${res != null}")
-                        if (continuation.isActive) {
-                            continuation.resume(res)
-                        }
-                        webView.destroy()
-                    }
-                }
-
-                class PoTokenBridge {
-                    @JavascriptInterface
-                    fun onPoTokenFound(token: String, visitor: String, url: String) {
-                        android.os.Handler(android.os.Looper.getMainLooper()).post {
-                            if (isCompleted) return@post
-                            println("[YT_DEBUG] [Telemetry] [Bridge-Callback] Captured Token: ${token.take(20)}...")
-                            println("[YT_DEBUG] [Telemetry] [Bridge-Callback] Captured Visitor: $visitor")
-                            
-                            val cookieManager = android.webkit.CookieManager.getInstance()
-                            val cookieStr = cookieManager.getCookie(targetUrl)
-                            
-                            saveCachedTokens(videoId, token, visitor, cookieStr)
-                            safeResume(Triple(token, visitor, cookieStr))
-                        }
-                    }
-                }
-
-                webView.apply {
-                    @SuppressLint("SetJavaScriptEnabled")
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-                    settings.databaseEnabled = true
-                    settings.mediaPlaybackRequiresUserGesture = false 
-                    
-                    val defaultUa = settings.userAgentString
-                    println("[YT_DEBUG] [Telemetry] [UA_Check] Using Genuine Default Mobile WebView UA: $defaultUa")
-                    
-                    settings.loadsImagesAutomatically = false
-
-                    addJavascriptInterface(PoTokenBridge(), "PoTokenBridge")
-
-                    webChromeClient = object : WebChromeClient() {
-                        override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
-                            consoleMessage?.let {
-                                println("[YT_DEBUG] [WebView-Console] [${it.messageLevel()}] ${it.message()} (Source: ${it.sourceId()}:${it.lineNumber()})")
-                            }
-                            return true
-                        }
-                    }
-
-                    pollRunnable = object : Runnable {
-                        override fun run() {
-                            if (isCompleted) return
-
-                            // [유튜브 정품 Player Response 모바일 API 폴링]:
-                            // 비동기 /player 네트워크 수집에 잡히지 않더라도, 동영상이 기동되는 즉시 html5 플레이어 
-                            // 위젯이 생성한 메모리 원천Response 객체를 호출하여 poToken 및 pot 파라미터를 낚아채는 가속 마스터 수식
-                            val pollingScript = """
-                                (function() {
-                                    try {
-                                        var poToken = null;
-                                        var visitorData = null;
-                                        
-                                        var player = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
-                                        if (player && typeof player.getPlayerResponse === 'function') {
-                                            var pr = player.getPlayerResponse();
-                                            if (pr) {
-                                                if (pr.serviceIntegrityDimensions && pr.serviceIntegrityDimensions.poToken) {
-                                                    poToken = pr.serviceIntegrityDimensions.poToken;
-                                                }
-                                                if (!poToken && pr.streamingData && pr.streamingData.poToken) {
-                                                    poToken = pr.streamingData.poToken;
-                                                }
-                                                if (!poToken && pr.streamingData && pr.streamingData.adaptiveFormats) {
-                                                    var formats = pr.streamingData.adaptiveFormats;
-                                                    for (var i = 0; i < formats.length; i++) {
-                                                        var url = formats[i].url || formats[i].signatureCipher || "";
-                                                        var m = url.match(/[&?]pot=([^&]+)/);
-                                                        if (m) {
-                                                            poToken = decodeURIComponent(m[1]);
-                                                            break;
-                                                        }
-                                                    }
-                                                }
-                                                if (pr.responseContext && pr.responseContext.visitorData) {
-                                                    visitorData = pr.responseContext.visitorData;
-                                                }
-                                            }
-                                        }
-                                        
-                                        if (!poToken) {
-                                            var pr = window.ytInitialPlayerResponse;
-                                            if (pr) {
-                                                if (pr.serviceIntegrityDimensions && pr.serviceIntegrityDimensions.poToken) {
-                                                    poToken = pr.serviceIntegrityDimensions.poToken;
-                                                }
-                                                if (!poToken && pr.streamingData && pr.streamingData.poToken) {
-                                                    poToken = pr.streamingData.poToken;
-                                                }
-                                            }
-                                        }
-
-                                        if (poToken) {
-                                            return JSON.stringify({ poToken: poToken, visitorData: visitorData || "" });
-                                        }
-                                        return JSON.stringify({ error: 'Player response poToken not available yet' });
-                                    } catch (e) {
-                                        return JSON.stringify({ error: 'Exception in polling: ' + e.message });
-                                    }
-                                })()
-                            """.trimIndent()
-
-                            evaluateJavascript(pollingScript) { jsonResult ->
-                                if (isCompleted) return@evaluateJavascript
-
-                                if (jsonResult != null && jsonResult != "null" && jsonResult.isNotBlank()) {
-                                    try {
-                                        val cleanedJson = jsonResult.replace("\\\"", "\"").removePrefix("\"").removeSuffix("\"")
-                                        val json = JSONObject(cleanedJson)
-
-                                        if (!json.has("error")) {
-                                            val poToken = json.optString("poToken")
-                                            val visitorData = json.optString("visitorData")
-
-                                            if (poToken.isNotBlank()) {
-                                                println("[YT_DEBUG] [Telemetry] [Polling-Fallback] Success! Captured poToken via getPlayerResponse().")
-                                                val cookieManager = android.webkit.CookieManager.getInstance()
-                                                val cookieStr = cookieManager.getCookie(targetUrl)
-                                                
-                                                saveCachedTokens(videoId, poToken, visitorData, cookieStr)
-                                                safeResume(Triple(poToken, visitorData, cookieStr))
-                                                return@evaluateJavascript
-                                            }
-                                        }
-                                    } catch (e: Exception) {
-                                        // 무시
-                                    }
-                                }
-                                handler.postDelayed(this, 300)
-                            }
-                        }
-                    }
-
-                    val injectJsHooks = {
-                        val hookScript = """
-                            (function() {
-                                if (window._poTokenHookInjected) {
-                                    return;
-                                }
-                                window._poTokenHookInjected = true;
-                                console.log("[JS_HOOK] Injecting Fetch/XHR Interceptors and Active Ad-Skipper...");
-
-                                var skipAd = function() {
-                                    var video = document.querySelector('video');
-                                    var adShowing = document.querySelector('.ad-showing, .ytp-ad-player-overlay, .ytp-ad-player-overlay-instream-info, .ytp-ad-overlay-container, .ytp-ad-persistent-progress-bar');
-                                    var skipBtn = document.querySelector('.ytp-ad-skip-button, .ytp-ad-skip-button-modern, .ytp-ad-skip-button-slot, .ytp-ad-skip-button-container');
-                                    if ((adShowing || skipBtn) && video) {
-                                        console.log("[AD_SKIP] Ad detected! Force-skipping...");
-                                        if (video.duration && isFinite(video.duration)) {
-                                            video.currentTime = video.duration;
-                                        } else {
-                                            video.currentTime = 9999;
-                                        }
-                                        if (skipBtn) {
-                                            skipBtn.click();
-                                        }
-                                    }
-                                };
-                                setInterval(skipAd, 200);
-
-                                function scanObjectForPoToken(obj) {
-                                    if (!obj) return null;
-                                    if (typeof obj === 'string') {
-                                        if (obj.length > 80 && obj.length < 200 && (obj.startsWith('M') || obj.startsWith('AO'))) {
-                                            return obj;
-                                        }
-                                        return null;
-                                    }
-                                    if (typeof obj === 'object') {
-                                        for (var key in obj) {
-                                            if (obj.hasOwnProperty(key)) {
-                                                if (key === 'poToken' || key === 'rolloutToken') {
-                                                    if (typeof obj[key] === 'string' && obj[key].length > 50) {
-                                                        return obj[key];
-                                                    }
-                                                }
-                                                var found = scanObjectForPoToken(obj[key]);
-                                                if (found) return found;
-                                            }
-                                        }
-                                    }
-                                    return null;
-                                }
-
-                                function checkPayload(body, url) {
-                                    if (!body) return;
-                                    try {
-                                        var parsed = null;
-                                        if (typeof body === 'string') {
-                                            parsed = JSON.parse(body);
-                                        } else {
-                                            parsed = body;
-                                        }
-                                        if (parsed) {
-                                            var token = scanObjectForPoToken(parsed);
-                                            var visitorData = null;
-                                            if (parsed.context && parsed.context.client) {
-                                                visitorData = parsed.context.client.visitorData;
-                                            }
-                                            if (token) {
-                                                console.log("[JS_HOOK] Success! Captured poToken: " + token.substring(0, 15) + "..., visitorData: " + visitorData);
-                                                if (window.PoTokenBridge) {
-                                                    window.PoTokenBridge.onPoTokenFound(token, visitorData || "", url || "");
-                                                }
-                                            }
-                                        }
-                                    } catch (e) {
-                                        console.log("[JS_HOOK] JSON payload scan issue: " + e.message);
-                                    }
-                                }
-
-                                var rawOpen = XMLHttpRequest.prototype.open;
-                                XMLHttpRequest.prototype.open = function(method, url) {
-                                    this._url = url;
-                                    return rawOpen.apply(this, arguments);
-                                };
-
-                                var rawSend = XMLHttpRequest.prototype.send;
-                                XMLHttpRequest.prototype.send = function(body) {
-                                    if (this._url && (this._url.indexOf('v1/player') !== -1 || this._url.indexOf('youtubei/v1/player') !== -1)) {
-                                        console.log("[JS_HOOK] XHR Payload intercepted. Endpoint: " + this._url);
-                                        checkPayload(body, this._url);
-                                    }
-                                    return rawSend.apply(this, arguments);
-                                };
-
-                                var rawFetch = window.fetch;
-                                window.fetch = function(input, init) {
-                                    var url = (typeof input === 'string') ? input : (input && input.url);
-                                    if (url && (url.indexOf('v1/player') !== -1 || url.indexOf('youtubei/v1/player') !== -1)) {
-                                        console.log("[JS_HOOK] Fetch Payload intercepted. Endpoint: " + url);
-                                        if (init && init.body) {
-                                            checkPayload(init.body, url);
-                                        }
-                                    }
-                                    return rawFetch.apply(this, arguments);
-                                };
-
-                                console.log("[JS_HOOK] Flow hook injection completed.");
-                            })();
-                        """.trimIndent()
-                        evaluateJavascript(hookScript, null)
-                    }
-
-                    webViewClient = object : WebViewClient() {
-                        override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
-                            val urlStr = request?.url?.toString() ?: return null
-                            if (urlStr.contains(".png") || urlStr.contains(".jpg") || urlStr.contains(".jpeg") || 
-                                urlStr.contains(".woff") || urlStr.contains(".ttf") || urlStr.contains(".css") ||
-                                urlStr.contains("googleads") || urlStr.contains("doubleclick") || urlStr.contains("adservice")) {
-                                return WebResourceResponse("text/plain", "UTF-8", ByteArrayInputStream(ByteArray(0)))
-                            }
-                            return null
-                        }
-
-                        override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                            println("[YT_DEBUG] [Telemetry] [onPageStarted] Loading: $url. Injecting hook script.")
-                            injectJsHooks()
-                        }
-
-                        override fun onPageFinished(view: WebView?, url: String?) {
-                            println("[YT_DEBUG] [Telemetry] [onPageFinished] Loading done: $url. Sync-injecting hook.")
-                            injectJsHooks()
-                            pollRunnable?.let { handler.post(it) }
-                        }
-
-                        override fun onLoadResource(view: WebView?, url: String?) {
-                            if (url != null && (url.contains("player") || url.contains("jnn") || url.contains("botguard") || url.contains("googleapis"))) {
-                                println("[YT_DEBUG] [Telemetry] [onLoadResource] Intercepted resource loading: $url")
-                            }
-                        }
-
-                        override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
-                            println("[YT_DEBUG] [Telemetry] [onReceivedError] Failed request: ${request?.url}, Error: ${error?.description} (Code: ${error?.errorCode})")
-                        }
-                    }
-
-                    // 12초 타임아웃
-                    handler.postDelayed({
-                        if (!isCompleted) {
-                            println("[YT_DEBUG] [Telemetry] WebView sandbox attestation TIMEOUT (12s). Triggering deep diagnostic scan...")
-                            
-                            val diagnosticScript = """
-                                (function() {
-                                    var logs = [];
-                                    logs.push("========= ATTESTATION TIMEOUT DIAGNOSTIC REPORT =========");
-                                    logs.push("Page Title: " + document.title);
-                                    logs.push("Current URL: " + window.location.href);
-                                    logs.push("ytInitialPlayerResponse exists: " + (!!window.ytInitialPlayerResponse));
-                                    if (window.ytInitialPlayerResponse) {
-                                        logs.push("  - Keys: " + Object.keys(window.ytInitialPlayerResponse).join(", "));
-                                        var pr = window.ytInitialPlayerResponse;
-                                        var sid = pr.serviceIntegrityDimensions || {};
-                                        logs.push("  - serviceIntegrityDimensions exists: " + (!!pr.serviceIntegrityDimensions));
-                                        logs.push("  - poToken in SID: " + (!!sid.poToken));
-                                        var sd = pr.streamingData || {};
-                                        logs.push("  - streamingData exists: " + (!!pr.streamingData));
-                                        logs.push("  - poToken in streamingData: " + (!!sd.poToken));
-                                    }
-                                    logs.push("ytplayer exists: " + (!!window.ytplayer));
-                                    if (window.ytplayer) {
-                                        logs.push("  - config exists: " + (!!window.ytplayer.config));
-                                        if (window.ytplayer.config) {
-                                            logs.push("  - config.args exists: " + (!!window.ytplayer.config.args));
-                                        }
-                                        logs.push("  - bootstrapPlayerResponse exists: " + (!!window.ytplayer.bootstrapPlayerResponse));
-                                    }
-                                    logs.push("ytcfg exists: " + (!!window.ytcfg));
-                                    if (window.ytcfg && typeof window.ytcfg.get === 'function') {
-                                        logs.push("  - PLAYER_RESPONSE exists: " + (!!window.ytcfg.get('PLAYER_RESPONSE')));
-                                        logs.push("  - PLAYER_VARS exists: " + (!!window.ytcfg.get('PLAYER_VARS')));
-                                        logs.push("  - VISITOR_DATA: " + window.ytcfg.get('VISITOR_DATA'));
-                                    }
-                                    logs.push("Cookies on page: " + document.cookie);
-                                    logs.push("Video elements on page: " + document.getElementsByTagName('video').length);
-                                    if (document.getElementsByTagName('video').length > 0) {
-                                        var v = document.getElementsByTagName('video')[0];
-                                        logs.push("  - src: " + v.src);
-                                        logs.push("  - paused: " + v.paused);
-                                        logs.push("  - currentTime: " + v.currentTime);
-                                        logs.push("  - error code: " + (v.error ? v.error.code : "none"));
-                                    }
-                                    var errorScreen = document.querySelector('.ytp-error');
-                                    if (errorScreen) {
-                                        logs.push("VISIBLE PLAYER ERROR: " + errorScreen.innerText);
-                                    }
-                                    console.log(logs.join("\n"));
-                                    return logs.join("\n");
-                                })();
-                            """.trimIndent()
-                            
-                            evaluateJavascript(diagnosticScript) { diagnosticResult ->
-                                println("[YT_DEBUG] [Telemetry] Timeout diagnostic scan dumped.")
-                                safeResume(null)
-                            }
-                        }
-                    }, 12000)
-                }
-
-                // 공식 모바일 Watch 페이지 진입
-                webView.loadUrl(targetUrl)
-
-                continuation.invokeOnCancellation {
-                    android.os.Handler(android.os.Looper.getMainLooper()).post {
-                        println("[YT_DEBUG] [Telemetry] Sandbox cancellation requested. Releasing web resources.")
-                        safeResume(null)
-                    }
-                }
-            }
         }
     }
 
@@ -621,7 +114,6 @@ open class YoutubeExtractor : ExtractorApi() {
         println("[YT_DEBUG] [getUrl] 호출됨. 원본 URL: $url")
         val cleanedUrl = url.replace(schemaStripRegex, "")
         val videoId = YoutubeUtils.extractYoutubeId(cleanedUrl) ?: cleanedUrl
-        println("[YT_DEBUG] [getUrl] 가공된 cleanedUrl: $cleanedUrl, 비디오 ID: $videoId")
 
         val cachedLinks = ytVideos[videoId]
         if (cachedLinks.isNullOrEmpty()) {
@@ -814,3 +306,577 @@ open class YoutubeExtractor : ExtractorApi() {
                     try {
                         val active = activeServer
                         if (active != null) {
+                            while (!active.isClosed) {
+                                val client = active.accept()
+                                client.soTimeout = 5000 
+                                serverExecutor.execute { handleClient(client) }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        println("[YT_DEBUG] [ServerSocket-Thread] accept() 도중 오류 발생: ${e.message}")
+                    } finally {
+                        synchronized(serverLock) {
+                            try {
+                                activeServer?.close()
+                            } catch (_: Exception) {}
+                            activeServer = null
+                            serverPort = 0
+                        }
+                        println("[YT_DEBUG] [ServerSocket-Thread] 리스너 중단 및 포트 가상화 초기화.")
+                    }
+                }
+            } catch (e: Exception) { 
+                logError(e) 
+            }
+        }
+    }
+
+    private fun registerManifestAndGetUrl(xmlContent: String): String? {
+        if (serverPort == 0) return null
+        val id = UUID.randomUUID().toString()
+        manifestMap[id] = xmlContent
+        return "http://127.0.0.1:$serverPort/$id.mpd"
+    }
+
+    private fun handleClient(client: Socket) {
+        try {
+            client.use { socket ->
+                val reader = BufferedReader(InputStreamReader(socket.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))
+                val os = socket.getOutputStream()
+                val line = reader.readLine()
+                if (line != null && line.startsWith("GET")) {
+                    val parts = line.split(" ")
+                    if (parts.size > 1) {
+                        val cleanPath = parts[1].substringAfter("/").substringBefore("?")
+                        val path = if (cleanPath.endsWith(".mpd", ignoreCase = true)) {
+                            cleanPath.substring(0, cleanPath.length - 4)
+                        } else {
+                            cleanPath
+                        }
+                        val content = manifestMap[path]
+                        if (content != null) {
+                            val bodyBytes = content.toByteArray(java.nio.charset.StandardCharsets.UTF_8)
+                            val headerBuilder = java.lang.StringBuilder()
+                            headerBuilder.append("HTTP/1.1 200 OK\r\n")
+                            headerBuilder.append("Content-Type: application/dash+xml\r\n")
+                            headerBuilder.append("Content-Length: ${bodyBytes.size}\r\n")
+                            headerBuilder.append("Connection: close\r\n")
+                            headerBuilder.append("Access-Control-Allow-Origin: *\r\n")
+                            headerBuilder.append("\r\n")
+
+                            val headerBytes = headerBuilder.toString().toByteArray(java.nio.charset.StandardCharsets.UTF_8)
+                            os.write(headerBytes)
+                            os.write(bodyBytes)
+                            os.flush()
+                        } else {
+                            val errorResponse = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n"
+                            os.write(errorResponse.toByteArray(java.nio.charset.StandardCharsets.UTF_8))
+                            os.flush()
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            println("[YT_DEBUG] [handleClient] 소켓 예외 발생: ${e.message}")
+        }
+    }
+
+    private fun buildDashManifestXml(
+        video: StreamInfo,
+        audioList: List<AudioInfo>,
+        durationSec: Long
+    ): String {
+        val cleanVideoUrl = escapeXml(video.url)
+        val durationString = "PT${durationSec}S"
+
+        val sb = java.lang.StringBuilder(2048)
+        sb.append("""<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011" type="static" minBufferTime="PT5.0S" mediaPresentationDuration="$durationString">""")
+        sb.append("<Period>")
+
+        val vMime = video.mimeType
+        val vCodecs = if (vMime.contains("webm")) "vp9" else "avc1.4d401f"
+
+        val vSegmentBase = if (video.initRange != null && video.indexRange != null) {
+            """<SegmentBase indexRange="${video.indexRange}"><Initialization range="${video.initRange}" /></SegmentBase>"""
+        } else ""
+
+        sb.append("""
+            <AdaptationSet mimeType="$vMime" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
+              <Representation id="video" bandwidth="4000000" width="0" height="${video.height}" codecs="$vCodecs">
+                <BaseURL>$cleanVideoUrl</BaseURL>
+                $vSegmentBase
+              </Representation>
+            </AdaptationSet>
+        """.trimIndent())
+
+        audioList.forEachIndexed { index, audio ->
+            val cleanAudioUrl = escapeXml(audio.url)
+            val audioId = "audio_$index"
+            val aMime = audio.mimeType
+            val aCodecs = if (aMime.contains("webm")) "opus" else "mp4a.40.2"
+
+            val aSegmentBase = if (audio.initRange != null && audio.indexRange != null) {
+                """<SegmentBase indexRange="${audio.initRange}"><Initialization range="${audio.initRange}" /></SegmentBase>"""
+            } else ""
+
+            sb.append("""
+                <AdaptationSet mimeType="$aMime" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
+                  <Representation id="$audioId" bandwidth="${if(audio.bitrate>0) audio.bitrate else 128000}" codecs="$aCodecs">
+                    <BaseURL>$cleanAudioUrl</BaseURL>
+                    $aSegmentBase
+                  </Representation>
+                </AdaptationSet>
+            """.trimIndent())
+        }
+
+        sb.append("</Period>")
+        sb.append("</MPD>")
+        return sb.toString()
+    }
+
+    private fun escapeXml(url: String): String {
+        if (!url.contains('&') && !url.contains('<') && !url.contains('>') && !url.contains('\'') && !url.contains('"')) return url
+        val sb = java.lang.StringBuilder(url.length + 16)
+        for (i in 0 until url.length) {
+            val c = url[i]
+            when (c) {
+                '&' -> sb.append("&amp;")
+                '<' -> sb.append("&lt;")
+                '>' -> sb.append("&gt;")
+                '\'' -> sb.append("&apos;")
+                '"' -> sb.append("&quot;")
+                else -> sb.append(c)
+            }
+        }
+        return sb.toString()
+    }
+
+    private fun getMimeTypeFromUrl(url: String, isAudio: Boolean): String {
+        return try {
+            val decoded = YoutubeUtils.urlDecode(url)
+            if (decoded.contains("video/webm") || decoded.contains("audio/webm")) {
+                if (isAudio) "audio/webm" else "video/webm"
+            } else {
+                if (isAudio) "audio/mp4" else "video/mp4"
+            }
+        } catch (e: Exception) { if (isAudio) "audio/mp4" else "video/mp4" }
+    }
+
+    private fun buildVideoLabelNumber(vs: org.schabi.newpipe.extractor.stream.VideoStream): String {
+        val height = runCatching { vs.height }.getOrNull() ?: 0
+        if (height > 0) return height.toString()
+        return "video"
+    }
+}
+
+//region [NewPipe 순정 App 레벨 PoToken 발급 모듈 - Coroutines 완전 포팅 사양]
+
+interface PoTokenGenerator : Closeable {
+    suspend fun generatePoToken(identifier: String): String
+    fun isExpired(): Boolean
+}
+
+class PoTokenWebView private constructor(
+    context: Context
+) : PoTokenGenerator {
+    private val webView = WebView(context)
+    private val poTokenContinuations = ConcurrentHashMap<String, kotlin.coroutines.Continuation<String>>()
+    private lateinit var expirationInstant: Instant
+    private var initContinuation: kotlin.coroutines.Continuation<Unit>? = null
+
+    companion object {
+        private const val TAG = "PoTokenWebView"
+        private const val GOOGLE_API_KEY = "AIzaSyDyT5W0Jh49F30Pqqtyfdf7pDLFKLJoAnw"
+        private const val REQUEST_KEY = "O43z0dpjhgX20SCx4KAo"
+        private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.3"
+        private const val JS_INTERFACE = "PoTokenWebView"
+
+        suspend fun newPoTokenGenerator(context: Context): PoTokenGenerator = withContext(Dispatchers.Main) {
+            val potWv = PoTokenWebView(context)
+            potWv.initialize()
+            potWv
+        }
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private suspend fun initialize() {
+        val settings = webView.settings
+        settings.javaScriptEnabled = true
+        settings.domStorageEnabled = true
+        settings.databaseEnabled = true
+        settings.userAgentString = USER_AGENT
+        settings.blockNetworkLoads = true // 로컬 연산이므로 네트워크 로딩 방지
+
+        webView.addJavascriptInterface(this, JS_INTERFACE)
+
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onConsoleMessage(m: ConsoleMessage): Boolean {
+                if (m.message().contains("Uncaught")) {
+                    val fmt = "\"${m.message()}\", source: ${m.sourceId()} (${m.lineNumber()})"
+                    println("[YT_DEBUG] [PoTokenWebView] Broken WebView: $fmt")
+                    initContinuation?.resumeWith(Result.failure(Exception("WebView Broken: $fmt")))
+                }
+                return super.onConsoleMessage(m)
+            }
+        }
+
+        // [Asset 격리 해결]: HTML 파일을 에셋 대신 raw string으로 하드코딩 주입
+        val html = """
+            <!DOCTYPE html>
+            <html lang="en"><head><title></title><script>
+            function loadBotGuard(challengeData) {
+                this.vm = this[challengeData.globalName];
+                this.program = challengeData.program;
+                this.vmFunctions = {};
+                this.syncSnapshotFunction = null;
+                if (!this.vm) throw new Error('[BotGuardClient]: VM not found');
+                if (!this.vm.a) throw new Error('[BotGuardClient]: Could not load program');
+                const vmFunctionsCallback = function (asyncSnapshotFunction, shutdownFunction, passEventFunction, checkCameraFunction) {
+                    this.vmFunctions = {
+                        asyncSnapshotFunction: asyncSnapshotFunction,
+                        shutdownFunction: shutdownFunction,
+                        passEventFunction: passEventFunction,
+                        checkCameraFunction: checkCameraFunction
+                    };
+                };
+                this.syncSnapshotFunction = this.vm.a(this.program, vmFunctionsCallback, true, this.userInteractionElement, function () {}, [ [], [] ])[0];
+                return new Promise(function (resolve, reject) {
+                    var i = 0;
+                    var refreshIntervalId = setInterval(function () {
+                        if (!!this.vmFunctions.asyncSnapshotFunction) {
+                            resolve(this);
+                            clearInterval(refreshIntervalId);
+                        }
+                        if (i >= 10000) {
+                            reject("asyncSnapshotFunction is null even after 10s");
+                            clearInterval(refreshIntervalId);
+                        }
+                        i += 1;
+                    }, 1);
+                });
+            }
+            function snapshot(args) {
+                return new Promise(function (resolve, reject) {
+                    if (!this.vmFunctions.asyncSnapshotFunction) return reject(new Error('Async snapshot not found'));
+                    this.vmFunctions.asyncSnapshotFunction(function (response) { resolve(response) }, [
+                        args.contentBinding, args.signedTimestamp, args.webPoSignalOutput, args.skipPrivacyBuffer
+                    ]);
+                });
+            }
+            function runBotGuard(challengeData) {
+                const js = challengeData.interpreterJavascript.privateDoNotAccessOrElseSafeScriptWrappedValue;
+                if (js) { new Function(js)(); } else throw new Error('Could not load VM');
+                const webPoSignalOutput = [];
+                return loadBotGuard({
+                    globalName: challengeData.globalName, globalObj: this, program: challengeData.program
+                }).then(function (botguard) {
+                    return botguard.snapshot({ webPoSignalOutput: webPoSignalOutput })
+                }).then(function (botguardResponse) {
+                    return { webPoSignalOutput: webPoSignalOutput, botguardResponse: botguardResponse }
+                });
+            }
+            function obtainPoToken(webPoSignalOutput, integrityToken, identifier) {
+                const getMinter = webPoSignalOutput[0];
+                if (!getMinter) throw new Error('PMD:Undefined');
+                const mintCallback = getMinter(integrityToken);
+                if (!(mintCallback instanceof Function)) throw new Error('APF:Failed');
+                const result = mintCallback(identifier);
+                if (!result) throw new Error('YNJ:Undefined');
+                if (!(result instanceof Uint8Array)) throw new Error('ODM:Invalid');
+                return result;
+            }
+            </script></head><body></body></html>
+        """.trimIndent()
+
+        suspendCancellableCoroutine<Unit> { cont ->
+            initContinuation = cont
+            webView.loadDataWithBaseURL("https://www.youtube.com", html, "text/html", "utf-8", null)
+        }
+    }
+
+    @JavascriptInterface
+    fun downloadAndRunBotguard() {
+        // [Rx Java 우회]: 백그라운드 코루틴 발송으로 순정 gRPC API 호출 완수
+        GlobalScope.launch(Dispatchers.IO) {
+            try {
+                val responseBody = makeBotguardServiceRequest(
+                    "https://www.youtube.com/api/jnn/v1/Create",
+                    "[ \"$REQUEST_KEY\" ]"
+                )
+                val parsedChallengeData = parseChallengeData(responseBody)
+                withContext(Dispatchers.Main) {
+                    webView.evaluateJavascript(
+                        """try {
+                            data = $parsedChallengeData
+                            runBotGuard(data).then(function (result) {
+                                this.webPoSignalOutput = result.webPoSignalOutput
+                                $JS_INTERFACE.onRunBotguardResult(result.botguardResponse)
+                            }, function (error) {
+                                $JS_INTERFACE.onJsInitializationError(error + "\n" + error.stack)
+                            })
+                        } catch (error) {
+                            $JS_INTERFACE.onJsInitializationError(error + "\n" + error.stack)
+                        }""".trimIndent(),
+                        null
+                    )
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    initContinuation?.resumeWith(Result.failure(e))
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun onJsInitializationError(error: String) {
+        initContinuation?.resumeWith(Result.failure(Exception("JS Init Error: $error")))
+    }
+
+    @JavascriptInterface
+    fun onRunBotguardResult(botguardResponse: String) {
+        GlobalScope.launch(Dispatchers.IO) {
+            try {
+                val responseBody = makeBotguardServiceRequest(
+                    "https://www.youtube.com/api/jnn/v1/GenerateIT",
+                    "[ \"$REQUEST_KEY\", \"$botguardResponse\" ]"
+                )
+                val (integrityToken, expirationTimeInSeconds) = parseIntegrityTokenData(responseBody)
+                expirationInstant = Instant.now().plusSeconds(expirationTimeInSeconds - 600)
+
+                withContext(Dispatchers.Main) {
+                    webView.evaluateJavascript("this.integrityToken = $integrityToken", null)
+                    initContinuation?.resume(Unit)
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    initContinuation?.resumeWith(Result.failure(e))
+                }
+            }
+        }
+    }
+
+    override suspend fun generatePoToken(identifier: String): String = withContext(Dispatchers.Main) {
+        val u8Identifier = stringToU8(identifier)
+        suspendCancellableCoroutine { cont ->
+            poTokenContinuations[identifier] = cont
+            webView.evaluateJavascript(
+                """try {
+                        identifier = "$identifier"
+                        u8Identifier = $u8Identifier
+                        poTokenU8 = obtainPoToken(webPoSignalOutput, integrityToken, u8Identifier)
+                        poTokenU8String = ""
+                        for (i = 0; i < poTokenU8.length; i++) {
+                            if (i != 0) poTokenU8String += ","
+                            poTokenU8String += poTokenU8[i]
+                        }
+                        $JS_INTERFACE.onObtainPoTokenResult(identifier, poTokenU8String)
+                    } catch (error) {
+                        $JS_INTERFACE.onObtainPoTokenError(identifier, error + "\n" + error.stack)
+                    }""".trimIndent(),
+                null
+            )
+        }
+    }
+
+    @JavascriptInterface
+    fun onObtainPoTokenError(identifier: String, error: String) {
+        poTokenContinuations.remove(identifier)?.resumeWith(Result.failure(Exception(error)))
+    }
+
+    @JavascriptInterface
+    fun onObtainPoTokenResult(identifier: String, poTokenU8: String) {
+        try {
+            val poToken = u8ToBase64(poTokenU8)
+            poTokenContinuations.remove(identifier)?.resume(poToken)
+        } catch (t: Throwable) {
+            poTokenContinuations.remove(identifier)?.resumeWith(Result.failure(t))
+        }
+    }
+
+    override fun isExpired(): Boolean {
+        return Instant.now().isAfter(expirationInstant)
+    }
+
+    override fun close() {
+        android.os.Handler(Looper.getMainLooper()).post {
+            webView.clearHistory()
+            webView.clearCache(true)
+            webView.loadUrl("about:blank")
+            webView.onPause()
+            webView.destroy()
+        }
+    }
+
+    // [다운로더 독립화]: 자바 순정 HTTP 전송 체계로 BotGuard API 연계 완벽 구성
+    private fun makeBotguardServiceRequest(urlStr: String, data: String): String {
+        val url = URL(urlStr)
+        val conn = url.openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.doOutput = true
+        conn.setRequestProperty("User-Agent", USER_AGENT)
+        conn.setRequestProperty("Accept", "application/json")
+        conn.setRequestProperty("Content-Type", "application/json+protobuf")
+        conn.setRequestProperty("x-goog-api-key", GOOGLE_API_KEY)
+        conn.setRequestProperty("x-user-agent", "grpc-web-javascript/0.1")
+
+        conn.outputStream.use { os ->
+            os.write(data.toByteArray(StandardCharsets.UTF_8))
+        }
+        val httpCode = conn.responseCode
+        if (httpCode != 200) {
+            throw Exception("HTTP Error from BotGuard Service: $httpCode")
+        }
+        return conn.inputStream.bufferedReader().use { it.readText() }
+    }
+}
+
+// [바이너리 데이터 정합성 해석 어댑터]
+fun parseChallengeData(rawChallengeData: String): String {
+    val scrambled = JSONArray(rawChallengeData)
+    val challengeData = if (scrambled.length() > 1 && scrambled.optString(1).isNotEmpty()) {
+        val descrambled = descramble(scrambled.getString(1))
+        JSONArray(descrambled)
+    } else {
+        scrambled.getJSONArray(0)
+    }
+
+    val messageId = challengeData.getString(0)
+    val interpreterHash = challengeData.getString(3)
+    val program = challengeData.getString(4)
+    val globalName = challengeData.getString(5)
+    val clientExperimentsStateBlob = challengeData.getString(7)
+
+    val arr1 = challengeData.optJSONArray(1)
+    var privateDoNotAccessOrElseSafeScriptWrappedValue: String? = null
+    if (arr1 != null) {
+        for (i in 0 until arr1.length()) {
+            val item = arr1.optString(i)
+            if (!item.isNullOrBlank()) {
+                privateDoNotAccessOrElseSafeScriptWrappedValue = item
+                break
+            }
+        }
+    }
+
+    val arr2 = challengeData.optJSONArray(2)
+    var privateDoNotAccessOrElseTrustedResourceUrlWrappedValue: String? = null
+    if (arr2 != null) {
+        for (i in 0 until arr2.length()) {
+            val item = arr2.optString(i)
+            if (!item.isNullOrBlank()) {
+                privateDoNotAccessOrElseTrustedResourceUrlWrappedValue = item
+                break
+            }
+        }
+    }
+
+    val out = JSONObject()
+    out.put("messageId", messageId)
+    val interpreterJs = JSONObject()
+    interpreterJs.put("privateDoNotAccessOrElseSafeScriptWrappedValue", privateDoNotAccessOrElseSafeScriptWrappedValue)
+    interpreterJs.put("privateDoNotAccessOrElseTrustedResourceUrlWrappedValue", privateDoNotAccessOrElseTrustedResourceUrlWrappedValue)
+    out.put("interpreterJavascript", interpreterJs)
+    out.put("interpreterHash", interpreterHash)
+    out.put("program", program)
+    out.put("globalName", globalName)
+    out.put("clientExperimentsStateBlob", clientExperimentsStateBlob)
+    
+    return out.toString()
+}
+
+fun parseIntegrityTokenData(rawIntegrityTokenData: String): Pair<String, Long> {
+    val integrityTokenData = JSONArray(rawIntegrityTokenData)
+    return base64ToU8(integrityTokenData.getString(0)) to integrityTokenData.getLong(1)
+}
+
+fun stringToU8(identifier: String): String {
+    return newUint8Array(identifier.toByteArray(StandardCharsets.UTF_8))
+}
+
+fun newUint8Array(contents: ByteArray): String {
+    return "new Uint8Array([" + contents.joinToString(separator = ",") { (it.toInt() and 0xFF).toString() } + "])"
+}
+
+fun u8ToBase64(poToken: String): String {
+    val bytes = poToken.split(",")
+        .map { it.trim().toInt().toByte() }
+        .toByteArray()
+    return android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP or android.util.Base64.URL_SAFE)
+        .replace("=", "")
+}
+
+private fun descramble(scrambledChallenge: String): String {
+    val decoded = android.util.Base64.decode(scrambledChallenge.replace('-', '+').replace('_', '/'), android.util.Base64.DEFAULT)
+    val descrambledBytes = decoded.map { (it + 97).toByte() }.toByteArray()
+    return String(descrambledBytes, StandardCharsets.UTF_8)
+}
+
+private fun base64ToU8(base64: String): String {
+    val decoded = android.util.Base64.decode(base64.replace('-', '+').replace('_', '/'), android.util.Base64.DEFAULT)
+    return newUint8Array(decoded)
+}
+
+// [NewPipe 사양의 PoTokenProvider 수집 연동 모듈]
+object PoTokenProviderImpl : PoTokenProvider {
+    private val lock = Any()
+    private var webPoTokenVisitorData: String? = null
+    private var webPoTokenStreamingPot: String? = null
+    private var webPoTokenGenerator: PoTokenGenerator? = null
+
+    override fun getWebClientPoToken(videoId: String): PoTokenResult? {
+        try {
+            return getWebClientPoToken(videoId, forceRecreate = false)
+        } catch (e: Exception) {
+            println("[YT_DEBUG] [PoTokenProviderImpl] Failed to obtain poToken: ${e.message}")
+            return null
+        }
+    }
+
+    private fun getWebClientPoToken(videoId: String, forceRecreate: Boolean): PoTokenResult {
+        val (generator, visitorData, streamingPot, hasBeenRecreated) = synchronized(lock) {
+            val shouldRecreate = webPoTokenGenerator == null || forceRecreate || webPoTokenGenerator!!.isExpired()
+            if (shouldRecreate) {
+                println("[YT_DEBUG] [PoTokenProviderImpl] Recreating PoTokenGenerator Sandbox...")
+                val prefs = PreferenceManager.getDefaultSharedPreferences(AcraApplication.context!!)
+                val savedVisitor = prefs.getString("yt_visitor_data", null) ?: "CgptdWpfa0NXZ2tfdyi28vS0Bg"
+                
+                webPoTokenVisitorData = savedVisitor
+                webPoTokenGenerator?.close()
+                
+                webPoTokenGenerator = kotlinx.coroutines.runBlocking {
+                    PoTokenWebView.newPoTokenGenerator(AcraApplication.context!!)
+                }
+                webPoTokenStreamingPot = kotlinx.coroutines.runBlocking {
+                    webPoTokenGenerator!!.generatePoToken(webPoTokenVisitorData!!)
+                }
+            }
+            
+            Quadruple(webPoTokenGenerator!!, webPoTokenVisitorData!!, webPoTokenStreamingPot!!, shouldRecreate)
+        }
+
+        val playerPot = try {
+            kotlinx.coroutines.runBlocking {
+                generator.generatePoToken(videoId)
+            }
+        } catch (throwable: Throwable) {
+            if (hasBeenRecreated) {
+                throw throwable
+            } else {
+                println("[YT_DEBUG] [PoTokenProviderImpl] Attestation failed, retrying forceRecreate...")
+                return getWebClientPoToken(videoId, forceRecreate = true)
+            }
+        }
+
+        println("[YT_DEBUG] [PoTokenProviderImpl] Attestation SUCCESS! PlayerPot: ${playerPot.take(15)}..., StreamingPot: ${streamingPot.take(15)}...")
+        return PoTokenResult(visitorData, playerPot, streamingPot)
+    }
+
+    override fun getWebEmbedClientPoToken(videoId: String): PoTokenResult? = getWebClientPoToken(videoId)
+    override fun getAndroidClientPoToken(videoId: String): PoTokenResult? = getWebClientPoToken(videoId)
+    override fun getIosClientPoToken(videoId: String): PoTokenResult? = getWebClientPoToken(videoId)
+
+    private data class Quadruple<T1, T2, T3, T4>(val first: T1, val second: T2, val third: T3, val fourth: T4)
+}
+
+//endregion
