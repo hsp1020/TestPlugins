@@ -24,7 +24,7 @@ import kotlin.coroutines.cancellation.CancellationException
 object YoutubeUtils {
     const val CHROME_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
     const val SAFARI_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
-    const val IOS_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
+    const val IOS_USER_AGENT = "com.google.ios.youtube/19.29.35 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X; en_US)"
     const val DEFAULT_CLIENT_VERSION = "2.20240725.01.00"
 
     private val sha1Digest = ThreadLocal.withInitial {
