@@ -220,8 +220,9 @@ open class YoutubeExtractor : ExtractorApi() {
                                         ) {
                                             this.referer = mainUrl
                                             this.quality = video.height
+                                            // [교정완료]: poToken 수집용 Web Chrome UA와 헤더를 일치화시켜 403 차단 전면 잠금 해제
                                             this.headers = mapOf(
-                                                "User-Agent" to YoutubeUtils.IOS_USER_AGENT,
+                                                "User-Agent" to YoutubeUtils.CHROME_USER_AGENT,
                                                 "Origin" to "https://www.youtube.com",
                                                 "Referer" to "https://www.youtube.com"
                                             )
@@ -247,8 +248,9 @@ open class YoutubeExtractor : ExtractorApi() {
                         newExtractorLink(this.name, "$mLabel (Legacy)", mUrl, type = INFER_TYPE) {
                             this.referer = mainUrl
                             this.quality = mHeight
+                            // [교정완료]: poToken 수집용 Web Chrome UA와 헤더를 일치화시켜 403 차단 전면 잠금 해제
                             this.headers = mapOf(
-                                "User-Agent" to YoutubeUtils.IOS_USER_AGENT,
+                                "User-Agent" to YoutubeUtils.CHROME_USER_AGENT,
                                 "Origin" to "https://www.youtube.com",
                                 "Referer" to "https://www.youtube.com"
                             )
@@ -901,6 +903,7 @@ private fun base64ToU8(base64: String): String {
     return newUint8Array(decoded)
 }
 
+// [유튜브 특화형 점(.) -> 이퀄(=) 복원 디코더]
 private fun base64ToByteArray(base64: String): ByteArray {
     val base64Mod = base64
         .replace('-', '+')
