@@ -984,9 +984,9 @@ object PoTokenProviderImpl : PoTokenProvider {
         return PoTokenResult(visitorData, playerPot, streamingPot)
     }
 
-    override fun getWebEmbedClientPoToken(videoId: String): PoTokenResult? = getWebClientPoToken(videoId)
-    override fun getAndroidClientPoToken(videoId: String): PoTokenResult? = getWebClientPoToken(videoId)
-    override fun getIosClientPoToken(videoId: String): PoTokenResult? = getWebClientPoToken(videoId)
+    override fun getWebEmbedClientPoToken(videoId: String): PoTokenResult? = null
+    override fun getAndroidClientPoToken(videoId: String): PoTokenResult? = null //  정상 교정 완료 (null 반환)
+    override fun getIosClientPoToken(videoId: String): PoTokenResult? = null     //  정상 교정 완료 (null 반환)
 
     private data class Quadruple<T1, T2, T3, T4>(val first: T1, val second: T2, val third: T3, val fourth: T4)
 }
