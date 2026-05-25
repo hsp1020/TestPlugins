@@ -92,6 +92,8 @@ open class YoutubeExtractor : ExtractorApi() {
         )
 
         init {
+            // [결정적 패치]: DASH 비디오-오디오 트랙간의 클라이언트 지문 불일치(403) 차단을 완벽 방어하기 위해 
+            // 혼선을 유발하는 iOS 수집 라인을 무효화하고 오직 순정 안드로이드 단일 파이프라인으로 전면 일치화합니다.
             YoutubeStreamExtractor.setFetchIosClient(false)
             YoutubeStreamExtractor.setPoTokenProvider(PoTokenProviderImpl)
         }
@@ -177,6 +179,10 @@ open class YoutubeExtractor : ExtractorApi() {
                         val initR = if (asr.initStart != null && asr.initStart >= 0 && asr.initEnd != null && asr.initEnd >= 0) "${asr.initStart}-${asr.initEnd}" else null
                         val indexR = if (asr.indexStart != null && asr.indexStart >= 0 && asr.indexEnd != null && asr.indexEnd >= 0) "${asr.indexStart}-${asr.indexEnd}" else null
 
+                        // [복원 완료]: 유실되었던 오디오 언어 식별자 추출 전처리 2줄을 완벽 복구
+                        var rawLang = asr.audioTrackId ?: "Default"
+                        if (rawLang.contains(".")) rawLang = rawLang.substringBefore(".")
+
                         AudioInfo(aUrl, mime, bitrate, initR, indexR, rawLang.uppercase())
                     } catch (e: Exception) { null }
                 }.distinctBy { it.url }
@@ -218,7 +224,7 @@ open class YoutubeExtractor : ExtractorApi() {
                                             sourceName,
                                             finalName,
                                             localLink,
-                                            type = ExtractorLinkType.DASH
+                                            type = ExtExtractorLinkType.DASH
                                         ) {
                                             this.referer = mainUrl
                                             this.quality = video.height
