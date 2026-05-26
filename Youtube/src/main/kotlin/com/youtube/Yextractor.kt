@@ -1,8 +1,10 @@
 package com.youtube
 
 import com.lagradost.cloudstream3.SubtitleFile
-import com.lagradost.cloudstream3.newAudioFile
+import com.lagradost.cloudstream3.AudioFile
+import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.newSubtitleFile
+import com.lagradost.cloudstream3.newAudioFile
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -33,7 +35,7 @@ open class CustomYoutubeExtractor : ExtractorApi() {
         val watchUrl = "$mainUrl/watch?v=$videoId"
 
         try {
-            // 본진 코어 앱과 동일하게 StreamInfo 1회만 호출하여 403, 2004 에러 차단
+            // 본진 코어 앱과 동일하게 StreamInfo 1회만 호출하여 403, 2004 에러 원천 차단
             val info = StreamInfo.getInfo(watchUrl)
 
             val isLive =
@@ -97,8 +99,7 @@ open class CustomYoutubeExtractor : ExtractorApi() {
                 ) {
                     quality = video.height ?: 0
                     
-                    // 💡 [질문자님 묘책 적용] newAudioFile의 두 번째 인자인 람다 블록을 열어 
-                    // 내부에서 직접 name과 lang을 오디오 파일 제목으로 세팅해 줍니다!
+                    // 코틀린 컴파일러 제약으로 인해 suspend 람다 매개변수 'audioFile'을 직접 선언하여 대입합니다.
                     audioTracks = audioStreams.mapNotNull { audio ->
                         val aUrl = audio.content ?: return@mapNotNull null
                         val langCode = audio.audioLocale?.language ?: audio.audioTrackId ?: "und"
@@ -107,9 +108,9 @@ open class CustomYoutubeExtractor : ExtractorApi() {
                             ?: audio.audioTrackId 
                             ?: "Audio"
 
-                        newAudioFile(aUrl) {
-                            it.name = displayName
-                            it.lang = langCode
+                        newAudioFile(aUrl) { audioFile ->
+                            audioFile.name = displayName
+                            audioFile.lang = langCode
                         }
                     }
                 }
