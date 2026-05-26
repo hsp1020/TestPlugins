@@ -2055,11 +2055,9 @@ class YoutubeProvider(
             }
         }
 
-        // 🔥 본진 코어 앱의 고장난 loadExtractor() 대신 
-        // 오디오 트랙 버그를 완벽히 고친 플러그인 내장 CustomYoutubeExtractor를 직접 실행합니다!
-        com.youtube.YoutubeExtractor().getUrl(safeUrl, null, subtitleCallback, callback)
-        
+        // 본진 롤백 추출기 직접 호출하여 순정 재생
+        com.lagradost.cloudstream3.extractors.YoutubeExtractor().getUrl(safeUrl, null, subtitleCallback, callback)
         return true
     }
 }
-                                                  
+
