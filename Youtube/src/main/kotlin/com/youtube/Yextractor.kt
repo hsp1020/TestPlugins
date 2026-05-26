@@ -1,7 +1,6 @@
 package com.youtube
 
 import com.lagradost.cloudstream3.SubtitleFile
-import com.lagradost.cloudstream3.AudioFile
 import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.newSubtitleFile
 import com.lagradost.cloudstream3.newAudioFile
@@ -74,7 +73,7 @@ open class CustomYoutubeExtractor : ExtractorApi() {
 
         if (videoStreams.isEmpty() && muxedStreams.isEmpty()) return false
 
-        // 1. 영상+오디오 통합본 (Muxed) 백업 추출
+        // 1. 영상+오디오 통합본 (Muxed) 추출
         muxedStreams.forEach { video ->
             val vUrl = video.content ?: return@forEach
             callback(
@@ -88,36 +87,50 @@ open class CustomYoutubeExtractor : ExtractorApi() {
             )
         }
 
-        // 2. 단일 비디오 링크 안에 다국어 오디오 트랙 정보와 이름표를 정상적으로 주입
+        // 2. 💡 [최종 묘책] 각 오디오(더빙)별로 독립된 순정 ExtractorLink를 콜백으로 보냅니다.
         videoStreams.forEach { video ->
             val vUrl = video.content ?: return@forEach
-            callback(
-                newExtractorLink(
-                    source = name,
-                    name = "YouTube ${normalizeCodec(video.codec)}",
-                    url = vUrl
-                ) {
-                    quality = video.height ?: 0
-                    
-                    // 코틀린 컴파일러 제약으로 인해 suspend 람다 매개변수 'audioFile'을 직접 선언하여 대입합니다.
-                    audioTracks = audioStreams.mapNotNull { audio ->
-                        val aUrl = audio.content ?: return@mapNotNull null
-                        val langCode = audio.audioLocale?.language ?: audio.audioTrackId ?: "und"
-                        val displayName = audio.audioLocale?.getDisplayLanguage(Locale.KOREAN) 
-                            ?: audio.audioLocale?.displayName 
-                            ?: audio.audioTrackId 
-                            ?: "Audio"
+            val height = video.height ?: 0
+            val codecName = normalizeCodec(video.codec)
 
-                        newAudioFile(aUrl) { audioFile ->
-                            audioFile.name = displayName
-                            audioFile.lang = langCode
-                        }
+            if (audioStreams.isEmpty()) {
+                callback(
+                    newExtractorLink(
+                        source = name,
+                        name = "YouTube $codecName ${height}p",
+                        url = vUrl
+                    ) {
+                        quality = height
                     }
+                )
+            } else {
+                // 수많은 오디오(언어)별로 비디오와 1:1 결합하여 서버 리스트를 분할합니다.
+                audioStreams.forEach { audio ->
+                    val aUrl = audio.content ?: return@forEach
+                    
+                    // 언어 정보 가져오기 (한국어 번역 우선)
+                    val displayName = audio.audioLocale?.getDisplayLanguage(Locale.KOREAN) 
+                        ?: audio.audioLocale?.displayName 
+                        ?: audio.audioTrackId 
+                        ?: "Audio"
+
+                    // source 속성에 다국어 이름을 주입하여 서버 선택창에서 바로 한국어/영어를 골라 재생하도록 합니다.
+                    callback(
+                        newExtractorLink(
+                            source = "$name ($displayName)", 
+                            name = "YouTube $codecName ${height}p",
+                            url = vUrl
+                        ) {
+                            quality = height
+                            // 본진의 깡통 매핑(newAudioFile) 문법 규칙을 준수하여, 빌드 에러 없이 1개 오디오만 깔끔하게 주입합니다.
+                            audioTracks = listOf(newAudioFile(aUrl))
+                        }
+                    )
                 }
-            )
+            }
         }
 
-        // 3. 자막 처리
+        // 3. 자막 처리 (컴파일 에러 우회를 위해 위치 기반 인자 사용)
         info.subtitles.orEmpty().forEach { subtitle ->
             val subUrl = subtitle.content ?: return@forEach
             val langName = subtitle.displayLanguageName ?: subtitle.languageTag ?: "Unknown"
