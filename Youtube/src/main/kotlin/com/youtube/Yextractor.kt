@@ -32,26 +32,31 @@ open class CustomYoutubeExtractor : ExtractorApi() {
         val videoId = extractYouTubeId(url)
         val watchUrl = "$mainUrl/watch?v=$videoId"
 
-        val info = StreamInfo.getInfo(watchUrl)
+        try {
+            // 본진 코어 앱과 동일하게 StreamInfo 1회만 호출하여 403, 2004 에러 차단
+            val info = StreamInfo.getInfo(watchUrl)
 
-        val isLive =
-            info.streamType == StreamType.LIVE_STREAM
-                    || info.streamType == StreamType.AUDIO_LIVE_STREAM
-                    || info.streamType == StreamType.POST_LIVE_STREAM
-                    || info.streamType == StreamType.POST_LIVE_AUDIO_STREAM
+            val isLive =
+                info.streamType == StreamType.LIVE_STREAM
+                        || info.streamType == StreamType.AUDIO_LIVE_STREAM
+                        || info.streamType == StreamType.POST_LIVE_STREAM
+                        || info.streamType == StreamType.POST_LIVE_AUDIO_STREAM
 
-        if (isLive && info.hlsUrl != null) {
-            callback(
-                newExtractorLink(
-                    source = name,
-                    name = "YouTube Live",
-                    url = info.hlsUrl
-                ) {
-                    type = ExtractorLinkType.M3U8
-                }
-            )
-        } else {
-            processVideo(info, subtitleCallback, callback)
+            if (isLive && info.hlsUrl != null) {
+                callback(
+                    newExtractorLink(
+                        source = name,
+                        name = "YouTube Live",
+                        url = info.hlsUrl
+                    ) {
+                        type = ExtractorLinkType.M3U8
+                    }
+                )
+            } else {
+                processVideo(info, subtitleCallback, callback)
+            }
+        } catch (e: Exception) {
+            logError(e)
         }
     }
 
@@ -67,7 +72,7 @@ open class CustomYoutubeExtractor : ExtractorApi() {
 
         if (videoStreams.isEmpty() && muxedStreams.isEmpty()) return false
 
-        // 1. Muxed Streams (영상+음성 통합본) 추출
+        // 1. 영상+오디오 통합본 (Muxed) 백업 추출
         muxedStreams.forEach { video ->
             val vUrl = video.content ?: return@forEach
             callback(
@@ -81,7 +86,7 @@ open class CustomYoutubeExtractor : ExtractorApi() {
             )
         }
 
-        // 2. 💡 [질문자님 해법 적용] 비디오 링크 단 1개에 모든 언어의 오디오 트랙을 이름표와 함께 주입
+        // 2. 단일 비디오 링크 안에 다국어 오디오 트랙 정보와 이름표를 정상적으로 주입
         videoStreams.forEach { video ->
             val vUrl = video.content ?: return@forEach
             callback(
@@ -92,24 +97,26 @@ open class CustomYoutubeExtractor : ExtractorApi() {
                 ) {
                     quality = video.height ?: 0
                     
-                    // NewPipe에서 오디오 언어 정보를 가져와 newAudioFile(주소, 이름) 형태로 이름 파라미터에 직접 꽂아줍니다.
+                    // 💡 [질문자님 묘책 적용] newAudioFile의 두 번째 인자인 람다 블록을 열어 
+                    // 내부에서 직접 name과 lang을 오디오 파일 제목으로 세팅해 줍니다!
                     audioTracks = audioStreams.mapNotNull { audio ->
                         val aUrl = audio.content ?: return@mapNotNull null
-                        
-                        // 한국어 번역 우선 매핑
+                        val langCode = audio.audioLocale?.language ?: audio.audioTrackId ?: "und"
                         val displayName = audio.audioLocale?.getDisplayLanguage(Locale.KOREAN) 
                             ?: audio.audioLocale?.displayName 
                             ?: audio.audioTrackId 
                             ?: "Audio"
 
-                        // 위치 기반 인자로 안전하게 (주소, 이름) 전달하여 und 버그 해결 및 컴파일 에러 해결
-                        newAudioFile(aUrl, displayName)
+                        newAudioFile(aUrl) {
+                            it.name = displayName
+                            it.lang = langCode
+                        }
                     }
                 }
             )
         }
 
-        // 3. 자막 처리 로직 (위치 기반 인자로 컴파일 안전성 확보)
+        // 3. 자막 처리
         info.subtitles.orEmpty().forEach { subtitle ->
             val subUrl = subtitle.content ?: return@forEach
             val langName = subtitle.displayLanguageName ?: subtitle.languageTag ?: "Unknown"
