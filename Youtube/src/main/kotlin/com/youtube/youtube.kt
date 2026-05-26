@@ -2199,6 +2199,13 @@ class YoutubeProvider(
             logError(e)
         }
 
+        // 🔥 NewPipe가 생성하는 c=IOS 스트림에 맞는 실제 네이티브 앱 User-Agent
+        // (Origin이나 Referer는 네이티브 앱에서 보내지 않으므로 오히려 넣으면 403의 원인이 됩니다)
+        val iosNativeUserAgent = "com.google.ios.youtube/19.29.1 (iPhone14,3; U; CPU iOS 17_5_1 like Mac OS X; en_US)"
+        val fixedHeaders = mapOf(
+            "User-Agent" to iosNativeUserAgent
+        )
+
         if (isLive) {
             val tempLinks = mutableListOf<ExtractorLink>()
             loadExtractor(fullUrl, subtitleCallback) { tempLinks.add(it) }
@@ -2212,11 +2219,7 @@ class YoutubeProvider(
                 ) {
                     this.quality = link.quality
                     this.referer = link.referer
-                    this.headers = mapOf(
-                        "User-Agent" to YoutubeUtils.IOS_USER_AGENT,
-                        "Origin" to "https://www.youtube.com",
-                        "Referer" to "https://www.youtube.com/"
-                    )
+                    this.headers = fixedHeaders
                 }
                 callback(fixedLink)
             }
@@ -2230,15 +2233,36 @@ class YoutubeProvider(
                 }
             }
 
-            // 1. 고화질 DASH 추출기 무조건 실행 (정상 작동)
+            // 1. 고화질 DASH 추출기 무조건 실행 (첫번째 추출기)
             com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback) {
                 callback(it)
             }
 
-            // 2. DASH 링크 확보 여부(0개인지)와 상관없이 내장 Extractor도 무조건 추가 실행
+            // 2. 내장 Extractor 실행 (두번째 추출기)
             val tempLinks = mutableListOf<ExtractorLink>()
             loadExtractor(fullUrl, subtitleCallback) { tempLinks.add(it) }
 
+            // 💡 [요청하신 디버그 코드] 403 에러가 나는지, 원인이 무엇인지 확인하기 위한 다이렉트 테스트
+            val testLink = tempLinks.firstOrNull { it.url.contains("videoplayback") }
+            if (testLink != null) {
+                try {
+                    println("[YT_DEBUG_403] ======= 403 HTTP REQUEST TEST START =======")
+                    println("[YT_DEBUG_403] Test URL: ${testLink.url.take(100)}...")
+                    println("[YT_DEBUG_403] Test Headers: $fixedHeaders")
+                    val testResponse = app.get(testLink.url, headers = fixedHeaders)
+                    println("[YT_DEBUG_403] RESPONSE CODE: ${testResponse.code}")
+                    if (!testResponse.isSuccessful) {
+                        println("[YT_DEBUG_403] 🚨 ERROR BODY 🚨: \n${testResponse.text}")
+                    } else {
+                        println("[YT_DEBUG_403] SUCCESS! No 403 error with these headers.")
+                    }
+                    println("[YT_DEBUG_403] ======= 403 HTTP REQUEST TEST END =======")
+                } catch (e: Exception) {
+                    println("[YT_DEBUG_403] Request failed with exception: ${e.message}")
+                }
+            }
+
+            // 수정된 헤더를 적용하여 콜백으로 전달
             for (link in tempLinks) {
                 val fixedLink = newExtractorLink(
                     source = link.source,
@@ -2247,12 +2271,8 @@ class YoutubeProvider(
                     type = link.type
                 ) {
                     this.quality = link.quality
-                    this.referer = link.referer
-                    this.headers = mapOf(
-                        "User-Agent" to YoutubeUtils.IOS_USER_AGENT,
-                        "Origin" to "https://www.youtube.com",
-                        "Referer" to "https://www.youtube.com/"
-                    )
+                    this.referer = link.referer // 내장 추출기의 기본 referer는 무시되고 headers가 우선 적용됨
+                    this.headers = fixedHeaders
                 }
                 callback(fixedLink)
             }
