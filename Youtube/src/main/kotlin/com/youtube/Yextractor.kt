@@ -70,7 +70,11 @@ open class YoutubeExtractor : ExtractorApi() {
 
         if (videoStreams.isEmpty()) return false
 
-        val audioStreams = info.audioStreams.orEmpty()
+        // 💡 [핵심 보완] 일반 영상은 유지하고, 다국어 영상일 경우 더빙(DUBBED) 및 화면해설(DESCRIPTIVE) 트랙을 원천 배제합니다.
+        val audioStreams = info.audioStreams.orEmpty().filter { audio ->
+            audio.audioTrackType == null 
+            || audio.audioTrackType == org.schabi.newpipe.extractor.stream.AudioTrackType.ORIGINAL
+        }
 
         videoStreams.forEach { video ->
 
