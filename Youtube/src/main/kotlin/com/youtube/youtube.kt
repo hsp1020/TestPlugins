@@ -2200,14 +2200,24 @@ class YoutubeProvider(
         }
 
         if (isLive) {
-            loadExtractor(fullUrl, subtitleCallback) { link ->
-                val fixedLink = link.copy(
-                    headers = mapOf(
+            val tempLinks = mutableListOf<ExtractorLink>()
+            loadExtractor(fullUrl, subtitleCallback) { tempLinks.add(it) }
+            
+            for (link in tempLinks) {
+                val fixedLink = newExtractorLink(
+                    source = link.source,
+                    name = link.name,
+                    url = link.url,
+                    type = link.type
+                ) {
+                    this.quality = link.quality
+                    this.referer = link.referer
+                    this.headers = mapOf(
                         "User-Agent" to YoutubeUtils.IOS_USER_AGENT,
                         "Origin" to "https://www.youtube.com",
                         "Referer" to "https://www.youtube.com/"
                     )
-                )
+                }
                 callback(fixedLink)
             }
         } else {
@@ -2226,14 +2236,24 @@ class YoutubeProvider(
             }
 
             // 2. DASH 링크 확보 여부(0개인지)와 상관없이 내장 Extractor도 무조건 추가 실행
-            loadExtractor(fullUrl, subtitleCallback) { link ->
-                val fixedLink = link.copy(
-                    headers = mapOf(
+            val tempLinks = mutableListOf<ExtractorLink>()
+            loadExtractor(fullUrl, subtitleCallback) { tempLinks.add(it) }
+
+            for (link in tempLinks) {
+                val fixedLink = newExtractorLink(
+                    source = link.source,
+                    name = link.name,
+                    url = link.url,
+                    type = link.type
+                ) {
+                    this.quality = link.quality
+                    this.referer = link.referer
+                    this.headers = mapOf(
                         "User-Agent" to YoutubeUtils.IOS_USER_AGENT,
                         "Origin" to "https://www.youtube.com",
                         "Referer" to "https://www.youtube.com/"
                     )
-                )
+                }
                 callback(fixedLink)
             }
 
@@ -2243,7 +2263,6 @@ class YoutubeProvider(
 
         return true
     }
-    
     
     private suspend fun loadLinksAdvanced(
         videoId: String,
