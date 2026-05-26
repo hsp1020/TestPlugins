@@ -69,25 +69,12 @@ open class CustomYoutubeExtractor : ExtractorApi() {
 
         val videoStreams = info.videoOnlyStreams.orEmpty()
         val audioStreams = info.audioStreams.orEmpty()
-        val muxedStreams = info.videoStreams.orEmpty()
 
-        if (videoStreams.isEmpty() && muxedStreams.isEmpty()) return false
+        if (videoStreams.isEmpty()) return false
 
-        // 1. 영상+오디오 통합본 (Muxed) 추출
-        muxedStreams.forEach { video ->
-            val vUrl = video.content ?: return@forEach
-            callback(
-                newExtractorLink(
-                    source = name,
-                    name = "YouTube ${normalizeCodec(video.codec)} (Muxed)",
-                    url = vUrl
-                ) {
-                    quality = video.height ?: 0
-                }
-            )
-        }
+        // [보완 1] Muxed (영상+음성 통합본) 추출 로직은 전송하지 않고 전면 폐기했습니다.
 
-        // 2. 💡 [최종 묘책] 각 오디오(더빙)별로 독립된 순정 ExtractorLink를 콜백으로 보냅니다.
+        // [보완 2] 각 오디오별 비디오 링크를 생성하되, 링크 이름 자체에 언어를 직접 표기합니다.
         videoStreams.forEach { video ->
             val vUrl = video.content ?: return@forEach
             val height = video.height ?: 0
@@ -104,7 +91,7 @@ open class CustomYoutubeExtractor : ExtractorApi() {
                     }
                 )
             } else {
-                // 수많은 오디오(언어)별로 비디오와 1:1 결합하여 서버 리스트를 분할합니다.
+                // 오디오 언어별로 각각 분리된 링크를 생성하여 쏘아줍니다.
                 audioStreams.forEach { audio ->
                     val aUrl = audio.content ?: return@forEach
                     
@@ -114,15 +101,15 @@ open class CustomYoutubeExtractor : ExtractorApi() {
                         ?: audio.audioTrackId 
                         ?: "Audio"
 
-                    // source 속성에 다국어 이름을 주입하여 서버 선택창에서 바로 한국어/영어를 골라 재생하도록 합니다.
+                    // source는 YouTube로 통일하고, name 자체에 언어명을 박아서 UI에서 완벽하게 보이도록 수정!
                     callback(
                         newExtractorLink(
-                            source = "$name ($displayName)", 
-                            name = "YouTube $codecName ${height}p",
+                            source = name, 
+                            name = "YouTube $codecName ${height}p ($displayName)",
                             url = vUrl
                         ) {
                             quality = height
-                            // 본진의 깡통 매핑(newAudioFile) 문법 규칙을 준수하여, 빌드 에러 없이 1개 오디오만 깔끔하게 주입합니다.
+                            // 깡통 newAudioFile 에 맞춰 순수 주소만 주입 (에러 발생 원천 차단)
                             audioTracks = listOf(newAudioFile(aUrl))
                         }
                     )
@@ -130,7 +117,7 @@ open class CustomYoutubeExtractor : ExtractorApi() {
             }
         }
 
-        // 3. 자막 처리 (컴파일 에러 우회를 위해 위치 기반 인자 사용)
+        // 3. 자막 처리
         info.subtitles.orEmpty().forEach { subtitle ->
             val subUrl = subtitle.content ?: return@forEach
             val langName = subtitle.displayLanguageName ?: subtitle.languageTag ?: "Unknown"
