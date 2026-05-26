@@ -37,7 +37,26 @@ open class YoutubeExtractor : ExtractorApi() {
         val videoId = extractYouTubeId(url)
         val watchUrl = "$mainUrl/watch?v=$videoId"
 
-        val info = StreamInfo.getInfo(watchUrl)
+        var info: StreamInfo? = null
+        var lastException: Exception? = null
+
+        // 💡 [보완 1] 빈번한 링크 누락 현상 해결을 위해 최대 3회 자동 백그라운드 재시도 로직 탑재
+        for (retry in 1..3) {
+            try {
+                println("[YT_DEBUG] [getUrl] 유튜브 정보 파싱 시도 ($retry/3)")
+                info = StreamInfo.getInfo(watchUrl)
+                if (info != null) break
+            } catch (e: Exception) {
+                lastException = e
+                kotlinx.coroutines.delay(600) // 실패 시 0.6초 대기 후 무소음 재시도
+            }
+        }
+
+        if (info == null) {
+            println("[YT_DEBUG] [getUrl] 유튜브 정보 파싱 최종 실패")
+            if (lastException != null) logError(lastException)
+            return
+        }
 
         val isLive =
             info.streamType == StreamType.LIVE_STREAM
@@ -70,7 +89,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
         if (videoStreams.isEmpty()) return false
 
-        // 💡 [핵심 보완] 일반 영상은 유지하고, 다국어 영상일 경우 더빙(DUBBED) 및 화면해설(DESCRIPTIVE) 트랙을 원천 배제합니다.
+        // 💡 [보완 2] 다국어 오디오(und, 영어 더빙 등)로 인한 리스트 스패밍을 해결하기 위해 오직 오리지널(원음) 트랙만 필터링합니다.
         val audioStreams = info.audioStreams.orEmpty().filter { audio ->
             audio.audioTrackType == null 
             || audio.audioTrackType == org.schabi.newpipe.extractor.stream.AudioTrackType.ORIGINAL
