@@ -19,15 +19,17 @@ import java.io.InputStreamReader
 import java.io.PrintWriter
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.URLEncoder
 import java.util.UUID
 import java.util.Collections
 import java.util.LinkedHashMap
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.SynchronousQueue
 import java.util.concurrent.ThreadFactory
 import kotlin.concurrent.thread
+import okhttp3.OkHttpClient
+import okhttp3.Request
 
 open class YoutubeExtractor : ExtractorApi() {
     override val mainUrl = "https://www.youtube.com"
@@ -35,15 +37,27 @@ open class YoutubeExtractor : ExtractorApi() {
     override val name = "YouTube"
 
     companion object {
-        private val ytVideos = ConcurrentHashMap<String, List<ExtractorLink>>()
-        private val ytVideosSubtitles = ConcurrentHashMap<String, List<SubtitlesStream>>()
+        private val ytVideos: MutableMap<String, List<ExtractorLink>> = Collections.synchronizedMap(
+            object : LinkedHashMap<String, List<ExtractorLink>>(32, 0.75f, true) {
+                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<ExtractorLink>>?): Boolean {
+                    return size > 50
+                }
+            }
+        )
+
+        private val ytVideosSubtitles: MutableMap<String, List<SubtitlesStream>> = Collections.synchronizedMap(
+            object : LinkedHashMap<String, List<SubtitlesStream>>(32, 0.75f, true) {
+                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<SubtitlesStream>>?): Boolean {
+                    return size > 50
+                }
+            }
+        )
 
         @Volatile
         private var activeServer: ServerSocket? = null
         private var serverPort: Int = 0
         private val serverLock = Any()
 
-        // 2004 에러의 근본적 해결책: 캐시 상한치를 50개에서 1000개로 대폭 확장 (다국어 매핑 폭발에 대처)
         private val manifestMap: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(128, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
@@ -52,16 +66,22 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         )
 
-        // CallerRunsPolicy를 적용하여 가상 MPD 및 세그먼트 정체 시 패킷 폐기 방지 및 백프레셔 제어 보장
         private val serverExecutor = ThreadPoolExecutor(
-            2, 
-            8, 
-            30L, 
+            0, 
+            32, 
+            60L, 
             TimeUnit.SECONDS,
-            LinkedBlockingQueue(256),
-            ThreadFactory { r -> Thread(r, "YT-DASH-Server-Worker") },
+            SynchronousQueue<Runnable>(),
+            ThreadFactory { r -> Thread(r, "YT-DASH-Server-Worker").apply { isDaemon = true } },
             ThreadPoolExecutor.CallerRunsPolicy()
         )
+
+        private val proxyClient = OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(20, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .build()
 
         init {
             YoutubeStreamExtractor.setFetchIosClient(true)
@@ -96,28 +116,22 @@ open class YoutubeExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("[YT_DEBUG] [getUrl] 호출됨. 원본 URL: $url")
         val cleanedUrl = url.replace(schemaStripRegex, "")
         val videoId = YoutubeUtils.extractYoutubeId(cleanedUrl) ?: cleanedUrl
-        println("[YT_DEBUG] [getUrl] 가공된 cleanedUrl: $cleanedUrl, 비디오 ID: $videoId")
 
         ytVideos.remove(videoId)
         ytVideosSubtitles.remove(videoId)
 
         val cachedLinks = ytVideos[videoId]
         if (cachedLinks.isNullOrEmpty()) {
-            println("[YT_DEBUG] [getUrl] 분석을 진행합니다.")
             try {
-                println("[YT_DEBUG] [getUrl] NewPipe linkHandler에서 link 분석 시작")
                 val link = YoutubeStreamLinkHandlerFactory.getInstance().fromUrl(cleanedUrl)
                 val s = object : YoutubeStreamExtractor(ServiceList.YouTube, link) {}
-                println("[YT_DEBUG] [getUrl] s.fetchPage() 네트워크 호출 시작")
                 s.fetchPage()
-                println("[YT_DEBUG] [getUrl] s.fetchPage() 호출 성공. 제목: '${s.name}', 길이: ${s.length}초")
 
                 val durationSeconds = if (s.length > 0) s.length else 3600L
                 val builtLinks = mutableListOf<ExtractorLink>()
-                val seenUrls = ConcurrentHashMap.newKeySet<String>()
+                val seenUrls = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
                 val videoOnlyList = (s.videoOnlyStreams ?: emptyList()).mapNotNull { vs ->
                     try {
@@ -125,7 +139,7 @@ open class YoutubeExtractor : ExtractorApi() {
                         if (!seenUrls.add(streamUrl)) return@mapNotNull null
 
                         val label = buildVideoLabelNumber(vs)
-                        val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
+                        val height = vs.height ?: 0
 
                         var mime = vs.format?.mimeType
                         if (mime.isNullOrEmpty()) mime = getMimeTypeFromUrl(streamUrl, false)
@@ -133,14 +147,9 @@ open class YoutubeExtractor : ExtractorApi() {
                         val initR = if (vs.initStart != null && vs.initEnd != null) "${vs.initStart}-${vs.initEnd}" else null
                         val indexR = if (vs.indexStart != null && vs.indexEnd != null) "${vs.indexStart}-${vs.indexEnd}" else null
 
-                        println("[YT_DEBUG] [getUrl] DASH 비디오 스트림 파싱 성공 -> 화질: ${height}p, 포맷: $mime, URL: ${streamUrl.take(60)}...")
                         StreamInfo(streamUrl, mime, height, label, initR, indexR)
-                    } catch (e: Exception) { 
-                        println("[YT_DEBUG] [getUrl] DASH 비디오 파싱 중 오류 발생: ${e.message}")
-                        null 
-                    }
+                    } catch (e: Exception) { null }
                 }.distinctBy { it.height }
-                println("[YT_DEBUG] [getUrl] 최종 수집된 DASH 비디오 스트림 개수: ${videoOnlyList.size}")
 
                 val audioInfoList = (s.audioStreams ?: emptyList()).mapNotNull { asr ->
                     try {
@@ -155,28 +164,21 @@ open class YoutubeExtractor : ExtractorApi() {
                         var rawLang = asr.audioTrackId ?: "Default"
                         if (rawLang.contains(".")) rawLang = rawLang.substringBefore(".")
 
-                        println("[YT_DEBUG] [getUrl] DASH 오디오 스트림 파싱 성공 -> 언어: $rawLang, 전송률: $bitrate, 포맷: $mime, URL: ${aUrl.take(60)}...")
                         AudioInfo(aUrl, mime, bitrate, initR, indexR, rawLang.uppercase())
-                    } catch (e: Exception) { 
-                        println("[YT_DEBUG] [getUrl] DASH 오디오 파싱 중 오류 발생: ${e.message}")
-                        null 
-                    }
+                    } catch (e: Exception) { null }
                 }.distinctBy { it.url }
-                println("[YT_DEBUG] [getUrl] 최종 수집된 DASH 오디오 스트림 개수: ${audioInfoList.size}")
 
                 val audiosByLanguage = audioInfoList.groupBy { it.language }
 
                 try {
                     val subs = s.subtitlesDefault?.filterNotNull() ?: emptyList()
                     ytVideosSubtitles[videoId] = subs
-                    println("[YT_DEBUG] [getUrl] 자막 트랙 개수: ${subs.size}")
                 } catch (e: Exception) {
-                    println("[YT_DEBUG] [getUrl] 자막 파싱 중 예외 발생: ${e.message}")
+                    logError(e)
                 }
 
                 startServerIfNeeded()
 
-                println("[YT_DEBUG] [getUrl] DASH 가상 XML 생성 루프를 시작합니다.")
                 for (video in videoOnlyList) {
                     if (audiosByLanguage.isNotEmpty()) {
                         for ((lang, audios) in audiosByLanguage) {
@@ -195,7 +197,6 @@ open class YoutubeExtractor : ExtractorApi() {
                                     val finalName = "${video.label} ($lang) ${video.label}"
                                     val sourceName = "${this.name} ($lang)"
 
-                                    println("[YT_DEBUG] [getUrl] DASH 가상 링크 빌드 성공 -> 화질: ${video.label}, 언어: $lang, 가상 URL: $localLink")
                                     builtLinks.add(
                                         newExtractorLink(
                                             sourceName,
@@ -218,7 +219,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
 
-                // 외부 고해상도 웹 다운로드 포털 연동 보완 로직 보존
+                // 외부 연동 보완 로직 (원본 유지)
                 builtLinks.add(
                     newExtractorLink(
                         source = "YouTube Downloader",
@@ -244,22 +245,16 @@ open class YoutubeExtractor : ExtractorApi() {
                 )
 
                 ytVideos[videoId] = builtLinks.toList()
-                println("[YT_DEBUG] [getUrl] 전체 링크 정렬 및 저장 완료. 총 수집 링크 개수: ${builtLinks.size}")
 
             } catch (e: Exception) { 
-                println("[YT_DEBUG] [getUrl] NewPipe Extractor 분석 도중 에러가 감지되었습니다: ${e.message}")
                 logError(e) 
             }
-        } else {
-            println("[YT_DEBUG] [getUrl] 이미 캐시된 링크 리스트가 존재하여 캐시 데이터를 반환합니다.")
         }
 
         val finalLinks: List<ExtractorLink> = ytVideos[videoId] ?: emptyList()
-        println("[YT_DEBUG] [getUrl] 반환되는 최종 링크 리스트 개수: ${finalLinks.size}")
         finalLinks.forEach { callback(it) }
 
         val finalSubtitles: List<SubtitlesStream> = ytVideosSubtitles[videoId] ?: emptyList()
-        println("[YT_DEBUG] [getUrl] 반환되는 최종 자막 개수: ${finalSubtitles.size}")
         finalSubtitles.mapNotNull { ss ->
             try {
                 val lang = ss.locale?.language ?: return@mapNotNull null
@@ -272,10 +267,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
                 newSubtitleFile(lang, url)
-            } catch (e: Exception) { 
-                println("[YT_DEBUG] [getUrl] 자막 처리 중 에러: ${e.message}")
-                null 
-            }
+            } catch (e: Exception) { null }
         }.forEach { subtitleCallback(it) }
     }
 
@@ -283,31 +275,27 @@ open class YoutubeExtractor : ExtractorApi() {
         synchronized(serverLock) {
             val server = activeServer
             if (server != null && !server.isClosed) {
-                println("[YT_DEBUG] [startServerIfNeeded] 기존 DASH 루프백 서버가 구동 중이므로 리스너 스레드 생성을 스킵합니다. (포트: $serverPort)")
                 return
             }
             try {
                 val newServer = ServerSocket(0)
                 activeServer = newServer
                 serverPort = newServer.localPort
-                println("[YT_DEBUG] [startServerIfNeeded] 가상 포트 $serverPort 에 리스너 바인딩 성공")
                 
-                thread(name = "YT-DASH-Server-Acceptor") {
-                    println("[YT_DEBUG] [ServerSocket-Thread] accept() 대기 루프 스레드를 시작합니다.")
+                thread(name = "YT-DASH-Server-Acceptor", isDaemon = true) {
                     try {
                         while (true) {
                             val active = activeServer ?: break
                             if (active.isClosed) break
                             val client = active.accept()
-                            client.soTimeout = 5000 
+                            client.soTimeout = 15000 
                             serverExecutor.execute { handleClient(client) }
                         }
                     } catch (e: Exception) {
-                        println("[YT_DEBUG] [ServerSocket-Thread] accept() 대기 동작 중 오류 발생: ${e.message}")
+                        // Accept loop 종료
                     }
                 }
             } catch (e: Exception) { 
-                println("[YT_DEBUG] [startServerIfNeeded] 서버 소켓 생성 실패 예외: ${e.message}")
                 logError(e) 
             }
         }
@@ -324,37 +312,124 @@ open class YoutubeExtractor : ExtractorApi() {
         try {
             client.use { socket ->
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))
-                val output = PrintWriter(socket.getOutputStream(), true)
-                val line = reader.readLine()
-                if (line != null && line.startsWith("GET")) {
+                val line = reader.readLine() ?: return
+                
+                if (line.startsWith("GET")) {
                     val parts = line.split(" ")
                     if (parts.size > 1) {
-                        // 쿼리 매개변수(?) 및 불필요 경로를 정규화하여 안정적인 UUID 획득
-                        val cleanPath = parts[1].substringAfter("/").substringBefore("?")
-                        val path = if (cleanPath.endsWith(".mpd", ignoreCase = true)) {
-                            cleanPath.substring(0, cleanPath.length - 4)
-                        } else {
-                            cleanPath
+                        val requestPath = parts[1]
+                        val cleanPath = requestPath.substringAfter("/").substringBefore("?")
+                        
+                        val clientHeaders = mutableMapOf<String, String>()
+                        var headerLine: String?
+                        while (true) {
+                            headerLine = reader.readLine()
+                            if (headerLine.isNullOrBlank()) break
+                            val idx = headerLine.indexOf(":")
+                            if (idx > 0) {
+                                val key = headerLine.substring(0, idx).trim().lowercase()
+                                val value = headerLine.substring(idx + 1).trim()
+                                clientHeaders[key] = value
+                            }
                         }
-                        val content = manifestMap[path]
-                        if (content != null) {
-                            output.println("HTTP/1.1 200 OK")
-                            output.println("Content-Type: application/dash+xml")
-                            output.println("Connection: close")
-                            output.println("Access-Control-Allow-Origin: *")
-                            output.println("")
-                            output.println(content)
+
+                        if (cleanPath.startsWith("proxy", ignoreCase = true)) {
+                            val query = requestPath.substringAfter("?")
+                            val params = parseQueryParams(query)
+                            val targetUrl = params["url"]
+                            if (!targetUrl.isNullOrBlank()) {
+                                handleProxyRequest(socket, targetUrl, clientHeaders)
+                            }
                         } else {
-                            println("[YT_DEBUG] [handleClient] 에러: 메모리에 매칭되는 가상 MPD가 없습니다. UUID: $path (404 반환)")
-                            output.println("HTTP/1.1 404 Not Found")
-                            output.println("")
+                            val path = if (cleanPath.endsWith(".mpd", ignoreCase = true)) {
+                                cleanPath.substring(0, cleanPath.length - 4)
+                            } else {
+                                cleanPath
+                            }
+                            val content = manifestMap[path]
+                            val output = PrintWriter(socket.getOutputStream(), true)
+                            if (content != null) {
+                                output.println("HTTP/1.1 200 OK")
+                                output.println("Content-Type: application/dash+xml")
+                                output.println("Connection: close")
+                                output.println("Access-Control-Allow-Origin: *")
+                                output.println("")
+                                output.println(content)
+                            } else {
+                                output.println("HTTP/1.1 404 Not Found")
+                                output.println("")
+                            }
                         }
                     }
                 }
             }
         } catch (e: Exception) {
-            println("[YT_DEBUG] [handleClient] 소켓 데이터 스트림 처리 중 예외: ${e.message}")
+            // 소켓 통신 오류 예외 격리
         }
+    }
+
+    private fun handleProxyRequest(client: Socket, targetUrl: String, clientHeaders: Map<String, String>) {
+        try {
+            val requestBuilder = Request.Builder()
+                .url(targetUrl)
+                .header("User-Agent", YoutubeUtils.IOS_USER_AGENT)
+                .header("Referer", "https://www.youtube.com")
+                .header("Origin", "https://www.youtube.com")
+
+            clientHeaders["range"]?.let { range ->
+                requestBuilder.header("Range", range)
+            }
+
+            proxyClient.newCall(requestBuilder.build()).execute().use { response ->
+                val outputStream = client.getOutputStream()
+                val headerBytes = StringBuilder()
+                
+                headerBytes.append("HTTP/1.1 ${response.code} ${response.message}\r\n")
+                response.header("Content-Type")?.let { headerBytes.append("Content-Type: $it\r\n") }
+                response.header("Content-Length")?.let { headerBytes.append("Content-Length: $it\r\n") }
+                response.header("Content-Range")?.let { headerBytes.append("Content-Range: $it\r\n") }
+                response.header("Accept-Ranges")?.let { headerBytes.append("Accept-Ranges: $it\r\n") }
+                
+                headerBytes.append("Connection: close\r\n")
+                headerBytes.append("Access-Control-Allow-Origin: *\r\n")
+                headerBytes.append("\r\n")
+                
+                outputStream.write(headerBytes.toString().toByteArray(java.nio.charset.StandardCharsets.UTF_8))
+                outputStream.flush()
+
+                val body = response.body
+                if (body != null) {
+                    body.byteStream().use { inputStream ->
+                        val buffer = ByteArray(32 * 1024)
+                        var bytesRead: Int
+                        while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                            outputStream.write(buffer, 0, bytesRead)
+                        }
+                    }
+                    outputStream.flush()
+                }
+            }
+        } catch (e: Exception) {
+            try {
+                val outputStream = client.getOutputStream()
+                val errorResponse = "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n"
+                outputStream.write(errorResponse.toByteArray(java.nio.charset.StandardCharsets.UTF_8))
+                outputStream.flush()
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun parseQueryParams(query: String): Map<String, String> {
+        val params = mutableMapOf<String, String>()
+        query.split("&").forEach { pair ->
+            val idx = pair.indexOf("=")
+            if (idx > 0) {
+                val key = pair.substring(0, idx)
+                val value = pair.substring(idx + 1)
+                params[key] = YoutubeUtils.urlDecode(value)
+            }
+        }
+        return params
     }
 
     private fun buildDashManifestXml(
@@ -362,10 +437,10 @@ open class YoutubeExtractor : ExtractorApi() {
         audioList: List<AudioInfo>,
         durationSec: Long
     ): String {
-        val cleanVideoUrl = escapeXml(video.url)
+        val localVideoUrl = escapeXml("http://127.0.0.1:$serverPort/proxy?url=${URLEncoder.encode(video.url, "UTF-8")}")
         val durationString = "PT${durationSec}S"
 
-        val sb = java.lang.StringBuilder(2048)
+        val sb = StringBuilder(2048)
         sb.append("""<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011" type="static" minBufferTime="PT5.0S" mediaPresentationDuration="$durationString">""")
         sb.append("<Period>")
 
@@ -379,14 +454,14 @@ open class YoutubeExtractor : ExtractorApi() {
         sb.append("""
             <AdaptationSet mimeType="$vMime" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
               <Representation id="video" bandwidth="4000000" width="0" height="${video.height}" codecs="$vCodecs">
-                <BaseURL>$cleanVideoUrl</BaseURL>
+                <BaseURL>$localVideoUrl</BaseURL>
                 $vSegmentBase
               </Representation>
             </AdaptationSet>
         """.trimIndent())
 
         audioList.forEachIndexed { index, audio ->
-            val cleanAudioUrl = escapeXml(audio.url)
+            val localAudioUrl = escapeXml("http://127.0.0.1:$serverPort/proxy?url=${URLEncoder.encode(audio.url, "UTF-8")}")
             val audioId = "audio_$index"
             val aMime = audio.mimeType
             val aCodecs = if (aMime.contains("webm")) "opus" else "mp4a.40.2"
@@ -398,7 +473,7 @@ open class YoutubeExtractor : ExtractorApi() {
             sb.append("""
                 <AdaptationSet mimeType="$aMime" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
                   <Representation id="$audioId" bandwidth="${if(audio.bitrate>0) audio.bitrate else 128000}" codecs="$aCodecs">
-                    <BaseURL>$cleanAudioUrl</BaseURL>
+                    <BaseURL>$localAudioUrl</BaseURL>
                     $aSegmentBase
                   </Representation>
                 </AdaptationSet>
@@ -412,7 +487,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
     private fun escapeXml(url: String): String {
         if (!url.contains('&') && !url.contains('<') && !url.contains('>') && !url.contains('\'') && !url.contains('"')) return url
-        val sb = java.lang.StringBuilder(url.length + 16)
+        val sb = StringBuilder(url.length + 16)
         for (i in 0 until url.length) {
             val c = url[i]
             when (c) {
@@ -439,7 +514,7 @@ open class YoutubeExtractor : ExtractorApi() {
     }
 
     private fun buildVideoLabelNumber(vs: org.schabi.newpipe.extractor.stream.VideoStream): String {
-        val height = runCatching { vs.height }.getOrNull() ?: 0
+        val height = vs.height ?: 0
         if (height > 0) return height.toString()
         return "video"
     }
