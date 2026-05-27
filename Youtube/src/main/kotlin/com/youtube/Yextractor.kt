@@ -10,6 +10,7 @@ import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.schemaStripRegex
 import com.lagradost.cloudstream3.ar.youtube.YoutubeUtils
+import com.lagradost.cloudstream3.ar.youtube.YoutubePoTokenProvider
 import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor
 import org.schabi.newpipe.extractor.services.youtube.linkHandler.YoutubeStreamLinkHandlerFactory
@@ -52,18 +53,30 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         )
 
+        // [프록시 추가됨] 청크 UUID -> 원본 YouTube CDN URL 매핑
+        private val streamUrlCache = ConcurrentHashMap<String, String>()
+
         // CallerRunsPolicy를 적용하여 가상 MPD 및 세그먼트 정체 시 패킷 폐기 방지 및 백프레셔 제어 보장
         private val serverExecutor = ThreadPoolExecutor(
-            2, 
-            8, 
+            4, // 청크 프록시 처리를 위해 코어 스레드 4개로 확장
+            16, 
             30L, 
             TimeUnit.SECONDS,
-            LinkedBlockingQueue(256),
+            LinkedBlockingQueue(512),
             ThreadFactory { r -> Thread(r, "YT-DASH-Server-Worker") },
             ThreadPoolExecutor.CallerRunsPolicy()
         )
 
+        // [프록시 추가됨] 청크 릴레이 통신용 로컬 HTTP 클라이언트
+        private val proxyHttpClient = okhttp3.OkHttpClient.Builder()
+            .retryOnConnectionFailure(true)
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .build()
+
         init {
+            // NewPipe Extractor에 강제 Header 및 통신망 주입 (YoutubeUtils에 선언됨)
+            YoutubeUtils.initNewPipeDownloader()
             YoutubeStreamExtractor.setFetchIosClient(true)
         }
     }
@@ -299,7 +312,7 @@ open class YoutubeExtractor : ExtractorApi() {
                             val active = activeServer ?: break
                             if (active.isClosed) break
                             val client = active.accept()
-                            client.soTimeout = 5000 
+                            client.soTimeout = 15000 // 프록시 처리를 위해 타임아웃 15초로 상향 
                             serverExecutor.execute { handleClient(client) }
                         }
                     } catch (e: Exception) {
@@ -323,32 +336,61 @@ open class YoutubeExtractor : ExtractorApi() {
     private fun handleClient(client: Socket) {
         try {
             client.use { socket ->
-                val reader = BufferedReader(InputStreamReader(socket.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))
-                val output = PrintWriter(socket.getOutputStream(), true)
-                val line = reader.readLine()
-                if (line != null && line.startsWith("GET")) {
-                    val parts = line.split(" ")
-                    if (parts.size > 1) {
-                        // 쿼리 매개변수(?) 및 불필요 경로를 정규화하여 안정적인 UUID 획득
-                        val cleanPath = parts[1].substringAfter("/").substringBefore("?")
-                        val path = if (cleanPath.endsWith(".mpd", ignoreCase = true)) {
-                            cleanPath.substring(0, cleanPath.length - 4)
-                        } else {
-                            cleanPath
-                        }
-                        val content = manifestMap[path]
-                        if (content != null) {
-                            output.println("HTTP/1.1 200 OK")
-                            output.println("Content-Type: application/dash+xml")
-                            output.println("Connection: close")
-                            output.println("Access-Control-Allow-Origin: *")
-                            output.println("")
-                            output.println(content)
-                        } else {
-                            println("[YT_DEBUG] [handleClient] 에러: 메모리에 매칭되는 가상 MPD가 없습니다. UUID: $path (404 반환)")
-                            output.println("HTTP/1.1 404 Not Found")
-                            output.println("")
-                        }
+                val inputStream = socket.getInputStream()
+                val reader = BufferedReader(InputStreamReader(inputStream, java.nio.charset.StandardCharsets.UTF_8))
+                val output = socket.getOutputStream()
+                val outWriter = PrintWriter(output, true)
+
+                val requestLine = reader.readLine() ?: return
+                if (!requestLine.startsWith("GET")) return
+                val parts = requestLine.split(" ")
+                if (parts.size < 2) return
+
+                val fullPath = parts[1]
+                
+                // HTTP 헤더 수집 (ExoPlayer가 보낸 Range 헤더 탈취)
+                val clientHeaders = mutableMapOf<String, String>()
+                while (true) {
+                    val line = reader.readLine()
+                    if (line.isNullOrBlank()) break
+                    val colonIndex = line.indexOf(':')
+                    if (colonIndex != -1) {
+                        clientHeaders[line.substring(0, colonIndex).trim().lowercase()] = line.substring(colonIndex + 1).trim()
+                    }
+                }
+
+                val cleanPath = fullPath.substringBefore("?")
+                val queryParams = fullPath.substringAfter("?", "")
+
+                // 1. 영상/음성 청크 프록시 라우트
+                if (cleanPath.startsWith("/chunk")) {
+                    val idMatch = Regex("id=([^&]+)").find(queryParams)
+                    val chunkId = idMatch?.groupValues?.get(1)
+                    val targetYoutubeUrl = if (chunkId != null) streamUrlCache[chunkId] else null
+
+                    if (targetYoutubeUrl != null) {
+                        proxyChunkToYouTube(socket, targetYoutubeUrl, clientHeaders)
+                    } else {
+                        outWriter.print("HTTP/1.1 404 Not Found\r\n\r\n")
+                        outWriter.flush()
+                    }
+                } 
+                // 2. MPD 매니페스트 제공 라우트
+                else {
+                    val path = cleanPath.substringAfterLast("/").removeSuffix(".mpd")
+                    val content = manifestMap[path]
+                    if (content != null) {
+                        outWriter.print("HTTP/1.1 200 OK\r\n")
+                        outWriter.print("Content-Type: application/dash+xml\r\n")
+                        outWriter.print("Connection: close\r\n")
+                        outWriter.print("Access-Control-Allow-Origin: *\r\n")
+                        outWriter.print("\r\n")
+                        outWriter.print(content)
+                        outWriter.flush()
+                    } else {
+                        println("[YT_DEBUG] [handleClient] 에러: 메모리에 매칭되는 가상 MPD가 없습니다. UUID: $path (404 반환)")
+                        outWriter.print("HTTP/1.1 404 Not Found\r\n\r\n")
+                        outWriter.flush()
                     }
                 }
             }
@@ -357,12 +399,62 @@ open class YoutubeExtractor : ExtractorApi() {
         }
     }
 
+    // [프록시 로직] 로컬 소켓 -> 유튜브 원본 서버로 HTTP 프록시 릴레이 (po_token + Header 주입)
+    private fun proxyChunkToYouTube(socket: Socket, targetUrl: String, clientHeaders: Map<String, String>) {
+        try {
+            var finalTargetUrl = targetUrl
+            val poToken = YoutubePoTokenProvider.poToken
+            
+            // 2004 에러 방지: potoken 누락 시 동적 주입
+            if (finalTargetUrl.contains("googlevideo.com") && !finalTargetUrl.contains("pot=") && poToken.isNotBlank()) {
+                finalTargetUrl += "&pot=$poToken"
+            }
+
+            val requestBuilder = okhttp3.Request.Builder()
+                .url(finalTargetUrl)
+                // 2004 에러 방지: 반드시 초기 추출 시점의 User-Agent와 일치시켜야 봇 방어를 뚫음
+                .header("User-Agent", YoutubeUtils.IOS_USER_AGENT)
+                .header("Connection", "keep-alive")
+
+            // ExoPlayer가 요청한 동적 청크 범위를 원본 유튜브 서버에 바이패스
+            clientHeaders["range"]?.let { requestBuilder.header("Range", it) }
+
+            val response = proxyHttpClient.newCall(requestBuilder.build()).execute()
+            val output = socket.getOutputStream()
+            val rawOutWriter = java.io.PrintWriter(output, false)
+
+            // 스트림 헤더 릴레이
+            rawOutWriter.print("HTTP/1.1 ${response.code} ${response.message}\r\n")
+            response.header("Content-Type")?.let { rawOutWriter.print("Content-Type: $it\r\n") }
+            response.header("Content-Length")?.let { rawOutWriter.print("Content-Length: $it\r\n") }
+            response.header("Content-Range")?.let { rawOutWriter.print("Content-Range: $it\r\n") }
+            response.header("Accept-Ranges")?.let { rawOutWriter.print("Accept-Ranges: $it\r\n") }
+            rawOutWriter.print("Connection: close\r\n")
+            rawOutWriter.print("\r\n")
+            rawOutWriter.flush()
+
+            // 유튜브 조각 데이터를 그대로 ExoPlayer 소켓으로 펌핑
+            response.body?.byteStream()?.use { input ->
+                input.copyTo(output)
+            }
+            output.flush()
+
+        } catch (e: Exception) {
+            println("[YT_DEBUG] [proxyChunkToYouTube] 프록시 릴레이 실패: ${e.message}")
+        }
+    }
+
     private fun buildDashManifestXml(
         video: StreamInfo,
         audioList: List<AudioInfo>,
         durationSec: Long
     ): String {
-        val cleanVideoUrl = escapeXml(video.url)
+        // [중요 수정됨] 원본 URL을 캐시에 넣고, MPD 안에는 로컬 프록시 URL을 삽입
+        val videoChunkId = UUID.randomUUID().toString()
+        streamUrlCache[videoChunkId] = video.url
+        val proxyVideoUrl = "http://127.0.0.1:$serverPort/chunk?id=$videoChunkId"
+        
+        val cleanVideoUrl = escapeXml(proxyVideoUrl)
         val durationString = "PT${durationSec}S"
 
         val sb = java.lang.StringBuilder(2048)
@@ -386,7 +478,12 @@ open class YoutubeExtractor : ExtractorApi() {
         """.trimIndent())
 
         audioList.forEachIndexed { index, audio ->
-            val cleanAudioUrl = escapeXml(audio.url)
+            // 오디오도 프록시 URL 처리
+            val audioIdChunk = UUID.randomUUID().toString()
+            streamUrlCache[audioIdChunk] = audio.url
+            val proxyAudioUrl = "http://127.0.0.1:$serverPort/chunk?id=$audioIdChunk"
+            val cleanAudioUrl = escapeXml(proxyAudioUrl)
+
             val audioId = "audio_$index"
             val aMime = audio.mimeType
             val aCodecs = if (aMime.contains("webm")) "opus" else "mp4a.40.2"
