@@ -10,6 +10,7 @@ import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import okhttp3.Interceptor
 import okhttp3.Response
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.URLEncoder
 import java.net.URLDecoder
 import java.security.MessageDigest
@@ -19,6 +20,16 @@ import com.lagradost.cloudstream3.AcraApplication
 import androidx.preference.PreferenceManager
 import com.lagradost.cloudstream3.ar.youtube.YoutubeProvider.Config.SLEEP_BETWEEN
 import java.util.concurrent.ConcurrentHashMap
+import org.schabi.newpipe.extractor.NewPipe
+import org.schabi.newpipe.extractor.downloader.Downloader
+import org.schabi.newpipe.extractor.downloader.Request
+import org.schabi.newpipe.extractor.utils.Localization
+
+// [추가됨] 향후 WebView 기반 토큰 생성기 연동 및 로컬 소켓 프록시에서 사용할 po_token 공유 객체
+object YoutubePoTokenProvider {
+    var visitorData: String = ""
+    var poToken: String = "" // 예: "Mlx_..." 형태의 po_token 문자열
+}
 
 object YoutubeUtils {
     const val CHROME_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
@@ -36,6 +47,41 @@ object YoutubeUtils {
 
     // 동적 컴파일 Regex 부하를 줄이기 위한 내부 캐시
     private val regexCache = ConcurrentHashMap<String, Regex>()
+
+    // [추가됨] NewPipe Extractor에 강제로 User-Agent를 일치시키는 커스텀 다운로더 초기화 함수
+    fun initNewPipeDownloader() {
+        val downloader = object : Downloader() {
+            private val okHttpClient = okhttp3.OkHttpClient.Builder().build()
+            
+            override fun execute(request: Request): org.schabi.newpipe.extractor.downloader.Response {
+                val method = request.httpMethod()
+                val url = request.url()
+                val headers = request.headers()
+                val data = request.dataToSend()
+
+                val reqBody = data?.toRequestBody(null)
+                val reqBuilder = okhttp3.Request.Builder()
+                    .url(url)
+                    .method(method, reqBody)
+
+                headers.forEach { (key, values) ->
+                    values.forEach { reqBuilder.addHeader(key, it) }
+                }
+                
+                // 유튜브 CDN이 모바일로 인지하도록 강제 헤더 주입
+                reqBuilder.header("User-Agent", IOS_USER_AGENT)
+
+                val res = okHttpClient.newCall(reqBuilder.build()).execute()
+                val resHeaders = res.headers.toMultimap()
+                val resBodyStr = res.body?.string() ?: ""
+                
+                return org.schabi.newpipe.extractor.downloader.Response(
+                    res.code, res.message, resHeaders, resBodyStr, request.url()
+                )
+            }
+        }
+        NewPipe.init(downloader, Localization.DEFAULT, Localization.DEFAULT)
+    }
 
     fun sha1(input: String): String {
         val md = sha1Digest.get()
@@ -2253,4 +2299,4 @@ class YoutubeProvider(
         }
         return true
     }
-}
+} 
