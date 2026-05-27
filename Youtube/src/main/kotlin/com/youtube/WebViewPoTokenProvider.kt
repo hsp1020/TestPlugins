@@ -51,7 +51,7 @@ class WebViewPoTokenProvider : PoTokenProvider {
                 webView.settings.domStorageEnabled = true
 
                 val jsInterface = PoTokenJsInterface { token, visitorData ->
-                    result = PoTokenResult(token, visitorData, System.currentTimeMillis() / 1000 + 3600 * 6)
+                    result = PoTokenResult(token, visitorData, (System.currentTimeMillis() / 1000 + 3600 * 6).toString())
                     latch.countDown()
                 }
                 webView.addJavascriptInterface(jsInterface, "PoTokenBridge")
