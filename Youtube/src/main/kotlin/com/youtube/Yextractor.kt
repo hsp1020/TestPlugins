@@ -32,7 +32,7 @@ import kotlin.concurrent.thread
 open class YoutubeExtractor : ExtractorApi() {
     override val mainUrl = "https://www.youtube.com"
     override val requiresReferer = false
-    override val name = "YouTube"
+    override val name = "YouTube DASH"
 
     companion object {
         private val ytVideos = ConcurrentHashMap<String, List<ExtractorLink>>()
