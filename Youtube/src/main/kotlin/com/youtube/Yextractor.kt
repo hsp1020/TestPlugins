@@ -53,7 +53,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
         private val sessions = ConcurrentHashMap<String, StreamSession>()
         private val sessionQueue = ConcurrentLinkedQueue<String>()
-        private val videoIdToSession = ConcurrentHashMap<String, String>() // videoId → sessionId 매핑
+        private val videoIdToSession = ConcurrentHashMap<String, String>()
 
         @Volatile private var activeServer: ServerSocket? = null
         private var serverPort: Int = 0
@@ -175,8 +175,8 @@ open class YoutubeExtractor : ExtractorApi() {
                 session.videoStreams = extractor.videoOnlyStreams.orEmpty().mapNotNull { vs ->
                     val url = vs.content ?: return@mapNotNull null
                     VideoStreamInfo(
-                        quality = vs.height ?: 0,
-                        label = (vs.height ?: 0).toString(),
+                        quality = vs.height,                       // Non‑Null
+                        label = vs.height.toString(),
                         mimeType = vs.format?.mimeType ?: "video/mp4",
                         initRange = if (vs.initStart != null && vs.initEnd != null) "${vs.initStart}-${vs.initEnd}" else null,
                         indexRange = if (vs.indexStart != null && vs.indexEnd != null) "${vs.indexStart}-${vs.indexEnd}" else null,
@@ -188,7 +188,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     val url = as_.content ?: return@mapNotNull null
                     val lang = as_.audioTrackId?.substringBefore(".") ?: "Default"
                     AudioStreamInfo(
-                        bitrate = as_.bitrate ?: 128000,
+                        bitrate = as_.bitrate,                     // Non‑Null
                         mimeType = as_.format?.mimeType ?: "audio/mp4",
                         language = lang.uppercase(),
                         initRange = if (as_.initStart != null && as_.initEnd != null) "${as_.initStart}-${as_.initEnd}" else null,
@@ -249,7 +249,6 @@ open class YoutubeExtractor : ExtractorApi() {
         val cleanedUrl = url.replace(schemaStripRegex, "")
         val videoId = YoutubeUtils.extractYoutubeId(cleanedUrl) ?: cleanedUrl
 
-        // 이미 존재하는 세션이면 재사용 (중복 추출 방지)
         var sessionId = videoIdToSession[videoId]
         var session: StreamSession? = if (sessionId != null) sessions[sessionId] else null
 
@@ -264,8 +263,8 @@ open class YoutubeExtractor : ExtractorApi() {
             val videoStreams = extractor.videoOnlyStreams.orEmpty().mapNotNull { vs ->
                 val streamUrl = vs.content ?: return@mapNotNull null
                 VideoStreamInfo(
-                    quality = vs.height ?: 0,
-                    label = (vs.height ?: 0).toString(),
+                    quality = vs.height,
+                    label = vs.height.toString(),
                     mimeType = vs.format?.mimeType ?: "video/mp4",
                     initRange = if (vs.initStart != null && vs.initEnd != null) "${vs.initStart}-${vs.initEnd}" else null,
                     indexRange = if (vs.indexStart != null && vs.indexEnd != null) "${vs.indexStart}-${vs.indexEnd}" else null,
@@ -277,7 +276,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 val streamUrl = as_.content ?: return@mapNotNull null
                 val lang = as_.audioTrackId?.substringBefore(".") ?: "Default"
                 AudioStreamInfo(
-                    bitrate = as_.bitrate ?: 128000,
+                    bitrate = as_.bitrate,
                     mimeType = as_.format?.mimeType ?: "audio/mp4",
                     language = lang.uppercase(),
                     initRange = if (as_.initStart != null && as_.initEnd != null) "${as_.initStart}-${as_.initEnd}" else null,
@@ -301,7 +300,6 @@ open class YoutubeExtractor : ExtractorApi() {
             sessionQueue.add(sessionId)
             videoIdToSession[videoId] = sessionId
 
-            // LRU 정리
             if (sessions.size > 50) {
                 val old = sessionQueue.poll()
                 if (old != null) {
@@ -310,13 +308,11 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
             }
         } else {
-            // 기존 세션이 있으면 갱신 (50초 이상 지났으면)
             synchronized(session.refreshLock) {
                 if (System.currentTimeMillis() - session.lastRefreshMs > 50_000) {
                     refreshSession(session)
                 }
             }
-            // sessionId는 그대로 유지
             sessionId = videoIdToSession[videoId]!!
         }
 
@@ -330,7 +326,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 type = ExtractorLinkType.DASH
             ) {
                 this.referer = mainUrl
-                this.quality = session!!.videoStreams.maxOfOrNull { it.quality } ?: 720
+                this.quality = session.videoStreams.maxOfOrNull { it.quality } ?: 720
                 this.headers = mapOf(
                     "User-Agent" to YoutubeUtils.IOS_USER_AGENT,
                     "Origin" to "https://www.youtube.com",
@@ -339,10 +335,10 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         )
 
-        session!!.subtitles.mapNotNull { sub ->
+        session.subtitles.mapNotNull { sub ->
             try {
                 val lang = sub.locale?.language ?: return@mapNotNull null
-                var subUrl = sub.content ?: sub.url ?: return@mapNotNull null
+                var subUrl = sub.content ?: sub.getUrl() ?: return@mapNotNull null
                 if (subUrl.startsWith("http") && !subUrl.contains("fmt=srt")) subUrl += "&fmt=srt"
                 newSubtitleFile(lang, subUrl)
             } catch (_: Exception) { null }
