@@ -64,7 +64,7 @@ open class YoutubeExtractor : ExtractorApi() {
         )
 
         init {
-            YoutubeStreamExtractor.setFetchIosClient(true)
+            YoutubeStreamExtractor.setFetchIosClient(false)
         }
     }
 
