@@ -75,7 +75,7 @@ open class YoutubeExtractor : ExtractorApi() {
          * GVS 요청에 포함시킵니다.
          */
         init {
-            YoutubeStreamExtractor.setFetchIosClient(true)
+            YoutubeStreamExtractor.setFetchIosClient(false)
             // PO Token Provider 등록
             YoutubeStreamExtractor.setPoTokenProvider(WebViewPoTokenProvider())
             println("[YT_DEBUG] WebViewPoTokenProvider registered for iOS client PO token generation")
