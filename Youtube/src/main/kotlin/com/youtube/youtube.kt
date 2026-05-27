@@ -2162,6 +2162,7 @@ class YoutubeProvider(
         }
     }
 
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -2199,29 +2200,15 @@ class YoutubeProvider(
             logError(e)
         }
 
-        // 🔥 NewPipe가 생성하는 c=IOS 스트림에 맞는 실제 네이티브 앱 User-Agent
-        // (Origin이나 Referer는 네이티브 앱에서 보내지 않으므로 오히려 넣으면 403의 원인이 됩니다)
-        val iosNativeUserAgent = "com.google.ios.youtube/19.29.1 (iPhone14,3; U; CPU iOS 17_5_1 like Mac OS X; en_US)"
-        val fixedHeaders = mapOf(
-            "User-Agent" to iosNativeUserAgent
-        )
-
         if (isLive) {
-            val tempLinks = mutableListOf<ExtractorLink>()
-            loadExtractor(fullUrl, subtitleCallback) { tempLinks.add(it) }
-            
-            for (link in tempLinks) {
-                val fixedLink = newExtractorLink(
-                    source = link.source,
-                    name = link.name,
-                    url = link.url,
-                    type = link.type
-                ) {
-                    this.quality = link.quality
-                    this.referer = link.referer
-                    this.headers = fixedHeaders
-                }
-                callback(fixedLink)
+            // 라이브 방송 처리 시 내장 추출기를 쓰기 위해 iOS 모드를 잠시 끕니다.
+            org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor.setFetchIosClient(false)
+            try {
+                com.lagradost.cloudstream3.extractors.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback) { callback(it) }
+            } catch (e: Exception) {
+                logError(e)
+            } finally {
+                org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor.setFetchIosClient(true)
             }
         } else {
             if (playerResponseText.isNotBlank()) {
@@ -2233,56 +2220,58 @@ class YoutubeProvider(
                 }
             }
 
-            // 1. 고화질 DASH 추출기 무조건 실행 (첫번째 추출기)
+            // 1. 고화질 DASH 추출기 무조건 실행 (Yextractor.kt)
             com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback) {
                 callback(it)
             }
 
-            // 2. 내장 Extractor 실행 (두번째 추출기)
+            // 2. Cloudstream 내장 Extractor 실행
             val tempLinks = mutableListOf<ExtractorLink>()
-            loadExtractor(fullUrl, subtitleCallback) { tempLinks.add(it) }
+            
+            // 🔥 다른 플러그인과 동일하게 동작하도록 내장 추출기 실행 직전 iOS 모드를 OFF
+            org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor.setFetchIosClient(false)
+            try {
+                com.lagradost.cloudstream3.extractors.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback) { 
+                    tempLinks.add(it) 
+                }
+            } catch (e: Exception) {
+                logError(e)
+            } finally {
+                // 첫번째 추출기(Yextractor)를 위해 전역 iOS 설정을 다시 ON
+                org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor.setFetchIosClient(true)
+            }
 
-            // 💡 [요청하신 디버그 코드] 403 에러가 나는지, 원인이 무엇인지 확인하기 위한 다이렉트 테스트
+            // 💡 [요청하신 디버그 코드] 403 에러 원인 증명 및 작동 확인 (URL 전체 출력)
             val testLink = tempLinks.firstOrNull { it.url.contains("videoplayback") }
             if (testLink != null) {
                 try {
-                    println("[YT_DEBUG_403] ======= 403 HTTP REQUEST TEST START =======")
-                    println("[YT_DEBUG_403] Test URL: ${testLink.url.take(100)}...")
-                    println("[YT_DEBUG_403] Test Headers: $fixedHeaders")
-                    val testResponse = app.get(testLink.url, headers = fixedHeaders)
+                    println("[YT_DEBUG_403] ======= BUILT-IN EXTRACTOR HTTP REQUEST TEST START =======")
+                    println("[YT_DEBUG_403] Test URL (FULL): ${testLink.url}")
+                    println("[YT_DEBUG_403] Test Headers: ${testLink.headers}")
+                    
+                    val testResponse = app.get(testLink.url, headers = testLink.headers)
                     println("[YT_DEBUG_403] RESPONSE CODE: ${testResponse.code}")
+                    
                     if (!testResponse.isSuccessful) {
                         println("[YT_DEBUG_403] 🚨 ERROR BODY 🚨: \n${testResponse.text}")
                     } else {
-                        println("[YT_DEBUG_403] SUCCESS! No 403 error with these headers.")
+                        println("[YT_DEBUG_403] SUCCESS! No 403 error with built-in extractor.")
                     }
-                    println("[YT_DEBUG_403] ======= 403 HTTP REQUEST TEST END =======")
+                    println("[YT_DEBUG_403] ======= BUILT-IN EXTRACTOR HTTP REQUEST TEST END =======")
                 } catch (e: Exception) {
                     println("[YT_DEBUG_403] Request failed with exception: ${e.message}")
                 }
             }
 
-            // 수정된 헤더를 적용하여 콜백으로 전달
-            for (link in tempLinks) {
-                val fixedLink = newExtractorLink(
-                    source = link.source,
-                    name = link.name,
-                    url = link.url,
-                    type = link.type
-                ) {
-                    this.quality = link.quality
-                    this.referer = link.referer // 내장 추출기의 기본 referer는 무시되고 headers가 우선 적용됨
-                    this.headers = fixedHeaders
-                }
-                callback(fixedLink)
-            }
+            // 추출된 링크들을 플레이어로 전달
+            tempLinks.forEach { callback(it) }
 
             // 보조 모바일 앱 시뮬레이션 워밍업 유지
             loadLinksAdvanced(videoId, subtitleCallback) { }
         }
 
         return true
-    }
+    }   
     
     private suspend fun loadLinksAdvanced(
         videoId: String,
