@@ -27,7 +27,142 @@ import java.util.concurrent.*
 import kotlin.concurrent.thread
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+import android.webkit.JavascriptInterface
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import com.lagradost.cloudstream3.AcraApplication
+import org.schabi.newpipe.extractor.services.youtube.PoTokenProvider
+import org.schabi.newpipe.extractor.services.youtube.PoTokenResult
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
+// ─────────────────────────────────────────────────────────────────
+//  WebViewPoTokenProvider
+// ─────────────────────────────────────────────────────────────────
+class WebViewPoTokenProvider : PoTokenProvider {
+
+    companion object {
+        private const val TAG = "YT_PO_TOKEN"
+        private const val TIMEOUT_SECONDS = 30L
+    }
+
+    override fun getIosClientPoToken(videoId: String): PoTokenResult? {
+        Log.d(TAG, "getIosClientPoToken called for $videoId")
+        return generatePoToken("ios", videoId)
+    }
+
+    override fun getWebClientPoToken(videoId: String): PoTokenResult? {
+        Log.d(TAG, "getWebClientPoToken called for $videoId")
+        return generatePoToken("web", videoId)
+    }
+
+    override fun getAndroidClientPoToken(videoId: String): PoTokenResult? = null
+    override fun getWebEmbedClientPoToken(videoId: String): PoTokenResult? = null
+
+    private fun generatePoToken(clientType: String, videoId: String): PoTokenResult? {
+        val latch = CountDownLatch(1)
+        var result: PoTokenResult? = null
+        val handler = Handler(Looper.getMainLooper())
+
+        handler.post {
+            try {
+                val context = AcraApplication.context ?: run {
+                    Log.e(TAG, "Context is null")
+                    latch.countDown()
+                    return@post
+                }
+
+                val webView = WebView(context)
+                webView.settings.javaScriptEnabled = true
+                webView.settings.domStorageEnabled = true
+                webView.settings.userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+
+                // BotGuard 스크립트를 직접 주입하는 HTML 페이지
+                val html = """
+                    <!DOCTYPE html>
+                    <html>
+                    <head>
+                        <script>
+                            async function generateToken() {
+                                try {
+                                    const ytcfg = window.ytcfg || {};
+                                    const visitorData = ytcfg.get('VISITOR_INFO1_LIVE') || ytcfg.get('VISITOR_DATA') || '';
+                                    console.log('[YT_PO_TOKEN] visitorData=' + visitorData);
+                                    
+                                    if (window.botguard && window.botguard.generateToken) {
+                                        const token = await window.botguard.generateToken('$clientType', '$videoId', visitorData);
+                                        console.log('[YT_PO_TOKEN] token=' + token);
+                                        PoTokenBridge.onTokenGenerated(token, visitorData);
+                                    } else {
+                                        console.warn('[YT_PO_TOKEN] botguard not available');
+                                        PoTokenBridge.onTokenGenerated('', '');
+                                    }
+                                } catch (e) {
+                                    console.error('[YT_PO_TOKEN] error:', e);
+                                    PoTokenBridge.onTokenGenerated('', '');
+                                }
+                            }
+                        </script>
+                    </head>
+                    <body onload="generateToken()">
+                    </body>
+                    </html>
+                """.trimIndent()
+
+                val jsInterface = PoTokenJsInterface { token, visitorData ->
+                    if (!token.isNullOrBlank() && !visitorData.isNullOrBlank()) {
+                        Log.d(TAG, "PO token generated: token=${token.take(30)}..., visitorData=$visitorData")
+                        result = PoTokenResult(token, visitorData, null)
+                    } else {
+                        Log.e(TAG, "Empty token or visitorData")
+                    }
+                    latch.countDown()
+                }
+                webView.addJavascriptInterface(jsInterface, "PoTokenBridge")
+
+                webView.webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        Log.d(TAG, "Page finished: $url")
+                        view?.evaluateJavascript("generateToken();", null)
+                    }
+                }
+
+                webView.loadDataWithBaseURL("https://www.youtube.com/", html, "text/html", "UTF-8", null)
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Exception setting up WebView", e)
+                latch.countDown()
+            }
+        }
+
+        return try {
+            if (latch.await(TIMEOUT_SECONDS, TimeUnit.SECONDS)) result
+            else {
+                Log.w(TAG, "Timeout waiting for PO token")
+                null
+            }
+        } catch (e: InterruptedException) {
+            Log.e(TAG, "Interrupted", e)
+            null
+        }
+    }
+
+    private class PoTokenJsInterface(
+        private val callback: (token: String?, visitorData: String?) -> Unit
+    ) {
+        @JavascriptInterface
+        fun onTokenGenerated(token: String?, visitorData: String?) {
+            callback(token ?: "", visitorData ?: "")
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+//  YoutubeExtractor
+// ─────────────────────────────────────────────────────────────────
 open class YoutubeExtractor : ExtractorApi() {
     override val mainUrl = "https://www.youtube.com"
     override val requiresReferer = false
@@ -70,8 +205,8 @@ open class YoutubeExtractor : ExtractorApi() {
             .build()
 
         init {
-            // ANDROID_VR 클라이언트 사용을 위해 setFetchIosClient(false) 설정
-            YoutubeStreamExtractor.setFetchIosClient(false)
+            YoutubeStreamExtractor.setFetchIosClient(true)
+            YoutubeStreamExtractor.setPoTokenProvider(WebViewPoTokenProvider())
         }
     }
 
@@ -103,21 +238,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 println("[YT_DEBUG] getUrl called. videoId=$videoId")
                 val link = YoutubeStreamLinkHandlerFactory.getInstance().fromUrl(cleanedUrl)
                 val s = object : YoutubeStreamExtractor(ServiceList.YouTube, link) {}
-
-                // ANDROID_VR 클라이언트로 강제 설정 (PO Token 불필요)
-                try {
-                    val clientField = YoutubeStreamExtractor::class.java.getDeclaredField("client")
-                    clientField.isAccessible = true
-                    val clientEnum = Enum.valueOf(
-                        Class.forName("org.schabi.newpipe.extractor.services.youtube.YoutubeClient") as Class<Enum<*>>,
-                        "ANDROID_VR"
-                    )
-                    clientField.set(s, clientEnum)
-                    println("[YT_DEBUG] Successfully forced ANDROID_VR client")
-                } catch (e: Exception) {
-                    println("[YT_DEBUG] Failed to force ANDROID_VR client: ${e.message}")
-                    // 실패 시 기본 클라이언트로 계속 진행
-                }
 
                 s.fetchPage()
                 println("[YT_DEBUG] fetchPage done. Duration=${s.length}")
