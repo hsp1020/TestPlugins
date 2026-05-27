@@ -403,7 +403,7 @@ open class YoutubeExtractor : ExtractorApi() {
             proxyClient.newCall(requestBuilder.build()).execute().use { response ->
                 val code = response.code
                 println("[YT_DEBUG] Proxy response code: $code")
-                response.headers().forEach { (name, value) ->
+                response.headers.forEach { (name, value) ->
                     println("[YT_DEBUG] Response header: $name: $value")
                 }
 
