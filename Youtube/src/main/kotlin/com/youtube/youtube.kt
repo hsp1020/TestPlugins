@@ -2200,19 +2200,7 @@ class YoutubeProvider(
         }
 
         if (isLive) {
-            // 라이브 방송은 순정 환경(내장 추출기)으로 처리
-            org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor.setFetchIosClient(false)
-            try {
-                loadExtractor(fullUrl, subtitleCallback) { link ->
-                    if (!link.url.contains("127.0.0.1") && !link.url.endsWith(".mpd")) {
-                        callback(link)
-                    }
-                }
-            } catch (e: Exception) {
-                logError(e)
-            } finally {
-                org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor.setFetchIosClient(true)
-            }
+            loadExtractor(fullUrl, subtitleCallback, callback)
         } else {
             if (playerResponseText.isNotBlank()) {
                 try {
@@ -2223,37 +2211,21 @@ class YoutubeProvider(
                 }
             }
 
-            // 1. 고화질 DASH 추출기 (회원님의 Yextractor.kt) 무조건 실행
+            var advancedLinksCount = 0
             com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback) {
+                advancedLinksCount++
                 callback(it)
             }
 
-            // 2. Cloudstream 내장 Extractor 실행 (recloudstream과 완벽히 동일한 조건)
-            // 🔥 다른 플러그인처럼 완벽하게 작동하게 만들기 위해 전역 설정을 WEB(false)으로 되돌립니다.
-            org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor.setFetchIosClient(false)
-            try {
-                // 이름 충돌이 해결되었으므로 이제 정상적으로 코어 내장 추출기가 실행됩니다.
-                loadExtractor(fullUrl, subtitleCallback) { link ->
-                    // Yextractor(127.0.0.1) 중복 호출 필터링 후 내장 링크만 전달
-                    if (!link.url.contains("127.0.0.1") && !link.url.endsWith(".mpd")) {
-                        callback(link)
-                    }
-                }
-            } catch (e: Exception) {
-                logError(e)
-            } finally {
-                // 다음 영상을 위해 다시 iOS 모드를 켭니다.
-                org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor.setFetchIosClient(true)
+            if (advancedLinksCount == 0) {
+                loadExtractor(fullUrl, subtitleCallback, callback)
+            } else {
+                loadLinksAdvanced(videoId, subtitleCallback) { }
             }
-
-            // 보조 모바일 앱 시뮬레이션 워밍업 유지
-            loadLinksAdvanced(videoId, subtitleCallback) { }
         }
 
         return true
-    }
-
-   
+    }    
     
     private suspend fun loadLinksAdvanced(
         videoId: String,
