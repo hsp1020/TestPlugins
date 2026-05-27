@@ -15,7 +15,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.util.UUID
 import java.util.concurrent.*
-
+ 
 open class YoutubeExtractor : ExtractorApi() {
     override val mainUrl = "https://www.youtube.com"
     override val requiresReferer = false
