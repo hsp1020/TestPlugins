@@ -2162,7 +2162,6 @@ class YoutubeProvider(
         }
     }
 
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -2201,10 +2200,14 @@ class YoutubeProvider(
         }
 
         if (isLive) {
-            // 라이브 방송 처리 시 내장 추출기를 쓰기 위해 iOS 모드를 잠시 끕니다.
+            // 라이브는 내장 추출기(순정 상태)로 처리하기 위해 잠시 iOS 모드 OFF
             org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor.setFetchIosClient(false)
             try {
-                com.lagradost.cloudstream3.extractors.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback) { callback(it) }
+                loadExtractor(fullUrl, subtitleCallback) { link ->
+                    if (!link.url.contains("127.0.0.1") && !link.url.endsWith(".mpd")) {
+                        callback(link)
+                    }
+                }
             } catch (e: Exception) {
                 logError(e)
             } finally {
@@ -2221,49 +2224,56 @@ class YoutubeProvider(
             }
 
             // 1. 고화질 DASH 추출기 무조건 실행 (Yextractor.kt)
+            // (이 시점에는 iOS 모드가 true이므로 MPD가 완벽하게 작동합니다)
+            org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor.setFetchIosClient(true)
             com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback) {
                 callback(it)
             }
 
-            // 2. Cloudstream 내장 Extractor 실행
+            // 2. 내장 Extractor 실행 (다른 플러그인처럼 완벽하게 작동하게 만듦)
             val tempLinks = mutableListOf<ExtractorLink>()
             
-            // 🔥 다른 플러그인과 동일하게 동작하도록 내장 추출기 실행 직전 iOS 모드를 OFF
+            // 🔥 내장 추출기를 돌리기 직전, 순정(WEB) 상태로 되돌립니다.
             org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor.setFetchIosClient(false)
             try {
-                com.lagradost.cloudstream3.extractors.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback) { 
-                    tempLinks.add(it) 
+                loadExtractor(fullUrl, subtitleCallback) { link ->
+                    // loadExtractor가 첫 번째 DASH 추출기를 중복 호출할 수 있으므로, MPD 링크는 필터링하여 걸러냅니다.
+                    if (!link.url.contains("127.0.0.1") && !link.url.endsWith(".mpd")) {
+                        tempLinks.add(link)
+                    }
                 }
             } catch (e: Exception) {
                 logError(e)
             } finally {
-                // 첫번째 추출기(Yextractor)를 위해 전역 iOS 설정을 다시 ON
+                // 다음 실행을 위해 다시 iOS 모드를 ON으로 복구합니다.
                 org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor.setFetchIosClient(true)
             }
 
-            // 💡 [요청하신 디버그 코드] 403 에러 원인 증명 및 작동 확인 (URL 전체 출력)
-            val testLink = tempLinks.firstOrNull { it.url.contains("videoplayback") }
+            // 💡 [요청하신 디버그 코드] 403 에러가 완벽히 사라졌는지 직접 HTTP 요청으로 증명합니다.
+            val testLink = tempLinks.firstOrNull { it.url.contains("googlevideo.com") }
             if (testLink != null) {
                 try {
-                    println("[YT_DEBUG_403] ======= BUILT-IN EXTRACTOR HTTP REQUEST TEST START =======")
-                    println("[YT_DEBUG_403] Test URL (FULL): ${testLink.url}")
-                    println("[YT_DEBUG_403] Test Headers: ${testLink.headers}")
+                    println("[YT_DEBUG_TEST] ======= BUILT-IN EXTRACTOR HTTP REQUEST TEST START =======")
+                    println("[YT_DEBUG_TEST] Test URL (FULL): ${testLink.url}")
+                    println("[YT_DEBUG_TEST] Test Headers: ${testLink.headers ?: emptyMap<String, String>()}")
                     
-                    val testResponse = app.get(testLink.url, headers = testLink.headers)
-                    println("[YT_DEBUG_403] RESPONSE CODE: ${testResponse.code}")
+                    val testResponse = app.get(testLink.url, headers = testLink.headers ?: emptyMap())
+                    println("[YT_DEBUG_TEST] RESPONSE CODE: ${testResponse.code}")
                     
                     if (!testResponse.isSuccessful) {
-                        println("[YT_DEBUG_403] 🚨 ERROR BODY 🚨: \n${testResponse.text}")
+                        println("[YT_DEBUG_TEST] 🚨 ERROR BODY 🚨: \n${testResponse.text}")
                     } else {
-                        println("[YT_DEBUG_403] SUCCESS! No 403 error with built-in extractor.")
+                        println("[YT_DEBUG_TEST] SUCCESS! 200 OK. No 403 error!")
                     }
-                    println("[YT_DEBUG_403] ======= BUILT-IN EXTRACTOR HTTP REQUEST TEST END =======")
+                    println("[YT_DEBUG_TEST] ======= BUILT-IN EXTRACTOR HTTP REQUEST TEST END =======")
                 } catch (e: Exception) {
-                    println("[YT_DEBUG_403] Request failed with exception: ${e.message}")
+                    println("[YT_DEBUG_TEST] Request failed with exception: ${e.message}")
                 }
+            } else {
+                println("[YT_DEBUG_TEST] No googlevideo links found by built-in extractor.")
             }
 
-            // 추출된 링크들을 플레이어로 전달
+            // 내장 추출기 링크 최종 전달
             tempLinks.forEach { callback(it) }
 
             // 보조 모바일 앱 시뮬레이션 워밍업 유지
@@ -2271,7 +2281,8 @@ class YoutubeProvider(
         }
 
         return true
-    }   
+    }
+   
     
     private suspend fun loadLinksAdvanced(
         videoId: String,
