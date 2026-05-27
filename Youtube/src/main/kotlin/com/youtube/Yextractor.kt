@@ -69,16 +69,9 @@ open class YoutubeExtractor : ExtractorApi() {
             .followSslRedirects(true)
             .build()
 
-        /**
-         * PO Token 문제를 해결하기 위해 WebView 기반 PoTokenProvider를 등록합니다.
-         * 이 설정이 적용되면, NewPipe Extractor는 자동으로 PO Token을 생성하여
-         * GVS 요청에 포함시킵니다.
-         */
         init {
-            YoutubeStreamExtractor.setFetchIosClient(true)
-            // PO Token Provider 등록
-            YoutubeStreamExtractor.setPoTokenProvider(WebViewPoTokenProvider())
-            println("[YT_DEBUG] WebViewPoTokenProvider registered for iOS client PO token generation")
+            // ANDROID_VR 클라이언트 사용을 위해 setFetchIosClient(false) 설정
+            YoutubeStreamExtractor.setFetchIosClient(false)
         }
     }
 
@@ -110,7 +103,24 @@ open class YoutubeExtractor : ExtractorApi() {
                 println("[YT_DEBUG] getUrl called. videoId=$videoId")
                 val link = YoutubeStreamLinkHandlerFactory.getInstance().fromUrl(cleanedUrl)
                 val s = object : YoutubeStreamExtractor(ServiceList.YouTube, link) {}
+
+                // ANDROID_VR 클라이언트로 강제 설정 (PO Token 불필요)
+                try {
+                    val clientField = YoutubeStreamExtractor::class.java.getDeclaredField("client")
+                    clientField.isAccessible = true
+                    val clientEnum = Enum.valueOf(
+                        Class.forName("org.schabi.newpipe.extractor.services.youtube.YoutubeClient") as Class<Enum<*>>,
+                        "ANDROID_VR"
+                    )
+                    clientField.set(s, clientEnum)
+                    println("[YT_DEBUG] Successfully forced ANDROID_VR client")
+                } catch (e: Exception) {
+                    println("[YT_DEBUG] Failed to force ANDROID_VR client: ${e.message}")
+                    // 실패 시 기본 클라이언트로 계속 진행
+                }
+
                 s.fetchPage()
+                println("[YT_DEBUG] fetchPage done. Duration=${s.length}")
 
                 val durationSeconds = if (s.length > 0) s.length else 3600L
                 val builtLinks = mutableListOf<ExtractorLink>()
@@ -182,6 +192,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
 
+                // 외부 다운로더 링크
                 builtLinks.add(
                     newExtractorLink("YouTube Downloader", "Cobalt Web Download(4K)", "https://qwkuns.me/#https://www.youtube.com/watch?v=$videoId", type = INFER_TYPE) {
                         this.quality = 2160; this.referer = mainUrl
@@ -196,6 +207,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 ytVideos[videoId] = builtLinks.toList()
             } catch (e: Exception) {
                 logError(e)
+                println("[YT_DEBUG] Extraction failed: ${e.message}")
             }
         }
 
@@ -213,7 +225,6 @@ open class YoutubeExtractor : ExtractorApi() {
         }?.forEach { subtitleCallback(it) }
     }
 
-    // --- 로컬 서버 관련 코드 (기존과 동일) ---
     private fun startServerIfNeeded() {
         synchronized(serverLock) {
             if (activeServer != null && !activeServer!!.isClosed) return
@@ -251,7 +262,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 val requestPath = parts[1]
                 val cleanPath = requestPath.substringAfter("/").substringBefore("?")
 
-                // 헤더 읽기
                 val headers = mutableMapOf<String, String>()
                 while (true) {
                     val headerLine = reader.readLine()?.takeIf { it.isNotBlank() } ?: break
