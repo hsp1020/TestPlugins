@@ -23,10 +23,7 @@ import java.net.URLEncoder
 import java.util.UUID
 import java.util.Collections
 import java.util.LinkedHashMap
-import java.util.concurrent.ThreadPoolExecutor
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.SynchronousQueue
-import java.util.concurrent.ThreadFactory
+import java.util.concurrent.*
 import kotlin.concurrent.thread
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -39,39 +36,28 @@ open class YoutubeExtractor : ExtractorApi() {
     companion object {
         private val ytVideos: MutableMap<String, List<ExtractorLink>> = Collections.synchronizedMap(
             object : LinkedHashMap<String, List<ExtractorLink>>(32, 0.75f, true) {
-                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<ExtractorLink>>?): Boolean {
-                    return size > 50
-                }
+                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<ExtractorLink>>?): Boolean = size > 50
             }
         )
-
         private val ytVideosSubtitles: MutableMap<String, List<SubtitlesStream>> = Collections.synchronizedMap(
             object : LinkedHashMap<String, List<SubtitlesStream>>(32, 0.75f, true) {
-                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<SubtitlesStream>>?): Boolean {
-                    return size > 50
-                }
+                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<SubtitlesStream>>?): Boolean = size > 50
             }
         )
 
-        @Volatile
-        private var activeServer: ServerSocket? = null
+        @Volatile private var activeServer: ServerSocket? = null
         private var serverPort: Int = 0
         private val serverLock = Any()
 
         private val manifestMap: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(128, 0.75f, true) {
-                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
-                    return size > 1000
-                }
+                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = size > 1000
             }
         )
 
         private val serverExecutor = ThreadPoolExecutor(
-            0,
-            32,
-            60L,
-            TimeUnit.SECONDS,
-            SynchronousQueue<Runnable>(),
+            0, 32, 60L, TimeUnit.SECONDS,
+            SynchronousQueue(),
             ThreadFactory { r -> Thread(r, "YT-DASH-Server-Worker").apply { isDaemon = true } },
             ThreadPoolExecutor.CallerRunsPolicy()
         )
@@ -83,42 +69,37 @@ open class YoutubeExtractor : ExtractorApi() {
             .followSslRedirects(true)
             .build()
 
+        /**
+         * PO Token 문제를 해결하기 위해 WebView 기반 PoTokenProvider를 등록합니다.
+         * 이 설정이 적용되면, NewPipe Extractor는 자동으로 PO Token을 생성하여
+         * GVS 요청에 포함시킵니다.
+         */
         init {
             YoutubeStreamExtractor.setFetchIosClient(true)
+            // PO Token Provider 등록
+            YoutubeStreamExtractor.setPoTokenProvider(WebViewPoTokenProvider())
+            println("[YT_DEBUG] WebViewPoTokenProvider registered for iOS client PO token generation")
         }
     }
 
-    override fun getExtractorUrl(id: String): String {
-        return "$mainUrl/watch?v=$id"
-    }
+    override fun getExtractorUrl(id: String): String = "$mainUrl/watch?v=$id"
 
     data class StreamInfo(
-        val url: String,
-        val mimeType: String,
-        val height: Int,
-        val label: String,
-        val initRange: String?,
-        val indexRange: String?
+        val url: String, val mimeType: String, val height: Int,
+        val label: String, val initRange: String?, val indexRange: String?
     )
-
     data class AudioInfo(
-        val url: String,
-        val mimeType: String,
-        val bitrate: Int,
-        val initRange: String?,
-        val indexRange: String?,
-        val language: String
+        val url: String, val mimeType: String, val bitrate: Int,
+        val initRange: String?, val indexRange: String?, val language: String
     )
 
     override suspend fun getUrl(
-        url: String,
-        referer: String?,
+        url: String, referer: String?,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
         val cleanedUrl = url.replace(schemaStripRegex, "")
         val videoId = YoutubeUtils.extractYoutubeId(cleanedUrl) ?: cleanedUrl
-        println("[YT_DEBUG] getUrl called. videoId=$videoId")
 
         ytVideos.remove(videoId)
         ytVideosSubtitles.remove(videoId)
@@ -126,264 +107,185 @@ open class YoutubeExtractor : ExtractorApi() {
         val cachedLinks = ytVideos[videoId]
         if (cachedLinks.isNullOrEmpty()) {
             try {
-                println("[YT_DEBUG] No cache, extracting streams via NewPipe...")
+                println("[YT_DEBUG] getUrl called. videoId=$videoId")
                 val link = YoutubeStreamLinkHandlerFactory.getInstance().fromUrl(cleanedUrl)
                 val s = object : YoutubeStreamExtractor(ServiceList.YouTube, link) {}
                 s.fetchPage()
-                println("[YT_DEBUG] fetchPage done. Duration=${s.length}")
 
                 val durationSeconds = if (s.length > 0) s.length else 3600L
                 val builtLinks = mutableListOf<ExtractorLink>()
-                val seenUrls = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+                val seenUrls = ConcurrentHashMap.newKeySet<String>()
 
                 val videoOnlyList = (s.videoOnlyStreams ?: emptyList()).mapNotNull { vs ->
-                    try {
-                        val streamUrl = vs.content ?: return@mapNotNull null
-                        if (!seenUrls.add(streamUrl)) return@mapNotNull null
-
-                        val label = buildVideoLabelNumber(vs)
-                        val height = vs.height ?: 0
-                        var mime = vs.format?.mimeType
-                        if (mime.isNullOrEmpty()) mime = getMimeTypeFromUrl(streamUrl, false)
-
-                        val initR = if (vs.initStart != null && vs.initEnd != null) "${vs.initStart}-${vs.initEnd}" else null
-                        val indexR = if (vs.indexStart != null && vs.indexEnd != null) "${vs.indexStart}-${vs.indexEnd}" else null
-
-                        println("[YT_DEBUG] Video stream: height=$height, mime=$mime, url=${streamUrl.take(70)}...")
-                        StreamInfo(streamUrl, mime, height, label, initR, indexR)
-                    } catch (e: Exception) { null }
+                    vs.content?.let { streamUrl ->
+                        if (!seenUrls.add(streamUrl)) null
+                        else {
+                            val mime = vs.format?.mimeType ?: getMimeTypeFromUrl(streamUrl, false)
+                            StreamInfo(
+                                url = streamUrl, mimeType = mime,
+                                height = vs.height, label = (vs.height ?: 0).toString(),
+                                initRange = if (vs.initStart != null && vs.initEnd != null) "${vs.initStart}-${vs.initEnd}" else null,
+                                indexRange = if (vs.indexStart != null && vs.indexEnd != null) "${vs.indexStart}-${vs.indexEnd}" else null
+                            )
+                        }
+                    }
                 }.distinctBy { it.height }
-                println("[YT_DEBUG] Total distinct video streams: ${videoOnlyList.size}")
 
                 val audioInfoList = (s.audioStreams ?: emptyList()).mapNotNull { asr ->
-                    try {
-                        val aUrl = asr.content ?: return@mapNotNull null
+                    asr.content?.let { aUrl ->
                         val bitrate = asr.bitrate ?: 128000
-                        var mime = asr.format?.mimeType
-                        if (mime.isNullOrEmpty()) mime = getMimeTypeFromUrl(aUrl, true)
-
-                        val initR = if (asr.initStart != null && asr.initEnd != null) "${asr.initStart}-${asr.initEnd}" else null
-                        val indexR = if (asr.indexStart != null && asr.indexEnd != null) "${asr.indexStart}-${asr.indexEnd}" else null
-                        var rawLang = asr.audioTrackId ?: "Default"
-                        if (rawLang.contains(".")) rawLang = rawLang.substringBefore(".")
-
-                        println("[YT_DEBUG] Audio stream: lang=$rawLang, bitrate=$bitrate, url=${aUrl.take(70)}...")
-                        AudioInfo(aUrl, mime, bitrate, initR, indexR, rawLang.uppercase())
-                    } catch (e: Exception) { null }
+                        val mime = asr.format?.mimeType ?: getMimeTypeFromUrl(aUrl, true)
+                        val rawLang = (asr.audioTrackId ?: "Default").substringBefore(".")
+                        AudioInfo(
+                            url = aUrl, mimeType = mime, bitrate = bitrate,
+                            initRange = if (asr.initStart != null && asr.initEnd != null) "${asr.initStart}-${asr.initEnd}" else null,
+                            indexRange = if (asr.indexStart != null && asr.indexEnd != null) "${asr.indexStart}-${asr.indexEnd}" else null,
+                            language = rawLang.uppercase()
+                        )
+                    }
                 }.distinctBy { it.url }
-                println("[YT_DEBUG] Total distinct audio streams: ${audioInfoList.size}")
 
-                val audiosByLanguage = audioInfoList.groupBy { it.language }
+                println("[YT_DEBUG] Extracted ${videoOnlyList.size} video streams, ${audioInfoList.size} audio streams")
 
                 try {
-                    val subs = s.subtitlesDefault?.filterNotNull() ?: emptyList()
-                    ytVideosSubtitles[videoId] = subs
-                    println("[YT_DEBUG] Subtitles count: ${subs.size}")
+                    ytVideosSubtitles[videoId] = s.subtitlesDefault?.filterNotNull() ?: emptyList()
                 } catch (e: Exception) {
-                    println("[YT_DEBUG] Failed to extract subtitles: ${e.message}")
+                    logError(e)
                 }
 
                 startServerIfNeeded()
 
-                // Build DASH links (now pointing to local proxy)
+                val audiosByLanguage = audioInfoList.groupBy { it.language }
                 for (video in videoOnlyList) {
-                    if (audiosByLanguage.isNotEmpty()) {
-                        for ((lang, audios) in audiosByLanguage) {
-                            val bestAudioForLang = if (video.mimeType.contains("webm")) {
-                                audios.sortedWith(compareByDescending<AudioInfo> { it.mimeType.contains("webm") }.thenByDescending { it.bitrate }).firstOrNull()
-                            } else {
-                                audios.sortedWith(compareByDescending<AudioInfo> { it.mimeType.contains("mp4") }.thenByDescending { it.bitrate }).firstOrNull()
-                            }
-
-                            if (bestAudioForLang != null) {
-                                val singleAudioList = listOf(bestAudioForLang)
-                                val dashXml = buildDashManifestXml(video, singleAudioList, durationSeconds)
-                                println("[YT_DEBUG] Generated DASH XML for video=${video.label}, audio_lang=$lang. XML head: ${dashXml.take(200)}")
-                                val localLink = registerManifestAndGetUrl(dashXml)
-                                if (localLink != null) {
-                                    println("[YT_DEBUG] Registered MPD at: $localLink")
-                                    builtLinks.add(
-                                        newExtractorLink(
-                                            "${this.name} ($lang)",
-                                            "${video.label} ($lang)",
-                                            localLink,
-                                            type = ExtractorLinkType.DASH
-                                        ) {
-                                            this.referer = mainUrl
-                                            this.quality = video.height
-                                            this.headers = mapOf(
-                                                "User-Agent" to YoutubeUtils.IOS_USER_AGENT,
-                                                "Origin" to "https://www.youtube.com",
-                                                "Referer" to "https://www.youtube.com"
-                                            )
-                                        }
+                    val bestAudio = audiosByLanguage.values.flatten().maxByOrNull { it.bitrate }
+                    if (bestAudio != null) {
+                        val dashXml = buildDashManifestXml(video, listOf(bestAudio), durationSeconds)
+                        val localLink = registerManifestAndGetUrl(dashXml)
+                        if (localLink != null) {
+                            builtLinks.add(
+                                newExtractorLink(
+                                    "${this.name} (${bestAudio.language})",
+                                    "${video.label} (${bestAudio.language})",
+                                    localLink,
+                                    type = ExtractorLinkType.DASH
+                                ) {
+                                    this.referer = mainUrl
+                                    this.quality = video.height
+                                    this.headers = mapOf(
+                                        "User-Agent" to YoutubeUtils.IOS_USER_AGENT,
+                                        "Origin" to "https://www.youtube.com",
+                                        "Referer" to "https://www.youtube.com"
                                     )
-                                } else {
-                                    println("[YT_DEBUG] FAILED to register MPD (serverPort=$serverPort)")
                                 }
-                            }
+                            )
                         }
                     }
                 }
 
-                // 외부 다운로더 링크 (기존 유지)
                 builtLinks.add(
                     newExtractorLink("YouTube Downloader", "Cobalt Web Download(4K)", "https://qwkuns.me/#https://www.youtube.com/watch?v=$videoId", type = INFER_TYPE) {
-                        this.quality = 2160
-                        this.referer = mainUrl
+                        this.quality = 2160; this.referer = mainUrl
                     }
                 )
                 builtLinks.add(
                     newExtractorLink("YouTube Downloader", "SOSYouTube Web Download(1080p)", "https://www.sosyoutube.com/watch?v=$videoId", type = INFER_TYPE) {
-                        this.quality = 2160
-                        this.referer = mainUrl
+                        this.quality = 2160; this.referer = mainUrl
                     }
                 )
 
                 ytVideos[videoId] = builtLinks.toList()
-                println("[YT_DEBUG] Total ExtractorLinks built: ${builtLinks.size}")
-
             } catch (e: Exception) {
-                println("[YT_DEBUG] Exception during extraction: ${e.message}")
                 logError(e)
             }
-        } else {
-            println("[YT_DEBUG] Using cached links. Count=${cachedLinks.size}")
         }
 
-        val finalLinks: List<ExtractorLink> = ytVideos[videoId] ?: emptyList()
-        finalLinks.forEach { callback(it) }
-
-        val finalSubtitles: List<SubtitlesStream> = ytVideosSubtitles[videoId] ?: emptyList()
-        finalSubtitles.mapNotNull { ss ->
+        ytVideos[videoId]?.forEach { callback(it) }
+        ytVideosSubtitles[videoId]?.mapNotNull { sub ->
             try {
-                val lang = ss.locale?.language ?: return@mapNotNull null
-                var url = ss.content ?: ss.getUrl() ?: return@mapNotNull null
-                if (url.startsWith("http")) {
-                    url = url.replace(Regex("&fmt=[^&]+"), "")
-                    if (!url.contains("fmt=srt")) url = "$url&fmt=srt"
+                val lang = sub.locale?.language ?: return@mapNotNull null
+                var subUrl = sub.content ?: sub.getUrl() ?: return@mapNotNull null
+                if (subUrl.startsWith("http")) {
+                    subUrl = subUrl.replace(Regex("&fmt=[^&]+"), "")
+                    if (!subUrl.contains("fmt=srt")) subUrl += "&fmt=srt"
                 }
-                newSubtitleFile(lang, url)
-            } catch (e: Exception) { null }
-        }.forEach { subtitleCallback(it) }
+                newSubtitleFile(lang, subUrl)
+            } catch (_: Exception) { null }
+        }?.forEach { subtitleCallback(it) }
     }
 
+    // --- 로컬 서버 관련 코드 (기존과 동일) ---
     private fun startServerIfNeeded() {
         synchronized(serverLock) {
-            val server = activeServer
-            if (server != null && !server.isClosed) {
-                println("[YT_DEBUG] Server already running on port $serverPort")
-                return
-            }
+            if (activeServer != null && !activeServer!!.isClosed) return
             try {
-                val newServer = ServerSocket(0)
-                activeServer = newServer
-                serverPort = newServer.localPort
-                println("[YT_DEBUG] Local DASH proxy server started on port $serverPort")
+                val server = ServerSocket(0)
+                activeServer = server
+                serverPort = server.localPort
+                println("[YT_DEBUG] Server started on port $serverPort")
                 thread(name = "YT-DASH-Server-Acceptor", isDaemon = true) {
-                    try {
-                        while (true) {
-                            val active = activeServer ?: break
-                            if (active.isClosed) break
-                            val client = active.accept()
-                            println("[YT_DEBUG] Accepted connection from ${client.inetAddress}")
-                            client.soTimeout = 15000
-                            serverExecutor.execute { handleClient(client) }
-                        }
-                    } catch (e: Exception) {
-                        println("[YT_DEBUG] Server accept loop terminated: ${e.message}")
+                    while (true) {
+                        val client = try { server.accept() } catch (_: Exception) { break }
+                        client.soTimeout = 15000
+                        serverExecutor.execute { handleClient(client) }
                     }
                 }
-            } catch (e: Exception) {
-                println("[YT_DEBUG] Failed to start server: ${e.message}")
-                logError(e)
-            }
+            } catch (e: Exception) { logError(e) }
         }
     }
 
     private fun registerManifestAndGetUrl(xmlContent: String): String? {
-        if (serverPort == 0) {
-            println("[YT_DEBUG] registerManifestAndGetUrl: serverPort is 0")
-            return null
-        }
+        if (serverPort == 0) return null
         val id = UUID.randomUUID().toString()
         manifestMap[id] = xmlContent
-        val url = "http://127.0.0.1:$serverPort/$id.mpd"
-        println("[YT_DEBUG] MPD registered: id=$id, url=$url")
-        return url
+        return "http://127.0.0.1:$serverPort/$id.mpd"
     }
 
     private fun handleClient(client: Socket) {
         try {
             client.use { socket ->
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
-                val line = reader.readLine() ?: run {
-                    println("[YT_DEBUG] handleClient: empty request line")
-                    return
+                val line = reader.readLine() ?: return
+                if (!line.startsWith("GET")) return
+                val parts = line.split(" ")
+                if (parts.size < 2) return
+                val requestPath = parts[1]
+                val cleanPath = requestPath.substringAfter("/").substringBefore("?")
+
+                // 헤더 읽기
+                val headers = mutableMapOf<String, String>()
+                while (true) {
+                    val headerLine = reader.readLine()?.takeIf { it.isNotBlank() } ?: break
+                    val idx = headerLine.indexOf(":")
+                    if (idx > 0) headers[headerLine.substring(0, idx).trim().lowercase()] = headerLine.substring(idx + 1).trim()
                 }
-                println("[YT_DEBUG] handleClient: request line = $line")
 
-                if (line.startsWith("GET")) {
-                    val parts = line.split(" ")
-                    if (parts.size > 1) {
-                        val requestPath = parts[1]
-                        val cleanPath = requestPath.substringAfter("/").substringBefore("?")
-                        println("[YT_DEBUG] cleanPath = $cleanPath")
-
-                        val clientHeaders = mutableMapOf<String, String>()
-                        var headerLine: String?
-                        while (true) {
-                            headerLine = reader.readLine()
-                            if (headerLine.isNullOrBlank()) break
-                            val idx = headerLine.indexOf(":")
-                            if (idx > 0) {
-                                val key = headerLine.substring(0, idx).trim().lowercase()
-                                val value = headerLine.substring(idx + 1).trim()
-                                clientHeaders[key] = value
-                            }
-                        }
-                        println("[YT_DEBUG] client headers: $clientHeaders")
-
-                        if (cleanPath.startsWith("proxy", ignoreCase = true)) {
-                            val query = requestPath.substringAfter("?")
-                            val params = parseQueryParams(query)
-                            val targetUrl = params["url"]
-                            println("[YT_DEBUG] Proxy request for targetUrl = $targetUrl")
-                            if (!targetUrl.isNullOrBlank()) {
-                                handleProxyRequest(socket, targetUrl, clientHeaders)
-                            } else {
-                                println("[YT_DEBUG] Proxy request missing 'url' parameter")
-                                send404(socket)
-                            }
-                        } else {
-                            val path = if (cleanPath.endsWith(".mpd", ignoreCase = true)) {
-                                cleanPath.substring(0, cleanPath.length - 4)
-                            } else {
-                                cleanPath
-                            }
-                            println("[YT_DEBUG] MPD request for id=$path")
-                            val content = manifestMap[path]
-                            val output = PrintWriter(socket.getOutputStream(), true)
-                            if (content != null) {
-                                output.println("HTTP/1.1 200 OK")
-                                output.println("Content-Type: application/dash+xml")
-                                output.println("Connection: close")
-                                output.println("Access-Control-Allow-Origin: *")
-                                output.println("")
-                                output.println(content)
-                                println("[YT_DEBUG] Served MPD (size=${content.length})")
-                            } else {
-                                println("[YT_DEBUG] MPD not found for id=$path")
-                                output.println("HTTP/1.1 404 Not Found")
-                                output.println("")
-                            }
-                        }
+                if (cleanPath.startsWith("proxy", ignoreCase = true)) {
+                    val query = requestPath.substringAfter("?")
+                    val params = parseQueryParams(query)
+                    val targetUrl = params["url"]
+                    if (!targetUrl.isNullOrBlank()) {
+                        handleProxyRequest(socket, targetUrl, headers)
+                    } else {
+                        send404(socket)
+                    }
+                } else {
+                    val path = if (cleanPath.endsWith(".mpd", ignoreCase = true)) cleanPath.substring(0, cleanPath.length - 4) else cleanPath
+                    val content = manifestMap[path]
+                    val output = PrintWriter(socket.getOutputStream(), true)
+                    if (content != null) {
+                        output.println("HTTP/1.1 200 OK")
+                        output.println("Content-Type: application/dash+xml")
+                        output.println("Connection: close")
+                        output.println("Access-Control-Allow-Origin: *")
+                        output.println()
+                        output.println(content)
+                    } else {
+                        output.println("HTTP/1.1 404 Not Found")
+                        output.println()
                     }
                 }
             }
-        } catch (e: Exception) {
-            println("[YT_DEBUG] handleClient error: ${e.message}")
-        }
+        } catch (_: Exception) {}
     }
 
     private fun handleProxyRequest(client: Socket, targetUrl: String, clientHeaders: Map<String, String>) {
@@ -393,23 +295,12 @@ open class YoutubeExtractor : ExtractorApi() {
                 .header("User-Agent", YoutubeUtils.IOS_USER_AGENT)
                 .header("Referer", "https://www.youtube.com")
                 .header("Origin", "https://www.youtube.com")
-
-            clientHeaders["range"]?.let { range ->
-                requestBuilder.header("Range", range)
-                println("[YT_DEBUG] Forwarding Range header: $range")
-            }
-            println("[YT_DEBUG] Starting proxy request to $targetUrl")
+            clientHeaders["range"]?.let { requestBuilder.header("Range", it) }
 
             proxyClient.newCall(requestBuilder.build()).execute().use { response ->
-                val code = response.code
-                println("[YT_DEBUG] Proxy response code: $code")
-                response.headers.forEach { (name, value) ->
-                    println("[YT_DEBUG] Response header: $name: $value")
-                }
-
                 val outputStream = client.getOutputStream()
                 val headerBytes = StringBuilder()
-                headerBytes.append("HTTP/1.1 $code ${response.message}\r\n")
+                headerBytes.append("HTTP/1.1 ${response.code} ${response.message}\r\n")
                 response.header("Content-Type")?.let { headerBytes.append("Content-Type: $it\r\n") }
                 response.header("Content-Length")?.let { headerBytes.append("Content-Length: $it\r\n") }
                 response.header("Content-Range")?.let { headerBytes.append("Content-Range: $it\r\n") }
@@ -417,35 +308,23 @@ open class YoutubeExtractor : ExtractorApi() {
                 headerBytes.append("Connection: close\r\n")
                 headerBytes.append("Access-Control-Allow-Origin: *\r\n")
                 headerBytes.append("\r\n")
-
                 outputStream.write(headerBytes.toString().toByteArray(Charsets.UTF_8))
                 outputStream.flush()
-                println("[YT_DEBUG] Sent response headers to client")
 
-                val body = response.body
-                if (body != null) {
-                    var totalRead = 0L
-                    body.byteStream().use { inputStream ->
-                        val buffer = ByteArray(32 * 1024)
-                        var bytesRead: Int
-                        while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                            outputStream.write(buffer, 0, bytesRead)
-                            totalRead += bytesRead
-                        }
+                response.body?.byteStream()?.use { inputStream ->
+                    val buffer = ByteArray(32 * 1024)
+                    var bytesRead: Int
+                    while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                        outputStream.write(buffer, 0, bytesRead)
                     }
-                    outputStream.flush()
-                    println("[YT_DEBUG] Proxy forwarding completed, total bytes sent: $totalRead")
-                } else {
-                    println("[YT_DEBUG] Response body was null")
                 }
-            }
-        } catch (e: Exception) {
-            println("[YT_DEBUG] Proxy request failed: ${e.message}")
-            try {
-                val outputStream = client.getOutputStream()
-                val errorResponse = "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n"
-                outputStream.write(errorResponse.toByteArray(Charsets.UTF_8))
                 outputStream.flush()
+            }
+        } catch (_: Exception) {
+            try {
+                val errorResponse = "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n"
+                client.getOutputStream().write(errorResponse.toByteArray(Charsets.UTF_8))
+                client.getOutputStream().flush()
             } catch (_: Exception) {}
         }
     }
@@ -454,23 +333,14 @@ open class YoutubeExtractor : ExtractorApi() {
         val params = mutableMapOf<String, String>()
         query.split("&").forEach { pair ->
             val idx = pair.indexOf("=")
-            if (idx > 0) {
-                val key = pair.substring(0, idx)
-                val value = pair.substring(idx + 1)
-                params[key] = YoutubeUtils.urlDecode(value)
-            }
+            if (idx > 0) params[pair.substring(0, idx)] = YoutubeUtils.urlDecode(pair.substring(idx + 1))
         }
         return params
     }
 
-    private fun buildDashManifestXml(
-        video: StreamInfo,
-        audioList: List<AudioInfo>,
-        durationSec: Long
-    ): String {
+    private fun buildDashManifestXml(video: StreamInfo, audioList: List<AudioInfo>, durationSec: Long): String {
         val localVideoUrl = escapeXml("http://127.0.0.1:$serverPort/proxy?url=${URLEncoder.encode(video.url, "UTF-8")}")
         val durationString = "PT${durationSec}S"
-        println("[YT_DEBUG] buildDashManifestXml: videoUrl=$localVideoUrl")
 
         val sb = StringBuilder(2048)
         sb.append("""<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011" type="static" minBufferTime="PT5.0S" mediaPresentationDuration="$durationString">""")
@@ -478,7 +348,6 @@ open class YoutubeExtractor : ExtractorApi() {
 
         val vMime = video.mimeType
         val vCodecs = if (vMime.contains("webm")) "vp9" else "avc1.4d401f"
-
         val vSegmentBase = if (video.initRange != null && video.indexRange != null) {
             """<SegmentBase indexRange="${video.indexRange}"><Initialization range="${video.initRange}" /></SegmentBase>"""
         } else ""
@@ -494,17 +363,15 @@ open class YoutubeExtractor : ExtractorApi() {
 
         audioList.forEachIndexed { index, audio ->
             val localAudioUrl = escapeXml("http://127.0.0.1:$serverPort/proxy?url=${URLEncoder.encode(audio.url, "UTF-8")}")
-            val audioId = "audio_$index"
             val aMime = audio.mimeType
             val aCodecs = if (aMime.contains("webm")) "opus" else "mp4a.40.2"
-
             val aSegmentBase = if (audio.initRange != null && audio.indexRange != null) {
                 """<SegmentBase indexRange="${audio.indexRange}"><Initialization range="${audio.initRange}" /></SegmentBase>"""
             } else ""
 
             sb.append("""
                 <AdaptationSet mimeType="$aMime" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
-                  <Representation id="$audioId" bandwidth="${if(audio.bitrate>0) audio.bitrate else 128000}" codecs="$aCodecs">
+                  <Representation id="audio_$index" bandwidth="${if(audio.bitrate>0) audio.bitrate else 128000}" codecs="$aCodecs">
                     <BaseURL>$localAudioUrl</BaseURL>
                     $aSegmentBase
                   </Representation>
@@ -520,8 +387,7 @@ open class YoutubeExtractor : ExtractorApi() {
     private fun escapeXml(url: String): String {
         if (!url.contains('&') && !url.contains('<') && !url.contains('>') && !url.contains('\'') && !url.contains('"')) return url
         val sb = StringBuilder(url.length + 16)
-        for (i in 0 until url.length) {
-            val c = url[i]
+        url.forEach { c ->
             when (c) {
                 '&' -> sb.append("&amp;")
                 '<' -> sb.append("&lt;")
@@ -537,23 +403,14 @@ open class YoutubeExtractor : ExtractorApi() {
     private fun getMimeTypeFromUrl(url: String, isAudio: Boolean): String {
         return try {
             val decoded = YoutubeUtils.urlDecode(url)
-            if (decoded.contains("video/webm") || decoded.contains("audio/webm")) {
+            if (decoded.contains("video/webm") || decoded.contains("audio/webm"))
                 if (isAudio) "audio/webm" else "video/webm"
-            } else {
+            else
                 if (isAudio) "audio/mp4" else "video/mp4"
-            }
-        } catch (e: Exception) { if (isAudio) "audio/mp4" else "video/mp4" }
-    }
-
-    private fun buildVideoLabelNumber(vs: org.schabi.newpipe.extractor.stream.VideoStream): String {
-        val height = vs.height ?: 0
-        if (height > 0) return height.toString()
-        return "video"
+        } catch (_: Exception) { if (isAudio) "audio/mp4" else "video/mp4" }
     }
 
     private fun send404(socket: Socket) {
-        try {
-            PrintWriter(socket.getOutputStream(), true).use { it.println("HTTP/1.1 404 Not Found\r\n\r\n") }
-        } catch (_: Exception) {}
+        try { PrintWriter(socket.getOutputStream(), true).println("HTTP/1.1 404 Not Found\r\n\r\n") } catch (_: Exception) {}
     }
 }
