@@ -2200,7 +2200,7 @@ class YoutubeProvider(
         }
 
         if (isLive) {
-            // 라이브는 내장 추출기(순정 상태)로 처리하기 위해 잠시 iOS 모드 OFF
+            // 라이브 방송은 순정 환경(내장 추출기)으로 처리
             org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor.setFetchIosClient(false)
             try {
                 loadExtractor(fullUrl, subtitleCallback) { link ->
@@ -2223,58 +2223,28 @@ class YoutubeProvider(
                 }
             }
 
-            // 1. 고화질 DASH 추출기 무조건 실행 (Yextractor.kt)
-            // (이 시점에는 iOS 모드가 true이므로 MPD가 완벽하게 작동합니다)
-            org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor.setFetchIosClient(true)
+            // 1. 고화질 DASH 추출기 (회원님의 Yextractor.kt) 무조건 실행
             com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback) {
                 callback(it)
             }
 
-            // 2. 내장 Extractor 실행 (다른 플러그인처럼 완벽하게 작동하게 만듦)
-            val tempLinks = mutableListOf<ExtractorLink>()
-            
-            // 🔥 내장 추출기를 돌리기 직전, 순정(WEB) 상태로 되돌립니다.
+            // 2. Cloudstream 내장 Extractor 실행 (recloudstream과 완벽히 동일한 조건)
+            // 🔥 다른 플러그인처럼 완벽하게 작동하게 만들기 위해 전역 설정을 WEB(false)으로 되돌립니다.
             org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor.setFetchIosClient(false)
             try {
+                // 이름 충돌이 해결되었으므로 이제 정상적으로 코어 내장 추출기가 실행됩니다.
                 loadExtractor(fullUrl, subtitleCallback) { link ->
-                    // loadExtractor가 첫 번째 DASH 추출기를 중복 호출할 수 있으므로, MPD 링크는 필터링하여 걸러냅니다.
+                    // Yextractor(127.0.0.1) 중복 호출 필터링 후 내장 링크만 전달
                     if (!link.url.contains("127.0.0.1") && !link.url.endsWith(".mpd")) {
-                        tempLinks.add(link)
+                        callback(link)
                     }
                 }
             } catch (e: Exception) {
                 logError(e)
             } finally {
-                // 다음 실행을 위해 다시 iOS 모드를 ON으로 복구합니다.
+                // 다음 영상을 위해 다시 iOS 모드를 켭니다.
                 org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor.setFetchIosClient(true)
             }
-
-            // 💡 [요청하신 디버그 코드] 403 에러가 완벽히 사라졌는지 직접 HTTP 요청으로 증명합니다.
-            val testLink = tempLinks.firstOrNull { it.url.contains("googlevideo.com") }
-            if (testLink != null) {
-                try {
-                    println("[YT_DEBUG_TEST] ======= BUILT-IN EXTRACTOR HTTP REQUEST TEST START =======")
-                    println("[YT_DEBUG_TEST] Test URL (FULL): ${testLink.url}")
-                    println("[YT_DEBUG_TEST] Test Headers: ${testLink.headers ?: emptyMap<String, String>()}")
-                    
-                    val testResponse = app.get(testLink.url, headers = testLink.headers ?: emptyMap())
-                    println("[YT_DEBUG_TEST] RESPONSE CODE: ${testResponse.code}")
-                    
-                    if (!testResponse.isSuccessful) {
-                        println("[YT_DEBUG_TEST] 🚨 ERROR BODY 🚨: \n${testResponse.text}")
-                    } else {
-                        println("[YT_DEBUG_TEST] SUCCESS! 200 OK. No 403 error!")
-                    }
-                    println("[YT_DEBUG_TEST] ======= BUILT-IN EXTRACTOR HTTP REQUEST TEST END =======")
-                } catch (e: Exception) {
-                    println("[YT_DEBUG_TEST] Request failed with exception: ${e.message}")
-                }
-            } else {
-                println("[YT_DEBUG_TEST] No googlevideo links found by built-in extractor.")
-            }
-
-            // 내장 추출기 링크 최종 전달
-            tempLinks.forEach { callback(it) }
 
             // 보조 모바일 앱 시뮬레이션 워밍업 유지
             loadLinksAdvanced(videoId, subtitleCallback) { }
@@ -2282,6 +2252,7 @@ class YoutubeProvider(
 
         return true
     }
+
    
     
     private suspend fun loadLinksAdvanced(
