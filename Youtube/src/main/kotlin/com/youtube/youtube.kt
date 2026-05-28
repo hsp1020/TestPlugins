@@ -23,7 +23,7 @@ import java.util.concurrent.ConcurrentHashMap
 import org.schabi.newpipe.extractor.NewPipe
 import org.schabi.newpipe.extractor.downloader.Downloader
 import org.schabi.newpipe.extractor.downloader.Request
-import org.schabi.newpipe.extractor.utils.Localization
+import org.schabi.newpipe.extractor.localization.Localization
 
 // [추가됨] 향후 WebView 기반 토큰 생성기 연동 및 로컬 소켓 프록시에서 사용할 po_token 공유 객체
 object YoutubePoTokenProvider {
