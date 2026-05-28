@@ -94,13 +94,13 @@ object YoutubeUtils {
                     .method(method, reqBody)
 
                 headers.forEach { (key, values) ->
-                    // Origin, Referer를 아예 제외시켜 iOS 앱인 척 완벽 위장
+                    // Origin, Referer를 아예 제외시켜 크롬 웹인 척 완벽 위장
                     if (!key.equals("Origin", true) && !key.equals("Referer", true)) {
                         values.forEach { reqBuilder.addHeader(key, it) }
                     }
                 }
                 
-                reqBuilder.header("User-Agent", IOS_USER_AGENT)
+                reqBuilder.header("User-Agent", CHROME_USER_AGENT)
 
                 val res = okHttpClient.newCall(reqBuilder.build()).execute()
                 val resHeaders = res.headers.toMultimap()
