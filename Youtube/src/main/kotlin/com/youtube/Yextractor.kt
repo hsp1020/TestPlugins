@@ -74,6 +74,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
         init {
             YoutubeUtils.initNewPipeDownloader()
+            org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor.setPoTokenProvider(YoutubePoTokenProvider)
             YoutubeStreamExtractor.setFetchIosClient(true)
         }
     }
@@ -334,11 +335,13 @@ open class YoutubeExtractor : ExtractorApi() {
             // [초정밀 디버깅 2] 토큰 확인
             val poToken = YoutubePoTokenProvider.poToken
             val visitorData = YoutubePoTokenProvider.visitorData
+            val urlHasPot = finalTargetUrl.contains("pot=")
             
             println("\n[YT_PROXY_DEBUG] ================= CHUNK REQUEST START =================")
             println("[YT_PROXY_DEBUG] 1. n-파라미터 상태: $nParam (없으면 1분 차단의 핵심 원인!)")
             println("[YT_PROXY_DEBUG] 2. po_token 상태: ${if(poToken.isBlank()) "❌ EMPTY (추출 실패/누락)" else "✅ [${poToken.take(10)}...]"}")
             println("[YT_PROXY_DEBUG] 3. visitorData 상태: ${if(visitorData.isBlank()) "❌ EMPTY" else "✅ [$visitorData]"}")
+            println("[YT_PROXY_DEBUG] 3.5 URL 자체 pot 존재 여부: ${if(urlHasPot) "✅ 존재함 (성공)" else "❌ 미존재"}")
             
             // 토큰 주입 로직 (기존에 pot가 없고, 우리가 추출한 토큰이 있을 때만)
             if (finalTargetUrl.contains("googlevideo.com") && !finalTargetUrl.contains("pot=") && poToken.isNotBlank()) {
