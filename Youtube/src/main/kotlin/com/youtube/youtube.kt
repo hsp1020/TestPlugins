@@ -19,6 +19,8 @@ import java.util.regex.Pattern
 import com.lagradost.cloudstream3.AcraApplication
 import androidx.preference.PreferenceManager
 import com.lagradost.cloudstream3.ar.youtube.YoutubeProvider.Config.SLEEP_BETWEEN
+import org.schabi.newpipe.extractor.services.youtube.PoTokenProvider
+import org.schabi.newpipe.extractor.services.youtube.PoTokenResult
 import java.util.concurrent.ConcurrentHashMap
 import org.schabi.newpipe.extractor.NewPipe
 import org.schabi.newpipe.extractor.downloader.Downloader
@@ -27,16 +29,37 @@ import org.schabi.newpipe.extractor.localization.Localization
 import org.schabi.newpipe.extractor.localization.ContentCountry
 
 // [강화됨] PoTokenProvider에 디버그 기능을 달아두었습니다.
-object YoutubePoTokenProvider {
+object YoutubePoTokenProvider : PoTokenProvider {
     // 💡 디버그용: 앱 실행 시 임시로 사용할 토큰. (추후 WebView 엔진 연동 전까지 하드코딩 테스트용)
-    var visitorData: String = ""
-    var poToken: String = "" 
+    @Volatile var visitorData: String = ""
+    @Volatile var poToken: String = "" 
 
     init {
-        // 이 블록에서 향후 외부 API나 JS 엔진을 호출하여 poToken을 채워 넣습니다.
         println("[YT_TOKEN_DEBUG] YoutubePoTokenProvider가 초기화되었습니다.")
     }
+
+    override fun getWebClientPoToken(videoId: String): PoTokenResult? {
+        if (poToken.isBlank()) return null
+        return PoTokenResult(visitorData, poToken, poToken)
+    }
+
+    override fun getWebEmbedClientPoToken(videoId: String): PoTokenResult? {
+        if (poToken.isBlank()) return null
+        return PoTokenResult(visitorData, poToken, poToken)
+    }
+
+    override fun getAndroidClientPoToken(videoId: String): PoTokenResult? {
+        if (poToken.isBlank()) return null
+        return PoTokenResult(visitorData, poToken, poToken)
+    }
+
+    override fun getIosClientPoToken(videoId: String): PoTokenResult? {
+        if (poToken.isBlank()) return null
+        return PoTokenResult(visitorData, poToken, poToken)
+    }
 }
+
+
 
 object YoutubeUtils {
     const val CHROME_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
@@ -1113,9 +1136,10 @@ class YoutubeProvider(
                 } else {
                     val targetUrl = if(requestData == "Home") mainUrl else requestData
                     val html = app.get(targetUrl, interceptor = ytInterceptor).text
-                    
+
                     savedApiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY") ?: savedApiKey
                     savedVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA") ?: savedVisitorData
+                    savedVisitorData?.let { YoutubePoTokenProvider.visitorData = it }
                     savedClientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: savedClientVersion ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
                     
                     if (!savedApiKey.isNullOrBlank()) {
@@ -1263,8 +1287,10 @@ class YoutubeProvider(
 
                 savedApiKey = API_KEY_EXTRACT_REGEX.find(html)?.groupValues?.get(1)
                 savedVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA")
+                savedVisitorData?.let { YoutubePoTokenProvider.visitorData = it }
 
                 val initialData = extractYtInitialData(html)
+
                 if (initialData != null) {
                     processRecursive(initialData, results, seenIds, playlistMode)
                     savedContinuationToken = findTokenRecursive(initialData)
@@ -1592,7 +1618,8 @@ class YoutubeProvider(
                 val apiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY")
                 val clientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
                 val visitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA")
-
+                visitorData?.let { YoutubePoTokenProvider.visitorData = it }
+                
                 val header = safeGet(data, "header", "c4TabbedHeaderRenderer")
                     ?: safeGet(data, "header", "pageHeaderRenderer")
 
