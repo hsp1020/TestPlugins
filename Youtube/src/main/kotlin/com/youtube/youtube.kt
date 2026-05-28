@@ -37,15 +37,15 @@ import org.schabi.newpipe.extractor.services.youtube.PoTokenResult
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
-// [완벽 디버깅판] NewPipe의 2-Token 체계를 100% 반영한 PoTokenProvider
+// [완벽 디버깅판] 듀얼 토큰(PlayerPot, StreamingPot) 완벽 추출기
 object YoutubePoTokenProvider : PoTokenProvider {
     
-    private val WebPoTokenGenLock = Any() // 스레드 충돌 방지 락
+    private val WebPoTokenGenLock = Any()
     
     @Volatile private var cachedVideoId: String = ""
     @Volatile private var visitorData: String = ""
-    @Volatile private var playerPot: String = ""     // videoId로 서명된 초기 호출용 토큰
-    @Volatile private var streamingPot: String = ""  // visitorData로 서명된 청크 다운로드용 토큰
+    @Volatile private var playerPot: String = ""     // /v1/player 호출용 (약 150자)
+    @Volatile private var streamingPot: String = ""  // /videoplayback 호출용 (약 16자)
 
     private val handler = Handler(Looper.getMainLooper())
 
@@ -55,7 +55,6 @@ object YoutubePoTokenProvider : PoTokenProvider {
 
     private fun getOrFetchTokens(videoId: String, forceRecreate: Boolean = false): PoTokenResult? {
         synchronized(WebPoTokenGenLock) {
-            // 캐시가 유효하면 즉시 반환 (두 토큰이 모두 존재해야 함)
             if (!forceRecreate && cachedVideoId == videoId && playerPot.isNotBlank() && streamingPot.isNotBlank()) {
                 return PoTokenResult(visitorData, playerPot, streamingPot)
             }
@@ -74,14 +73,14 @@ object YoutubePoTokenProvider : PoTokenProvider {
                     @SuppressLint("SetJavaScriptEnabled")
                     webView.settings.javaScriptEnabled = true
                     webView.settings.domStorageEnabled = true
-                    webView.settings.mediaPlaybackRequiresUserGesture = false // 버퍼링이 시작되어야 streamingPot이 나오므로 자동재생 허용
-                    webView.settings.userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
+                    webView.settings.mediaPlaybackRequiresUserGesture = false
+                    webView.settings.userAgentString = YoutubeUtils.CHROME_USER_AGENT
 
-                    // 안드로이드 인터페이스 브릿지
                     webView.addJavascriptInterface(object {
                         @JavascriptInterface
                         fun onTokensReady(vData: String, pPot: String, sPot: String) {
-                            if (pPot.length > 50 && sPot.length > 50) {
+                            // [수정됨] PlayerPot은 길고, StreamingPot은 짧은 것을 정확히 검증
+                            if (pPot.length > 30 && sPot.length >= 10) {
                                 extVisitor = vData
                                 extPlayer = pPot
                                 extStreaming = sPot
@@ -94,7 +93,6 @@ object YoutubePoTokenProvider : PoTokenProvider {
                         override fun onPageFinished(view: WebView?, url: String?) {
                             super.onPageFinished(view, url)
                             
-                            // [핵심 로직] /v1/player와 /videoplayback 통신을 동시에 가로채어 2개의 토큰을 모두 수집
                             val script = """
                                 (function() {
                                     let capturedVisitor = '';
@@ -107,60 +105,64 @@ object YoutubePoTokenProvider : PoTokenProvider {
                                         }
                                     }
 
-                                    // 1. /v1/player 가로채기 (visitorData, playerPot 수집)
                                     const originalFetch = window.fetch;
                                     window.fetch = async function(...args) {
                                         const reqUrl = args[0];
-                                        if (typeof reqUrl === 'string' && reqUrl.includes('/youtubei/v1/player')) {
-                                            try {
-                                                const options = args[1];
-                                                if (options && options.body) {
-                                                    const bodyObj = JSON.parse(options.body);
-                                                    if (bodyObj.context && bodyObj.context.client && bodyObj.context.client.visitorData) {
-                                                        capturedVisitor = bodyObj.context.client.visitorData;
+                                        if (typeof reqUrl === 'string') {
+                                            if (reqUrl.includes('/youtubei/v1/player')) {
+                                                try {
+                                                    const options = args[1];
+                                                    if (options && options.body) {
+                                                        const bodyObj = JSON.parse(options.body);
+                                                        if (bodyObj.context && bodyObj.context.client && bodyObj.context.client.visitorData) {
+                                                            capturedVisitor = bodyObj.context.client.visitorData;
+                                                        }
+                                                        if (bodyObj.serviceIntegrityDimensions && bodyObj.serviceIntegrityDimensions.poToken) {
+                                                            capturedPlayerPot = bodyObj.serviceIntegrityDimensions.poToken;
+                                                        }
+                                                        checkAndSend();
                                                     }
-                                                    if (bodyObj.serviceIntegrityDimensions && bodyObj.serviceIntegrityDimensions.poToken) {
-                                                        capturedPlayerPot = bodyObj.serviceIntegrityDimensions.poToken;
+                                                } catch(e) {}
+                                            }
+                                            
+                                            if (reqUrl.includes('/videoplayback') && reqUrl.includes('pot=')) {
+                                                try {
+                                                    const urlObj = new URL(reqUrl.startsWith('http') ? reqUrl : window.location.origin + reqUrl);
+                                                    if (urlObj.searchParams.has('pot')) {
+                                                        capturedStreamingPot = urlObj.searchParams.get('pot');
+                                                        checkAndSend();
                                                     }
-                                                    checkAndSend();
-                                                }
-                                            } catch(e) {}
-                                        }
-                                        
-                                        // 2. 혹시 fetch로 videoplayback을 요청할 경우 대비
-                                        if (typeof reqUrl === 'string' && reqUrl.includes('/videoplayback') && reqUrl.includes('pot=')) {
-                                            try {
-                                                const params = new URLSearchParams(reqUrl.split('?')[1]);
-                                                if (params.has('pot')) {
-                                                    capturedStreamingPot = params.get('pot');
-                                                    checkAndSend();
-                                                }
-                                            } catch(e) {}
+                                                } catch(e) {}
+                                            }
                                         }
                                         return originalFetch.apply(this, args);
                                     };
 
-                                    // 3. /videoplayback XHR 가로채기 (streamingPot 수집)
                                     const originalXhrOpen = XMLHttpRequest.prototype.open;
                                     XMLHttpRequest.prototype.open = function(method, reqUrl) {
                                         if (typeof reqUrl === 'string' && reqUrl.includes('/videoplayback') && reqUrl.includes('pot=')) {
                                             try {
-                                                const params = new URLSearchParams(reqUrl.split('?')[1]);
-                                                if (params.has('pot')) {
-                                                    capturedStreamingPot = params.get('pot');
+                                                const urlObj = new URL(reqUrl.startsWith('http') ? reqUrl : window.location.origin + reqUrl);
+                                                if (urlObj.searchParams.has('pot')) {
+                                                    capturedStreamingPot = urlObj.searchParams.get('pot');
                                                     checkAndSend();
                                                 }
                                             } catch(e) {}
                                         }
                                         originalXhrOpen.apply(this, arguments);
                                     };
+
+                                    // [추가됨] 백그라운드에서 강제 재생 클릭 이벤트를 쏴서 videoplayback 통신을 유도
+                                    setInterval(() => {
+                                        const playBtn = document.querySelector('.ytp-large-play-button');
+                                        if (playBtn) playBtn.click();
+                                    }, 500);
                                 })();
                             """.trimIndent()
                             view?.evaluateJavascript(script, null)
                         }
                     }
 
-                    // autoplay=1을 줘서 즉시 버퍼링(streamingPot 발생) 유도
                     webView.loadUrl("https://www.youtube.com/embed/$videoId?autoplay=1")
 
                     handler.postDelayed({
@@ -169,7 +171,7 @@ object YoutubePoTokenProvider : PoTokenProvider {
                             webView.destroy()
                             if (latch.count > 0) latch.countDown()
                         } catch (e: Exception) {}
-                    }, 15000) // 최대 15초 대기
+                    }, 15000)
 
                 } catch (e: Exception) {
                     latch.countDown()
@@ -231,13 +233,14 @@ object YoutubeUtils {
                     .method(method, reqBody)
 
                 headers.forEach { (key, values) ->
-                    // Origin, Referer를 아예 제외시켜 iOS 앱인 척 완벽 위장
-                    if (!key.equals("Origin", true) && !key.equals("Referer", true)) {
+                    // [수정됨] WEB 클라이언트 통신을 위해 Origin과 Referer를 지우지 않고 그대로 전송
+                    if (!key.equals("User-Agent", true)) {
                         values.forEach { reqBuilder.addHeader(key, it) }
                     }
                 }
                 
-                reqBuilder.header("User-Agent", IOS_USER_AGENT)
+                // [수정됨] WEB 클라이언트에 맞는 PC 크롬 헤더 강제 주입
+                reqBuilder.header("User-Agent", CHROME_USER_AGENT)
 
                 val res = okHttpClient.newCall(reqBuilder.build()).execute()
                 val resHeaders = res.headers.toMultimap()
@@ -2296,5 +2299,3 @@ class YoutubeProvider(
         return true
     }
 }
-
-
