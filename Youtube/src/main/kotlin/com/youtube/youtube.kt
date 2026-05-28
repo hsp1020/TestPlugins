@@ -15,51 +15,188 @@ import java.net.URLEncoder
 import java.net.URLDecoder
 import java.security.MessageDigest
 import java.nio.charset.StandardCharsets
-import java.util.regex.Pattern
-import com.lagradost.cloudstream3.AcraApplication
-import androidx.preference.PreferenceManager
-import com.lagradost.cloudstream3.ar.youtube.YoutubeProvider.Config.SLEEP_BETWEEN
-import org.schabi.newpipe.extractor.services.youtube.PoTokenProvider
-import org.schabi.newpipe.extractor.services.youtube.PoTokenResult
 import java.util.concurrent.ConcurrentHashMap
 import org.schabi.newpipe.extractor.NewPipe
 import org.schabi.newpipe.extractor.downloader.Downloader
 import org.schabi.newpipe.extractor.downloader.Request
 import org.schabi.newpipe.extractor.localization.Localization
 import org.schabi.newpipe.extractor.localization.ContentCountry
+import androidx.preference.PreferenceManager
+import com.lagradost.cloudstream3.ar.youtube.YoutubeProvider.Config.SLEEP_BETWEEN
+import com.lagradost.cloudstream3.AcraApplication
 
-// [강화됨] PoTokenProvider에 디버그 기능을 달아두었습니다.
+import android.annotation.SuppressLint
+import android.os.Handler
+import android.os.Looper
+import android.webkit.JavascriptInterface
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import org.schabi.newpipe.extractor.services.youtube.PoTokenProvider
+import org.schabi.newpipe.extractor.services.youtube.PoTokenResult
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+
+// [완벽 디버깅판] NewPipe의 2-Token 체계를 100% 반영한 PoTokenProvider
 object YoutubePoTokenProvider : PoTokenProvider {
-    @Volatile var visitorData: String = ""
     
-    // 💡 디버그용 하드코딩 필드: 수집하신 토큰 세트를 완벽히 적용했습니다.
-    @Volatile var poToken: String = "IgjPC88KpROOOw=="
-    @Volatile var testVisitorData: String = "Cgt5eENDQ1RLSkhfOCiuguHQBjIKCgJLUhIEGgAgS2LfAgrcAjE4LllUPXpMTnFPaVNoX2ZmaUg2WXpkR3hZNDQ1YUpDRWRFU0lPRGdST1dvSTgwWnMyUS0tU0tMREpHbGNNU095T0ZxQWg4UllwcXVqbjA1X1JCaHczVmZqdXctX1ljTUdJQXhnQzVlOUNSNTVBakRfUEFRNDctamNGcGtENEw0Z1RJLVJfS08tX3NTSjBKejRIQ0czemVlRjFtMk1sMjlTT3MwWm95QWYtc2lOUjcxaXZPTEpSZ2o3dldfdmVjZW9HMjJDM0RyMVNubU9vZ1BXa3otR28yN21oYUhRV2VvZkJMQnk4VG4tSzJfWTFpOHVqSGtVeWtzZGJ2aWZxNkZORGtFWXlTYU9aYXhaRE05NExFOU9raXhZSEg3QVE4U25ENEVpQ25Sdl9ORHM0cVRtQl9MSlhoWFA0ODZzeV9mMEpzQmNjdEx5cG5fWjBTNTFNS1k1Vl9xczJsdw=="
+    private val WebPoTokenGenLock = Any() // 스레드 충돌 방지 락
+    
+    @Volatile private var cachedVideoId: String = ""
+    @Volatile private var visitorData: String = ""
+    @Volatile private var playerPot: String = ""     // videoId로 서명된 초기 호출용 토큰
+    @Volatile private var streamingPot: String = ""  // visitorData로 서명된 청크 다운로드용 토큰
+
+    private val handler = Handler(Looper.getMainLooper())
 
     init {
-        println("[YT_TOKEN_DEBUG] YoutubePoTokenProvider가 초기화되었습니다.")
+        println("[YT_TOKEN_DEBUG] 듀얼 토큰 하이재킹 모듈 초기화 완료")
     }
 
-    private fun getActiveResult(): PoTokenResult? {
-        if (poToken.isBlank()) return null
-        
-        // ⚠️ 핵심: poToken은 발급 시점의 visitorData와 암호학적으로 묶여 있습니다.
-        // 테스트용 토큰이 입력되었다면, 앱이 동적 수집한 visitorData 대신 
-        // 토큰과 매칭되는 testVisitorData를 반환해야 403 차단을 회피할 수 있습니다.
-        val activeVisitor = if (testVisitorData.isNotBlank()) testVisitorData else visitorData
-        return PoTokenResult(activeVisitor, poToken, poToken)
+    private fun getOrFetchTokens(videoId: String, forceRecreate: Boolean = false): PoTokenResult? {
+        synchronized(WebPoTokenGenLock) {
+            // 캐시가 유효하면 즉시 반환 (두 토큰이 모두 존재해야 함)
+            if (!forceRecreate && cachedVideoId == videoId && playerPot.isNotBlank() && streamingPot.isNotBlank()) {
+                return PoTokenResult(visitorData, playerPot, streamingPot)
+            }
+
+            val context = AcraApplication.context ?: return null
+            println("[YT_TOKEN_DEBUG] 비디오($videoId) 전용 PlayerPot & StreamingPot 추출 시작...")
+
+            val latch = CountDownLatch(1)
+            var extVisitor = ""
+            var extPlayer = ""
+            var extStreaming = ""
+
+            handler.post {
+                try {
+                    val webView = WebView(context)
+                    @SuppressLint("SetJavaScriptEnabled")
+                    webView.settings.javaScriptEnabled = true
+                    webView.settings.domStorageEnabled = true
+                    webView.settings.mediaPlaybackRequiresUserGesture = false // 버퍼링이 시작되어야 streamingPot이 나오므로 자동재생 허용
+                    webView.settings.userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
+
+                    // 안드로이드 인터페이스 브릿지
+                    webView.addJavascriptInterface(object {
+                        @JavascriptInterface
+                        fun onTokensReady(vData: String, pPot: String, sPot: String) {
+                            if (pPot.length > 50 && sPot.length > 50) {
+                                extVisitor = vData
+                                extPlayer = pPot
+                                extStreaming = sPot
+                                latch.countDown()
+                            }
+                        }
+                    }, "PoTokenBridge")
+
+                    webView.webViewClient = object : WebViewClient() {
+                        override fun onPageFinished(view: WebView?, url: String?) {
+                            super.onPageFinished(view, url)
+                            
+                            // [핵심 로직] /v1/player와 /videoplayback 통신을 동시에 가로채어 2개의 토큰을 모두 수집
+                            val script = """
+                                (function() {
+                                    let capturedVisitor = '';
+                                    let capturedPlayerPot = '';
+                                    let capturedStreamingPot = '';
+
+                                    function checkAndSend() {
+                                        if (capturedVisitor && capturedPlayerPot && capturedStreamingPot) {
+                                            PoTokenBridge.onTokensReady(capturedVisitor, capturedPlayerPot, capturedStreamingPot);
+                                        }
+                                    }
+
+                                    // 1. /v1/player 가로채기 (visitorData, playerPot 수집)
+                                    const originalFetch = window.fetch;
+                                    window.fetch = async function(...args) {
+                                        const reqUrl = args[0];
+                                        if (typeof reqUrl === 'string' && reqUrl.includes('/youtubei/v1/player')) {
+                                            try {
+                                                const options = args[1];
+                                                if (options && options.body) {
+                                                    const bodyObj = JSON.parse(options.body);
+                                                    if (bodyObj.context && bodyObj.context.client && bodyObj.context.client.visitorData) {
+                                                        capturedVisitor = bodyObj.context.client.visitorData;
+                                                    }
+                                                    if (bodyObj.serviceIntegrityDimensions && bodyObj.serviceIntegrityDimensions.poToken) {
+                                                        capturedPlayerPot = bodyObj.serviceIntegrityDimensions.poToken;
+                                                    }
+                                                    checkAndSend();
+                                                }
+                                            } catch(e) {}
+                                        }
+                                        
+                                        // 2. 혹시 fetch로 videoplayback을 요청할 경우 대비
+                                        if (typeof reqUrl === 'string' && reqUrl.includes('/videoplayback') && reqUrl.includes('pot=')) {
+                                            try {
+                                                const params = new URLSearchParams(reqUrl.split('?')[1]);
+                                                if (params.has('pot')) {
+                                                    capturedStreamingPot = params.get('pot');
+                                                    checkAndSend();
+                                                }
+                                            } catch(e) {}
+                                        }
+                                        return originalFetch.apply(this, args);
+                                    };
+
+                                    // 3. /videoplayback XHR 가로채기 (streamingPot 수집)
+                                    const originalXhrOpen = XMLHttpRequest.prototype.open;
+                                    XMLHttpRequest.prototype.open = function(method, reqUrl) {
+                                        if (typeof reqUrl === 'string' && reqUrl.includes('/videoplayback') && reqUrl.includes('pot=')) {
+                                            try {
+                                                const params = new URLSearchParams(reqUrl.split('?')[1]);
+                                                if (params.has('pot')) {
+                                                    capturedStreamingPot = params.get('pot');
+                                                    checkAndSend();
+                                                }
+                                            } catch(e) {}
+                                        }
+                                        originalXhrOpen.apply(this, arguments);
+                                    };
+                                })();
+                            """.trimIndent()
+                            view?.evaluateJavascript(script, null)
+                        }
+                    }
+
+                    // autoplay=1을 줘서 즉시 버퍼링(streamingPot 발생) 유도
+                    webView.loadUrl("https://www.youtube.com/embed/$videoId?autoplay=1")
+
+                    handler.postDelayed({
+                        try {
+                            webView.stopLoading()
+                            webView.destroy()
+                            if (latch.count > 0) latch.countDown()
+                        } catch (e: Exception) {}
+                    }, 15000) // 최대 15초 대기
+
+                } catch (e: Exception) {
+                    latch.countDown()
+                }
+            }
+
+            try { latch.await(15, TimeUnit.SECONDS) } catch (e: InterruptedException) {}
+
+            if (extVisitor.isNotBlank() && extPlayer.isNotBlank() && extStreaming.isNotBlank()) {
+                println("[YT_TOKEN_DEBUG] 토큰 2종 수집 완료! PlayerPot=${extPlayer.take(10)}..., StreamingPot=${extStreaming.take(10)}...")
+                cachedVideoId = videoId
+                visitorData = extVisitor
+                playerPot = extPlayer
+                streamingPot = extStreaming
+                return PoTokenResult(extVisitor, extPlayer, extStreaming)
+            }
+
+            println("[YT_TOKEN_DEBUG] 듀얼 토큰 수집 실패.")
+            return null
+        }
     }
 
-    override fun getWebClientPoToken(videoId: String): PoTokenResult? = getActiveResult()
-    override fun getWebEmbedClientPoToken(videoId: String): PoTokenResult? = getActiveResult()
-    override fun getAndroidClientPoToken(videoId: String): PoTokenResult? = getActiveResult()
-    override fun getIosClientPoToken(videoId: String): PoTokenResult? = getActiveResult()
+    override fun getWebClientPoToken(videoId: String): PoTokenResult? = getOrFetchTokens(videoId)
+    override fun getWebEmbedClientPoToken(videoId: String): PoTokenResult? = getOrFetchTokens(videoId)
+    override fun getAndroidClientPoToken(videoId: String): PoTokenResult? = getOrFetchTokens(videoId)
+    override fun getIosClientPoToken(videoId: String): PoTokenResult? = getOrFetchTokens(videoId)
 }
-
-
-
-
-
 
 object YoutubeUtils {
     const val CHROME_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
@@ -94,13 +231,13 @@ object YoutubeUtils {
                     .method(method, reqBody)
 
                 headers.forEach { (key, values) ->
-                    // Origin, Referer를 아예 제외시켜 크롬 웹인 척 완벽 위장
+                    // Origin, Referer를 아예 제외시켜 iOS 앱인 척 완벽 위장
                     if (!key.equals("Origin", true) && !key.equals("Referer", true)) {
                         values.forEach { reqBuilder.addHeader(key, it) }
                     }
                 }
                 
-                reqBuilder.header("User-Agent", CHROME_USER_AGENT)
+                reqBuilder.header("User-Agent", IOS_USER_AGENT)
 
                 val res = okHttpClient.newCall(reqBuilder.build()).execute()
                 val resHeaders = res.headers.toMultimap()
@@ -1136,10 +1273,9 @@ class YoutubeProvider(
                 } else {
                     val targetUrl = if(requestData == "Home") mainUrl else requestData
                     val html = app.get(targetUrl, interceptor = ytInterceptor).text
-
+                    
                     savedApiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY") ?: savedApiKey
                     savedVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA") ?: savedVisitorData
-                    savedVisitorData?.let { YoutubePoTokenProvider.visitorData = it }
                     savedClientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: savedClientVersion ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
                     
                     if (!savedApiKey.isNullOrBlank()) {
@@ -1287,10 +1423,8 @@ class YoutubeProvider(
 
                 savedApiKey = API_KEY_EXTRACT_REGEX.find(html)?.groupValues?.get(1)
                 savedVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA")
-                savedVisitorData?.let { YoutubePoTokenProvider.visitorData = it }
 
                 val initialData = extractYtInitialData(html)
-
                 if (initialData != null) {
                     processRecursive(initialData, results, seenIds, playlistMode)
                     savedContinuationToken = findTokenRecursive(initialData)
@@ -1618,8 +1752,7 @@ class YoutubeProvider(
                 val apiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY")
                 val clientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
                 val visitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA")
-                visitorData?.let { YoutubePoTokenProvider.visitorData = it }
-                
+
                 val header = safeGet(data, "header", "c4TabbedHeaderRenderer")
                     ?: safeGet(data, "header", "pageHeaderRenderer")
 
@@ -2163,3 +2296,7 @@ class YoutubeProvider(
         return true
     }
 }
+
+2. Yextractor.kt 전체 코드
+
+(기존 코드를 모두 지우고 아래 코드로 100% 덮어쓰세요.)
