@@ -30,34 +30,34 @@ import org.schabi.newpipe.extractor.localization.ContentCountry
 
 // [강화됨] PoTokenProvider에 디버그 기능을 달아두었습니다.
 object YoutubePoTokenProvider : PoTokenProvider {
-    // 💡 디버그용: 앱 실행 시 임시로 사용할 토큰. (추후 WebView 엔진 연동 전까지 하드코딩 테스트용)
     @Volatile var visitorData: String = ""
-    @Volatile var poToken: String = "" 
+    
+    // 💡 디버그용 하드코딩 필드: 수집하신 토큰 세트를 완벽히 적용했습니다.
+    @Volatile var poToken: String = "IgjPC88KpROOOw=="
+    @Volatile var testVisitorData: String = "Cgt5eENDQ1RLSkhfOCiuguHQBjIKCgJLUhIEGgAgS2LfAgrcAjE4LllUPXpMTnFPaVNoX2ZmaUg2WXpkR3hZNDQ1YUpDRWRFU0lPRGdST1dvSTgwWnMyUS0tU0tMREpHbGNNU095T0ZxQWg4UllwcXVqbjA1X1JCaHczVmZqdXctX1ljTUdJQXhnQzVlOUNSNTVBakRfUEFRNDctamNGcGtENEw0Z1RJLVJfS08tX3NTSjBKejRIQ0czemVlRjFtMk1sMjlTT3MwWm95QWYtc2lOUjcxaXZPTEpSZ2o3dldfdmVjZW9HMjJDM0RyMVNubU9vZ1BXa3otR28yN21oYUhRV2VvZkJMQnk4VG4tSzJfWTFpOHVqSGtVeWtzZGJ2aWZxNkZORGtFWXlTYU9aYXhaRE05NExFOU9raXhZSEg3QVE4U25ENEVpQ25Sdl9ORHM0cVRtQl9MSlhoWFA0ODZzeV9mMEpzQmNjdEx5cG5fWjBTNTFNS1k1Vl9xczJsdw=="
 
     init {
         println("[YT_TOKEN_DEBUG] YoutubePoTokenProvider가 초기화되었습니다.")
     }
 
-    override fun getWebClientPoToken(videoId: String): PoTokenResult? {
+    private fun getActiveResult(): PoTokenResult? {
         if (poToken.isBlank()) return null
-        return PoTokenResult(visitorData, poToken, poToken)
+        
+        // ⚠️ 핵심: poToken은 발급 시점의 visitorData와 암호학적으로 묶여 있습니다.
+        // 테스트용 토큰이 입력되었다면, 앱이 동적 수집한 visitorData 대신 
+        // 토큰과 매칭되는 testVisitorData를 반환해야 403 차단을 회피할 수 있습니다.
+        val activeVisitor = if (testVisitorData.isNotBlank()) testVisitorData else visitorData
+        return PoTokenResult(activeVisitor, poToken, poToken)
     }
 
-    override fun getWebEmbedClientPoToken(videoId: String): PoTokenResult? {
-        if (poToken.isBlank()) return null
-        return PoTokenResult(visitorData, poToken, poToken)
-    }
-
-    override fun getAndroidClientPoToken(videoId: String): PoTokenResult? {
-        if (poToken.isBlank()) return null
-        return PoTokenResult(visitorData, poToken, poToken)
-    }
-
-    override fun getIosClientPoToken(videoId: String): PoTokenResult? {
-        if (poToken.isBlank()) return null
-        return PoTokenResult(visitorData, poToken, poToken)
-    }
+    override fun getWebClientPoToken(videoId: String): PoTokenResult? = getActiveResult()
+    override fun getWebEmbedClientPoToken(videoId: String): PoTokenResult? = getActiveResult()
+    override fun getAndroidClientPoToken(videoId: String): PoTokenResult? = getActiveResult()
+    override fun getIosClientPoToken(videoId: String): PoTokenResult? = getActiveResult()
 }
+
+
+
 
 
 
