@@ -55,7 +55,7 @@ open class YoutubeExtractor : ExtractorApi() {
         private val streamUrlCache = ConcurrentHashMap<String, String>()
 
         private val serverExecutor = ThreadPoolExecutor(
-            8, // I/O 블로킹 403 대비 스레드 상향
+            8, 
             32, 
             30L, 
             TimeUnit.SECONDS,
@@ -74,9 +74,10 @@ open class YoutubeExtractor : ExtractorApi() {
 
         init {
             YoutubeUtils.initNewPipeDownloader()
-            // NewPipe 익스트랙터에 생성한 듀얼 토큰 프로바이더를 등록합니다.
+            // [수정됨] 듀얼 토큰 프로바이더 등록
             org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor.setPoTokenProvider(YoutubePoTokenProvider)
-            YoutubeStreamExtractor.setFetchIosClient(true)
+            // [수정됨] WEB 클라이언트 기반 통신을 강제화하여 토큰 검증 시스템 가동
+            YoutubeStreamExtractor.setFetchIosClient(false)
         }
     }
 
@@ -191,8 +192,7 @@ open class YoutubeExtractor : ExtractorApi() {
                                             this.referer = mainUrl
                                             this.quality = video.height
                                             this.headers = mapOf(
-                                                "User-Agent" to YoutubeUtils.IOS_USER_AGENT
-                                                // Origin과 Referer 제거 (모바일 앱으로 위장하기 위함)
+                                                "User-Agent" to YoutubeUtils.CHROME_USER_AGENT
                                             )
                                         }
                                     )
@@ -327,11 +327,8 @@ open class YoutubeExtractor : ExtractorApi() {
 
     private fun proxyChunkToYouTube(socket: Socket, targetUrl: String, clientHeaders: Map<String, String>) {
         try {
-            // NewPipe 익스트랙터가 pot 파라미터를 이미 완벽하게 생성하여 스트림 주소에 붙여주었으므로,
-            // 이전처럼 수동으로 pot 파라미터를 덕지덕지 주입하던 로직은 삭제합니다.
             val finalTargetUrl = targetUrl
             
-            // [초정밀 디버깅] URL 자체에 pot 파라미터가 잘 전달되었는지 확인만 합니다.
             val nParamMatch = Regex("[?&]n=([^&]+)").find(finalTargetUrl)
             val nParam = nParamMatch?.groupValues?.get(1) ?: "없음"
             val urlHasPot = finalTargetUrl.contains("pot=") 
@@ -342,7 +339,8 @@ open class YoutubeExtractor : ExtractorApi() {
 
             val requestBuilder = okhttp3.Request.Builder()
                 .url(finalTargetUrl)
-                .header("User-Agent", YoutubeUtils.IOS_USER_AGENT)
+                // [수정됨] 청크 릴레이 통신 시에도 반드시 PC 크롬 헤더를 사용해야 합니다.
+                .header("User-Agent", YoutubeUtils.CHROME_USER_AGENT)
                 .header("Accept", "*/*")
                 .header("Connection", "keep-alive")
 
