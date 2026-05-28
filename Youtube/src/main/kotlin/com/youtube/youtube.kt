@@ -24,8 +24,10 @@ import org.schabi.newpipe.extractor.NewPipe
 import org.schabi.newpipe.extractor.downloader.Downloader
 import org.schabi.newpipe.extractor.downloader.Request
 import org.schabi.newpipe.extractor.localization.Localization
+// [추가됨] 0.26.2 버전 시그니처 대응을 위한 ContentCountry 임포트
+import org.schabi.newpipe.extractor.localization.ContentCountry
 
-// [추가됨] 향후 WebView 기반 토큰 생성기 연동 및 로컬 소켓 프록시에서 사용할 po_token 공유 객체
+// 향후 WebView 기반 토큰 생성기 연동 및 로컬 소켓 프록시에서 사용할 po_token 공유 객체
 object YoutubePoTokenProvider {
     var visitorData: String = ""
     var poToken: String = "" // 예: "Mlx_..." 형태의 po_token 문자열
@@ -48,7 +50,7 @@ object YoutubeUtils {
     // 동적 컴파일 Regex 부하를 줄이기 위한 내부 캐시
     private val regexCache = ConcurrentHashMap<String, Regex>()
 
-    // [추가됨] NewPipe Extractor에 강제로 User-Agent를 일치시키는 커스텀 다운로더 초기화 함수
+    // NewPipe Extractor에 강제로 User-Agent를 일치시키는 커스텀 다운로더 초기화 함수
     fun initNewPipeDownloader() {
         val downloader = object : Downloader() {
             private val okHttpClient = okhttp3.OkHttpClient.Builder().build()
@@ -80,7 +82,8 @@ object YoutubeUtils {
                 )
             }
         }
-        NewPipe.init(downloader, Localization.DEFAULT, Localization.DEFAULT)
+        // [수정됨] 0.26.2 버전에 맞게 세 번째 인자를 ContentCountry.DEFAULT로 변경
+        NewPipe.init(downloader, Localization.DEFAULT, ContentCountry.DEFAULT)
     }
 
     fun sha1(input: String): String {
@@ -2299,4 +2302,4 @@ class YoutubeProvider(
         }
         return true
     }
-} 
+}
