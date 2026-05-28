@@ -2297,6 +2297,4 @@ class YoutubeProvider(
     }
 }
 
-2. Yextractor.kt 전체 코드
 
-(기존 코드를 모두 지우고 아래 코드로 100% 덮어쓰세요.)
