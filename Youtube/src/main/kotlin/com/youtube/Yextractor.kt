@@ -65,7 +65,7 @@ open class YoutubeExtractor : ExtractorApi() {
             ThreadPoolExecutor.CallerRunsPolicy()
         )
 
-        // 프록시 통신용 클라이언트 (자동 리다이렉트 방지 및 타임아웃 세팅)
+        // 프록시 통신용 클라이언트
         private val proxyHttpClient = okhttp3.OkHttpClient.Builder()
             .followRedirects(true)
             .followSslRedirects(true)
@@ -126,9 +126,10 @@ open class YoutubeExtractor : ExtractorApi() {
                 val builtLinks = mutableListOf<ExtractorLink>()
                 val seenUrls = ConcurrentHashMap.newKeySet<String>()
 
+                // [중요 수정됨] .content로 생짜 URL을 뽑지 말고, .getUrl()을 사용하여 NewPipe의 n-parameter 해독 모듈을 거치도록 강제함.
                 val videoOnlyList = (s.videoOnlyStreams ?: emptyList()).mapNotNull { vs ->
                     try {
-                        val streamUrl = vs.content ?: return@mapNotNull null
+                        val streamUrl = vs.getUrl() ?: return@mapNotNull null
                         if (!seenUrls.add(streamUrl)) return@mapNotNull null
 
                         val label = buildVideoLabelNumber(vs)
@@ -142,9 +143,10 @@ open class YoutubeExtractor : ExtractorApi() {
                     } catch (e: Exception) { null }
                 }.distinctBy { it.height }
 
+                // [중요 수정됨] 오디오 역시 .getUrl()을 호출해야 합니다.
                 val audioInfoList = (s.audioStreams ?: emptyList()).mapNotNull { asr ->
                     try {
-                        val aUrl = asr.content ?: return@mapNotNull null
+                        val aUrl = asr.getUrl() ?: return@mapNotNull null
                         val bitrate = asr.bitrate ?: 128000
                         var mime = asr.format?.mimeType
                         if (mime.isNullOrEmpty()) mime = getMimeTypeFromUrl(aUrl, true)
@@ -326,7 +328,6 @@ open class YoutubeExtractor : ExtractorApi() {
         }
     }
 
-    // 초정밀 디버그 로그 및 쿠키 주입이 포함된 프록시 함수
     private fun proxyChunkToYouTube(socket: Socket, targetUrl: String, clientHeaders: Map<String, String>) {
         try {
             var finalTargetUrl = targetUrl
@@ -344,12 +345,10 @@ open class YoutubeExtractor : ExtractorApi() {
                 .url(finalTargetUrl)
                 .header("User-Agent", YoutubeUtils.IOS_USER_AGENT)
                 .header("Connection", "keep-alive")
-                // 유튜브 CDN 거부를 막기 위한 필수 헤더 강제 주입
                 .header("Origin", "https://www.youtube.com")
                 .header("Referer", "https://www.youtube.com/")
                 .header("Accept", "*/*")
 
-            // Range 헤더 릴레이
             clientHeaders["range"]?.let { 
                 requestBuilder.header("Range", it) 
                 println("[YT_PROXY_DEBUG] 요청 Range: $it")
@@ -360,7 +359,6 @@ open class YoutubeExtractor : ExtractorApi() {
             
             println("[YT_PROXY_DEBUG] 유튜브 CDN 응답 코드: ${response.code}")
 
-            // 403 차단 시 에러 바디를 파싱하여 로그에 출력 (원인 분석용 핵심)
             if (response.code == 403 || response.code == 400) {
                 val errorBody = response.body?.string() ?: "Empty Body"
                 println("[YT_PROXY_DEBUG] ❌ 유튜브 차단됨! 에러 바디 내용:\n$errorBody")
