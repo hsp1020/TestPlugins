@@ -75,7 +75,7 @@ open class YoutubeExtractor : ExtractorApi() {
         init {
             YoutubeUtils.initNewPipeDownloader()
             org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor.setPoTokenProvider(YoutubePoTokenProvider)
-            YoutubeStreamExtractor.setFetchIosClient(true)
+            YoutubeStreamExtractor.setFetchIosClient(false)
         }
     }
 
