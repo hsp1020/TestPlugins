@@ -52,12 +52,15 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         )
 
-        private val streamUrlCache = ConcurrentHashMap<String, String>()
+        // ✅ [FIX] chunkId → (url, createdAt) 로 변경하여 TTL 기반 만료 관리
+        data class CachedStream(val url: String, val createdAt: Long = System.currentTimeMillis())
+        private val streamUrlCache = ConcurrentHashMap<String, CachedStream>()
+        private const val STREAM_CACHE_TTL_MS = 5 * 60 * 60 * 1000L // 5시간 (YouTube URL 유효기간 6h)
 
         private val serverExecutor = ThreadPoolExecutor(
-            8, 
-            32, 
-            30L, 
+            8,
+            32,
+            30L,
             TimeUnit.SECONDS,
             LinkedBlockingQueue(1024),
             ThreadFactory { r -> Thread(r, "YT-DASH-Server-Worker") },
@@ -74,10 +77,41 @@ open class YoutubeExtractor : ExtractorApi() {
 
         init {
             YoutubeUtils.initNewPipeDownloader()
-            // [수정됨] 듀얼 토큰 프로바이더 등록
-            org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor.setPoTokenProvider(YoutubePoTokenProvider)
-            // [수정됨] WEB 클라이언트 기반 통신을 강제화하여 토큰 검증 시스템 가동
-            YoutubeStreamExtractor.setFetchIosClient(false)
+            YoutubeStreamExtractor.setFetchIosClient(true)
+
+            // ✅ [FIX] PoToken 백그라운드 사전 초기화
+            thread(name = "YT-PoToken-Init", isDaemon = true) {
+                try {
+                    YoutubePoTokenProvider.refresh()
+                    val tok = YoutubePoTokenProvider.poToken
+                    val vis = YoutubePoTokenProvider.visitorData
+                    println("[YT_DEBUG] PoToken 초기화 완료 | pot=${if (tok.isNotBlank()) tok.take(12) + "..." else "EMPTY"} | visitor=${if (vis.isNotBlank()) vis.take(10) + "..." else "EMPTY"}")
+                } catch (e: Exception) {
+                    println("[YT_DEBUG] PoToken 초기화 실패 (무시됨): ${e.message}")
+                }
+            }
+        }
+
+        // ✅ [FIX] URL에 pot + visitorData를 주입하는 유틸
+        private fun injectTokensToUrl(rawUrl: String): String {
+            if (!rawUrl.contains("googlevideo.com")) return rawUrl
+            val poToken = YoutubePoTokenProvider.poToken
+            val visitorData = YoutubePoTokenProvider.visitorData
+            var enriched = rawUrl
+            if (poToken.isNotBlank() && !enriched.contains("pot=")) {
+                enriched += "&pot=${java.net.URLEncoder.encode(poToken, "UTF-8")}"
+            }
+            // visitorData는 일부 클라이언트 타입에서 필요 (무해하므로 항상 포함)
+            if (visitorData.isNotBlank() && !enriched.contains("visitor_data=")) {
+                enriched += "&visitor_data=${java.net.URLEncoder.encode(visitorData, "UTF-8")}"
+            }
+            return enriched
+        }
+
+        // ✅ [FIX] 만료된 캐시 엔트리 정리
+        private fun cleanExpiredCache() {
+            val now = System.currentTimeMillis()
+            streamUrlCache.entries.removeIf { now - it.value.createdAt > STREAM_CACHE_TTL_MS }
         }
     }
 
@@ -116,6 +150,17 @@ open class YoutubeExtractor : ExtractorApi() {
         ytVideos.remove(videoId)
         ytVideosSubtitles.remove(videoId)
 
+        // ✅ [FIX] getUrl 호출 시마다 PoToken 만료 여부 확인 후 갱신 시도
+        val poToken = YoutubePoTokenProvider.poToken
+        if (poToken.isBlank()) {
+            println("[YT_DEBUG] PoToken이 비어있음. 재획득 시도...")
+            try {
+                YoutubePoTokenProvider.refresh()
+            } catch (e: Exception) {
+                println("[YT_DEBUG] PoToken 재획득 실패: ${e.message}")
+            }
+        }
+
         val cachedLinks = ytVideos[videoId]
         if (cachedLinks.isNullOrEmpty()) {
             try {
@@ -127,9 +172,11 @@ open class YoutubeExtractor : ExtractorApi() {
                 val builtLinks = mutableListOf<ExtractorLink>()
                 val seenUrls = ConcurrentHashMap.newKeySet<String>()
 
+                // ✅ [FIX] 스트림 URL 추출 시점에 pot 토큰 즉시 주입
                 val videoOnlyList = (s.videoOnlyStreams ?: emptyList()).mapNotNull { vs ->
                     try {
-                        val streamUrl = vs.getUrl() ?: return@mapNotNull null
+                        val rawStreamUrl = vs.getUrl() ?: return@mapNotNull null
+                        val streamUrl = injectTokensToUrl(rawStreamUrl)
                         if (!seenUrls.add(streamUrl)) return@mapNotNull null
 
                         val label = buildVideoLabelNumber(vs)
@@ -145,7 +192,8 @@ open class YoutubeExtractor : ExtractorApi() {
 
                 val audioInfoList = (s.audioStreams ?: emptyList()).mapNotNull { asr ->
                     try {
-                        val aUrl = asr.getUrl() ?: return@mapNotNull null
+                        val rawAUrl = asr.getUrl() ?: return@mapNotNull null
+                        val aUrl = injectTokensToUrl(rawAUrl) // ✅ [FIX] 오디오 URL에도 토큰 주입
                         val bitrate = asr.bitrate ?: 128000
                         var mime = asr.format?.mimeType
                         if (mime.isNullOrEmpty()) mime = getMimeTypeFromUrl(aUrl, true)
@@ -166,6 +214,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 } catch (e: Exception) {}
 
                 startServerIfNeeded()
+                cleanExpiredCache() // ✅ [FIX] 오래된 캐시 정리
 
                 for (video in videoOnlyList) {
                     if (audiosByLanguage.isNotEmpty()) {
@@ -192,7 +241,7 @@ open class YoutubeExtractor : ExtractorApi() {
                                             this.referer = mainUrl
                                             this.quality = video.height
                                             this.headers = mapOf(
-                                                "User-Agent" to YoutubeUtils.CHROME_USER_AGENT
+                                                "User-Agent" to YoutubeUtils.IOS_USER_AGENT
                                             )
                                         }
                                     )
@@ -207,8 +256,8 @@ open class YoutubeExtractor : ExtractorApi() {
 
                 ytVideos[videoId] = builtLinks.toList()
 
-            } catch (e: Exception) { 
-                logError(e) 
+            } catch (e: Exception) {
+                logError(e)
             }
         }
 
@@ -238,14 +287,14 @@ open class YoutubeExtractor : ExtractorApi() {
                 activeServer = newServer
                 serverPort = newServer.localPort
                 println("[YT_PROXY_DEBUG] 가상 프록시 서버 포트 바인딩 완료: $serverPort")
-                
+
                 thread(name = "YT-DASH-Server-Acceptor") {
                     try {
                         while (true) {
                             val active = activeServer ?: break
                             if (active.isClosed) break
                             val client = active.accept()
-                            client.soTimeout = 15000 
+                            client.soTimeout = 15000
                             serverExecutor.execute { handleClient(client) }
                         }
                     } catch (e: Exception) {
@@ -276,7 +325,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 if (parts.size < 2) return
 
                 val fullPath = parts[1]
-                
+
                 val clientHeaders = mutableMapOf<String, String>()
                 while (true) {
                     val line = reader.readLine()
@@ -293,17 +342,25 @@ open class YoutubeExtractor : ExtractorApi() {
                 if (cleanPath.startsWith("/chunk")) {
                     val idMatch = Regex("id=([^&]+)").find(queryParams)
                     val chunkId = idMatch?.groupValues?.get(1)
-                    val targetYoutubeUrl = if (chunkId != null) streamUrlCache[chunkId] else null
+                    val cached = if (chunkId != null) streamUrlCache[chunkId] else null
 
-                    if (targetYoutubeUrl != null) {
-                        proxyChunkToYouTube(socket, targetYoutubeUrl, clientHeaders)
+                    if (cached != null) {
+                        // ✅ [FIX] 캐시된 URL의 TTL 만료 체크
+                        val isExpired = System.currentTimeMillis() - cached.createdAt > STREAM_CACHE_TTL_MS
+                        if (isExpired) {
+                            println("[YT_PROXY_DEBUG] ⚠️ 스트림 URL TTL 만료됨 (chunkId=$chunkId). 410 반환.")
+                            streamUrlCache.remove(chunkId)
+                            outWriter.print("HTTP/1.1 410 Gone\r\nContent-Length: 0\r\n\r\n")
+                            outWriter.flush()
+                        } else {
+                            proxyChunkToYouTube(socket, cached.url, clientHeaders, chunkId!!)
+                        }
                     } else {
                         println("[YT_PROXY_DEBUG] 404 Not Found - Chunk ID가 메모리에 없습니다: $chunkId")
                         outWriter.print("HTTP/1.1 404 Not Found\r\n\r\n")
                         outWriter.flush()
                     }
-                } 
-                else if (cleanPath.endsWith(".mpd", ignoreCase = true)) {
+                } else if (cleanPath.endsWith(".mpd", ignoreCase = true)) {
                     val path = cleanPath.substringBeforeLast(".mpd").removePrefix("/")
                     val content = manifestMap[path]
                     if (content != null) {
@@ -325,44 +382,68 @@ open class YoutubeExtractor : ExtractorApi() {
         }
     }
 
-    private fun proxyChunkToYouTube(socket: Socket, targetUrl: String, clientHeaders: Map<String, String>) {
+    private fun proxyChunkToYouTube(
+        socket: Socket,
+        targetUrl: String,
+        clientHeaders: Map<String, String>,
+        chunkId: String // ✅ [FIX] 403 시 캐시 제거를 위해 chunkId 추가
+    ) {
         try {
-            val finalTargetUrl = targetUrl
-            
-            val nParamMatch = Regex("[?&]n=([^&]+)").find(finalTargetUrl)
-            val nParam = nParamMatch?.groupValues?.get(1) ?: "없음"
-            val urlHasPot = finalTargetUrl.contains("pot=") 
-            
+            // ✅ [FIX] 프록시 시점에서도 pot 토큰 재확인 및 주입 (URL 생성 후 토큰이 갱신된 경우 대비)
+            var finalTargetUrl = targetUrl
+            val currentPoToken = YoutubePoTokenProvider.poToken
+            val currentVisitorData = YoutubePoTokenProvider.visitorData
+
+            // URL에 pot가 없고 현재 토큰이 있으면 주입 (URL 생성 시점에 토큰이 없었을 경우 보완)
+            if (finalTargetUrl.contains("googlevideo.com")) {
+                if (currentPoToken.isNotBlank() && !finalTargetUrl.contains("pot=")) {
+                    finalTargetUrl += "&pot=${java.net.URLEncoder.encode(currentPoToken, "UTF-8")}"
+                }
+                if (currentVisitorData.isNotBlank() && !finalTargetUrl.contains("visitor_data=")) {
+                    finalTargetUrl += "&visitor_data=${java.net.URLEncoder.encode(currentVisitorData, "UTF-8")}"
+                }
+            }
+
+            // n 파라미터 상태 디버그
+            val nParam = Regex("[?&]n=([^&]+)").find(finalTargetUrl)?.groupValues?.get(1) ?: "없음"
+            val potInUrl = if (finalTargetUrl.contains("pot=")) "✅ 포함됨" else "❌ 없음"
+
             println("\n[YT_PROXY_DEBUG] ================= CHUNK REQUEST START =================")
-            println("[YT_PROXY_DEBUG] 1. n-파라미터 상태: $nParam")
-            println("[YT_PROXY_DEBUG] 2. URL 자체 pot 존재 여부: ${if(urlHasPot) "✅ 존재함 (NewPipe 정상주입 완료)" else "❌ 미존재"}")
+            println("[YT_PROXY_DEBUG] 1. n-파라미터: $nParam")
+            println("[YT_PROXY_DEBUG] 2. pot URL 포함 여부: $potInUrl")
+            println("[YT_PROXY_DEBUG] 3. 현재 PoToken: ${if (currentPoToken.isNotBlank()) "✅ [${currentPoToken.take(12)}...]" else "❌ EMPTY"}")
+            println("[YT_PROXY_DEBUG] 4. visitorData: ${if (currentVisitorData.isNotBlank()) "✅ [${currentVisitorData.take(10)}...]" else "❌ EMPTY"}")
 
             val requestBuilder = okhttp3.Request.Builder()
                 .url(finalTargetUrl)
-                // [수정됨] 청크 릴레이 통신 시에도 반드시 PC 크롬 헤더를 사용해야 합니다.
-                .header("User-Agent", YoutubeUtils.CHROME_USER_AGENT)
+                .header("User-Agent", YoutubeUtils.IOS_USER_AGENT)
                 .header("Accept", "*/*")
                 .header("Connection", "keep-alive")
 
-            clientHeaders["range"]?.let { 
-                requestBuilder.header("Range", it) 
-                println("[YT_PROXY_DEBUG] 3. 요청 Range: $it")
+            clientHeaders["range"]?.let {
+                requestBuilder.header("Range", it)
+                println("[YT_PROXY_DEBUG] 5. 요청 Range: $it")
             }
 
             val request = requestBuilder.build()
             val response = proxyHttpClient.newCall(request).execute()
-            
-            println("[YT_PROXY_DEBUG] 4. 유튜브 CDN 응답 코드: ${response.code}")
+
+            println("[YT_PROXY_DEBUG] 6. 유튜브 CDN 응답 코드: ${response.code}")
 
             if (response.code == 403 || response.code == 400) {
                 val errorBody = response.body?.string() ?: "Empty Body"
-                println("[YT_PROXY_DEBUG] 🚨 ${response.code} 에러 발생! 🚨")
-                println("[YT_PROXY_DEBUG] 에러 응답 본문:\n$errorBody")
+                println("[YT_PROXY_DEBUG] 🚨 ${response.code} FORBIDDEN 발생!")
+                println("[YT_PROXY_DEBUG] 에러 응답 본문: $errorBody")
+
+                // ✅ [FIX] 403/400 시 해당 chunkId 캐시 제거 (재생 재시작 시 재추출 유도)
+                streamUrlCache.remove(chunkId)
+                println("[YT_PROXY_DEBUG] ♻️ 만료된 스트림 캐시 제거 완료: chunkId=$chunkId")
                 println("[YT_PROXY_DEBUG] =======================================================\n")
-                
+
                 val output = socket.getOutputStream()
                 val rawOutWriter = java.io.PrintWriter(output, false)
-                rawOutWriter.print("HTTP/1.1 ${response.code} ${response.message}\r\n\r\n")
+                // ✅ [FIX] 410 Gone 반환 → 플레이어가 정상 종료 처리하도록 유도 (무한 재시도 방지)
+                rawOutWriter.print("HTTP/1.1 410 Gone\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 rawOutWriter.flush()
                 return
             }
@@ -397,9 +478,10 @@ open class YoutubeExtractor : ExtractorApi() {
         durationSec: Long
     ): String {
         val videoChunkId = UUID.randomUUID().toString()
-        streamUrlCache[videoChunkId] = video.url
+        // ✅ [FIX] CachedStream으로 저장 (TTL 추적)
+        streamUrlCache[videoChunkId] = CachedStream(video.url)
         val proxyVideoUrl = "http://127.0.0.1:$serverPort/chunk?id=$videoChunkId"
-        
+
         val cleanVideoUrl = escapeXml(proxyVideoUrl)
         val durationString = "PT${durationSec}S"
 
@@ -425,7 +507,8 @@ open class YoutubeExtractor : ExtractorApi() {
 
         audioList.forEachIndexed { index, audio ->
             val audioIdChunk = UUID.randomUUID().toString()
-            streamUrlCache[audioIdChunk] = audio.url
+            // ✅ [FIX] CachedStream으로 저장
+            streamUrlCache[audioIdChunk] = CachedStream(audio.url)
             val proxyAudioUrl = "http://127.0.0.1:$serverPort/chunk?id=$audioIdChunk"
             val cleanAudioUrl = escapeXml(proxyAudioUrl)
 
@@ -439,7 +522,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
             sb.append("""
                 <AdaptationSet mimeType="$aMime" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
-                  <Representation id="$audioId" bandwidth="${if(audio.bitrate>0) audio.bitrate else 128000}" codecs="$aCodecs">
+                  <Representation id="$audioId" bandwidth="${if (audio.bitrate > 0) audio.bitrate else 128000}" codecs="$aCodecs">
                     <BaseURL>$cleanAudioUrl</BaseURL>
                     $aSegmentBase
                   </Representation>
@@ -455,7 +538,7 @@ open class YoutubeExtractor : ExtractorApi() {
     private fun escapeXml(url: String): String {
         if (!url.contains('&') && !url.contains('<') && !url.contains('>') && !url.contains('\'') && !url.contains('"')) return url
         val sb = java.lang.StringBuilder(url.length + 16)
-        for (i in 0 until url.length) {
+        for (i in url.indices) {
             val c = url[i]
             when (c) {
                 '&' -> sb.append("&amp;")
