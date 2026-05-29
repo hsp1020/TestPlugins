@@ -366,6 +366,125 @@ class YoutubeProvider(
         @JsonProperty("baseUrl") val baseUrl: String?
     )
 
+    // 재생 시간(Duration) 형식을 추출하는 핵심 함수 ("14:55", "1:15:20" 등만 매치)
+    private fun getDurationString(map: Map<*, *>?): String {
+        if (map == null) return ""
+        var rawText = getText(map.getMapKey("lengthText"))
+        if (rawText.isBlank()) {
+            val overlays = map.getListKey("thumbnailOverlays") ?: YoutubeUtils.getListKeyFromAny(map, "thumbnailOverlays") as? List<Map<*,*>>
+            overlays?.forEach { overlay ->
+                val timeStatus = overlay.getMapKey("thumbnailOverlayTimeStatusRenderer")
+                if (timeStatus != null) {
+                    val t = getText(timeStatus.getMapKey("text"))
+                    if (t.isNotBlank()) {
+                        rawText = t
+                        return@forEach
+                    }
+                }
+            }
+        }
+        val match = Regex("""(\d{1,2}:)?\d{1,2}:\d{2}""").find(rawText)
+        return match?.value ?: ""
+    }
+
+    private fun findAllRenderers(obj: Any?, targetKeys: List<String>, results: MutableList<Map<*,*>>, depth: Int = 0) {
+        if (obj == null || depth > 32) return
+        when (obj) {
+            is Map<*, *> -> {
+                for (key in targetKeys) {
+                    if (obj.containsKey(key)) {
+                        val match = obj[key] as? Map<*,*>
+                        if (match != null) results.add(match)
+                    }
+                }
+                for (value in obj.values) {
+                    findAllRenderers(value, targetKeys, results, depth + 1)
+                }
+            }
+            is List<*> -> {
+                for (item in obj) {
+                    findAllRenderers(item, targetKeys, results, depth + 1)
+                }
+            }
+        }
+    }
+
+    private fun extractVideosFromItems(items: List<*>, collectTo: MutableList<Episode>) {
+        val targetRendererKeys = listOf("videoRenderer", "gridVideoRenderer", "compactVideoRenderer", "shortsVideoRenderer", "reelItemRenderer", "shortsLockupViewModel", "videoViewModel", "lockupViewModel")
+
+        items.forEachIndexed { index, item ->
+            try {
+                val map = item as? Map<*, *> ?: return@forEachIndexed
+
+                if (map.containsKey("continuationItemRenderer")) {
+                    return@forEachIndexed
+                }
+
+                val foundRenderers = mutableListOf<Map<*,*>>()
+                findAllRenderers(map, targetRendererKeys, foundRenderers)
+
+                if (foundRenderers.isEmpty()) {
+                    return@forEachIndexed
+                }
+
+                for (renderer in foundRenderers) {
+                    var vidId = renderer.getString("videoId")
+                    if (vidId.isNullOrBlank()) vidId = renderer.getString("contentId")
+                    if (vidId.isNullOrBlank()) vidId = safeGet(renderer, "onTap", "innertubeCommand", "reelWatchEndpoint", "videoId") as? String
+
+                    if (!vidId.isNullOrBlank()) {
+                        var vidTitle = getText(renderer["title"])
+                        if (vidTitle.isBlank()) vidTitle = getText(renderer["headline"])
+                        if (vidTitle.isBlank()) vidTitle = getText(renderer["shortBylineText"])
+                        if (vidTitle.isBlank()) vidTitle = getText(safeGet(renderer, "metadata", "lockupMetadataViewModel", "title"))
+                        if (vidTitle.isBlank()) vidTitle = "Video"
+
+                        val thumb = YoutubeUtils.getBestThumbnail(renderer["thumbnail"]) 
+                            ?: YoutubeUtils.getBestThumbnail(safeGet(renderer, "contentImage", "image", "sources")) 
+                            ?: YoutubeUtils.buildThumbnailFromId(vidId)
+
+                        val metaList = mutableListOf<String>()
+
+                        val duration = getDurationString(renderer)
+                        if (duration.isNotBlank()) metaList.add(duration)
+
+                        val legacyViews = getText(renderer["viewCountText"])
+                        if (legacyViews.isNotBlank()) metaList.add(formatViews(legacyViews))
+
+                        val legacyTime = getText(renderer["publishedTimeText"])
+                        if (legacyTime.isNotBlank()) metaList.add(legacyTime)
+
+                        if (metaList.isEmpty() || metaList.size == 1) { 
+                            val rows = safeGet(renderer, "metadata", "lockupMetadataViewModel", "metadata", "contentMetadataViewModel", "metadataRows") as? List<*>
+                            rows?.forEach { row ->
+                                val parts = safeGet(row, "metadataParts") as? List<*>
+                                parts?.forEach { part ->
+                                    val text = getText(safeGet(part, "text"))
+                                    if (text.isNotBlank() && text != duration) {
+                                        if (METADATA_VIEW_REGEX.matches(text)) {
+                                            metaList.add(formatViews(text))
+                                        } else {
+                                            metaList.add(text)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        collectTo.add(newEpisode("$mainUrl/watch?v=$vidId") {
+                            this.name = vidTitle
+                            this.posterUrl = thumb
+                            this.description = metaList.joinToString(" • ")
+                        })
+                        
+                        break 
+                    }
+                }
+            } catch (e: Exception) {
+            }
+        }
+    }
+
     private fun generateCpn(): String {
         val alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
         return (1..16).map { alphabet.random() }.joinToString("")
@@ -677,7 +796,12 @@ class YoutubeProvider(
                 val contextTag = if (isSearchContext) "&ctx=search" else "&ctx=home"
                 val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
 
-                val descText = if (views.isNotBlank()) "조회수: $views" else ""
+                val duration = getDurationString(shortsData)
+                val descText = buildString {
+                    if (duration.isNotBlank()) append(duration).append(" • ")
+                    if (views.isNotBlank()) append("조회수: $views")
+                }.removeSuffix(" • ")
+                
                 if (currentList.none { it.data == finalUrl }) {
                     currentList.add(newEpisode(finalUrl) {
                         this.name = title
@@ -778,13 +902,16 @@ class YoutubeProvider(
                     val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
                     poster = "https://i.ytimg.com/vi/$videoId/oar2.jpg"
                     
+                    val duration = getDurationString(lockup.getMapKey("content") ?: lockup)
                     val descText = buildString {
+                        if (duration.isNotBlank()) append(duration).append(" • ")
                         if (channel.isNotBlank()) append("채널: $channel")
                         if (views.isNotBlank()) {
-                            if (isNotEmpty()) append(" • ")
+                            if (isNotEmpty() && !endsWith(" • ")) append(" • ")
                             append("조회수: $views")
                         }
-                    }
+                    }.removeSuffix(" • ")
+
                     if (currentList.none { it.data == finalUrl }) {
                         currentList.add(newEpisode(finalUrl) {
                             this.name = title
@@ -1353,12 +1480,15 @@ class YoutubeProvider(
                     if (!videoId.isNullOrBlank() && seenIds.add(videoId)) {
                         val title = getText(playlistVideo.getMapKey("title"))
                         val channel = getText(playlistVideo.getMapKey("shortBylineText"))
+                        val duration = getDurationString(playlistVideo)
                         val thumb = YoutubeUtils.getBestThumbnail(playlistVideo.getMapKey("thumbnail")) ?: YoutubeUtils.buildThumbnailFromId(videoId)
+                        
+                        val descList = listOf(duration, channel).filter { it.isNotBlank() }
                         episodes.add(newEpisode("$mainUrl/watch?v=$videoId") {
                             this.name = title
                             this.episode = episodes.size + 1
                             this.posterUrl = thumb
-                            this.description = channel
+                            this.description = descList.joinToString(" • ")
                         })
                     }
                 }
@@ -1369,12 +1499,15 @@ class YoutubeProvider(
                     if (!videoId.isNullOrBlank() && seenIds.add(videoId)) {
                         val title = getText(playlistPanelVideo.getMapKey("title"))
                         val channel = getText(playlistPanelVideo.getMapKey("shortBylineText"))
+                        val duration = getDurationString(playlistPanelVideo)
                         val thumb = YoutubeUtils.getBestThumbnail(playlistPanelVideo.getMapKey("thumbnail")) ?: YoutubeUtils.buildThumbnailFromId(videoId)
+                        
+                        val descList = listOf(duration, channel).filter { it.isNotBlank() }
                         episodes.add(newEpisode("$mainUrl/watch?v=$videoId") {
                             this.name = title
                             this.episode = episodes.size + 1
                             this.posterUrl = thumb
-                            this.description = channel
+                            this.description = descList.joinToString(" • ")
                         })
                     }
                 }
@@ -1652,110 +1785,6 @@ class YoutubeProvider(
                     return null
                 }
 
-                fun extractVideosFromItems(items: List<*>, collectTo: MutableList<Episode>) {
-                    
-                    fun findAllRenderers(obj: Any?, targetKeys: List<String>, results: MutableList<Map<*,*>>, depth: Int = 0) {
-                        if (obj == null || depth > 32) return
-                        when (obj) {
-                            is Map<*, *> -> {
-                                for (key in targetKeys) {
-                                    if (obj.containsKey(key)) {
-                                        val match = obj[key] as? Map<*,*>
-                                        if (match != null) results.add(match)
-                                    }
-                                }
-                                for (value in obj.values) {
-                                    findAllRenderers(value, targetKeys, results, depth + 1)
-                                }
-                            }
-                            is List<*> -> {
-                                for (item in obj) {
-                                    findAllRenderers(item, targetKeys, results, depth + 1)
-                                }
-                            }
-                        }
-                    }
-
-                    val targetRendererKeys = listOf("videoRenderer", "gridVideoRenderer", "compactVideoRenderer", "shortsVideoRenderer", "reelItemRenderer", "shortsLockupViewModel", "videoViewModel", "lockupViewModel")
-
-                    items.forEachIndexed { index, item ->
-                        try {
-                            val map = item as? Map<*, *>
-                            if (map == null) {
-                                return@forEachIndexed
-                            }
-
-                            if (map.containsKey("continuationItemRenderer")) {
-                                return@forEachIndexed
-                            }
-
-                            val foundRenderers = mutableListOf<Map<*,*>>()
-                            findAllRenderers(map, targetRendererKeys, foundRenderers)
-
-                            if (foundRenderers.isEmpty()) {
-                                return@forEachIndexed
-                            }
-
-                            for (renderer in foundRenderers) {
-                                var vidId = renderer["videoId"] as? String
-                                
-                                if (vidId.isNullOrBlank() && renderer.containsKey("contentId")) {
-                                    vidId = renderer["contentId"] as? String
-                                }
-                                if (vidId.isNullOrBlank()) {
-                                    vidId = safeGet(renderer, "onTap", "innertubeCommand", "reelWatchEndpoint", "videoId") as? String
-                                }
-
-                                if (!vidId.isNullOrBlank()) {
-                                    var vidTitle = getText(renderer["title"])
-                                    if (vidTitle.isBlank()) vidTitle = getText(renderer["headline"])
-                                    if (vidTitle.isBlank()) vidTitle = getText(renderer["shortBylineText"])
-                                    if (vidTitle.isBlank()) vidTitle = getText(safeGet(renderer, "metadata", "lockupMetadataViewModel", "title"))
-                                    if (vidTitle.isBlank()) vidTitle = "Video"
-
-                                    val thumb = YoutubeUtils.getBestThumbnail(renderer["thumbnail"]) 
-                                        ?: YoutubeUtils.getBestThumbnail(safeGet(renderer, "contentImage", "image", "sources")) 
-                                        ?: YoutubeUtils.buildThumbnailFromId(vidId)
-
-                                    val metaList = mutableListOf<String>()
-
-                                    val legacyViews = getText(renderer["viewCountText"])
-                                    if (legacyViews.isNotBlank()) metaList.add(formatViews(legacyViews))
-
-                                    val legacyTime = getText(renderer["publishedTimeText"])
-                                    if (legacyTime.isNotBlank()) metaList.add(legacyTime)
-
-                                    if (metaList.isEmpty()) {
-                                        val rows = safeGet(renderer, "metadata", "lockupMetadataViewModel", "metadata", "contentMetadataViewModel", "metadataRows") as? List<*>
-                                        rows?.forEach { row ->
-                                            val parts = safeGet(row, "metadataParts") as? List<*>
-                                            parts?.forEach { part ->
-                                                val text = getText(safeGet(part, "text"))
-                                                if (text.isNotBlank()) {
-                                                    if (METADATA_VIEW_REGEX.matches(text)) {
-                                                        metaList.add(formatViews(text))
-                                                    } else {
-                                                        metaList.add(text)
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    collectTo.add(newEpisode("$mainUrl/watch?v=$vidId") {
-                                        this.name = vidTitle
-                                        this.posterUrl = thumb
-                                        this.description = metaList.joinToString(" • ")
-                                    })
-                                    
-                                    break 
-                                }
-                            }
-                        } catch (e: Exception) {
-                        }
-                    }
-                }
-
                 var initialItems: List<*>? = null
                 val tabs = safeGet(data, "contents", "twoColumnBrowseResultsRenderer", "tabs") as? List<*>
                 if (tabs != null) {
@@ -1947,6 +1976,7 @@ class YoutubeProvider(
         var channelAvatar = ""
 
         val recommendations = mutableListOf<SearchResponse>()
+        val recEpisodes = mutableListOf<Episode>()
         val seenRecIds = mutableSetOf<String>()
 
         if (data != null) {
@@ -1987,9 +2017,10 @@ class YoutubeProvider(
                 }
             }
 
-            val secondaryResults = safeGet(data, "contents", "twoColumnWatchNextResults", "secondaryResults", "secondaryResults", "results")
+            val secondaryResults = safeGet(data, "contents", "twoColumnWatchNextResults", "secondaryResults", "secondaryResults", "results") as? List<*>
             if (secondaryResults != null) {
-                processRecursive(secondaryResults, recommendations, seenRecIds, false)
+                // processRecursive 대신, duration이 포함된 Episode 리스트로 직접 추출합니다.
+                extractVideosFromItems(secondaryResults, recEpisodes)
             }
 
         } else {
@@ -2013,8 +2044,6 @@ class YoutubeProvider(
             recommendations.add(0, channelCard)
         }
 
-        val filteredRecs = recommendations.filter { !it.url.contains("/shorts/") }
-
         val episodes = mutableListOf<Episode>()
         
         episodes.add(newEpisode(url) {
@@ -2025,12 +2054,18 @@ class YoutubeProvider(
         })
 
         var epCount = 2
-        filteredRecs.forEach { rec ->
-            if (rec.url.contains("watch?v=") || rec.url.contains("/shorts/")) {
-                episodes.add(newEpisode(rec.url) {
-                    this.name = rec.name
-                    this.posterUrl = rec.posterUrl
-                    this.episode = epCount++
+        // 추출된 추천목록 Episode를 전체 에피소드 리스트 및 하단 추천 리스트 양쪽 모두에 삽입
+        recEpisodes.filter { !it.data.contains("/shorts/") }.forEach { ep ->
+            if (seenRecIds.add(ep.data)) {
+                ep.episode = epCount++
+                episodes.add(ep)
+                
+                recommendations.add(newMovieSearchResponse(
+                    ep.name ?: "Video",
+                    ep.data,
+                    TvType.Movie
+                ) {
+                    this.posterUrl = ep.posterUrl
                 })
             }
         }
@@ -2043,7 +2078,7 @@ class YoutubeProvider(
                 this.tags = listOf(channelName)
             }
 
-            this.recommendations = filteredRecs 
+            this.recommendations = recommendations 
         }
     }
 
