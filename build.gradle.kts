@@ -110,7 +110,7 @@ subprojects {
         implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
         implementation("com.github.vidstige:jadb:v1.2.1")
         implementation("org.bouncycastle:bcpkix-jdk15on:1.70")
-        implementation("com.github.InfinityLoop1308:PipePipeExtractor:v5.1.1")
+        implementation("com.github.InfinityLoop1308:PipePipeExtractor:871ea2d")
     }
 
     // v1.4 우회 로직: 컴파일이 정상적으로 뚫린 후 Cloudstream make 태스크에서 발생하는 AGP 8.x 종특(res.apk 누락) 에러 방지
