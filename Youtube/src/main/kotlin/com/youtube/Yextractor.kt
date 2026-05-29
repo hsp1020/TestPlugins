@@ -55,7 +55,7 @@ open class YoutubeExtractor : ExtractorApi() {
         private val streamUrlCache = ConcurrentHashMap<String, String>()
 
         private val serverExecutor = ThreadPoolExecutor(
-            8, 
+            8, // I/O 블로킹 403 대비 스레드 상향
             32, 
             30L, 
             TimeUnit.SECONDS,
@@ -74,10 +74,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
         init {
             YoutubeUtils.initNewPipeDownloader()
-            // [수정됨] 듀얼 토큰 프로바이더 등록
-            org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor.setPoTokenProvider(YoutubePoTokenProvider)
-            // [수정됨] WEB 클라이언트 기반 통신을 강제화하여 토큰 검증 시스템 가동
-            YoutubeStreamExtractor.setFetchIosClient(false)
+            YoutubeStreamExtractor.setFetchIosClient(true)
         }
     }
 
@@ -192,7 +189,8 @@ open class YoutubeExtractor : ExtractorApi() {
                                             this.referer = mainUrl
                                             this.quality = video.height
                                             this.headers = mapOf(
-                                                "User-Agent" to YoutubeUtils.CHROME_USER_AGENT
+                                                "User-Agent" to YoutubeUtils.IOS_USER_AGENT
+                                                // Origin과 Referer 제거 (모바일 앱으로 위장하기 위함)
                                             )
                                         }
                                     )
@@ -327,36 +325,51 @@ open class YoutubeExtractor : ExtractorApi() {
 
     private fun proxyChunkToYouTube(socket: Socket, targetUrl: String, clientHeaders: Map<String, String>) {
         try {
-            val finalTargetUrl = targetUrl
+            var finalTargetUrl = targetUrl
             
+            // [초정밀 디버깅 1] n 파라미터 확인
             val nParamMatch = Regex("[?&]n=([^&]+)").find(finalTargetUrl)
             val nParam = nParamMatch?.groupValues?.get(1) ?: "없음"
-            val urlHasPot = finalTargetUrl.contains("pot=") 
+            
+            // [초정밀 디버깅 2] 토큰 확인
+            val poToken = YoutubePoTokenProvider.poToken
+            val visitorData = YoutubePoTokenProvider.visitorData
             
             println("\n[YT_PROXY_DEBUG] ================= CHUNK REQUEST START =================")
-            println("[YT_PROXY_DEBUG] 1. n-파라미터 상태: $nParam")
-            println("[YT_PROXY_DEBUG] 2. URL 자체 pot 존재 여부: ${if(urlHasPot) "✅ 존재함 (NewPipe 정상주입 완료)" else "❌ 미존재"}")
+            println("[YT_PROXY_DEBUG] 1. n-파라미터 상태: $nParam (없으면 1분 차단의 핵심 원인!)")
+            println("[YT_PROXY_DEBUG] 2. po_token 상태: ${if(poToken.isBlank()) "❌ EMPTY (추출 실패/누락)" else "✅ [${poToken.take(10)}...]"}")
+            println("[YT_PROXY_DEBUG] 3. visitorData 상태: ${if(visitorData.isBlank()) "❌ EMPTY" else "✅ [$visitorData]"}")
+            
+            // 토큰 주입 로직 (기존에 pot가 없고, 우리가 추출한 토큰이 있을 때만)
+            if (finalTargetUrl.contains("googlevideo.com") && !finalTargetUrl.contains("pot=") && poToken.isNotBlank()) {
+                finalTargetUrl += "&pot=$poToken"
+                println("[YT_PROXY_DEBUG] 4. URL에 pot 파라미터 정상 주입 완료!")
+            } else if (finalTargetUrl.contains("pot=")) {
+                println("[YT_PROXY_DEBUG] 4. URL에 이미 pot 파라미터가 포함되어 있습니다.")
+            } else {
+                println("[YT_PROXY_DEBUG] 4. ❌ 경고: po_token을 주입할 수 없습니다! (1분 뒤 403 차단 예상됨)")
+            }
 
+            // [초정밀 디버깅 3] 요청 헤더 설정 (Web 헤더인 Origin, Referer 완전히 제거)
             val requestBuilder = okhttp3.Request.Builder()
                 .url(finalTargetUrl)
-                // [수정됨] 청크 릴레이 통신 시에도 반드시 PC 크롬 헤더를 사용해야 합니다.
-                .header("User-Agent", YoutubeUtils.CHROME_USER_AGENT)
+                .header("User-Agent", YoutubeUtils.IOS_USER_AGENT)
                 .header("Accept", "*/*")
                 .header("Connection", "keep-alive")
 
             clientHeaders["range"]?.let { 
                 requestBuilder.header("Range", it) 
-                println("[YT_PROXY_DEBUG] 3. 요청 Range: $it")
+                println("[YT_PROXY_DEBUG] 5. 요청 Range: $it")
             }
 
             val request = requestBuilder.build()
             val response = proxyHttpClient.newCall(request).execute()
             
-            println("[YT_PROXY_DEBUG] 4. 유튜브 CDN 응답 코드: ${response.code}")
+            println("[YT_PROXY_DEBUG] 6. 유튜브 CDN 응답 코드: ${response.code}")
 
             if (response.code == 403 || response.code == 400) {
                 val errorBody = response.body?.string() ?: "Empty Body"
-                println("[YT_PROXY_DEBUG] 🚨 ${response.code} 에러 발생! 🚨")
+                println("[YT_PROXY_DEBUG] 🚨 403 FORBIDDEN 발생! 🚨")
                 println("[YT_PROXY_DEBUG] 에러 응답 본문:\n$errorBody")
                 println("[YT_PROXY_DEBUG] =======================================================\n")
                 
