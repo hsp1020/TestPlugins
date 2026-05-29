@@ -287,6 +287,7 @@ class YoutubeProvider(
         private val homeShorts = mutableListOf<Episode>()
         private val searchShorts = mutableListOf<Episode>()
 
+        // SharedPreferences 연속 I/O 병목을 해결하기 위한 인메모리 캐시 맵
         private val continuationTokenCache = ConcurrentHashMap<String, String>()
 
         private val VIEW_REPLACE_REGEX = Regex("조회수|views|مشاهدة|시청 중|시청중|watching|명|시청자")
@@ -366,139 +367,90 @@ class YoutubeProvider(
     )
 
     // =========================================================================
-    // [강력 개선] 완전한 Deep Search 기능 도입 (Map 내부 어디에 있든 100% 추출)
+    // [추가] 공통 에피소드 메타데이터 생성 (원본 코드의 안전한 확장 함수들 기반)
     // =========================================================================
-    
-    private fun getText(obj: Any?): String {
-        if (obj == null) return ""
-        if (obj is String) return obj
-        if (obj is Map<*, *>) {
-            val simpleText = obj["simpleText"] as? String
-            if (!simpleText.isNullOrBlank()) return simpleText
-            
-            val runs = obj["runs"] as? List<*>
-            if (runs != null && runs.isNotEmpty()) {
-                return runs.joinToString("") { run ->
-                    if (run is Map<*, *>) {
-                        (run["text"] as? String) ?: ""
-                    } else run?.toString() ?: ""
-                }
-            }
-            
-            val textObj = obj["text"]
-            if (textObj != null) return getText(textObj)
-            
-            val content = obj["content"] as? String
-            if (!content.isNullOrBlank()) return content
-            
-            val label = obj["label"] as? String
-            if (!label.isNullOrBlank()) return label
-        }
-        return ""
-    }
-
-    private fun deepSearchText(obj: Any?, targetKeys: List<String>, depth: Int = 0): String {
-        if (obj == null || depth > 10) return ""
-        if (obj is Map<*, *>) {
-            for (key in targetKeys) {
-                if (obj.containsKey(key)) {
-                    val text = getText(obj[key])
-                    if (text.isNotBlank()) return text
-                }
-            }
-            for (value in obj.values) {
-                val res = deepSearchText(value, targetKeys, depth + 1)
-                if (res.isNotBlank()) return res
-            }
-        } else if (obj is List<*>) {
-            for (item in obj) {
-                val res = deepSearchText(item, targetKeys, depth + 1)
-                if (res.isNotBlank()) return res
-            }
-        }
-        return ""
-    }
-
-    private fun deepSearchString(obj: Any?, targetKeys: List<String>, depth: Int = 0): String {
-        if (obj == null || depth > 10) return ""
-        if (obj is Map<*, *>) {
-            for (key in targetKeys) {
-                if (obj.containsKey(key)) {
-                    val v = obj[key]
-                    if (v is String && v.isNotBlank()) return v
-                }
-            }
-            for (value in obj.values) {
-                val res = deepSearchString(value, targetKeys, depth + 1)
-                if (res.isNotBlank()) return res
-            }
-        } else if (obj is List<*>) {
-            for (item in obj) {
-                val res = deepSearchString(item, targetKeys, depth + 1)
-                if (res.isNotBlank()) return res
-            }
-        }
-        return ""
-    }
-
-    private fun getSolidDuration(map: Any?): String {
-        val rawText = deepSearchText(map, listOf("lengthText", "thumbnailOverlayTimeStatusRenderer"))
-        val match = Regex("""(\d{1,2}:)?\d{1,2}:\d{2}""").find(rawText)
-        return match?.value ?: ""
-    }
-
-    private fun getSolidChannel(map: Any?): String {
-        return deepSearchText(map, listOf("longBylineText", "shortBylineText", "ownerText", "bylineText"))
-    }
-
-    private fun getSolidViews(map: Any?): String {
-        var text = deepSearchText(map, listOf("viewCountText", "shortViewCountText"))
-        if (text.isNotBlank()) return formatViews(text)
+    private fun getEpisodeMetaString(renderer: Map<*, *>?): String {
+        if (renderer == null) return ""
         
-        text = deepSearchText(map, listOf("videoInfo", "subtitle"))
-        if (text.isNotBlank()) {
-            val match = Regex("""(\d+[KMBkmb천만억]?\s*회?)""").find(text)
-            if (match != null) return formatViews(match.value)
+        var duration = getText(renderer.getMapKey("lengthText"))
+        if (duration.isBlank()) {
+            val overlays = renderer.getListKey("thumbnailOverlays") ?: YoutubeUtils.getListKeyFromAny(renderer, "thumbnailOverlays") as? List<*>
+            overlays?.forEach { overlay ->
+                if (overlay is Map<*, *>) {
+                    val timeStatus = overlay.getMapKey("thumbnailOverlayTimeStatusRenderer")
+                    if (timeStatus != null) {
+                        val t = getText(timeStatus.getMapKey("text"))
+                        if (t.isNotBlank()) duration = t
+                    }
+                }
+            }
         }
-        return ""
-    }
-
-    private fun getSolidDate(map: Any?): String {
-        var text = deepSearchText(map, listOf("publishedTimeText"))
-        if (text.isNotBlank()) return text
+        val matchDur = Regex("""(\d{1,2}:)?\d{1,2}:\d{2}""").find(duration)
+        duration = matchDur?.value ?: ""
         
-        text = deepSearchText(map, listOf("videoInfo", "subtitle"))
-        if (text.isNotBlank()) {
-            val parts = text.split("•", "·").map { it.trim() }
-            if (parts.size > 1) return parts[1]
+        val channel = getText(renderer.getMapKey("longBylineText"))
+                        .ifBlank { getText(renderer.getMapKey("shortBylineText")) }
+                        .ifBlank { getText(renderer.getMapKey("ownerText")) }
+        
+        var viewsRaw = getText(renderer.getMapKey("viewCountText"))
+                        .ifBlank { getText(renderer.getMapKey("shortViewCountText")) }
+                        .ifBlank { getText(renderer.getMapKey("videoInfo")) }
+        
+        var views = ""
+        var date = getText(renderer.getMapKey("publishedTimeText"))
+
+        if (viewsRaw.contains("•") || viewsRaw.contains("·") || viewsRaw.contains("전")) {
+            val parts = viewsRaw.split("•", "·").map { it.trim() }
+            if (parts.isNotEmpty()) viewsRaw = parts[0]
+            if (parts.size > 1 && date.isBlank()) date = parts[1]
         }
-        return ""
+        
+        if (viewsRaw.isNotBlank()) {
+            val match = Regex("""(\d+[KMBkmb천만억]?\s*회?)""").find(viewsRaw)
+            if (match != null) views = formatViews(match.value)
+        }
+
+        if (views.isBlank() || date.isBlank()) {
+            val rows = renderer.getMapKey("metadata")
+                ?.getMapKey("lockupMetadataViewModel")
+                ?.getMapKey("metadata")
+                ?.getMapKey("contentMetadataViewModel")
+                ?.getListKey("metadataRows")
+            
+            rows?.forEach { row ->
+                val parts = row.getListKey("metadataParts") ?: YoutubeUtils.getListKeyFromAny(row, "metadataParts") as? List<*>
+                parts?.forEach { part ->
+                    if (part is Map<*, *>) {
+                        val text = getText(part.getMapKey("text"))
+                        if (text.isNotBlank() && text != duration && text != channel) {
+                            if (METADATA_VIEW_REGEX.matches(text)) {
+                                views = formatViews(text)
+                            } else if (date.isBlank()) {
+                                date = text
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        val parts = listOf(duration, channel, views, date).filter { it.isNotBlank() && it != "N/A" }
+        return parts.joinToString(" • ")
     }
 
     private fun extractRecommendationMeta(obj: Any?, outMap: MutableMap<String, String>, depth: Int = 0) {
         if (obj == null || depth > 10) return
         if (obj is Map<*, *>) {
-            val rendererKeys = listOf("compactVideoRenderer", "videoRenderer", "gridVideoRenderer", "playlistVideoRenderer", "playlistPanelVideoRenderer", "lockupViewModel")
+            val rendererKeys = listOf("compactVideoRenderer", "videoRenderer", "gridVideoRenderer", "playlistVideoRenderer", "playlistPanelVideoRenderer")
             for (key in rendererKeys) {
-                if (obj.containsKey(key)) {
-                    val renderer = obj[key]
-                    val vidId = deepSearchString(renderer, listOf("videoId", "contentId"))
-                    if (vidId.isNotBlank()) {
-                        val duration = getSolidDuration(renderer)
-                        val channel = getSolidChannel(renderer)
-                        val views = getSolidViews(renderer)
-                        val date = getSolidDate(renderer)
-
-                        val metaParts = mutableListOf<String>()
-                        if (duration.isNotBlank()) metaParts.add(duration)
-                        if (channel.isNotBlank()) metaParts.add(channel)
-                        if (views.isNotBlank()) metaParts.add(views)
-                        if (date.isNotBlank()) metaParts.add(date)
-
-                        println("[YT_DEBUG_PLOT] Recommendation: VID=$vidId | D=$duration | C=$channel | V=$views | Date=$date")
-
-                        if (metaParts.isNotEmpty()) {
-                            outMap[vidId] = metaParts.joinToString(" • ")
+                val renderer = obj.getMapKey(key)
+                if (renderer != null) {
+                    val vidId = renderer.getString("videoId") ?: renderer.getString("contentId")
+                    if (!vidId.isNullOrBlank()) {
+                        val meta = getEpisodeMetaString(renderer)
+                        println("[YT_DEBUG_PLOT] Recommendation: VID=$vidId | Meta=$meta")
+                        if (meta.isNotBlank()) {
+                            outMap[vidId] = meta
                         }
                     }
                 }
@@ -510,58 +462,6 @@ class YoutubeProvider(
             for (item in obj) {
                 extractRecommendationMeta(item, outMap, depth + 1)
             }
-        }
-    }
-
-    private fun formatViews(viewText: String?): String {
-        if (viewText.isNullOrBlank()) return "N/A"
-        var text = viewText.trim()
-        
-        val isLive = text.contains("명") || text.contains("시청자") || text.contains("watching") || text.contains("시청 중")
-
-        text = VIEW_REPLACE_REGEX.replace(text, "").trim()
-
-        if (VIEW_FORMAT_REGEX.matches(text) && text.length < 15) {
-            return if (isLive) {
-                if (lang == "ko" && !text.contains("명")) "${text}명" 
-                else if (lang != "ko" && !text.contains("watching")) "${text} watching"
-                else text
-            } else {
-                if (lang == "ko" && !text.contains("회")) "${text}회" 
-                else text
-            }
-        }
-        
-        val sb = java.lang.StringBuilder(text.length)
-        for (i in 0 until text.length) {
-            val c = text[i]
-            if (c in '0'..'9') sb.append(c)
-        }
-        val digits = sb.toString()
-        if (digits.isBlank()) return text
-        
-        return try {
-            val v = digits.toLong()
-            if (lang == "ko") {
-                val suffix = if (isLive) { "명" } else { "회" }
-                when {
-                    v < 1000 -> "$v$suffix"
-                    v < 10000 -> String.format("%.1f천$suffix", v / 1000.0).replace(".0천", "천")
-                    v < 100000 -> String.format("%.1f만$suffix", v / 10000.0).replace(".0만", "만")
-                    v < 100000000 -> "${v / 10000}만$suffix"
-                    else -> String.format("%.1f억$suffix", v / 100000000.0).replace(".0억", "억")
-                }
-            } else {
-                val suffix = if (isLive) " watching" else ""
-                when {
-                    v < 1000 -> "$v$suffix"
-                    v < 1_000_000 -> String.format("%.1fK$suffix", v / 1000.0).replace(".0K", "K")
-                    v < 1_000_000_000 -> String.format("%.1fM$suffix", v / 1_000_000.0).replace(".0M", "M")
-                    else -> String.format("%.1fB$suffix", v / 1_000_000_000.0).replace(".0B", "B")
-                }
-            }
-        } catch (e: Exception) {
-            text
         }
     }
     // =========================================================================
@@ -642,19 +542,156 @@ class YoutubeProvider(
         }
     }
 
+    private fun Map<*, *>.getMapKey(key: String): Map<*, *>? {
+        return (this[key] as? Map<*, *>) 
+            ?: (this.entries.firstOrNull { (it.key as? String) == key }?.value as? Map<*, *>)
+    }
+
+    private fun Map<*, *>.getListKey(key: String): List<Map<*, *>>? {
+        return (this[key] as? List<Map<*, *>>)
+            ?: (this.entries.firstOrNull { (it.key as? String) == key }?.value as? List<Map<*, *>>)
+    }
+
+    private fun Map<*, *>.getString(key: String): String? {
+        return (this[key] as? String)
+            ?: (this.entries.firstOrNull { (it.key as? String) == key }?.value as? String)
+    }
+
+    private fun getText(obj: Any?): String {
+        if (obj == null) return ""
+        if (obj is String) return obj
+        if (obj is Map<*, *>) {
+            return obj.getString("simpleText")
+                ?: obj.getString("text")
+                ?: obj.getString("content")
+                ?: obj.getString("label")
+                ?: (obj.getListKey("runs") ?: YoutubeUtils.getListKeyFromAny(obj, "runs"))?.joinToString("") { run ->
+                    when (run) {
+                        is String -> run
+                        is Map<*, *> -> (run["text"] as? String)
+                            ?: run.getString("simpleText")
+                            ?: ""
+
+                        else -> ""
+                    }
+                }.orEmpty()
+                ?: obj.getMapKey("text")?.let { getText(it) }.orEmpty()
+        }
+        return ""
+    }
+
+    private fun extractPartsFromMetadataRows(rows: List<*>?, viewFormatter: (String) -> String): List<String> {
+        val collected = mutableListOf<String>()
+        rows?.forEach { row ->
+            val rowMap = row as? Map<*, *> ?: return@forEach
+            val parts = (rowMap["metadataParts"] as? List<*>)
+                ?: (rowMap.entries.firstOrNull { (it.key as? String) == "metadataParts" }?.value as? List<*>)
+            parts?.forEach { part ->
+                val partMap = part as? Map<*, *> ?: return@forEach
+                val text = getText(partMap.getMapKey("text") ?: partMap["text"])
+                if (text.isNotBlank()) {
+                    if (METADATA_VIEW_REGEX.matches(text)) {
+                        collected.add(viewFormatter(text))
+                    } else {
+                        collected.add(text)
+                    }
+                }
+            }
+        }
+        return collected
+    }
+
     private fun extractLockupMetadata(lockup: Map<*, *>) : Pair<String, String> {
-        var channel = getSolidChannel(lockup)
-        var views = getSolidViews(lockup)
+        var channel = ""
+        var views = ""
+
+        try {
+            val rows = lockup.getMapKey("metadata")
+                ?.getMapKey("lockupMetadataViewModel")
+                ?.getMapKey("metadata")
+                ?.getMapKey("contentMetadataViewModel")
+                ?.getListKey("metadataRows")
+
+            val rawParts = extractPartsFromMetadataRows(rows) { formatViews(it) }
+            rawParts.forEach { text ->
+                if (text.contains("회") || text.contains("시청") || text.contains("조회") || 
+                    text.contains("views") || text.contains("watching") || 
+                    text.contains("명") || text.contains("시청자") || text.contains("مشاهد")) {
+                    views = text
+                } else if (!METADATA_SKIP_REGEX.matches(text) && text.length > 1 && !text.contains("•")) {
+                    channel = text
+                }
+            }
+        } catch (_: Exception) {
+        }
 
         if (views.isEmpty() || views == "N/A") {
             val direct = getText(
-                YoutubeUtils.getMapKeyFromAny(YoutubeUtils.getMapKeyFromAny(lockup, "metadata"), "lockupMetadataViewModel")
-                    ?.let { YoutubeUtils.getMapKeyFromAny(it, "viewCount") }
+                lockup.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")
+                    ?.getMapKey("viewCount")
             )
             if (direct.isNotBlank()) views = formatViews(direct)
         }
 
         return Pair(channel, views)
+    }
+
+    private fun formatViews(viewText: String?): String {
+        if (viewText.isNullOrBlank()) return "N/A"
+        var text = viewText.trim()
+        
+        val isLive = text.contains("명") || text.contains("시청자") || text.contains("watching") || text.contains("시청 중")
+
+        text = VIEW_REPLACE_REGEX.replace(text, "").trim()
+
+        if (VIEW_FORMAT_REGEX.matches(text) && text.length < 15) {
+            return if (isLive) {
+                if (lang == "ko" && !text.contains("명")) "${text}명" 
+                else if (lang != "ko" && !text.contains("watching")) "${text} watching"
+                else text
+            } else {
+                if (lang == "ko" && !text.contains("회")) "${text}회" 
+                else text
+            }
+        }
+        
+        val sb = java.lang.StringBuilder(text.length)
+        for (i in 0 until text.length) {
+            val c = text[i]
+            if (c in '0'..'9') sb.append(c)
+        }
+        val digits = sb.toString()
+        if (digits.isBlank()) return text
+        
+        return try {
+            val v = digits.toLong()
+            if (lang == "ko") {
+                val suffix = if (isLive) { "명" } else { "회" }
+                when {
+                    v < 1000 -> "$v$suffix"
+                    v < 10000 -> String.format("%.1f천$suffix", v / 1000.0).replace(".0천", "천")
+                    v < 100000 -> String.format("%.1f만$suffix", v / 10000.0).replace(".0만", "만")
+                    v < 100000000 -> "${v / 10000}만$suffix"
+                    else -> String.format("%.1f억$suffix", v / 100000000.0).replace(".0억", "억")
+                }
+            } else {
+                val suffix = if (isLive) " watching" else ""
+                when {
+                    v < 1000 -> "$v$suffix"
+                    v < 1_000_000 -> String.format("%.1fK$suffix", v / 1000.0).replace(".0K", "K")
+                    v < 1_000_000_000 -> String.format("%.1fM$suffix", v / 1_000_000.0).replace(".0M", "M")
+                    else -> String.format("%.1fB$suffix", v / 1_000_000_000.0).replace(".0B", "B")
+                }
+            }
+        } catch (e: Exception) {
+            text
+        }
+    }
+
+    private fun getRawText(map: Map<*, *>?, key: String): String? {
+        val obj = map?.getMapKey(key) ?: return null
+        return obj.getString("simpleText")
+            ?: obj.getListKey("runs")?.firstOrNull()?.getString("text")
     }
 
     private fun collectFromRenderer(
@@ -663,21 +700,24 @@ class YoutubeProvider(
     ): SearchResponse? {
         if (renderer == null) return null
 
-        val videoData = YoutubeUtils.getMapKeyFromAny(renderer, "videoRenderer")
-            ?: YoutubeUtils.getMapKeyFromAny(renderer, "compactVideoRenderer")
-            ?: YoutubeUtils.getMapKeyFromAny(renderer, "gridVideoRenderer")
-            ?: YoutubeUtils.getMapKeyFromAny(renderer, "playlistVideoRenderer")       
-            ?: YoutubeUtils.getMapKeyFromAny(renderer, "playlistPanelVideoRenderer")  
+        val videoData = renderer.getMapKey("videoRenderer")
+            ?: renderer.getMapKey("compactVideoRenderer")
+            ?: renderer.getMapKey("gridVideoRenderer")
+            ?: renderer.getMapKey("playlistVideoRenderer")       
+            ?: renderer.getMapKey("playlistPanelVideoRenderer")  
 
         if (videoData != null) {
-            val videoId = YoutubeUtils.getStringFromAny(videoData, "videoId")
+            val videoId = videoData.getString("videoId")
             if (!videoId.isNullOrBlank() && seenIds.add(videoId)) {
-                val title = getText(YoutubeUtils.getMapKeyFromAny(videoData, "title")) ?: "Video"
-                val channel = getSolidChannel(videoData)
-                val views = getSolidViews(videoData)
+                val title = getText(videoData.getMapKey("title")) ?: "Video"
+                val viewText = getText(videoData.getMapKey("viewCountText"))
+                    ?: getText(videoData.getMapKey("shortViewCountText"))
+                val channel = getText(videoData.getMapKey("ownerText"))
+                    ?: getText(videoData.getMapKey("shortBylineText")) ?: ""
+                val views = formatViews(viewText)
                 val finalTitle =
                     if (channel.isNotBlank()) "{$channel | $views} $title" else "{$views} $title"
-                var poster = YoutubeUtils.getBestThumbnail(YoutubeUtils.getMapKeyFromAny(videoData, "thumbnail"))
+                var poster = YoutubeUtils.getBestThumbnail(videoData.getMapKey("thumbnail"))
                 if (poster.isNullOrBlank()) poster = YoutubeUtils.buildThumbnailFromId(videoId)
                 
                 return newMovieSearchResponse(
@@ -691,38 +731,45 @@ class YoutubeProvider(
             return null
         }
 
-        val richContent = YoutubeUtils.getMapKeyFromAny(YoutubeUtils.getMapKeyFromAny(renderer, "richItemRenderer"), "content")
-        val shortsData = YoutubeUtils.getMapKeyFromAny(renderer, "reelItemRenderer")
-            ?: YoutubeUtils.getMapKeyFromAny(renderer, "shortsLockupViewModel")
-            ?: YoutubeUtils.getMapKeyFromAny(richContent, "shortsLockupViewModel")
+        val richContent = renderer.getMapKey("richItemRenderer")?.getMapKey("content")
+        val shortsData = renderer.getMapKey("reelItemRenderer")
+            ?: renderer.getMapKey("shortsLockupViewModel")
+            ?: richContent?.getMapKey("shortsLockupViewModel")
 
         if (shortsData != null) {
-            val onTap = YoutubeUtils.getMapKeyFromAny(shortsData, "onTap")
-            val videoId = YoutubeUtils.getStringFromAny(
-                YoutubeUtils.getMapKeyFromAny(YoutubeUtils.getMapKeyFromAny(onTap, "innertubeCommand"), "reelWatchEndpoint"), "videoId"
-            ) ?: YoutubeUtils.getStringFromAny(shortsData, "videoId")
-              ?: YoutubeUtils.getStringFromAny(shortsData, "entityId")?.replace("shorts-shelf-item-", "")
+            val onTap = shortsData.getMapKey("onTap")
+            val videoId = onTap?.getMapKey("innertubeCommand")?.getMapKey("reelWatchEndpoint")
+                ?.getString("videoId")
+                ?: shortsData.getString("videoId")
+                ?: shortsData.getString("entityId")?.replace("shorts-shelf-item-", "")
 
             if (!videoId.isNullOrBlank() && seenIds.add(videoId)) {
-                val overlay = YoutubeUtils.getMapKeyFromAny(shortsData, "overlayMetadata")
-                val accessibilityText = YoutubeUtils.getStringFromAny(shortsData, "accessibilityText") ?: ""
+                val overlay = shortsData.getMapKey("overlayMetadata")
+                val accessibilityText = shortsData.getString("accessibilityText") ?: ""
 
-                var title = YoutubeUtils.getStringFromAny(YoutubeUtils.getMapKeyFromAny(overlay, "primaryText"), "content")
-                if (title.isNullOrBlank()) title = getText(YoutubeUtils.getMapKeyFromAny(shortsData, "headline"))
-                if (title.isNullOrBlank()) title = YoutubeUtils.getStringFromAny(YoutubeUtils.getMapKeyFromAny(overlay, "primaryText"), "simpleText")
-                if (title.isNullOrBlank() && accessibilityText.contains(",")) title = accessibilityText.substringBefore(",").trim()
+                var title = overlay?.getMapKey("primaryText")?.getString("content")
+                if (title.isNullOrBlank()) title = getText(shortsData.getMapKey("headline"))
+                if (title.isNullOrBlank()) title =
+                    overlay?.getMapKey("primaryText")?.getString("simpleText")
+                if (title.isNullOrBlank() && accessibilityText.contains(",")) title =
+                    accessibilityText.substringBefore(",").trim()
                 if (title.isNullOrBlank()) title = "Shorts Clip"
 
-                var viewRaw = YoutubeUtils.getStringFromAny(YoutubeUtils.getMapKeyFromAny(overlay, "secondaryText"), "content")
-                if (viewRaw.isNullOrBlank()) viewRaw = getText(YoutubeUtils.getMapKeyFromAny(shortsData, "viewCountText"))
+                var viewRaw = overlay?.getMapKey("secondaryText")?.getString("content")
+                if (viewRaw.isNullOrBlank()) viewRaw =
+                    getText(shortsData.getMapKey("viewCountText"))
                 if (viewRaw.isNullOrBlank() && accessibilityText.isNotBlank()) {
                     val match = Regex(",\\s*(.*?)\\s*-").find(accessibilityText)
                     if (match != null) viewRaw = match.groupValues[1].trim()
                 }
                 val views = formatViews(viewRaw)
 
-                var poster = YoutubeUtils.getStringFromAny(YoutubeUtils.getListKeyFromAny(YoutubeUtils.getMapKeyFromAny(shortsData, "thumbnail"), "thumbnails")?.lastOrNull(), "url")
-                if (poster.isNullOrBlank()) poster = YoutubeUtils.getStringFromAny(YoutubeUtils.getListKeyFromAny(YoutubeUtils.getMapKeyFromAny(YoutubeUtils.getMapKeyFromAny(YoutubeUtils.getMapKeyFromAny(shortsData, "thumbnailViewModel"), "thumbnailViewModel"), "image"), "sources")?.lastOrNull(), "url")
+                var poster =
+                    shortsData.getMapKey("thumbnail")?.getListKey("thumbnails")?.lastOrNull()
+                        ?.getString("url")
+                if (poster.isNullOrBlank()) poster =
+                    shortsData.getMapKey("thumbnailViewModel")?.getMapKey("thumbnailViewModel")
+                        ?.getMapKey("image")?.getListKey("sources")?.lastOrNull()?.getString("url")
                 if (poster.isNullOrBlank()) poster = "https://i.ytimg.com/vi/$videoId/oar2.jpg"
 
                 val currentList = if (isSearchContext) searchShorts else homeShorts
@@ -747,24 +794,35 @@ class YoutubeProvider(
             }
         }
 
-        val lockup = YoutubeUtils.getMapKeyFromAny(renderer, "lockupViewModel")
+        val lockup = renderer.getMapKey("lockupViewModel")
         if (lockup != null) {
-            val contentType = YoutubeUtils.getStringFromAny(lockup, "contentType") ?: ""
+            val contentType = lockup.getString("contentType") ?: ""
             if (contentType.contains("AD") || contentType.contains("SPONSORED") || contentType.contains("PROMOTED")) {
                 return null
             }
 
             if (contentType == "LOCKUP_CONTENT_TYPE_PLAYLIST") {
-                val playlistId = YoutubeUtils.getStringFromAny(lockup, "contentId")
+                val playlistId = lockup.getString("contentId")
                 if (!playlistId.isNullOrBlank() && seenIds.add(playlistId)) {
-                    var title = YoutubeUtils.getStringFromAny(YoutubeUtils.getMapKeyFromAny(YoutubeUtils.getMapKeyFromAny(YoutubeUtils.getMapKeyFromAny(lockup, "metadata"), "lockupMetadataViewModel"), "title"), "content") ?: "Playlist"
+                    var title = lockup.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")
+                        ?.getMapKey("title")?.getString("content") ?: "Playlist"
 
                     if (playlistId.startsWith("RD") || playlistId.startsWith("UL") || playlistId.startsWith("MM") || playlistId.startsWith("RDMM")) {
                         title = YoutubeUtils.cleanMixTitle(title)
                     }
 
-                    val episodeCount = deepSearchText(lockup, listOf("thumbnailOverlayBadgeViewModel"))
-                    val poster = YoutubeUtils.getStringFromAny(YoutubeUtils.getListKeyFromAny(YoutubeUtils.getMapKeyFromAny(YoutubeUtils.getMapKeyFromAny(YoutubeUtils.getMapKeyFromAny(YoutubeUtils.getMapKeyFromAny(lockup, "contentImage"), "collectionThumbnailViewModel"), "primaryThumbnail"), "thumbnailViewModel"), "image")?.lastOrNull(), "url")
+                    val episodeCount =
+                        lockup.getMapKey("contentImage")?.getMapKey("collectionThumbnailViewModel")
+                            ?.getMapKey("primaryThumbnail")?.getMapKey("thumbnailViewModel")
+                            ?.getListKey("overlays")?.firstOrNull()
+                            ?.getMapKey("thumbnailOverlayBadgeViewModel")
+                            ?.getListKey("thumbnailBadges")?.firstOrNull()
+                            ?.getMapKey("thumbnailBadgeViewModel")?.getString("text") ?: ""
+                    val poster =
+                        lockup.getMapKey("contentImage")?.getMapKey("collectionThumbnailViewModel")
+                            ?.getMapKey("primaryThumbnail")?.getMapKey("thumbnailViewModel")
+                            ?.getMapKey("image")?.getListKey("sources")?.lastOrNull()
+                            ?.getString("url")
 
                     val extractedUrl = YoutubeUtils.extractUrlFromLockup(lockup)
                     val targetPath = if (!extractedUrl.isNullOrBlank()) {
@@ -787,24 +845,29 @@ class YoutubeProvider(
                 }
             }
 
-            val videoId = YoutubeUtils.getStringFromAny(lockup, "contentId")
-                ?: YoutubeUtils.getStringFromAny(YoutubeUtils.getMapKeyFromAny(lockup, "content"), "videoId")
-                ?: YoutubeUtils.getStringFromAny(YoutubeUtils.getMapKeyFromAny(YoutubeUtils.getMapKeyFromAny(lockup, "content"), "videoRenderer"), "videoId")
+            val videoId = lockup.getString("contentId")
+                ?: lockup.getMapKey("content")?.getString("videoId")
+                ?: (lockup.getMapKey("content")?.getMapKey("videoRenderer")?.getString("videoId"))
 
             if (!videoId.isNullOrBlank() && seenIds.add(videoId)) {
                 val title = getText(
-                    YoutubeUtils.getMapKeyFromAny(YoutubeUtils.getMapKeyFromAny(YoutubeUtils.getMapKeyFromAny(lockup, "metadata"), "lockupMetadataViewModel"), "title")
+                    lockup.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")
+                        ?.getMapKey("title")
                 )
                 if (title.isBlank()) {
                     return null
                 }
                 var (channel, views) = extractLockupMetadata(lockup)     
                 if (channel.isBlank()) {
-                    val label = YoutubeUtils.getStringFromAny(YoutubeUtils.getMapKeyFromAny(YoutubeUtils.getMapKeyFromAny(lockup, "accessibility"), "accessibilityData"), "label") ?: ""
-                    val match = Regex("(?:by|من|ع버|قناة)\\s+(.*?)\\s+(?:\\d|view|مشاهدة)").find(label)
+                    val label = lockup.getMapKey("accessibility")?.getMapKey("accessibilityData")
+                        ?.getString("label") ?: ""
+                    val match =
+                        Regex("(?:by|من|ع버|قناة)\\s+(.*?)\\s+(?:\\d|view|مشاهدة)").find(label)
                     if (match != null) channel = match.groupValues[1].replace("Shorts", "").trim()
                 }
-                val isShorts = YoutubeUtils.getMapKeyFromAny(lockup, "content")?.containsKey("shortsLockupViewModel") == true || lockup.toString().contains("reelWatchEndpoint")
+                val isShorts = lockup.getMapKey("content")
+                    ?.containsKey("shortsLockupViewModel") == true || lockup.toString()
+                    .contains("reelWatchEndpoint")
                 val finalTitle: String
                 val poster: String
 
@@ -839,7 +902,9 @@ class YoutubeProvider(
                 } else {
                     finalTitle =
                         if (channel.isNotBlank()) "{$channel | $views} $title" else "{$views} $title"
-                    poster = YoutubeUtils.getBestThumbnail(YoutubeUtils.getListKeyFromAny(YoutubeUtils.getMapKeyFromAny(YoutubeUtils.getMapKeyFromAny(lockup, "contentImage"), "image"), "sources")) ?: "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
+                    poster = YoutubeUtils.getBestThumbnail(
+                        lockup.getMapKey("contentImage")?.getMapKey("image")?.getListKey("sources")
+                    ) ?: "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
                     return newMovieSearchResponse(
                         finalTitle,
                         "$mainUrl/watch?v=$videoId",
@@ -851,13 +916,14 @@ class YoutubeProvider(
             }
         }
 
-        val channelData = YoutubeUtils.getMapKeyFromAny(renderer, "channelRenderer")
+        val channelData = renderer.getMapKey("channelRenderer")
         if (channelData != null) {
-            val id = YoutubeUtils.getStringFromAny(channelData, "channelId")
+            val id = channelData.getString("channelId")
             if (!id.isNullOrBlank() && seenIds.add(id)) {
-                val title = getText(YoutubeUtils.getMapKeyFromAny(channelData, "title")) ?: "Channel"
-                val stats = (getText(YoutubeUtils.getMapKeyFromAny(channelData, "videoCountText")).ifBlank { getText(YoutubeUtils.getMapKeyFromAny(channelData, "subscriberCountText")) }) ?: ""
-                val poster = YoutubeUtils.getBestThumbnail(YoutubeUtils.getMapKeyFromAny(channelData, "thumbnail"))
+                val title = getText(channelData.getMapKey("title")) ?: "Channel"
+                val stats = (getText(channelData.getMapKey("videoCountText"))
+                    ?: getText(channelData.getMapKey("subscriberCountText"))) ?: ""
+                val poster = YoutubeUtils.getBestThumbnail(channelData.getMapKey("thumbnail"))
                 return newMovieSearchResponse(
                     "$title ($stats)",
                     "$mainUrl/channel/$id",
@@ -877,7 +943,7 @@ class YoutubeProvider(
         playlistMode: Boolean,
         depth: Int = 0
     ) {
-        if (data == null || depth > 32) return 
+        if (data == null || depth > 32) return // Stack Overflow 방지용 Depth 안전 보호막
         if (data is Map<*, *>) {
             val extracted = collectFromRenderer(data, seenIds)
             if (extracted != null) {
@@ -1370,53 +1436,51 @@ class YoutubeProvider(
 
     private fun extractTitle(titleObject: Map<*, *>?): String? {
         if (titleObject == null) return null
-        return YoutubeUtils.getStringFromAny(titleObject, "simpleText")
-            ?: YoutubeUtils.getListKeyFromAny(titleObject, "runs")?.joinToString("") { YoutubeUtils.getStringFromAny(it, "text") ?: "" }
-            ?: YoutubeUtils.getStringFromAny(titleObject, "text")
+        return titleObject.getString("simpleText")
+            ?: titleObject.getListKey("runs")?.joinToString("") { it.getString("text") ?: "" }
+            ?: titleObject.getString("text")
     }
 
-    // -------------------------------------------------------------------------
-    // 재생목록(플레이리스트/믹스) 에피소드 추출 부분에 Deep Search 일괄 적용
-    // -------------------------------------------------------------------------
     private fun extractPlaylistEpisodes(data: Any?, seenIds: MutableSet<String>): List<Episode> {
         val episodes = mutableListOf<Episode>()
         
         fun recurse(node: Any?, depth: Int = 0) {
             if (node == null || depth > 32) return
             if (node is Map<*, *>) {
-                val rendererKeys = listOf("playlistVideoRenderer", "playlistPanelVideoRenderer")
-                for (key in rendererKeys) {
-                    if (node.containsKey(key)) {
-                        val renderer = node[key]
-                        val videoId = deepSearchString(renderer, listOf("videoId"))
-                        if (videoId.isNotBlank() && seenIds.add(videoId)) {
-                            val title = deepSearchText(renderer, listOf("title"))
-                            val thumb = YoutubeUtils.getBestThumbnail(YoutubeUtils.getMapKeyFromAny(renderer, "thumbnail")) ?: YoutubeUtils.buildThumbnailFromId(videoId)
-                            
-                            val duration = getSolidDuration(renderer)
-                            val channel = getSolidChannel(renderer)
-                            val views = getSolidViews(renderer)
-                            val date = getSolidDate(renderer)
-
-                            val metaParts = mutableListOf<String>()
-                            if (duration.isNotBlank()) metaParts.add(duration)
-                            if (channel.isNotBlank()) metaParts.add(channel)
-                            if (views.isNotBlank()) metaParts.add(views)
-                            if (date.isNotBlank()) metaParts.add(date)
-
-                            println("[YT_DEBUG_PLOT] Playlist: VID=$videoId | Meta=${metaParts.joinToString(" • ")}")
-
-                            episodes.add(newEpisode("$mainUrl/watch?v=$videoId") {
-                                this.name = title
-                                this.episode = episodes.size + 1
-                                this.posterUrl = thumb
-                                this.description = metaParts.joinToString(" • ")
-                            })
-                        }
+                val playlistVideo = node.getMapKey("playlistVideoRenderer")
+                if (playlistVideo != null) {
+                    val videoId = playlistVideo.getString("videoId")
+                    if (!videoId.isNullOrBlank() && seenIds.add(videoId)) {
+                        val title = getText(playlistVideo.getMapKey("title"))
+                        val thumb = YoutubeUtils.getBestThumbnail(playlistVideo.getMapKey("thumbnail")) ?: YoutubeUtils.buildThumbnailFromId(videoId)
+                        episodes.add(newEpisode("$mainUrl/watch?v=$videoId") {
+                            this.name = title
+                            this.episode = episodes.size + 1
+                            this.posterUrl = thumb
+                            this.description = getEpisodeMetaString(playlistVideo)
+                        })
                     }
                 }
+                
+                val playlistPanelVideo = node.getMapKey("playlistPanelVideoRenderer")
+                if (playlistPanelVideo != null) {
+                    val videoId = playlistPanelVideo.getString("videoId")
+                    if (!videoId.isNullOrBlank() && seenIds.add(videoId)) {
+                        val title = getText(playlistPanelVideo.getMapKey("title"))
+                        val thumb = YoutubeUtils.getBestThumbnail(playlistPanelVideo.getMapKey("thumbnail")) ?: YoutubeUtils.buildThumbnailFromId(videoId)
+                        episodes.add(newEpisode("$mainUrl/watch?v=$videoId") {
+                            this.name = title
+                            this.episode = episodes.size + 1
+                            this.posterUrl = thumb
+                            this.description = getEpisodeMetaString(playlistPanelVideo)
+                        })
+                    }
+                }
+                
                 for (value in node.values) {
-                    recurse(value, depth + 1)
+                    if (value is Map<*, *> || value is List<*>) {
+                        recurse(value, depth + 1)
+                    }
                 }
             } else if (node is List<*>) {
                 for (item in node) {
@@ -1686,63 +1750,82 @@ class YoutubeProvider(
                     return null
                 }
 
-                // -------------------------------------------------------------------------
-                // 채널 비디오 목록 에피소드 추출 부분에 Deep Search 일괄 적용
-                // -------------------------------------------------------------------------
                 fun extractVideosFromItems(items: List<*>, collectTo: MutableList<Episode>) {
-                    val targetRendererKeys = listOf("videoRenderer", "gridVideoRenderer", "compactVideoRenderer", "shortsVideoRenderer", "reelItemRenderer", "shortsLockupViewModel", "videoViewModel", "lockupViewModel")
-
-                    fun recurseFind(obj: Any?, depth: Int = 0) {
+                    
+                    fun findAllRenderers(obj: Any?, targetKeys: List<String>, results: MutableList<Map<*,*>>, depth: Int = 0) {
                         if (obj == null || depth > 32) return
-                        if (obj is Map<*, *>) {
-                            if (obj.containsKey("continuationItemRenderer")) return
-                            
-                            var matched = false
-                            for (key in targetRendererKeys) {
-                                if (obj.containsKey(key)) {
-                                    matched = true
-                                    val renderer = obj[key]
-                                    val vidId = deepSearchString(renderer, listOf("videoId", "contentId"))
-                                    if (vidId.isNotBlank()) {
-                                        var vidTitle = deepSearchText(renderer, listOf("title", "headline"))
-                                        if (vidTitle.isBlank()) vidTitle = "Video"
-                                        val thumb = YoutubeUtils.getBestThumbnail(YoutubeUtils.getMapKeyFromAny(renderer, "thumbnail")) ?: YoutubeUtils.buildThumbnailFromId(vidId)
-
-                                        val duration = getSolidDuration(renderer)
-                                        val channel = getSolidChannel(renderer)
-                                        val views = getSolidViews(renderer)
-                                        val date = getSolidDate(renderer)
-
-                                        val metaParts = mutableListOf<String>()
-                                        if (duration.isNotBlank()) metaParts.add(duration)
-                                        if (channel.isNotBlank()) metaParts.add(channel)
-                                        if (views.isNotBlank()) metaParts.add(views)
-                                        if (date.isNotBlank()) metaParts.add(date)
-
-                                        println("[YT_DEBUG_PLOT] Channel Video: VID=$vidId | Meta=${metaParts.joinToString(" • ")}")
-
-                                        collectTo.add(newEpisode("$mainUrl/watch?v=$vidId") {
-                                            this.name = vidTitle
-                                            this.posterUrl = thumb
-                                            this.description = metaParts.joinToString(" • ")
-                                        })
+                        when (obj) {
+                            is Map<*, *> -> {
+                                for (key in targetKeys) {
+                                    if (obj.containsKey(key)) {
+                                        val match = obj[key] as? Map<*,*>
+                                        if (match != null) results.add(match)
                                     }
                                 }
-                            }
-                            if (!matched) {
                                 for (value in obj.values) {
-                                    recurseFind(value, depth + 1)
+                                    findAllRenderers(value, targetKeys, results, depth + 1)
                                 }
                             }
-                        } else if (obj is List<*>) {
-                            for (item in obj) {
-                                recurseFind(item, depth + 1)
+                            is List<*> -> {
+                                for (item in obj) {
+                                    findAllRenderers(item, targetKeys, results, depth + 1)
+                                }
                             }
                         }
                     }
 
-                    for (item in items) {
-                        recurseFind(item)
+                    val targetRendererKeys = listOf("videoRenderer", "gridVideoRenderer", "compactVideoRenderer", "shortsVideoRenderer", "reelItemRenderer", "shortsLockupViewModel", "videoViewModel", "lockupViewModel")
+
+                    items.forEachIndexed { index, item ->
+                        try {
+                            val map = item as? Map<*, *>
+                            if (map == null) {
+                                return@forEachIndexed
+                            }
+
+                            if (map.containsKey("continuationItemRenderer")) {
+                                return@forEachIndexed
+                            }
+
+                            val foundRenderers = mutableListOf<Map<*,*>>()
+                            findAllRenderers(map, targetRendererKeys, foundRenderers)
+
+                            if (foundRenderers.isEmpty()) {
+                                return@forEachIndexed
+                            }
+
+                            for (renderer in foundRenderers) {
+                                var vidId = renderer["videoId"] as? String
+                                
+                                if (vidId.isNullOrBlank() && renderer.containsKey("contentId")) {
+                                    vidId = renderer["contentId"] as? String
+                                }
+                                if (vidId.isNullOrBlank()) {
+                                    vidId = safeGet(renderer, "onTap", "innertubeCommand", "reelWatchEndpoint", "videoId") as? String
+                                }
+
+                                if (!vidId.isNullOrBlank()) {
+                                    var vidTitle = getText(renderer["title"])
+                                    if (vidTitle.isBlank()) vidTitle = getText(renderer["headline"])
+                                    if (vidTitle.isBlank()) vidTitle = getText(renderer["shortBylineText"])
+                                    if (vidTitle.isBlank()) vidTitle = getText(safeGet(renderer, "metadata", "lockupMetadataViewModel", "title"))
+                                    if (vidTitle.isBlank()) vidTitle = "Video"
+
+                                    val thumb = YoutubeUtils.getBestThumbnail(renderer["thumbnail"]) 
+                                        ?: YoutubeUtils.getBestThumbnail(safeGet(renderer, "contentImage", "image", "sources")) 
+                                        ?: YoutubeUtils.buildThumbnailFromId(vidId)
+
+                                    collectTo.add(newEpisode("$mainUrl/watch?v=$vidId") {
+                                        this.name = vidTitle
+                                        this.posterUrl = thumb
+                                        this.description = getEpisodeMetaString(renderer)
+                                    })
+                                    
+                                    break 
+                                }
+                            }
+                        } catch (e: Exception) {
+                        }
                     }
                 }
 
@@ -1866,7 +1949,7 @@ class YoutubeProvider(
 
                 val isMix = url.contains("list=RD") || url.contains("list=MM") || url.contains("list=UL")
                 if (isMix) {
-                    val firstChannel = episodes.firstOrNull()?.description
+                    val firstChannel = episodes.firstOrNull()?.description?.split("•")?.firstOrNull()?.trim()
                     if (!firstChannel.isNullOrBlank()) {
                         title = if (lang == "ko") {
                             "믹스 - $firstChannel"
@@ -1981,7 +2064,6 @@ class YoutubeProvider(
             val secondaryResults = safeGet(data, "contents", "twoColumnWatchNextResults", "secondaryResults", "secondaryResults", "results")
             if (secondaryResults != null) {
                 processRecursive(secondaryResults, recommendations, seenRecIds, false)
-                // 하단 추천목록의 Duration, Channel, Views, Date 모두를 딥서치로 완벽하게 추출
                 extractRecommendationMeta(secondaryResults, recMetaMap)
             }
 
@@ -2010,49 +2092,36 @@ class YoutubeProvider(
 
         val episodes = mutableListOf<Episode>()
         
-        // --- 1. 진입(메인) 영상 플롯 (Deep Search & 정규식 이중 체크) ---
         var mainDuration = ""
         val lengthMatch = Regex(""""lengthSeconds"\s*:\s*"(\d+)"""").find(html)
         if (lengthMatch != null) {
             try {
                 val s = lengthMatch.groupValues[1].toLong()
-                val hrs = s / 3600
-                val mins = (s % 3600) / 60
-                val secs = s % 60
-                mainDuration = if (hrs > 0) String.format("%d:%02d:%02d", hrs, mins, secs) else String.format("%d:%02d", mins, secs)
+                mainDuration = if (s >= 3600) String.format("%d:%02d:%02d", s/3600, (s%3600)/60, s%60) else String.format("%d:%02d", s/60, s%60)
             } catch (e: Exception) {}
         }
-
+        
         var mainViews = ""
         val viewMatch = Regex(""""viewCount"\s*:\s*"(\d+)"""").find(html)
-        if (viewMatch != null) {
-            mainViews = formatViews(viewMatch.groupValues[1])
-        }
-
+        if (viewMatch != null) mainViews = formatViews(viewMatch.groupValues[1])
+        
         var mainDate = ""
         val dateMatch = Regex(""""publishDate"\s*:\s*"([^"]+)"""").find(html)
-        if (dateMatch != null) {
-            mainDate = dateMatch.groupValues[1] 
-        }
+        if (dateMatch != null) mainDate = dateMatch.groupValues[1] 
 
         val resultsContents = safeGet(data, "contents", "twoColumnWatchNextResults", "results", "results", "contents") as? List<*>
         resultsContents?.forEach { item ->
             val m = item as? Map<*, *>
-            val primary = m?.get("videoPrimaryInfoRenderer") as? Map<*, *>
+            val primary = m?.getMapKey("videoPrimaryInfoRenderer")
             if (primary != null) {
-                val vCount = getText(YoutubeUtils.getMapKeyFromAny(primary, "videoViewCountRenderer")?.get("viewCount") ?: primary["viewCount"])
+                val vCount = getText(primary.getMapKey("videoViewCountRenderer")?.getMapKey("viewCount") ?: primary.getMapKey("viewCount"))
                 if (vCount.isNotBlank()) mainViews = formatViews(vCount)
-                val dText = getText(primary["dateText"])
+                val dText = getText(primary.getMapKey("dateText"))
                 if (dText.isNotBlank()) mainDate = dText
             }
         }
 
-        val mainDescParts = mutableListOf<String>()
-        if (mainDuration.isNotBlank()) mainDescParts.add(mainDuration)
-        if (channelName.isNotBlank()) mainDescParts.add(channelName)
-        if (mainViews.isNotBlank() && mainViews != "N/A") mainDescParts.add(mainViews)
-        if (mainDate.isNotBlank()) mainDescParts.add(mainDate)
-        
+        val mainDescParts = listOf(mainDuration, channelName, mainViews, mainDate).filter { it.isNotBlank() && it != "N/A" }
         val mainDescStr = mainDescParts.joinToString(" • ")
 
         episodes.add(newEpisode(url) {
@@ -2062,14 +2131,13 @@ class YoutubeProvider(
             this.description = mainDescStr.ifBlank { channelName.ifBlank { "재생 중" } }
         })
 
-        // --- 2. 하단/우측 추천영상 플롯 적용 ---
         var epCount = 2
         filteredRecs.forEach { rec ->
             if (rec.url.contains("watch?v=") || rec.url.contains("/shorts/")) {
                 val recVidId = YoutubeUtils.extractYoutubeId(rec.url)
                 val extraMeta = if (recVidId != null) recMetaMap[recVidId] else ""
                 
-                var cleanName = rec.name.replaceFirst(Regex("^\\{.*?\\}\\s*"), "")
+                val cleanName = rec.name.replaceFirst(Regex("^\\{.*?\\}\\s*"), "")
 
                 episodes.add(newEpisode(rec.url) {
                     this.name = cleanName
