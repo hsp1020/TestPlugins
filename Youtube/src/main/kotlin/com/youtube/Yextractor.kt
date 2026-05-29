@@ -55,7 +55,10 @@ open class YoutubeExtractor : ExtractorApi() {
         private val streamUrlCache = ConcurrentHashMap<String, String>()
 
         private val serverExecutor = ThreadPoolExecutor(
-            8, 32, 30L, TimeUnit.SECONDS,
+            8, 
+            32, 
+            30L, 
+            TimeUnit.SECONDS,
             LinkedBlockingQueue(1024),
             ThreadFactory { r -> Thread(r, "YT-DASH-Server-Worker") },
             ThreadPoolExecutor.CallerRunsPolicy()
@@ -71,7 +74,10 @@ open class YoutubeExtractor : ExtractorApi() {
 
         init {
             YoutubeUtils.initNewPipeDownloader()
-            YoutubeStreamExtractor.setFetchIosClient(true)
+            // [수정됨] 듀얼 토큰 프로바이더 등록
+            org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor.setPoTokenProvider(YoutubePoTokenProvider)
+            // [수정됨] WEB 클라이언트 기반 통신을 강제화하여 토큰 검증 시스템 가동
+            YoutubeStreamExtractor.setFetchIosClient(false)
         }
     }
 
@@ -125,12 +131,14 @@ open class YoutubeExtractor : ExtractorApi() {
                     try {
                         val streamUrl = vs.getUrl() ?: return@mapNotNull null
                         if (!seenUrls.add(streamUrl)) return@mapNotNull null
+
                         val label = buildVideoLabelNumber(vs)
                         val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
                         var mime = vs.format?.mimeType
                         if (mime.isNullOrEmpty()) mime = getMimeTypeFromUrl(streamUrl, false)
                         val initR = if (vs.initStart != null && vs.initEnd != null) "${vs.initStart}-${vs.initEnd}" else null
                         val indexR = if (vs.indexStart != null && vs.indexEnd != null) "${vs.indexStart}-${vs.indexEnd}" else null
+
                         StreamInfo(streamUrl, mime, height, label, initR, indexR)
                     } catch (e: Exception) { null }
                 }.distinctBy { it.height }
@@ -145,6 +153,7 @@ open class YoutubeExtractor : ExtractorApi() {
                         val indexR = if (asr.indexStart != null && asr.indexEnd != null) "${asr.indexStart}-${asr.indexEnd}" else null
                         var rawLang = asr.audioTrackId ?: "Default"
                         if (rawLang.contains(".")) rawLang = rawLang.substringBefore(".")
+
                         AudioInfo(aUrl, mime, bitrate, initR, indexR, rawLang.uppercase())
                     } catch (e: Exception) { null }
                 }.distinctBy { it.url }
@@ -175,13 +184,16 @@ open class YoutubeExtractor : ExtractorApi() {
                                 if (localLink != null) {
                                     val finalName = "${video.label} ($lang) ${video.label}"
                                     val sourceName = "${this.name} ($lang)"
+
                                     builtLinks.add(
                                         newExtractorLink(
                                             sourceName, finalName, localLink, type = ExtractorLinkType.DASH
                                         ) {
                                             this.referer = mainUrl
                                             this.quality = video.height
-                                            this.headers = mapOf("User-Agent" to YoutubeUtils.IOS_USER_AGENT)
+                                            this.headers = mapOf(
+                                                "User-Agent" to YoutubeUtils.CHROME_USER_AGENT
+                                            )
                                         }
                                     )
                                 }
@@ -195,8 +207,8 @@ open class YoutubeExtractor : ExtractorApi() {
 
                 ytVideos[videoId] = builtLinks.toList()
 
-            } catch (e: Exception) {
-                logError(e)
+            } catch (e: Exception) { 
+                logError(e) 
             }
         }
 
@@ -226,14 +238,14 @@ open class YoutubeExtractor : ExtractorApi() {
                 activeServer = newServer
                 serverPort = newServer.localPort
                 println("[YT_PROXY_DEBUG] 가상 프록시 서버 포트 바인딩 완료: $serverPort")
-
+                
                 thread(name = "YT-DASH-Server-Acceptor") {
                     try {
                         while (true) {
                             val active = activeServer ?: break
                             if (active.isClosed) break
                             val client = active.accept()
-                            client.soTimeout = 15000
+                            client.soTimeout = 15000 
                             serverExecutor.execute { handleClient(client) }
                         }
                     } catch (e: Exception) {
@@ -264,7 +276,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 if (parts.size < 2) return
 
                 val fullPath = parts[1]
-
+                
                 val clientHeaders = mutableMapOf<String, String>()
                 while (true) {
                     val line = reader.readLine()
@@ -290,7 +302,8 @@ open class YoutubeExtractor : ExtractorApi() {
                         outWriter.print("HTTP/1.1 404 Not Found\r\n\r\n")
                         outWriter.flush()
                     }
-                } else if (cleanPath.endsWith(".mpd", ignoreCase = true)) {
+                } 
+                else if (cleanPath.endsWith(".mpd", ignoreCase = true)) {
                     val path = cleanPath.substringBeforeLast(".mpd").removePrefix("/")
                     val content = manifestMap[path]
                     if (content != null) {
@@ -314,52 +327,39 @@ open class YoutubeExtractor : ExtractorApi() {
 
     private fun proxyChunkToYouTube(socket: Socket, targetUrl: String, clientHeaders: Map<String, String>) {
         try {
-            var finalTargetUrl = targetUrl
-
+            val finalTargetUrl = targetUrl
+            
             val nParamMatch = Regex("[?&]n=([^&]+)").find(finalTargetUrl)
             val nParam = nParamMatch?.groupValues?.get(1) ?: "없음"
-
-            val poToken = YoutubePoTokenProvider.poToken
-            val visitorData = YoutubePoTokenProvider.visitorData
-
+            val urlHasPot = finalTargetUrl.contains("pot=") 
+            
             println("\n[YT_PROXY_DEBUG] ================= CHUNK REQUEST START =================")
-            println("[YT_PROXY_DEBUG] 1. n-파라미터 상태: $nParam (없으면 1분 차단의 핵심 원인!)")
-            println("[YT_PROXY_DEBUG] 2. po_token 상태: ${if (poToken.isBlank()) "❌ EMPTY (추출 실패/누락)" else "✅ [${poToken.take(10)}...]"}")
-            println("[YT_PROXY_DEBUG] 3. visitorData 상태: ${if (visitorData.isBlank()) "❌ EMPTY" else "✅ [$visitorData]"}")
-
-            if (finalTargetUrl.contains("googlevideo.com") && !finalTargetUrl.contains("pot=") && poToken.isNotBlank()) {
-                finalTargetUrl += "&pot=$poToken"
-                println("[YT_PROXY_DEBUG] 4. URL에 pot 파라미터 정상 주입 완료!")
-            } else if (finalTargetUrl.contains("pot=")) {
-                println("[YT_PROXY_DEBUG] 4. URL에 이미 pot 파라미터가 포함되어 있습니다.")
-            } else {
-                println("[YT_PROXY_DEBUG] 4. ❌ 경고: po_token을 주입할 수 없습니다! (1분 뒤 403 차단 예상됨)")
-            }
+            println("[YT_PROXY_DEBUG] 1. n-파라미터 상태: $nParam")
+            println("[YT_PROXY_DEBUG] 2. URL 자체 pot 존재 여부: ${if(urlHasPot) "✅ 존재함 (NewPipe 정상주입 완료)" else "❌ 미존재"}")
 
             val requestBuilder = okhttp3.Request.Builder()
                 .url(finalTargetUrl)
-                .header("User-Agent", YoutubeUtils.IOS_USER_AGENT)
+                // [수정됨] 청크 릴레이 통신 시에도 반드시 PC 크롬 헤더를 사용해야 합니다.
+                .header("User-Agent", YoutubeUtils.CHROME_USER_AGENT)
                 .header("Accept", "*/*")
                 .header("Connection", "keep-alive")
 
-            clientHeaders["range"]?.let {
-                requestBuilder.header("Range", it)
-                println("[YT_PROXY_DEBUG] 5. 요청 Range: $it")
+            clientHeaders["range"]?.let { 
+                requestBuilder.header("Range", it) 
+                println("[YT_PROXY_DEBUG] 3. 요청 Range: $it")
             }
 
             val request = requestBuilder.build()
             val response = proxyHttpClient.newCall(request).execute()
-
-            println("[YT_PROXY_DEBUG] 6. 유튜브 CDN 응답 코드: ${response.code}")
+            
+            println("[YT_PROXY_DEBUG] 4. 유튜브 CDN 응답 코드: ${response.code}")
 
             if (response.code == 403 || response.code == 400) {
                 val errorBody = response.body?.string() ?: "Empty Body"
-                println("[YT_PROXY_DEBUG] 🚨 403 FORBIDDEN 발생! 🚨")
+                println("[YT_PROXY_DEBUG] 🚨 ${response.code} 에러 발생! 🚨")
                 println("[YT_PROXY_DEBUG] 에러 응답 본문:\n$errorBody")
                 println("[YT_PROXY_DEBUG] =======================================================\n")
-
-                streamUrlCache.entries.removeIf { it.value == targetUrl }
-
+                
                 val output = socket.getOutputStream()
                 val rawOutWriter = java.io.PrintWriter(output, false)
                 rawOutWriter.print("HTTP/1.1 ${response.code} ${response.message}\r\n\r\n")
@@ -399,7 +399,7 @@ open class YoutubeExtractor : ExtractorApi() {
         val videoChunkId = UUID.randomUUID().toString()
         streamUrlCache[videoChunkId] = video.url
         val proxyVideoUrl = "http://127.0.0.1:$serverPort/chunk?id=$videoChunkId"
-
+        
         val cleanVideoUrl = escapeXml(proxyVideoUrl)
         val durationString = "PT${durationSec}S"
 
@@ -439,7 +439,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
             sb.append("""
                 <AdaptationSet mimeType="$aMime" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
-                  <Representation id="$audioId" bandwidth="${if (audio.bitrate > 0) audio.bitrate else 128000}" codecs="$aCodecs">
+                  <Representation id="$audioId" bandwidth="${if(audio.bitrate>0) audio.bitrate else 128000}" codecs="$aCodecs">
                     <BaseURL>$cleanAudioUrl</BaseURL>
                     $aSegmentBase
                   </Representation>
