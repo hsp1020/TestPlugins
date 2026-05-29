@@ -111,6 +111,7 @@ subprojects {
         implementation("com.github.vidstige:jadb:v1.2.1")
         implementation("org.bouncycastle:bcpkix-jdk15on:1.70")
         implementation("com.github.teamnewpipe:NewPipeExtractor:v0.26.2") // NewPipe Extractor
+        implementation("com.github.InfinityLoop1308:PipePipeExtractor:v5.1.1")
     }
 
     // v1.4 우회 로직: 컴파일이 정상적으로 뚫린 후 Cloudstream make 태스크에서 발생하는 AGP 8.x 종특(res.apk 누락) 에러 방지
