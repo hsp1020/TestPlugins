@@ -69,7 +69,7 @@ open class YoutubeExtractor : ExtractorApi() {
             .build()
             
         init {
-            println("[YT_DEBUG_INIT] 독자 API 추출기 초기화 완료 (ANDROID_VR + DASH 프록시 전용)")
+            println("[YT_DEBUG_INIT] 독자 API 추출기 초기화 완료 (재생시간 버그 패치완료)")
         }
     }
 
@@ -77,7 +77,6 @@ open class YoutubeExtractor : ExtractorApi() {
         return "$mainUrl/watch?v=$id"
     }
 
-    // [수정] 코덱(codec) 정보를 명시적으로 분리하여 저장하도록 필드 추가
     data class StreamInfo(
         val url: String,
         val mimeType: String,
@@ -98,7 +97,8 @@ open class YoutubeExtractor : ExtractorApi() {
         val language: String
     )
 
-    private suspend fun fetchStreamingData(videoId: String): JSONObject? {
+    // [핵심 수정] streamingData와 함께 실제 영상 길이(초)를 반환하도록 변경
+    private suspend fun fetchStreamingData(videoId: String): Pair<JSONObject?, Long> {
         val watchUrl = "https://www.youtube.com/watch?v=$videoId"
         
         val html = app.get(watchUrl, headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)).text
@@ -143,11 +143,15 @@ open class YoutubeExtractor : ExtractorApi() {
             val vrRes = app.post(apiUrl, json = vrPayload, headers = vrHeaders).text
             val vrJson = JSONObject(vrRes)
             val status = vrJson.optJSONObject("playabilityStatus")?.optString("status")
-            println("[YT_DEBUG_EXTRACTOR] ANDROID_VR API 응답 상태: $status")
+            
+            // 실제 영상 길이 추출 (없으면 기본값 1시간)
+            val lengthSeconds = vrJson.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
+            
+            println("[YT_DEBUG_EXTRACTOR] ANDROID_VR API 응답 상태: $status, 영상 길이: ${lengthSeconds}초")
             
             if (status == "OK" || vrJson.has("streamingData")) {
                 println("[YT_DEBUG_EXTRACTOR] ✅ ANDROID_VR에서 streamingData 확보 성공!")
-                return vrJson.optJSONObject("streamingData")
+                return Pair(vrJson.optJSONObject("streamingData"), lengthSeconds)
             } else if (status == "UNPLAYABLE" || status == "LOGIN_REQUIRED") {
                 println("[YT_DEBUG_EXTRACTOR] VR 차단됨. TV_EMBEDDED로 연령 제한 우회 시도...")
                 val webApiKey = Regex(""""INNERTUBE_API_KEY":"([^"]+)"""").find(html)?.groupValues?.get(1)
@@ -174,15 +178,16 @@ open class YoutubeExtractor : ExtractorApi() {
                     )
                     val tvRes = app.post(tvApiUrl, json = tvPayload).text
                     val tvJson = JSONObject(tvRes)
+                    val tvLengthSeconds = tvJson.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
                     println("[YT_DEBUG_EXTRACTOR] TV API 응답 상태: ${tvJson.optJSONObject("playabilityStatus")?.optString("status")}")
-                    return tvJson.optJSONObject("streamingData")
+                    return Pair(tvJson.optJSONObject("streamingData"), tvLengthSeconds)
                 }
             }
         } catch (e: Exception) { 
             println("[YT_DEBUG_EXTRACTOR] API 요청 예외: ${e.message}") 
         }
 
-        return null
+        return Pair(null, 3600L)
     }
 
     override suspend fun getUrl(
@@ -198,7 +203,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
         withContext(Dispatchers.IO) {
             try {
-                val streamingData = fetchStreamingData(videoId)
+                val (streamingData, durationSeconds) = fetchStreamingData(videoId)
 
                 if (streamingData == null) {
                     println("[YT_DEBUG_EXTRACTOR] 🚨 모든 우회 실패! streamingData 없음.")
@@ -223,7 +228,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         continue
                     }
 
-                    // [핵심 수정] 원본 mimeType 문자열을 파싱하여 순수 mimeType과 코덱을 분리
                     val rawMimeType = format.optString("mimeType", "")
                     var cleanMimeType = rawMimeType
                     var codec = ""
@@ -233,7 +237,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         cleanMimeType = parts[0].trim()
                         val codecPart = parts.find { it.trim().startsWith("codecs=") }
                         if (codecPart != null) {
-                            // codecs="avc1.640028" 형태에서 따옴표와 codecs= 를 제거
                             codec = codecPart.substringAfter("=").replace("\"", "").trim()
                         }
                     }
@@ -292,7 +295,8 @@ open class YoutubeExtractor : ExtractorApi() {
                             }
 
                             if (bestAudio != null) {
-                                val dashXml = buildDashManifestXml(video, listOf(bestAudio), 3600L)
+                                // [수정] 하드코딩된 3600L 대신 실제 영상 길이(durationSeconds)를 전달
+                                val dashXml = buildDashManifestXml(video, listOf(bestAudio), durationSeconds)
                                 val localLink = registerManifestAndGetUrl(dashXml)
 
                                 if (localLink != null) {
@@ -486,7 +490,6 @@ open class YoutubeExtractor : ExtractorApi() {
             """<SegmentBase indexRange="${video.indexRange}"><Initialization range="${video.initRange}" /></SegmentBase>"""
         } else ""
 
-        // [수정] 따옴표가 중첩되지 않도록 파싱된 순수 mimeType과 codec을 분리해서 삽입
         sb.append("""
             <AdaptationSet mimeType="${video.mimeType}" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
               <Representation id="video" bandwidth="4000000" width="0" height="${video.height}" codecs="${video.codec}">
