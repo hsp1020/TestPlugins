@@ -84,6 +84,7 @@ object YoutubeUtils {
         return Pair(cookieBuilder.toString(), sapisidVal)
     }
 
+    // 일반영상 검색 결과 및 계속 시청 전용 하단 크롭 정렬 추가 프록시 필터 (a=bottom)
     fun getProxiedPoster(poster: String?): String? {
         if (poster.isNullOrBlank()) return null
         return try {
@@ -748,7 +749,8 @@ class YoutubeProvider(
                     "$mainUrl/watch?v=$videoId",
                     TvType.Movie
                 ) {
-                    this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
+                    // 검색 결과 화면(isSearchContext = true)인 경우에만 wsrv.nl 프록시(&a=bottom 포함)를 적용하고, 홈 화면은 원본 이미지 적용
+                    this.posterUrl = if (isSearchContext) YoutubeUtils.getProxiedPoster(poster) else poster
                 }
             }
             return null
@@ -859,7 +861,8 @@ class YoutubeProvider(
                         "$mainUrl/$targetPath",
                         TvType.TvSeries
                     ) {
-                        this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
+                        // 검색 결과 화면(isSearchContext = true)인 경우에만 wsrv.nl 프록시(&a=bottom 포함)를 적용하고, 홈 화면은 원본 이미지 적용
+                        this.posterUrl = if (isSearchContext) YoutubeUtils.getProxiedPoster(poster) else poster
                     }
                 }
             }
@@ -934,7 +937,8 @@ class YoutubeProvider(
                         "$mainUrl/watch?v=$videoId",
                         TvType.Movie
                     ) {
-                        this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
+                        // 검색 결과 화면(isSearchContext = true)인 경우에만 wsrv.nl 프록시(&a=bottom 포함)를 적용하고, 홈 화면은 원본 이미지 적용
+                        this.posterUrl = if (isSearchContext) YoutubeUtils.getProxiedPoster(poster) else poster
                     }
                 }
             }
@@ -953,7 +957,8 @@ class YoutubeProvider(
                     "$mainUrl/channel/$id",
                     TvType.Live
                 ) {
-                    this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
+                    // 검색 결과 화면(isSearchContext = true)인 경우에만 wsrv.nl 프록시(&a=bottom 포함)를 적용하고, 홈 화면은 원본 이미지 적용
+                    this.posterUrl = if (isSearchContext) YoutubeUtils.getProxiedPoster(poster) else poster
                 }
             }
         }
