@@ -87,7 +87,7 @@ object YoutubeUtils {
     fun getProxiedPoster(poster: String?): String? {
         if (poster.isNullOrBlank()) return null
         return try {
-            "https://wsrv.nl/?url=${URLEncoder.encode(poster, "UTF-8")}&w=300&h=450&fit=contain&cbg=black"
+            "https://wsrv.nl/?url=${URLEncoder.encode(poster, "UTF-8")}&w=300&h=450&fit=contain&cbg=black&a=bottom"
         } catch (e: Exception) {
             poster
         }
