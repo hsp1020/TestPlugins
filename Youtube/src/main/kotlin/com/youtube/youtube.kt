@@ -2281,7 +2281,6 @@ class YoutubeProvider(
         val videoId = YoutubeUtils.extractYoutubeId(data) ?: data
         val fullUrl = "https://www.youtube.com/watch?v=$videoId"
 
-        var isLive = false
         var playerResponseText = ""
         try {
             val apiUrl = "$mainUrl/youtubei/v1/player"
@@ -2298,30 +2297,20 @@ class YoutubeProvider(
             )
             val headers = mapOf("Referer" to "$mainUrl/watch?v=$videoId")
             playerResponseText = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).text
-            if (playerResponseText.isNotBlank()) {
-                val root = JSONObject(playerResponseText)
-                val videoDetails = root.optJSONObject("videoDetails")
-                if (videoDetails != null && videoDetails.optBoolean("isLive", false)) {
-                    isLive = true
-                }
-            }
         } catch (e: Exception) {
             logError(e)
         }
 
-        if (isLive) {
-            loadExtractor(fullUrl, subtitleCallback, callback)
-        } else {
-            if (playerResponseText.isNotBlank()) {
-                try {
-                    val playerResponse = parseJson<PlayerResponse>(playerResponseText)
-                    triggerPlaybackTracking(playerResponse.playbackTracking, videoId)
-                } catch (e: Exception) {
-                }
+        if (playerResponseText.isNotBlank()) {
+            try {
+                val playerResponse = parseJson<PlayerResponse>(playerResponseText)
+                triggerPlaybackTracking(playerResponse.playbackTracking, videoId)
+            } catch (e: Exception) {
             }
-
-            com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback, callback)
         }
+
+        // VOD 및 Live 구분 없이 당사가 최적화한 고성능 YoutubeExtractor로 일괄 위임 처리
+        com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback, callback)
 
         return true
     }    
