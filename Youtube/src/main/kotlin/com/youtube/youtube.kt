@@ -137,7 +137,6 @@ object YoutubeUtils {
     }
 
     fun cleanMixTitle(title: String): String {
-        // 불필요한 연쇄 Regex 런타임 낭비를 방지하는 조기 Exit 가드
         if (!title.contains("mix", ignoreCase = true) && !title.contains("믹스")) return title
         return MIX_TITLE_REPLACE_EN.replace(MIX_TITLE_REPLACE_KO.replace(title, ""), "").trim()
     }
@@ -159,7 +158,6 @@ object YoutubeUtils {
         return current
     }
 
-    // O(N) 순회를 차단하고 Direct Lookup O(1)를 우선 배치한 맵 캐스팅 유틸
     fun getMapKeyFromAny(obj: Any?, key: String): Map<*, *>? {
         val map = obj as? Map<*, *> ?: return null
         val direct = map[key]
@@ -255,11 +253,11 @@ class YoutubeProvider(
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Live)
 
     companion object {
-        // 멀티스레드 CME 회피를 위한 동기화 리스트 래핑 구성
+        // 동시성 크래시를 전격 방지하기 위한 이중 가드형 스레드 세이프 전역 리스트
         private val homeShorts = Collections.synchronizedList(mutableListOf<Episode>())
         private val searchShorts = Collections.synchronizedList(mutableListOf<Episode>())
 
-        // 메모리 폭증을 제어하기 위한 정적 바운디드 LRU 캐시 맵 정의
+        // 메모리 파열 및 자원 무제한 점유를 전면 억제하는 고성능 LRU 캐시 세그먼트
         private val continuationTokenCache: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(128, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
@@ -276,7 +274,14 @@ class YoutubeProvider(
             }
         )
 
-        // 상 정형적인 pre-compiled 정규식 패턴 이관
+        // 멀티코어 메모리 가시성 붕괴 및 병렬 로딩 시 API key 누수를 차단하기 위해 Companion 범위로 격상된 Volatile 변수
+        @Volatile
+        private var savedVisitorData: String? = null
+        @Volatile
+        private var savedApiKey: String? = null
+        @Volatile
+        private var savedClientVersion: String? = null
+
         private val VIEW_REPLACE_REGEX = Regex("조회수|views|مشاهدة|시청 중|시청중|watching|명|시청자")
         private val VIEW_FORMAT_REGEX = Regex(".*[천만억KMBkmb].*")
         private val METADATA_VIEW_REGEX = Regex(".*(\\d+[KMBkmb]|views|조회수|회|시청|watching|مشاهدة|명|시청자|مشاهد).*")
@@ -292,7 +297,6 @@ class YoutubeProvider(
         private val VIEW_COUNT_REGEX = Regex(""""viewCount"\s*:\s*"?(\d+)"""")
         private val PUBLISH_DATE_REGEX = Regex(""""publishDate"\s*:\s*"?([^"]+)"""")
 
-        // 재귀 탐색 시 가비지 누적을 줄이기 위한 고정 참조 상수 리스트
         private val KEYS_TO_CHECK = listOf(
             "contents", "items", "continuationItems", "onResponseReceivedActions",
             "onResponseReceivedEndpoints", "appendContinuationItemsAction", "onResponseReceivedCommands",
@@ -306,7 +310,6 @@ class YoutubeProvider(
             "videoViewModel", "lockupViewModel"
         )
 
-        // 원자성과 락 최소 범위가 보존되는 리스트 추가 헬퍼 (최대 200개 제한)
         private fun addToShortsList(list: MutableList<Episode>, ep: Episode) {
             synchronized(list) {
                 if (list.none { it.data == ep.data }) {
@@ -365,9 +368,6 @@ class YoutubeProvider(
     private val ytInterceptor = YouTubeInterceptor(this)
 
     private var savedContinuationToken: String? = null
-    private var savedVisitorData: String? = null
-    private var savedApiKey: String? = null
-    private var savedClientVersion: String? = null
 
     @Suppress("PropertyName")
     private data class PlayerResponse(
@@ -582,7 +582,6 @@ class YoutubeProvider(
         return ""
     }
 
-    // JVM 람다 인스턴스 재생성을 방지하는 고성능 평가 가이드를 적용했습니다.
     private fun extractPartsFromMetadataRows(rows: List<*>?): List<String> {
         if (rows == null) return emptyList()
         val collected = java.util.ArrayList<String>()
@@ -959,7 +958,6 @@ class YoutubeProvider(
             }
 
             var foundContainer = false
-            // KEYS_TO_CHECK 정적 리스트를 활용한 힙 오버헤드 억제형 고속 순회
             val keysSize = KEYS_TO_CHECK.size
             for (i in 0 until keysSize) {
                 val key = KEYS_TO_CHECK[i]
@@ -1170,9 +1168,6 @@ class YoutubeProvider(
         try {
             if (page == 1) {
                 if (isChip) {
-                    savedApiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
-                    savedVisitorData = savedVisitorData ?: appPrefs?.getString("yt_visitor_data", null)
-                    savedClientVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION)
                     val tokenToUse = requestData.removePrefix("chip_")
 
                     if (!savedApiKey.isNullOrBlank()) {
@@ -1246,11 +1241,12 @@ class YoutubeProvider(
             } else {
                 var tokenToUse = getSavedContinuationToken(requestData)
                 
+                // 복구 루프 내부 연쇄 폭증 제어 블록 (Cascade Load Block) 탑재
                 if (tokenToUse.isNullOrBlank() && page == 2) { 
                     val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
                     val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION) ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
 
-                    if (isChip) {
+                    if (isChip && !apiKey.isNullOrBlank()) {
                         val rawToken = requestData.removePrefix("chip_")
                         val apiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
                         val payload = mapOf(
@@ -1268,20 +1264,39 @@ class YoutubeProvider(
                         val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                         if (response != null) {
                             tokenToUse = findTokenRecursive(response)
-                            saveContinuationToken(requestData, tokenToUse)
-                        }
-                    } else {
-                        val urlToGet = if(requestData == "Home") mainUrl else requestData
-                        val html = app.get(urlToGet, interceptor = ytInterceptor).text
-                        val initialData = extractYtInitialData(html)
-                        if (initialData != null) {
-                            tokenToUse = findTokenRecursive(initialData)
-                            saveContinuationToken(requestData, tokenToUse)
+                            if (!tokenToUse.isNullOrBlank()) {
+                                saveContinuationToken(requestData, tokenToUse)
+                                
+                                // 긴급 복구 직후 즉시 2페이지 데이터를 동일 스레드 하부에서 즉시 실시간 렌더링하도록 징검다리 체인 강제 결속
+                                val innerApiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
+                                val innerPayload = mapOf(
+                                    "context" to mapOf(
+                                        "client" to mapOf(
+                                            "clientName" to "WEB", 
+                                            "clientVersion" to cVersion, 
+                                            "hl" to lang,
+                                            "platform" to "DESKTOP"
+                                        )
+                                    ),
+                                    "continuation" to tokenToUse
+                                )
+                                val innerResponse = app.post(innerApiUrl, json = innerPayload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                                if (innerResponse != null) {
+                                    val actions = innerResponse["onResponseReceivedActions"] 
+                                        ?: innerResponse["onResponseReceivedEndpoints"]
+                                        ?: innerResponse["onResponseReceivedCommands"] 
+                                        ?: innerResponse["continuationContents"] 
+                                        ?: innerResponse
+                                    processRecursive(actions, results, seenIds, playlistMode = false)
+                                    nextContinuation = findTokenRecursive(innerResponse)
+                                }
+                            }
                         }
                     }
                 }
 
-                if (!tokenToUse.isNullOrBlank()) {
+                // 일반 정상 플로우의 페이지네이션 기동
+                if (!tokenToUse.isNullOrBlank() && results.isEmpty()) {
                     val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
                     val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION) ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
                     val apiUrl = if (requestData.contains("/results")) "$mainUrl/youtubei/v1/search?key=$apiKey" else "$mainUrl/youtubei/v1/browse?key=$apiKey"
@@ -1313,7 +1328,9 @@ class YoutubeProvider(
             logError(e) 
         }
 
-        saveContinuationToken(requestData, nextContinuation)
+        if (nextContinuation != null) {
+            saveContinuationToken(requestData, nextContinuation)
+        }
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
     }
 
@@ -1558,7 +1575,6 @@ class YoutubeProvider(
                 if (!d.isNullOrBlank()) metadata.description = d
             }
 
-            // 불필요한 mapped keys 할당 생성을 억제하기 위한 containKey 우선검사
             val hasPlaylistId = obj.containsKey("playlistId")
             val hasTitleInfo = obj.containsKey("titleText") || obj.containsKey("title")
             if (hasPlaylistId && hasTitleInfo) {
@@ -1610,7 +1626,6 @@ class YoutubeProvider(
             val videoId = YoutubeUtils.extractYoutubeId(url) ?: "video"
             val useSearchList = url.contains("&ctx=search")
             val sourceList = if (useSearchList) searchShorts else homeShorts
-            // CME 안정성 락 확보 하의 리스트 클로닝 적용
             val targetEpisodes = synchronized(sourceList) { sourceList.toMutableList() }
             var currentEp = targetEpisodes.find { YoutubeUtils.extractYoutubeId(it.data) == videoId }
 
