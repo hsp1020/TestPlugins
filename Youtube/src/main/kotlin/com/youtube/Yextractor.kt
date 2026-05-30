@@ -41,6 +41,7 @@ open class YoutubeExtractor : ExtractorApi() {
         private var serverPort: Int = 0
         private val serverLock = Any()
 
+        // LRU 기반 가상 프록시 매니페스트 캐시 (최대 1000개 유지)
         private val manifestMap: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(128, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
@@ -49,7 +50,14 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         )
 
-        private val streamUrlCache = ConcurrentHashMap<String, String>()
+        // LRU 기반 스트림 URL 캐시 (메모리 누수 완전 방지, 최대 1000개 제한)
+        private val streamUrlCache: MutableMap<String, String> = Collections.synchronizedMap(
+            object : LinkedHashMap<String, String>(128, 0.75f, true) {
+                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
+                    return size > 1000
+                }
+            }
+        )
 
         private val serverExecutor = ThreadPoolExecutor(
             8, 
@@ -70,7 +78,7 @@ open class YoutubeExtractor : ExtractorApi() {
             .build()
             
         init {
-            println("[YT_DEBUG_INIT] 유튜브 DASH 추출기 초기화 완료 (Android_VR 전용 초경량 패치 적용)")
+            println("[YT_DEBUG_INIT] 유튜브 DASH 추출기 초기화 완료 (Android_VR 전용 초경량 패치 및 LRU 메모리 관리 장착)")
         }
     }
 
@@ -235,8 +243,8 @@ open class YoutubeExtractor : ExtractorApi() {
 
                 val adaptiveFormats = streamingData.optJSONArray("adaptiveFormats") ?: JSONArray()
                 
-                val videoOnlyList = mutableListOf<StreamInfo>()
-                val audioInfoList = mutableListOf<AudioInfo>()
+                val videoOnlyList = ArrayList<StreamInfo>(adaptiveFormats.length())
+                val audioInfoList = ArrayList<AudioInfo>(adaptiveFormats.length())
 
                 for (i in 0 until adaptiveFormats.length()) {
                     val format = adaptiveFormats.getJSONObject(i)
@@ -405,7 +413,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
                 val fullPath = parts[1]
                 
-                val clientHeaders = mutableMapOf<String, String>()
+                val clientHeaders = LinkedHashMap<String, String>()
                 while (true) {
                     val line = reader.readLine()
                     if (line.isNullOrBlank()) break
@@ -491,7 +499,8 @@ open class YoutubeExtractor : ExtractorApi() {
                 rawOutWriter.flush()
 
                 response.body?.byteStream()?.use { input ->
-                    input.copyTo(output)
+                    // 프록시 스트리밍 처리량 강화를 위해 64KB 고속 전송 버퍼 도입
+                    input.copyTo(output, bufferSize = 65536)
                 }
                 output.flush()
             }
