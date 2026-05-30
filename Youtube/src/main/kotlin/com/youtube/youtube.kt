@@ -1358,6 +1358,14 @@ class YoutubeProvider(
         }
 
         saveContinuationToken(requestData, nextContinuation)
+
+        if (requestData.contains("history", ignoreCase = true) || requestData.contains("기록")) {
+            val (shorts, vods) = results.partition { it.url.contains("/shorts/") }
+            results.clear()
+            results.addAll(vods)
+            results.addAll(shorts)
+        }
+        
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
     }
 
