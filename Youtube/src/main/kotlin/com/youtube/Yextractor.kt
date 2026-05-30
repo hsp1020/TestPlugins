@@ -10,7 +10,8 @@ import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.schemaStripRegex
 import com.lagradost.cloudstream3.ar.youtube.YoutubeUtils
-import com.lagradost.cloudstream3.ar.youtube.YoutubePoTokenProvider
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor
 import org.schabi.newpipe.extractor.services.youtube.linkHandler.YoutubeStreamLinkHandlerFactory
@@ -74,7 +75,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
         init {
             YoutubeUtils.initNewPipeDownloader()
-            YoutubeStreamExtractor.setFetchIosClient(true)
+            // [수정됨] PipePipe v5.1.1 은 기본적으로 Android VR 클라이언트를 사용하므로 불필요한 iOS 클라이언트 설정 제거
         }
     }
 
@@ -118,7 +119,11 @@ open class YoutubeExtractor : ExtractorApi() {
             try {
                 val link = YoutubeStreamLinkHandlerFactory.getInstance().fromUrl(cleanedUrl)
                 val s = object : YoutubeStreamExtractor(ServiceList.YouTube, link) {}
-                s.fetchPage()
+                
+                // [수정됨] 라이브러리 내부 파싱/네트워크 작업이 메인 흐름을 방해하지 않도록 IO 코루틴 컨텍스트에서 안전하게 실행
+                withContext(Dispatchers.IO) {
+                    s.fetchPage()
+                }
 
                 val durationSeconds = if (s.length > 0) s.length else 3600L
                 val builtLinks = mutableListOf<ExtractorLink>()
@@ -189,8 +194,8 @@ open class YoutubeExtractor : ExtractorApi() {
                                             this.referer = mainUrl
                                             this.quality = video.height
                                             this.headers = mapOf(
-                                                "User-Agent" to YoutubeUtils.IOS_USER_AGENT
-                                                // Origin과 Referer 제거 (모바일 앱으로 위장하기 위함)
+                                                // [수정됨] 앱 내부 플레이어에서도 Android VR 세션과 일치하도록 헤더 설정
+                                                "User-Agent" to YoutubeUtils.ANDROID_VR_USER_AGENT
                                             )
                                         }
                                     )
@@ -296,7 +301,6 @@ open class YoutubeExtractor : ExtractorApi() {
                     if (targetYoutubeUrl != null) {
                         proxyChunkToYouTube(socket, targetYoutubeUrl, clientHeaders)
                     } else {
-                        println("[YT_PROXY_DEBUG] 404 Not Found - Chunk ID가 메모리에 없습니다: $chunkId")
                         outWriter.print("HTTP/1.1 404 Not Found\r\n\r\n")
                         outWriter.flush()
                     }
@@ -325,51 +329,39 @@ open class YoutubeExtractor : ExtractorApi() {
 
     private fun proxyChunkToYouTube(socket: Socket, targetUrl: String, clientHeaders: Map<String, String>) {
         try {
-            var finalTargetUrl = targetUrl
-            
-            // [초정밀 디버깅 1] n 파라미터 확인
-            val nParamMatch = Regex("[?&]n=([^&]+)").find(finalTargetUrl)
-            val nParam = nParamMatch?.groupValues?.get(1) ?: "없음"
-            
-            // [초정밀 디버깅 2] 토큰 확인
-            val poToken = YoutubePoTokenProvider.poToken
-            val visitorData = YoutubePoTokenProvider.visitorData
+            val finalTargetUrl = targetUrl
             
             println("\n[YT_PROXY_DEBUG] ================= CHUNK REQUEST START =================")
-            println("[YT_PROXY_DEBUG] 1. n-파라미터 상태: $nParam (없으면 1분 차단의 핵심 원인!)")
-            println("[YT_PROXY_DEBUG] 2. po_token 상태: ${if(poToken.isBlank()) "❌ EMPTY (추출 실패/누락)" else "✅ [${poToken.take(10)}...]"}")
-            println("[YT_PROXY_DEBUG] 3. visitorData 상태: ${if(visitorData.isBlank()) "❌ EMPTY" else "✅ [$visitorData]"}")
             
-            // 토큰 주입 로직 (기존에 pot가 없고, 우리가 추출한 토큰이 있을 때만)
-            if (finalTargetUrl.contains("googlevideo.com") && !finalTargetUrl.contains("pot=") && poToken.isNotBlank()) {
-                finalTargetUrl += "&pot=$poToken"
-                println("[YT_PROXY_DEBUG] 4. URL에 pot 파라미터 정상 주입 완료!")
-            } else if (finalTargetUrl.contains("pot=")) {
-                println("[YT_PROXY_DEBUG] 4. URL에 이미 pot 파라미터가 포함되어 있습니다.")
-            } else {
-                println("[YT_PROXY_DEBUG] 4. ❌ 경고: po_token을 주입할 수 없습니다! (1분 뒤 403 차단 예상됨)")
-            }
-
-            // [초정밀 디버깅 3] 요청 헤더 설정 (Web 헤더인 Origin, Referer 완전히 제거)
+            // [수정됨] 불필요한 구버전 PoToken 검증 로직 및 주입 강제 코드 완전히 삭제 (PipePipeExtractor가 자체 처리함)
+            
+            // [수정됨] Android VR 세션과 일치하는 User-Agent 강제 주입 및 불필요한 웹 브라우저 헤더 차단
             val requestBuilder = okhttp3.Request.Builder()
                 .url(finalTargetUrl)
-                .header("User-Agent", YoutubeUtils.IOS_USER_AGENT)
+                .header("User-Agent", YoutubeUtils.ANDROID_VR_USER_AGENT)
                 .header("Accept", "*/*")
                 .header("Connection", "keep-alive")
 
+            clientHeaders.forEach { (key, value) ->
+                val lowerKey = key.lowercase()
+                // Origin과 Referer 등 불필요한 브라우저 특성 헤더를 철저히 필터링
+                if (lowerKey != "host" && lowerKey != "user-agent" && lowerKey != "origin" && lowerKey != "referer") {
+                    requestBuilder.header(key, value)
+                }
+            }
+
             clientHeaders["range"]?.let { 
-                requestBuilder.header("Range", it) 
-                println("[YT_PROXY_DEBUG] 5. 요청 Range: $it")
+                println("[YT_PROXY_DEBUG] 1. 요청 Range: $it")
             }
 
             val request = requestBuilder.build()
             val response = proxyHttpClient.newCall(request).execute()
             
-            println("[YT_PROXY_DEBUG] 6. 유튜브 CDN 응답 코드: ${response.code}")
+            println("[YT_PROXY_DEBUG] 2. 유튜브 CDN 응답 코드: ${response.code}")
 
             if (response.code == 403 || response.code == 400) {
                 val errorBody = response.body?.string() ?: "Empty Body"
-                println("[YT_PROXY_DEBUG] 🚨 403 FORBIDDEN 발생! 🚨")
+                println("[YT_PROXY_DEBUG] 🚨 403/400 FORBIDDEN 발생! 🚨")
                 println("[YT_PROXY_DEBUG] 에러 응답 본문:\n$errorBody")
                 println("[YT_PROXY_DEBUG] =======================================================\n")
                 
