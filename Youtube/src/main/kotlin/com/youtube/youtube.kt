@@ -2313,21 +2313,39 @@ class YoutubeProvider(
     ): Boolean {
         val videoId = YoutubeUtils.extractYoutubeId(data) ?: data
         val fullUrl = "https://www.youtube.com/watch?v=$videoId"
+        val isShort = data.contains("/shorts/")
 
         var playerResponseText = ""
         try {
-            val apiUrl = "$mainUrl/youtubei/v1/player"
-            val payload = mapOf(
-                "context" to mapOf(
-                    "client" to mapOf(
-                        "clientName" to "WEB",
-                        "clientVersion" to YoutubeUtils.DEFAULT_CLIENT_VERSION,
-                        "hl" to lang,
-                        "gl" to if (lang == "ko") "KR" else "US"
+            // 쇼츠 진입 시 전용 시청기록 및 수급 엔드포인트인 reel_item_watch API로 직접 분기 우회
+            val apiUrl = if (isShort) "$mainUrl/youtubei/v1/reel/reel_item_watch" else "$mainUrl/youtubei/v1/player"
+            val payload = if (isShort) {
+                mapOf(
+                    "context" to mapOf(
+                        "client" to mapOf(
+                            "clientName" to "WEB",
+                            "clientVersion" to YoutubeUtils.DEFAULT_CLIENT_VERSION,
+                            "hl" to lang,
+                            "gl" to if (lang == "ko") "KR" else "US"
+                        )
+                    ),
+                    "playerRequest" to mapOf(
+                        "videoId" to videoId
                     )
-                ),
-                "videoId" to videoId
-            )
+                )
+            } else {
+                mapOf(
+                    "context" to mapOf(
+                        "client" to mapOf(
+                            "clientName" to "WEB",
+                            "clientVersion" to YoutubeUtils.DEFAULT_CLIENT_VERSION,
+                            "hl" to lang,
+                            "gl" to if (lang == "ko") "KR" else "US"
+                        )
+                    ),
+                    "videoId" to videoId
+                )
+            }
             val headers = mapOf("Referer" to "$mainUrl/watch?v=$videoId")
             playerResponseText = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).text
         } catch (e: Exception) {
@@ -2342,9 +2360,8 @@ class YoutubeProvider(
             }
         }
 
-        // VOD 및 Live 구분 없이 당사가 최적화한 고성능 YoutubeExtractor로 일괄 위임 처리
         com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback, callback)
 
         return true
-    }    
+    }
 }
