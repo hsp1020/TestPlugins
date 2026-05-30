@@ -7,6 +7,14 @@ import org.jsoup.Jsoup
 import java.net.URLDecoder
 import java.net.URLEncoder
 
+import android.os.Handler
+import android.os.Looper
+import android.webkit.CookieManager
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+
 class CUTVProvider : MainAPI() {
     override var mainUrl = "https://cu-tv.com"
     override var name = "CUTV"
@@ -20,19 +28,185 @@ class CUTVProvider : MainAPI() {
 
     private val userAgent = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
 
-    private val defaultHeaders = mapOf(
-        "User-Agent" to userAgent,
-        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Upgrade-Insecure-Requests" to "1"
-    )
+    private var cfCookies: String? = null
+    private var cfUserAgent: String? = null
+
+    private fun getHeaders(referer: String? = null): Map<String, String> {
+        val currentUA = cfUserAgent ?: userAgent
+        val headers = mutableMapOf(
+            "User-Agent" to currentUA,
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Upgrade-Insecure-Requests" to "1"
+        )
+        cfCookies?.let {
+            headers["Cookie"] = it
+        }
+        referer?.let {
+            headers["Referer"] = it
+        }
+        return headers
+    }
+
+    private fun getPosterHeaders(referer: String): Map<String, String> {
+        val currentUA = cfUserAgent ?: userAgent
+        val headers = mutableMapOf(
+            "Referer" to referer,
+            "User-Agent" to currentUA,
+            "Accept" to "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            "Sec-Fetch-Dest" to "image",
+            "Sec-Fetch-Mode" to "no-cors",
+            "Sec-Fetch-Site" to "cross-site"
+        )
+        cfCookies?.let {
+            headers["Cookie"] = it
+        }
+        return headers
+    }
+
+    private val defaultHeaders: Map<String, String>
+        get() = getHeaders()
+
+    private suspend fun solveCloudflare(url: String): Pair<String, String>? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+        val context = try {
+            Class.forName("android.app.ActivityThread")
+                .getMethod("currentApplication")
+                .invoke(null) as? android.content.Context
+        } catch (e: Exception) {
+            null
+        }
+
+        if (context == null) {
+            println("[CUTV_DEBUG] [Cloudflare Bypass] ERROR: Context를 획득하지 못했습니다.")
+            return@withContext null
+        }
+
+        println("[CUTV_DEBUG] [Cloudflare Bypass] 진입 -> URL: $url")
+
+        suspendCancellableCoroutine<Pair<String, String>?> { continuation ->
+            val webView = WebView(context)
+            
+            webView.settings.javaScriptEnabled = true
+            webView.settings.domStorageEnabled = true
+            webView.settings.databaseEnabled = true
+            
+            val actualUserAgent = webView.settings.userAgentString
+            println("[CUTV_DEBUG] [Cloudflare Bypass] WebView User-Agent: $actualUserAgent")
+
+            webView.webViewClient = object : WebViewClient() {
+                var solved = false
+
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    super.onPageFinished(view, url)
+                    if (url == null) return
+                    checkCookies(url)
+                }
+
+                fun checkCookies(currentUrl: String) {
+                    if (solved) return
+                    val cookieManager = CookieManager.getInstance()
+                    val cookies = cookieManager.getCookie(currentUrl) ?: ""
+                    println("[CUTV_DEBUG] [Cloudflare Bypass] 실시간 쿠키 체크: $cookies")
+
+                    if (cookies.contains("cf_clearance")) {
+                        solved = true
+                        println("[CUTV_DEBUG] [Cloudflare Bypass] 성공: cf_clearance 쿠키 발견!")
+                        if (continuation.isActive) {
+                            continuation.resume(Pair(cookies, actualUserAgent))
+                        }
+                        try {
+                            webView.stopLoading()
+                            webView.destroy()
+                        } catch (e: Exception) {}
+                    }
+                }
+            }
+
+            webView.loadUrl(url)
+
+            val handler = Handler(Looper.getMainLooper())
+            val timeoutRunnable = Runnable {
+                if (continuation.isActive) {
+                    println("[CUTV_DEBUG] [Cloudflare Bypass] 실패: 15초 타임아웃 초과")
+                    val cookieManager = CookieManager.getInstance()
+                    val cookies = cookieManager.getCookie(url) ?: ""
+                    if (cookies.isNotBlank()) {
+                        println("[CUTV_DEBUG] [Cloudflare Bypass] 타임아웃되었으나 수집된 쿠키 반환 시도: $cookies")
+                        continuation.resume(Pair(cookies, actualUserAgent))
+                    } else {
+                        continuation.resume(null)
+                    }
+                    try {
+                        webView.stopLoading()
+                        webView.destroy()
+                    } catch (e: Exception) {}
+                }
+            }
+            handler.postDelayed(timeoutRunnable, 15000)
+
+            val intervalRunnable = object : Runnable {
+                override fun run() {
+                    if (continuation.isActive) {
+                        webView.url?.let { currentUrl ->
+                            val cookieManager = CookieManager.getInstance()
+                            val cookies = cookieManager.getCookie(currentUrl) ?: ""
+                            if (cookies.contains("cf_clearance")) {
+                                println("[CUTV_DEBUG] [Cloudflare Bypass] 성공 (인터벌 체크): cf_clearance 쿠키 발견!")
+                                handler.removeCallbacks(timeoutRunnable)
+                                continuation.resume(Pair(cookies, actualUserAgent))
+                                try {
+                                    webView.stopLoading()
+                                    webView.destroy()
+                                } catch (e: Exception) {}
+                                return
+                            }
+                        }
+                        handler.postDelayed(this, 1500)
+                    }
+                }
+            }
+            handler.postDelayed(intervalRunnable, 1500)
+
+            continuation.invokeOnCancellation {
+                handler.removeCallbacks(timeoutRunnable)
+                handler.removeCallbacks(intervalRunnable)
+                try {
+                    webView.stopLoading()
+                    webView.destroy()
+                } catch (e: Exception) {}
+            }
+        }
+    }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = "$mainUrl${request.data}"
         val items = mutableListOf<SearchResponse>()
         
         try {
-            val doc = app.get(url, headers = defaultHeaders).document
+            if (cfCookies == null) {
+                println("[CUTV_DEBUG] [Cloudflare Bypass] 시작: cfCookies가 없으므로 우회 절차를 시도합니다.")
+                val cfResult = solveCloudflare(mainUrl)
+                if (cfResult != null) {
+                    cfCookies = cfResult.first
+                    cfUserAgent = cfResult.second
+                    println("[CUTV_DEBUG] [Cloudflare Bypass] 성공적으로 우회 완료! cfCookies 수집됨.")
+                } else {
+                    println("[CUTV_DEBUG] [Cloudflare Bypass] 우회 실패: 결과가 null입니다.")
+                }
+            }
+
+            var doc = app.get(url, headers = defaultHeaders).document
+
+            if (doc.html().contains("cloudflare") || doc.html().contains("challenge-platform")) {
+                println("[CUTV_DEBUG] [Cloudflare Bypass] Cloudflare 챌린지 감지됨. 우회 절차를 재시도합니다.")
+                val cfResult = solveCloudflare(mainUrl)
+                if (cfResult != null) {
+                    cfCookies = cfResult.first
+                    cfUserAgent = cfResult.second
+                    println("[CUTV_DEBUG] [Cloudflare Bypass] 재시도 성공! defaultHeaders 갱신 완료.")
+                    doc = app.get(url, headers = defaultHeaders).document
+                }
+            }
             
             val iframeSrc = doc.select("iframe").mapNotNull { it.attr("src") }
                 .firstOrNull { it.contains("galaxy-stream") || it.contains("hudtv") || it.contains("cli") }
@@ -162,14 +336,7 @@ class CUTVProvider : MainAPI() {
                         items.add(
                             newLiveSearchResponse(name = title, url = fakeUrl) {
                                 this.posterUrl = posterUrl
-                                this.posterHeaders = mapOf(
-                                    "Referer" to iframeSrc,
-                                    "User-Agent" to userAgent,
-                                    "Accept" to "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-                                    "Sec-Fetch-Dest" to "image",
-                                    "Sec-Fetch-Mode" to "no-cors",
-                                    "Sec-Fetch-Site" to "cross-site"
-                                )
+                                this.posterHeaders = getPosterHeaders(iframeSrc)
                             }
                         )
                     }
@@ -209,14 +376,7 @@ class CUTVProvider : MainAPI() {
         ) {
             this.posterUrl = posterUrl
             this.plot = "실시간 스포츠 중계" // 플롯 값 고정 지정
-            this.posterHeaders = mapOf(
-                "Referer" to iframeUrl,
-                "User-Agent" to userAgent,
-                "Accept" to "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-                "Sec-Fetch-Dest" to "image",
-                "Sec-Fetch-Mode" to "no-cors",
-                "Sec-Fetch-Site" to "cross-site"
-            )
+            this.posterHeaders = getPosterHeaders(iframeUrl)
         }
     }
 
@@ -289,7 +449,7 @@ class CUTVProvider : MainAPI() {
                                     "Sec-Fetch-Dest" to "empty",
                                     "Sec-Fetch-Mode" to "cors",
                                     "Sec-Fetch-Site" to "cross-site",
-                                    "User-Agent" to userAgent
+                                    "User-Agent" to (cfUserAgent ?: userAgent)
                                 )
                             }
                         )
