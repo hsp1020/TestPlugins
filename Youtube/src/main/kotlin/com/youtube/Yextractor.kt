@@ -75,28 +75,10 @@ open class YoutubeExtractor : ExtractorApi() {
 
         init {
             println("[YT_DEBUG_INIT] 초기화 시작")
+            // [핵심] 리플렉션으로 강제 활성화하던 쓸데없는 코드를 전부 날렸습니다.
+            // PipePipeExtractor 내부에서 이미 VR 클라이언트를 기본으로 사용하도록 패치되어 있으므로, 우리는 다운로더만 연결해주면 됩니다.
             YoutubeUtils.initNewPipeDownloader()
-            
-            // [핵심] 일관성 유지를 위해 오직 ANDROID_VR 클라이언트만 강제 활성화합니다.
-            // iOS나 TV 클라이언트가 섞이면 URL 서명(c=IOS 등)과 프록시의 VR User-Agent가 불일치하여 403이 발생할 수 있습니다.
-            try {
-                YoutubeStreamExtractor.setFetchIosClient(false)
-                println("[YT_DEBUG_INIT] iOS Client 명시적 비활성화 완료")
-            } catch (e: Exception) { }
-            
-            try {
-                val methodTv = YoutubeStreamExtractor::class.java.getMethod("setFetchTvClient", Boolean::class.java)
-                methodTv.invoke(null, false)
-                println("[YT_DEBUG_INIT] TV Client 명시적 비활성화 완료")
-            } catch (e: Exception) { }
-
-            try {
-                val methodVr = YoutubeStreamExtractor::class.java.getMethod("setFetchAndroidVrClient", Boolean::class.java)
-                methodVr.invoke(null, true)
-                println("[YT_DEBUG_INIT] Android VR Client 단독 활성화 성공 (v5.1.1 403 우회용)")
-            } catch (e: Exception) {
-                println("[YT_DEBUG_INIT] Android VR Client 메서드 탐색 실패: ${e.message}")
-            }
+            println("[YT_DEBUG_INIT] 다운로더 연결 완료 (순정 PipePipeExtractor 모드)")
         }
     }
 
@@ -145,7 +127,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     val link = YoutubeStreamLinkHandlerFactory.getInstance().fromUrl(cleanedUrl)
                     val s = object : YoutubeStreamExtractor(ServiceList.YouTube, link) {}
                     
-                    println("[YT_DEBUG_EXTRACTOR] fetchPage() 호출 시작 (VR 클라이언트 전용 네트워크 통신)...")
+                    println("[YT_DEBUG_EXTRACTOR] fetchPage() 호출 시작 (네트워크 통신 발생)...")
                     s.fetchPage()
                     println("[YT_DEBUG_EXTRACTOR] fetchPage() 호출 완료!")
 
@@ -224,8 +206,10 @@ open class YoutubeExtractor : ExtractorApi() {
                                                 ) {
                                                     this.referer = mainUrl
                                                     this.quality = video.height
+                                                    // [수정점] 엑소플레이어가 로컬호스트(프록시)로 요청할 때 쓸 User-Agent.
+                                                    // ExoPlayer가 봇으로 감지되지 않도록만 설정. (실제 유튜브 통신은 프록시가 담당함)
                                                     this.headers = mapOf(
-                                                        "User-Agent" to YoutubeUtils.ANDROID_VR_USER_AGENT
+                                                        "User-Agent" to YoutubeUtils.CHROME_USER_AGENT
                                                     )
                                                 }
                                             )
@@ -370,14 +354,25 @@ open class YoutubeExtractor : ExtractorApi() {
             
             println("\n[YT_PROXY_DEBUG] ================= CHUNK REQUEST START =================")
             
-            // [중요] 익스트랙터가 ANDROID_VR 기반으로 URL을 만들었으므로, 프록시도 정확히 ANDROID_VR User-Agent를 사용해야 합니다.
-            // 봇 감지용 헤더(Origin, Referer) 철저히 필터링
+            // [핵심 방어 로직] 청크 URL에 포함된 "c=" (Client) 파라미터를 읽어서,
+            // 실제 다운로드할 때 유튜브 CDN이 봇으로 감지하지 못하도록 해당 클라이언트에 맞는 완벽한 User-Agent를 세팅합니다.
+            val cParamMatch = Regex("[?&]c=([^&]+)").find(finalTargetUrl)
+            val cParam = cParamMatch?.groupValues?.get(1)?.uppercase() ?: "UNKNOWN"
+
+            val dynamicUserAgent = when (cParam) {
+                "ANDROID_VR" -> YoutubeUtils.ANDROID_VR_USER_AGENT
+                "IOS" -> YoutubeUtils.IOS_USER_AGENT
+                "WEB", "MWEB" -> YoutubeUtils.CHROME_USER_AGENT
+                else -> YoutubeUtils.ANDROID_VR_USER_AGENT // Fallback
+            }
+
             val requestBuilder = okhttp3.Request.Builder()
                 .url(finalTargetUrl)
-                .header("User-Agent", YoutubeUtils.ANDROID_VR_USER_AGENT)
+                .header("User-Agent", dynamicUserAgent)
                 .header("Accept", "*/*")
                 .header("Connection", "keep-alive")
 
+            // ExoPlayer가 보낸 헤더 중 위험한 것들(Host, User-Agent 변경 등)은 필터링하고 안전한 것만 넘깁니다.
             clientHeaders.forEach { (key, value) ->
                 val lowerKey = key.lowercase()
                 if (lowerKey != "host" && lowerKey != "user-agent" && lowerKey != "origin" && lowerKey != "referer" && lowerKey != "accept-encoding") {
@@ -388,6 +383,7 @@ open class YoutubeExtractor : ExtractorApi() {
             val request = requestBuilder.build()
             val response = proxyHttpClient.newCall(request).execute()
             
+            println("[YT_PROXY_DEBUG] 클라이언트 매칭: $cParam -> UA: $dynamicUserAgent")
             println("[YT_PROXY_DEBUG] 유튜브 CDN 응답 코드: ${response.code}")
 
             if (response.code == 403 || response.code == 400) {
