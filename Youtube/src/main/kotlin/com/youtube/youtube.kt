@@ -279,7 +279,7 @@ class YoutubeProvider(
         private val homeShorts = Collections.synchronizedList(mutableListOf<Episode>())
         private val searchShorts = Collections.synchronizedList(mutableListOf<Episode>())
 
-        // 힙 영역 메모리 누수를 제어하는 LRU 기반 캐시 구조
+        // 메모리 파열 방지용 LRU 캐시 세그먼트
         private val continuationTokenCache: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(128, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
@@ -1348,9 +1348,7 @@ class YoutubeProvider(
             logError(e) 
         }
 
-        if (nextContinuation != null) {
-            saveContinuationToken(requestData, nextContinuation)
-        }
+        saveContinuationToken(requestData, nextContinuation)
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
     }
 
@@ -2008,7 +2006,8 @@ class YoutubeProvider(
                 }
 
                 return newTvSeriesLoadResponse(title, url, TvType.TvSeries, allEpisodes) {
-                    this.posterUrl = poster
+                    // 계속 시청 썸네일도 wsrv.nl 적용 버전으로 수정
+                    this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
                     this.plot = "Channel: $title\nSubscribers: ${subscriberCount}\nVideos Fetched: ${allEpisodes.size}"
                     this.tags = listOf(title, "Channel")
                 }
@@ -2080,7 +2079,8 @@ class YoutubeProvider(
                 }
 
                 return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                    this.posterUrl = playlistPoster
+                    // 계속 시청 썸네일도 wsrv.nl 적용 버전으로 수정
+                    this.posterUrl = YoutubeUtils.getProxiedPoster(playlistPoster)
                     
                     val finalDescription = buildString {
                         append("Channel: $author")
@@ -2251,7 +2251,8 @@ class YoutubeProvider(
         }
 
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-            this.posterUrl = poster
+            // 계속 시청 썸네일도 wsrv.nl 적용 버전으로 수정
+            this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
             this.plot = plot
 
             if (channelName.isNotBlank()) {
@@ -2316,4 +2317,3 @@ class YoutubeProvider(
         return true
     }    
 }
-
