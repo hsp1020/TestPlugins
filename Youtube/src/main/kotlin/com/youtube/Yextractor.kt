@@ -242,7 +242,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     callback(
                         newExtractorLink(
                             this@YoutubeExtractor.name,
-                            "YouTube Live (M3U8)",
+                            "YouTube Live",
                             hlsUrl,
                             type = ExtractorLinkType.M3U8
                         ) {
