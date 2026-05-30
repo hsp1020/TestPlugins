@@ -13,7 +13,6 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.*
 import androidx.appcompat.app.AlertDialog
-import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.DialogFragment
 import androidx.fragment.app.FragmentContainerView
 import androidx.fragment.app.FragmentManager
@@ -39,6 +38,7 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.*
 import com.lagradost.cloudstream3.app
 import org.jsoup.Jsoup
+
 data class CustomSection(
     @JsonProperty("name") var name: String = "",
     @JsonProperty("url") var url: String = "",
@@ -88,7 +88,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
         private val KEY_PAGES = "channel_pages_limit"
         private val KEY_PLAYLIST_TAG = "playlist_search_tag"
         private val KEY_LANGUAGE = "youtube_language"
-        private val KEY_PLAYER_TYPE = "youtube_player_type"
 
         private lateinit var languagePref: ListPreference
         private lateinit var authCategory: PreferenceCategory
@@ -97,12 +96,10 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
         private lateinit var loginStatusPref: Preference
         private lateinit var visitorPref: EditTextPreference
         private lateinit var clearPref: Preference
-        private lateinit var playerTypePref: ListPreference
         private lateinit var pagesPref: SeekBarPreference
         private lateinit var playlistTagPref: EditTextPreference
         private lateinit var homeCategory: PreferenceCategory
         private lateinit var manageChannelsPref: Preference
-        private lateinit var trendingPref: SwitchPreferenceCompat
 
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
             val ctx = requireContext()
@@ -111,12 +108,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
 
             homeCategory = PreferenceCategory(ctx)
             preferenceScreen.addPreference(homeCategory)
-
-            trendingPref = SwitchPreferenceCompat(ctx).apply {
-                key = "show_trending_home"
-                setDefaultValue(true)
-            }
-            homeCategory.addPreference(trendingPref)
 
             manageChannelsPref = Preference(ctx).apply {
                 key = "manage_custom_channels"
@@ -137,7 +128,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 if (value == null) setValue("ar")
                 summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
                 setOnPreferenceChangeListener { _, newValue ->
-
                     sharedPref.edit().putString(KEY_LANGUAGE, newValue as String).apply()
                     view?.post { updateTexts() }
                     true
@@ -181,7 +171,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
 
             clearPref = Preference(ctx).apply {
                 setOnPreferenceClickListener {
-
                     MaterialAlertDialogBuilder(ctx)
                         .setTitle(Loc.getString(sharedPref, "logout_confirm_title"))
                         .setMessage(Loc.getString(sharedPref, "logout_confirm_msg"))
@@ -203,15 +192,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
 
             customCategory = PreferenceCategory(ctx)
             preferenceScreen.addPreference(customCategory)
-
-            playerTypePref = ListPreference(ctx).apply {
-                key = KEY_PLAYER_TYPE
-                entryValues = arrayOf("advanced", "classic")
-                if (value == null) setValue("advanced")
-                summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
-                setOnPreferenceChangeListener { _, _ -> true }
-            }
-            customCategory.addPreference(playerTypePref)
 
             pagesPref = SeekBarPreference(ctx).apply {
                 key = KEY_PAGES
@@ -249,7 +229,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
 
         private fun updateTexts() {
             homeCategory.title = Loc.getString(sharedPref, "home_section")
-            trendingPref.title = Loc.getString(sharedPref, "trending")
             manageChannelsPref.title = Loc.getString(sharedPref, "manage_channels")
             manageChannelsPref.summary = Loc.getString(sharedPref, "manage_channels_sum")
 
@@ -270,14 +249,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
             visitorPref.setNegativeButtonText(Loc.getString(sharedPref, "cancel"))
 
             clearPref.title = Loc.getString(sharedPref, "logout_btn")
-
-            playerTypePref.title = Loc.getString(sharedPref, "player_engine")
-            playerTypePref.entries = arrayOf(
-                Loc.getString(sharedPref, "player_advanced"),
-                Loc.getString(sharedPref, "player_classic")
-            )
-            playerTypePref.setPositiveButtonText(Loc.getString(sharedPref, "ok"))
-            playerTypePref.setNegativeButtonText(Loc.getString(sharedPref, "cancel"))
 
             pagesPref.title = Loc.getString(sharedPref, "pages_limit")
             pagesPref.summary = Loc.getString(sharedPref, "pages_sum")
@@ -320,18 +291,14 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
             }
 
             val backBtn = ImageView(ctx).apply {
-
                 setImageDrawable(createSvgIcon("M20,11H7.83l5.59,-5.59L12,4l-8,8 8,8 1.41,-1.41L7.83,13H20v-2z", "#FFFFFF"))
-
                 val outValue = android.util.TypedValue()
                 ctx.theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, outValue, true)
                 setBackgroundResource(outValue.resourceId)
-
                 setPadding(15, 15, 15, 15)
                 layoutParams = LinearLayout.LayoutParams(90, 90).apply {
                     setMargins(0, 0, 30, 0)
                 }
-
                 setOnClickListener { dismiss() }
             }
 
@@ -436,7 +403,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
 
             val loadingIndicator = ProgressBar(ctx, null, android.R.attr.progressBarStyleSmall).apply {
                 visibility = View.GONE
-
                 layoutParams = FrameLayout.LayoutParams(80, 80).apply {
                     gravity = Gravity.CENTER_VERTICAL or Gravity.END
                     marginEnd = 20
@@ -453,19 +419,16 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
                 override fun afterTextChanged(s: android.text.Editable?) {
                     val url = s.toString().trim()
-                    fetchJob?.cancel() // إلغاء أي عملية سابقة
+                    fetchJob?.cancel()
 
                     if (url.startsWith("http") && url.contains("youtube") && inputName.text.isBlank()) {
                         loadingIndicator.visibility = View.VISIBLE
-
                         fetchJob = kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                             try {
-
                                 val response = com.lagradost.cloudstream3.app.get(url).text
                                 val doc = org.jsoup.Jsoup.parse(response)
                                 var title = doc.selectFirst("meta[property=og:title]")?.attr("content")
                                     ?.replace(" - YouTube", "")
-
                                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
                                     if (!title.isNullOrBlank()) {
                                         inputName.setText(title)
