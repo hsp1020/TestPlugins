@@ -84,21 +84,11 @@ object YoutubeUtils {
         return Pair(cookieBuilder.toString(), sapisidVal)
     }
 
-    // 추천 목록 및 에피소드 썸네일 전용 표준 썸네일 변환기 (바텀 짤림이 없는 오리지널 contain 비율 유지)
+    // 일반영상 검색 결과 및 계속 시청 전용 하단 크롭 정렬 추가 프록시 필터 (a=bottom)
     fun getProxiedPoster(poster: String?): String? {
         if (poster.isNullOrBlank()) return null
         return try {
-            "https://wsrv.nl/?url=${URLEncoder.encode(poster, "UTF-8")}&w=800&h=1200&fit=contain&cbg=black"
-        } catch (e: Exception) {
-            poster
-        }
-    }
-
-    // 일반영상 검색 결과 및 계속 시청 전용 하단 크롭 정렬 추가 프록시 필터 (a=bottom)
-    fun getProxiedPosterBottom(poster: String?): String? {
-        if (poster.isNullOrBlank()) return null
-        return try {
-            "https://wsrv.nl/?url=${URLEncoder.encode(poster, "UTF-8")}&w=800&h=1200&fit=contain&cbg=black&a=bottom"
+            "https://wsrv.nl/?url=${URLEncoder.encode(poster, "UTF-8")}&w=720&h=1080&fit=contain&cbg=black&a=bottom"
         } catch (e: Exception) {
             poster
         }
@@ -109,7 +99,7 @@ object YoutubeUtils {
         return try {
             val targetUrl = "https://i.ytimg.com/vi/$videoId/oardefault.jpg?sqp=-oaymwEoCJUDENAFSFqQAgHyq4qpAxcIARUAAIhC2AEB4gEKCBgQAhgGOAFAAQ==&rs=AOn4CLDWlHo9hImueeIb7JfDzDGNRuQ5tg&usqp=CCk"
             val encoded = URLEncoder.encode(targetUrl, "UTF-8")
-            "https://wsrv.nl/?url=$encoded&w=800&h=1200&fit=contain&cbg=black"
+            "https://wsrv.nl/?url=$encoded&w=720&h=1080&fit=contain&cbg=black"
         } catch (e: Exception) {
             "https://i.ytimg.com/vi/$videoId/oar2.jpg"
         }
@@ -361,6 +351,7 @@ class YoutubeProvider(
 
     // 썸네일 노출 3단 격리를 실현하기 위한 정밀 렌더링 컨텍스트 플래그
     private var currentRenderContext = RenderContext.HOME
+    private var isSearchContext = false // 빌드 오류 방지용 동기화 플래그 정상 유지
 
     class YouTubeInterceptor(private val provider: YoutubeProvider) : Interceptor {
         private val prefs get() = provider.appPrefs
@@ -811,9 +802,9 @@ class YoutubeProvider(
                 // 세로 규격 전용 쇼츠 커스텀 썸네일(600x900) 장착
                 val poster = YoutubeUtils.getShortsSearchPoster(videoId)
 
-                val currentList = if (currentRenderContext == RenderContext.SEARCH) searchShorts else homeShorts
+                val currentList = if (isSearchContext) searchShorts else homeShorts
                 val episodeNum = synchronized(currentList) { currentList.size } + 1
-                val contextTag = if (currentRenderContext == RenderContext.SEARCH) "&ctx=search" else "&ctx=home"
+                val contextTag = if (isSearchContext) "&ctx=search" else "&ctx=home"
                 val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
 
                 val descText = if (views.isNotBlank()) "조회수: $views" else ""
@@ -1213,6 +1204,7 @@ class YoutubeProvider(
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         currentRenderContext = RenderContext.HOME // 홈 화면 진입 시 홈 렌더링 컨텍스트 적용 (우회 없는 원본 이미지 룩업)
+        isSearchContext = false
         val rawRequestData = request.data
         val requestData = YoutubeUtils.urlDecode(rawRequestData)
         val maxPages = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
@@ -1398,13 +1390,13 @@ class YoutubeProvider(
 
     override suspend fun search(query: String, page: Int): SearchResponseList? {
         currentRenderContext = RenderContext.SEARCH // 검색 화면 진입 시 검색 렌더링 컨텍스트 적용 (wsrv.nl bottom 필터 적용)
+        isSearchContext = true
         val maxPages = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
         if (page > maxPages) {
             return newSearchResponseList(emptyList(), false)
         }
 
         val results = mutableListOf<SearchResponse>()
-        isSearchContext = true
         if (page == 1) {
             searchShorts.clear()
         }
@@ -1682,6 +1674,7 @@ class YoutubeProvider(
 
     override suspend fun load(url: String): LoadResponse {
         currentRenderContext = RenderContext.DETAIL // 상세 페이지(Detail) 진입 시 렌더링 컨텍스트 적용 (추천목록 짤림 방지 fit=contain 적용)
+        isSearchContext = false
         if (url.contains("/shorts/")) {
             val videoId = YoutubeUtils.extractYoutubeId(url) ?: "video"
             val useSearchList = url.contains("ctx=search")
@@ -1860,6 +1853,147 @@ class YoutubeProvider(
 
                 val allEpisodes = mutableListOf<Episode>()
 
+                fun findContinuationItemsRecursive(obj: Any?, depth: Int = 0): List<*>? {
+                    if (obj == null || depth > 32) return null
+                    when (obj) {
+                        is Map<*, *> -> {
+                            if (obj.containsKey("continuationItems")) return obj["continuationItems"] as? List<*>
+                            val keysToTry = listOf("onResponseReceivedActions", "onResponseReceivedEndpoints", "onResponseReceivedCommands", "onResponseReceivedResults", "continuationContents")
+                            val keysToTrySize = keysToTry.size
+                            for (i in 0 until keysToTrySize) {
+                                val k = keysToTry[i]
+                                val v = obj[k]
+                                val r = findContinuationItemsRecursive(v, depth + 1)
+                                if (r != null) return r
+                            }
+                            for (v in obj.values) {
+                                val r = findContinuationItemsRecursive(v, depth + 1)
+                                if (r != null) return r
+                            }
+                        }
+                        is List<*> -> {
+                            for (i in obj) {
+                                val r = findContinuationItemsRecursive(i, depth + 1)
+                                if (r != null) return r
+                            }
+                        }
+                    }
+                    return null
+                }
+
+                fun extractVideosFromItems(items: List<*>, collectTo: MutableList<Episode>) {
+                    
+                    fun findAllRenderers(obj: Any?, results: MutableList<Map<*,*>>, depth: Int = 0) {
+                        if (obj == null || depth > 32) return
+                        when (obj) {
+                            is Map<*, *> -> {
+                                for ((k, v) in obj) {
+                                    if (k is String && TARGET_RENDERER_KEYS.contains(k)) {
+                                        val match = v as? Map<*,*>
+                                        if (match != null) results.add(match)
+                                    }
+                                }
+                                for (value in obj.values) {
+                                    findAllRenderers(value, results, depth + 1)
+                                }
+                            }
+                            is List<*> -> {
+                                for (item in obj) {
+                                    findAllRenderers(item, results, depth + 1)
+                                }
+                            }
+                        }
+                    }
+
+                    items.forEachIndexed { index, item ->
+                        try {
+                            val map = item as? Map<*, *>
+                            if (map == null) {
+                                return@forEachIndexed
+                            }
+
+                            if (map.containsKey("continuationItemRenderer")) {
+                                return@forEachIndexed
+                            }
+
+                            val foundRenderers = mutableListOf<Map<*,*>>()
+                            findAllRenderers(map, foundRenderers)
+
+                            if (foundRenderers.isEmpty()) {
+                                return@forEachIndexed
+                            }
+
+                            for (renderer in foundRenderers) {
+                                var vidId = renderer["videoId"] as? String
+                                
+                                if (vidId.isNullOrBlank() && renderer.containsKey("contentId")) {
+                                    vidId = renderer["contentId"] as? String
+                                }
+                                if (vidId.isNullOrBlank()) {
+                                    vidId = safeGet(renderer, "onTap", "innertubeCommand", "reelWatchEndpoint", "videoId") as? String
+                                }
+
+                                if (!vidId.isNullOrBlank()) {
+                                    var vidTitle = getText(renderer["title"])
+                                    if (vidTitle.isBlank()) vidTitle = getText(renderer["headline"])
+                                    if (vidTitle.isBlank()) vidTitle = getText(renderer["shortBylineText"])
+                                    if (vidTitle.isBlank()) vidTitle = getText(safeGet(renderer, "metadata", "lockupMetadataViewModel", "title"))
+                                    if (vidTitle.isBlank()) vidTitle = "Video"
+
+                                    val thumb = YoutubeUtils.getBestThumbnail(renderer["thumbnail"]) 
+                                        ?: YoutubeUtils.getBestThumbnail(safeGet(renderer, "contentImage", "image", "sources")) 
+                                        ?: YoutubeUtils.buildThumbnailFromId(vidId)
+
+                                    collectTo.add(newEpisode("$mainUrl/watch?v=$vidId") {
+                                        this.name = vidTitle
+                                        this.posterUrl = thumb
+                                        this.description = getEpisodeMetaString(renderer)
+                                    })
+                                    
+                                    break 
+                                }
+                            }
+                        } catch (e: Exception) {
+                        }
+                    }
+                }
+
+                var initialItems: List<*>? = null
+                val tabs = safeGet(data, "contents", "twoColumnBrowseResultsRenderer", "tabs") as? List<*>
+                if (tabs != null) {
+                    val actualActiveTab = tabs.firstOrNull { tab ->
+                        safeGet(tab, "tabRenderer", "selected") == true
+                    }
+
+                    val activeContent = safeGet(actualActiveTab, "tabRenderer", "content") as? Map<*, *>
+
+                    if (activeContent?.containsKey("richGridRenderer") == true) {
+                        initialItems = safeGet(activeContent, "richGridRenderer", "contents") as? List<*>
+                    } else if (activeContent?.containsKey("gridRenderer") == true) {
+                        initialItems = safeGet(activeContent, "gridRenderer", "items") as? List<*>
+                    }
+
+                    if (initialItems == null) {
+                        for (tab in tabs) {
+                            val tabMap = tab as? Map<*, *>
+                            val tabRenderer = tabMap?.get("tabRenderer") as? Map<*, *>
+                            val tabContent = tabRenderer?.get("content") as? Map<*, *>
+                            if (tabContent?.containsKey("richGridRenderer") == true) {
+                                initialItems = safeGet(tabContent, "richGridRenderer", "contents") as? List<*>
+                                break
+                            }
+                            if (tabContent?.containsKey("gridRenderer") == true) {
+                                initialItems = safeGet(tabContent, "gridRenderer", "items") as? List<*>
+                                break
+                            }
+                        }
+                    }
+                }
+                
+                if (initialItems != null) {
+                    extractVideosFromItems(initialItems, allEpisodes)
+                }
+
                 fun findContinuationFromItems(items: List<*>?): String? {
                     if (items == null) return null
                     for (it in items) {
@@ -1980,7 +2114,7 @@ class YoutubeProvider(
                 }
 
                 return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                    // 추천 목록(Detail)이므로 짤림 없는 contain 규격 우회 적용
+                    // 계속 시청 썸네일도 wsrv.nl 적용 버전으로 수정
                     this.posterUrl = YoutubeUtils.getProxiedPoster(playlistPoster)
                     
                     val finalDescription = buildString {
