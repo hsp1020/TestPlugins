@@ -42,10 +42,10 @@ open class YoutubeExtractor : ExtractorApi() {
         private var serverPort: Int = 0
         private val serverLock = Any()
 
-        // SecureRandom 동기식 차단을 회피하기 위한 고속 카운터
+        // SecureRandom 동기식 지연 차단을 배제하기 위한 고성능 카운터
         private val streamCounter = AtomicLong(0)
 
-        // 가상 프록시 매니페스트 LRU 캐시 (최대 1000개 한정)
+        // 가상 프록시 매니페스트 캐시 (LRU 1000 제한)
         private val manifestMap: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(128, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
@@ -54,7 +54,7 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         )
 
-        // 힙 메모리 유출을 전면 제어하는 LRU 스트림 캐시 (최대 1000개 한정)
+        // 메모리 유출을 전면 제어하는 LRU 스트림 캐시 (최대 1000개 제한)
         private val streamUrlCache: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(128, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
@@ -73,15 +73,18 @@ open class YoutubeExtractor : ExtractorApi() {
             ThreadPoolExecutor.CallerRunsPolicy()
         )
 
-        private val proxyHttpClient = okhttp3.OkHttpClient.Builder()
-            .followRedirects(true)
-            .followSslRedirects(true)
-            .retryOnConnectionFailure(true)
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(30, TimeUnit.SECONDS)
-            .build()
+        // 글로벌 커넥션 풀 자원(okHttpClient)을 고스란히 공유 및 상속하기 위한 지연 초기화 블록
+        private val proxyHttpClient by lazy {
+            app.okHttpClient.newBuilder()
+                .followRedirects(true)
+                .followSslRedirects(true)
+                .retryOnConnectionFailure(true)
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(30, TimeUnit.SECONDS)
+                .build()
+        }
 
-        // 핫패스 정규식 매칭을 위한 pre-compile 컴포넌트 선언
+        // 컴파일 정적 불변 정규식 선언부
         private val VISITOR_DATA_REGEX = Regex(""""VISITOR_DATA":"([^"]+)"""")
         private val STS_REGEX = Regex(""""signatureTimestamp":\s*(\d+)"""")
         private val WEB_API_KEY_REGEX = Regex(""""INNERTUBE_API_KEY":"([^"]+)"""")
@@ -393,11 +396,11 @@ open class YoutubeExtractor : ExtractorApi() {
             val server = activeServer
             if (server != null && !server.isClosed) return
             try {
-                // 루프백 호스트(127.0.0.1) 명시적 격리 바인딩을 적용하여 로컬 네트워크 유출 방지
+                // 루프백 호스트(127.0.0.1) 명시적 바인딩을 통해 내부 프로세스 격리 보안 강화
                 val newServer = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
                 activeServer = newServer
                 serverPort = newServer.localPort
-                println("[YT_PROXY_DEBUG] 격리형 가상 프록시 서버 포트 바인딩 완료: $serverPort")
+                println("[YT_PROXY_DEBUG] 가상 프록시 루프백 서버 바인딩 완료: $serverPort")
                 
                 thread(name = "YT-DASH-Server-Acceptor") {
                     try {
@@ -425,7 +428,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
     private fun handleClient(client: Socket) {
         try {
-            // client.use 블록으로 진입하여 안전 소켓 해제 보장
+            // client.use 영역 진입을 통하여 소켓 및 IO 자원의 안전 소멸 주기 확립
             client.use { socket ->
                 val inputStream = socket.getInputStream()
                 val reader = BufferedReader(InputStreamReader(inputStream, java.nio.charset.StandardCharsets.UTF_8))
@@ -440,7 +443,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 
                 val clientHeaders = LinkedHashMap<String, String>()
                 var headerLines = 0
-                // 비정상 패킷 차단 안전 가드
                 while (headerLines++ < 100) {
                     val line = reader.readLine()
                     if (line.isNullOrBlank()) break
@@ -526,7 +528,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 rawOutWriter.flush()
 
                 response.body?.byteStream()?.use { input ->
-                    // 64KB 고속 버퍼 릴레이 데이터 전송 지원
+                    // 데이터 복사 효율 극대화를 위한 고속 복사 버퍼 64KB 고정 릴레이
                     input.copyTo(output, bufferSize = 65536)
                 }
                 output.flush()
@@ -541,12 +543,12 @@ open class YoutubeExtractor : ExtractorApi() {
         audioList: List<AudioInfo>,
         durationSec: Long
     ): String {
-        // 동기 난수 고갈 문제를 보완하는 Atomic 고유 ID 체계 매핑
+        // 암호학적 엔트로피 차단을 우회하기 위한 Atomic 고유 카운터 아이디 매핑
         val videoChunkId = "v_${streamCounter.getAndIncrement()}"
         streamUrlCache[videoChunkId] = video.url
         val proxyVideoUrl = "http://127.0.0.1:$serverPort/chunk?id=$videoChunkId"
         
-        val cleanVideoUrl = escapeXml(proxyVideoUrl)
+        // AtomicLong 기반 ID는 XML 파괴용 특수문자가 물리적으로 부재하므로 escapeXml 단계 소거
         val durationString = "PT${durationSec}S"
 
         val sb = java.lang.StringBuilder(2048)
@@ -560,7 +562,7 @@ open class YoutubeExtractor : ExtractorApi() {
         sb.append("""
             <AdaptationSet mimeType="${video.mimeType}" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
               <Representation id="video" bandwidth="4000000" width="0" height="${video.height}" codecs="${video.codec}">
-                <BaseURL>$cleanVideoUrl</BaseURL>
+                <BaseURL>$proxyVideoUrl</BaseURL>
                 $vSegmentBase
               </Representation>
             </AdaptationSet>
@@ -570,7 +572,6 @@ open class YoutubeExtractor : ExtractorApi() {
             val audioIdChunk = "a_${streamCounter.getAndIncrement()}"
             streamUrlCache[audioIdChunk] = audio.url
             val proxyAudioUrl = "http://127.0.0.1:$serverPort/chunk?id=$audioIdChunk"
-            val cleanAudioUrl = escapeXml(proxyAudioUrl)
 
             val audioId = "audio_$index"
             val aSegmentBase = if (audio.initRange != null && audio.indexRange != null) {
@@ -580,7 +581,7 @@ open class YoutubeExtractor : ExtractorApi() {
             sb.append("""
                 <AdaptationSet mimeType="${audio.mimeType}" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
                   <Representation id="$audioId" bandwidth="${if(audio.bitrate>0) audio.bitrate else 128000}" codecs="${audio.codec}">
-                    <BaseURL>$cleanAudioUrl</BaseURL>
+                    <BaseURL>$proxyAudioUrl</BaseURL>
                     $aSegmentBase
                   </Representation>
                 </AdaptationSet>
@@ -589,23 +590,6 @@ open class YoutubeExtractor : ExtractorApi() {
 
         sb.append("</Period>")
         sb.append("</MPD>")
-        return sb.toString()
-    }
-
-    private fun escapeXml(url: String): String {
-        if (!url.contains('&') && !url.contains('<') && !url.contains('>') && !url.contains('\'') && !url.contains('"')) return url
-        val sb = java.lang.StringBuilder(url.length + 16)
-        for (i in 0 until url.length) {
-            val c = url[i]
-            when (c) {
-                '&' -> sb.append("&amp;")
-                '<' -> sb.append("&lt;")
-                '>' -> sb.append("&gt;")
-                '\'' -> sb.append("&apos;")
-                '"' -> sb.append("&quot;")
-                else -> sb.append(c)
-            }
-        }
         return sb.toString()
     }
 }
