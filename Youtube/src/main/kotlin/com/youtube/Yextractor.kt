@@ -182,7 +182,7 @@ open class YoutubeExtractor : ExtractorApi() {
                             "client" to mapOf(
                                 "clientName" to "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
                                 "clientVersion" to "2.0",
-                                "hl" to "en",
+                                "hl" to "en", // 컴파일 에러 해결을 위해 원래의 하드코딩 형식 "en"으로 정상 환원
                                 "gl" to "US",
                                 "visitorData" to visitorData
                             ),
@@ -242,7 +242,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     callback(
                         newExtractorLink(
                             this@YoutubeExtractor.name,
-                            "YouTube Live",
+                            "YouTube Live (M3U8)",
                             hlsUrl,
                             type = ExtractorLinkType.M3U8
                         ) {
@@ -323,6 +323,13 @@ open class YoutubeExtractor : ExtractorApi() {
                         var subUrl = track.optString("baseUrl")
                         val lang = track.optString("languageCode")
                         
+                        // [자막 최적화] 자동 생성(Auto-generated / ASR) 자막 식별 및 필터링 제거
+                        val kind = track.optString("kind", "")
+                        val vssId = track.optString("vssId", "")
+                        if (kind == "asr" || vssId.startsWith("a.")) {
+                            continue
+                        }
+
                         val nameObj = track.optJSONObject("name")
                         var displayName = nameObj?.optString("simpleText") ?: ""
                         if (displayName.isBlank()) {
@@ -333,6 +340,12 @@ open class YoutubeExtractor : ExtractorApi() {
                         }
                         if (displayName.isBlank()) {
                             displayName = lang.uppercase()
+                        }
+
+                        // [자막 최적화] 이름 기반의 2차 자동 생성 자막 안전 장치 필터링
+                        if (displayName.contains("auto-generated", ignoreCase = true) || 
+                            displayName.contains("자동 생성", ignoreCase = true)) {
+                            continue
                         }
 
                         if (subUrl.isNotEmpty() && lang.isNotEmpty()) {
@@ -459,7 +472,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     val targetYoutubeUrl = if (chunkId != null) streamUrlCache[chunkId] else null
 
                     if (targetYoutubeUrl != null) {
-                        proxyChunkToYouTube(socket, targetYoutubeUrl, clientHeaders)
+                        proxyChunkToYouTube(client, targetYoutubeUrl, clientHeaders)
                     } else {
                         outWriter.print("HTTP/1.1 404 Not Found\r\n\r\n")
                         outWriter.flush()
@@ -503,7 +516,9 @@ open class YoutubeExtractor : ExtractorApi() {
             }
 
             val request = requestBuilder.build()
-            proxyHttpClient.newCall(request).execute().use { response ->
+            val response = proxyHttpClient.newCall(request).execute()
+            
+            try {
                 if (response.code == 403 || response.code == 400) {
                     println("[YT_PROXY_DEBUG] 🚨 유튜브 CDN 에러 발생: ${response.code}")
                     val output = socket.getOutputStream()
@@ -525,11 +540,16 @@ open class YoutubeExtractor : ExtractorApi() {
                 rawOutWriter.print("\r\n")
                 rawOutWriter.flush()
 
-                response.body?.byteStream()?.use { input ->
-                    // 64KB 고속 버퍼 릴레이 데이터 전송 지원
-                    input.copyTo(output, bufferSize = 65536)
+                val body = response.body
+                if (body != null) {
+                    body.byteStream().use { input ->
+                        // 64KB 고속 버퍼 릴레이 데이터 전송 지원
+                        input.copyTo(output, bufferSize = 65536)
+                    }
                 }
                 output.flush()
+            } finally {
+                response.close()
             }
         } catch (e: Exception) {
             println("[YT_PROXY_DEBUG] 프록시 릴레이 중 예외 발생: ${e.message}")
@@ -546,7 +566,6 @@ open class YoutubeExtractor : ExtractorApi() {
         streamUrlCache[videoChunkId] = video.url
         val proxyVideoUrl = "http://127.0.0.1:$serverPort/chunk?id=$videoChunkId"
         
-        // AtomicLong 기반 ID는 XML 파괴용 특수문자가 물리적으로 부재하므로 escapeXml 단계 소거
         val durationString = "PT${durationSec}S"
 
         val sb = java.lang.StringBuilder(2048)
