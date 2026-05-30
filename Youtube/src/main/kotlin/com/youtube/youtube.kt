@@ -2305,6 +2305,7 @@ class YoutubeProvider(
         }
     }
 
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -2317,8 +2318,8 @@ class YoutubeProvider(
 
         var playerResponseText = ""
         try {
-            // 쇼츠 진입 시 전용 시청기록 및 수급 엔드포인트인 reel_item_watch API로 직접 분기 우회
-            val apiUrl = if (isShort) "$mainUrl/youtubei/v1/reel/reel_item_watch" else "$mainUrl/youtubei/v1/player"
+            // 쇼츠일 경우 시청기록 수급 필드를 포함한 단독 엔드포인트(?%24fields=playerResponse) 지정
+            val apiUrl = if (isShort) "$mainUrl/youtubei/v1/reel/reel_item_watch?%24fields=playerResponse" else "$mainUrl/youtubei/v1/player"
             val payload = if (isShort) {
                 mapOf(
                     "context" to mapOf(
@@ -2354,9 +2355,17 @@ class YoutubeProvider(
 
         if (playerResponseText.isNotBlank()) {
             try {
-                val playerResponse = parseJson<PlayerResponse>(playerResponseText)
+                val root = org.json.JSONObject(playerResponseText)
+                // 쇼츠 전용 중첩 구조(playerResponse) 감지 시 한 단계를 벗겨내어 일반 VOD 구조와 일치화 처리
+                val targetJson = if (root.has("playerResponse")) {
+                    root.getJSONObject("playerResponse").toString()
+                } else {
+                    playerResponseText
+                }
+                val playerResponse = parseJson<PlayerResponse>(targetJson)
                 triggerPlaybackTracking(playerResponse.playbackTracking, videoId)
             } catch (e: Exception) {
+                logError(e)
             }
         }
 
