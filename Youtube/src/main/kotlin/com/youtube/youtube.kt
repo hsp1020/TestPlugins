@@ -1168,6 +1168,9 @@ class YoutubeProvider(
         try {
             if (page == 1) {
                 if (isChip) {
+                    savedApiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
+                    savedVisitorData = savedVisitorData ?: appPrefs?.getString("yt_visitor_data", null)
+                    savedClientVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION)
                     val tokenToUse = requestData.removePrefix("chip_")
 
                     if (!savedApiKey.isNullOrBlank()) {
