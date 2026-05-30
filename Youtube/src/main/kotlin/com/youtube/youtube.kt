@@ -98,7 +98,7 @@ object YoutubeUtils {
     fun getHomeProxiedPoster(poster: String?): String? {
         if (poster.isNullOrBlank()) return null
         return try {
-            "https://wsrv.nl/?url=${URLEncoder.encode(poster, "UTF-8")}&w=1280&h=720&fit=contain&cbg=black"
+            "https://wsrv.nl/?url=${URLEncoder.encode(poster, "UTF-8")}&w=1920&h=1080&fit=contain&cbg=black"
         } catch (e: Exception) {
             poster
         }
