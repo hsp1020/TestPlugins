@@ -69,7 +69,7 @@ open class YoutubeExtractor : ExtractorApi() {
             .build()
             
         init {
-            println("[YT_DEBUG_INIT] 독자 API 추출기 초기화 완료 (재생시간 버그 패치완료)")
+            println("[YT_DEBUG_INIT] 독자 API 추출기 초기화 완료 (더빙, 자막, 포맷팅 완벽 복구)")
         }
     }
 
@@ -94,10 +94,10 @@ open class YoutubeExtractor : ExtractorApi() {
         val bitrate: Int,
         val initRange: String?,
         val indexRange: String?,
-        val language: String
+        val languageId: String,
+        val displayName: String // 더빙/원본 구분을 위한 이름
     )
 
-    // [핵심 수정] streamingData와 함께 실제 영상 길이(초)를 반환하도록 변경
     private suspend fun fetchStreamingData(videoId: String): Pair<JSONObject?, Long> {
         val watchUrl = "https://www.youtube.com/watch?v=$videoId"
         
@@ -119,8 +119,8 @@ open class YoutubeExtractor : ExtractorApi() {
                     "osVersion" to "12L",
                     "deviceMake" to "Oculus",
                     "deviceModel" to "Quest 3",
-                    "hl" to "en",
-                    "gl" to "US",
+                    "hl" to "ko", // 자막 및 더빙 트랙 이름을 한국어로 받기 위해 ko 설정
+                    "gl" to "KR",
                     "visitorData" to visitorData
                 )
             ),
@@ -139,21 +139,14 @@ open class YoutubeExtractor : ExtractorApi() {
         )
 
         try {
-            println("[YT_DEBUG_EXTRACTOR] ANDROID_VR API 직접 호출 중... (sts: $sts)")
             val vrRes = app.post(apiUrl, json = vrPayload, headers = vrHeaders).text
             val vrJson = JSONObject(vrRes)
             val status = vrJson.optJSONObject("playabilityStatus")?.optString("status")
-            
-            // 실제 영상 길이 추출 (없으면 기본값 1시간)
             val lengthSeconds = vrJson.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
             
-            println("[YT_DEBUG_EXTRACTOR] ANDROID_VR API 응답 상태: $status, 영상 길이: ${lengthSeconds}초")
-            
             if (status == "OK" || vrJson.has("streamingData")) {
-                println("[YT_DEBUG_EXTRACTOR] ✅ ANDROID_VR에서 streamingData 확보 성공!")
                 return Pair(vrJson.optJSONObject("streamingData"), lengthSeconds)
             } else if (status == "UNPLAYABLE" || status == "LOGIN_REQUIRED") {
-                println("[YT_DEBUG_EXTRACTOR] VR 차단됨. TV_EMBEDDED로 연령 제한 우회 시도...")
                 val webApiKey = Regex(""""INNERTUBE_API_KEY":"([^"]+)"""").find(html)?.groupValues?.get(1)
                 
                 if (!webApiKey.isNullOrEmpty()) {
@@ -164,8 +157,8 @@ open class YoutubeExtractor : ExtractorApi() {
                             "client" to mapOf(
                                 "clientName" to "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
                                 "clientVersion" to "2.0",
-                                "hl" to "en",
-                                "gl" to "US",
+                                "hl" to "ko",
+                                "gl" to "KR",
                                 "visitorData" to visitorData
                             ),
                             "thirdParty" to mapOf("embedUrl" to "https://www.youtube.com")
@@ -179,7 +172,6 @@ open class YoutubeExtractor : ExtractorApi() {
                     val tvRes = app.post(tvApiUrl, json = tvPayload).text
                     val tvJson = JSONObject(tvRes)
                     val tvLengthSeconds = tvJson.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
-                    println("[YT_DEBUG_EXTRACTOR] TV API 응답 상태: ${tvJson.optJSONObject("playabilityStatus")?.optString("status")}")
                     return Pair(tvJson.optJSONObject("streamingData"), tvLengthSeconds)
                 }
             }
@@ -196,17 +188,14 @@ open class YoutubeExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        println("[YT_DEBUG_EXTRACTOR] ===== GET URL START =====")
         val cleanedUrl = url.replace(schemaStripRegex, "")
         val videoId = YoutubeUtils.extractYoutubeId(cleanedUrl) ?: cleanedUrl
-        println("[YT_DEBUG_EXTRACTOR] 비디오 ID: $videoId")
 
         withContext(Dispatchers.IO) {
             try {
                 val (streamingData, durationSeconds) = fetchStreamingData(videoId)
 
                 if (streamingData == null) {
-                    println("[YT_DEBUG_EXTRACTOR] 🚨 모든 우회 실패! streamingData 없음.")
                     callback(newExtractorLink(source = "YouTube Downloader", name = "Cobalt Web Download(4K)", url = "https://qwkuns.me/#https://www.youtube.com/watch?v=$videoId", type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
                     callback(newExtractorLink(source = "YouTube Downloader", name = "SOSYouTube Web Download(1080p)", url = "https://www.sosyoutube.com/watch?v=$videoId", type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
                     return@withContext
@@ -221,12 +210,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     val format = adaptiveFormats.getJSONObject(i)
                     val streamUrl = format.optString("url")
                     
-                    if (streamUrl.isNullOrEmpty()) {
-                        if (format.has("signatureCipher")) {
-                            println("[YT_DEBUG_EXTRACTOR] ⚠️ 암호화된 스트림(signatureCipher) 발견 건너뜀.")
-                        }
-                        continue
-                    }
+                    if (streamUrl.isNullOrEmpty() || format.has("signatureCipher")) continue
 
                     val rawMimeType = format.optString("mimeType", "")
                     var cleanMimeType = rawMimeType
@@ -260,34 +244,66 @@ open class YoutubeExtractor : ExtractorApi() {
                         videoOnlyList.add(StreamInfo(streamUrl, cleanMimeType, codec, height, label, initR, indexR))
                     } else if (cleanMimeType.startsWith("audio/")) {
                         val bitrate = format.optInt("bitrate", 128000)
+                        
+                        // [보고서 1, 2번 개선] 오디오 트랙 이름과 언어 코드 정제
                         val audioTrack = format.optJSONObject("audioTrack")
-                        val lang = audioTrack?.optString("id", "Default")?.uppercase() ?: "DEFAULT"
+                        val rawId = audioTrack?.optString("id", "Default") ?: "Default"
+                        // EN.4 -> EN 으로 정제
+                        val langId = if (rawId.contains(".")) rawId.substringBefore(".").uppercase() else rawId.uppercase()
+                        // Korean (Dubbed) 같은 친절한 이름을 가져오고, 없으면 langId 사용
+                        val displayName = audioTrack?.optString("displayName", langId) ?: langId
+                        
                         if (codec.isEmpty()) codec = if (cleanMimeType.contains("webm")) "opus" else "mp4a.40.2"
                         
-                        audioInfoList.add(AudioInfo(streamUrl, cleanMimeType, codec, bitrate, initR, indexR, lang))
+                        audioInfoList.add(AudioInfo(streamUrl, cleanMimeType, codec, bitrate, initR, indexR, langId, displayName))
                     }
                 }
 
-                println("[YT_DEBUG_EXTRACTOR] 파싱 완료 -> 비디오: ${videoOnlyList.size}개, 오디오: ${audioInfoList.size}개")
+                // [보고서 3번 개선] 자막 및 구글 자동 번역 자막 완벽 복구
+                val captionsData = streamingData.optJSONObject("captions")?.optJSONObject("playerCaptionsTracklistRenderer")
+                if (captionsData != null) {
+                    val captionTracks = captionsData.optJSONArray("captionTracks") ?: JSONArray()
+                    val translationLanguages = captionsData.optJSONArray("translationLanguages") ?: JSONArray()
 
-                val captions = streamingData.optJSONObject("captions")?.optJSONObject("playerCaptionsTracklistRenderer")?.optJSONArray("captionTracks")
-                if (captions != null) {
-                    for (i in 0 until captions.length()) {
-                        val track = captions.getJSONObject(i)
-                        val subUrl = track.optString("baseUrl")
-                        val lang = track.optString("languageCode")
-                        if (subUrl.isNotEmpty() && lang.isNotEmpty()) {
-                            subtitleCallback(SubtitleFile(lang, subUrl))
+                    for (i in 0 until captionTracks.length()) {
+                        val track = captionTracks.getJSONObject(i)
+                        var subUrl = track.optString("baseUrl")
+                        val langCode = track.optString("languageCode")
+                        val nameObj = track.optJSONObject("name")
+                        val subName = nameObj?.optString("simpleText", langCode) ?: langCode
+
+                        if (subUrl.isNotEmpty()) {
+                            // 핵심: SRT 포맷 강제 변환
+                            subUrl = subUrl.replace(Regex("&fmt=[^&]+"), "")
+                            if (!subUrl.contains("fmt=srt")) {
+                                subUrl += "&fmt=srt"
+                            }
+                            
+                            subtitleCallback(SubtitleFile(subName, subUrl))
+
+                            // [핵심] 첫 번째 자막 트랙(보통 자동생성 또는 기본)을 이용해 구글 번역 자막 생성
+                            if (i == 0 && translationLanguages.length() > 0) {
+                                for (j in 0 until translationLanguages.length()) {
+                                    val transLang = translationLanguages.getJSONObject(j)
+                                    val tLangCode = transLang.optString("languageCode")
+                                    val tNameObj = transLang.optJSONObject("languageName")
+                                    val tName = tNameObj?.optString("simpleText", tLangCode) ?: tLangCode
+
+                                    val transUrl = "$subUrl&tlang=$tLangCode"
+                                    subtitleCallback(SubtitleFile("$tName (번역)", transUrl))
+                                }
+                            }
                         }
                     }
                 }
 
                 if (videoOnlyList.isNotEmpty() && audioInfoList.isNotEmpty()) {
-                    val audiosByLanguage = audioInfoList.groupBy { it.language }
+                    // [보고서 2번 개선] displayName(예: Korean (Dubbed)) 기준으로 오디오 그룹화
+                    val audiosByName = audioInfoList.groupBy { it.displayName }
                     startServerIfNeeded()
 
                     for (video in videoOnlyList.distinctBy { it.height }) {
-                        for ((lang, audios) in audiosByLanguage) {
+                        for ((audioName, audios) in audiosByName) {
                             val bestAudio = if (video.mimeType.contains("webm")) {
                                 audios.maxByOrNull { if (it.mimeType.contains("webm")) it.bitrate + 1000000 else it.bitrate }
                             } else {
@@ -295,15 +311,17 @@ open class YoutubeExtractor : ExtractorApi() {
                             }
 
                             if (bestAudio != null) {
-                                // [수정] 하드코딩된 3600L 대신 실제 영상 길이(durationSeconds)를 전달
                                 val dashXml = buildDashManifestXml(video, listOf(bestAudio), durationSeconds)
                                 val localLink = registerManifestAndGetUrl(dashXml)
 
                                 if (localLink != null) {
-                                    val finalName = "${video.label} ($lang) ${video.label}"
+                                    // [보고서 1번 개선] 소스명과 화질 라벨을 깔끔하게 분리
+                                    val sourceName = "${this@YoutubeExtractor.name} ($audioName)"
+                                    val finalName = "${video.height}p"
+                                    
                                     callback(
                                         newExtractorLink(
-                                            "${this@YoutubeExtractor.name} ($lang)", finalName, localLink, type = ExtractorLinkType.DASH
+                                            sourceName, finalName, localLink, type = ExtractorLinkType.DASH
                                         ) {
                                             this.referer = mainUrl
                                             this.quality = video.height
@@ -320,7 +338,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 callback(newExtractorLink(source = "YouTube Downloader", name = "SOSYouTube Web Download(1080p)", url = "https://www.sosyoutube.com/watch?v=$videoId", type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
 
             } catch (e: Exception) { 
-                println("[YT_DEBUG_EXTRACTOR] 🚨 Exception 발생: ${e.message}")
                 logError(e) 
             }
         }
@@ -334,7 +351,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 val newServer = ServerSocket(0)
                 activeServer = newServer
                 serverPort = newServer.localPort
-                println("[YT_PROXY_DEBUG] 가상 프록시 서버 포트 바인딩 완료: $serverPort")
                 
                 thread(name = "YT-DASH-Server-Acceptor") {
                     try {
@@ -346,7 +362,6 @@ open class YoutubeExtractor : ExtractorApi() {
                             serverExecutor.execute { handleClient(client) }
                         }
                     } catch (e: Exception) {
-                        println("[YT_PROXY_DEBUG] ServerSocket accept 오류: ${e.message}")
                     }
                 }
             } catch (e: Exception) { logError(e) }
@@ -416,9 +431,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
             }
-        } catch (e: Exception) {
-            println("[YT_PROXY_DEBUG] handleClient 예외: ${e.message}")
-        }
+        } catch (e: Exception) { }
     }
 
     private fun proxyChunkToYouTube(socket: Socket, targetUrl: String, clientHeaders: Map<String, String>) {
@@ -440,7 +453,6 @@ open class YoutubeExtractor : ExtractorApi() {
             val response = proxyHttpClient.newCall(request).execute()
             
             if (response.code == 403 || response.code == 400) {
-                println("[YT_PROXY_DEBUG] 🚨 유튜브 CDN 에러 발생: ${response.code}")
                 val output = socket.getOutputStream()
                 val rawOutWriter = java.io.PrintWriter(output, false)
                 rawOutWriter.print("HTTP/1.1 ${response.code} ${response.message}\r\n\r\n")
@@ -465,9 +477,7 @@ open class YoutubeExtractor : ExtractorApi() {
             }
             output.flush()
 
-        } catch (e: Exception) {
-            println("[YT_PROXY_DEBUG] 프록시 릴레이 중 예외 발생: ${e.message}")
-        }
+        } catch (e: Exception) { }
     }
 
     private fun buildDashManifestXml(
