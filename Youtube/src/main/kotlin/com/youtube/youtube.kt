@@ -93,6 +93,28 @@ object YoutubeUtils {
         }
     }
 
+    // 검색 결과창 노출용 세로 규격 쇼츠 전용 커스텀 썸네일 변환기 (600x900)
+    fun getShortsSearchPoster(videoId: String): String {
+        return try {
+            val targetUrl = "https://i.ytimg.com/vi/$videoId/oardefault.jpg?sqp=-oaymwEoCJUDENAFSFqQAgHyq4qpAxcIARUAAIhC2AEB4gEKCBgQAhgGOAFAAQ==&rs=AOn4CLDWlHo9hImueeIb7JfDzDGNRuQ5tg&usqp=CCk"
+            val encoded = URLEncoder.encode(targetUrl, "UTF-8")
+            "https://wsrv.nl/?url=$encoded&w=600&h=900&fit=contain&cbg=black"
+        } catch (e: Exception) {
+            "https://i.ytimg.com/vi/$videoId/oar2.jpg"
+        }
+    }
+
+    // 에피소드 플레이리스트 노출용 가로 규격 쇼츠 전용 커스텀 썸네일 변환기 (1280x720, 우측 정렬 크롭)
+    fun getShortsEpisodeThumbnail(videoId: String): String {
+        return try {
+            val targetUrl = "https://i.ytimg.com/vi/$videoId/oardefault.jpg?sqp=-oaymwEoCJUDENAFSFqQAgHyq4qpAxcIARUAAIhC2AEB4gEKCBgQAhgGOAFAAQ==&rs=AOn4CLDWlHo9hImueeIb7JfDzDGNRuQ5tg&usqp=CCk"
+            val encoded = URLEncoder.encode(targetUrl, "UTF-8")
+            "https://wsrv.nl/?url=$encoded&w=1280&h=720&fit=contain&cbg=black&a=right"
+        } catch (e: Exception) {
+            "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
+        }
+    }
+
     fun findConfig(html: String, key: String): String? {
         return try {
             val regex = regexCache.computeIfAbsent(key) { k ->
@@ -253,9 +275,11 @@ class YoutubeProvider(
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Live)
 
     companion object {
+        // 비동기 CME를 방지하기 위해 마련된 전역 보존 동적 리스트
         private val homeShorts = Collections.synchronizedList(mutableListOf<Episode>())
         private val searchShorts = Collections.synchronizedList(mutableListOf<Episode>())
 
+        // 힙 영역 메모리 누수를 제어하는 LRU 기반 캐시 구조
         private val continuationTokenCache: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(128, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
@@ -272,6 +296,7 @@ class YoutubeProvider(
             }
         )
 
+        // API Key 및 인증 파라미터 메모리 가시성(Memory Visibility) 보장을 위한 Volatile 동반 변수들
         @Volatile
         private var savedVisitorData: String? = null
         @Volatile
@@ -762,13 +787,8 @@ class YoutubeProvider(
                 }
                 val views = formatViews(viewRaw)
 
-                var poster =
-                    shortsData.getMapKey("thumbnail")?.getListKey("thumbnails")?.lastOrNull()
-                        ?.getString("url")
-                if (poster.isNullOrBlank()) poster =
-                    shortsData.getMapKey("thumbnailViewModel")?.getMapKey("thumbnailViewModel")
-                        ?.getMapKey("image")?.getListKey("sources")?.lastOrNull()?.getString("url")
-                if (poster.isNullOrBlank()) poster = "https://i.ytimg.com/vi/$videoId/oar2.jpg"
+                // 세로 규격 전용 쇼츠 커스텀 썸네일(600x900) 장착
+                val poster = YoutubeUtils.getShortsSearchPoster(videoId)
 
                 val currentList = if (isSearchContext) searchShorts else homeShorts
                 val episodeNum = synchronized(currentList) { currentList.size } + 1
@@ -779,7 +799,8 @@ class YoutubeProvider(
                 
                 val newShortEp = newEpisode(finalUrl) {
                     this.name = title
-                    this.posterUrl = poster
+                    // 에피소드 노출 가로 규격(1280x720, 우측정렬) 쇼츠 커스텀 썸네일 장착
+                    this.posterUrl = YoutubeUtils.getShortsEpisodeThumbnail(videoId)
                     this.episode = episodeNum
                     this.description = descText
                 }
@@ -876,7 +897,9 @@ class YoutubeProvider(
                     val episodeNum = synchronized(currentList) { currentList.size } + 1
                     val contextTag = if (isSearchContext) "&ctx=search" else "&ctx=home"
                     val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
-                    poster = "https://i.ytimg.com/vi/$videoId/oar2.jpg"
+                    
+                    // 쇼츠 전용 커스텀 가로/세로 썸네일 규격 각각 대응
+                    poster = YoutubeUtils.getShortsSearchPoster(videoId)
                     
                     val descText = buildString {
                         if (channel.isNotBlank()) append("채널: $channel")
@@ -888,7 +911,7 @@ class YoutubeProvider(
                     
                     val newShortEp2 = newEpisode(finalUrl) {
                         this.name = title
-                        this.posterUrl = poster
+                        this.posterUrl = YoutubeUtils.getShortsEpisodeThumbnail(videoId)
                         this.episode = episodeNum
                         this.description = descText
                     }
@@ -1197,33 +1220,7 @@ class YoutubeProvider(
                         }
                     }
                 } else {
-                    // 수동 등록 채널/재생목록 URL 로딩 시 첫 페이지 소실(Collapsed) 방지 가이드 연쇄 적용
-                    val isChannelOrPlaylist = requestData.contains("/@") || requestData.contains("/channel/") || requestData.contains("/c/") || requestData.contains("/user/") || requestData.contains("list=")
-                    
-                    val targetUrl = if (requestData == "Home") {
-                        mainUrl
-                    } else if (isChannelOrPlaylist && !requestData.contains("list=")) {
-                        // 채널의 경우 쇼츠나 비디오 탭 강제 강제 전향 전처리
-                        var cleanUrl = requestData.substringBefore("?").removeSuffix("/")
-                        var activeTabKeyword = "/videos"
-                        val tabKeywords = listOf("/featured", "/shorts", "/streams", "/playlists", "/community", "/about", "/videos")
-                        for (keyword in tabKeywords) {
-                            if (requestData.contains(keyword)) {
-                                activeTabKeyword = keyword
-                                break
-                            }
-                        }
-                        for (keyword in tabKeywords) {
-                            if (cleanUrl.endsWith(keyword)) {
-                                cleanUrl = cleanUrl.removeSuffix(keyword)
-                                break
-                            }
-                        }
-                        "$cleanUrl$activeTabKeyword"
-                    } else {
-                        requestData
-                    }
-
+                    val targetUrl = if(requestData == "Home") mainUrl else requestData
                     val html = app.get(targetUrl, interceptor = ytInterceptor).text
                     
                     savedApiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY") ?: savedApiKey
@@ -1262,36 +1259,6 @@ class YoutubeProvider(
                         }
                         processRecursive(initialData, results, seenIds, playlistMode = false)
                         nextContinuation = findTokenRecursive(initialData)
-
-                        // 1페이지 비디오 목록이 비어있고 후속 Continuation이 잡힐 경우 가로 행 증발 방지용 실시간 백그라운드 캐스케이드 강제 트리거
-                        if (results.isEmpty() && !nextContinuation.isNullOrBlank()) {
-                            val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
-                            val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION) ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
-                            if (!apiKey.isNullOrBlank()) {
-                                val apiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
-                                val payload = mapOf(
-                                    "context" to mapOf(
-                                        "client" to mapOf(
-                                            "clientName" to "WEB",
-                                            "clientVersion" to cVersion,
-                                            "hl" to lang,
-                                            "platform" to "DESKTOP"
-                                        )
-                                    ),
-                                    "continuation" to nextContinuation
-                                )
-                                val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
-                                val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
-                                if (response != null) {
-                                    val actions = response["onResponseReceivedActions"] 
-                                        ?: response["onResponseReceivedEndpoints"]
-                                        ?: response["onResponseReceivedCommands"] 
-                                        ?: response
-                                    processRecursive(actions, results, seenIds, playlistMode = false)
-                                    nextContinuation = findTokenRecursive(response)
-                                }
-                            }
-                        }
                     }
                 }
             } else {
@@ -1675,7 +1642,6 @@ class YoutubeProvider(
     }
 
     override suspend fun load(url: String): LoadResponse {
-        // 계속 시청(Continue Watching) 진입 시 메모리 소실에 대처한 연관 쇼츠 전용 복구 메커니즘
         if (url.contains("/shorts/")) {
             val videoId = YoutubeUtils.extractYoutubeId(url) ?: "video"
             val useSearchList = url.contains("ctx=search")
@@ -1684,76 +1650,83 @@ class YoutubeProvider(
             val currentEp = targetEpisodes.find { YoutubeUtils.extractYoutubeId(it.data) == videoId }
 
             var shortTitle = currentEp?.name ?: "Shorts Video"
-            var poster = currentEp?.posterUrl ?: YoutubeUtils.buildThumbnailFromId(videoId)
+            // 쇼츠 세로 규격 커스텀 포스터 변환기(600x900) 장착
+            val poster = YoutubeUtils.getShortsSearchPoster(videoId)
             var shortPlot = currentEp?.description ?: ""
 
-            // 메모리 해제(Cold Start) 상황 포획 시, 백그라운드 API 체인으로 타이틀 및 세로 추천목록 복구 기동
+            // 계속 시청 진입 등으로 메모리 소실 시 player 및 next API를 통한 타이틀/에피소드 복구 파이프라인
             if (currentEp == null || targetEpisodes.size <= 1) {
                 try {
                     val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
                     val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION) ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
                     
-                    if (!apiKey.isNullOrBlank()) {
-                        // 1. 플레이어 API를 통해 실제 원본 타이틀 및 제작자명 추출 복구
-                        val playerUrl = "https://www.youtube.com/youtubei/v1/player?key=$apiKey"
-                        val playerPayload = mapOf(
-                            "context" to mapOf("client" to mapOf("clientName" to "WEB", "clientVersion" to cVersion, "hl" to lang)),
-                            "videoId" to videoId
-                        )
-                        val pResponse = app.post(playerUrl, json = playerPayload, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
-                        if (pResponse != null) {
-                            val details = pResponse["videoDetails"] as? Map<*, *>
-                            val fetchedTitle = details?.getString("title")
-                            val channelName = details?.getString("author")
-                            if (!fetchedTitle.isNullOrBlank()) {
-                                shortTitle = fetchedTitle
-                                shortPlot = if (!channelName.isNullOrBlank()) "채널: $channelName" else ""
-                            }
+                    // 1. 플레이어 API 직접 호출로 실제 제목 및 채널 정보 실시간 역추적
+                    val playerUrl = "https://www.youtube.com/youtubei/v1/player?key=$apiKey"
+                    val playerPayload = mapOf(
+                        "context" to mapOf("client" to mapOf("clientName" to "WEB", "clientVersion" to cVersion, "hl" to lang)),
+                        "videoId" to videoId
+                    )
+                    val pResponse = app.post(playerUrl, json = playerPayload, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                    if (pResponse != null) {
+                        val details = pResponse["videoDetails"] as? Map<*, *>
+                        val fetchedTitle = details?.getString("title")
+                        val channelName = details?.getString("author")
+                        if (!fetchedTitle.isNullOrBlank()) {
+                            shortTitle = fetchedTitle
+                            shortPlot = if (!channelName.isNullOrBlank()) "채널: $channelName" else ""
                         }
-
-                        // 2. 추천 API(/v1/next) 호출 및 쇼츠 전용 선별기 가동
-                        val nextUrl = "https://www.youtube.com/youtubei/v1/next?key=$apiKey"
-                        val nextPayload = mapOf(
-                            "context" to mapOf("client" to mapOf("clientName" to "WEB", "clientVersion" to cVersion, "hl" to lang)),
-                            "videoId" to videoId
-                        )
-                        val nResponse = app.post(nextUrl, json = nextPayload, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
-                        val recEpisodes = mutableListOf<Episode>()
-                        
-                        // 현재 시청 지점 정보 기입
-                        recEpisodes.add(newEpisode(url) {
-                            this.name = shortTitle
-                            this.posterUrl = poster
-                            this.episode = 1
-                            this.description = shortPlot
-                        })
-
-                        if (nResponse != null) {
-                            val recs = mutableListOf<SearchResponse>()
-                            val seenRecIds = mutableSetOf<String>().apply { add(videoId) }
-                            val secondaryResults = safeGet(nResponse, "contents", "twoColumnWatchNextResults", "secondaryResults", "secondaryResults", "results")
-                            if (secondaryResults != null) {
-                                processRecursive(secondaryResults, recs, seenRecIds, false)
-                            }
-                            
-                            var epCount = 2
-                            recs.forEach { rec ->
-                                // 화이트리스트 검증: 오직 세로 쇼츠 비디오 유형의 추천만 선별 기입하여 플레이리스트 구성 (일반 롱폼 비디오 완벽 차단)
-                                if (rec.url.contains("/shorts/")) {
-                                    val recVidId = YoutubeUtils.extractYoutubeId(rec.url)
-                                    val cleanName = rec.name.replaceFirst(Regex("^\\{.*?\\}\\s*"), "")
-                                    recEpisodes.add(newEpisode("$mainUrl/shorts/$recVidId?ctx=home") {
-                                        this.name = cleanName
-                                        this.posterUrl = rec.posterUrl
-                                        this.episode = epCount++
-                                    })
-                                }
-                            }
-                        }
-                        targetEpisodes = recEpisodes
                     }
+
+                    // 2. 추천 API(/v1/next) 연쇄 호출하여 추천 쇼츠/비디오 목록 복원
+                    val nextUrl = "https://www.youtube.com/youtubei/v1/next?key=$apiKey"
+                    val nextPayload = mapOf(
+                        "context" to mapOf("client" to mapOf("clientName" to "WEB", "clientVersion" to cVersion, "hl" to lang)),
+                        "videoId" to videoId
+                    )
+                    val nResponse = app.post(nextUrl, json = nextPayload, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                    val recEpisodes = mutableListOf<Episode>()
+                    
+                    // 현재 계속 시청하는 쇼츠를 인덱스 1번에 배치 (에피소드 가로 썸네일 규격 적용)
+                    recEpisodes.add(newEpisode(url) {
+                        this.name = shortTitle
+                        this.posterUrl = YoutubeUtils.getShortsEpisodeThumbnail(videoId)
+                        this.episode = 1
+                        this.description = shortPlot
+                    })
+
+                    if (nResponse != null) {
+                        val recs = mutableListOf<SearchResponse>()
+                        val seenRecIds = mutableSetOf<String>().apply { add(videoId) }
+                        val secondaryResults = safeGet(nResponse, "contents", "twoColumnWatchNextResults", "secondaryResults", "secondaryResults", "results")
+                        if (secondaryResults != null) {
+                            processRecursive(secondaryResults, recs, seenRecIds, false)
+                        }
+                        
+                        var epCount = 2
+                        recs.forEach { rec ->
+                            if (rec.url.contains("watch?v=") || rec.url.contains("/shorts/")) {
+                                val recVidId = YoutubeUtils.extractYoutubeId(rec.url)
+                                val cleanName = rec.name.replaceFirst(Regex("^\\{.*?\\}\\s*"), "")
+                                val recUrl = "$mainUrl/shorts/$recVidId?ctx=home"
+                                recEpisodes.add(newEpisode(recUrl) {
+                                    this.name = cleanName
+                                    this.posterUrl = recVidId?.let { YoutubeUtils.getShortsEpisodeThumbnail(it) } ?: rec.posterUrl
+                                    this.episode = epCount++
+                                })
+                            }
+                        }
+                    }
+                    targetEpisodes = recEpisodes
                 } catch (e: Exception) {
                     logError(e)
+                }
+            } else {
+                // 캐시 보존 시 기존 에피소드들의 포스터 주소를 에피소드 가로 썸네일(1280x720) 규격으로 교정
+                targetEpisodes.forEach { ep ->
+                    val epVidId = YoutubeUtils.extractYoutubeId(ep.data)
+                    if (epVidId != null) {
+                        ep.posterUrl = YoutubeUtils.getShortsEpisodeThumbnail(epVidId)
+                    }
                 }
             }
 
@@ -2343,3 +2316,4 @@ class YoutubeProvider(
         return true
     }    
 }
+
