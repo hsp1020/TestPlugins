@@ -20,7 +20,7 @@ import java.io.InputStreamReader
 import java.io.PrintWriter
 import java.net.ServerSocket
 import java.net.Socket
-import java.util.UUID
+import java.net.InetAddress
 import java.util.Collections
 import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
@@ -28,6 +28,7 @@ import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.ThreadFactory
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 
 open class YoutubeExtractor : ExtractorApi() {
@@ -41,7 +42,10 @@ open class YoutubeExtractor : ExtractorApi() {
         private var serverPort: Int = 0
         private val serverLock = Any()
 
-        // LRU 기반 가상 프록시 매니페스트 캐시 (최대 1000개 유지)
+        // SecureRandom 동기식 차단을 회피하기 위한 고속 카운터
+        private val streamCounter = AtomicLong(0)
+
+        // 가상 프록시 매니페스트 LRU 캐시 (최대 1000개 한정)
         private val manifestMap: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(128, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
@@ -50,7 +54,7 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         )
 
-        // LRU 기반 스트림 URL 캐시 (메모리 누수 완전 방지, 최대 1000개 제한)
+        // 힙 메모리 유출을 전면 제어하는 LRU 스트림 캐시 (최대 1000개 한정)
         private val streamUrlCache: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(128, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
@@ -60,11 +64,11 @@ open class YoutubeExtractor : ExtractorApi() {
         )
 
         private val serverExecutor = ThreadPoolExecutor(
-            8, 
-            32, 
+            4, 
+            16, 
             30L, 
             TimeUnit.SECONDS,
-            LinkedBlockingQueue(1024),
+            LinkedBlockingQueue(128),
             ThreadFactory { r -> Thread(r, "YT-DASH-Server-Worker") },
             ThreadPoolExecutor.CallerRunsPolicy()
         )
@@ -76,9 +80,16 @@ open class YoutubeExtractor : ExtractorApi() {
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .build()
+
+        // 핫패스 정규식 매칭을 위한 pre-compile 컴포넌트 선언
+        private val VISITOR_DATA_REGEX = Regex(""""VISITOR_DATA":"([^"]+)"""")
+        private val STS_REGEX = Regex(""""signatureTimestamp":\s*(\d+)"""")
+        private val WEB_API_KEY_REGEX = Regex(""""INNERTUBE_API_KEY":"([^"]+)"""")
+        private val CHUNK_ID_REGEX = Regex("id=([^&]+)")
+        private val FMT_REPLACE_REGEX = Regex("&fmt=[^&]+")
             
         init {
-            println("[YT_DEBUG_INIT] 유튜브 DASH 추출기 초기화 완료 (Android_VR 전용 초경량 패치 및 LRU 메모리 관리 장착)")
+            println("[YT_DEBUG_INIT] 유튜브 DASH 추출기 최적화 가상서버 초기화 완료")
         }
     }
 
@@ -109,8 +120,8 @@ open class YoutubeExtractor : ExtractorApi() {
         val watchUrl = "https://www.youtube.com/watch?v=$videoId"
         
         val html = app.get(watchUrl, headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)).text
-        val visitorData = Regex(""""VISITOR_DATA":"([^"]+)"""").find(html)?.groupValues?.get(1) ?: ""
-        val sts = Regex(""""signatureTimestamp":\s*(\d+)""").find(html)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+        val visitorData = VISITOR_DATA_REGEX.find(html)?.groupValues?.get(1) ?: ""
+        val sts = STS_REGEX.find(html)?.groupValues?.get(1)?.toIntOrNull() ?: 0
 
         val androidApiKey = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
         val apiUrl = "https://www.youtube.com/youtubei/v1/player?key=$androidApiKey"
@@ -160,7 +171,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 return Pair(vrJson, lengthSeconds)
             } else if (status == "UNPLAYABLE" || status == "LOGIN_REQUIRED") {
                 println("[YT_DEBUG_EXTRACTOR] VR 차단됨. TV_EMBEDDED로 연령 제한 우회 시도...")
-                val webApiKey = Regex(""""INNERTUBE_API_KEY":"([^"]+)"""").find(html)?.groupValues?.get(1)
+                val webApiKey = WEB_API_KEY_REGEX.find(html)?.groupValues?.get(1)
                 
                 if (!webApiKey.isNullOrEmpty()) {
                     val tvApiUrl = "https://www.youtube.com/youtubei/v1/player?key=$webApiKey"
@@ -256,12 +267,24 @@ open class YoutubeExtractor : ExtractorApi() {
                     var cleanMimeType = rawMimeType
                     var codec = ""
                     
-                    if (rawMimeType.contains(";")) {
-                        val parts = rawMimeType.split(";")
-                        cleanMimeType = parts[0].trim()
-                        val codecPart = parts.find { it.trim().startsWith("codecs=") }
-                        if (codecPart != null) {
-                            codec = codecPart.substringAfter("=").replace("\"", "").trim()
+                    val semicolonIndex = rawMimeType.indexOf(";")
+                    if (semicolonIndex != -1) {
+                        cleanMimeType = rawMimeType.substring(0, semicolonIndex).trim()
+                        val rawCodecs = rawMimeType.substring(semicolonIndex + 1)
+                        val codecStart = rawCodecs.indexOf("codecs=")
+                        if (codecStart != -1) {
+                            val afterCodecs = rawCodecs.substring(codecStart + 7).trim()
+                            val firstQuote = afterCodecs.indexOf("\"")
+                            if (firstQuote != -1) {
+                                val secondQuote = afterCodecs.indexOf("\"", firstQuote + 1)
+                                codec = if (secondQuote != -1) {
+                                    afterCodecs.substring(firstQuote + 1, secondQuote)
+                                } else {
+                                    afterCodecs.substring(firstQuote + 1)
+                                }
+                            } else {
+                                codec = afterCodecs
+                            }
                         }
                     }
 
@@ -313,7 +336,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
                         if (subUrl.isNotEmpty() && lang.isNotEmpty()) {
                             if (subUrl.startsWith("http")) {
-                                subUrl = subUrl.replace(Regex("&fmt=[^&]+"), "")
+                                subUrl = subUrl.replace(FMT_REPLACE_REGEX, "")
                                 if (!subUrl.contains("fmt=srt")) {
                                     subUrl = "$subUrl&fmt=srt"
                                 }
@@ -370,10 +393,11 @@ open class YoutubeExtractor : ExtractorApi() {
             val server = activeServer
             if (server != null && !server.isClosed) return
             try {
-                val newServer = ServerSocket(0)
+                // 루프백 호스트(127.0.0.1) 명시적 격리 바인딩을 적용하여 로컬 네트워크 유출 방지
+                val newServer = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
                 activeServer = newServer
                 serverPort = newServer.localPort
-                println("[YT_PROXY_DEBUG] 가상 프록시 서버 포트 바인딩 완료: $serverPort")
+                println("[YT_PROXY_DEBUG] 격리형 가상 프록시 서버 포트 바인딩 완료: $serverPort")
                 
                 thread(name = "YT-DASH-Server-Acceptor") {
                     try {
@@ -394,13 +418,14 @@ open class YoutubeExtractor : ExtractorApi() {
 
     private fun registerManifestAndGetUrl(xmlContent: String): String? {
         if (serverPort == 0) return null
-        val id = UUID.randomUUID().toString()
+        val id = "m_${streamCounter.getAndIncrement()}"
         manifestMap[id] = xmlContent
         return "http://127.0.0.1:$serverPort/$id.mpd"
     }
 
     private fun handleClient(client: Socket) {
         try {
+            // client.use 블록으로 진입하여 안전 소켓 해제 보장
             client.use { socket ->
                 val inputStream = socket.getInputStream()
                 val reader = BufferedReader(InputStreamReader(inputStream, java.nio.charset.StandardCharsets.UTF_8))
@@ -414,7 +439,9 @@ open class YoutubeExtractor : ExtractorApi() {
                 val fullPath = parts[1]
                 
                 val clientHeaders = LinkedHashMap<String, String>()
-                while (true) {
+                var headerLines = 0
+                // 비정상 패킷 차단 안전 가드
+                while (headerLines++ < 100) {
                     val line = reader.readLine()
                     if (line.isNullOrBlank()) break
                     val colonIndex = line.indexOf(':')
@@ -427,7 +454,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 val queryParams = fullPath.substringAfter("?", "")
 
                 if (cleanPath.startsWith("/chunk")) {
-                    val idMatch = Regex("id=([^&]+)").find(queryParams)
+                    val idMatch = CHUNK_ID_REGEX.find(queryParams)
                     val chunkId = idMatch?.groupValues?.get(1)
                     val targetYoutubeUrl = if (chunkId != null) streamUrlCache[chunkId] else null
 
@@ -499,7 +526,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 rawOutWriter.flush()
 
                 response.body?.byteStream()?.use { input ->
-                    // 프록시 스트리밍 처리량 강화를 위해 64KB 고속 전송 버퍼 도입
+                    // 64KB 고속 버퍼 릴레이 데이터 전송 지원
                     input.copyTo(output, bufferSize = 65536)
                 }
                 output.flush()
@@ -514,7 +541,8 @@ open class YoutubeExtractor : ExtractorApi() {
         audioList: List<AudioInfo>,
         durationSec: Long
     ): String {
-        val videoChunkId = UUID.randomUUID().toString()
+        // 동기 난수 고갈 문제를 보완하는 Atomic 고유 ID 체계 매핑
+        val videoChunkId = "v_${streamCounter.getAndIncrement()}"
         streamUrlCache[videoChunkId] = video.url
         val proxyVideoUrl = "http://127.0.0.1:$serverPort/chunk?id=$videoChunkId"
         
@@ -539,7 +567,7 @@ open class YoutubeExtractor : ExtractorApi() {
         """.trimIndent())
 
         audioList.forEachIndexed { index, audio ->
-            val audioIdChunk = UUID.randomUUID().toString()
+            val audioIdChunk = "a_${streamCounter.getAndIncrement()}"
             streamUrlCache[audioIdChunk] = audio.url
             val proxyAudioUrl = "http://127.0.0.1:$serverPort/chunk?id=$audioIdChunk"
             val cleanAudioUrl = escapeXml(proxyAudioUrl)
