@@ -137,10 +137,13 @@ object YoutubeUtils {
     }
 
     fun cleanMixTitle(title: String): String {
+        // 불필요한 Regex 치환 연산을 줄이기 위한 early check 가드 구문 배치
+        if (!title.contains("mix", ignoreCase = true) && !title.contains("믹스")) return title
         return MIX_TITLE_REPLACE_EN.replace(MIX_TITLE_REPLACE_KO.replace(title, ""), "").trim()
     }
 
     fun urlDecode(input: String): String {
+        if (!input.contains('%')) return input
         var current = input
         var decodeCount = 0
         while (current.contains('%') && decodeCount < 3) {
@@ -156,22 +159,47 @@ object YoutubeUtils {
         return current
     }
 
+    // O(N) 순회를 차단하고 Direct Lookup O(1)를 선순위로 배치한 고속 맵 캐스팅 유틸
     fun getMapKeyFromAny(obj: Any?, key: String): Map<*, *>? {
         val map = obj as? Map<*, *> ?: return null
-        val value = map[key] ?: map.entries.firstOrNull { (it.key as? String) == key }?.value
-        return value as? Map<*, *>
+        val direct = map[key]
+        if (direct is Map<*, *>) return direct
+        val entriesList = map.entries
+        for (entry in entriesList) {
+            if ((entry.key as? String) == key) {
+                return entry.value as? Map<*, *>
+            }
+        }
+        return null
     }
 
     fun getListKeyFromAny(obj: Any?, key: String): List<*>? {
         val map = obj as? Map<*, *> ?: return null
-        val value = map[key] ?: map.entries.firstOrNull { (it.key as? String) == key }?.value
-        return value as? List<*>
+        val direct = map[key]
+        if (direct is List<*>) return direct
+        val entriesList = map.entries
+        for (entry in entriesList) {
+            if ((entry.key as? String) == key) {
+                return entry.value as? List<*>
+            }
+        }
+        return null
     }
 
     fun getStringFromAny(obj: Any?, key: String): String? {
         val map = obj as? Map<*, *> ?: return null
-        val value = map[key] ?: map.entries.firstOrNull { (it.key as? String) == key }?.value
-        return value as? String ?: value?.toString()
+        val direct = map[key]
+        if (direct != null) {
+            return if (direct is String) direct else direct.toString()
+        }
+        val entriesList = map.entries
+        for (entry in entriesList) {
+            if ((entry.key as? String) == key) {
+                val value = entry.value
+                return if (value is String) value else value?.toString()
+            }
+        }
+        return null
     }
 
     fun extractUrlFromLockup(lockup: Map<*, *>?): String? {
@@ -227,11 +255,11 @@ class YoutubeProvider(
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Live)
 
     companion object {
-        // Thread-Safe하고 바운딩된 글로벌 Shorts 수집 큐 (최대 200개 유지, 메모리 Leak 방지)
+        // 멀티스레드 CME 회피를 위한 동기화 구조 래핑
         private val homeShorts = Collections.synchronizedList(mutableListOf<Episode>())
         private val searchShorts = Collections.synchronizedList(mutableListOf<Episode>())
 
-        // LRU 기법 기반의 한계치가 보장된 캐시 데이터 구조 (Continuation 및 Episode 메타데이터 폭증 방지)
+        // 힙 메모리 고갈 문제를 보완하는 정적 바운디드 LRU 캐시 맵 정의
         private val continuationTokenCache: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(128, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
@@ -248,7 +276,7 @@ class YoutubeProvider(
             }
         )
 
-        // 정규식 컴파일 오버헤드 억제를 위해 Companion Object 레벨로 추출된 패턴 상수들
+        // 상 정적인 pre-compiled 정규식 패턴 이관
         private val VIEW_REPLACE_REGEX = Regex("조회수|views|مشاهدة|시청 중|시청중|watching|명|시청자")
         private val VIEW_FORMAT_REGEX = Regex(".*[천만억KMBkmb].*")
         private val METADATA_VIEW_REGEX = Regex(".*(\\d+[KMBkmb]|views|조회수|회|시청|watching|مشاهدة|명|시청자|مشاهد).*")
@@ -257,7 +285,6 @@ class YoutubeProvider(
         private val SUBSCRIBER_REPLACE_REGEX = Regex("(구독자|subscribers?)\\s*", RegexOption.IGNORE_CASE)
         private val API_KEY_EXTRACT_REGEX = Regex(""""INNERTUBE_API_KEY":"([^"]+)"""")
         
-        // 핫패스 내 동적 컴파일 방지를 위한 추가 상주형 정규식 패턴들
         private val DURATION_REGEX = Regex("""(\d{1,2}:)?\d{1,2}:\d{2}""")
         private val VIEWS_REGEX = Regex("""(\d+[KMBkmb천만억]?\s*회?)""")
         private val BY_CHANNEL_REGEX = Regex("(?:by|من|ع버|قناة)\\s+(.*?)\\s+(?:\\d|view|مشاهدة)")
@@ -265,23 +292,12 @@ class YoutubeProvider(
         private val VIEW_COUNT_REGEX = Regex(""""viewCount"\s*:\s*"?(\d+)"""")
         private val PUBLISH_DATE_REGEX = Regex(""""publishDate"\s*:\s*"?([^"]+)"""")
 
-        // 재귀 호출 시 불필요한 List 할당 방지를 위해 정적으로 배치된 키 컬렉션
+        // 매 노드 탐색 시 배열 재생성을 억제하기 위한 정적 불변 참조 리스트
         private val KEYS_TO_CHECK = listOf(
-            "contents",
-            "items",
-            "continuationItems",
-            "onResponseReceivedActions",
-            "onResponseReceivedEndpoints",
-            "appendContinuationItemsAction",
-            "onResponseReceivedCommands",
-            "gridShelfViewModel",
-            "verticalListRenderer",
-            "horizontalListRenderer",
-            "shelfRenderer",
-            "itemSectionRenderer",
-            "richShelfRenderer",
-            "reelShelfRenderer",
-            "richGridRenderer"
+            "contents", "items", "continuationItems", "onResponseReceivedActions",
+            "onResponseReceivedEndpoints", "appendContinuationItemsAction", "onResponseReceivedCommands",
+            "gridShelfViewModel", "verticalListRenderer", "horizontalListRenderer", "shelfRenderer",
+            "itemSectionRenderer", "richShelfRenderer", "reelShelfRenderer", "richGridRenderer"
         )
 
         private val TARGET_RENDERER_KEYS = setOf(
@@ -290,7 +306,7 @@ class YoutubeProvider(
             "videoViewModel", "lockupViewModel"
         )
 
-        // 메모리 릭 억제형 Shorts 추가 헬퍼
+        // 원자성이 보존되는 안전 추가 연산 수행 및 200개 자동 트리밍 가이드 적용
         private fun addToShortsList(list: MutableList<Episode>, ep: Episode) {
             synchronized(list) {
                 if (list.none { it.data == ep.data }) {
@@ -507,18 +523,40 @@ class YoutubeProvider(
     }
 
     private fun Map<*, *>.getMapKey(key: String): Map<*, *>? {
-        return (this[key] as? Map<*, *>) 
-            ?: (this.entries.firstOrNull { (it.key as? String) == key }?.value as? Map<*, *>)
+        val direct = this[key]
+        if (direct is Map<*, *>) return direct
+        val entriesList = this.entries
+        for (entry in entriesList) {
+            if ((entry.key as? String) == key) {
+                return entry.value as? Map<*, *>
+            }
+        }
+        return null
     }
 
     private fun Map<*, *>.getListKey(key: String): List<Map<*, *>>? {
-        return (this[key] as? List<Map<*, *>>)
-            ?: (this.entries.firstOrNull { (it.key as? String) == key }?.value as? List<Map<*, *>>)
+        val direct = this[key]
+        if (direct is List<*>) return direct as? List<Map<*, *>>
+        val entriesList = this.entries
+        for (entry in entriesList) {
+            if ((entry.key as? String) == key) {
+                return entry.value as? List<Map<*, *>>
+            }
+        }
+        return null
     }
 
     private fun Map<*, *>.getString(key: String): String? {
-        return (this[key] as? String)
-            ?: (this.entries.firstOrNull { (it.key as? String) == key }?.value as? String)
+        val direct = this[key]
+        if (direct != null) return if (direct is String) direct else direct.toString()
+        val entriesList = this.entries
+        for (entry in entriesList) {
+            if ((entry.key as? String) == key) {
+                val value = entry.value
+                return if (value is String) value else value?.toString()
+            }
+        }
+        return null
     }
 
     private fun getText(obj: Any?): String {
@@ -544,7 +582,7 @@ class YoutubeProvider(
         return ""
     }
 
-    // 람다 할당 방지 및 직접 호출을 통한 프레임 타임 최적화 버전을 적용했습니다.
+    // JVM 람다 누수를 제어하는 고성능 평가 전처리식 구현
     private fun extractPartsFromMetadataRows(rows: List<*>?): List<String> {
         if (rows == null) return emptyList()
         val collected = java.util.ArrayList<String>()
@@ -737,7 +775,7 @@ class YoutubeProvider(
                 if (poster.isNullOrBlank()) poster = "https://i.ytimg.com/vi/$videoId/oar2.jpg"
 
                 val currentList = if (isSearchContext) searchShorts else homeShorts
-                val episodeNum = currentList.size + 1
+                val episodeNum = synchronized(currentList) { currentList.size } + 1
                 val contextTag = if (isSearchContext) "&ctx=search" else "&ctx=home"
                 val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
 
@@ -839,7 +877,7 @@ class YoutubeProvider(
 
                 if (isShorts) {
                     val currentList = if (isSearchContext) searchShorts else homeShorts
-                    val episodeNum = currentList.size + 1
+                    val episodeNum = synchronized(currentList) { currentList.size } + 1
                     val contextTag = if (isSearchContext) "&ctx=search" else "&ctx=home"
                     val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
                     poster = "https://i.ytimg.com/vi/$videoId/oar2.jpg"
@@ -921,7 +959,7 @@ class YoutubeProvider(
             }
 
             var foundContainer = false
-            // KEYS_TO_CHECK 상수를 동적 재생성 없이 안전 순회합니다.
+            // KEYS_TO_CHECK 정적 리스트를 활용한 힙 오버헤드 억제형 고속 순회
             val keysSize = KEYS_TO_CHECK.size
             for (i in 0 until keysSize) {
                 val key = KEYS_TO_CHECK[i]
@@ -1520,7 +1558,7 @@ class YoutubeProvider(
                 if (!d.isNullOrBlank()) metadata.description = d
             }
 
-            // 불필요한 전체 키들의 string mapped list 복사를 피하고 고성능 containsKey 구조를 선택했습니다.
+            // 불필요한 mapped keys 할당 생성을 억제하기 위한 containKey 우선검사
             val hasPlaylistId = obj.containsKey("playlistId")
             val hasTitleInfo = obj.containsKey("titleText") || obj.containsKey("title")
             if (hasPlaylistId && hasTitleInfo) {
@@ -1572,7 +1610,8 @@ class YoutubeProvider(
             val videoId = YoutubeUtils.extractYoutubeId(url) ?: "video"
             val useSearchList = url.contains("&ctx=search")
             val sourceList = if (useSearchList) searchShorts else homeShorts
-            val targetEpisodes = sourceList.toMutableList()
+            // CME 안정성 락 확보 하의 리스트 클로닝 적용
+            val targetEpisodes = synchronized(sourceList) { sourceList.toMutableList() }
             var currentEp = targetEpisodes.find { YoutubeUtils.extractYoutubeId(it.data) == videoId }
 
             if (currentEp == null) {
