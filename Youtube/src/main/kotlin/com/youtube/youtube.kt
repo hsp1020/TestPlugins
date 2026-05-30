@@ -26,20 +26,15 @@ import org.schabi.newpipe.extractor.downloader.Request
 import org.schabi.newpipe.extractor.localization.Localization
 import org.schabi.newpipe.extractor.localization.ContentCountry
 
-// [강화됨] PoTokenProvider에 디버그 기능을 달아두었습니다.
-object YoutubePoTokenProvider {
-    var visitorData: String = ""
-    var poToken: String = "" 
-
-    init {
-        println("[YT_TOKEN_DEBUG] YoutubePoTokenProvider가 초기화되었습니다.")
-    }
-}
-
 object YoutubeUtils {
     const val CHROME_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
     const val SAFARI_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
     const val IOS_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
+    
+    // [추가됨] PipePipeExtractor v5.1.1의 Android VR 세션과 일치시키기 위한 전용 User-Agent
+    const val ANDROID_USER_AGENT = "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"
+    const val ANDROID_VR_USER_AGENT = "com.google.android.apps.youtube.vr/1.52.41 (Linux; U; Android 13; en_US; Quest 2 Build/SQ3A.220605.009.A1)"
+    
     const val DEFAULT_CLIENT_VERSION = "2.20240725.01.00"
 
     private val sha1Digest = ThreadLocal.withInitial {
@@ -73,7 +68,8 @@ object YoutubeUtils {
                     }
                 }
                 
-                reqBuilder.header("User-Agent", IOS_USER_AGENT)
+                // [수정됨] Android VR 세션 유지를 위해 UA 교체
+                reqBuilder.header("User-Agent", ANDROID_VR_USER_AGENT)
 
                 val res = okHttpClient.newCall(reqBuilder.build()).execute()
                 val resHeaders = res.headers.toMultimap()
@@ -247,6 +243,8 @@ object YoutubeUtils {
         return null
     }
 }
+
+// (이하 YoutubeProvider 본문 코드는 제공해주신 원본과 동일하게 유지되며, YoutubePoTokenProvider 부분만 제거되었습니다.)
 
 class YoutubeProvider(
     private val sharedPref: SharedPreferences? = null
