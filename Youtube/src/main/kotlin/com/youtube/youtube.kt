@@ -14,6 +14,8 @@ import java.net.URLEncoder
 import java.net.URLDecoder
 import java.security.MessageDigest
 import java.nio.charset.StandardCharsets
+import java.util.Collections
+import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
 import com.lagradost.cloudstream3.AcraApplication
 import androidx.preference.PreferenceManager
@@ -225,12 +227,28 @@ class YoutubeProvider(
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Live)
 
     companion object {
-        private val homeShorts = mutableListOf<Episode>()
-        private val searchShorts = mutableListOf<Episode>()
+        // Thread-Safe하고 바운딩된 글로벌 Shorts 수집 큐 (최대 200개 유지, 메모리 Leak 방지)
+        private val homeShorts = Collections.synchronizedList(mutableListOf<Episode>())
+        private val searchShorts = Collections.synchronizedList(mutableListOf<Episode>())
 
-        private val continuationTokenCache = ConcurrentHashMap<String, String>()
-        private val epMetaMapCache = ConcurrentHashMap<String, String>()
+        // LRU 기법 기반의 한계치가 보장된 캐시 데이터 구조 (Continuation 및 Episode 메타데이터 폭증 방지)
+        private val continuationTokenCache: MutableMap<String, String> = Collections.synchronizedMap(
+            object : LinkedHashMap<String, String>(128, 0.75f, true) {
+                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
+                    return size > 500
+                }
+            }
+        )
 
+        private val epMetaMapCache: MutableMap<String, String> = Collections.synchronizedMap(
+            object : LinkedHashMap<String, String>(128, 0.75f, true) {
+                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
+                    return size > 2000
+                }
+            }
+        )
+
+        // 정규식 컴파일 오버헤드 억제를 위해 Companion Object 레벨로 추출된 패턴 상수들
         private val VIEW_REPLACE_REGEX = Regex("조회수|views|مشاهدة|시청 중|시청중|watching|명|시청자")
         private val VIEW_FORMAT_REGEX = Regex(".*[천만억KMBkmb].*")
         private val METADATA_VIEW_REGEX = Regex(".*(\\d+[KMBkmb]|views|조회수|회|시청|watching|مشاهدة|명|시청자|مشاهد).*")
@@ -238,6 +256,51 @@ class YoutubeProvider(
         private val SUBSCRIBER_REGEX = Regex(".*(구독자|subscribers|명|K|M|B|sub).*\\s*", RegexOption.IGNORE_CASE)
         private val SUBSCRIBER_REPLACE_REGEX = Regex("(구독자|subscribers?)\\s*", RegexOption.IGNORE_CASE)
         private val API_KEY_EXTRACT_REGEX = Regex(""""INNERTUBE_API_KEY":"([^"]+)"""")
+        
+        // 핫패스 내 동적 컴파일 방지를 위한 추가 상주형 정규식 패턴들
+        private val DURATION_REGEX = Regex("""(\d{1,2}:)?\d{1,2}:\d{2}""")
+        private val VIEWS_REGEX = Regex("""(\d+[KMBkmb천만억]?\s*회?)""")
+        private val BY_CHANNEL_REGEX = Regex("(?:by|من|ع버|قناة)\\s+(.*?)\\s+(?:\\d|view|مشاهدة)")
+        private val LENGTH_SECONDS_REGEX = Regex(""""lengthSeconds"\s*:\s*"?(\d+)"""")
+        private val VIEW_COUNT_REGEX = Regex(""""viewCount"\s*:\s*"?(\d+)"""")
+        private val PUBLISH_DATE_REGEX = Regex(""""publishDate"\s*:\s*"?([^"]+)"""")
+
+        // 재귀 호출 시 불필요한 List 할당 방지를 위해 정적으로 배치된 키 컬렉션
+        private val KEYS_TO_CHECK = listOf(
+            "contents",
+            "items",
+            "continuationItems",
+            "onResponseReceivedActions",
+            "onResponseReceivedEndpoints",
+            "appendContinuationItemsAction",
+            "onResponseReceivedCommands",
+            "gridShelfViewModel",
+            "verticalListRenderer",
+            "horizontalListRenderer",
+            "shelfRenderer",
+            "itemSectionRenderer",
+            "richShelfRenderer",
+            "reelShelfRenderer",
+            "richGridRenderer"
+        )
+
+        private val TARGET_RENDERER_KEYS = setOf(
+            "videoRenderer", "gridVideoRenderer", "compactVideoRenderer",
+            "shortsVideoRenderer", "reelItemRenderer", "shortsLockupViewModel",
+            "videoViewModel", "lockupViewModel"
+        )
+
+        // 메모리 릭 억제형 Shorts 추가 헬퍼
+        private fun addToShortsList(list: MutableList<Episode>, ep: Episode) {
+            synchronized(list) {
+                if (list.none { it.data == ep.data }) {
+                    list.add(ep)
+                    if (list.size > 200) {
+                        list.removeAt(0)
+                    }
+                }
+            }
+        }
     }
 
     private var isSearchContext = false
@@ -379,7 +442,7 @@ class YoutubeProvider(
         var duration = ""
         val lengthText = getText(videoData.getMapKey("lengthText"))
         if (lengthText.isNotBlank()) {
-            duration = Regex("""(\d{1,2}:)?\d{1,2}:\d{2}""").find(lengthText)?.value ?: ""
+            duration = DURATION_REGEX.find(lengthText)?.value ?: ""
         } else {
             val overlays = videoData.getListKey("thumbnailOverlays") ?: YoutubeUtils.getListKeyFromAny(videoData, "thumbnailOverlays") as? List<*>
             overlays?.forEach { overlay ->
@@ -387,7 +450,7 @@ class YoutubeProvider(
                     val ts = overlay.getMapKey("thumbnailOverlayTimeStatusRenderer")
                     if (ts != null) {
                         val text = getText(ts.getMapKey("text"))
-                        val match = Regex("""(\d{1,2}:)?\d{1,2}:\d{2}""").find(text)
+                        val match = DURATION_REGEX.find(text)
                         if (match != null) duration = match.value
                     }
                 }
@@ -416,7 +479,7 @@ class YoutubeProvider(
         }
 
         if (rawViews.isNotBlank()) {
-            val match = Regex("""(\d+[KMBkmb천만억]?\s*회?)""").find(rawViews)
+            val match = VIEWS_REGEX.find(rawViews)
             if (match != null) views = formatViews(match.value)
         }
 
@@ -481,18 +544,20 @@ class YoutubeProvider(
         return ""
     }
 
-    private fun extractPartsFromMetadataRows(rows: List<*>?, viewFormatter: (String) -> String): List<String> {
-        val collected = mutableListOf<String>()
-        rows?.forEach { row ->
+    // 람다 할당 방지 및 직접 호출을 통한 프레임 타임 최적화 버전을 적용했습니다.
+    private fun extractPartsFromMetadataRows(rows: List<*>?): List<String> {
+        if (rows == null) return emptyList()
+        val collected = java.util.ArrayList<String>()
+        rows.forEach { row ->
             val rowMap = row as? Map<*, *> ?: return@forEach
-            val parts = (rowMap["metadataParts"] as? List<*>)
+            val parts = rowMap.getListKey("metadataParts")
                 ?: (rowMap.entries.firstOrNull { (it.key as? String) == "metadataParts" }?.value as? List<*>)
             parts?.forEach { part ->
                 val partMap = part as? Map<*, *> ?: return@forEach
                 val text = getText(partMap.getMapKey("text") ?: partMap["text"])
                 if (text.isNotBlank()) {
                     if (METADATA_VIEW_REGEX.matches(text)) {
-                        collected.add(viewFormatter(text))
+                        collected.add(formatViews(text))
                     } else {
                         collected.add(text)
                     }
@@ -513,7 +578,7 @@ class YoutubeProvider(
                 ?.getMapKey("contentMetadataViewModel")
                 ?.getListKey("metadataRows")
 
-            val rawParts = extractPartsFromMetadataRows(rows) { formatViews(it) }
+            val rawParts = extractPartsFromMetadataRows(rows)
             rawParts.forEach { text ->
                 if (text.contains("회") || text.contains("시청") || text.contains("조회") || 
                     text.contains("views") || text.contains("watching") || 
@@ -677,14 +742,14 @@ class YoutubeProvider(
                 val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
 
                 val descText = if (views.isNotBlank()) "조회수: $views" else ""
-                if (currentList.none { it.data == finalUrl }) {
-                    currentList.add(newEpisode(finalUrl) {
-                        this.name = title
-                        this.posterUrl = poster
-                        this.episode = episodeNum
-                        this.description = descText
-                    })
+                
+                val newShortEp = newEpisode(finalUrl) {
+                    this.name = title
+                    this.posterUrl = poster
+                    this.episode = episodeNum
+                    this.description = descText
                 }
+                addToShortsList(currentList, newShortEp)
 
                 val finalTitle = "#$episodeNum {Short | $views} $title"
                 return newMovieSearchResponse(finalTitle, finalUrl, TvType.Movie) {
@@ -760,8 +825,7 @@ class YoutubeProvider(
                 if (channel.isBlank()) {
                     val label = lockup.getMapKey("accessibility")?.getMapKey("accessibilityData")
                         ?.getString("label") ?: ""
-                    val match =
-                        Regex("(?:by|من|ع버|قناة)\\s+(.*?)\\s+(?:\\d|view|مشاهدة)").find(label)
+                    val match = BY_CHANNEL_REGEX.find(label)
                     if (match != null) channel = match.groupValues[1].replace("Shorts", "").trim()
                 }
                 val isShorts = lockup.getMapKey("content")
@@ -787,14 +851,15 @@ class YoutubeProvider(
                             append("조회수: $views")
                         }
                     }
-                    if (currentList.none { it.data == finalUrl }) {
-                        currentList.add(newEpisode(finalUrl) {
-                            this.name = title
-                            this.posterUrl = poster
-                            this.episode = episodeNum
-                            this.description = descText
-                        })
+                    
+                    val newShortEp2 = newEpisode(finalUrl) {
+                        this.name = title
+                        this.posterUrl = poster
+                        this.episode = episodeNum
+                        this.description = descText
                     }
+                    addToShortsList(currentList, newShortEp2)
+
                     finalTitle = "#$episodeNum [Shorts] {Short | $views} $title"
                     return newMovieSearchResponse(
                         finalTitle,
@@ -855,25 +920,11 @@ class YoutubeProvider(
                 return
             }
 
-            val keysToCheck = listOf(
-                "contents",
-                "items",
-                "continuationItems",
-                "onResponseReceivedActions",
-                "onResponseReceivedEndpoints",
-                "appendContinuationItemsAction",
-                "onResponseReceivedCommands",
-                "gridShelfViewModel",
-                "verticalListRenderer",
-                "horizontalListRenderer",
-                "shelfRenderer",
-                "itemSectionRenderer",
-                "richShelfRenderer",
-                "reelShelfRenderer",
-                "richGridRenderer"
-            )
             var foundContainer = false
-            for (key in keysToCheck) {
+            // KEYS_TO_CHECK 상수를 동적 재생성 없이 안전 순회합니다.
+            val keysSize = KEYS_TO_CHECK.size
+            for (i in 0 until keysSize) {
+                val key = KEYS_TO_CHECK[i]
                 if (data.containsKey(key)) {
                     processRecursive(data[key], outList, seenIds, playlistMode, depth + 1)
                     foundContainer = true
@@ -1408,7 +1459,6 @@ class YoutubeProvider(
     private fun findPlaylistMetadataRecursive(obj: Any?, metadata: PlaylistMetadata, depth: Int = 0) {
         if (obj == null || depth > 32) return
         if (obj is Map<*, *>) {
-            val keys = obj.keys.map { it.toString() }
 
             val primary = YoutubeUtils.getMapKeyFromAny(obj, "playlistSidebarPrimaryInfoRenderer")
             if (primary != null) {
@@ -1470,7 +1520,10 @@ class YoutubeProvider(
                 if (!d.isNullOrBlank()) metadata.description = d
             }
 
-            if (keys.contains("playlistId") && (keys.contains("titleText") || keys.contains("title"))) {
+            // 불필요한 전체 키들의 string mapped list 복사를 피하고 고성능 containsKey 구조를 선택했습니다.
+            val hasPlaylistId = obj.containsKey("playlistId")
+            val hasTitleInfo = obj.containsKey("titleText") || obj.containsKey("title")
+            if (hasPlaylistId && hasTitleInfo) {
                 val t = getText(obj["titleText"] ?: YoutubeUtils.getMapKeyFromAny(obj, "titleText"))
                     .ifBlank { getText(obj["title"] ?: YoutubeUtils.getMapKeyFromAny(obj, "title")) }
                 if (t.isNotBlank() && metadata.title.isBlank()) {
@@ -1632,7 +1685,9 @@ class YoutubeProvider(
                         is Map<*, *> -> {
                             if (obj.containsKey("continuationItems")) return obj["continuationItems"] as? List<*>
                             val keysToTry = listOf("onResponseReceivedActions", "onResponseReceivedEndpoints", "onResponseReceivedCommands", "onResponseReceivedResults", "continuationContents")
-                            for (k in keysToTry) {
+                            val keysToTrySize = keysToTry.size
+                            for (i in 0 until keysToTrySize) {
+                                val k = keysToTry[i]
                                 val v = obj[k]
                                 val r = findContinuationItemsRecursive(v, depth + 1)
                                 if (r != null) return r
@@ -1654,29 +1709,27 @@ class YoutubeProvider(
 
                 fun extractVideosFromItems(items: List<*>, collectTo: MutableList<Episode>) {
                     
-                    fun findAllRenderers(obj: Any?, targetKeys: List<String>, results: MutableList<Map<*,*>>, depth: Int = 0) {
+                    fun findAllRenderers(obj: Any?, results: MutableList<Map<*,*>>, depth: Int = 0) {
                         if (obj == null || depth > 32) return
                         when (obj) {
                             is Map<*, *> -> {
-                                for (key in targetKeys) {
-                                    if (obj.containsKey(key)) {
-                                        val match = obj[key] as? Map<*,*>
+                                for ((k, v) in obj) {
+                                    if (k is String && TARGET_RENDERER_KEYS.contains(k)) {
+                                        val match = v as? Map<*,*>
                                         if (match != null) results.add(match)
                                     }
                                 }
                                 for (value in obj.values) {
-                                    findAllRenderers(value, targetKeys, results, depth + 1)
+                                    findAllRenderers(value, results, depth + 1)
                                 }
                             }
                             is List<*> -> {
                                 for (item in obj) {
-                                    findAllRenderers(item, targetKeys, results, depth + 1)
+                                    findAllRenderers(item, results, depth + 1)
                                 }
                             }
                         }
                     }
-
-                    val targetRendererKeys = listOf("videoRenderer", "gridVideoRenderer", "compactVideoRenderer", "shortsVideoRenderer", "reelItemRenderer", "shortsLockupViewModel", "videoViewModel", "lockupViewModel")
 
                     items.forEachIndexed { index, item ->
                         try {
@@ -1690,7 +1743,7 @@ class YoutubeProvider(
                             }
 
                             val foundRenderers = mutableListOf<Map<*,*>>()
-                            findAllRenderers(map, targetRendererKeys, foundRenderers)
+                            findAllRenderers(map, foundRenderers)
 
                             if (foundRenderers.isEmpty()) {
                                 return@forEachIndexed
@@ -1995,7 +2048,7 @@ class YoutubeProvider(
         val episodes = mutableListOf<Episode>()
         
         var ep1Dur = ""
-        val lengthMatch = Regex(""""lengthSeconds"\s*:\s*"?(\d+)"""").find(html)
+        val lengthMatch = LENGTH_SECONDS_REGEX.find(html)
         if (lengthMatch != null) {
             try {
                 val s = lengthMatch.groupValues[1].toLong()
@@ -2004,13 +2057,13 @@ class YoutubeProvider(
         }
         
         var ep1Views = ""
-        val viewMatch = Regex(""""viewCount"\s*:\s*"?(\d+)"""").find(html)
+        val viewMatch = VIEW_COUNT_REGEX.find(html)
         if (viewMatch != null) {
             ep1Views = formatViews(viewMatch.groupValues[1])
         }
         
         var ep1Date = ""
-        val dateMatch = Regex(""""publishDate"\s*:\s*"?([^"]+)"""").find(html)
+        val dateMatch = PUBLISH_DATE_REGEX.find(html)
         if (dateMatch != null) {
             ep1Date = dateMatch.groupValues[1]
         }
