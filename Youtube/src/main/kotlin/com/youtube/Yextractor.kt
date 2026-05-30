@@ -75,7 +75,6 @@ open class YoutubeExtractor : ExtractorApi() {
 
         init {
             YoutubeUtils.initNewPipeDownloader()
-            // [수정됨] PipePipe v5.1.1 은 기본적으로 Android VR 클라이언트를 사용하므로 불필요한 iOS 클라이언트 설정 제거
         }
     }
 
@@ -117,98 +116,97 @@ open class YoutubeExtractor : ExtractorApi() {
         val cachedLinks = ytVideos[videoId]
         if (cachedLinks.isNullOrEmpty()) {
             try {
-                val link = YoutubeStreamLinkHandlerFactory.getInstance().fromUrl(cleanedUrl)
-                val s = object : YoutubeStreamExtractor(ServiceList.YouTube, link) {}
-                
-                // [수정됨] 라이브러리 내부 파싱/네트워크 작업이 메인 흐름을 방해하지 않도록 IO 코루틴 컨텍스트에서 안전하게 실행
+                // UI 스레드 프리징 및 동시성 이슈 방지를 위해 IO 스레드에서 안전하게 실행
                 withContext(Dispatchers.IO) {
+                    val link = YoutubeStreamLinkHandlerFactory.getInstance().fromUrl(cleanedUrl)
+                    val s = object : YoutubeStreamExtractor(ServiceList.YouTube, link) {}
                     s.fetchPage()
-                }
 
-                val durationSeconds = if (s.length > 0) s.length else 3600L
-                val builtLinks = mutableListOf<ExtractorLink>()
-                val seenUrls = ConcurrentHashMap.newKeySet<String>()
+                    val durationSeconds = if (s.length > 0) s.length else 3600L
+                    val builtLinks = mutableListOf<ExtractorLink>()
+                    val seenUrls = ConcurrentHashMap.newKeySet<String>()
 
-                val videoOnlyList = (s.videoOnlyStreams ?: emptyList()).mapNotNull { vs ->
+                    val videoOnlyList = (s.videoOnlyStreams ?: emptyList()).mapNotNull { vs ->
+                        try {
+                            val streamUrl = vs.getUrl() ?: return@mapNotNull null
+                            if (!seenUrls.add(streamUrl)) return@mapNotNull null
+
+                            val label = buildVideoLabelNumber(vs)
+                            val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
+                            var mime = vs.format?.mimeType
+                            if (mime.isNullOrEmpty()) mime = getMimeTypeFromUrl(streamUrl, false)
+                            val initR = if (vs.initStart != null && vs.initEnd != null) "${vs.initStart}-${vs.initEnd}" else null
+                            val indexR = if (vs.indexStart != null && vs.indexEnd != null) "${vs.indexStart}-${vs.indexEnd}" else null
+
+                            StreamInfo(streamUrl, mime, height, label, initR, indexR)
+                        } catch (e: Exception) { null }
+                    }.distinctBy { it.height }
+
+                    val audioInfoList = (s.audioStreams ?: emptyList()).mapNotNull { asr ->
+                        try {
+                            val aUrl = asr.getUrl() ?: return@mapNotNull null
+                            val bitrate = asr.bitrate ?: 128000
+                            var mime = asr.format?.mimeType
+                            if (mime.isNullOrEmpty()) mime = getMimeTypeFromUrl(aUrl, true)
+                            val initR = if (asr.initStart != null && asr.initEnd != null) "${asr.initStart}-${asr.initEnd}" else null
+                            val indexR = if (asr.indexStart != null && asr.indexEnd != null) "${asr.indexStart}-${asr.indexEnd}" else null
+                            var rawLang = asr.audioTrackId ?: "Default"
+                            if (rawLang.contains(".")) rawLang = rawLang.substringBefore(".")
+
+                            AudioInfo(aUrl, mime, bitrate, initR, indexR, rawLang.uppercase())
+                        } catch (e: Exception) { null }
+                    }.distinctBy { it.url }
+
+                    val audiosByLanguage = audioInfoList.groupBy { it.language }
+
                     try {
-                        val streamUrl = vs.getUrl() ?: return@mapNotNull null
-                        if (!seenUrls.add(streamUrl)) return@mapNotNull null
+                        val subs = s.subtitlesDefault?.filterNotNull() ?: emptyList()
+                        ytVideosSubtitles[videoId] = subs
+                    } catch (e: Exception) {}
 
-                        val label = buildVideoLabelNumber(vs)
-                        val height = runCatching { vs.height ?: 0 }.getOrNull() ?: 0
-                        var mime = vs.format?.mimeType
-                        if (mime.isNullOrEmpty()) mime = getMimeTypeFromUrl(streamUrl, false)
-                        val initR = if (vs.initStart != null && vs.initEnd != null) "${vs.initStart}-${vs.initEnd}" else null
-                        val indexR = if (vs.indexStart != null && vs.indexEnd != null) "${vs.indexStart}-${vs.indexEnd}" else null
+                    startServerIfNeeded()
 
-                        StreamInfo(streamUrl, mime, height, label, initR, indexR)
-                    } catch (e: Exception) { null }
-                }.distinctBy { it.height }
+                    for (video in videoOnlyList) {
+                        if (audiosByLanguage.isNotEmpty()) {
+                            for ((lang, audios) in audiosByLanguage) {
+                                val bestAudioForLang = if (video.mimeType.contains("webm")) {
+                                    audios.sortedWith(compareByDescending<AudioInfo> { it.mimeType.contains("webm") }.thenByDescending { it.bitrate }).firstOrNull()
+                                } else {
+                                    audios.sortedWith(compareByDescending<AudioInfo> { it.mimeType.contains("mp4") }.thenByDescending { it.bitrate }).firstOrNull()
+                                }
 
-                val audioInfoList = (s.audioStreams ?: emptyList()).mapNotNull { asr ->
-                    try {
-                        val aUrl = asr.getUrl() ?: return@mapNotNull null
-                        val bitrate = asr.bitrate ?: 128000
-                        var mime = asr.format?.mimeType
-                        if (mime.isNullOrEmpty()) mime = getMimeTypeFromUrl(aUrl, true)
-                        val initR = if (asr.initStart != null && asr.initEnd != null) "${asr.initStart}-${asr.initEnd}" else null
-                        val indexR = if (asr.indexStart != null && asr.indexEnd != null) "${asr.indexStart}-${asr.indexEnd}" else null
-                        var rawLang = asr.audioTrackId ?: "Default"
-                        if (rawLang.contains(".")) rawLang = rawLang.substringBefore(".")
+                                if (bestAudioForLang != null) {
+                                    val singleAudioList = listOf(bestAudioForLang)
+                                    val dashXml = buildDashManifestXml(video, singleAudioList, durationSeconds)
+                                    val localLink = registerManifestAndGetUrl(dashXml)
 
-                        AudioInfo(aUrl, mime, bitrate, initR, indexR, rawLang.uppercase())
-                    } catch (e: Exception) { null }
-                }.distinctBy { it.url }
+                                    if (localLink != null) {
+                                        val finalName = "${video.label} ($lang) ${video.label}"
+                                        val sourceName = "${this@YoutubeExtractor.name} ($lang)"
 
-                val audiosByLanguage = audioInfoList.groupBy { it.language }
-
-                try {
-                    val subs = s.subtitlesDefault?.filterNotNull() ?: emptyList()
-                    ytVideosSubtitles[videoId] = subs
-                } catch (e: Exception) {}
-
-                startServerIfNeeded()
-
-                for (video in videoOnlyList) {
-                    if (audiosByLanguage.isNotEmpty()) {
-                        for ((lang, audios) in audiosByLanguage) {
-                            val bestAudioForLang = if (video.mimeType.contains("webm")) {
-                                audios.sortedWith(compareByDescending<AudioInfo> { it.mimeType.contains("webm") }.thenByDescending { it.bitrate }).firstOrNull()
-                            } else {
-                                audios.sortedWith(compareByDescending<AudioInfo> { it.mimeType.contains("mp4") }.thenByDescending { it.bitrate }).firstOrNull()
-                            }
-
-                            if (bestAudioForLang != null) {
-                                val singleAudioList = listOf(bestAudioForLang)
-                                val dashXml = buildDashManifestXml(video, singleAudioList, durationSeconds)
-                                val localLink = registerManifestAndGetUrl(dashXml)
-
-                                if (localLink != null) {
-                                    val finalName = "${video.label} ($lang) ${video.label}"
-                                    val sourceName = "${this.name} ($lang)"
-
-                                    builtLinks.add(
-                                        newExtractorLink(
-                                            sourceName, finalName, localLink, type = ExtractorLinkType.DASH
-                                        ) {
-                                            this.referer = mainUrl
-                                            this.quality = video.height
-                                            this.headers = mapOf(
-                                                // [수정됨] 앱 내부 플레이어에서도 Android VR 세션과 일치하도록 헤더 설정
-                                                "User-Agent" to YoutubeUtils.ANDROID_VR_USER_AGENT
-                                            )
-                                        }
-                                    )
+                                        builtLinks.add(
+                                            newExtractorLink(
+                                                sourceName, finalName, localLink, type = ExtractorLinkType.DASH
+                                            ) {
+                                                this.referer = mainUrl
+                                                this.quality = video.height
+                                                this.headers = mapOf(
+                                                    "User-Agent" to YoutubeUtils.ANDROID_VR_USER_AGENT
+                                                    // Origin과 Referer는 모바일 앱 위장을 위해 제거
+                                                )
+                                            }
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
+
+                    builtLinks.add(newExtractorLink(source = "YouTube Downloader", name = "Cobalt Web Download(4K)", url = "https://qwkuns.me/#https://www.youtube.com/watch?v=$videoId", type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+                    builtLinks.add(newExtractorLink(source = "YouTube Downloader", name = "SOSYouTube Web Download(1080p)", url = "https://www.sosyoutube.com/watch?v=$videoId", type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+
+                    ytVideos[videoId] = builtLinks.toList()
                 }
-
-                builtLinks.add(newExtractorLink(source = "YouTube Downloader", name = "Cobalt Web Download(4K)", url = "https://qwkuns.me/#https://www.youtube.com/watch?v=$videoId", type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
-                builtLinks.add(newExtractorLink(source = "YouTube Downloader", name = "SOSYouTube Web Download(1080p)", url = "https://www.sosyoutube.com/watch?v=$videoId", type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
-
-                ytVideos[videoId] = builtLinks.toList()
 
             } catch (e: Exception) { 
                 logError(e) 
@@ -301,6 +299,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     if (targetYoutubeUrl != null) {
                         proxyChunkToYouTube(socket, targetYoutubeUrl, clientHeaders)
                     } else {
+                        println("[YT_PROXY_DEBUG] 404 Not Found - Chunk ID가 메모리에 없습니다: $chunkId")
                         outWriter.print("HTTP/1.1 404 Not Found\r\n\r\n")
                         outWriter.flush()
                     }
@@ -331,11 +330,16 @@ open class YoutubeExtractor : ExtractorApi() {
         try {
             val finalTargetUrl = targetUrl
             
+            val nParamMatch = Regex("[?&]n=([^&]+)").find(finalTargetUrl)
+            val nParam = nParamMatch?.groupValues?.get(1) ?: "없음"
+            
             println("\n[YT_PROXY_DEBUG] ================= CHUNK REQUEST START =================")
-            
-            // [수정됨] 불필요한 구버전 PoToken 검증 로직 및 주입 강제 코드 완전히 삭제 (PipePipeExtractor가 자체 처리함)
-            
-            // [수정됨] Android VR 세션과 일치하는 User-Agent 강제 주입 및 불필요한 웹 브라우저 헤더 차단
+            println("[YT_PROXY_DEBUG] 1. n-파라미터 상태: $nParam (없으면 1분 차단의 핵심 원인!)")
+            println("[YT_PROXY_DEBUG] 2. PipePipeExtractor v5.1.1 (ANDROID_VR) 기반 우회 적용 중")
+
+            // [안드로이드 메인 스레드 조작 및 정합성 해결]
+            // PipePipeExtractor의 ANDROID_VR 클라이언트에 완전히 일치하는 User-Agent를 강제 주입하며,
+            // 봇으로 감지될 수 있는 웹 브라우저 헤더(Origin, Referer)는 철저히 필터링 처리합니다.
             val requestBuilder = okhttp3.Request.Builder()
                 .url(finalTargetUrl)
                 .header("User-Agent", YoutubeUtils.ANDROID_VR_USER_AGENT)
@@ -344,24 +348,19 @@ open class YoutubeExtractor : ExtractorApi() {
 
             clientHeaders.forEach { (key, value) ->
                 val lowerKey = key.lowercase()
-                // Origin과 Referer 등 불필요한 브라우저 특성 헤더를 철저히 필터링
-                if (lowerKey != "host" && lowerKey != "user-agent" && lowerKey != "origin" && lowerKey != "referer") {
+                if (lowerKey != "host" && lowerKey != "user-agent" && lowerKey != "origin" && lowerKey != "referer" && lowerKey != "accept-encoding") {
                     requestBuilder.header(key, value)
                 }
-            }
-
-            clientHeaders["range"]?.let { 
-                println("[YT_PROXY_DEBUG] 1. 요청 Range: $it")
             }
 
             val request = requestBuilder.build()
             val response = proxyHttpClient.newCall(request).execute()
             
-            println("[YT_PROXY_DEBUG] 2. 유튜브 CDN 응답 코드: ${response.code}")
+            println("[YT_PROXY_DEBUG] 3. 유튜브 CDN 응답 코드: ${response.code}")
 
             if (response.code == 403 || response.code == 400) {
                 val errorBody = response.body?.string() ?: "Empty Body"
-                println("[YT_PROXY_DEBUG] 🚨 403/400 FORBIDDEN 발생! 🚨")
+                println("[YT_PROXY_DEBUG] 🚨 ${response.code} 발생! 🚨")
                 println("[YT_PROXY_DEBUG] 에러 응답 본문:\n$errorBody")
                 println("[YT_PROXY_DEBUG] =======================================================\n")
                 
