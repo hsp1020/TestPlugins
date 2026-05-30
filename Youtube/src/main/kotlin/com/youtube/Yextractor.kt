@@ -12,8 +12,8 @@ import com.lagradost.cloudstream3.utils.schemaStripRegex
 import com.lagradost.cloudstream3.ar.youtube.YoutubeUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.json.JSONObject
 import org.json.JSONArray
+import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.PrintWriter
@@ -69,7 +69,7 @@ open class YoutubeExtractor : ExtractorApi() {
             .build()
             
         init {
-            println("[YT_DEBUG_INIT] 독자 추출기 초기화 완료 (NewPipe 종속성 완전 제거)")
+            println("[YT_DEBUG_INIT] 독자 API 추출기 초기화 완료 (ANDROID_VR 전용)")
         }
     }
 
@@ -95,50 +95,85 @@ open class YoutubeExtractor : ExtractorApi() {
         val language: String
     )
 
-    private suspend fun fetchStreamingData(videoId: String, clientName: String): JSONObject? {
-        val apiUrl = "https://www.youtube.com/youtubei/v1/player"
+    private suspend fun fetchStreamingData(videoId: String): JSONObject? {
+        val watchUrl = "https://www.youtube.com/watch?v=$videoId"
         
-        // 클라이언트별 완벽한 스펙 매칭
-        val (clientVersion, userAgent, osName, osVersion, clientId) = when (clientName) {
-            "ANDROID_VR" -> listOf("1.65.10", YoutubeUtils.ANDROID_VR_USER_AGENT, "Android", "12L", "28")
-            "IOS" -> listOf("19.45.4", YoutubeUtils.IOS_USER_AGENT, "iOS", "17.5.1.21F90", "5")
-            else -> listOf("1.65.10", YoutubeUtils.ANDROID_VR_USER_AGENT, "Android", "12L", "28")
+        // 1. 웹페이지에서 API Key와 Visitor Data 추출 (이게 없으면 로그인 요구 에러 발생)
+        val html = app.get(watchUrl, headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)).text
+        
+        val apiKey = Regex(""""INNERTUBE_API_KEY":"([^"]+)"""").find(html)?.groupValues?.get(1)
+        val visitorData = Regex(""""VISITOR_DATA":"([^"]+)"""").find(html)?.groupValues?.get(1) ?: ""
+
+        // HTML 내부에 이미 데이터가 풀려있는 경우 (가장 빠르고 이상적)
+        val ytInitialRegex = Regex("""ytInitialPlayerResponse\s*=\s*(\{.+?\});""")
+        val htmlMatch = ytInitialRegex.find(html)
+        if (htmlMatch != null) {
+            try {
+                val json = JSONObject(htmlMatch.groupValues[1])
+                val streamData = json.optJSONObject("streamingData")
+                if (streamData != null && !streamData.toString().contains("signatureCipher")) {
+                    println("[YT_DEBUG_EXTRACTOR] HTML에서 streamingData 직접 추출 성공!")
+                    return streamData
+                }
+            } catch (e: Exception) {}
         }
-        
-        val payload = mapOf(
-            "context" to mapOf(
-                "client" to mapOf(
-                    "clientName" to clientName,
-                    "clientVersion" to clientVersion,
-                    "hl" to "en",
-                    "gl" to "US",
-                    "osName" to osName,
-                    "osVersion" to osVersion,
-                    "userAgent" to userAgent
+
+        if (apiKey.isNullOrEmpty()) {
+            println("[YT_DEBUG_EXTRACTOR] 🚨 치명적 오류: API Key 추출 실패!")
+            return null
+        }
+
+        // [핵심] PipePipe v5.1.1의 403 우회 방식인 ANDROID_VR 클라이언트로 API 직접 호출
+        val apiUrl = "https://www.youtube.com/youtubei/v1/player?key=$apiKey"
+
+        try {
+            val vrPayload = mapOf(
+                "videoId" to videoId,
+                "context" to mapOf(
+                    "client" to mapOf(
+                        "clientName" to "ANDROID_VR",
+                        "clientVersion" to "1.65.10",
+                        "osName" to "Android",
+                        "osVersion" to "12L",
+                        "hl" to "en",
+                        "gl" to "US",
+                        "visitorData" to visitorData
+                    )
                 )
-            ),
-            "videoId" to videoId
-        )
-        
-        val headers = mapOf(
-            "User-Agent" to userAgent,
-            "X-YouTube-Client-Name" to clientId,
-            "X-YouTube-Client-Version" to clientVersion,
-            "Content-Type" to "application/json"
-        )
-        
-        return try {
-            val response = app.post(apiUrl, json = payload, headers = headers).text
-            val root = JSONObject(response)
+            )
+            val vrRes = app.post(apiUrl, json = vrPayload, headers = mapOf("User-Agent" to YoutubeUtils.ANDROID_VR_USER_AGENT)).text
+            val vrJson = JSONObject(vrRes)
+            val status = vrJson.optJSONObject("playabilityStatus")?.optString("status")
+            println("[YT_DEBUG_EXTRACTOR] ANDROID_VR API 응답 상태: $status")
             
-            val status = root.optJSONObject("playabilityStatus")?.optString("status")
-            println("[YT_DEBUG_EXTRACTOR] API 호출 완료 ($clientName). PlayabilityStatus: $status")
-            
-            root.optJSONObject("streamingData")
-        } catch (e: Exception) {
-            println("[YT_DEBUG_EXTRACTOR] API 호출 에러 ($clientName): ${e.message}")
-            null
+            if (status == "OK" || vrJson.has("streamingData")) {
+                return vrJson.optJSONObject("streamingData")
+            } else if (status == "UNPLAYABLE" || status == "LOGIN_REQUIRED") {
+                // 연령 제한 등으로 VR이 막혔을 경우에만 TV 임베디드로 최후의 우회 시도
+                println("[YT_DEBUG_EXTRACTOR] VR 차단됨. TV_EMBEDDED로 우회 시도...")
+                val tvPayload = mapOf(
+                    "videoId" to videoId,
+                    "context" to mapOf(
+                        "client" to mapOf(
+                            "clientName" to "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
+                            "clientVersion" to "2.0",
+                            "hl" to "en",
+                            "gl" to "US",
+                            "visitorData" to visitorData
+                        ),
+                        "thirdParty" to mapOf("embedUrl" to "https://www.youtube.com")
+                    )
+                )
+                val tvRes = app.post(apiUrl, json = tvPayload).text
+                val tvJson = JSONObject(tvRes)
+                println("[YT_DEBUG_EXTRACTOR] TV API 응답 상태: ${tvJson.optJSONObject("playabilityStatus")?.optString("status")}")
+                return tvJson.optJSONObject("streamingData")
+            }
+        } catch (e: Exception) { 
+            println("[YT_DEBUG_EXTRACTOR] ANDROID_VR 요청 예외: ${e.message}") 
         }
+
+        return null
     }
 
     override suspend fun getUrl(
@@ -154,19 +189,14 @@ open class YoutubeExtractor : ExtractorApi() {
 
         withContext(Dispatchers.IO) {
             try {
-                // 1차 시도: ANDROID_VR (가장 강력한 403 우회)
-                var clientType = "ANDROID_VR"
-                var streamingData = fetchStreamingData(videoId, clientType)
-                
-                // 2차 시도: IOS (VR 실패 시 폴백)
-                if (streamingData == null || !streamingData.has("adaptiveFormats")) {
-                    println("[YT_DEBUG_EXTRACTOR] ANDROID_VR 추출 실패, IOS 클라이언트로 재시도...")
-                    clientType = "IOS"
-                    streamingData = fetchStreamingData(videoId, clientType)
-                }
+                val streamingData = fetchStreamingData(videoId)
 
                 if (streamingData == null) {
                     println("[YT_DEBUG_EXTRACTOR] 🚨 모든 클라이언트 우회 실패! streamingData 없음.")
+                    
+                    // 최후의 수단으로 외부 다운로더 링크 제공
+                    callback(newExtractorLink(source = "YouTube Downloader", name = "Cobalt Web Download(4K)", url = "https://qwkuns.me/#https://www.youtube.com/watch?v=$videoId", type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+                    callback(newExtractorLink(source = "YouTube Downloader", name = "SOSYouTube Web Download(1080p)", url = "https://www.sosyoutube.com/watch?v=$videoId", type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
                     return@withContext
                 }
 
@@ -178,7 +208,13 @@ open class YoutubeExtractor : ExtractorApi() {
                 for (i in 0 until adaptiveFormats.length()) {
                     val format = adaptiveFormats.getJSONObject(i)
                     val streamUrl = format.optString("url")
-                    if (streamUrl.isNullOrEmpty()) continue
+                    
+                    if (streamUrl.isNullOrEmpty()) {
+                        if (format.has("signatureCipher")) {
+                            println("[YT_DEBUG_EXTRACTOR] ⚠️ 암호화된 스트림(signatureCipher) 발견 건너뜀.")
+                        }
+                        continue
+                    }
 
                     val mimeType = format.optString("mimeType", "")
                     val initRange = format.optJSONObject("initRange")
@@ -232,7 +268,7 @@ open class YoutubeExtractor : ExtractorApi() {
                             }
 
                             if (bestAudio != null) {
-                                val dashXml = buildDashManifestXml(video, listOf(bestAudio), 3600L, clientType)
+                                val dashXml = buildDashManifestXml(video, listOf(bestAudio), 3600L)
                                 val localLink = registerManifestAndGetUrl(dashXml)
 
                                 if (localLink != null) {
@@ -243,6 +279,8 @@ open class YoutubeExtractor : ExtractorApi() {
                                         ) {
                                             this.referer = mainUrl
                                             this.quality = video.height
+                                            // ExoPlayer가 서버(프록시)로 요청할 때 사용할 헤더. 
+                                            // 봇 감지를 피하기 위해 일반 브라우저 헤더를 줍니다. (진짜 유튜브와의 통신은 프록시가 담당)
                                             this.headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
                                         }
                                     )
@@ -359,25 +397,14 @@ open class YoutubeExtractor : ExtractorApi() {
 
     private fun proxyChunkToYouTube(socket: Socket, targetUrl: String, clientHeaders: Map<String, String>) {
         try {
-            val finalTargetUrl = targetUrl
-            
-            // [핵심 방어 로직] 스트림 URL에 포함된 "c=" (Client) 파라미터를 읽어서,
-            // 유튜브 CDN이 봇으로 감지하지 못하도록 해당 클라이언트에 맞는 완벽한 User-Agent를 세팅합니다.
-            val cParamMatch = Regex("[?&]c=([^&]+)").find(finalTargetUrl)
-            val cParam = cParamMatch?.groupValues?.get(1)?.uppercase() ?: "ANDROID_VR"
-
-            val dynamicUserAgent = when (cParam) {
-                "ANDROID_VR" -> YoutubeUtils.ANDROID_VR_USER_AGENT
-                "IOS" -> YoutubeUtils.IOS_USER_AGENT
-                else -> YoutubeUtils.ANDROID_VR_USER_AGENT
-            }
-
+            // [프록시의 핵심] 유튜브 서버가 봇으로 감지하지 못하도록 ANDROID_VR User-Agent를 고정 세팅합니다.
             val requestBuilder = okhttp3.Request.Builder()
-                .url(finalTargetUrl)
-                .header("User-Agent", dynamicUserAgent)
+                .url(targetUrl)
+                .header("User-Agent", YoutubeUtils.ANDROID_VR_USER_AGENT)
                 .header("Accept", "*/*")
                 .header("Connection", "keep-alive")
 
+            // ExoPlayer가 보낸 헤더 중 봇 감지를 유발할 수 있는 헤더들은 필터링합니다.
             clientHeaders.forEach { (key, value) ->
                 val lowerKey = key.lowercase()
                 if (lowerKey != "host" && lowerKey != "user-agent" && lowerKey != "origin" && lowerKey != "referer" && lowerKey != "accept-encoding") {
@@ -389,6 +416,7 @@ open class YoutubeExtractor : ExtractorApi() {
             val response = proxyHttpClient.newCall(request).execute()
             
             if (response.code == 403 || response.code == 400) {
+                println("[YT_PROXY_DEBUG] 🚨 유튜브 CDN 에러 발생: ${response.code}")
                 val output = socket.getOutputStream()
                 val rawOutWriter = java.io.PrintWriter(output, false)
                 rawOutWriter.print("HTTP/1.1 ${response.code} ${response.message}\r\n\r\n")
@@ -421,13 +449,10 @@ open class YoutubeExtractor : ExtractorApi() {
     private fun buildDashManifestXml(
         video: StreamInfo,
         audioList: List<AudioInfo>,
-        durationSec: Long,
-        clientType: String
+        durationSec: Long
     ): String {
         val videoChunkId = UUID.randomUUID().toString()
-        // 프록시 서버가 클라이언트 타입을 알 수 있도록 c 파라미터 강제 삽입
-        val safeVideoUrl = if (video.url.contains("c=")) video.url else "${video.url}&c=$clientType"
-        streamUrlCache[videoChunkId] = safeVideoUrl
+        streamUrlCache[videoChunkId] = video.url
         val proxyVideoUrl = "http://127.0.0.1:$serverPort/chunk?id=$videoChunkId"
         
         val cleanVideoUrl = escapeXml(proxyVideoUrl)
@@ -455,8 +480,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
         audioList.forEachIndexed { index, audio ->
             val audioIdChunk = UUID.randomUUID().toString()
-            val safeAudioUrl = if (audio.url.contains("c=")) audio.url else "${audio.url}&c=$clientType"
-            streamUrlCache[audioIdChunk] = safeAudioUrl
+            streamUrlCache[audioIdChunk] = audio.url
             val proxyAudioUrl = "http://127.0.0.1:$serverPort/chunk?id=$audioIdChunk"
             val cleanAudioUrl = escapeXml(proxyAudioUrl)
 
