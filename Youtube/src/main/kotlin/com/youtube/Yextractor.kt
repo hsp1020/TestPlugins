@@ -69,7 +69,7 @@ open class YoutubeExtractor : ExtractorApi() {
             .build()
             
         init {
-            println("[YT_DEBUG_INIT] 독자 API 추출기 초기화 완료 (ANDROID_VR 전용 API 통신)")
+            println("[YT_DEBUG_INIT] 독자 API 추출기 초기화 완료 (ANDROID_VR 단일 직진 모드)")
         }
     }
 
@@ -96,48 +96,38 @@ open class YoutubeExtractor : ExtractorApi() {
     )
 
     private suspend fun fetchStreamingData(videoId: String): JSONObject? {
-        val watchUrl = "https://www.youtube.com/watch?v=$videoId"
-        
-        // 1. 웹페이지에서 API Key와 Visitor Data를 추출합니다.
-        val html = app.get(watchUrl, headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)).text
-        
-        val apiKey = Regex(""""INNERTUBE_API_KEY":"([^"]+)"""").find(html)?.groupValues?.get(1)
-        val visitorData = Regex(""""VISITOR_DATA":"([^"]+)"""").find(html)?.groupValues?.get(1) ?: ""
+        // [핵심 1] 웹용 API Key가 아닌, 안드로이드 모바일/VR 전용 고정 API Key 사용 (미스매치 방지)
+        val androidApiKey = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
+        val apiUrl = "https://www.youtube.com/youtubei/v1/player?key=$androidApiKey"
 
-        if (apiKey.isNullOrEmpty()) {
-            println("[YT_DEBUG_EXTRACTOR] 🚨 치명적 오류: API Key 추출 실패!")
-            return null
-        }
-
-        val apiUrl = "https://www.youtube.com/youtubei/v1/player?key=$apiKey"
-
-        // [핵심] 암호화(signatureCipher)를 무시하고 생주소를 얻기 위해 ANDROID_VR 클라이언트로 API를 찌릅니다.
-        try {
-            val vrPayload = mapOf(
-                "videoId" to videoId,
-                "context" to mapOf(
-                    "client" to mapOf(
-                        "clientName" to "ANDROID_VR",
-                        "clientVersion" to "1.65.10",
-                        "osName" to "Android",
-                        "osVersion" to "12L",
-                        "hl" to "en",
-                        "gl" to "US",
-                        "visitorData" to visitorData
-                    )
+        // [핵심 2] PipePipeExtractor v5.1.1 커밋과 100% 동일한 ANDROID_VR 페이로드 구성 (기기 정보 완벽 주입)
+        val vrPayload = mapOf(
+            "videoId" to videoId,
+            "context" to mapOf(
+                "client" to mapOf(
+                    "clientName" to "ANDROID_VR",
+                    "clientVersion" to "1.65.10",
+                    "androidSdkVersion" to 32,
+                    "osName" to "Android",
+                    "osVersion" to "12L",
+                    "deviceMake" to "Oculus",
+                    "deviceModel" to "Quest 3",
+                    "hl" to "en",
+                    "gl" to "US",
+                    "clientScreen" to "WATCH"
                 )
             )
-            
-            val vrHeaders = mapOf(
-                "User-Agent" to YoutubeUtils.ANDROID_VR_USER_AGENT,
-                "X-YouTube-Client-Name" to "28", // 28 = ANDROID_VR
-                "X-YouTube-Client-Version" to "1.65.10",
-                "Content-Type" to "application/json",
-                "Origin" to "https://www.youtube.com",
-                "Referer" to "https://www.youtube.com/"
-            )
+        )
+        
+        val vrHeaders = mapOf(
+            "User-Agent" to YoutubeUtils.ANDROID_VR_USER_AGENT,
+            "X-YouTube-Client-Name" to "28", // 28 = ANDROID_VR
+            "X-YouTube-Client-Version" to "1.65.10",
+            "Content-Type" to "application/json"
+        )
 
-            println("[YT_DEBUG_EXTRACTOR] ANDROID_VR API 요청 전송 중...")
+        try {
+            println("[YT_DEBUG_EXTRACTOR] ANDROID_VR API 직접 호출 중...")
             val vrRes = app.post(apiUrl, json = vrPayload, headers = vrHeaders).text
             val vrJson = JSONObject(vrRes)
             val status = vrJson.optJSONObject("playabilityStatus")?.optString("status")
@@ -147,28 +137,34 @@ open class YoutubeExtractor : ExtractorApi() {
                 println("[YT_DEBUG_EXTRACTOR] ✅ ANDROID_VR에서 streamingData 확보 성공!")
                 return vrJson.optJSONObject("streamingData")
             } else if (status == "UNPLAYABLE" || status == "LOGIN_REQUIRED") {
-                // 연령 제한 등으로 VR이 막혔을 경우 TV 임베디드로 우회 시도
-                println("[YT_DEBUG_EXTRACTOR] VR 차단됨. TV_EMBEDDED로 우회 시도...")
-                val tvPayload = mapOf(
-                    "videoId" to videoId,
-                    "context" to mapOf(
-                        "client" to mapOf(
-                            "clientName" to "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
-                            "clientVersion" to "2.0",
-                            "hl" to "en",
-                            "gl" to "US",
-                            "visitorData" to visitorData
-                        ),
-                        "thirdParty" to mapOf("embedUrl" to "https://www.youtube.com")
+                // VR이 연령 제한 등으로 막혔을 경우에만 최후의 수단으로 TV 임베디드 시도 (웹 API Key 필요)
+                println("[YT_DEBUG_EXTRACTOR] VR 차단됨. TV_EMBEDDED로 연령 제한 우회 시도...")
+                val watchUrl = "https://www.youtube.com/watch?v=$videoId"
+                val html = app.get(watchUrl, headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)).text
+                val webApiKey = Regex(""""INNERTUBE_API_KEY":"([^"]+)"""").find(html)?.groupValues?.get(1)
+                
+                if (!webApiKey.isNullOrEmpty()) {
+                    val tvApiUrl = "https://www.youtube.com/youtubei/v1/player?key=$webApiKey"
+                    val tvPayload = mapOf(
+                        "videoId" to videoId,
+                        "context" to mapOf(
+                            "client" to mapOf(
+                                "clientName" to "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
+                                "clientVersion" to "2.0",
+                                "hl" to "en",
+                                "gl" to "US"
+                            ),
+                            "thirdParty" to mapOf("embedUrl" to "https://www.youtube.com")
+                        )
                     )
-                )
-                val tvRes = app.post(apiUrl, json = tvPayload).text
-                val tvJson = JSONObject(tvRes)
-                println("[YT_DEBUG_EXTRACTOR] TV API 응답 상태: ${tvJson.optJSONObject("playabilityStatus")?.optString("status")}")
-                return tvJson.optJSONObject("streamingData")
+                    val tvRes = app.post(tvApiUrl, json = tvPayload).text
+                    val tvJson = JSONObject(tvRes)
+                    println("[YT_DEBUG_EXTRACTOR] TV API 응답 상태: ${tvJson.optJSONObject("playabilityStatus")?.optString("status")}")
+                    return tvJson.optJSONObject("streamingData")
+                }
             }
         } catch (e: Exception) { 
-            println("[YT_DEBUG_EXTRACTOR] ANDROID_VR 요청 예외: ${e.message}") 
+            println("[YT_DEBUG_EXTRACTOR] API 요청 예외: ${e.message}") 
         }
 
         return null
@@ -190,7 +186,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 val streamingData = fetchStreamingData(videoId)
 
                 if (streamingData == null) {
-                    println("[YT_DEBUG_EXTRACTOR] 🚨 모든 클라이언트 우회 실패! streamingData 없음.")
+                    println("[YT_DEBUG_EXTRACTOR] 🚨 모든 우회 실패! streamingData 없음.")
                     callback(newExtractorLink(source = "YouTube Downloader", name = "Cobalt Web Download(4K)", url = "https://qwkuns.me/#https://www.youtube.com/watch?v=$videoId", type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
                     callback(newExtractorLink(source = "YouTube Downloader", name = "SOSYouTube Web Download(1080p)", url = "https://www.sosyoutube.com/watch?v=$videoId", type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
                     return@withContext
@@ -238,7 +234,6 @@ open class YoutubeExtractor : ExtractorApi() {
 
                 println("[YT_DEBUG_EXTRACTOR] 파싱 완료 -> 비디오: ${videoOnlyList.size}개, 오디오: ${audioInfoList.size}개")
 
-                // 자막 추출 로직
                 val captions = streamingData.optJSONObject("captions")?.optJSONObject("playerCaptionsTracklistRenderer")?.optJSONArray("captionTracks")
                 if (captions != null) {
                     for (i in 0 until captions.length()) {
@@ -275,6 +270,7 @@ open class YoutubeExtractor : ExtractorApi() {
                                         ) {
                                             this.referer = mainUrl
                                             this.quality = video.height
+                                            // ExoPlayer가 서버(프록시)로 요청할 때 사용할 헤더
                                             this.headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
                                         }
                                     )
@@ -391,7 +387,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
     private fun proxyChunkToYouTube(socket: Socket, targetUrl: String, clientHeaders: Map<String, String>) {
         try {
-            // [프록시 핵심] 실제 다운로드 통신을 할 때도 유튜브 CDN이 봇으로 감지하지 못하도록 ANDROID_VR 헤더를 적용합니다.
+            // [프록시 방어 로직] 다운로드 시에도 완벽한 ANDROID_VR 헤더를 유지하여 403 차단 회피
             val requestBuilder = okhttp3.Request.Builder()
                 .url(targetUrl)
                 .header("User-Agent", YoutubeUtils.ANDROID_VR_USER_AGENT)
@@ -492,4 +488,28 @@ open class YoutubeExtractor : ExtractorApi() {
                     $aSegmentBase
                   </Representation>
                 </AdaptationSet>
-            """.trimI
+            """.trimIndent())
+        }
+
+        sb.append("</Period>")
+        sb.append("</MPD>")
+        return sb.toString()
+    }
+
+    private fun escapeXml(url: String): String {
+        if (!url.contains('&') && !url.contains('<') && !url.contains('>') && !url.contains('\'') && !url.contains('"')) return url
+        val sb = java.lang.StringBuilder(url.length + 16)
+        for (i in 0 until url.length) {
+            val c = url[i]
+            when (c) {
+                '&' -> sb.append("&amp;")
+                '<' -> sb.append("&lt;")
+                '>' -> sb.append("&gt;")
+                '\'' -> sb.append("&apos;")
+                '"' -> sb.append("&quot;")
+                else -> sb.append(c)
+            }
+        }
+        return sb.toString()
+    }
+}
