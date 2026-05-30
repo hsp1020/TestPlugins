@@ -31,9 +31,8 @@ object YoutubeUtils {
     const val SAFARI_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
     const val IOS_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
     
-    // [추가됨] PipePipeExtractor v5.1.1의 Android VR 세션과 일치시키기 위한 전용 User-Agent
-    const val ANDROID_USER_AGENT = "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"
-    const val ANDROID_VR_USER_AGENT = "com.google.android.apps.youtube.vr/1.52.41 (Linux; U; Android 13; en_US; Quest 2 Build/SQ3A.220605.009.A1)"
+    // [PipePipeExtractor v5.1.1 대응] ANDROID_VR 클라이언트 (Oculus Quest 3 / Android 12L) 전용 User-Agent
+    const val ANDROID_VR_USER_AGENT = "Mozilla/5.0 (Linux; Android 12L; Quest 3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"
     
     const val DEFAULT_CLIENT_VERSION = "2.20240725.01.00"
 
@@ -62,14 +61,20 @@ object YoutubeUtils {
                     .url(url)
                     .method(method, reqBody)
 
+                var hasUserAgent = false
                 headers.forEach { (key, values) ->
                     if (!key.equals("Origin", true) && !key.equals("Referer", true)) {
-                        values.forEach { reqBuilder.addHeader(key, it) }
+                        values.forEach { 
+                            reqBuilder.addHeader(key, it) 
+                            if (key.equals("User-Agent", true)) hasUserAgent = true
+                        }
                     }
                 }
                 
-                // [수정됨] Android VR 세션 유지를 위해 UA 교체
-                reqBuilder.header("User-Agent", ANDROID_VR_USER_AGENT)
+                // PipePipeExtractor 내부에서 명시하지 않은 경우 ANDROID_VR User-Agent 강제 적용
+                if (!hasUserAgent) {
+                    reqBuilder.header("User-Agent", ANDROID_VR_USER_AGENT)
+                }
 
                 val res = okHttpClient.newCall(reqBuilder.build()).execute()
                 val resHeaders = res.headers.toMultimap()
@@ -244,8 +249,6 @@ object YoutubeUtils {
     }
 }
 
-// (이하 YoutubeProvider 본문 코드는 제공해주신 원본과 동일하게 유지되며, YoutubePoTokenProvider 부분만 제거되었습니다.)
-
 class YoutubeProvider(
     private val sharedPref: SharedPreferences? = null
 ) : MainAPI() {
@@ -283,7 +286,6 @@ class YoutubeProvider(
 
         private val continuationTokenCache = ConcurrentHashMap<String, String>()
         
-        // 추천목록 등에서 ID 매칭을 위해 저장해두는 전역 메타데이터 저장소 (100% 안전)
         private val epMetaMapCache = ConcurrentHashMap<String, String>()
 
         private val VIEW_REPLACE_REGEX = Regex("조회수|views|مشاهدة|시청 중|시청중|watching|명|시청자")
@@ -435,9 +437,6 @@ class YoutubeProvider(
         }
     }
 
-    // ==================================================================================
-    // [플롯 전용 추출기] 기존 탐색(getMapKey)을 안전하게 활용하여 데이터 손실 없이 꺼내옵니다.
-    // ==================================================================================
     private fun getEpisodeMetaString(videoData: Map<*, *>?): String {
         if (videoData == null) return ""
         
@@ -506,12 +505,9 @@ class YoutubeProvider(
 
         val partsList = listOf(duration, channel, views, date).filter { it.isNotBlank() && it != "N/A" }
         val result = partsList.joinToString(" • ")
-        println("[YT_DEBUG_PLOT] Generated Meta: $result")
         return result
     }
 
-    // ==================================================================================
-    
     private fun Map<*, *>.getMapKey(key: String): Map<*, *>? {
         return (this[key] as? Map<*, *>) 
             ?: (this.entries.firstOrNull { (it.key as? String) == key }?.value as? Map<*, *>)
@@ -664,7 +660,6 @@ class YoutubeProvider(
             ?: obj.getListKey("runs")?.firstOrNull()?.getString("text")
     }
 
-    // 여기서 추출된 정보를 epMetaMapCache 에 저장하여 나중에 에피소드 Plot으로 꺼내 씁니다.
     private fun collectFromRenderer(
         renderer: Map<*, *>?,
         seenIds: MutableSet<String>
@@ -681,7 +676,6 @@ class YoutubeProvider(
             val videoId = videoData.getString("videoId")
             if (!videoId.isNullOrBlank() && seenIds.add(videoId)) {
                 
-                // [플롯 저장 로직 추가] 추천목록/에피소드에 쓸 데이터를 전역 캐시에 담음
                 val metaString = getEpisodeMetaString(videoData)
                 if (metaString.isNotBlank()) epMetaMapCache[videoId] = metaString
 
@@ -847,7 +841,6 @@ class YoutubeProvider(
                 val finalTitle: String
                 val poster: String
 
-                // [플롯 저장 로직 추가] 락업(채널 영상) 플롯 저장
                 val metaString = getEpisodeMetaString(lockup.getMapKey("content") ?: lockup)
                 if (metaString.isNotBlank()) epMetaMapCache[videoId] = metaString
 
@@ -923,7 +916,7 @@ class YoutubeProvider(
         playlistMode: Boolean,
         depth: Int = 0
     ) {
-        if (data == null || depth > 32) return // Stack Overflow 방지용 Depth 안전 보호막
+        if (data == null || depth > 32) return 
         if (data is Map<*, *>) {
             val extracted = collectFromRenderer(data, seenIds)
             if (extracted != null) {
@@ -1986,7 +1979,7 @@ class YoutubeProvider(
 
         val videoId = YoutubeUtils.extractYoutubeId(url) ?: throw ErrorLoadingException("Invalid YouTube URL")
 
-        epMetaMapCache.clear() // 매번 초기화
+        epMetaMapCache.clear()
 
         val headers = mapOf("Referer" to "https://www.youtube.com/")
         val response = app.get(url, headers = headers, interceptor = ytInterceptor)
@@ -2072,11 +2065,6 @@ class YoutubeProvider(
 
         val episodes = mutableListOf<Episode>()
         
-        // ==========================================
-        // 진입 영상 (에피소드 1) 플롯 추출 로직
-        // ==========================================
-        println("\n[YT_DEBUG_EP1] Starting main video extraction")
-        
         var ep1Dur = ""
         val lengthMatch = Regex(""""lengthSeconds"\s*:\s*"?(\d+)"""").find(html)
         if (lengthMatch != null) {
@@ -2112,7 +2100,6 @@ class YoutubeProvider(
 
         val mainDescParts = listOf(ep1Dur, channelName, ep1Views, ep1Date).filter { it.isNotBlank() && it != "N/A" }
         val mainDescStr = mainDescParts.joinToString(" • ")
-        println("[YT_DEBUG_EP1] Final Plot: $mainDescStr")
 
         episodes.add(newEpisode(url) {
             this.name = title
@@ -2121,9 +2108,6 @@ class YoutubeProvider(
             this.description = mainDescStr.ifBlank { channelName.ifBlank { "재생 중" } }
         })
 
-        // ==========================================
-        // 하단 추천 영상 (에피소드 2 이후) 플롯 매핑
-        // ==========================================
         var epCount = 2
         filteredRecs.forEach { rec ->
             if (rec.url.contains("watch?v=") || rec.url.contains("/shorts/")) {
