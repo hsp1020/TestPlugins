@@ -182,7 +182,7 @@ open class YoutubeExtractor : ExtractorApi() {
                             "client" to mapOf(
                                 "clientName" to "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
                                 "clientVersion" to "2.0",
-                                "hl" to en,
+                                "hl" to "en",
                                 "gl" to "US",
                                 "visitorData" to visitorData
                             ),
