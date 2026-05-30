@@ -9,6 +9,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.schemaStripRegex
+import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.ar.youtube.YoutubeUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -69,7 +70,7 @@ open class YoutubeExtractor : ExtractorApi() {
             .build()
             
         init {
-            println("[YT_DEBUG_INIT] 독자 API 추출기 초기화 완료 (재생시간 버그 패치완료)")
+            println("[YT_DEBUG_INIT] 유튜브 DASH 추출기 초기화 완료 (재생 버그 및 XML 문법 교정 적용)")
         }
     }
 
@@ -94,11 +95,29 @@ open class YoutubeExtractor : ExtractorApi() {
         val bitrate: Int,
         val initRange: String?,
         val indexRange: String?,
-        val language: String
+        val languageId: String,
+        val displayName: String
     )
 
-    // [핵심 수정] streamingData와 함께 실제 영상 길이(초)를 반환하도록 변경
-    private suspend fun fetchStreamingData(videoId: String): Pair<JSONObject?, Long> {
+    private fun cleanLanguageLabel(langId: String, displayName: String): String {
+        if (displayName.isNotBlank()) {
+            return displayName
+                .replace(" (original)", "")
+                .replace(" (dubbed)", " (Dub)")
+                .replace(" (더빙)", " (Dub)")
+                .trim()
+        }
+        val upper = langId.uppercase()
+        if (upper.contains(".")) {
+            val parts = upper.split(".")
+            if (parts.size >= 2) {
+                return "${parts[0]} (Dub ${parts[1]})"
+            }
+        }
+        return upper
+    }
+
+    private suspend fun fetchPlayerResponse(videoId: String): Pair<JSONObject?, Long> {
         val watchUrl = "https://www.youtube.com/watch?v=$videoId"
         
         val html = app.get(watchUrl, headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)).text
@@ -133,7 +152,7 @@ open class YoutubeExtractor : ExtractorApi() {
         
         val vrHeaders = mapOf(
             "User-Agent" to YoutubeUtils.ANDROID_VR_USER_AGENT,
-            "X-YouTube-Client-Name" to "28", // 28 = ANDROID_VR
+            "X-YouTube-Client-Name" to "28",
             "X-YouTube-Client-Version" to "1.65.10",
             "Content-Type" to "application/json"
         )
@@ -144,14 +163,13 @@ open class YoutubeExtractor : ExtractorApi() {
             val vrJson = JSONObject(vrRes)
             val status = vrJson.optJSONObject("playabilityStatus")?.optString("status")
             
-            // 실제 영상 길이 추출 (없으면 기본값 1시간)
             val lengthSeconds = vrJson.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
             
             println("[YT_DEBUG_EXTRACTOR] ANDROID_VR API 응답 상태: $status, 영상 길이: ${lengthSeconds}초")
             
             if (status == "OK" || vrJson.has("streamingData")) {
-                println("[YT_DEBUG_EXTRACTOR] ✅ ANDROID_VR에서 streamingData 확보 성공!")
-                return Pair(vrJson.optJSONObject("streamingData"), lengthSeconds)
+                println("[YT_DEBUG_EXTRACTOR] ✅ ANDROID_VR에서 playerResponse 확보 성공!")
+                return Pair(vrJson, lengthSeconds)
             } else if (status == "UNPLAYABLE" || status == "LOGIN_REQUIRED") {
                 println("[YT_DEBUG_EXTRACTOR] VR 차단됨. TV_EMBEDDED로 연령 제한 우회 시도...")
                 val webApiKey = Regex(""""INNERTUBE_API_KEY":"([^"]+)"""").find(html)?.groupValues?.get(1)
@@ -180,7 +198,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     val tvJson = JSONObject(tvRes)
                     val tvLengthSeconds = tvJson.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
                     println("[YT_DEBUG_EXTRACTOR] TV API 응답 상태: ${tvJson.optJSONObject("playabilityStatus")?.optString("status")}")
-                    return Pair(tvJson.optJSONObject("streamingData"), tvLengthSeconds)
+                    return Pair(tvJson, tvLengthSeconds)
                 }
             }
         } catch (e: Exception) { 
@@ -203,12 +221,35 @@ open class YoutubeExtractor : ExtractorApi() {
 
         withContext(Dispatchers.IO) {
             try {
-                val (streamingData, durationSeconds) = fetchStreamingData(videoId)
+                val (playerResponse, durationSeconds) = fetchPlayerResponse(videoId)
 
-                if (streamingData == null) {
-                    println("[YT_DEBUG_EXTRACTOR] 🚨 모든 우회 실패! streamingData 없음.")
+                if (playerResponse == null) {
+                    println("[YT_DEBUG_EXTRACTOR] 🚨 모든 우회 실패! playerResponse 없음.")
                     callback(newExtractorLink(source = "YouTube Downloader", name = "Cobalt Web Download(4K)", url = "https://qwkuns.me/#https://www.youtube.com/watch?v=$videoId", type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
                     callback(newExtractorLink(source = "YouTube Downloader", name = "SOSYouTube Web Download(1080p)", url = "https://www.sosyoutube.com/watch?v=$videoId", type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+                    return@withContext
+                }
+
+                val streamingData = playerResponse.optJSONObject("streamingData")
+                if (streamingData == null) {
+                    println("[YT_DEBUG_EXTRACTOR] 🚨 streamingData 없음.")
+                    return@withContext
+                }
+
+                val hlsUrl = streamingData.optString("hlsManifestUrl")
+                if (!hlsUrl.isNullOrBlank()) {
+                    println("[YT_DEBUG_EXTRACTOR] 실시간 스트리밍(HLS) 발견: $hlsUrl")
+                    callback(
+                        newExtractorLink(
+                            this@YoutubeExtractor.name,
+                            "YouTube Live (M3U8)",
+                            hlsUrl,
+                            type = ExtractorLinkType.M3U8
+                        ) {
+                            this.referer = mainUrl
+                            this.quality = Qualities.Unknown.value
+                        }
+                    )
                     return@withContext
                 }
 
@@ -221,12 +262,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     val format = adaptiveFormats.getJSONObject(i)
                     val streamUrl = format.optString("url")
                     
-                    if (streamUrl.isNullOrEmpty()) {
-                        if (format.has("signatureCipher")) {
-                            println("[YT_DEBUG_EXTRACTOR] ⚠️ 암호화된 스트림(signatureCipher) 발견 건너뜀.")
-                        }
-                        continue
-                    }
+                    if (streamUrl.isNullOrEmpty()) continue
 
                     val rawMimeType = format.optString("mimeType", "")
                     var cleanMimeType = rawMimeType
@@ -261,33 +297,53 @@ open class YoutubeExtractor : ExtractorApi() {
                     } else if (cleanMimeType.startsWith("audio/")) {
                         val bitrate = format.optInt("bitrate", 128000)
                         val audioTrack = format.optJSONObject("audioTrack")
-                        val lang = audioTrack?.optString("id", "Default")?.uppercase() ?: "DEFAULT"
+                        val langId = audioTrack?.optString("id", "Default")?.uppercase() ?: "DEFAULT"
+                        val displayName = audioTrack?.optString("displayName", "") ?: ""
                         if (codec.isEmpty()) codec = if (cleanMimeType.contains("webm")) "opus" else "mp4a.40.2"
                         
-                        audioInfoList.add(AudioInfo(streamUrl, cleanMimeType, codec, bitrate, initR, indexR, lang))
+                        audioInfoList.add(AudioInfo(streamUrl, cleanMimeType, codec, bitrate, initR, indexR, langId, displayName))
                     }
                 }
 
                 println("[YT_DEBUG_EXTRACTOR] 파싱 완료 -> 비디오: ${videoOnlyList.size}개, 오디오: ${audioInfoList.size}개")
 
-                val captions = streamingData.optJSONObject("captions")?.optJSONObject("playerCaptionsTracklistRenderer")?.optJSONArray("captionTracks")
+                val captions = playerResponse.optJSONObject("captions")?.optJSONObject("playerCaptionsTracklistRenderer")?.optJSONArray("captionTracks")
                 if (captions != null) {
                     for (i in 0 until captions.length()) {
                         val track = captions.getJSONObject(i)
-                        val subUrl = track.optString("baseUrl")
+                        var subUrl = track.optString("baseUrl")
                         val lang = track.optString("languageCode")
+                        
+                        val nameObj = track.optJSONObject("name")
+                        var displayName = nameObj?.optString("simpleText") ?: ""
+                        if (displayName.isBlank()) {
+                            val runs = nameObj?.optJSONArray("runs")
+                            if (runs != null && runs.length() > 0) {
+                                displayName = runs.optJSONObject(0)?.optString("text") ?: ""
+                            }
+                        }
+                        if (displayName.isBlank()) {
+                            displayName = lang.uppercase()
+                        }
+
                         if (subUrl.isNotEmpty() && lang.isNotEmpty()) {
-                            subtitleCallback(SubtitleFile(lang, subUrl))
+                            if (subUrl.startsWith("http")) {
+                                subUrl = subUrl.replace(Regex("&fmt=[^&]+"), "")
+                                if (!subUrl.contains("fmt=srt")) {
+                                    subUrl = "$subUrl&fmt=srt"
+                                }
+                            }
+                            subtitleCallback(SubtitleFile(displayName, subUrl))
                         }
                     }
                 }
 
                 if (videoOnlyList.isNotEmpty() && audioInfoList.isNotEmpty()) {
-                    val audiosByLanguage = audioInfoList.groupBy { it.language }
+                    val audiosByLanguage = audioInfoList.groupBy { it.languageId }
                     startServerIfNeeded()
 
                     for (video in videoOnlyList.distinctBy { it.height }) {
-                        for ((lang, audios) in audiosByLanguage) {
+                        for ((langId, audios) in audiosByLanguage) {
                             val bestAudio = if (video.mimeType.contains("webm")) {
                                 audios.maxByOrNull { if (it.mimeType.contains("webm")) it.bitrate + 1000000 else it.bitrate }
                             } else {
@@ -295,15 +351,17 @@ open class YoutubeExtractor : ExtractorApi() {
                             }
 
                             if (bestAudio != null) {
-                                // [수정] 하드코딩된 3600L 대신 실제 영상 길이(durationSeconds)를 전달
                                 val dashXml = buildDashManifestXml(video, listOf(bestAudio), durationSeconds)
                                 val localLink = registerManifestAndGetUrl(dashXml)
 
                                 if (localLink != null) {
-                                    val finalName = "${video.label} ($lang) ${video.label}"
+                                    val cleanLangLabel = cleanLanguageLabel(bestAudio.languageId, bestAudio.displayName)
+                                    val finalName = "YouTube ${video.label} ($cleanLangLabel)"
+                                    val sourceName = "YouTube ($cleanLangLabel)"
+                                    
                                     callback(
                                         newExtractorLink(
-                                            "${this@YoutubeExtractor.name} ($lang)", finalName, localLink, type = ExtractorLinkType.DASH
+                                            sourceName, finalName, localLink, type = ExtractorLinkType.DASH
                                         ) {
                                             this.referer = mainUrl
                                             this.quality = video.height
@@ -437,34 +495,33 @@ open class YoutubeExtractor : ExtractorApi() {
             }
 
             val request = requestBuilder.build()
-            val response = proxyHttpClient.newCall(request).execute()
-            
-            if (response.code == 403 || response.code == 400) {
-                println("[YT_PROXY_DEBUG] 🚨 유튜브 CDN 에러 발생: ${response.code}")
+            proxyHttpClient.newCall(request).execute().use { response ->
+                if (response.code == 403 || response.code == 400) {
+                    println("[YT_PROXY_DEBUG] 🚨 유튜브 CDN 에러 발생: ${response.code}")
+                    val output = socket.getOutputStream()
+                    val rawOutWriter = java.io.PrintWriter(output, false)
+                    rawOutWriter.print("HTTP/1.1 ${response.code} ${response.message}\r\n\r\n")
+                    rawOutWriter.flush()
+                    return
+                }
+
                 val output = socket.getOutputStream()
                 val rawOutWriter = java.io.PrintWriter(output, false)
-                rawOutWriter.print("HTTP/1.1 ${response.code} ${response.message}\r\n\r\n")
+
+                rawOutWriter.print("HTTP/1.1 ${response.code} ${response.message}\r\n")
+                response.header("Content-Type")?.let { rawOutWriter.print("Content-Type: $it\r\n") }
+                response.header("Content-Length")?.let { rawOutWriter.print("Content-Length: $it\r\n") }
+                response.header("Content-Range")?.let { rawOutWriter.print("Content-Range: $it\r\n") }
+                response.header("Accept-Ranges")?.let { rawOutWriter.print("Accept-Ranges: $it\r\n") }
+                rawOutWriter.print("Connection: close\r\n")
+                rawOutWriter.print("\r\n")
                 rawOutWriter.flush()
-                return
+
+                response.body?.byteStream()?.use { input ->
+                    input.copyTo(output)
+                }
+                output.flush()
             }
-
-            val output = socket.getOutputStream()
-            val rawOutWriter = java.io.PrintWriter(output, false)
-
-            rawOutWriter.print("HTTP/1.1 ${response.code} ${response.message}\r\n")
-            response.header("Content-Type")?.let { rawOutWriter.print("Content-Type: $it\r\n") }
-            response.header("Content-Length")?.let { rawOutWriter.print("Content-Length: $it\r\n") }
-            response.header("Content-Range")?.let { rawOutWriter.print("Content-Range: $it\r\n") }
-            response.header("Accept-Ranges")?.let { rawOutWriter.print("Accept-Ranges: $it\r\n") }
-            rawOutWriter.print("Connection: close\r\n")
-            rawOutWriter.print("\r\n")
-            rawOutWriter.flush()
-
-            response.body?.byteStream()?.use { input ->
-                input.copyTo(output)
-            }
-            output.flush()
-
         } catch (e: Exception) {
             println("[YT_PROXY_DEBUG] 프록시 릴레이 중 예외 발생: ${e.message}")
         }
