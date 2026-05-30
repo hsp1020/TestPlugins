@@ -88,7 +88,7 @@ object YoutubeUtils {
     fun getProxiedPoster(poster: String?): String? {
         if (poster.isNullOrBlank()) return null
         return try {
-            "https://wsrv.nl/?url=${URLEncoder.encode(poster, "UTF-8")}&w=600&h=900&fit=contain&cbg=black"
+            "https://wsrv.nl/?url=${URLEncoder.encode(poster, "UTF-8")}&w=800&h=1200&fit=contain&cbg=black"
         } catch (e: Exception) {
             poster
         }
@@ -98,7 +98,7 @@ object YoutubeUtils {
     fun getProxiedPosterBottom(poster: String?): String? {
         if (poster.isNullOrBlank()) return null
         return try {
-            "https://wsrv.nl/?url=${URLEncoder.encode(poster, "UTF-8")}&w=600&h=900&fit=contain&cbg=black&a=bottom"
+            "https://wsrv.nl/?url=${URLEncoder.encode(poster, "UTF-8")}&w=800&h=1200&fit=contain&cbg=black&a=bottom"
         } catch (e: Exception) {
             poster
         }
@@ -109,7 +109,7 @@ object YoutubeUtils {
         return try {
             val targetUrl = "https://i.ytimg.com/vi/$videoId/oardefault.jpg?sqp=-oaymwEoCJUDENAFSFqQAgHyq4qpAxcIARUAAIhC2AEB4gEKCBgQAhgGOAFAAQ==&rs=AOn4CLDWlHo9hImueeIb7JfDzDGNRuQ5tg&usqp=CCk"
             val encoded = URLEncoder.encode(targetUrl, "UTF-8")
-            "https://wsrv.nl/?url=$encoded&w=600&h=900&fit=contain&cbg=black"
+            "https://wsrv.nl/?url=$encoded&w=800&h=1200&fit=contain&cbg=black"
         } catch (e: Exception) {
             "https://i.ytimg.com/vi/$videoId/oar2.jpg"
         }
