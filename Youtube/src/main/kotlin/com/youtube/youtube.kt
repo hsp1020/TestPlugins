@@ -1095,8 +1095,12 @@ class YoutubeProvider(
             }
 
             val nextData = data["nextContinuationData"] as? Map<*, *>
+                ?: data["reloadContinuationData"] as? Map<*, *>
+                ?: data["timedContinuationData"] as? Map<*, *>
+                ?: data["invalidationContinuationData"] as? Map<*, *>
             if (nextData != null) {
                 val token = nextData["continuation"] as? String
+                    ?: nextData["token"] as? String
                 if (!token.isNullOrBlank()) return token
             }
 
@@ -1964,7 +1968,7 @@ class YoutubeProvider(
                     extractVideosFromItems(initialItems, allEpisodes)
                 }
 
-                fun findContinuationTokenFromItems(items: List<*>?): String? {
+                fun findContinuationFromItems(items: List<*>?): String? {
                     if (items == null) return null
                     for (it in items) {
                         val m = it as? Map<*, *> ?: continue
@@ -1974,10 +1978,10 @@ class YoutubeProvider(
                     return null
                 }
 
-                var currentToken: String? = findContinuationTokenFromItems(initialItems)
+                var currentToken: String? = findContinuationFromItems(initialItems)
                 if (currentToken.isNullOrBlank()) {
                     val conts = findContinuationItemsRecursive(data)
-                    currentToken = findContinuationTokenFromItems(conts)
+                    currentToken = findContinuationFromItems(conts)
                 }
 
                 var pagesFetchedLocal = 1
@@ -2004,7 +2008,7 @@ class YoutubeProvider(
                         val jsonResponse = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>() ?: break
                         val continuationItems = findContinuationItemsRecursive(jsonResponse) ?: break
                         extractVideosFromItems(continuationItems, allEpisodes)
-                        currentToken = findContinuationTokenFromItems(continuationItems)
+                        currentToken = findContinuationFromItems(continuationItems)
                     } catch (e: Exception) {
                         break
                     }
