@@ -1359,14 +1359,39 @@ class YoutubeProvider(
 
         saveContinuationToken(requestData, nextContinuation)
 
+        // 시청기록(History) 행의 경우, 일자별 시간 경계는 유지하되 일자 내부에서만 일반 영상이 쇼츠보다 앞에 오도록 그룹 스왑 정렬
         if (requestData.contains("history", ignoreCase = true) || requestData.contains("기록")) {
-            val (shorts, vods) = results.partition { it.url.contains("/shorts/") }
+            val sorted = mutableListOf<SearchResponse>()
+            val tempShorts = mutableListOf<SearchResponse>()
+            val tempVods = mutableListOf<SearchResponse>()
+            
+            for (item in results) {
+                val isShort = item.url.contains("/shorts/")
+                if (isShort) {
+                    // 일반 영상을 보다가 다시 쇼츠가 등장했다는 것은 '새로운 날짜 섹션(새로운 날)'으로 진입했음을 의미함.
+                    // 따라서 이전 날짜 그룹의 정렬을 완료(일반 ➡️ 쇼츠 순)하여 sorted에 비우고 새로 수집 시작.
+                    if (tempVods.isNotEmpty()) {
+                        sorted.addAll(tempVods)
+                        tempVods.clear()
+                        sorted.addAll(tempShorts)
+                        tempShorts.clear()
+                    }
+                    tempShorts.add(item)
+                } else {
+                    tempVods.add(item)
+                }
+            }
+            // 미처 비워지지 않고 남아있는 마지막 날짜 섹션의 데이터를 순서대로 적재
+            if (tempVods.isNotEmpty() || tempShorts.isNotEmpty()) {
+                sorted.addAll(tempVods)
+                sorted.addAll(tempShorts)
+            }
             results.clear()
-            results.addAll(vods)
-            results.addAll(shorts)
+            results.addAll(sorted)
         }
-        
+
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
+
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
