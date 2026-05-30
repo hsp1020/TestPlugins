@@ -253,11 +253,11 @@ class YoutubeProvider(
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Live)
 
     companion object {
-        // 동시성 크래시를 전격 방지하기 위한 이중 가드형 스레드 세이프 전역 리스트
+        // 스레드 경합 붕괴로 인한 CME 크래시를 전격 가드하기 위한 배타 동기 리스트
         private val homeShorts = Collections.synchronizedList(mutableListOf<Episode>())
         private val searchShorts = Collections.synchronizedList(mutableListOf<Episode>())
 
-        // 메모리 파열 및 자원 무제한 점유를 전면 억제하는 고성능 LRU 캐시 세그먼트
+        // 메모리 파열 및 힙 전유를 전면 억제하는 고성능 LRU 캐싱 세그먼트
         private val continuationTokenCache: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(128, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
@@ -274,7 +274,7 @@ class YoutubeProvider(
             }
         )
 
-        // 멀티코어 메모리 가시성 붕괴 및 병렬 로딩 시 API key 누수를 차단하기 위해 Companion 범위로 격상된 Volatile 변수
+        // 병렬 가동 경쟁 시 메모리 가시성(Visibility) 붕괴를 원천 차단하기 위해 Companion 영역으로 격상된 휘발성 가드 변수들
         @Volatile
         private var savedVisitorData: String? = null
         @Volatile
@@ -1239,12 +1239,43 @@ class YoutubeProvider(
                         }
                         processRecursive(initialData, results, seenIds, playlistMode = false)
                         nextContinuation = findTokenRecursive(initialData)
+
+                        // [Bug 2 완벽 패치]: 만약 수동 등록한 채널/재생목록 칩의 첫 페이지 로드 데이터가 비어있으나 Continuation 토큰은 존재할 때,
+                        // 곧바로 다음 단계 비동기 POST 렌더러를 기동하여 강제 복구함으로써 홈 가로 행(Row) 증발을 완벽하게 예방
+                        if (results.isEmpty() && !nextContinuation.isNullOrBlank()) {
+                            val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
+                            val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION) ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
+                            if (!apiKey.isNullOrBlank()) {
+                                val apiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
+                                val payload = mapOf(
+                                    "context" to mapOf(
+                                        "client" to mapOf(
+                                            "clientName" to "WEB",
+                                            "clientVersion" to cVersion,
+                                            "hl" to lang,
+                                            "platform" to "DESKTOP"
+                                        )
+                                    ),
+                                    "continuation" to nextContinuation
+                                )
+                                val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
+                                val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                                if (response != null) {
+                                    val actions = response["onResponseReceivedActions"] 
+                                        ?: response["onResponseReceivedEndpoints"]
+                                        ?: response["onResponseReceivedCommands"] 
+                                        ?: response
+                                    processRecursive(actions, results, seenIds, playlistMode = false)
+                                    nextContinuation = findTokenRecursive(response)
+                                }
+                            }
+                        }
                     }
                 }
             } else {
                 var tokenToUse = getSavedContinuationToken(requestData)
                 
-                // 복구 루프 내부 연쇄 폭증 제어 블록 (Cascade Load Block) 탑재
+                // 복구 루프 내부 연쇄 폭증 제어 블록 (Cascade Load Block) 탑재 및 apiKey 가드 보강
                 if (tokenToUse.isNullOrBlank() && page == 2) { 
                     val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
                     val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION) ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
@@ -1625,37 +1656,109 @@ class YoutubeProvider(
     }
 
     override suspend fun load(url: String): LoadResponse {
+        // [Bug 1 완벽 패치]: "계속 시청" 진입 시 메모리 캐시 소실에 대항하는 실시간 쇼츠 타이틀 및 플레이리스트 복구 체인 적용
         if (url.contains("/shorts/")) {
             val videoId = YoutubeUtils.extractYoutubeId(url) ?: "video"
-            val useSearchList = url.contains("&ctx=search")
+            val useSearchList = url.contains("ctx=search")
             val sourceList = if (useSearchList) searchShorts else homeShorts
-            val targetEpisodes = synchronized(sourceList) { sourceList.toMutableList() }
+            var targetEpisodes = synchronized(sourceList) { sourceList.toMutableList() }
             var currentEp = targetEpisodes.find { YoutubeUtils.extractYoutubeId(it.data) == videoId }
 
-            if (currentEp == null) {
-                val fallbackEp = newEpisode(url) {
-                    this.name = "Shorts Video"
-                    this.posterUrl = YoutubeUtils.buildThumbnailFromId(videoId)
-                    this.episode = targetEpisodes.size + 1
+            var shortTitle = currentEp?.name ?: "Shorts Video"
+            var poster = currentEp?.posterUrl ?: YoutubeUtils.buildThumbnailFromId(videoId)
+            var shortPlot = currentEp?.description ?: ""
+
+            // 프로세스 킬 혹은 앱 최초 재기동(Cold Start) 상태 등으로 에피소드 풀이 비어있다면, 연동 API를 통해 원천 데이터를 실시간 역구축
+            if (currentEp == null || targetEpisodes.size <= 1) {
+                try {
+                    val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
+                    val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION) ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
+                    
+                    if (!apiKey.isNullOrBlank()) {
+                        // 1. 유튜브 Player API를 통해 실제 쇼츠 제목 및 저자 정보 역추적하여 덮어쓰기
+                        val playerUrl = "https://www.youtube.com/youtubei/v1/player?key=$apiKey"
+                        val playerPayload = mapOf(
+                            "context" to mapOf(
+                                "client" to mapOf(
+                                    "clientName" to "WEB",
+                                    "clientVersion" to cVersion,
+                                    "hl" to lang
+                                )
+                            ),
+                            "videoId" to videoId
+                        )
+                        val pResponse = app.post(playerUrl, json = playerPayload, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                        if (pResponse != null) {
+                            val details = pResponse["videoDetails"] as? Map<*, *>
+                            val fetchedTitle = details?.getString("title")
+                            val channelName = details?.getString("author")
+                            if (!fetchedTitle.isNullOrBlank()) {
+                                shortTitle = fetchedTitle
+                                shortPlot = if (!channelName.isNullOrBlank()) "채널: $channelName" else ""
+                            }
+                        }
+
+                        // 2. 추천 연관 API(/v1/next)를 기동하여 유사 쇼츠/추천 목록을 가로 에피소드 목록으로 완벽 복원
+                        val nextUrl = "https://www.youtube.com/youtubei/v1/next?key=$apiKey"
+                        val nextPayload = mapOf(
+                            "context" to mapOf(
+                                "client" to mapOf(
+                                    "clientName" to "WEB",
+                                    "clientVersion" to cVersion,
+                                    "hl" to lang
+                                )
+                            ),
+                            "videoId" to videoId
+                        )
+                        val nResponse = app.post(nextUrl, json = nextPayload, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                        val recEpisodes = mutableListOf<Episode>()
+                        
+                        // 슬롯 1에 활성화된 현재 쇼츠 배치
+                        recEpisodes.add(newEpisode(url) {
+                            this.name = shortTitle
+                            this.posterUrl = poster
+                            this.episode = 1
+                            this.description = shortPlot
+                        })
+
+                        if (nResponse != null) {
+                            val recs = mutableListOf<SearchResponse>()
+                            val seenRecIds = mutableSetOf<String>().apply { add(videoId) }
+                            val secondaryResults = safeGet(nResponse, "contents", "twoColumnWatchNextResults", "secondaryResults", "secondaryResults", "results")
+                            if (secondaryResults != null) {
+                                processRecursive(secondaryResults, recs, seenRecIds, false)
+                            }
+                            
+                            var epCount = 2
+                            recs.forEach { rec ->
+                                if (rec.url.contains("watch?v=") || rec.url.contains("/shorts/")) {
+                                    val recVidId = YoutubeUtils.extractYoutubeId(rec.url)
+                                    val cleanName = rec.name.replaceFirst(Regex("^\\{.*?\\}\\s*"), "")
+                                    recEpisodes.add(newEpisode("$mainUrl/shorts/$recVidId?ctx=home") {
+                                        this.name = cleanName
+                                        this.posterUrl = rec.posterUrl
+                                        this.episode = epCount++
+                                    })
+                                }
+                            }
+                        }
+                        targetEpisodes = recEpisodes
+                    }
+                } catch (e: Exception) {
+                    logError(e)
                 }
-                targetEpisodes.add(0, fallbackEp)
-                currentEp = fallbackEp
             }
 
-            val poster = currentEp?.posterUrl ?: YoutubeUtils.buildThumbnailFromId(videoId)
-
-            val shortTitle = currentEp?.name ?: "Shorts Video"
-            val shortPlot = buildString {
+            val finalPlot = buildString {
                 append(shortTitle)
-                val desc = currentEp?.description
-                if (!desc.isNullOrBlank()) {
-                    append("\n\n$desc")
+                if (shortPlot.isNotBlank()) {
+                    append("\n\n$shortPlot")
                 }
             }
 
             return newTvSeriesLoadResponse(shortTitle, url, TvType.TvSeries, targetEpisodes) {
                 this.posterUrl = poster
-                this.plot = shortPlot
+                this.plot = finalPlot
                 this.tags = listOf("Shorts")
             }
         }
