@@ -1856,7 +1856,8 @@ class YoutubeProvider(
 
                 val allEpisodes = mutableListOf<Episode>()
 
-                fun findContinuationItemsRecursive(obj: Any?, depth: Int = 0): List<*>? {
+                    // 1. 중첩 함수 선언부 (컴파일 순서 일치)
+                    fun findContinuationItemsRecursive(obj: Any?, depth: Int = 0): List<*>? {
                         if (obj == null || depth > 32) return null
                         when (obj) {
                             is Map<*, *> -> {
@@ -1885,7 +1886,6 @@ class YoutubeProvider(
                     }
 
                     fun extractVideosFromItems(items: List<*>, collectTo: MutableList<Episode>) {
-                        
                         fun findAllRenderers(obj: Any?, results: MutableList<Map<*,*>>, depth: Int = 0) {
                             if (obj == null || depth > 32) return
                             when (obj) {
@@ -1960,22 +1960,59 @@ class YoutubeProvider(
                             }
                         }
                     }
-                    
-                fun findContinuationFromItems(items: List<*>?): String? {
-                    if (items == null) return null
-                    for (it in items) {
-                        val m = it as? Map<*, *> ?: continue
-                        val token = findTokenRecursive(m)
-                        if (!token.isNullOrBlank()) return token
-                    }
-                    return null
-                }
 
-                var currentToken: String? = findContinuationFromItems(initialItems)
-                if (currentToken.isNullOrBlank()) {
-                    val conts = findContinuationItemsRecursive(data)
-                    currentToken = findContinuationFromItems(conts)
-                }
+                    fun findContinuationFromItems(items: List<*>?): String? {
+                        if (items == null) return null
+                        for (it in items) {
+                            val m = it as? Map<*, *> ?: continue
+                            val token = findTokenRecursive(m)
+                            if (!token.isNullOrBlank()) return token
+                        }
+                        return null
+                    }
+
+                    // 2. 변수 선언 및 유튜브 탭 구조 파싱부
+                    var initialItems: List<*>? = null
+                    val tabs = safeGet(data, "contents", "twoColumnBrowseResultsRenderer", "tabs") as? List<*>
+                    if (tabs != null) {
+                        val actualActiveTab = tabs.firstOrNull { tab ->
+                            safeGet(tab, "tabRenderer", "selected") == true
+                        }
+
+                        val activeContent = safeGet(actualActiveTab, "tabRenderer", "content") as? Map<*, *>
+
+                        if (activeContent?.containsKey("richGridRenderer") == true) {
+                            initialItems = safeGet(activeContent, "richGridRenderer", "contents") as? List<*>
+                        } else if (activeContent?.containsKey("gridRenderer") == true) {
+                            initialItems = safeGet(activeContent, "gridRenderer", "items") as? List<*>
+                        }
+
+                        if (initialItems == null) {
+                            for (tab in tabs) {
+                                val tabMap = tab as? Map<*, *>
+                                val tabRenderer = tabMap?.get("tabRenderer") as? Map<*, *>
+                                val tabContent = tabRenderer?.get("content") as? Map<*, *>
+                                if (tabContent?.containsKey("richGridRenderer") == true) {
+                                    initialItems = safeGet(tabContent, "richGridRenderer", "contents") as? List<*>
+                                    break
+                                }
+                                if (tabContent?.containsKey("gridRenderer") == true) {
+                                    initialItems = safeGet(tabContent, "gridRenderer", "items") as? List<*>
+                                    break
+                                }
+                            }
+                        }
+                    }
+                    
+                    if (initialItems != null) {
+                        extractVideosFromItems(initialItems, allEpisodes)
+                    }
+
+                    var currentToken: String? = findContinuationFromItems(initialItems)
+                    if (currentToken.isNullOrBlank()) {
+                        val conts = findContinuationItemsRecursive(data)
+                        currentToken = findContinuationFromItems(conts)
+                    }
 
                 var pagesFetchedLocal = 1
                 val maxPagesLimit = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
