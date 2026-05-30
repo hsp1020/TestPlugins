@@ -430,7 +430,7 @@ class YoutubeProvider(
         return uri.build().toString()
     }
 
-    private suspend fun triggerPlaybackTracking(playbackTracking: PlaybackTracking?, videoId: String) {
+    private suspend fun triggerPlaybackTracking(playbackTracking: PlaybackTracking?, videoId: String, isShort: Boolean = false) {
         val playbackBaseUrl = playbackTracking?.videostatsPlaybackUrl?.baseUrl
         val watchtimeBaseUrl = playbackTracking?.videostatsWatchtimeUrl?.baseUrl
 
@@ -438,15 +438,29 @@ class YoutubeProvider(
 
         val cpn = generateCpn()
         try {
-            val playbackUrl = buildTrackingUrl(playbackBaseUrl, cpn, cmt = "0.000", state = null, realTime = "0")
+            var playbackUrl = buildTrackingUrl(playbackBaseUrl, cpn, cmt = "0.000", state = null, realTime = "0")
+            var watchtimeUrl = buildTrackingUrl(watchtimeBaseUrl, cpn, cmt = "5.000", state = "playing", realTime = "5")
+            
+            // 쇼츠 영상일 경우, 유튜브 로그 수집 서버에 일반 VOD가 아닌 쇼츠 전용 시청기록(el=shortspage)으로 기입되도록 트래킹 파라미터 변환
+            if (isShort) {
+                playbackUrl = playbackUrl.replace("el=detailpage", "el=shortspage").replace("el=embedded", "el=shortspage")
+                if (!playbackUrl.contains("el=shortspage")) {
+                    playbackUrl = "$playbackUrl&el=shortspage"
+                }
+                watchtimeUrl = watchtimeUrl.replace("el=detailpage", "el=shortspage").replace("el=embedded", "el=shortspage")
+                if (!watchtimeUrl.contains("el=shortspage")) {
+                    watchtimeUrl = "$watchtimeUrl&el=shortspage"
+                }
+            }
+
             app.get(playbackUrl, interceptor = ytInterceptor)
 
-            val watchtimeUrl = buildTrackingUrl(watchtimeBaseUrl, cpn, cmt = "5.000", state = "playing", realTime = "5")
             app.get(watchtimeUrl, interceptor = ytInterceptor)
         } catch (e: Exception) {
             logError(e)
         }
     }
+
     
     private fun getSavedContinuationToken(key: String): String? {
         val hashedKey = YoutubeUtils.sha1(key)
@@ -2363,7 +2377,9 @@ class YoutubeProvider(
                     playerResponseText
                 }
                 val playerResponse = parseJson<PlayerResponse>(targetJson)
-                triggerPlaybackTracking(playerResponse.playbackTracking, videoId)
+                
+                // 쇼츠 전용 플래그 파라미터(isShort)를 이행하여 시청 기록을 쇼츠 전용 데이터로 적재
+                triggerPlaybackTracking(playerResponse.playbackTracking, videoId, isShort)
             } catch (e: Exception) {
                 logError(e)
             }
