@@ -10,21 +10,13 @@ import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import okhttp3.Interceptor
 import okhttp3.Response
-import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.URLEncoder
 import java.net.URLDecoder
 import java.security.MessageDigest
 import java.nio.charset.StandardCharsets
-import java.util.regex.Pattern
+import java.util.concurrent.ConcurrentHashMap
 import com.lagradost.cloudstream3.AcraApplication
 import androidx.preference.PreferenceManager
-import com.lagradost.cloudstream3.ar.youtube.YoutubeProvider.Config.SLEEP_BETWEEN
-import java.util.concurrent.ConcurrentHashMap
-import org.schabi.newpipe.extractor.NewPipe
-import org.schabi.newpipe.extractor.downloader.Downloader
-import org.schabi.newpipe.extractor.downloader.Request
-import org.schabi.newpipe.extractor.localization.Localization
-import org.schabi.newpipe.extractor.localization.ContentCountry
 
 object YoutubeUtils {
     const val CHROME_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
@@ -42,42 +34,6 @@ object YoutubeUtils {
     val MIX_TITLE_REPLACE_EN = Regex("""\s*\(Mix\s*Playlist\)""", RegexOption.IGNORE_CASE)
 
     private val regexCache = ConcurrentHashMap<String, Regex>()
-
-    fun initNewPipeDownloader() {
-        val downloader = object : Downloader() {
-            private val okHttpClient = okhttp3.OkHttpClient.Builder()
-                .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
-                .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                .build()
-            
-            override fun execute(request: Request): org.schabi.newpipe.extractor.downloader.Response {
-                val method = request.httpMethod()
-                val url = request.url()
-                val headers = request.headers()
-                val data = request.dataToSend()
-
-                val reqBody = data?.toRequestBody(null)
-                val reqBuilder = okhttp3.Request.Builder()
-                    .url(url)
-                    .method(method, reqBody)
-
-                // [핵심 해결] 헤더를 강제로 지우거나 덮어씌우는 로직 완전히 제거.
-                // PipePipeExtractor가 치밀하게 계산해서 넘겨준 헤더(Origin, Referer, User-Agent 등)를 100% 순정 상태로 보냅니다.
-                headers.forEach { (key, values) ->
-                    values.forEach { reqBuilder.addHeader(key, it) }
-                }
-
-                val res = okHttpClient.newCall(reqBuilder.build()).execute()
-                val resHeaders = res.headers.toMultimap()
-                val resBodyStr = res.body?.string() ?: ""
-                
-                return org.schabi.newpipe.extractor.downloader.Response(
-                    res.code, res.message, resHeaders, resBodyStr, request.url()
-                )
-            }
-        }
-        NewPipe.init(downloader, Localization.DEFAULT, ContentCountry.DEFAULT)
-    }
 
     fun sha1(input: String): String {
         val md = sha1Digest.get()
@@ -258,9 +214,6 @@ class YoutubeProvider(
         @JsonProperty("token") val token: String
     )
 
-    object Config {
-        const val SLEEP_BETWEEN = 1
-    }
     override var mainUrl = "https://www.youtube.com"
     override var name = "YouTube"
     override val hasMainPage = true
@@ -276,7 +229,6 @@ class YoutubeProvider(
         private val searchShorts = mutableListOf<Episode>()
 
         private val continuationTokenCache = ConcurrentHashMap<String, String>()
-        
         private val epMetaMapCache = ConcurrentHashMap<String, String>()
 
         private val VIEW_REPLACE_REGEX = Regex("조회수|views|مشاهدة|시청 중|시청중|watching|명|시청자")
@@ -380,22 +332,15 @@ class YoutubeProvider(
         val playbackBaseUrl = playbackTracking?.videostatsPlaybackUrl?.baseUrl
         val watchtimeBaseUrl = playbackTracking?.videostatsWatchtimeUrl?.baseUrl
 
-        if (playbackBaseUrl.isNullOrBlank() || watchtimeBaseUrl.isNullOrBlank()) {
-            println("[YT_DEBUG] playbackTracking base URLs are empty, skipping tracking")
-            return
-        }
+        if (playbackBaseUrl.isNullOrBlank() || watchtimeBaseUrl.isNullOrBlank()) return
 
         val cpn = generateCpn()
-        println("[YT_DEBUG] Triggering playback tracking for videoId: $videoId with cpn: $cpn")
-
         try {
             val playbackUrl = buildTrackingUrl(playbackBaseUrl, cpn, cmt = "0.000", state = null, realTime = "0")
             app.get(playbackUrl, interceptor = ytInterceptor)
 
             val watchtimeUrl = buildTrackingUrl(watchtimeBaseUrl, cpn, cmt = "5.000", state = "playing", realTime = "5")
             app.get(watchtimeUrl, interceptor = ytInterceptor)
-            
-            println("[YT_DEBUG] Playback tracking successfully triggered.")
         } catch (e: Exception) {
             logError(e)
         }
@@ -495,8 +440,7 @@ class YoutubeProvider(
         }
 
         val partsList = listOf(duration, channel, views, date).filter { it.isNotBlank() && it != "N/A" }
-        val result = partsList.joinToString(" • ")
-        return result
+        return partsList.joinToString(" • ")
     }
 
     private fun Map<*, *>.getMapKey(key: String): Map<*, *>? {
@@ -643,12 +587,6 @@ class YoutubeProvider(
         } catch (e: Exception) {
             text
         }
-    }
-
-    private fun getRawText(map: Map<*, *>?, key: String): String? {
-        val obj = map?.getMapKey(key) ?: return null
-        return obj.getString("simpleText")
-            ?: obj.getListKey("runs")?.firstOrNull()?.getString("text")
     }
 
     private fun collectFromRenderer(
@@ -2178,45 +2116,9 @@ class YoutubeProvider(
                 }
             }
 
-            var advancedLinksCount = 0
-            com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback) {
-                advancedLinksCount++
-                callback(it)
-            }
-
-            if (advancedLinksCount == 0) {
-                loadExtractor(fullUrl, subtitleCallback, callback)
-            } else {
-                loadLinksAdvanced(videoId, subtitleCallback) { }
-            }
+            com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback, callback)
         }
 
         return true
     }    
-    
-    private suspend fun loadLinksAdvanced(
-        videoId: String,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        try {
-            val apiUrl = "$mainUrl/youtubei/v1/player"
-            val payload = mapOf(
-                "context" to mapOf(
-                    "client" to mapOf(
-                        "clientName" to "3",
-                        "clientVersion" to "19.29.35",
-                        "hl" to lang,
-                        "gl" to if (lang == "ko") "KR" else "US"
-                    )
-                ),
-                "videoId" to videoId
-            )
-            val headers = mapOf("Referer" to "$mainUrl/watch?v=$videoId")
-            app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).text
-        } catch (e: Exception) {
-        }
-        return true
-    }
-}  
-       
+}
