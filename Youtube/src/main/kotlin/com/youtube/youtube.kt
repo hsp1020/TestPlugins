@@ -137,7 +137,7 @@ object YoutubeUtils {
     }
 
     fun cleanMixTitle(title: String): String {
-        // 불필요한 Regex 치환 연산을 줄이기 위한 early check 가드 구문 배치
+        // 불필요한 연쇄 Regex 런타임 낭비를 방지하는 조기 Exit 가드
         if (!title.contains("mix", ignoreCase = true) && !title.contains("믹스")) return title
         return MIX_TITLE_REPLACE_EN.replace(MIX_TITLE_REPLACE_KO.replace(title, ""), "").trim()
     }
@@ -159,7 +159,7 @@ object YoutubeUtils {
         return current
     }
 
-    // O(N) 순회를 차단하고 Direct Lookup O(1)를 선순위로 배치한 고속 맵 캐스팅 유틸
+    // O(N) 순회를 차단하고 Direct Lookup O(1)를 우선 배치한 맵 캐스팅 유틸
     fun getMapKeyFromAny(obj: Any?, key: String): Map<*, *>? {
         val map = obj as? Map<*, *> ?: return null
         val direct = map[key]
@@ -255,11 +255,11 @@ class YoutubeProvider(
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Live)
 
     companion object {
-        // 멀티스레드 CME 회피를 위한 동기화 구조 래핑
+        // 멀티스레드 CME 회피를 위한 동기화 리스트 래핑 구성
         private val homeShorts = Collections.synchronizedList(mutableListOf<Episode>())
         private val searchShorts = Collections.synchronizedList(mutableListOf<Episode>())
 
-        // 힙 메모리 고갈 문제를 보완하는 정적 바운디드 LRU 캐시 맵 정의
+        // 메모리 폭증을 제어하기 위한 정적 바운디드 LRU 캐시 맵 정의
         private val continuationTokenCache: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(128, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
@@ -276,7 +276,7 @@ class YoutubeProvider(
             }
         )
 
-        // 상 정적인 pre-compiled 정규식 패턴 이관
+        // 상 정형적인 pre-compiled 정규식 패턴 이관
         private val VIEW_REPLACE_REGEX = Regex("조회수|views|مشاهدة|시청 중|시청중|watching|명|시청자")
         private val VIEW_FORMAT_REGEX = Regex(".*[천만억KMBkmb].*")
         private val METADATA_VIEW_REGEX = Regex(".*(\\d+[KMBkmb]|views|조회수|회|시청|watching|مشاهدة|명|시청자|مشاهد).*")
@@ -292,7 +292,7 @@ class YoutubeProvider(
         private val VIEW_COUNT_REGEX = Regex(""""viewCount"\s*:\s*"?(\d+)"""")
         private val PUBLISH_DATE_REGEX = Regex(""""publishDate"\s*:\s*"?([^"]+)"""")
 
-        // 매 노드 탐색 시 배열 재생성을 억제하기 위한 정적 불변 참조 리스트
+        // 재귀 탐색 시 가비지 누적을 줄이기 위한 고정 참조 상수 리스트
         private val KEYS_TO_CHECK = listOf(
             "contents", "items", "continuationItems", "onResponseReceivedActions",
             "onResponseReceivedEndpoints", "appendContinuationItemsAction", "onResponseReceivedCommands",
@@ -306,7 +306,7 @@ class YoutubeProvider(
             "videoViewModel", "lockupViewModel"
         )
 
-        // 원자성이 보존되는 안전 추가 연산 수행 및 200개 자동 트리밍 가이드 적용
+        // 원자성과 락 최소 범위가 보존되는 리스트 추가 헬퍼 (최대 200개 제한)
         private fun addToShortsList(list: MutableList<Episode>, ep: Episode) {
             synchronized(list) {
                 if (list.none { it.data == ep.data }) {
@@ -582,7 +582,7 @@ class YoutubeProvider(
         return ""
     }
 
-    // JVM 람다 누수를 제어하는 고성능 평가 전처리식 구현
+    // JVM 람다 인스턴스 재생성을 방지하는 고성능 평가 가이드를 적용했습니다.
     private fun extractPartsFromMetadataRows(rows: List<*>?): List<String> {
         if (rows == null) return emptyList()
         val collected = java.util.ArrayList<String>()
