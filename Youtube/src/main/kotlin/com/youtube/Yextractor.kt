@@ -69,7 +69,7 @@ open class YoutubeExtractor : ExtractorApi() {
             .build()
             
         init {
-            println("[YT_DEBUG_INIT] 독자 API 추출기 초기화 완료 (ANDROID_VR 단일 직진 모드)")
+            println("[YT_DEBUG_INIT] 독자 API 추출기 초기화 완료 (ANDROID_VR + DASH 프록시 전용)")
         }
     }
 
@@ -96,11 +96,18 @@ open class YoutubeExtractor : ExtractorApi() {
     )
 
     private suspend fun fetchStreamingData(videoId: String): JSONObject? {
-        // [핵심 1] 웹용 API Key가 아닌, 안드로이드 모바일/VR 전용 고정 API Key 사용 (미스매치 방지)
+        val watchUrl = "https://www.youtube.com/watch?v=$videoId"
+        
+        // 1. 웹페이지에서 타임스탬프(sts)와 VisitorData 추출
+        val html = app.get(watchUrl, headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)).text
+        val visitorData = Regex(""""VISITOR_DATA":"([^"]+)"""").find(html)?.groupValues?.get(1) ?: ""
+        val sts = Regex(""""signatureTimestamp":\s*(\d+)""").find(html)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+
+        // [핵심 1] 웹 API Key가 아닌, ANDROID_VR 전용 고정 API Key 사용 (LOGIN_REQUIRED 완벽 차단)
         val androidApiKey = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
         val apiUrl = "https://www.youtube.com/youtubei/v1/player?key=$androidApiKey"
 
-        // [핵심 2] PipePipeExtractor v5.1.1 커밋과 100% 동일한 ANDROID_VR 페이로드 구성 (기기 정보 완벽 주입)
+        // [핵심 2] PipePipe v5.1.1과 100% 일치하는 VR 페이로드 (sts 주입 포함)
         val vrPayload = mapOf(
             "videoId" to videoId,
             "context" to mapOf(
@@ -114,7 +121,12 @@ open class YoutubeExtractor : ExtractorApi() {
                     "deviceModel" to "Quest 3",
                     "hl" to "en",
                     "gl" to "US",
-                    "clientScreen" to "WATCH"
+                    "visitorData" to visitorData
+                )
+            ),
+            "playbackContext" to mapOf(
+                "contentPlaybackContext" to mapOf(
+                    "signatureTimestamp" to sts
                 )
             )
         )
@@ -127,7 +139,7 @@ open class YoutubeExtractor : ExtractorApi() {
         )
 
         try {
-            println("[YT_DEBUG_EXTRACTOR] ANDROID_VR API 직접 호출 중...")
+            println("[YT_DEBUG_EXTRACTOR] ANDROID_VR API 직접 호출 중... (sts: $sts)")
             val vrRes = app.post(apiUrl, json = vrPayload, headers = vrHeaders).text
             val vrJson = JSONObject(vrRes)
             val status = vrJson.optJSONObject("playabilityStatus")?.optString("status")
@@ -139,8 +151,6 @@ open class YoutubeExtractor : ExtractorApi() {
             } else if (status == "UNPLAYABLE" || status == "LOGIN_REQUIRED") {
                 // VR이 연령 제한 등으로 막혔을 경우에만 최후의 수단으로 TV 임베디드 시도 (웹 API Key 필요)
                 println("[YT_DEBUG_EXTRACTOR] VR 차단됨. TV_EMBEDDED로 연령 제한 우회 시도...")
-                val watchUrl = "https://www.youtube.com/watch?v=$videoId"
-                val html = app.get(watchUrl, headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)).text
                 val webApiKey = Regex(""""INNERTUBE_API_KEY":"([^"]+)"""").find(html)?.groupValues?.get(1)
                 
                 if (!webApiKey.isNullOrEmpty()) {
@@ -152,9 +162,15 @@ open class YoutubeExtractor : ExtractorApi() {
                                 "clientName" to "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
                                 "clientVersion" to "2.0",
                                 "hl" to "en",
-                                "gl" to "US"
+                                "gl" to "US",
+                                "visitorData" to visitorData
                             ),
                             "thirdParty" to mapOf("embedUrl" to "https://www.youtube.com")
+                        ),
+                        "playbackContext" to mapOf(
+                            "contentPlaybackContext" to mapOf(
+                                "signatureTimestamp" to sts
+                            )
                         )
                     )
                     val tvRes = app.post(tvApiUrl, json = tvPayload).text
@@ -246,6 +262,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
 
+                // [핵심] 고화질 비디오와 오디오를 합치기 위해 DASH 프록시를 구동합니다.
                 if (videoOnlyList.isNotEmpty() && audioInfoList.isNotEmpty()) {
                     val audiosByLanguage = audioInfoList.groupBy { it.language }
                     startServerIfNeeded()
@@ -270,7 +287,7 @@ open class YoutubeExtractor : ExtractorApi() {
                                         ) {
                                             this.referer = mainUrl
                                             this.quality = video.height
-                                            // ExoPlayer가 서버(프록시)로 요청할 때 사용할 헤더
+                                            // ExoPlayer가 로컬 프록시를 찌를 때 쓸 헤더
                                             this.headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
                                         }
                                     )
@@ -387,13 +404,14 @@ open class YoutubeExtractor : ExtractorApi() {
 
     private fun proxyChunkToYouTube(socket: Socket, targetUrl: String, clientHeaders: Map<String, String>) {
         try {
-            // [프록시 방어 로직] 다운로드 시에도 완벽한 ANDROID_VR 헤더를 유지하여 403 차단 회피
+            // [프록시 방어 로직] 다운로드 시 유튜브 CDN이 봇으로 감지하지 못하도록 완벽한 ANDROID_VR 헤더 강제 주입
             val requestBuilder = okhttp3.Request.Builder()
                 .url(targetUrl)
                 .header("User-Agent", YoutubeUtils.ANDROID_VR_USER_AGENT)
                 .header("Accept", "*/*")
                 .header("Connection", "keep-alive")
 
+            // ExoPlayer가 보낸 헤더 중 봇 감지를 유발할 수 있는 헤더들은 철저히 필터링
             clientHeaders.forEach { (key, value) ->
                 val lowerKey = key.lowercase()
                 if (lowerKey != "host" && lowerKey != "user-agent" && lowerKey != "origin" && lowerKey != "referer" && lowerKey != "accept-encoding") {
