@@ -253,11 +253,9 @@ class YoutubeProvider(
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Live)
 
     companion object {
-        // 스레드 경합 붕괴로 인한 CME 크래시를 전격 가드하기 위한 배타 동기 리스트
         private val homeShorts = Collections.synchronizedList(mutableListOf<Episode>())
         private val searchShorts = Collections.synchronizedList(mutableListOf<Episode>())
 
-        // 메모리 파열 및 힙 전유를 전면 억제하는 고성능 LRU 캐싱 세그먼트
         private val continuationTokenCache: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(128, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
@@ -274,7 +272,6 @@ class YoutubeProvider(
             }
         )
 
-        // 병렬 가동 경쟁 시 메모리 가시성(Visibility) 붕괴를 원천 차단하기 위해 Companion 영역으로 격상된 휘발성 가드 변수들
         @Volatile
         private var savedVisitorData: String? = null
         @Volatile
@@ -1200,7 +1197,33 @@ class YoutubeProvider(
                         }
                     }
                 } else {
-                    val targetUrl = if(requestData == "Home") mainUrl else requestData
+                    // 수동 등록 채널/재생목록 URL 로딩 시 첫 페이지 소실(Collapsed) 방지 가이드 연쇄 적용
+                    val isChannelOrPlaylist = requestData.contains("/@") || requestData.contains("/channel/") || requestData.contains("/c/") || requestData.contains("/user/") || requestData.contains("list=")
+                    
+                    val targetUrl = if (requestData == "Home") {
+                        mainUrl
+                    } else if (isChannelOrPlaylist && !requestData.contains("list=")) {
+                        // 채널의 경우 쇼츠나 비디오 탭 강제 강제 전향 전처리
+                        var cleanUrl = requestData.substringBefore("?").removeSuffix("/")
+                        var activeTabKeyword = "/videos"
+                        val tabKeywords = listOf("/featured", "/shorts", "/streams", "/playlists", "/community", "/about", "/videos")
+                        for (keyword in tabKeywords) {
+                            if (requestData.contains(keyword)) {
+                                activeTabKeyword = keyword
+                                break
+                            }
+                        }
+                        for (keyword in tabKeywords) {
+                            if (cleanUrl.endsWith(keyword)) {
+                                cleanUrl = cleanUrl.removeSuffix(keyword)
+                                break
+                            }
+                        }
+                        "$cleanUrl$activeTabKeyword"
+                    } else {
+                        requestData
+                    }
+
                     val html = app.get(targetUrl, interceptor = ytInterceptor).text
                     
                     savedApiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY") ?: savedApiKey
@@ -1240,8 +1263,7 @@ class YoutubeProvider(
                         processRecursive(initialData, results, seenIds, playlistMode = false)
                         nextContinuation = findTokenRecursive(initialData)
 
-                        // [Bug 2 완벽 패치]: 만약 수동 등록한 채널/재생목록 칩의 첫 페이지 로드 데이터가 비어있으나 Continuation 토큰은 존재할 때,
-                        // 곧바로 다음 단계 비동기 POST 렌더러를 기동하여 강제 복구함으로써 홈 가로 행(Row) 증발을 완벽하게 예방
+                        // 1페이지 비디오 목록이 비어있고 후속 Continuation이 잡힐 경우 가로 행 증발 방지용 실시간 백그라운드 캐스케이드 강제 트리거
                         if (results.isEmpty() && !nextContinuation.isNullOrBlank()) {
                             val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
                             val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION) ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
@@ -1275,7 +1297,6 @@ class YoutubeProvider(
             } else {
                 var tokenToUse = getSavedContinuationToken(requestData)
                 
-                // 복구 루프 내부 연쇄 폭증 제어 블록 (Cascade Load Block) 탑재 및 apiKey 가드 보강
                 if (tokenToUse.isNullOrBlank() && page == 2) { 
                     val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
                     val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION) ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
@@ -1301,7 +1322,6 @@ class YoutubeProvider(
                             if (!tokenToUse.isNullOrBlank()) {
                                 saveContinuationToken(requestData, tokenToUse)
                                 
-                                // 긴급 복구 직후 즉시 2페이지 데이터를 동일 스레드 하부에서 즉시 실시간 렌더링하도록 징검다리 체인 강제 결속
                                 val innerApiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
                                 val innerPayload = mapOf(
                                     "context" to mapOf(
@@ -1329,7 +1349,6 @@ class YoutubeProvider(
                     }
                 }
 
-                // 일반 정상 플로우의 페이지네이션 기동
                 if (!tokenToUse.isNullOrBlank() && results.isEmpty()) {
                     val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
                     val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION) ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
@@ -1656,35 +1675,29 @@ class YoutubeProvider(
     }
 
     override suspend fun load(url: String): LoadResponse {
-        // [Bug 1 완벽 패치]: "계속 시청" 진입 시 메모리 캐시 소실에 대항하는 실시간 쇼츠 타이틀 및 플레이리스트 복구 체인 적용
+        // 계속 시청(Continue Watching) 진입 시 메모리 소실에 대처한 연관 쇼츠 전용 복구 메커니즘
         if (url.contains("/shorts/")) {
             val videoId = YoutubeUtils.extractYoutubeId(url) ?: "video"
             val useSearchList = url.contains("ctx=search")
             val sourceList = if (useSearchList) searchShorts else homeShorts
             var targetEpisodes = synchronized(sourceList) { sourceList.toMutableList() }
-            var currentEp = targetEpisodes.find { YoutubeUtils.extractYoutubeId(it.data) == videoId }
+            val currentEp = targetEpisodes.find { YoutubeUtils.extractYoutubeId(it.data) == videoId }
 
             var shortTitle = currentEp?.name ?: "Shorts Video"
             var poster = currentEp?.posterUrl ?: YoutubeUtils.buildThumbnailFromId(videoId)
             var shortPlot = currentEp?.description ?: ""
 
-            // 프로세스 킬 혹은 앱 최초 재기동(Cold Start) 상태 등으로 에피소드 풀이 비어있다면, 연동 API를 통해 원천 데이터를 실시간 역구축
+            // 메모리 해제(Cold Start) 상황 포획 시, 백그라운드 API 체인으로 타이틀 및 세로 추천목록 복구 기동
             if (currentEp == null || targetEpisodes.size <= 1) {
                 try {
                     val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
                     val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION) ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
                     
                     if (!apiKey.isNullOrBlank()) {
-                        // 1. 유튜브 Player API를 통해 실제 쇼츠 제목 및 저자 정보 역추적하여 덮어쓰기
+                        // 1. 플레이어 API를 통해 실제 원본 타이틀 및 제작자명 추출 복구
                         val playerUrl = "https://www.youtube.com/youtubei/v1/player?key=$apiKey"
                         val playerPayload = mapOf(
-                            "context" to mapOf(
-                                "client" to mapOf(
-                                    "clientName" to "WEB",
-                                    "clientVersion" to cVersion,
-                                    "hl" to lang
-                                )
-                            ),
+                            "context" to mapOf("client" to mapOf("clientName" to "WEB", "clientVersion" to cVersion, "hl" to lang)),
                             "videoId" to videoId
                         )
                         val pResponse = app.post(playerUrl, json = playerPayload, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
@@ -1698,22 +1711,16 @@ class YoutubeProvider(
                             }
                         }
 
-                        // 2. 추천 연관 API(/v1/next)를 기동하여 유사 쇼츠/추천 목록을 가로 에피소드 목록으로 완벽 복원
+                        // 2. 추천 API(/v1/next) 호출 및 쇼츠 전용 선별기 가동
                         val nextUrl = "https://www.youtube.com/youtubei/v1/next?key=$apiKey"
                         val nextPayload = mapOf(
-                            "context" to mapOf(
-                                "client" to mapOf(
-                                    "clientName" to "WEB",
-                                    "clientVersion" to cVersion,
-                                    "hl" to lang
-                                )
-                            ),
+                            "context" to mapOf("client" to mapOf("clientName" to "WEB", "clientVersion" to cVersion, "hl" to lang)),
                             "videoId" to videoId
                         )
                         val nResponse = app.post(nextUrl, json = nextPayload, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                         val recEpisodes = mutableListOf<Episode>()
                         
-                        // 슬롯 1에 활성화된 현재 쇼츠 배치
+                        // 현재 시청 지점 정보 기입
                         recEpisodes.add(newEpisode(url) {
                             this.name = shortTitle
                             this.posterUrl = poster
@@ -1731,7 +1738,8 @@ class YoutubeProvider(
                             
                             var epCount = 2
                             recs.forEach { rec ->
-                                if (rec.url.contains("watch?v=") || rec.url.contains("/shorts/")) {
+                                // 화이트리스트 검증: 오직 세로 쇼츠 비디오 유형의 추천만 선별 기입하여 플레이리스트 구성 (일반 롱폼 비디오 완벽 차단)
+                                if (rec.url.contains("/shorts/")) {
                                     val recVidId = YoutubeUtils.extractYoutubeId(rec.url)
                                     val cleanName = rec.name.replaceFirst(Regex("^\\{.*?\\}\\s*"), "")
                                     recEpisodes.add(newEpisode("$mainUrl/shorts/$recVidId?ctx=home") {
