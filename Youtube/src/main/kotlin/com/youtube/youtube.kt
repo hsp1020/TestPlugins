@@ -30,10 +30,7 @@ object YoutubeUtils {
     const val CHROME_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
     const val SAFARI_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
     const val IOS_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"
-    
-    // [PipePipeExtractor v5.1.1 대응] ANDROID_VR 클라이언트 (Oculus Quest 3 / Android 12L) 전용 User-Agent
     const val ANDROID_VR_USER_AGENT = "Mozilla/5.0 (Linux; Android 12L; Quest 3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"
-    
     const val DEFAULT_CLIENT_VERSION = "2.20240725.01.00"
 
     private val sha1Digest = ThreadLocal.withInitial {
@@ -48,7 +45,10 @@ object YoutubeUtils {
 
     fun initNewPipeDownloader() {
         val downloader = object : Downloader() {
-            private val okHttpClient = okhttp3.OkHttpClient.Builder().build()
+            private val okHttpClient = okhttp3.OkHttpClient.Builder()
+                .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+                .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                .build()
             
             override fun execute(request: Request): org.schabi.newpipe.extractor.downloader.Response {
                 val method = request.httpMethod()
@@ -61,19 +61,10 @@ object YoutubeUtils {
                     .url(url)
                     .method(method, reqBody)
 
-                var hasUserAgent = false
+                // [핵심 해결] 헤더를 강제로 지우거나 덮어씌우는 로직 완전히 제거.
+                // PipePipeExtractor가 치밀하게 계산해서 넘겨준 헤더(Origin, Referer, User-Agent 등)를 100% 순정 상태로 보냅니다.
                 headers.forEach { (key, values) ->
-                    if (!key.equals("Origin", true) && !key.equals("Referer", true)) {
-                        values.forEach { 
-                            reqBuilder.addHeader(key, it) 
-                            if (key.equals("User-Agent", true)) hasUserAgent = true
-                        }
-                    }
-                }
-                
-                // PipePipeExtractor 내부에서 명시하지 않은 경우 ANDROID_VR User-Agent 강제 적용
-                if (!hasUserAgent) {
-                    reqBuilder.header("User-Agent", ANDROID_VR_USER_AGENT)
+                    values.forEach { reqBuilder.addHeader(key, it) }
                 }
 
                 val res = okHttpClient.newCall(reqBuilder.build()).execute()
@@ -2227,4 +2218,5 @@ class YoutubeProvider(
         }
         return true
     }
-}
+}  
+       
