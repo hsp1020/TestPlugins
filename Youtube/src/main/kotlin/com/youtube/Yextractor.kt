@@ -42,7 +42,7 @@ open class YoutubeExtractor : ExtractorApi() {
         private var serverPort: Int = 0
         private val serverLock = Any()
 
-        // SecureRandom 동기식 지연 차단을 배제하기 위한 고성능 원자적 카운터
+        // SecureRandom 동기식 지연 차단을 배제하기 위한 고성능 원자적 스레드세이프 카운터
         private val streamCounter = AtomicLong(0)
 
         // 가상 프록시 Manifest 캐시 (최대 1000개 보장 LRU)
@@ -182,7 +182,7 @@ open class YoutubeExtractor : ExtractorApi() {
                             "client" to mapOf(
                                 "clientName" to "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
                                 "clientVersion" to "2.0",
-                                "hl" to "en",
+                                "hl" to lang,
                                 "gl" to "US",
                                 "visitorData" to visitorData
                             ),
@@ -425,69 +425,65 @@ open class YoutubeExtractor : ExtractorApi() {
     }
 
     private fun handleClient(client: Socket) {
-        // 모든 JDK 런타임 환경에서 완벽히 호환되는 명시적 try-finally 기반 파일 디스크립터 안전 자원 회수 설계
         try {
-            val inputStream = client.getInputStream()
-            val reader = BufferedReader(InputStreamReader(inputStream, java.nio.charset.StandardCharsets.UTF_8))
-            val output = client.getOutputStream()
-            val outWriter = PrintWriter(output, true)
+            // client.use 영역 진입을 통하여 소켓 및 IO 자원의 안전 소멸 주기 확립
+            client.use { socket ->
+                val inputStream = socket.getInputStream()
+                val reader = BufferedReader(InputStreamReader(inputStream, java.nio.charset.StandardCharsets.UTF_8))
+                val output = socket.getOutputStream()
+                val outWriter = PrintWriter(output, true)
 
-            val requestLine = reader.readLine() ?: return
-            val parts = requestLine.split(" ")
-            if (parts.size < 2) return
+                val requestLine = reader.readLine() ?: return
+                val parts = requestLine.split(" ")
+                if (parts.size < 2) return
 
-            val fullPath = parts[1]
-            
-            val clientHeaders = LinkedHashMap<String, String>()
-            var headerLines = 0
-            while (headerLines++ < 100) {
-                val line = reader.readLine()
-                if (line.isNullOrBlank()) break
-                val colonIndex = line.indexOf(':')
-                if (colonIndex != -1) {
-                    clientHeaders[line.substring(0, colonIndex).trim().lowercase()] = line.substring(colonIndex + 1).trim()
+                val fullPath = parts[1]
+                
+                val clientHeaders = LinkedHashMap<String, String>()
+                var headerLines = 0
+                while (headerLines++ < 100) {
+                    val line = reader.readLine()
+                    if (line.isNullOrBlank()) break
+                    val colonIndex = line.indexOf(':')
+                    if (colonIndex != -1) {
+                        clientHeaders[line.substring(0, colonIndex).trim().lowercase()] = line.substring(colonIndex + 1).trim()
+                    }
                 }
-            }
 
-            val cleanPath = fullPath.substringBefore("?")
-            val queryParams = fullPath.substringAfter("?", "")
+                val cleanPath = fullPath.substringBefore("?")
+                val queryParams = fullPath.substringAfter("?", "")
 
-            if (cleanPath.startsWith("/chunk")) {
-                val idMatch = CHUNK_ID_REGEX.find(queryParams)
-                val chunkId = idMatch?.groupValues?.get(1)
-                val targetYoutubeUrl = if (chunkId != null) streamUrlCache[chunkId] else null
+                if (cleanPath.startsWith("/chunk")) {
+                    val idMatch = CHUNK_ID_REGEX.find(queryParams)
+                    val chunkId = idMatch?.groupValues?.get(1)
+                    val targetYoutubeUrl = if (chunkId != null) streamUrlCache[chunkId] else null
 
-                if (targetYoutubeUrl != null) {
-                    proxyChunkToYouTube(client, targetYoutubeUrl, clientHeaders)
-                } else {
-                    outWriter.print("HTTP/1.1 404 Not Found\r\n\r\n")
-                    outWriter.flush()
-                }
-            } 
-            else if (cleanPath.endsWith(".mpd", ignoreCase = true)) {
-                val path = cleanPath.substringBeforeLast(".mpd").removePrefix("/")
-                val content = manifestMap[path]
-                if (content != null) {
-                    outWriter.print("HTTP/1.1 200 OK\r\n")
-                    outWriter.print("Content-Type: application/dash+xml\r\n")
-                    outWriter.print("Connection: close\r\n")
-                    outWriter.print("Access-Control-Allow-Origin: *\r\n")
-                    outWriter.print("\r\n")
-                    outWriter.print(content)
-                    outWriter.flush()
-                } else {
-                    outWriter.print("HTTP/1.1 404 Not Found\r\n\r\n")
-                    outWriter.flush()
+                    if (targetYoutubeUrl != null) {
+                        proxyChunkToYouTube(socket, targetYoutubeUrl, clientHeaders)
+                    } else {
+                        outWriter.print("HTTP/1.1 404 Not Found\r\n\r\n")
+                        outWriter.flush()
+                    }
+                } 
+                else if (cleanPath.endsWith(".mpd", ignoreCase = true)) {
+                    val path = cleanPath.substringBeforeLast(".mpd").removePrefix("/")
+                    val content = manifestMap[path]
+                    if (content != null) {
+                        outWriter.print("HTTP/1.1 200 OK\r\n")
+                        outWriter.print("Content-Type: application/dash+xml\r\n")
+                        outWriter.print("Connection: close\r\n")
+                        outWriter.print("Access-Control-Allow-Origin: *\r\n")
+                        outWriter.print("\r\n")
+                        outWriter.print(content)
+                        outWriter.flush()
+                    } else {
+                        outWriter.print("HTTP/1.1 404 Not Found\r\n\r\n")
+                        outWriter.flush()
+                    }
                 }
             }
         } catch (e: Exception) {
             println("[YT_PROXY_DEBUG] handleClient 예외: ${e.message}")
-        } finally {
-            try {
-                client.close()
-            } catch (e2: Exception) {
-                // ignore
-            }
         }
     }
 
@@ -507,9 +503,7 @@ open class YoutubeExtractor : ExtractorApi() {
             }
 
             val request = requestBuilder.build()
-            val response = proxyHttpClient.newCall(request).execute()
-            
-            try {
+            proxyHttpClient.newCall(request).execute().use { response ->
                 if (response.code == 403 || response.code == 400) {
                     println("[YT_PROXY_DEBUG] 🚨 유튜브 CDN 에러 발생: ${response.code}")
                     val output = socket.getOutputStream()
@@ -531,16 +525,11 @@ open class YoutubeExtractor : ExtractorApi() {
                 rawOutWriter.print("\r\n")
                 rawOutWriter.flush()
 
-                val body = response.body
-                if (body != null) {
-                    body.byteStream().use { input ->
-                        // 64KB 고정 고속 프록시 릴레이 버퍼 적용
-                        input.copyTo(output, bufferSize = 65536)
-                    }
+                response.body?.byteStream()?.use { input ->
+                    // 64KB 고속 버퍼 릴레이 데이터 전송 지원
+                    input.copyTo(output, bufferSize = 65536)
                 }
                 output.flush()
-            } finally {
-                response.close()
             }
         } catch (e: Exception) {
             println("[YT_PROXY_DEBUG] 프록시 릴레이 중 예외 발생: ${e.message}")
@@ -557,6 +546,7 @@ open class YoutubeExtractor : ExtractorApi() {
         streamUrlCache[videoChunkId] = video.url
         val proxyVideoUrl = "http://127.0.0.1:$serverPort/chunk?id=$videoChunkId"
         
+        // AtomicLong 기반 ID는 XML 파괴용 특수문자가 물리적으로 부재하므로 escapeXml 단계 소거
         val durationString = "PT${durationSec}S"
 
         val sb = java.lang.StringBuilder(2048)
