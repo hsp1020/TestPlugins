@@ -70,7 +70,7 @@ open class YoutubeExtractor : ExtractorApi() {
             .build()
             
         init {
-            println("[YT_DEBUG_INIT] 유튜브 DASH 추출기 초기화 완료 (재생 버그 및 XML 문법 교정 적용)")
+            println("[YT_DEBUG_INIT] 유튜브 DASH 추출기 초기화 완료 (Android_VR 전용 초경량 패치 적용)")
         }
     }
 
@@ -94,28 +94,8 @@ open class YoutubeExtractor : ExtractorApi() {
         val codec: String,
         val bitrate: Int,
         val initRange: String?,
-        val indexRange: String?,
-        val languageId: String,
-        val displayName: String
+        val indexRange: String?
     )
-
-    private fun cleanLanguageLabel(langId: String, displayName: String): String {
-        if (displayName.isNotBlank()) {
-            return displayName
-                .replace(" (original)", "")
-                .replace(" (dubbed)", " (Dub)")
-                .replace(" (더빙)", " (Dub)")
-                .trim()
-        }
-        val upper = langId.uppercase()
-        if (upper.contains(".")) {
-            val parts = upper.split(".")
-            if (parts.size >= 2) {
-                return "${parts[0]} (Dub ${parts[1]})"
-            }
-        }
-        return upper
-    }
 
     private suspend fun fetchPlayerResponse(videoId: String): Pair<JSONObject?, Long> {
         val watchUrl = "https://www.youtube.com/watch?v=$videoId"
@@ -296,12 +276,9 @@ open class YoutubeExtractor : ExtractorApi() {
                         videoOnlyList.add(StreamInfo(streamUrl, cleanMimeType, codec, height, label, initR, indexR))
                     } else if (cleanMimeType.startsWith("audio/")) {
                         val bitrate = format.optInt("bitrate", 128000)
-                        val audioTrack = format.optJSONObject("audioTrack")
-                        val langId = audioTrack?.optString("id", "Default")?.uppercase() ?: "DEFAULT"
-                        val displayName = audioTrack?.optString("displayName", "") ?: ""
                         if (codec.isEmpty()) codec = if (cleanMimeType.contains("webm")) "opus" else "mp4a.40.2"
                         
-                        audioInfoList.add(AudioInfo(streamUrl, cleanMimeType, codec, bitrate, initR, indexR, langId, displayName))
+                        audioInfoList.add(AudioInfo(streamUrl, cleanMimeType, codec, bitrate, initR, indexR))
                     }
                 }
 
@@ -339,36 +316,32 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
 
                 if (videoOnlyList.isNotEmpty() && audioInfoList.isNotEmpty()) {
-                    val audiosByLanguage = audioInfoList.groupBy { it.languageId }
                     startServerIfNeeded()
 
                     for (video in videoOnlyList.distinctBy { it.height }) {
-                        for ((langId, audios) in audiosByLanguage) {
-                            val bestAudio = if (video.mimeType.contains("webm")) {
-                                audios.maxByOrNull { if (it.mimeType.contains("webm")) it.bitrate + 1000000 else it.bitrate }
-                            } else {
-                                audios.maxByOrNull { if (it.mimeType.contains("mp4")) it.bitrate + 1000000 else it.bitrate }
-                            }
+                        val bestAudio = if (video.mimeType.contains("webm")) {
+                            audioInfoList.maxByOrNull { if (it.mimeType.contains("webm")) it.bitrate + 1000000 else it.bitrate }
+                        } else {
+                            audioInfoList.maxByOrNull { if (it.mimeType.contains("mp4")) it.bitrate + 1000000 else it.bitrate }
+                        }
 
-                            if (bestAudio != null) {
-                                val dashXml = buildDashManifestXml(video, listOf(bestAudio), durationSeconds)
-                                val localLink = registerManifestAndGetUrl(dashXml)
+                        if (bestAudio != null) {
+                            val dashXml = buildDashManifestXml(video, listOf(bestAudio), durationSeconds)
+                            val localLink = registerManifestAndGetUrl(dashXml)
 
-                                if (localLink != null) {
-                                    val cleanLangLabel = cleanLanguageLabel(bestAudio.languageId, bestAudio.displayName)
-                                    val finalName = "YouTube ${video.label} ($cleanLangLabel)"
-                                    val sourceName = "YouTube ($cleanLangLabel)"
-                                    
-                                    callback(
-                                        newExtractorLink(
-                                            sourceName, finalName, localLink, type = ExtractorLinkType.DASH
-                                        ) {
-                                            this.referer = mainUrl
-                                            this.quality = video.height
-                                            this.headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
-                                        }
-                                    )
-                                }
+                            if (localLink != null) {
+                                val finalName = "YouTube ${video.label}"
+                                val sourceName = "YouTube"
+                                
+                                callback(
+                                    newExtractorLink(
+                                        sourceName, finalName, localLink, type = ExtractorLinkType.DASH
+                                    ) {
+                                        this.referer = mainUrl
+                                        this.quality = video.height
+                                        this.headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
+                                    }
+                                )
                             }
                         }
                     }
