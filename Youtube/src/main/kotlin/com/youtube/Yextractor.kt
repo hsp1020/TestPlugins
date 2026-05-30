@@ -77,9 +77,11 @@ open class YoutubeExtractor : ExtractorApi() {
         return "$mainUrl/watch?v=$id"
     }
 
+    // [수정] 코덱(codec) 정보를 명시적으로 분리하여 저장하도록 필드 추가
     data class StreamInfo(
         val url: String,
         val mimeType: String,
+        val codec: String,
         val height: Int,
         val label: String,
         val initRange: String?,
@@ -89,6 +91,7 @@ open class YoutubeExtractor : ExtractorApi() {
     data class AudioInfo(
         val url: String,
         val mimeType: String,
+        val codec: String,
         val bitrate: Int,
         val initRange: String?,
         val indexRange: String?,
@@ -98,16 +101,13 @@ open class YoutubeExtractor : ExtractorApi() {
     private suspend fun fetchStreamingData(videoId: String): JSONObject? {
         val watchUrl = "https://www.youtube.com/watch?v=$videoId"
         
-        // 1. 웹페이지에서 타임스탬프(sts)와 VisitorData 추출
         val html = app.get(watchUrl, headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)).text
         val visitorData = Regex(""""VISITOR_DATA":"([^"]+)"""").find(html)?.groupValues?.get(1) ?: ""
         val sts = Regex(""""signatureTimestamp":\s*(\d+)""").find(html)?.groupValues?.get(1)?.toIntOrNull() ?: 0
 
-        // [핵심 1] 웹 API Key가 아닌, ANDROID_VR 전용 고정 API Key 사용 (LOGIN_REQUIRED 완벽 차단)
         val androidApiKey = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
         val apiUrl = "https://www.youtube.com/youtubei/v1/player?key=$androidApiKey"
 
-        // [핵심 2] PipePipe v5.1.1과 100% 일치하는 VR 페이로드 (sts 주입 포함)
         val vrPayload = mapOf(
             "videoId" to videoId,
             "context" to mapOf(
@@ -149,7 +149,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 println("[YT_DEBUG_EXTRACTOR] ✅ ANDROID_VR에서 streamingData 확보 성공!")
                 return vrJson.optJSONObject("streamingData")
             } else if (status == "UNPLAYABLE" || status == "LOGIN_REQUIRED") {
-                // VR이 연령 제한 등으로 막혔을 경우에만 최후의 수단으로 TV 임베디드 시도 (웹 API Key 필요)
                 println("[YT_DEBUG_EXTRACTOR] VR 차단됨. TV_EMBEDDED로 연령 제한 우회 시도...")
                 val webApiKey = Regex(""""INNERTUBE_API_KEY":"([^"]+)"""").find(html)?.groupValues?.get(1)
                 
@@ -224,7 +223,21 @@ open class YoutubeExtractor : ExtractorApi() {
                         continue
                     }
 
-                    val mimeType = format.optString("mimeType", "")
+                    // [핵심 수정] 원본 mimeType 문자열을 파싱하여 순수 mimeType과 코덱을 분리
+                    val rawMimeType = format.optString("mimeType", "")
+                    var cleanMimeType = rawMimeType
+                    var codec = ""
+                    
+                    if (rawMimeType.contains(";")) {
+                        val parts = rawMimeType.split(";")
+                        cleanMimeType = parts[0].trim()
+                        val codecPart = parts.find { it.trim().startsWith("codecs=") }
+                        if (codecPart != null) {
+                            // codecs="avc1.640028" 형태에서 따옴표와 codecs= 를 제거
+                            codec = codecPart.substringAfter("=").replace("\"", "").trim()
+                        }
+                    }
+
                     val initRange = format.optJSONObject("initRange")
                     val indexRange = format.optJSONObject("indexRange")
 
@@ -236,15 +249,19 @@ open class YoutubeExtractor : ExtractorApi() {
                     val initR = if (initStart != null && initEnd != null) "$initStart-$initEnd" else null
                     val indexR = if (idxStart != null && idxEnd != null) "$idxStart-$idxEnd" else null
 
-                    if (mimeType.startsWith("video/")) {
+                    if (cleanMimeType.startsWith("video/")) {
                         val height = format.optInt("height", 0)
                         val label = if (height > 0) "${height}p" else "video"
-                        videoOnlyList.add(StreamInfo(streamUrl, mimeType, height, label, initR, indexR))
-                    } else if (mimeType.startsWith("audio/")) {
+                        if (codec.isEmpty()) codec = if (cleanMimeType.contains("webm")) "vp9" else "avc1.4d401f"
+                        
+                        videoOnlyList.add(StreamInfo(streamUrl, cleanMimeType, codec, height, label, initR, indexR))
+                    } else if (cleanMimeType.startsWith("audio/")) {
                         val bitrate = format.optInt("bitrate", 128000)
                         val audioTrack = format.optJSONObject("audioTrack")
                         val lang = audioTrack?.optString("id", "Default")?.uppercase() ?: "DEFAULT"
-                        audioInfoList.add(AudioInfo(streamUrl, mimeType, bitrate, initR, indexR, lang))
+                        if (codec.isEmpty()) codec = if (cleanMimeType.contains("webm")) "opus" else "mp4a.40.2"
+                        
+                        audioInfoList.add(AudioInfo(streamUrl, cleanMimeType, codec, bitrate, initR, indexR, lang))
                     }
                 }
 
@@ -262,7 +279,6 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
 
-                // [핵심] 고화질 비디오와 오디오를 합치기 위해 DASH 프록시를 구동합니다.
                 if (videoOnlyList.isNotEmpty() && audioInfoList.isNotEmpty()) {
                     val audiosByLanguage = audioInfoList.groupBy { it.language }
                     startServerIfNeeded()
@@ -287,7 +303,6 @@ open class YoutubeExtractor : ExtractorApi() {
                                         ) {
                                             this.referer = mainUrl
                                             this.quality = video.height
-                                            // ExoPlayer가 로컬 프록시를 찌를 때 쓸 헤더
                                             this.headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
                                         }
                                     )
@@ -404,14 +419,12 @@ open class YoutubeExtractor : ExtractorApi() {
 
     private fun proxyChunkToYouTube(socket: Socket, targetUrl: String, clientHeaders: Map<String, String>) {
         try {
-            // [프록시 방어 로직] 다운로드 시 유튜브 CDN이 봇으로 감지하지 못하도록 완벽한 ANDROID_VR 헤더 강제 주입
             val requestBuilder = okhttp3.Request.Builder()
                 .url(targetUrl)
                 .header("User-Agent", YoutubeUtils.ANDROID_VR_USER_AGENT)
                 .header("Accept", "*/*")
                 .header("Connection", "keep-alive")
 
-            // ExoPlayer가 보낸 헤더 중 봇 감지를 유발할 수 있는 헤더들은 철저히 필터링
             clientHeaders.forEach { (key, value) ->
                 val lowerKey = key.lowercase()
                 if (lowerKey != "host" && lowerKey != "user-agent" && lowerKey != "origin" && lowerKey != "referer" && lowerKey != "accept-encoding") {
@@ -469,16 +482,14 @@ open class YoutubeExtractor : ExtractorApi() {
         sb.append("""<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011" type="static" minBufferTime="PT5.0S" mediaPresentationDuration="$durationString">""")
         sb.append("<Period>")
 
-        val vMime = video.mimeType
-        val vCodecs = if (vMime.contains("webm")) "vp9" else "avc1.4d401f"
-
         val vSegmentBase = if (video.initRange != null && video.indexRange != null) {
             """<SegmentBase indexRange="${video.indexRange}"><Initialization range="${video.initRange}" /></SegmentBase>"""
         } else ""
 
+        // [수정] 따옴표가 중첩되지 않도록 파싱된 순수 mimeType과 codec을 분리해서 삽입
         sb.append("""
-            <AdaptationSet mimeType="$vMime" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
-              <Representation id="video" bandwidth="4000000" width="0" height="${video.height}" codecs="$vCodecs">
+            <AdaptationSet mimeType="${video.mimeType}" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
+              <Representation id="video" bandwidth="4000000" width="0" height="${video.height}" codecs="${video.codec}">
                 <BaseURL>$cleanVideoUrl</BaseURL>
                 $vSegmentBase
               </Representation>
@@ -492,16 +503,13 @@ open class YoutubeExtractor : ExtractorApi() {
             val cleanAudioUrl = escapeXml(proxyAudioUrl)
 
             val audioId = "audio_$index"
-            val aMime = audio.mimeType
-            val aCodecs = if (aMime.contains("webm")) "opus" else "mp4a.40.2"
-
             val aSegmentBase = if (audio.initRange != null && audio.indexRange != null) {
                 """<SegmentBase indexRange="${audio.indexRange}"><Initialization range="${audio.initRange}" /></SegmentBase>"""
             } else ""
 
             sb.append("""
-                <AdaptationSet mimeType="$aMime" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
-                  <Representation id="$audioId" bandwidth="${if(audio.bitrate>0) audio.bitrate else 128000}" codecs="$aCodecs">
+                <AdaptationSet mimeType="${audio.mimeType}" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
+                  <Representation id="$audioId" bandwidth="${if(audio.bitrate>0) audio.bitrate else 128000}" codecs="${audio.codec}">
                     <BaseURL>$cleanAudioUrl</BaseURL>
                     $aSegmentBase
                   </Representation>
