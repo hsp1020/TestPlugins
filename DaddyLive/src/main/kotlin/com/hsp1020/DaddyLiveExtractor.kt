@@ -15,9 +15,13 @@ class DaddyLiveExtractor : ExtractorApi() {
     override val mainUrl = "https://dlhd.pk"
     override val name = "DaddyLive"
     override val requiresReferer = false
-    
-    // dlstreams.py 와 동일한 User-Agent 사용
-    private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+    private val userAgent =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
+    private val headers = mapOf(
+        "Referer" to mainUrl,
+        "user-agent" to userAgent,
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
+    )
 
     private fun debugLog(message: String) {
         Log.d("DDL-DEBUG", "[DDL-DEBUG] $message")
@@ -31,16 +35,32 @@ class DaddyLiveExtractor : ExtractorApi() {
         callback: (ExtractorLink) -> Unit
     ) {
         val links = tryParseJson<List<Pair<String, String>>>(url)
-        val streamUrls = links?.map { it.second } ?: listOf(url)
+        
+        // 단일 URL로 인입된 경우의 예외 처리
+        if (links == null) {
+            val link = extractVideo(url, this.name)
+            if (link != null) callback(link)
+            return
+        }
 
-        // 6개의 플레이어(stream, cast, watch 등)를 순회하며 뚫리는 곳을 찾음 (dlstreams.py 로직)
-        for (streamUrl in streamUrls) {
-            val link = extractVideo(streamUrl, this.name)
-            if (link != null) {
-                callback(link)
-                // 하나라도 성공하면 불필요한 트래픽 낭비 방지를 위해 해당 채널 탐색 종료
-                debugLog("성공적으로 추출 완료. 다음 후보 URL 탐색 중지.")
-                break
+        // 1. "채널명 - 플레이어타입"을 기준으로 그룹화 (예: "Sky Sports" 단위로 묶음)
+        val groupedLinks = links.groupBy { it.first.substringBefore(" - ") }
+
+        // 2. 각 채널마다 독립적으로 추출 시도
+        groupedLinks.forEach { (channelName, playerPairs) ->
+            debugLog("[$channelName] 채널의 스트림 추출 시작 (총 ${playerPairs.size}개 후보)")
+            
+            for (playerPair in playerPairs) {
+                val sourceName = playerPair.first // UI에 표시될 이름 (예: "Sky Sports - stream")
+                val streamUrl = playerPair.second
+
+                val link = extractVideo(streamUrl, sourceName)
+                if (link != null) {
+                    callback(link)
+                    // 해당 채널의 주소를 하나 찾았으므로, 이 채널의 나머지 백업 플레이어(cast, watch 등) 탐색만 중지함
+                    debugLog("[$channelName] 성공적으로 추출 완료. 해당 채널의 나머지 백업 플레이어 탐색 중지.")
+                    break 
+                }
             }
         }
     }
