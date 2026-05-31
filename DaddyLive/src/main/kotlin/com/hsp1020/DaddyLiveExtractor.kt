@@ -1,28 +1,17 @@
 package com.hsp1020
 
-import android.annotation.SuppressLint
-import android.os.Handler
-import android.os.Looper
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import android.webkit.WebView
-import android.webkit.WebViewClient
+import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.api.Log
-import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
-import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
+import com.lagradost.cloudstream3.utils.Qualities
 import java.net.URL
-import kotlin.coroutines.resume
 
 class DaddyLiveExtractor : ExtractorApi() {
     override val mainUrl = "https://dlhd.pk"
@@ -60,7 +49,16 @@ class DaddyLiveExtractor : ExtractorApi() {
     ) {
         debugLog("getUrl: Triggered extractor. Raw URL input payload: $url")
         val links = tryParseJson<List<Pair<String, String>>>(url)
-        val extractors = links?.map { extractVideo(it.second, it.first) } ?: listOf(extractVideo(url))
+        
+        val extractors = if (links != null) {
+            debugLog("getUrl: Parsed payload list of size ${links.size}. Initializing extraction queue.")
+            links.map {
+                extractVideo(it.second, it.first)
+            }
+        } else {
+            debugLog("getUrl: Input payload is not list-formatted. Single link extraction initiated: $url")
+            listOf(extractVideo(url))
+        }
 
         var successfullyExtractedCount = 0
         extractors.forEach {
@@ -69,48 +67,118 @@ class DaddyLiveExtractor : ExtractorApi() {
                 callback(it)
             }
         }
-        debugLog("getUrl SUCCESS: Extracted $successfullyExtractedCount stream link(s).")
+        debugLog("getUrl SUCCESS: Extracted $successfullyExtractedCount stream link(s) out of ${extractors.size} candidates.")
     }
 
     private suspend fun extractVideo(url: String, sourceName: String = this.name): ExtractorLink? {
-        debugLog("extractVideo: [Step 1] Loading parent page: $url")
-        
+        debugLog("extractVideo: [Step 1] Loading player host page: $url")
+        if (!url.contains("dlhd") || url.contains("stream-5015.php")) {
+            debugLog("extractVideo ERROR: URL does not belong to main dlhd domain or is a blacklisted backup stream. Terminating.")
+            return null
+        }
+
         return try {
-            val resp = app.get(url, headers = headers).document
-            val iframeSrc = resp.select("iframe").attr("src")
+            val resp = app.post(url, headers = headers).document
+            val iframes = resp.select("iframe")
+            val iframeSrc = iframes.attr("src")
+            debugLog("extractVideo: [Step 2] Extracted iframe elements. Candidate src attribute: '$iframeSrc'")
             
             if (iframeSrc.isNullOrEmpty()) {
                 debugLog("extractVideo ERROR: FAILED to find valid iframe source inside document.")
                 return null
             }
             
-            val iframeUrl = if (iframeSrc.startsWith("//")) "https:$iframeSrc" else iframeSrc
-            val parsedUrl = URL(iframeUrl)
-            val refererBase = "${parsedUrl.protocol}://${parsedUrl.host}"
-            
-            debugLog("extractVideo: [Step 2] Found embed iframe: $iframeUrl")
+            val url1 = if (iframeSrc.startsWith("//")) "https:$iframeSrc" else iframeSrc
+            debugLog("extractVideo: [Step 3] Formatted iframe source: '$url1'")
 
-            // 쌩 WebView를 메인 스레드에 띄워서 자바스크립트 우회 및 m3u8 가로채기
-            val finalUrl = resolveWithRawWebView(iframeUrl, refererBase)
-
-            if (finalUrl == null) {
-                debugLog("extractVideo ERROR: Raw WebView failed to intercept M3U8 within 30 seconds timeout.")
+            // 플레이어 URL에서 고유 ID 추출 (예: stream-168.php -> 168)
+            val id = url.substringAfter("stream-").substringBefore(".php").trim()
+            if (id.isEmpty() || !id.all { it.isDigit() }) {
+                debugLog("extractVideo ERROR: Invalid or empty ID extracted: '$id'")
                 return null
             }
+            val channelKey = "premium$id"
+            debugLog("extractVideo: [Step 4] Resolved channelKey: '$channelKey'")
 
-            debugLog("extractVideo SUCCESS: Intercepted final stream URL: $finalUrl")
+            // 1. 임베드 도메인 디렉토리 형태에 맞춘 server_lookup.php 동적 경로 조립
+            val serverLookupUrl = if (url1.contains("/premiumtv/")) {
+                url1.substringBefore("/premiumtv/") + "/premiumtv/server_lookup.php?channel_id=$channelKey"
+            } else {
+                val parsed = URL(url1)
+                "${parsed.protocol}://${parsed.host}/server_lookup.php?channel_id=$channelKey"
+            }
+            debugLog("extractVideo: [Step 5] Fetching live CDN serverKey from: $serverLookupUrl")
+            
+            val serverKeyResp = app.get(serverLookupUrl, headers = mapOf("User-Agent" to userAgent, "Referer" to url1)).body.string()
+            debugLog("extractVideo: [Step 6] server_lookup response payload: '$serverKeyResp'")
+            
+            val data = try { 
+                parseJson<DataResponse>(serverKeyResp) 
+            } catch (e: Exception) {
+                debugLog("extractVideo ERROR: Failed to parse server_lookup response", e)
+                return null
+            }
+            val serverKey = data.serverKey
+            debugLog("extractVideo: [Step 7] Active serverKey resolved: '$serverKey'")
 
+            // 2. 동적 게이트웨이 접미사 큐 순회 탐색 (dvalna 및 newkso 대역 모두 수용)
+            val hostSuffixes = listOf("new.newkso.ru", "new.dvalna.ru")
+            var location: String? = null
+            var activeGatewayUrl = ""
+
+            val streamHeaders = mapOf(
+                "User-Agent" to userAgent,
+                "Referer" to "https://forcedtoplay.xyz/",
+                "Origin" to "https://forcedtoplay.xyz",
+                "Connection" to "Keep-Alive"
+            )
+
+            for (suffix in hostSuffixes) {
+                val m3u8GatewayUrl = if (serverKey == "top1/cdn") {
+                    "https://top1.newkso.ru/top1/cdn/$channelKey/mono.m3u8"
+                } else {
+                    "https://${serverKey}${suffix}/${serverKey}/${channelKey}/mono.m3u8"
+                }
+                debugLog("extractVideo: [Step 8] Attempting Gateway URL: $m3u8GatewayUrl")
+
+                try {
+                    val streamResponse = app.get(m3u8GatewayUrl, headers = streamHeaders, allowRedirects = false)
+                    debugLog("extractVideo: [Step 9] Gateway Server Response for '$suffix': ${streamResponse.code}")
+                    
+                    val loc = streamResponse.headers["Location"] ?: streamResponse.headers["location"]
+                    if (!loc.isNullOrEmpty()) {
+                        location = loc
+                        activeGatewayUrl = m3u8GatewayUrl
+                        debugLog("extractVideo: [Step 10] Active Gateway identified with redirect location: '$location'")
+                        break
+                    }
+                } catch (e: Exception) {
+                    debugLog("extractVideo WARNING: Failed on suffix '$suffix' due to network/DNS exception", e)
+                }
+            }
+
+            val finalUrl = if (!location.isNullOrEmpty()) {
+                location
+            } else {
+                debugLog("extractVideo WARNING: All redirects were empty. Falling back to default gateway URL.")
+                if (serverKey == "top1/cdn") "https://top1.newkso.ru/top1/cdn/$channelKey/mono.m3u8"
+                else "https://${serverKey}new.newkso.ru/${serverKey}/${channelKey}/mono.m3u8"
+            }
+
+            debugLog("extractVideo SUCCESS: Resolved dynamic tokenized playback URL: $finalUrl")
+            
+            val refererBase = "https://forcedtoplay.xyz"
             newExtractorLink(
                 sourceName,
-                "$sourceName (WebView)",
+                sourceName,
                 finalUrl,
                 type = ExtractorLinkType.M3U8,
             ) {
-                this.referer = "https://player.videasy.net/"
+                this.referer = "$refererBase/"
                 this.quality = Qualities.Unknown.value
                 this.headers = mapOf(
-                    "Origin" to "https://player.videasy.net",
-                    "Referer" to "https://player.videasy.net/",
+                    "Referer" to "$refererBase/",
+                    "Origin" to refererBase,
                     "Connection" to "Keep-Alive",
                     "User-Agent" to userAgent
                 )
@@ -121,104 +189,5 @@ class DaddyLiveExtractor : ExtractorApi() {
         }
     }
 
-    // 안드로이드 쌩 WebView 생성 및 터치 이벤트 강제 주입 로직
-    @SuppressLint("SetJavaScriptEnabled")
-    private suspend fun resolveWithRawWebView(targetUrl: String, refererBase: String): String? {
-        var webView: WebView? = null
-        
-        val resultUrl = withContext(Dispatchers.Main) {
-            withTimeoutOrNull(30000L) { // 30초 내에 연산을 풀고 m3u8이 나와야 함
-                suspendCancellableCoroutine<String> { cont ->
-                    val context = AcraApplication.context
-                    if (context == null) {
-                        debugLog("RawWebView ERROR: Context is null. Cannot spawn WebView.")
-                        return@suspendCancellableCoroutine
-                    }
-
-                    webView = WebView(context)
-                    var isResumed = false
-
-                    webView?.settings?.apply {
-                        javaScriptEnabled = true
-                        domStorageEnabled = true
-                        // 사용자 터치 없이도 미디어가 재생(WASM 실행)되도록 허용
-                        mediaPlaybackRequiresUserGesture = false 
-                        userAgentString = userAgent
-                    }
-
-                    webView?.webViewClient = object : WebViewClient() {
-                        override fun shouldInterceptRequest(
-                            view: WebView?,
-                            request: WebResourceRequest?
-                        ): WebResourceResponse? {
-                            val reqUrl = request?.url?.toString() ?: ""
-                            
-                            // WASM 연산이 끝나고 phantemlis.top의 m3u8 토큰 주소를 요청하는 순간 낚아챔
-                            if (reqUrl.contains(".m3u8") && (reqUrl.contains("phantemlis.top") || reqUrl.contains("tracks-v1a1") || reqUrl.contains("mizhls.ru"))) {
-                                if (!isResumed) {
-                                    isResumed = true
-                                    debugLog("RawWebView: Intercepted Target M3U8 -> $reqUrl")
-                                    cont.resume(reqUrl)
-                                }
-                            }
-                            return super.shouldInterceptRequest(view, request)
-                        }
-
-                        override fun onPageFinished(view: WebView?, url: String?) {
-                            super.onPageFinished(view, url)
-                            // 팝업, 투명 광고창을 모두 날려버리고 가짜 클릭 이벤트를 강제로 발생시키는 JS 주입
-                            val js = """
-                                setInterval(function() {
-                                    // 1. 클릭을 방해하는 투명 광고 오버레이 날리기
-                                    document.querySelectorAll('div, iframe').forEach(e => {
-                                        var style = window.getComputedStyle(e);
-                                        if (style.zIndex && parseInt(style.zIndex) > 10000) e.remove();
-                                    });
-
-                                    // 2. 플레이어 버튼 강제 클릭
-                                    var btn = document.querySelector('.vjs-big-play-button, .play-button, button');
-                                    if (btn) btn.click();
-                                    
-                                    // 3. 비디오 태그 강제 클릭 및 재생
-                                    var vid = document.querySelector('video');
-                                    if (vid) {
-                                        vid.click();
-                                        vid.play().catch(err => {});
-                                    }
-
-                                    // 4. 화면 정중앙 강제 터치 이벤트 발생
-                                    var x = window.innerWidth / 2;
-                                    var y = window.innerHeight / 2;
-                                    var element = document.elementFromPoint(x, y);
-                                    if (element) {
-                                        element.click();
-                                    }
-                                }, 1000);
-                            """.trimIndent()
-                            view?.evaluateJavascript(js, null)
-                        }
-                    }
-
-                    val customHeaders = mutableMapOf<String, String>()
-                    customHeaders["Referer"] = "$refererBase/"
-                    
-                    debugLog("RawWebView: Loading URL -> $targetUrl")
-                    webView?.loadUrl(targetUrl, customHeaders)
-                }
-            }
-        }
-
-        // 코루틴(결과 수신 혹은 타임아웃)이 끝나면 백그라운드에서 돌고 있는 웹뷰를 메인 스레드에서 즉각 폐기(메모리 누수 방지)
-        withContext(Dispatchers.Main) {
-            try {
-                webView?.destroy()
-                webView = null
-                debugLog("RawWebView: WebView destroyed safely.")
-            } catch (e: Exception) {
-                debugLog("RawWebView WARNING: Failed to destroy WebView", e)
-            }
-        }
-
-        return resultUrl
-    }
+    data class DataResponse(@JsonProperty("server_key") val serverKey: String)
 }
