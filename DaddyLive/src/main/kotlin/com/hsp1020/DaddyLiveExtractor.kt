@@ -170,6 +170,12 @@ class DaddyLiveExtractor : ExtractorApi() {
             val pageHtml = pageResponse.body.string()
             val page = Jsoup.parse(pageHtml)
             
+            val id = try {
+                urlNextPage.substringAfter("id=").substringBefore("&")
+            } catch (e: Exception) {
+                "1"
+            }
+            
             val scriptElement = page.select("script").firstOrNull { 
                 it.data().contains("channelKey") || it.data().contains("CHANNEL_KEY") 
             }
@@ -294,7 +300,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             }
 
             debugLog("extractFromNewzar: Script-based parsing skipped. Falling back to general HTML/Packer parser on cached DOM.")
-            findM3u8InHtml(pageHtml)
+            findM3u8InHtml(pageHtml, id)
         } catch (e: Exception) {
             debugLog("extractFromNewzar EXCEPTION encountered during Newzar parsing.", e)
             null
@@ -315,7 +321,87 @@ class DaddyLiveExtractor : ExtractorApi() {
         return result.ifEmpty { "0" }
     }
 
-    private fun findM3u8InHtml(html: String): String? {
+    private fun findM3u8InDecodedStrings(decodedEven: String, decodedOdd: String, id: String): String? {
+        val m3u8Regex = Regex("""(?:https?:)?//[^"'`\s]+\.m3u8[^"'`\s]*""", RegexOption.IGNORE_CASE)
+        
+        // 1. 디코딩된 자바스크립트 소스 풀 내에 온전한 스트림 주소가 잡히는지 확인
+        val match = m3u8Regex.find(decodedEven) ?: m3u8Regex.find(decodedOdd)
+        if (match != null) {
+            val cleanUrl = match.value.replace("\\/", "/").trim()
+            val finalUrl = if (cleanUrl.startsWith("//")) "https:$cleanUrl" else cleanUrl
+            debugLog("findM3u8InDecodedStrings: Found complete .m3u8 URL: $finalUrl")
+            return finalUrl
+        }
+        
+        // 2. 만약 조각나 수집될 경우, 디코딩 정보 내부에서 동적 스트리밍 엣지 도메인 대역을 색출
+        val domainRegex = Regex("""[^"'`\s/]+\.(?:hlsjs\.ru|onlinehdhls\.ru|openhd\.lol|mizhls\.ru|newkso\.ru)""", RegexOption.IGNORE_CASE)
+        val pathRegex = Regex("""/[^"'`\s]+\.m3u8[^"'`\s]*""", RegexOption.IGNORE_CASE)
+        
+        val host = domainRegex.find(decodedEven)?.value 
+            ?: domainRegex.find(decodedOdd)?.value 
+            ?: "webhdrus.onlinehdhls.ru"
+            
+        val path = pathRegex.find(decodedEven)?.value 
+            ?: pathRegex.find(decodedOdd)?.value
+            ?: "/lb/premium$id/index.m3u8"
+            
+        debugLog("findM3u8InDecodedStrings: Reconstructed URL from Host: '$host', Path: '$path'")
+        return "https://$host$path"
+    }
+
+    private fun findM3u8InHtml(html: String, id: String): String? {
+        // 1. 문자열 테이블 변수 'f' 검출 및 교차 해독기 가동
+        val fValue = Regex("""var\s+f\s*=\s*['"]([^'"]+)['"]""").find(html)?.groupValues?.get(1)
+            ?: Regex("""const\s+f\s*=\s*['"]([^'"]+)['"]""").find(html)?.groupValues?.get(1)
+            ?: Regex("""let\s+f\s*=\s*['"]([^'"]+)['"]""").find(html)?.groupValues?.get(1)
+            
+        if (fValue != null) {
+            // [Step 1] 난독화 원문 전체 로깅
+            debugLog("findM3u8InHtml: [Step 1] Raw Encrypted fValue = $fValue")
+            val kEven = StringBuilder()
+            val kOdd = StringBuilder()
+            for (i in fValue.indices) {
+                if (i % 2 == 0) {
+                    kEven.append(fValue[i])
+                } else {
+                    kOdd.append(fValue[i])
+                }
+            }
+            
+            val decodedEven = kEven.toString().reversed()
+            val decodedOdd = kOdd.toString()
+            
+            // [Step 2 & 3] 분리된 짝수 영역과 홀수 영역 분석 데이터 로깅
+            debugLog("findM3u8InHtml: [Step 2] Decoded Even (Reversed) = $decodedEven")
+            debugLog("findM3u8InHtml: [Step 3] Decoded Odd = $decodedOdd")
+            
+            val evenWords = decodedEven.split("z")
+            val oddWords = decodedOdd.split("z")
+            
+            val reconstructedWords = mutableListOf<String>()
+            val minSize = minOf(evenWords.size, oddWords.size)
+            for (i in 0 until minSize) {
+                val evenWord = evenWords[evenWords.size - 1 - i]
+                val oddWord = oddWords[i]
+                reconstructedWords.add(evenWord + oddWord)
+            }
+            val fullyDecryptedText = reconstructedWords.joinToString(" ")
+            
+            // [Step 4] 대칭 교차 복원을 마친 최종 평문 로깅
+            debugLog("findM3u8InHtml: [Step 4] Fully Decrypted Text = $fullyDecryptedText")
+            
+            val resolvedUrl = findM3u8InDecodedStrings(fullyDecryptedText, "", id)
+            
+            // [Step 5] 난독화 본문에서 도출된 최종 재생 소스 주소 로깅
+            debugLog("findM3u8InHtml: [Step 5] Final Resolved Stream URL = $resolvedUrl")
+            if (resolvedUrl != null) {
+                return resolvedUrl
+            }
+        } else {
+            debugLog("findM3u8InHtml: Obfuscated variable 'f' was not found in page source.")
+        }
+
+        // 2. 일반적인 Packer 형태의 자바스크립트 해독 처리 및 탐색
         var unpackedHtml = html
         val packedRegex = Regex("""eval\s*\(\s*function\s*\(\s*[^)]+\s*\).*?\}\s*\(\s*(['"])(.*?)\1\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(['"])(.*?)\5\.split""")
         
@@ -350,7 +436,13 @@ class DaddyLiveExtractor : ExtractorApi() {
             return finalCleanUrl
         }
         
-        debugLog("findM3u8InHtml: No .m3u8 found. HTML Sample (first 1000 chars): ${unpackedHtml.take(1000)}")
+        // 3. 미디어 링크가 어떠한 형태로도 포착되지 않을 때, 도출해 둔 채널 ID로 주소를 복구하여 생존율 보장
+        debugLog("findM3u8InHtml: No .m3u8 detected in decrypted plain text. Launching ultimate reconstruction fallback.")
+        val resolvedUrl = findM3u8InDecodedStrings(unpackedHtml, "", id)
+        if (resolvedUrl != null) {
+            return resolvedUrl
+        }
+        
         return null
     }
 
