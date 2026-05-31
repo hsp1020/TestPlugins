@@ -31,16 +31,16 @@ class DaddyLiveExtractor : ExtractorApi() {
     private fun debugLog(message: String, throwable: Throwable? = null) {
         val errMessage = throwable?.message ?: "Unknown Error"
         val formatted = if (throwable != null) {
-            "[DDL-Extractor] $message | Exception: $errMessage"
+            "[DDL-DEBUG] $message | Exception: $errMessage"
         } else {
-            "[DDL-Extractor] $message"
+            "[DDL-DEBUG] $message"
         }
         
         if (throwable != null) {
-            Log.e("DaddyLive-DEBUG", "$message: $errMessage")
+            Log.e("DDL-DEBUG", "[DDL-DEBUG] $message: $errMessage")
             println(formatted)
         } else {
-            Log.d("DaddyLive-DEBUG", message)
+            Log.d("DDL-DEBUG", "[DDL-DEBUG] $message")
             println(formatted)
         }
     }
@@ -167,7 +167,6 @@ class DaddyLiveExtractor : ExtractorApi() {
             val pageResponse = app.get(urlNextPage, headers)
             debugLog("extractFromNewzar: Page response received with code ${pageResponse.code}")
             
-            // 이중 소비 에러 방지를 위해 원본 바디 스트림을 단 한 번만 읽어 캐싱 처리
             val pageHtml = pageResponse.body.string()
             val page = Jsoup.parse(pageHtml)
             
@@ -294,7 +293,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                 }
             }
 
-            // Newzar 파싱에 실패하거나 해당 스크립트가 존재하지 않는 일반 플레이어일 경우 메모리상의 pageHtml로 가동
             debugLog("extractFromNewzar: Script-based parsing skipped. Falling back to general HTML/Packer parser on cached DOM.")
             findM3u8InHtml(pageHtml)
         } catch (e: Exception) {
