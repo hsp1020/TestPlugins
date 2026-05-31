@@ -1,14 +1,17 @@
 package com.hsp1020
 
+import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
+import org.jsoup.Jsoup
 import java.net.URL
 
 class DaddyLiveExtractor : ExtractorApi() {
@@ -69,22 +72,17 @@ class DaddyLiveExtractor : ExtractorApi() {
     }
 
     private suspend fun extractVideo(url: String, sourceName: String = this.name): ExtractorLink? {
-        // [Step 1] 비디오 추출 탐색 시작 로깅
-        debugLog("extractVideo: [Step 1] Initiated extraction for player page URL: $url")
-        if (!url.contains("dlhd")) {
-            debugLog("extractVideo ERROR: URL does not belong to dlhd domain. Terminating.")
+        debugLog("extractVideo: [Step 1] Loading player host page: $url")
+        if (!url.contains("dlhd") || url.contains("stream-5015.php")) {
+            debugLog("extractVideo ERROR: URL does not belong to main dlhd domain or is a blacklisted backup stream. Terminating.")
             return null
         }
 
         return try {
             val resp = app.post(url, headers = headers).document
-            // [Step 2] 부모 페이지 로드 성공 로깅
-            debugLog("extractVideo: [Step 2] Successfully fetched dlhd parent page. DOM size: ${resp.toString().length} characters.")
-            
             val iframes = resp.select("iframe")
             val iframeSrc = iframes.attr("src")
-            // [Step 3] iframe 획득 로깅
-            debugLog("extractVideo: [Step 3] Raw iframe source attribute found: '$iframeSrc'")
+            debugLog("extractVideo: [Step 2] Extracted iframe elements. Candidate src attribute: '$iframeSrc'")
             
             if (iframeSrc.isNullOrEmpty()) {
                 debugLog("extractVideo ERROR: FAILED to find valid iframe source inside document.")
@@ -92,59 +90,86 @@ class DaddyLiveExtractor : ExtractorApi() {
             }
             
             val url1 = if (iframeSrc.startsWith("//")) "https:$iframeSrc" else iframeSrc
-            // [Step 4] 정형화된 iframe 주소 도출 로깅
-            debugLog("extractVideo: [Step 4] Formatted iframe source URL: '$url1'")
+            debugLog("extractVideo: [Step 3] Formatted iframe source: '$url1'")
 
             // 플레이어 URL에서 고유 ID 추출 (예: stream-168.php -> 168)
             val id = url.substringAfter("stream-").substringBefore(".php").trim()
-            // [Step 5] 고유 채널 ID 파싱 결과 로깅
-            debugLog("extractVideo: [Step 5] Extracted raw stream ID: '$id'")
             if (id.isEmpty() || !id.all { it.isDigit() }) {
-                debugLog("extractVideo ERROR: Raw stream ID is empty or contains non-numeric characters.")
+                debugLog("extractVideo ERROR: Invalid or empty ID extracted: '$id'")
                 return null
             }
             val channelKey = "premium$id"
-            // [Step 6] Newzar/mizhls 채널 매핑 키 규격 로깅
-            debugLog("extractVideo: [Step 6] Configured channelKey = '$channelKey'")
+            debugLog("extractVideo: [Step 4] Resolved channelKey: '$channelKey'")
 
-            // 1. mizhls.ru 게이트웨이 주소 조립
-            val mizhlsGatewayUrl = "https://xyzdddd.mizhls.ru/lb/$channelKey/index.m3u8"
-            // [Step 7] 게이트웨이 최종 도메인 타겟 빌드 결과 로깅
-            debugLog("extractVideo: [Step 7] Assembled Gateway URL = $mizhlsGatewayUrl")
+            // 임베드 페이지의 스크립트를 로드하여 실시간 도메인 접미사(Host Suffix)를 동적으로 파싱
+            val pageResponse = app.get(url1, headers = headers)
+            debugLog("extractVideo: [Step 5] Loaded iframe contents. Response code: ${pageResponse.code}")
+            val pageHtml = pageResponse.body.string()
+            val page = Jsoup.parse(pageHtml)
 
-            // 2. 게이트웨이에 302 리다이렉트 추적 요청 (cookiewebplay 헤더 필수 우회)
+            val scriptElement = page.select("script").firstOrNull { 
+                it.data().contains("serverKey") || it.data().contains("CHANNEL_KEY") 
+            }
+            
+            if (scriptElement == null) {
+                debugLog("extractVideo ERROR: Failed to find script containing serverKey/CHANNEL_KEY in page.")
+                return null
+            }
+            val script = scriptElement.data()
+
+            // 1. Newkso.ru 나 dvalna.ru 등의 가변 도메인 접미사 동적 정규식 파싱 (하드코딩 제거)
+            val rawHostSuffix = Regex("""serverKey\s*\+\s*["']([^"']+)["']""").find(script)?.groupValues?.get(1) ?: "new.newkso.ru"
+            val hostSuffix = rawHostSuffix.trim().removeSuffix("/").trim()
+            debugLog("extractVideo: [Step 6] Dynamically extracted Host Suffix: '$hostSuffix'")
+
+            // 2. 임베드 도메인의 server_lookup.php를 호출하여 실시간 serverKey 획득
+            val serverLookupUrl = url1.substringBefore("/daddy") + "/server_lookup.php?channel_id=$channelKey"
+            debugLog("extractVideo: [Step 7] Fetching live CDN serverKey from: $serverLookupUrl")
+            
+            val serverKeyResp = app.get(serverLookupUrl, headers = mapOf("User-Agent" to userAgent, "Referer" to url1)).body.string()
+            debugLog("extractVideo: [Step 8] server_lookup response payload: '$serverKeyResp'")
+            
+            val data = try { 
+                parseJson<DataResponse>(serverKeyResp) 
+            } catch (e: Exception) {
+                debugLog("extractVideo ERROR: Failed to parse server_lookup response", e)
+                return null
+            }
+            val serverKey = data.serverKey
+            debugLog("extractVideo: [Step 9] Active serverKey resolved: '$serverKey'")
+
+            // 3. 동적으로 수집된 키와 도메인 접미사를 조합해 최신 게이트웨이 주소 조립
+            val m3u8GatewayUrl = if (serverKey == "top1/cdn") {
+                "https://top1.newkso.ru/top1/cdn/$channelKey/mono.m3u8"
+            } else {
+                "https://${serverKey}${hostSuffix}/${serverKey}/${channelKey}/mono.m3u8"
+            }
+            debugLog("extractVideo: [Step 10] Assembled Gateway URL: $m3u8GatewayUrl")
+
+            // 4. 게이트웨이에 302 리다이렉트 추적 요청 송신 (forcedtoplay 필수 검증 헤더 기입)
             val streamHeaders = mapOf(
                 "User-Agent" to userAgent,
-                "Referer" to "https://cookiewebplay.xyz/",
-                "Origin" to "https://cookiewebplay.xyz",
+                "Referer" to "https://forcedtoplay.xyz/",
+                "Origin" to "https://forcedtoplay.xyz",
                 "Connection" to "Keep-Alive"
             )
-            // [Step 8] 게이트웨이 우회용 cookiewebplay 헤더 할당 로깅
-            debugLog("extractVideo: [Step 8] Configured bypass headers -> Referer: 'https://cookiewebplay.xyz/', Origin: 'https://cookiewebplay.xyz'")
-            
-            // [Step 9] 302 가로채기 호출 전 로깅
-            debugLog("extractVideo: [Step 9] Requesting Gateway URL with allowRedirects=false to catch 302 redirection...")
-            val streamResponse = app.get(mizhlsGatewayUrl, headers = streamHeaders, allowRedirects = false)
-            // [Step 10] 게이트웨이 서버 응답 코드 로깅
-            debugLog("extractVideo: [Step 10] Gateway Server HTTP Response Code = ${streamResponse.code}")
+            debugLog("extractVideo: [Step 11] Requesting Gateway URL with allowRedirects=false to catch 302 redirection...")
+            val streamResponse = app.get(m3u8GatewayUrl, headers = streamHeaders, allowRedirects = false)
+            debugLog("extractVideo: [Step 12] Gateway Server HTTP Response Code = ${streamResponse.code}")
             
             val location = streamResponse.headers["Location"] ?: streamResponse.headers["location"]
-            // [Step 11] 리다이렉트 Location 헤더 로깅 (phantemlis.top의 md5/expires가 수집되는 영역)
-            debugLog("extractVideo: [Step 11] Extracted Location Header = '$location'")
+            debugLog("extractVideo: [Step 13] Extracted Location Header = '$location'")
             
             val finalUrl = if (!location.isNullOrEmpty()) {
                 location
             } else {
-                debugLog("extractVideo WARNING: Redirect Location was empty or null. Falling back to Gateway URL.")
-                mizhlsGatewayUrl
+                debugLog("extractVideo WARNING: Redirect Location was empty. Reverting to Gateway URL.")
+                m3u8GatewayUrl
             }
 
-            // [Step 12] 추출 완료된 최종 재생용 HLS 주소 로깅
-            debugLog("extractVideo: [Step 12] Final Stream URL Resolved = $finalUrl")
+            debugLog("extractVideo SUCCESS: Resolved dynamic tokenized playback URL: $finalUrl")
             
-            val refererBase = "https://cookiewebplay.xyz"
-            // [Step 13] 미디어 플레이어 전달용 최종 헤더 바인딩 로깅
-            debugLog("extractVideo: [Step 13] Creating ExtractorLink with refererBase: '$refererBase'")
+            val refererBase = "https://forcedtoplay.xyz"
             newExtractorLink(
                 sourceName,
                 sourceName,
@@ -161,8 +186,10 @@ class DaddyLiveExtractor : ExtractorApi() {
                 )
             }
         } catch (e: Exception) {
-            debugLog("extractVideo EXCEPTION at target URL: $url", e)
+            debugLog("extractVideo EXCEPTION at target URL: $url : ${e.message}")
             null
         }
     }
+
+    data class DataResponse(@JsonProperty("server_key") val serverKey: String)
 }
