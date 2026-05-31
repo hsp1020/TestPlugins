@@ -13,6 +13,7 @@ import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import java.net.URL
 
+
 class DaddyLiveExtractor : ExtractorApi() {
     override val mainUrl = "https://dlhd.pk"
     override val name = "DaddyLive"
