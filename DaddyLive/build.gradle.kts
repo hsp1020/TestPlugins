@@ -21,7 +21,7 @@ cloudstream {
 
     requiresResources = false
 
-    iconUrl = "https://raw.githubusercontent.com/doGior/doGiorsHadEnough/refs/heads/master/DaddyLive/live-streaming.png"
+    iconUrl = "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/DaddyLive/live-streaming.png"
 }
 //dependencies{
 //    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.1")
