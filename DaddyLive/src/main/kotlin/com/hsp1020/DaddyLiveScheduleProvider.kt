@@ -61,7 +61,7 @@ class DaddyLiveScheduleProvider : MainAPI() {
     @Suppress("ConstPropertyName")
     companion object {
         private const val posterUrl =
-            "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/DaddyLive/live-streaming.png"
+            "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/DaddyLive/live-streaming2.png"
 
         fun convertGMTToLocalTime(gmtTime: String): String {
             val gmtFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
