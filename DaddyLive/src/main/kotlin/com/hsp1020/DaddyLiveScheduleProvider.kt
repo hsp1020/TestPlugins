@@ -236,7 +236,7 @@ class DaddyLiveScheduleProvider : MainAPI() {
     ): Boolean {
         debugLog("loadLinks: Loading links using channel payload: $data")
         return try {
-            val players = listOf("stream")
+            val players = listOf("stream", "cast", "watch", "plus", "casting", "player")
             val channels = parseJson<List<Channel>>(data)
             debugLog("loadLinks: Parsed channel count: ${channels.size}")
 
