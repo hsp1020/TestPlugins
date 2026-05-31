@@ -100,13 +100,9 @@ class DaddyLiveExtractor : ExtractorApi() {
             val channelKey = "premium$id"
             debugLog("extractVideo: [Step 4] Resolved channelKey: '$channelKey'")
 
-            // 1. 임베드 도메인 디렉토리 형태에 맞춘 server_lookup.php 동적 경로 조립
-            val serverLookupUrl = if (url1.contains("/premiumtv/")) {
-                url1.substringBefore("/premiumtv/") + "/premiumtv/server_lookup.php?channel_id=$channelKey"
-            } else {
-                val parsed = URL(url1)
-                "${parsed.protocol}://${parsed.host}/server_lookup.php?channel_id=$channelKey"
-            }
+            // server_lookup.php는 항상 호스트의 최상위 루트 경로(Root)에 존재함 (404 File not found 대응)
+            val parsed = URL(url1)
+            val serverLookupUrl = "${parsed.protocol}://${parsed.host}/server_lookup.php?channel_id=$channelKey"
             debugLog("extractVideo: [Step 5] Fetching live CDN serverKey from: $serverLookupUrl")
             
             val serverKeyResp = app.get(serverLookupUrl, headers = mapOf("User-Agent" to userAgent, "Referer" to url1)).body.string()
@@ -121,7 +117,7 @@ class DaddyLiveExtractor : ExtractorApi() {
             val serverKey = data.serverKey
             debugLog("extractVideo: [Step 7] Active serverKey resolved: '$serverKey'")
 
-            // 2. 동적 게이트웨이 접미사 큐 순회 탐색 (dvalna 및 newkso 대역 모두 수용)
+            // 동적 게이트웨이 접미사 큐 순회 탐색 (dvalna 및 newkso 대역 모두 수용)
             val hostSuffixes = listOf("new.newkso.ru", "new.dvalna.ru")
             var location: String? = null
             var activeGatewayUrl = ""
