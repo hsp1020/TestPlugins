@@ -14,7 +14,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
-import okhttp3.HttpUrl.Companion.toHttpUrl
 import java.net.URL
 
 class DaddyLiveExtractor : ExtractorApi() {
@@ -34,7 +33,6 @@ class DaddyLiveExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // List of pairs <channel name, link>
         val links = tryParseJson<List<Pair<String, String>>>(url)
         Log.d("DDLExt - Links", links?.toJson() ?: "null")
         val extractors = links?.map {
@@ -53,15 +51,16 @@ class DaddyLiveExtractor : ExtractorApi() {
 
         val resp = app.post(url, headers = headers).document
         val iframes = resp.select("iframe")
-        val url1 = iframes.attr("src")
+        val iframeSrc = iframes.attr("src")
+        if (iframeSrc.isNullOrEmpty()) return null
+        
+        val url1 = if (iframeSrc.startsWith("//")) "https:$iframeSrc" else iframeSrc
         val parsedUrl = URL(url1)
         val refererBase = "${parsedUrl.protocol}://${parsedUrl.host}"
-
 
         Log.d("DDLExt", url1)
         val finalUrl = (if (url1.contains("vidembed")) extractFromVidembed(url1) else
             extractFromNewzar(url1, refererBase)) ?: return null
-
 
         return newExtractorLink(
             sourceName,
@@ -72,16 +71,16 @@ class DaddyLiveExtractor : ExtractorApi() {
             this.referer = "$refererBase/"
             this.quality = Qualities.Unknown.value
             this.headers = mapOf(
+                "Referer" to "$refererBase/",
                 "Origin" to refererBase,
                 "Connection" to "Keep-Alive",
                 "User-Agent" to userAgent
             )
         }
-
     }
 
     private suspend fun extractFromVidembed(urlNextPage: String): String? {
-        val vidembedHost = urlNextPage.toHttpUrl().host
+        val vidembedHost = URL(urlNextPage).host
         val liveId = urlNextPage.substringAfterLast("/").substringBefore("#")
         val liveUrl = "https://www.$vidembedHost/api/source/$liveId?type=live"
         val requestBody = "{\"r\":\"https://thedaddy.top/\",\"d\":\"www.$vidembedHost\"}"
@@ -106,57 +105,111 @@ class DaddyLiveExtractor : ExtractorApi() {
 
     private suspend fun extractFromNewzar(urlNextPage: String, serverUrl: String): String? {
         val page = app.get(urlNextPage, headers).document
-//        Log.d("DDLExt", page.toString())
-        val script = page.select("script").first { it.data().contains("CHANNEL_KEY") }.data()
-//        Log.d("DDLExt", script)
+        val scriptElement = page.select("script").firstOrNull { 
+            it.data().contains("channelKey") || it.data().contains("CHANNEL_KEY") 
+        } ?: return null
+        val script = scriptElement.data()
 
-        val bundle = base64Decode(
-            Regex("""(?<=const IJXX=").*(?=")""").find(script)?.value ?: return null
-        )
-        val bundleObj = parseJson<Bundle>(bundle)
-        Log.d("DDLExt", bundleObj.toJson())
-        val channelKey =
-            Regex("""(?<=const CHANNEL_KEY=").*(?=")""").find(script)?.value ?: return null
-//        Log.d("DDLExt", channelKey)
-        val params = mapOf(
-            "channel_id" to channelKey,
-            "ts" to base64Decode(bundleObj.bTs),
-            "rnd" to base64Decode(bundleObj.bRnd),
-            "sig" to base64Decode(bundleObj.bSig),
-        )
-        Log.d("DDLExt", "Params: $params")
-        //Requests
-        val authResponse = //withContext(Dispatchers.IO) {
-            app.get(
-                "https://top2new.newkso.ru/auth.php",
-                params = params,
-                headers = mapOf(
-                    "User-Agent" to userAgent,
-                    "Referer" to "$serverUrl/",
-                    "Origin" to serverUrl
-                ),
-//                interceptor = CloudflareKiller()
-            )
-        //}
-//        Log.d("DDLExt", authResponse.code.toString())
-        Log.d("DDLExt", "Auth: " + authResponse.body.string())
-        if (authResponse.code == 403) return null
+        // 1. 채널 키 동적 파싱
+        val channelKey = Regex("""channelKey\s*=\s*["']([^"']+)["']""").find(script)?.groupValues?.get(1)
+            ?: Regex("""CHANNEL_KEY\s*=\s*["']([^"']+)["']""").find(script)?.groupValues?.get(1)
+            ?: return null
 
-        val serverKey = app.get("$serverUrl/server_lookup.php?channel_id=$channelKey").body.string()
-        Log.d("DDLExt", "Server Key: $serverKey")
-        val data = try { parseJson<DataResponse>(serverKey) }
-        catch (e: MismatchedInputException){
-            Log.d("DDLExt", serverKey)
-            Log.d("DDLExt", "$e")
+        // 2. 인증 파라미터 동적 파싱 및 Fallback 처리
+        var authTs = Regex("""authTs\s*=\s*["']([^"']+)["']""").find(script)?.groupValues?.get(1)
+            ?: Regex("""authTs\s*=\s*([0-9]+)""").find(script)?.groupValues?.get(1)
+        var authRnd = Regex("""authRnd\s*=\s*["']([^"']+)["']""").find(script)?.groupValues?.get(1)
+        var authSig = Regex("""authSig\s*=\s*["']([^"']+)["']""").find(script)?.groupValues?.get(1)
+
+        if (authTs == null || authRnd == null || authSig == null) {
+            val bundleBase64 = Regex("""IJXX\s*=\s*["']([^"']+)["']""").find(script)?.groupValues?.get(1)
+            if (bundleBase64 != null) {
+                val bundle = base64Decode(bundleBase64)
+                val bundleObj = tryParseJson<Bundle>(bundle)
+                if (bundleObj != null) {
+                    authTs = base64Decode(bundleObj.bTs)
+                    authRnd = base64Decode(bundleObj.bRnd)
+                    authSig = base64Decode(bundleObj.bSig)
+                }
+            }
+        }
+
+        if (authTs == null || authRnd == null || authSig == null) {
+            Log.d("DDLExt", "Required authentication parameters missing.")
             return null
         }
-        //So far it works
-        val m3u8 = when (data.serverKey) {
-            "top1/cdn" -> "https://top1.newkso.ru/top1/cdn/$channelKey/mono.m3u8"
-            else -> "https://${data.serverKey}new.newkso.ru/${data.serverKey}/$channelKey/mono.m3u8"
+
+        val authHost = Regex("""(https?://[^\s]+/auth\.php\?channel_id=)""").find(script)?.groupValues?.get(1)
+            ?: "https://top2new.newkso.ru/auth.php?channel_id="
+
+        val params = mapOf(
+            "channel_id" to channelKey,
+            "ts" to authTs,
+            "rnd" to authRnd,
+            "sig" to authSig,
+        )
+        Log.d("DDLExt", "Params: $params")
+
+        // 3. auth.php 세션 인증 트리거 호출
+        val authResponse = app.get(
+            "$authHost$channelKey",
+            params = params,
+            headers = mapOf(
+                "User-Agent" to userAgent,
+                "Referer" to "$serverUrl/",
+                "Origin" to serverUrl,
+                "Connection" to "Keep-Alive"
+            )
+        )
+        Log.d("DDLExt", "Auth Status Code: ${authResponse.code}")
+        if (authResponse.code == 403) return null
+
+        // 4. server_lookup.php 호출
+        val serverKeyResp = app.get("$serverUrl/server_lookup.php?channel_id=$channelKey").body.string()
+        Log.d("DDLExt", "Server Lookup response: $serverKeyResp")
+        val data = try { 
+            parseJson<DataResponse>(serverKeyResp) 
+        } catch (e: Exception) {
+            Log.d("DDLExt", "Mismatched server key payload: $e")
+            return null
         }
-        Log.d("DDLExt", "Final Url: $m3u8")
-        return m3u8
+
+        // 5. iframe 내부의 HLS 호스트 주소 파싱
+        val host = Regex("""serverKey\s*\+\s*["']([^"']+)["']""").find(script)?.groupValues?.get(1) 
+            ?: "new.newkso.ru"
+
+        val serverKey = data.serverKey
+        val m3u8Url = if (serverKey == "top1/cdn") {
+            "https://top1.newkso.ru/top1/cdn/$channelKey/mono.m3u8"
+        } else {
+            "https://${serverKey}new.newkso.ru/${serverKey}/$channelKey/mono.m3u8"
+        }
+        Log.d("DDLExt", "Assembled m3u8 Source: $m3u8Url")
+
+        // 6. HTTP 리다이렉트(302) 추적하여 최종 md5 & expires 주소 도출
+        val streamHeaders = mapOf(
+            "User-Agent" to userAgent,
+            "Referer" to "$serverUrl/",
+            "Origin" to serverUrl,
+            "Connection" to "Keep-Alive"
+        )
+        
+        // 헤더 누실로 인한 403 인증 실패를 막기 위해 Redirect를 일시 차단 후 location을 안전하게 추출
+        val streamResponse = app.get(m3u8Url, headers = streamHeaders, allowRedirects = false)
+        val location = streamResponse.headers["Location"] ?: streamResponse.headers["location"]
+        val finalUrl = if (!location.isNullOrEmpty()) {
+            if (location.startsWith("/")) {
+                val parsedM3u8 = URL(m3u8Url)
+                "${parsedM3u8.protocol}://${parsedM3u8.host}$location"
+            } else {
+                location
+            }
+        } else {
+            streamResponse.url
+        }
+
+        Log.d("DDLExt", "Resolved Stream URL: $finalUrl")
+        return finalUrl
     }
 
     data class DataResponse(@JsonProperty("server_key") val serverKey: String)
