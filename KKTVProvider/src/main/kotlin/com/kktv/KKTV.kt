@@ -133,6 +133,7 @@ class CUTVProvider : MainAPI() {
             webView.settings.domStorageEnabled = true
             webView.settings.databaseEnabled = true
             
+            // 일반 모바일 Chrome 브라우저 User-Agent 강제 주입 (; wv 제거)
             webView.settings.userAgentString = userAgent
             println("[CUTV_DEBUG] [Cloudflare Bypass] WebView User-Agent 강제 설정: $userAgent")
 
@@ -299,21 +300,21 @@ class CUTVProvider : MainAPI() {
                 val jsonData = matchResult.groupValues[1]
                 val matches = AppUtils.parseJson<List<Map<String, String>>>(jsonData)
                 
-                // [방안1 - 동적 추출]: 실시간 경기 목록 데이터 내부의 실제 스트림 URL 도메인을 동적으로 추출합니다.
-                val firstStreamUrl = matches.asSequence()
+                // [우선순위 1]: 실시간 스트림 목록 중에서 썸네일을 실제 호스팅하는 oncahot.com 계열의 미디어 주소를 먼저 찾아 도메인을 추출합니다.
+                val firstOncahotUrl = matches.asSequence()
                     .map { item -> listOfNotNull(item["surl"], item["surl2"], item["surl3"]) }
                     .flatten()
-                    .firstOrNull { it.isNotBlank() }
+                    .firstOrNull { it.isNotBlank() && it.contains("oncahot.com", ignoreCase = true) }
 
-                if (firstStreamUrl != null) {
-                    val extractedHost = extractDomainFromStreamUrl(firstStreamUrl)
+                if (firstOncahotUrl != null) {
+                    val extractedHost = extractDomainFromStreamUrl(firstOncahotUrl)
                     if (!extractedHost.isNullOrBlank()) {
                         dynamicThumbBase = "https://$extractedHost/thumbs"
-                        println("[CUTV_DEBUG] SUCCESS: [방안1] 실시간 스트림 도메인 기반 썸네일 경로 추출 성공 -> $dynamicThumbBase")
+                        println("[CUTV_DEBUG] SUCCESS: [우선순위 1] 실시간 oncahot 스트림 도메인 기반 썸네일 경로 추출 성공 -> $dynamicThumbBase")
                     }
                 }
 
-                // [방안2 - 기존 정규식 폴백]: 도메인 동적 추출 실패 시 기존 정규식 로직으로 폴백을 시도합니다.
+                // [우선순위 2]: 데이터 내에 oncahot 주소가 보이지 않는다면, 기존 원본 HTML의 oncahot 도메인을 정규식 매칭합니다.
                 if (dynamicThumbBase.isBlank()) {
                     val hostRegex = """([a-zA-Z0-9.-]*oncahot\.com)""".toRegex(RegexOption.IGNORE_CASE)
                     val hostMatch = hostRegex.find(iframeHtml)
@@ -321,51 +322,51 @@ class CUTVProvider : MainAPI() {
                     if (hostMatch != null) {
                         val cleanDomain = hostMatch.groupValues[1]
                         dynamicThumbBase = "https://$cleanDomain/thumbs"
-                        println("[CUTV_DEBUG] SUCCESS: [폴백 방안1] 도메인 다이렉트 매칭 성공 -> $dynamicThumbBase")
-                    } else {
-                        println("[CUTV_DEBUG] INFO: [폴백 방안1] 매칭 실패. [폴백 방안2] 자바스크립트 파일 추적으로 진입합니다.")
-                        
-                        val iframeDoc = Jsoup.parse(iframeHtml)
-                        val scriptSrc = iframeDoc.select("script").map { it.attr("src") }
-                            .firstOrNull { it.contains("script.bootstrap.js") }
+                        println("[CUTV_DEBUG] SUCCESS: [우선순위 2] HTML 본문 oncahot 도메인 정규식 매칭 성공 -> $dynamicThumbBase")
+                    }
+                }
 
-                        println("[CUTV_DEBUG] 찾은 script.bootstrap.js 경로: $scriptSrc")
+                // [우선순위 3]: JS 설정 파일(script.bootstrap.js) 추적 및 매칭
+                if (dynamicThumbBase.isBlank()) {
+                    println("[CUTV_DEBUG] INFO: [우선순위 2] 매칭 실패. [우선순위 3] 자바스크립트 파일 추적으로 진입합니다.")
+                    
+                    val iframeDoc = Jsoup.parse(iframeHtml)
+                    val scriptSrc = iframeDoc.select("script").map { it.attr("src") }
+                        .firstOrNull { it.contains("script.bootstrap.js") }
 
-                        if (!scriptSrc.isNullOrBlank()) {
-                            val iframeUri = Uri.parse(iframeSrc)
-                            val scriptUrl = if (scriptSrc.startsWith("http")) {
-                                scriptSrc
-                            } else {
-                                val cleanPath = scriptSrc.replace("../", "")
-                                "${iframeUri.scheme}://${iframeUri.host}/$cleanPath"
-                            }
-                            println("[CUTV_DEBUG] 타겟 스크립트 절대경로: $scriptUrl")
-                            
-                            try {
-                                val scriptHtml = app.get(scriptUrl, headers = defaultHeaders, referer = iframeSrc).text
-                                println("[CUTV_DEBUG] 스크립트 내용 수신 완료. 크기: ${scriptHtml.length}자")
-
-                                val indexOfThumbsScript = scriptHtml.indexOf("thumbs", ignoreCase = true)
-                                if (indexOfThumbsScript != -1) {
-                                    val start = maxOf(0, indexOfThumbsScript - 100)
-                                    val end = minOf(scriptHtml.length, indexOfThumbsScript + 100)
-                                    val context = scriptHtml.substring(start, end)
-                                    println("[CUTV_DEBUG] 🔍 [FACT DUMP] 스크립트 내 'thumbs' 주변 200자 원본 데이터:\n[DUMP_START]\n$context\n[DUMP_END]")
-                                }
-
-                                val fallbackRegex = """(https?(?::|\\:)(?:/|\\/)+[a-zA-Z0-9.-]+(?:/|\\/)+thumbs)""".toRegex(RegexOption.IGNORE_CASE)
-                                val scriptMatch = fallbackRegex.find(scriptHtml)
-                                if (scriptMatch != null) {
-                                    dynamicThumbBase = scriptMatch.groupValues[1].replace("\\", "")
-                                    println("[CUTV_DEBUG] SUCCESS: [폴백 방안2] 스크립트 내부에서 완전한 주소 추출 성공 -> $dynamicThumbBase")
-                                } else {
-                                    println("[CUTV_DEBUG] FAIL: [폴백 방안2] 스크립트는 로드했으나 패턴 매칭 실패")
-                                }
-                            } catch (e: Exception) {
-                                println("[CUTV_DEBUG] FAIL: [폴백 방안2] script.bootstrap.js 네트워크 요청 실패: ${e.message}")
-                            }
+                    if (!scriptSrc.isNullOrBlank()) {
+                        val iframeUri = Uri.parse(iframeSrc)
+                        val scriptUrl = if (scriptSrc.startsWith("http")) {
+                            scriptSrc
                         } else {
-                            println("[CUTV_DEBUG] FAIL: iframe 내부에서 script.bootstrap.js 태그 자체를 찾을 수 없음")
+                            val cleanPath = scriptSrc.replace("../", "")
+                            "${iframeUri.scheme}://${iframeUri.host}/$cleanPath"
+                        }
+                        
+                        try {
+                            val scriptHtml = app.get(scriptUrl, headers = defaultHeaders, referer = iframeSrc).text
+                            val fallbackRegex = """(https?(?::|\\:)(?:/|\\/)+[a-zA-Z0-9.-]+(?:/|\\/)+thumbs)""".toRegex(RegexOption.IGNORE_CASE)
+                            val scriptMatch = fallbackRegex.find(scriptHtml)
+                            if (scriptMatch != null) {
+                                dynamicThumbBase = scriptMatch.groupValues[1].replace("\\", "")
+                                println("[CUTV_DEBUG] SUCCESS: [우선순위 3] 스크립트 내부에서 완전한 주소 추출 성공 -> $dynamicThumbBase")
+                            }
+                        } catch (e: Exception) {}
+                    }
+                }
+
+                // [우선순위 4 - 최후 수단]: 만약 oncahot.com 도메인을 어디서도 발견하지 못했다면, 임의의 첫 번째 재생 서버 호스트를 추출하여 할당합니다.
+                if (dynamicThumbBase.isBlank()) {
+                    val firstUrl = matches.asSequence()
+                        .map { item -> listOfNotNull(item["surl"], item["surl2"], item["surl3"]) }
+                        .flatten()
+                        .firstOrNull { it.isNotBlank() }
+
+                    if (firstUrl != null) {
+                        val extractedHost = extractDomainFromStreamUrl(firstUrl)
+                        if (!extractedHost.isNullOrBlank()) {
+                            dynamicThumbBase = "https://$extractedHost/thumbs"
+                            println("[CUTV_DEBUG] SUCCESS: [우선순위 4 - 최후 폴백] 첫 번째 스트림 도메인 기반 추출 -> $dynamicThumbBase")
                         }
                     }
                 }
