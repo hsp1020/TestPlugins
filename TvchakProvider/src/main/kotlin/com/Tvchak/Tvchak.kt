@@ -176,7 +176,8 @@ class TvchakProvider : MainAPI() {
     /**
      * 상세 페이지
      */
-    override suspend fun load(url: String): LoadResponse {
+
+     override suspend fun load(url: String): LoadResponse {
         checkAndUpdateDomain()
         
         val realUrl = url.substringBefore("?poster=")
@@ -193,12 +194,11 @@ class TvchakProvider : MainAPI() {
         val episodes = document.select(".content_playlist li a").reversed().mapIndexedNotNull { index, element ->
             val epTitle = element.text().trim()
             val epHref = fixUrlNull(element.attr("href")) ?: return@mapIndexedNotNull null
-            
-            val epNum = Regex("(\\d+)\\s*[화회부]").find(epTitle)?.groupValues?.get(1)?.toIntOrNull() ?: (index + 1)
 
             newEpisode(epHref) {
                 this.name = epTitle
-                this.episode = epNum
+                // 정규식 매칭을 제거하고 수집된 순서대로 1, 2, 3, 4... 에피소드 번호를 부여합니다.
+                this.episode = index + 1
             }
         }
 
@@ -209,6 +209,8 @@ class TvchakProvider : MainAPI() {
             this.plot = plot
         }
     }
+
+
 
     /**
      * 영상 링크 추출
