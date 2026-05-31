@@ -36,7 +36,6 @@ class DaddyLiveExtractor : ExtractorApi() {
         }
         
         if (throwable != null) {
-            // 인자 개수 초과 에러 방지를 위해 에러 태그와 조립된 문자열 2개만 전달
             Log.e("DaddyLive-DEBUG", "$message: $errMessage")
             println(formatted)
         } else {
@@ -101,8 +100,16 @@ class DaddyLiveExtractor : ExtractorApi() {
                 debugLog("extractVideo: Vidembed signature matched. Executing extractFromVidembed.")
                 extractFromVidembed(url1)
             } else {
-                debugLog("extractVideo: Newzar media engine matched. Executing extractFromNewzar.")
-                extractFromNewzar(url1, refererBase)
+                debugLog("extractVideo: Executing extractFromNewzar.")
+                val newzarUrl = extractFromNewzar(url1, refererBase)
+                if (newzarUrl == null) {
+                    debugLog("extractVideo: Newzar parser returned null. Falling back to generic HTML/Packer parser.")
+                    // Newzar 가 매칭되지 않는 일반 임베드 사이트일 경우 직접 HTML을 다운로드하여 복호화 및 직접 파싱 시도
+                    val pageHtml = app.get(url1, headers = headers).body.string()
+                    findM3u8InHtml(pageHtml)
+                } else {
+                    newzarUrl
+                }
             }
 
             if (finalUrl == null) {
@@ -306,6 +313,60 @@ class DaddyLiveExtractor : ExtractorApi() {
             debugLog("extractFromNewzar EXCEPTION encountered during Newzar parsing.", e)
             null
         }
+    }
+
+    // 진법 변환 처리기 (Java/Kotlin 기본 toString()은 진법 36 까지만 지원하므로 Dean Edwards Unpacker에 필수적인 Base62 지원 구현)
+    private fun encodeBase(num: Int, radix: Int): String {
+        val chars = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        if (radix <= 36) {
+            return num.toString(radix)
+        }
+        var n = num
+        var result = ""
+        while (n > 0) {
+            result = chars[n % radix] + result
+            n /= radix
+        }
+        return result.ifEmpty { "0" }
+    }
+
+    private fun findM3u8InHtml(html: String): String? {
+        var unpackedHtml = html
+        // Dean Edwards Packed 자바스크립트 스크립트 해독 처리 [eval(function(p,a,c,k,e,d)...)]
+        val packedRegex = Regex("""eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,\s*[rd]\s*\).*?\}\s*\(\s*(['"])(.*?)\1\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(['"])(.*?)\5\.split""")
+        
+        packedRegex.findAll(html).forEach { match ->
+            try {
+                val p = match.groupValues[2]
+                val a = match.groupValues[3].toInt()
+                val c = match.groupValues[4].toInt()
+                val k = match.groupValues[6].split('|')
+                
+                var result = p
+                for (i in k.indices) {
+                    val word = k[i]
+                    if (word.isNotEmpty()) {
+                        val key = encodeBase(i, a)
+                        result = result.replace(Regex("\\b$key\\b"), word)
+                    }
+                }
+                unpackedHtml += "\n$result"
+                debugLog("findM3u8InHtml: Unpacked packed script. Unpacked size: ${result.length}")
+            } catch (e: Exception) {
+                debugLog("findM3u8InHtml: Failed to unpack packed script", e)
+            }
+        }
+
+        // 압축이 전면 해제된 소스코드에서 미디어 HLS (.m3u8) 경로 최종 수집 및 문자열 탈출 가공
+        val m3u8Regex = Regex("""https?://[^\s"']+\.m3u8[^\s"']*""")
+        val match = m3u8Regex.find(unpackedHtml)
+        if (match != null) {
+            val cleanUrl = match.value.replace("\\/", "/")
+            debugLog("findM3u8InHtml: Found .m3u8 URL: $cleanUrl")
+            return cleanUrl
+        }
+        
+        return null
     }
 
     data class DataResponse(@JsonProperty("server_key") val serverKey: String)
