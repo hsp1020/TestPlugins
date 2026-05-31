@@ -8,7 +8,6 @@ import android.content.Context
 class DaddyLivePlugin: Plugin() {
     override fun load(context: Context) {
         // All providers should be added in this manner
-        registerMainAPI(DaddyLiveTVProvider())
         registerMainAPI(DaddyLiveScheduleProvider())
         registerExtractorAPI(DaddyLiveExtractor())
     }
