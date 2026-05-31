@@ -67,6 +67,16 @@ class CUTVProvider : MainAPI() {
     private val defaultHeaders: Map<String, String>
         get() = getHeaders()
 
+    private fun isCloudflareChallenge(html: String): Boolean {
+        val lowerHtml = html.lowercase()
+        return (lowerHtml.contains("window._cf_chl_opt") || 
+                lowerHtml.contains("cf-challenge-running") || 
+                lowerHtml.contains("id=\"challenge-form\"") ||
+                lowerHtml.contains("id=\"cf-challenge-form\"") ||
+                lowerHtml.contains("just a moment...")) && 
+               lowerHtml.contains("cloudflare")
+    }
+
     private suspend fun solveCloudflare(url: String): Pair<String, String>? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
         val context = try {
             Class.forName("android.app.ActivityThread")
@@ -90,8 +100,9 @@ class CUTVProvider : MainAPI() {
             webView.settings.domStorageEnabled = true
             webView.settings.databaseEnabled = true
             
-            val actualUserAgent = webView.settings.userAgentString
-            println("[CUTV_DEBUG] [Cloudflare Bypass] WebView User-Agent: $actualUserAgent")
+            // 일반 모바일 Chrome 브라우저 User-Agent 강제 주입 (; wv 제거)
+            webView.settings.userAgentString = userAgent
+            println("[CUTV_DEBUG] [Cloudflare Bypass] WebView User-Agent 강제 설정: $userAgent")
 
             webView.webViewClient = object : WebViewClient() {
                 var solved = false
@@ -112,7 +123,7 @@ class CUTVProvider : MainAPI() {
                         solved = true
                         println("[CUTV_DEBUG] [Cloudflare Bypass] 성공: cf_clearance 쿠키 발견!")
                         if (continuation.isActive) {
-                            continuation.resume(Pair(cookies, actualUserAgent))
+                            continuation.resume(Pair(cookies, userAgent))
                         }
                         try {
                             webView.stopLoading()
@@ -132,7 +143,7 @@ class CUTVProvider : MainAPI() {
                     val cookies = cookieManager.getCookie(url) ?: ""
                     if (cookies.isNotBlank()) {
                         println("[CUTV_DEBUG] [Cloudflare Bypass] 타임아웃되었으나 수집된 쿠키 반환 시도: $cookies")
-                        continuation.resume(Pair(cookies, actualUserAgent))
+                        continuation.resume(Pair(cookies, userAgent))
                     } else {
                         continuation.resume(null)
                     }
@@ -153,7 +164,7 @@ class CUTVProvider : MainAPI() {
                             if (cookies.contains("cf_clearance")) {
                                 println("[CUTV_DEBUG] [Cloudflare Bypass] 성공 (인터벌 체크): cf_clearance 쿠키 발견!")
                                 handler.removeCallbacks(timeoutRunnable)
-                                continuation.resume(Pair(cookies, actualUserAgent))
+                                continuation.resume(Pair(cookies, userAgent))
                                 try {
                                     webView.stopLoading()
                                     webView.destroy()
@@ -197,7 +208,7 @@ class CUTVProvider : MainAPI() {
 
             var doc = app.get(url, headers = defaultHeaders).document
 
-            if (doc.html().contains("cloudflare") || doc.html().contains("challenge-platform")) {
+            if (isCloudflareChallenge(doc.html())) {
                 println("[CUTV_DEBUG] [Cloudflare Bypass] Cloudflare 챌린지 감지됨. 우회 절차를 재시도합니다.")
                 val cfResult = solveCloudflare(mainUrl)
                 if (cfResult != null) {
@@ -207,21 +218,23 @@ class CUTVProvider : MainAPI() {
                     doc = app.get(url, headers = defaultHeaders).document
                 }
             }
-            
+
+            println("[CUTV_DEBUG] === START CUTV 팩트 체크 디버깅 ===")
+            println("[CUTV_DEBUG] 접속 메인 URL: $url")
+            println("[CUTV_DEBUG] 메인 HTML 크기: ${doc.html().length}자")
+
             val iframeSrc = doc.select("iframe").mapNotNull { it.attr("src") }
                 .firstOrNull { it.contains("galaxy-stream") || it.contains("hudtv") || it.contains("cli") }
 
             if (iframeSrc.isNullOrBlank()) {
                 println("[CUTV_DEBUG] FAIL: iframeSrc를 찾을 수 없습니다.")
+                val preview = if (doc.html().length > 1000) doc.html().substring(0, 1000) else doc.html()
+                println("[CUTV_DEBUG] 🔍 [DEBUG PREVIEW] 메인 HTML 앞부분 1000자:\n[PREVIEW_START]\n$preview\n[PREVIEW_END]")
                 return newHomePageResponse(request.name, emptyList())
             }
 
             val iframeHtml = app.get(iframeSrc, headers = defaultHeaders, referer = url).text
-            
-            println("[CUTV_DEBUG] === START CUTV 팩트 체크 디버깅 ===")
-            println("[CUTV_DEBUG] 접속 메인 URL: $url")
             println("[CUTV_DEBUG] 추출된 iframe 주소: $iframeSrc")
-            println("[CUTV_DEBUG] 메인 HTML 크기: ${doc.html().length}자")
             println("[CUTV_DEBUG] iframe HTML 크기: ${iframeHtml.length}자")
 
             val indexOfOncahot = iframeHtml.indexOf("oncahot", ignoreCase = true)
