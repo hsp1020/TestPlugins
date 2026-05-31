@@ -11,7 +11,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
-import org.jsoup.Jsoup
 import java.net.URL
 
 class DaddyLiveExtractor : ExtractorApi() {
@@ -25,21 +24,9 @@ class DaddyLiveExtractor : ExtractorApi() {
         "user-agent" to userAgent
     )
 
-    private fun debugLog(message: String, throwable: Throwable? = null) {
-        val errMessage = throwable?.message ?: "Unknown Error"
-        val formatted = if (throwable != null) {
-            "[DDL-DEBUG] $message | Exception: $errMessage"
-        } else {
-            "[DDL-DEBUG] $message"
-        }
-        
-        if (throwable != null) {
-            Log.e("DDL-DEBUG", "[DDL-DEBUG] $message: $errMessage")
-            println(formatted)
-        } else {
-            Log.d("DDL-DEBUG", "[DDL-DEBUG] $message")
-            println(formatted)
-        }
+    private fun debugLog(message: String) {
+        Log.d("DDL-DEBUG", "[DDL-DEBUG] $message")
+        println("[DDL-DEBUG] $message")
     }
 
     override suspend fun getUrl(
@@ -101,33 +88,17 @@ class DaddyLiveExtractor : ExtractorApi() {
             val channelKey = "premium$id"
             debugLog("extractVideo: [Step 4] Resolved channelKey: '$channelKey'")
 
-            // 임베드 페이지의 스크립트를 로드하여 실시간 도메인 접미사(Host Suffix)를 동적으로 파싱
-            val pageResponse = app.get(url1, headers = headers)
-            debugLog("extractVideo: [Step 5] Loaded iframe contents. Response code: ${pageResponse.code}")
-            val pageHtml = pageResponse.body.string()
-            val page = Jsoup.parse(pageHtml)
-
-            val scriptElement = page.select("script").firstOrNull { 
-                it.data().contains("serverKey") || it.data().contains("CHANNEL_KEY") 
+            // 1. 임베드 도메인 디렉토리 형태에 맞춘 server_lookup.php 동적 경로 조립
+            val serverLookupUrl = if (url1.contains("/premiumtv/")) {
+                url1.substringBefore("/premiumtv/") + "/premiumtv/server_lookup.php?channel_id=$channelKey"
+            } else {
+                val parsed = URL(url1)
+                "${parsed.protocol}://${parsed.host}/server_lookup.php?channel_id=$channelKey"
             }
-            
-            if (scriptElement == null) {
-                debugLog("extractVideo ERROR: Failed to find script containing serverKey/CHANNEL_KEY in page.")
-                return null
-            }
-            val script = scriptElement.data()
-
-            // 1. Newkso.ru 나 dvalna.ru 등의 가변 도메인 접미사 동적 정규식 파싱 (하드코딩 제거)
-            val rawHostSuffix = Regex("""serverKey\s*\+\s*["']([^"']+)["']""").find(script)?.groupValues?.get(1) ?: "new.newkso.ru"
-            val hostSuffix = rawHostSuffix.trim().removeSuffix("/").trim()
-            debugLog("extractVideo: [Step 6] Dynamically extracted Host Suffix: '$hostSuffix'")
-
-            // 2. 임베드 도메인의 server_lookup.php를 호출하여 실시간 serverKey 획득
-            val serverLookupUrl = url1.substringBefore("/daddy") + "/server_lookup.php?channel_id=$channelKey"
-            debugLog("extractVideo: [Step 7] Fetching live CDN serverKey from: $serverLookupUrl")
+            debugLog("extractVideo: [Step 5] Fetching live CDN serverKey from: $serverLookupUrl")
             
             val serverKeyResp = app.get(serverLookupUrl, headers = mapOf("User-Agent" to userAgent, "Referer" to url1)).body.string()
-            debugLog("extractVideo: [Step 8] server_lookup response payload: '$serverKeyResp'")
+            debugLog("extractVideo: [Step 6] server_lookup response payload: '$serverKeyResp'")
             
             val data = try { 
                 parseJson<DataResponse>(serverKeyResp) 
@@ -136,35 +107,50 @@ class DaddyLiveExtractor : ExtractorApi() {
                 return null
             }
             val serverKey = data.serverKey
-            debugLog("extractVideo: [Step 9] Active serverKey resolved: '$serverKey'")
+            debugLog("extractVideo: [Step 7] Active serverKey resolved: '$serverKey'")
 
-            // 3. 동적으로 수집된 키와 도메인 접미사를 조합해 최신 게이트웨이 주소 조립
-            val m3u8GatewayUrl = if (serverKey == "top1/cdn") {
-                "https://top1.newkso.ru/top1/cdn/$channelKey/mono.m3u8"
-            } else {
-                "https://${serverKey}${hostSuffix}/${serverKey}/${channelKey}/mono.m3u8"
-            }
-            debugLog("extractVideo: [Step 10] Assembled Gateway URL: $m3u8GatewayUrl")
+            // 2. 동적 게이트웨이 접미사 큐 순회 탐색 (dvalna 및 newkso 대역 모두 수용)
+            val hostSuffixes = listOf("new.newkso.ru", "new.dvalna.ru")
+            var location: String? = null
+            var activeGatewayUrl = ""
 
-            // 4. 게이트웨이에 302 리다이렉트 추적 요청 송신 (forcedtoplay 필수 검증 헤더 기입)
             val streamHeaders = mapOf(
                 "User-Agent" to userAgent,
                 "Referer" to "https://forcedtoplay.xyz/",
                 "Origin" to "https://forcedtoplay.xyz",
                 "Connection" to "Keep-Alive"
             )
-            debugLog("extractVideo: [Step 11] Requesting Gateway URL with allowRedirects=false to catch 302 redirection...")
-            val streamResponse = app.get(m3u8GatewayUrl, headers = streamHeaders, allowRedirects = false)
-            debugLog("extractVideo: [Step 12] Gateway Server HTTP Response Code = ${streamResponse.code}")
-            
-            val location = streamResponse.headers["Location"] ?: streamResponse.headers["location"]
-            debugLog("extractVideo: [Step 13] Extracted Location Header = '$location'")
-            
+
+            for (suffix in hostSuffixes) {
+                val m3u8GatewayUrl = if (serverKey == "top1/cdn") {
+                    "https://top1.newkso.ru/top1/cdn/$channelKey/mono.m3u8"
+                } else {
+                    "https://${serverKey}${suffix}/${serverKey}/${channelKey}/mono.m3u8"
+                }
+                debugLog("extractVideo: [Step 8] Attempting Gateway URL: $m3u8GatewayUrl")
+
+                try {
+                    val streamResponse = app.get(m3u8GatewayUrl, headers = streamHeaders, allowRedirects = false)
+                    debugLog("extractVideo: [Step 9] Gateway Server Response for '$suffix': ${streamResponse.code}")
+                    
+                    val loc = streamResponse.headers["Location"] ?: streamResponse.headers["location"]
+                    if (!loc.isNullOrEmpty()) {
+                        location = loc
+                        activeGatewayUrl = m3u8GatewayUrl
+                        debugLog("extractVideo: [Step 10] Active Gateway identified with redirect location: '$location'")
+                        break
+                    }
+                } catch (e: Exception) {
+                    debugLog("extractVideo WARNING: Failed on suffix '$suffix' due to network/DNS exception: ${e.message}")
+                }
+            }
+
             val finalUrl = if (!location.isNullOrEmpty()) {
                 location
             } else {
-                debugLog("extractVideo WARNING: Redirect Location was empty. Reverting to Gateway URL.")
-                m3u8GatewayUrl
+                debugLog("extractVideo WARNING: All redirects were empty. Falling back to default gateway URL.")
+                if (serverKey == "top1/cdn") "https://top1.newkso.ru/top1/cdn/$channelKey/mono.m3u8"
+                else "https://${serverKey}new.newkso.ru/${serverKey}/${channelKey}/mono.m3u8"
             }
 
             debugLog("extractVideo SUCCESS: Resolved dynamic tokenized playback URL: $finalUrl")
