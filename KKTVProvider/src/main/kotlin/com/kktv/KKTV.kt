@@ -48,7 +48,7 @@ class CUTVProvider : MainAPI() {
         return headers
     }
 
-    private fun getPosterHeaders(referer: String): Map<String, String> {
+    private fun getPosterHeaders(posterUrl: String, referer: String): Map<String, String> {
         val currentUA = cfUserAgent ?: userAgent
         val headers = mutableMapOf(
             "Referer" to referer,
@@ -58,8 +58,11 @@ class CUTVProvider : MainAPI() {
             "Sec-Fetch-Mode" to "no-cors",
             "Sec-Fetch-Site" to "cross-site"
         )
-        cfCookies?.let {
-            headers["Cookie"] = it
+        // 불필요한 타사 이미지 서버로의 세션 쿠키 유출 및 403 차단을 방지하기 위해, 동일 도메인(cu-tv.com)일 때만 쿠키를 첨부합니다.
+        if (posterUrl.contains("cu-tv.com")) {
+            cfCookies?.let {
+                headers["Cookie"] = it
+            }
         }
         return headers
     }
@@ -75,6 +78,27 @@ class CUTVProvider : MainAPI() {
                 lowerHtml.contains("id=\"cf-challenge-form\"") ||
                 lowerHtml.contains("just a moment...")) && 
                lowerHtml.contains("cloudflare")
+    }
+
+    // 스트림 재생 주소 내에서 실제 이미지 및 스트리밍을 공급하는 도메인을 안전하게 가공/추출하는 도우미 함수
+    private fun extractDomainFromStreamUrl(url: String): String? {
+        var cleanUrl = url
+        if (cleanUrl.startsWith("EMBED#")) {
+            cleanUrl = cleanUrl.removePrefix("EMBED#")
+        }
+        if (cleanUrl.contains("liveUrl=")) {
+            try {
+                cleanUrl.substringAfter("liveUrl=").substringBefore("&").let {
+                    cleanUrl = URLDecoder.decode(it, "UTF-8")
+                }
+            } catch (e: Exception) {}
+        }
+        return try {
+            val uri = Uri.parse(cleanUrl)
+            uri.host
+        } catch (e: Exception) {
+            null
+        }
     }
 
     private suspend fun solveCloudflare(url: String): Pair<String, String>? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
@@ -93,7 +117,6 @@ class CUTVProvider : MainAPI() {
 
         println("[CUTV_DEBUG] [Cloudflare Bypass] 진입 -> URL: $url")
 
-        // 기존에 디바이스 내부에 기생하던 효력 없는 만료 쿠키를 완전히 소거하여 새 챌린지 해결을 강제합니다.
         try {
             val cookieManager = CookieManager.getInstance()
             cookieManager.removeAllCookies(null)
@@ -110,7 +133,6 @@ class CUTVProvider : MainAPI() {
             webView.settings.domStorageEnabled = true
             webView.settings.databaseEnabled = true
             
-            // 일반 모바일 Chrome 브라우저 User-Agent 강제 주입 (; wv 제거)
             webView.settings.userAgentString = userAgent
             println("[CUTV_DEBUG] [Cloudflare Bypass] WebView User-Agent 강제 설정: $userAgent")
 
@@ -220,7 +242,6 @@ class CUTVProvider : MainAPI() {
 
             if (isCloudflareChallenge(doc.html())) {
                 println("[CUTV_DEBUG] [Cloudflare Bypass] Cloudflare 챌린지 감지됨. 우회 절차를 재시도합니다.")
-                // 재우회 시 기존 변수를 지워 새 검증을 확실히 보장합니다.
                 cfCookies = null
                 cfUserAgent = null
                 val cfResult = solveCloudflare(mainUrl)
@@ -271,66 +292,88 @@ class CUTVProvider : MainAPI() {
             // 썸네일 베이스 URL 동적 추출
             var dynamicThumbBase = "" 
             
-            val hostRegex = """([a-zA-Z0-9.-]*oncahot\.com)""".toRegex(RegexOption.IGNORE_CASE)
-            val hostMatch = hostRegex.find(iframeHtml)
+            val jsonRegex = """window\.galaxystream\.data2\s*=\s*'(.*?)';""".toRegex()
+            val matchResult = jsonRegex.find(iframeHtml)
             
-            if (hostMatch != null) {
-                val cleanDomain = hostMatch.groupValues[1]
-                dynamicThumbBase = "https://$cleanDomain/thumbs"
-                println("[CUTV_DEBUG] SUCCESS: [방안1] 도메인 다이렉트 매칭 성공 -> $dynamicThumbBase")
-            } else {
-                println("[CUTV_DEBUG] INFO: [방안1] 매칭 실패. [방안2] 자바스크립트 파일 추적으로 진입합니다.")
+            if (matchResult != null) {
+                val jsonData = matchResult.groupValues[1]
+                val matches = AppUtils.parseJson<List<Map<String, String>>>(jsonData)
                 
-                val iframeDoc = Jsoup.parse(iframeHtml)
-                val scriptSrc = iframeDoc.select("script").map { it.attr("src") }
-                    .firstOrNull { it.contains("script.bootstrap.js") }
+                // [방안1 - 동적 추출]: 실시간 경기 목록 데이터 내부의 실제 스트림 URL 도메인을 동적으로 추출합니다.
+                val firstStreamUrl = matches.asSequence()
+                    .map { item -> listOfNotNull(item["surl"], item["surl2"], item["surl3"]) }
+                    .flatten()
+                    .firstOrNull { it.isNotBlank() }
 
-                println("[CUTV_DEBUG] 찾은 script.bootstrap.js 경로: $scriptSrc")
-
-                if (!scriptSrc.isNullOrBlank()) {
-                    val iframeUri = Uri.parse(iframeSrc)
-                    val scriptUrl = if (scriptSrc.startsWith("http")) {
-                        scriptSrc
-                    } else {
-                        val cleanPath = scriptSrc.replace("../", "")
-                        "${iframeUri.scheme}://${iframeUri.host}/$cleanPath"
+                if (firstStreamUrl != null) {
+                    val extractedHost = extractDomainFromStreamUrl(firstStreamUrl)
+                    if (!extractedHost.isNullOrBlank()) {
+                        dynamicThumbBase = "https://$extractedHost/thumbs"
+                        println("[CUTV_DEBUG] SUCCESS: [방안1] 실시간 스트림 도메인 기반 썸네일 경로 추출 성공 -> $dynamicThumbBase")
                     }
-                    println("[CUTV_DEBUG] 타겟 스크립트 절대경로: $scriptUrl")
+                }
+
+                // [방안2 - 기존 정규식 폴백]: 도메인 동적 추출 실패 시 기존 정규식 로직으로 폴백을 시도합니다.
+                if (dynamicThumbBase.isBlank()) {
+                    val hostRegex = """([a-zA-Z0-9.-]*oncahot\.com)""".toRegex(RegexOption.IGNORE_CASE)
+                    val hostMatch = hostRegex.find(iframeHtml)
                     
-                    try {
-                        val scriptHtml = app.get(scriptUrl, headers = defaultHeaders, referer = iframeSrc).text
-                        println("[CUTV_DEBUG] 스크립트 내용 수신 완료. 크기: ${scriptHtml.length}자")
+                    if (hostMatch != null) {
+                        val cleanDomain = hostMatch.groupValues[1]
+                        dynamicThumbBase = "https://$cleanDomain/thumbs"
+                        println("[CUTV_DEBUG] SUCCESS: [폴백 방안1] 도메인 다이렉트 매칭 성공 -> $dynamicThumbBase")
+                    } else {
+                        println("[CUTV_DEBUG] INFO: [폴백 방안1] 매칭 실패. [폴백 방안2] 자바스크립트 파일 추적으로 진입합니다.")
+                        
+                        val iframeDoc = Jsoup.parse(iframeHtml)
+                        val scriptSrc = iframeDoc.select("script").map { it.attr("src") }
+                            .firstOrNull { it.contains("script.bootstrap.js") }
 
-                        val indexOfThumbsScript = scriptHtml.indexOf("thumbs", ignoreCase = true)
-                        if (indexOfThumbsScript != -1) {
-                            val start = maxOf(0, indexOfThumbsScript - 100)
-                            val end = minOf(scriptHtml.length, indexOfThumbsScript + 100)
-                            val context = scriptHtml.substring(start, end)
-                            println("[CUTV_DEBUG] 🔍 [FACT DUMP] 스크립트 내 'thumbs' 주변 200자 원본 데이터:\n[DUMP_START]\n$context\n[DUMP_END]")
-                        }
+                        println("[CUTV_DEBUG] 찾은 script.bootstrap.js 경로: $scriptSrc")
 
-                        val fallbackRegex = """(https?(?::|\\:)(?:/|\\/)+[a-zA-Z0-9.-]+(?:/|\\/)+thumbs)""".toRegex(RegexOption.IGNORE_CASE)
-                        val scriptMatch = fallbackRegex.find(scriptHtml)
-                        if (scriptMatch != null) {
-                            dynamicThumbBase = scriptMatch.groupValues[1].replace("\\", "")
-                            println("[CUTV_DEBUG] SUCCESS: [방안2] 스크립트 내부에서 완전한 주소 추출 성공 -> $dynamicThumbBase")
+                        if (!scriptSrc.isNullOrBlank()) {
+                            val iframeUri = Uri.parse(iframeSrc)
+                            val scriptUrl = if (scriptSrc.startsWith("http")) {
+                                scriptSrc
+                            } else {
+                                val cleanPath = scriptSrc.replace("../", "")
+                                "${iframeUri.scheme}://${iframeUri.host}/$cleanPath"
+                            }
+                            println("[CUTV_DEBUG] 타겟 스크립트 절대경로: $scriptUrl")
+                            
+                            try {
+                                val scriptHtml = app.get(scriptUrl, headers = defaultHeaders, referer = iframeSrc).text
+                                println("[CUTV_DEBUG] 스크립트 내용 수신 완료. 크기: ${scriptHtml.length}자")
+
+                                val indexOfThumbsScript = scriptHtml.indexOf("thumbs", ignoreCase = true)
+                                if (indexOfThumbsScript != -1) {
+                                    val start = maxOf(0, indexOfThumbsScript - 100)
+                                    val end = minOf(scriptHtml.length, indexOfThumbsScript + 100)
+                                    val context = scriptHtml.substring(start, end)
+                                    println("[CUTV_DEBUG] 🔍 [FACT DUMP] 스크립트 내 'thumbs' 주변 200자 원본 데이터:\n[DUMP_START]\n$context\n[DUMP_END]")
+                                }
+
+                                val fallbackRegex = """(https?(?::|\\:)(?:/|\\/)+[a-zA-Z0-9.-]+(?:/|\\/)+thumbs)""".toRegex(RegexOption.IGNORE_CASE)
+                                val scriptMatch = fallbackRegex.find(scriptHtml)
+                                if (scriptMatch != null) {
+                                    dynamicThumbBase = scriptMatch.groupValues[1].replace("\\", "")
+                                    println("[CUTV_DEBUG] SUCCESS: [폴백 방안2] 스크립트 내부에서 완전한 주소 추출 성공 -> $dynamicThumbBase")
+                                } else {
+                                    println("[CUTV_DEBUG] FAIL: [폴백 방안2] 스크립트는 로드했으나 패턴 매칭 실패")
+                                }
+                            } catch (e: Exception) {
+                                println("[CUTV_DEBUG] FAIL: [폴백 방안2] script.bootstrap.js 네트워크 요청 실패: ${e.message}")
+                            }
                         } else {
-                            println("[CUTV_DEBUG] FAIL: [방안2] 스크립트는 로드했으나 패턴 매칭 실패")
+                            println("[CUTV_DEBUG] FAIL: iframe 내부에서 script.bootstrap.js 태그 자체를 찾을 수 없음")
                         }
-                    } catch (e: Exception) {
-                        println("[CUTV_DEBUG] FAIL: [방안2] script.bootstrap.js 네트워크 요청 실패: ${e.message}")
                     }
-                } else {
-                    println("[CUTV_DEBUG] FAIL: iframe 내부에서 script.bootstrap.js 태그 자체를 찾을 수 없음")
                 }
             }
 
             if (dynamicThumbBase.isBlank()) {
                 println("[CUTV_DEBUG] WARNING: 모든 동적 추출 알고리즘이 최종 실패했습니다. 빈 주소가 부여됩니다.")
             }
-            
-            val jsonRegex = """window\.galaxystream\.data2\s*=\s*'(.*?)';""".toRegex()
-            val matchResult = jsonRegex.find(iframeHtml)
             
             if (matchResult != null) {
                 val jsonData = matchResult.groupValues[1]
@@ -362,7 +405,7 @@ class CUTVProvider : MainAPI() {
                         items.add(
                             newLiveSearchResponse(name = title, url = fakeUrl) {
                                 this.posterUrl = posterUrl
-                                this.posterHeaders = getPosterHeaders(iframeSrc)
+                                this.posterHeaders = getPosterHeaders(posterUrl, iframeSrc)
                             }
                         )
                     }
@@ -402,7 +445,7 @@ class CUTVProvider : MainAPI() {
         ) {
             this.posterUrl = posterUrl
             this.plot = "실시간 스포츠 중계" // 플롯 값 고정 지정
-            this.posterHeaders = getPosterHeaders(iframeUrl)
+            this.posterHeaders = getPosterHeaders(posterUrl, iframeUrl)
         }
     }
 
