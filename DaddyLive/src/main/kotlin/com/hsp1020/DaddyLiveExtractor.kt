@@ -28,10 +28,17 @@ class DaddyLiveExtractor : ExtractorApi() {
     )
 
     private fun debugLog(message: String, throwable: Throwable? = null) {
-        val formatted = "[DDL-Extractor] $message"
+        val errMessage = throwable?.message ?: "Unknown Error"
+        val formatted = if (throwable != null) {
+            "[DDL-Extractor] $message | Exception: $errMessage"
+        } else {
+            "[DDL-Extractor] $message"
+        }
+        
         if (throwable != null) {
-            Log.e("DaddyLive-DEBUG", message, throwable)
-            println("$formatted | Exception: ${throwable.message}")
+            // 인자 개수 초과 에러 방지를 위해 에러 태그와 조립된 문자열 2개만 전달
+            Log.e("DaddyLive-DEBUG", "$message: $errMessage")
+            println(formatted)
         } else {
             Log.d("DaddyLive-DEBUG", message)
             println(formatted)
