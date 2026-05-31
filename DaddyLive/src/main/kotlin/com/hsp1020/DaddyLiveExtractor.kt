@@ -100,16 +100,14 @@ class DaddyLiveExtractor : ExtractorApi() {
             val channelKey = "premium$id"
             debugLog("extractVideo: [Step 4] Resolved channelKey: '$channelKey'")
 
-            // 글로벌 검증 공유 데이터베이스 API 도메인 지정
-            val apiHosts = listOf("chevy.giokko.ru", "giokko.ru", "chevy.kiko2.ru")
-            val cfIps = listOf("104.21.32.228", "172.67.149.186") // giokko 서버 소속 글로벌 Cloudflare 공유 IP 주소 대역
+            // 1. 활성 상태가 검증된 최신 글로벌 전용 데이터베이스 API 대역으로 순회 큐 구성
+            val apiHosts = listOf("chevy.embedkclx.sbs", "embedkclx.sbs")
             var serverKey: String? = null
 
             for (apiHost in apiHosts) {
                 val serverLookupUrl = "https://$apiHost/server_lookup?channel_id=$channelKey"
                 debugLog("extractVideo: [Step 5] Fetching live CDN serverKey from: $serverLookupUrl")
                 try {
-                    // 1차 시도: 표준 DNS 환경에서 API 질의 진행
                     val serverKeyResp = app.get(serverLookupUrl, headers = mapOf("User-Agent" to userAgent, "Referer" to url1)).body.string()
                     debugLog("extractVideo: [Step 6] server_lookup response payload on '$apiHost': '$serverKeyResp'")
                     val data = parseJson<DataResponse>(serverKeyResp)
@@ -119,40 +117,12 @@ class DaddyLiveExtractor : ExtractorApi() {
                         break
                     }
                 } catch (e: Exception) {
-                    debugLog("extractVideo WARNING: Failed to query API host '$apiHost' via standard DNS: ${e.message}")
-                    
-                    // 2차 시도: 국내 통신사 DNS 강제 검열(UnknownHostException) 감지 시, Cloudflare IP 직결 SNI 바이패스 기법 적용
-                    if (e is java.net.UnknownHostException || e.message?.contains("Unable to resolve host") == true) {
-                        debugLog("extractVideo: [DNS-Bypass] DNS Block detected on '$apiHost'. Attempting Cloudflare IP direct SNI routing...")
-                        for (ip in cfIps) {
-                            val ipUrl = "https://$ip/server_lookup?channel_id=$channelKey"
-                            try {
-                                val serverKeyResp = app.get(
-                                    ipUrl, 
-                                    headers = mapOf(
-                                        "User-Agent" to userAgent, 
-                                        "Referer" to url1,
-                                        "Host" to apiHost // Cloudflare 에지 프록시 라우팅을 위한 가상 Host 헤더 주입 (핵심 우회부)
-                                    )
-                                ).body.string()
-                                debugLog("extractVideo: [DNS-Bypass SUCCESS] server_lookup payload on IP '$ip': '$serverKeyResp'")
-                                val data = parseJson<DataResponse>(serverKeyResp)
-                                if (data.serverKey.isNotEmpty()) {
-                                    serverKey = data.serverKey
-                                    debugLog("extractVideo: [Step 7] Active serverKey resolved via DNS-Bypass: '$serverKey'")
-                                    break
-                                }
-                            } catch (ipException: Exception) {
-                                debugLog("extractVideo WARNING: DNS-Bypass failed on IP '$ip': ${ipException.message}")
-                            }
-                        }
-                    }
+                    debugLog("extractVideo WARNING: Failed to query API host '$apiHost' due to exception", e)
                 }
-                if (serverKey != null) break
             }
 
             if (serverKey.isNullOrEmpty()) {
-                debugLog("extractVideo ERROR: FAILED to resolve serverKey from all available API nodes. DNS Censorship Bypass exhausted.")
+                debugLog("extractVideo ERROR: FAILED to resolve serverKey from all available API nodes.")
                 return null
             }
 
