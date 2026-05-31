@@ -34,7 +34,7 @@ class DaddyLiveTVProvider : MainAPI() {
     companion object {
         val channelsName: MutableMap<String, String> = mutableMapOf()
         private const val poster =
-            "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/DaddyLive/daddylive2.jpg"
+            "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/DaddyLive/live-streaming.png"
         val countries = listOf(
             "Andorra",
             "UAE",
