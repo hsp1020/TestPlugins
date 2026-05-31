@@ -1,15 +1,13 @@
 package com.hsp1020
 
-import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.utils.AppUtils.parseJson
+import com.lagradost.cloudstream3.base64Decode
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
-import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import java.net.URL
 
@@ -18,27 +16,16 @@ class DaddyLiveExtractor : ExtractorApi() {
     override val name = "DaddyLive"
     override val requiresReferer = false
     private val userAgent =
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36" // EasyProxy UA 차용
     private val headers = mapOf(
         "Referer" to mainUrl,
-        "user-agent" to userAgent
+        "user-agent" to userAgent,
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
     )
 
-    private fun debugLog(message: String, throwable: Throwable? = null) {
-        val errMessage = throwable?.message ?: "Unknown Error"
-        val formatted = if (throwable != null) {
-            "[DDL-DEBUG] $message | Exception: $errMessage"
-        } else {
-            "[DDL-DEBUG] $message"
-        }
-        
-        if (throwable != null) {
-            Log.e("DDL-DEBUG", "[DDL-DEBUG] $message: $errMessage")
-            println(formatted)
-        } else {
-            Log.d("DDL-DEBUG", "[DDL-DEBUG] $message")
-            println(formatted)
-        }
+    private fun debugLog(message: String) {
+        Log.d("DDL-DEBUG", "[DDL-DEBUG] $message")
+        println("[DDL-DEBUG] $message")
     }
 
     override suspend fun getUrl(
@@ -47,147 +34,87 @@ class DaddyLiveExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        debugLog("getUrl: Triggered extractor. Raw URL input payload: $url")
         val links = tryParseJson<List<Pair<String, String>>>(url)
-        
-        val extractors = if (links != null) {
-            debugLog("getUrl: Parsed payload list of size ${links.size}. Initializing extraction queue.")
-            links.map {
-                extractVideo(it.second, it.first)
-            }
-        } else {
-            debugLog("getUrl: Input payload is not list-formatted. Single link extraction initiated: $url")
-            listOf(extractVideo(url))
-        }
+        val streamUrls = links?.map { it.second } ?: listOf(url)
 
-        var successfullyExtractedCount = 0
-        extractors.forEach {
-            if (it != null) {
-                successfullyExtractedCount++
-                callback(it)
+        streamUrls.forEach { streamUrl ->
+            val link = extractVideo(streamUrl, this.name)
+            if (link != null) {
+                callback(link)
             }
         }
-        debugLog("getUrl SUCCESS: Extracted $successfullyExtractedCount stream link(s) out of ${extractors.size} candidates.")
     }
 
-    private suspend fun extractVideo(url: String, sourceName: String = this.name): ExtractorLink? {
-        debugLog("extractVideo: [Step 1] Loading player host page: $url")
-        if (!url.contains("dlhd") || url.contains("stream-5015.php")) {
-            debugLog("extractVideo ERROR: URL does not belong to main dlhd domain or is a blacklisted backup stream. Terminating.")
-            return null
-        }
-
-        return try {
-            val resp = app.post(url, headers = headers).document
-            val iframes = resp.select("iframe")
-            val iframeSrc = iframes.attr("src")
-            debugLog("extractVideo: [Step 2] Extracted iframe elements. Candidate src attribute: '$iframeSrc'")
+    private suspend fun extractVideo(url: String, sourceName: String): ExtractorLink? {
+        try {
+            debugLog("extractVideo: [1] 메인 플레이어 요청 -> $url")
+            
+            // 1. stream-*.php 메인 페이지 호출
+            val resp = app.get(url, headers = headers).document
+            
+            // 2. iframe src 추출 (EasyProxy 로직: thatframe ID 최우선 탐색)
+            var iframeSrc = resp.select("iframe#thatframe").attr("src")
+            if (iframeSrc.isNullOrEmpty()) {
+                iframeSrc = resp.select("iframe").attr("src")
+            }
             
             if (iframeSrc.isNullOrEmpty()) {
-                debugLog("extractVideo ERROR: FAILED to find valid iframe source inside document.")
+                debugLog("extractVideo: [오류] iframe을 찾을 수 없습니다.")
                 return null
             }
             
-            val url1 = if (iframeSrc.startsWith("//")) "https:$iframeSrc" else iframeSrc
-            debugLog("extractVideo: [Step 3] Formatted iframe source: '$url1'")
+            val iframeUrl = if (iframeSrc.startsWith("//")) "https:$iframeSrc" else iframeSrc
+            debugLog("extractVideo: [2] iframe 주소 발견 -> $iframeUrl")
 
-            // 플레이어 URL에서 고유 ID 추출 (예: stream-168.php -> 168)
-            val id = url.substringAfter("stream-").substringBefore(".php").trim()
-            if (id.isEmpty() || !id.all { it.isDigit() }) {
-                debugLog("extractVideo ERROR: Invalid or empty ID extracted: '$id'")
+            // 3. iframe 페이지 소스코드 다운로드
+            val iframeHeaders = headers.toMutableMap()
+            iframeHeaders["Referer"] = url
+            
+            val parsedUrl = URL(url)
+            val entryOrigin = "${parsedUrl.protocol}://${parsedUrl.host}"
+            iframeHeaders["Origin"] = entryOrigin
+            
+            val iframeHtml = app.get(iframeUrl, headers = iframeHeaders).text
+            
+            // 4. EasyProxy 핵심 로직: atob('...') Base64 인코딩 주소 추출
+            val atobMatch = Regex("""atob\(['"](.*?)['"]\)""").find(iframeHtml)
+            
+            if (atobMatch == null) {
+                debugLog("extractVideo: [오류] iframe HTML 내에서 atob() 해독 파라미터를 찾지 못했습니다.")
                 return null
             }
-            val channelKey = "premium$id"
-            debugLog("extractVideo: [Step 4] Resolved channelKey: '$channelKey'")
 
-            // 1. 임베드 도메인 디렉토리 형태에 맞춘 server_lookup.php 동적 경로 조립
-            val serverLookupUrl = if (url1.contains("/premiumtv/")) {
-                url1.substringBefore("/premiumtv/") + "/premiumtv/server_lookup.php?channel_id=$channelKey"
-            } else {
-                val parsed = URL(url1)
-                "${parsed.protocol}://${parsed.host}/server_lookup.php?channel_id=$channelKey"
-            }
-            debugLog("extractVideo: [Step 5] Fetching live CDN serverKey from: $serverLookupUrl")
+            val b64Url = atobMatch.groupValues[1]
+            val streamUrl = base64Decode(b64Url) // Base64 디코딩
             
-            val serverKeyResp = app.get(serverLookupUrl, headers = mapOf("User-Agent" to userAgent, "Referer" to url1)).body.string()
-            debugLog("extractVideo: [Step 6] server_lookup response payload: '$serverKeyResp'")
-            
-            val data = try { 
-                parseJson<DataResponse>(serverKeyResp) 
-            } catch (e: Exception) {
-                debugLog("extractVideo ERROR: Failed to parse server_lookup response", e)
-                return null
-            }
-            val serverKey = data.serverKey
-            debugLog("extractVideo: [Step 7] Active serverKey resolved: '$serverKey'")
+            debugLog("extractVideo: [3] Base64 디코딩 성공! 최종 스트림 주소 -> $streamUrl")
 
-            // 2. 동적 게이트웨이 접미사 큐 순회 탐색 (dvalna 및 newkso 대역 모두 수용)
-            val hostSuffixes = listOf("new.newkso.ru", "new.dvalna.ru")
-            var location: String? = null
-            var activeGatewayUrl = ""
+            // 5. EasyProxy 핵심 로직: 우회 헤더셋 구성
+            val parsedIframe = URL(iframeUrl)
+            val iframeOrigin = "${parsedIframe.protocol}://${parsedIframe.host}"
+            val refOrigin = entryOrigin.ifEmpty { iframeOrigin }
 
-            val streamHeaders = mapOf(
-                "User-Agent" to userAgent,
-                "Referer" to "https://forcedtoplay.xyz/",
-                "Origin" to "https://forcedtoplay.xyz",
-                "Connection" to "Keep-Alive"
-            )
-
-            for (suffix in hostSuffixes) {
-                val m3u8GatewayUrl = if (serverKey == "top1/cdn") {
-                    "https://top1.newkso.ru/top1/cdn/$channelKey/mono.m3u8"
-                } else {
-                    "https://${serverKey}${suffix}/${serverKey}/${channelKey}/mono.m3u8"
-                }
-                debugLog("extractVideo: [Step 8] Attempting Gateway URL: $m3u8GatewayUrl")
-
-                try {
-                    val streamResponse = app.get(m3u8GatewayUrl, headers = streamHeaders, allowRedirects = false)
-                    debugLog("extractVideo: [Step 9] Gateway Server Response for '$suffix': ${streamResponse.code}")
-                    
-                    val loc = streamResponse.headers["Location"] ?: streamResponse.headers["location"]
-                    if (!loc.isNullOrEmpty()) {
-                        location = loc
-                        activeGatewayUrl = m3u8GatewayUrl
-                        debugLog("extractVideo: [Step 10] Active Gateway identified with redirect location: '$location'")
-                        break
-                    }
-                } catch (e: Exception) {
-                    debugLog("extractVideo WARNING: Failed on suffix '$suffix' due to network/DNS exception", e)
-                }
-            }
-
-            val finalUrl = if (!location.isNullOrEmpty()) {
-                location
-            } else {
-                debugLog("extractVideo WARNING: All redirects were empty. Falling back to default gateway URL.")
-                if (serverKey == "top1/cdn") "https://top1.newkso.ru/top1/cdn/$channelKey/mono.m3u8"
-                else "https://${serverKey}new.newkso.ru/${serverKey}/${channelKey}/mono.m3u8"
-            }
-
-            debugLog("extractVideo SUCCESS: Resolved dynamic tokenized playback URL: $finalUrl")
-            
-            val refererBase = "https://forcedtoplay.xyz"
-            newExtractorLink(
-                sourceName,
-                sourceName,
-                finalUrl,
+            return ExtractorLink(
+                source = sourceName,
+                name = sourceName,
+                url = streamUrl,
+                referer = "$refOrigin/",
+                quality = Qualities.Unknown.value,
                 type = ExtractorLinkType.M3U8,
-            ) {
-                this.referer = "$refererBase/"
-                this.quality = Qualities.Unknown.value
-                this.headers = mapOf(
-                    "Referer" to "$refererBase/",
-                    "Origin" to refererBase,
-                    "Connection" to "Keep-Alive",
-                    "User-Agent" to userAgent
+                headers = mapOf(
+                    "Referer" to "$refOrigin/",
+                    "Origin" to refOrigin,
+                    "User-Agent" to userAgent,
+                    "Accept" to "*/*",
+                    "X-Direct-Connection" to "1", // ★ EasyProxy 핵심 우회 헤더
+                    "Sec-Fetch-Dest" to "empty",
+                    "Sec-Fetch-Mode" to "cors",
+                    "Sec-Fetch-Site" to "cross-site"
                 )
-            }
+            )
         } catch (e: Exception) {
-            debugLog("extractVideo EXCEPTION at target URL: $url", e)
-            null
+            debugLog("extractVideo: [예외] ${e.message}")
+            return null
         }
     }
-
-    data class DataResponse(@JsonProperty("server_key") val serverKey: String)
 }
