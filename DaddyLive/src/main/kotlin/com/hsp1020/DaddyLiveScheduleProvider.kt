@@ -124,7 +124,7 @@ class DaddyLiveScheduleProvider : MainAPI() {
                 val sectionTitle = it.select(".card__meta").text()
                 val events = searchResponseBuilder(it)
                 debugLog("getMainPage: Category '$sectionTitle' has ${events.size} events parsed.")
-                HomePageList(sectionTitle, events, false, isHorizontalImages = true)
+                HomePageList(sectionTitle, events, isHorizontalImages = true)
             }
             debugLog("getMainPage successfully loaded with ${schedule.size} homepage sections.")
             newHomePageResponse(schedule, false)
