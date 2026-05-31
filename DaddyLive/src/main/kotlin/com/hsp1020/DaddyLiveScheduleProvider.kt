@@ -17,14 +17,10 @@ import com.lagradost.cloudstream3.fixUrl
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newLiveSearchResponse
 import com.lagradost.cloudstream3.newLiveStreamLoadResponse
-import com.lagradost.cloudstream3.newMovieSearchResponse
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.loadExtractor
-import org.json.JSONObject
-import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -49,36 +45,24 @@ class DaddyLiveScheduleProvider : MainAPI() {
             "https://raw.githubusercontent.com/doGior/doGiorsHadEnough/refs/heads/master/DaddyLive/daddylive.jpg"
 
         fun convertGMTToLocalTime(gmtTime: String): String {
-            // Define the input format (GMT time)
             val gmtFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
-            gmtFormat.timeZone = TimeZone.getTimeZone("GMT") // Set the timezone to GMT
+            gmtFormat.timeZone = TimeZone.getTimeZone("GMT")
 
-            // Parse the input time string
             val date: Date =
                 gmtFormat.parse(gmtTime) ?: throw IllegalArgumentException("Invalid time format")
 
-            // Define the output format (local time)
             val localFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
-            localFormat.timeZone =
-                TimeZone.getDefault() // Set the timezone to the device's local timezone
+            localFormat.timeZone = TimeZone.getDefault()
 
-            // Format the date to local time
             return localFormat.format(date)
         }
 
         fun convertStringToLocalDate(objectKey: String): String {
             val dateString = objectKey.substringBeforeLast(" -")
-
-            // Remove the ordinal suffix (e.g., "nd" in "02nd")
             val cleanedDateString = dateString.replace(Regex("(?<=\\d)(st|nd|rd|th)"), "")
-
-            // Define the date format
             val dateFormat = SimpleDateFormat("EEEE dd MMMM yyyy", Locale.ENGLISH)
-
-            // Parse the date string into a Date object
             val date = dateFormat.parse(cleanedDateString)
 
-            // Convert the Date to a Calendar object in the system's default time zone
             val calendar = Calendar.getInstance()
             calendar.time = date!!
 
@@ -91,7 +75,6 @@ class DaddyLiveScheduleProvider : MainAPI() {
         return doc.select(".schedule__event").map { e ->
             val dataTitle = e.select(".schedule__eventHeader").attr("data-title")
             val eventTitle = e.select(".schedule__eventTitle").text()
-            val channels = e.select(".schedule__channels > a").map { fixUrl(it.attr("href")) }
             val time = e.select(".schedule__time").text()
             val formattedTime = convertGMTToLocalTime(time)
             newLiveSearchResponse("$formattedTime - $eventTitle", dataTitle){
@@ -130,12 +113,29 @@ class DaddyLiveScheduleProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
+        // 직접 watch.php?id=* 등으로 강제 주소 진입했을 경우 대안 라우팅 처리
+        if (url.contains("watch.php") || url.contains("stream-")) {
+            val doc = app.get(url).document
+            val eventTitle = doc.select("h2").text().ifEmpty { doc.title().substringBefore(" | Watch") }
+            val iframeSrc = doc.select("iframe#playerFrame").attr("src")
+            val id = if (iframeSrc.isNotEmpty()) {
+                iframeSrc.substringAfter("stream-").substringBefore(".php")
+            } else {
+                url.substringAfter("id=")
+            }
+            val channels = listOf(Channel(eventTitle, "$mainUrl/%s/stream-$id.php"))
+            return newLiveStreamLoadResponse(eventTitle, url, dataUrl = channels.toJson()) {
+                this.posterUrl = Companion.posterUrl
+            }
+        }
+
+        // 기존 메인화면 스케줄 아이템 클릭 시 라우팅 처리
         val doc = app.get(mainUrl).document
         val dataTitle = url.removePrefix("$mainUrl/")
-        val event = doc.select(".schedule__event").first{
-            val header = it.select("div.schedule__eventHeader")
-            header.attr("data-title") == dataTitle
-        }
+        val event = doc.select(".schedule__event").firstOrNull {
+            it.select("div.schedule__eventHeader").attr("data-title") == dataTitle
+        } ?: throw NoSuchElementException("No scheduled event found for $dataTitle")
+
         val eventTitle = event.select(".schedule__eventTitle").text()
         val channels = event.select(".schedule__channels > a").map {
             val id = it.attr("href").substringAfter("id=")
@@ -156,7 +156,8 @@ class DaddyLiveScheduleProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
-        val players = listOf("stream", "cast", "watch", "plus", "casting", "player")
+        // 요구사항대로 플레이어를 stream 하나만 등록하여 트래픽 낭비 최적화
+        val players = listOf("stream")
         val channels = parseJson<List<Channel>>(data)
 
         val links = channels.map {
