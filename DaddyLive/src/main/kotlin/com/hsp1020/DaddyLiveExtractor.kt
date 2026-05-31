@@ -18,7 +18,7 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import java.net.URL
 
 class DaddyLiveExtractor : ExtractorApi() {
-    override val mainUrl = "https://dlhd.dad"
+    override val mainUrl = "https://dlhd.pk"
     override val name = "DaddyLive"
     override val requiresReferer = false
     private val userAgent =
