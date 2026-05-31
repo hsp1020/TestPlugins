@@ -93,6 +93,16 @@ class CUTVProvider : MainAPI() {
 
         println("[CUTV_DEBUG] [Cloudflare Bypass] 진입 -> URL: $url")
 
+        // 기존에 디바이스 내부에 기생하던 효력 없는 만료 쿠키를 완전히 소거하여 새 챌린지 해결을 강제합니다.
+        try {
+            val cookieManager = CookieManager.getInstance()
+            cookieManager.removeAllCookies(null)
+            cookieManager.flush()
+            println("[CUTV_DEBUG] [Cloudflare Bypass] 이전 웹뷰 만료 캐시 쿠키 제거 완료")
+        } catch (e: Exception) {
+            println("[CUTV_DEBUG] [Cloudflare Bypass] WARNING: 쿠키 비우기 실패: ${e.message}")
+        }
+
         suspendCancellableCoroutine<Pair<String, String>?> { continuation ->
             val webView = WebView(context)
             
@@ -141,8 +151,8 @@ class CUTVProvider : MainAPI() {
                     println("[CUTV_DEBUG] [Cloudflare Bypass] 실패: 15초 타임아웃 초과")
                     val cookieManager = CookieManager.getInstance()
                     val cookies = cookieManager.getCookie(url) ?: ""
-                    if (cookies.isNotBlank()) {
-                        println("[CUTV_DEBUG] [Cloudflare Bypass] 타임아웃되었으나 수집된 쿠키 반환 시도: $cookies")
+                    if (cookies.isNotBlank() && cookies.contains("cf_clearance")) {
+                        println("[CUTV_DEBUG] [Cloudflare Bypass] 타임아웃되었으나 수집된 cf_clearance 쿠키 반환 시도: $cookies")
                         continuation.resume(Pair(cookies, userAgent))
                     } else {
                         continuation.resume(null)
@@ -210,6 +220,9 @@ class CUTVProvider : MainAPI() {
 
             if (isCloudflareChallenge(doc.html())) {
                 println("[CUTV_DEBUG] [Cloudflare Bypass] Cloudflare 챌린지 감지됨. 우회 절차를 재시도합니다.")
+                // 재우회 시 기존 변수를 지워 새 검증을 확실히 보장합니다.
+                cfCookies = null
+                cfUserAgent = null
                 val cfResult = solveCloudflare(mainUrl)
                 if (cfResult != null) {
                     cfCookies = cfResult.first
