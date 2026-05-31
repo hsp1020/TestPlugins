@@ -22,6 +22,7 @@ import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import org.jsoup.nodes.Element
+import java.net.URLDecoder
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -38,6 +39,17 @@ class DaddyLiveScheduleProvider : MainAPI() {
     override val hasDownloadSupport = false
     private val userAgent =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
+
+    private fun debugLog(message: String, throwable: Throwable? = null) {
+        val formatted = "[DDL-Provider] $message"
+        if (throwable != null) {
+            Log.e("DaddyLive-DEBUG", message, throwable)
+            println("$formatted | Exception: ${throwable.message}")
+        } else {
+            Log.d("DaddyLive-DEBUG", message)
+            println(formatted)
+        }
+    }
 
     @Suppress("ConstPropertyName")
     companion object {
@@ -72,80 +84,140 @@ class DaddyLiveScheduleProvider : MainAPI() {
     }
 
     private fun searchResponseBuilder(doc: Element): List<LiveSearchResponse> {
-        return doc.select(".schedule__event").map { e ->
-            val dataTitle = e.select(".schedule__eventHeader").attr("data-title")
-            val eventTitle = e.select(".schedule__eventTitle").text()
-            val time = e.select(".schedule__time").text()
-            val formattedTime = convertGMTToLocalTime(time)
-            newLiveSearchResponse("$formattedTime - $eventTitle", dataTitle){
-                this.posterUrl = Companion.posterUrl
+        return try {
+            val elements = doc.select(".schedule__event")
+            debugLog("searchResponseBuilder: Found ${elements.size} raw schedule elements.")
+            elements.map { e ->
+                val dataTitle = e.select(".schedule__eventHeader").attr("data-title")
+                val eventTitle = e.select(".schedule__eventTitle").text()
+                val time = e.select(".schedule__time").text()
+                val formattedTime = convertGMTToLocalTime(time)
+                newLiveSearchResponse("$formattedTime - $eventTitle", dataTitle){
+                    this.posterUrl = Companion.posterUrl
+                }
             }
+        } catch (e: Exception) {
+            debugLog("searchResponseBuilder Failed to map elements", e)
+            emptyList()
         }
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val doc = app.get(mainUrl).document
-        val schedule = doc.select(".schedule__category").map {
-            val sectionTitle = it.select(".card__meta").text()
-            val events = searchResponseBuilder(it)
-            HomePageList(
-                sectionTitle,
-                events,
-                false
-            )
+        debugLog("getMainPage: Initiating call for main page: $mainUrl")
+        return try {
+            val response = app.get(mainUrl)
+            debugLog("getMainPage: Received response with status ${response.code}")
+            val doc = response.document
+            
+            val categories = doc.select(".schedule__category")
+            debugLog("getMainPage: Parsing schedule categories. Total categories: ${categories.size}")
+            
+            val schedule = categories.map {
+                val sectionTitle = it.select(".card__meta").text()
+                val events = searchResponseBuilder(it)
+                debugLog("getMainPage: Category '$sectionTitle' has ${events.size} events parsed.")
+                HomePageList(sectionTitle, events, false)
+            }
+            debugLog("getMainPage successfully loaded with ${schedule.size} homepage sections.")
+            newHomePageResponse(schedule, false)
+        } catch (e: Exception) {
+            debugLog("getMainPage FAILED", e)
+            throw e
         }
-        return newHomePageResponse(
-            schedule,
-            false
-        )
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val doc = app.get(mainUrl).document
-        val schedule = doc.select(".schedule__category").map {
-            searchResponseBuilder(it)
-        }.flatten()
-        val matches = schedule.filter {
-            query.lowercase().replace(" ", "") in
-                    it.name.lowercase().replace(" ", "")
+        debugLog("search: Initiated with query '$query'")
+        return try {
+            val response = app.get(mainUrl)
+            debugLog("search: Page loaded with status ${response.code}")
+            val doc = response.document
+            val schedule = doc.select(".schedule__category").map {
+                searchResponseBuilder(it)
+            }.flatten()
+            
+            val matches = schedule.filter {
+                query.lowercase().replace(" ", "") in it.name.lowercase().replace(" ", "")
+            }
+            debugLog("search: Filtered results. Found ${matches.size} matches for '$query'")
+            matches
+        } catch (e: Exception) {
+            debugLog("search FAILED for query '$query'", e)
+            emptyList()
         }
-        return matches
     }
 
     override suspend fun load(url: String): LoadResponse {
-        // 직접 watch.php?id=* 등으로 강제 주소 진입했을 경우 대안 라우팅 처리
-        if (url.contains("watch.php") || url.contains("stream-")) {
-            val doc = app.get(url).document
-            val eventTitle = doc.select("h2").text().ifEmpty { doc.title().substringBefore(" | Watch") }
-            val iframeSrc = doc.select("iframe#playerFrame").attr("src")
-            val id = if (iframeSrc.isNotEmpty()) {
-                iframeSrc.substringAfter("stream-").substringBefore(".php")
-            } else {
-                url.substringAfter("id=")
+        debugLog("load: Loading detailed stream information for URL: $url")
+        return try {
+            // 직접 watch.php?id=* 등으로 강제 주소 진입했을 경우 대안 라우팅 처리
+            if (url.contains("watch.php") || url.contains("stream-")) {
+                debugLog("load: Direct watch link detected. Commencing iframe extraction flow.")
+                val response = app.get(url)
+                debugLog("load: Watch page loaded with status ${response.code}")
+                val doc = response.document
+                val eventTitle = doc.select("h2").text().ifEmpty { doc.title().substringBefore(" | Watch") }
+                val iframeSrc = doc.select("iframe#playerFrame").attr("src")
+                debugLog("load: Found iframe#playerFrame src: '$iframeSrc'")
+                
+                val id = if (iframeSrc.isNotEmpty()) {
+                    iframeSrc.substringAfter("stream-").substringBefore(".php")
+                } else {
+                    url.substringAfter("id=")
+                }
+                debugLog("load: Extracted Channel Stream ID: $id")
+                
+                val channels = listOf(Channel(eventTitle, "$mainUrl/%s/stream-$id.php"))
+                debugLog("load SUCCESS: Built dynamic channel payload: ${channels.toJson()}")
+                return newLiveStreamLoadResponse(eventTitle, url, dataUrl = channels.toJson()) {
+                    this.posterUrl = Companion.posterUrl
+                }
             }
-            val channels = listOf(Channel(eventTitle, "$mainUrl/%s/stream-$id.php"))
-            return newLiveStreamLoadResponse(eventTitle, url, dataUrl = channels.toJson()) {
+
+            // 기존 메인화면 스케줄 클릭 후 라우팅 처리
+            debugLog("load: Standard schedule load detected. Fetching mainUrl schedule matrix.")
+            val response = app.get(mainUrl)
+            debugLog("load: Main schedule page loaded with status ${response.code}")
+            val doc = response.document
+            
+            val rawDataTitle = url.removePrefix("$mainUrl/")
+            val dataTitle = try {
+                val decoded = URLDecoder.decode(rawDataTitle, "UTF-8")
+                debugLog("load: Decoded raw title '$rawDataTitle' -> '$decoded'")
+                decoded
+            } catch (e: Exception) {
+                debugLog("load: URLDecoder failed. Reverting to raw string: '$rawDataTitle'", e)
+                rawDataTitle
+            }
+
+            debugLog("load: Searching DOM matrix for data-title matched with: '$dataTitle'")
+            val event = doc.select(".schedule__event").firstOrNull {
+                val candidate = it.select("div.schedule__eventHeader").attr("data-title")
+                candidate == dataTitle
+            }
+            
+            if (event == null) {
+                debugLog("load ERROR: FAILED to match any event in HTML with data-title: '$dataTitle'")
+                throw NoSuchElementException("No scheduled event found for '$dataTitle'")
+            }
+
+            val eventTitle = event.select(".schedule__eventTitle").text()
+            val channels = event.select(".schedule__channels > a").map {
+                val id = it.attr("href").substringAfter("id=")
+                Channel(it.text(), "$mainUrl/%s/stream-$id.php")
+            }
+            debugLog("load SUCCESS: Matched title='$eventTitle', generated channels=${channels.size}")
+            Log.d("DDL Schedule - Channels", channels.toJson())
+            
+            val time = event.select(".schedule__time").text()
+            val formattedTime = convertGMTToLocalTime(time)
+            
+            newLiveStreamLoadResponse("$formattedTime - $eventTitle", url, dataUrl = channels.toJson()){
                 this.posterUrl = Companion.posterUrl
             }
-        }
-
-        // 기존 메인화면 스케줄 아이템 클릭 시 라우팅 처리
-        val doc = app.get(mainUrl).document
-        val dataTitle = url.removePrefix("$mainUrl/")
-        val event = doc.select(".schedule__event").firstOrNull {
-            it.select("div.schedule__eventHeader").attr("data-title") == dataTitle
-        } ?: throw NoSuchElementException("No scheduled event found for $dataTitle")
-
-        val eventTitle = event.select(".schedule__eventTitle").text()
-        val channels = event.select(".schedule__channels > a").map {
-            val id = it.attr("href").substringAfter("id=")
-            Channel(it.text(), "$mainUrl/%s/stream-$id.php")
-        }
-        Log.d("DDL Schedule - Channels", channels.toJson())
-        val time = event.select(".schedule__time").text()
-        val formattedTime = convertGMTToLocalTime(time)
-        return newLiveStreamLoadResponse("$formattedTime - $eventTitle", url, dataUrl = channels.toJson()){
-            this.posterUrl = Companion.posterUrl
+        } catch (e: Exception) {
+            debugLog("load FAILED for URL: $url", e)
+            throw e
         }
     }
 
@@ -156,20 +228,28 @@ class DaddyLiveScheduleProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit,
     ): Boolean {
-        // 요구사항대로 플레이어를 stream 하나만 등록하여 트래픽 낭비 최적화
-        val players = listOf("stream")
-        val channels = parseJson<List<Channel>>(data)
+        debugLog("loadLinks: Loading links using channel payload: $data")
+        return try {
+            val players = listOf("stream")
+            val channels = parseJson<List<Channel>>(data)
+            debugLog("loadLinks: Parsed channel count: ${channels.size}")
 
-        val links = channels.map {
-            players.map { l ->
-                val url = it.channelId.format(l)
-                Log.d("DDL - Servers", url)
-                it.channelName + " - $l" to url
-            }
-        }.flatten()
+            val links = channels.map {
+                players.map { l ->
+                    val url = it.channelId.format(l)
+                    debugLog("loadLinks: Formatted server player URL: $url")
+                    it.channelName + " - $l" to url
+                }
+            }.flatten()
 
-        DaddyLiveExtractor().getUrl(links.toJson(), null, subtitleCallback, callback)
-        return true
+            debugLog("loadLinks: Transporting generated payload to Extractor. URL count: ${links.size}")
+            DaddyLiveExtractor().getUrl(links.toJson(), null, subtitleCallback, callback)
+            debugLog("loadLinks SUCCESS: Finished delegating links.")
+            true
+        } catch (e: Exception) {
+            debugLog("loadLinks FAILED", e)
+            false
+        }
     }
 
     data class Channel(
