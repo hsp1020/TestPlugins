@@ -13,7 +13,6 @@ import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import java.net.URL
 
-
 class DaddyLiveExtractor : ExtractorApi() {
     override val mainUrl = "https://dlhd.pk"
     override val name = "DaddyLive"
@@ -25,9 +24,21 @@ class DaddyLiveExtractor : ExtractorApi() {
         "user-agent" to userAgent
     )
 
-    private fun debugLog(message: String) {
-        Log.d("DDL-DEBUG", "[DDL-DEBUG] $message")
-        println("[DDL-DEBUG] $message")
+    private fun debugLog(message: String, throwable: Throwable? = null) {
+        val errMessage = throwable?.message ?: "Unknown Error"
+        val formatted = if (throwable != null) {
+            "[DDL-DEBUG] $message | Exception: $errMessage"
+        } else {
+            "[DDL-DEBUG] $message"
+        }
+        
+        if (throwable != null) {
+            Log.e("DDL-DEBUG", "[DDL-DEBUG] $message: $errMessage")
+            println(formatted)
+        } else {
+            Log.d("DDL-DEBUG", "[DDL-DEBUG] $message")
+            println(formatted)
+        }
     }
 
     override suspend fun getUrl(
@@ -142,7 +153,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                         break
                     }
                 } catch (e: Exception) {
-                    debugLog("extractVideo WARNING: Failed on suffix '$suffix' due to network/DNS exception: ${e.message}")
+                    debugLog("extractVideo WARNING: Failed on suffix '$suffix' due to network/DNS exception", e)
                 }
             }
 
@@ -173,7 +184,7 @@ class DaddyLiveExtractor : ExtractorApi() {
                 )
             }
         } catch (e: Exception) {
-            debugLog("extractVideo EXCEPTION at target URL: $url : ${e.message}")
+            debugLog("extractVideo EXCEPTION at target URL: $url", e)
             null
         }
     }
