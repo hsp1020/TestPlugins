@@ -41,10 +41,17 @@ class DaddyLiveScheduleProvider : MainAPI() {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
 
     private fun debugLog(message: String, throwable: Throwable? = null) {
-        val formatted = "[DDL-Provider] $message"
+        val errMessage = throwable?.message ?: "Unknown Error"
+        val formatted = if (throwable != null) {
+            "[DDL-Provider] $message | Exception: $errMessage"
+        } else {
+            "[DDL-Provider] $message"
+        }
+        
         if (throwable != null) {
-            Log.e("DaddyLive-DEBUG", message, throwable)
-            println("$formatted | Exception: ${throwable.message}")
+            // 인자 개수 초과 에러 방지를 위해 에러 태그와 조립된 문자열 2개만 전달
+            Log.e("DaddyLive-DEBUG", "$message: $errMessage")
+            println(formatted)
         } else {
             Log.d("DaddyLive-DEBUG", message)
             println(formatted)
@@ -64,7 +71,8 @@ class DaddyLiveScheduleProvider : MainAPI() {
                 gmtFormat.parse(gmtTime) ?: throw IllegalArgumentException("Invalid time format")
 
             val localFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
-            localFormat.timeZone = TimeZone.getDefault()
+            localFormat.timeZone =
+                TimeZone.getDefault()
 
             return localFormat.format(date)
         }
@@ -150,7 +158,6 @@ class DaddyLiveScheduleProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         debugLog("load: Loading detailed stream information for URL: $url")
         return try {
-            // 직접 watch.php?id=* 등으로 강제 주소 진입했을 경우 대안 라우팅 처리
             if (url.contains("watch.php") || url.contains("stream-")) {
                 debugLog("load: Direct watch link detected. Commencing iframe extraction flow.")
                 val response = app.get(url)
@@ -174,7 +181,6 @@ class DaddyLiveScheduleProvider : MainAPI() {
                 }
             }
 
-            // 기존 메인화면 스케줄 클릭 후 라우팅 처리
             debugLog("load: Standard schedule load detected. Fetching mainUrl schedule matrix.")
             val response = app.get(mainUrl)
             debugLog("load: Main schedule page loaded with status ${response.code}")
