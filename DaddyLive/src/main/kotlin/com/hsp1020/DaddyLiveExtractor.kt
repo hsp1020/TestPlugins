@@ -2,6 +2,8 @@ package com.hsp1020
 
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.SubtitleFile
+import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -13,78 +15,52 @@ class DaddyLiveExtractor : ExtractorApi() {
     override val name = "DaddyLive"
     override val requiresReferer = false
 
-    // 연동할 Cloudflare Worker 베이스 주소
-    private val workerBaseUrl = "https://dlhd.vynx-3b3.workers.dev"
-
-    private fun debugLog(message: String, throwable: Throwable? = null) {
-        val errMessage = throwable?.message ?: "Unknown Error"
-        val formatted = if (throwable != null) {
-            "[DDL-DEBUG] $message | Exception: $errMessage"
-        } else {
-            "[DDL-DEBUG] $message"
-        }
-        
-        if (throwable != null) {
-            Log.e("DDL-DEBUG", "[DDL-DEBUG] $message: $errMessage")
-            println(formatted)
-        } else {
-            Log.d("DDL-DEBUG", "[DDL-DEBUG] $message")
-            println(formatted)
-        }
-    }
-
     override suspend fun getUrl(
         url: String,
         referer: String?,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        debugLog("getUrl: Triggered extractor. Raw URL input payload: $url")
-        
-        // ScheduleProvider에서 넘어온 JSON 페이로드 파싱 (예: [{"first":"채널명","second":"주소"}])
         val links = tryParseJson<List<Pair<String, String>>>(url)
-        
-        val streamUrls = if (links != null) {
-            debugLog("getUrl: Parsed payload list of size ${links.size}.")
-            links
-        } else {
-            debugLog("getUrl: Input payload is not list-formatted. Single link extraction initiated.")
-            listOf(this.name to url)
-        }
+        val streamUrls = links?.map { it.second } ?: listOf(url)
 
-        var successfullyExtractedCount = 0
-        
-        streamUrls.forEach { (sourceName, streamUrl) ->
+        streamUrls.forEach { streamUrl ->
             try {
-                // 스트림 URL에서 채널 고유 ID만 깔끔하게 추출 (예: stream-168.php -> 168)
-                val id = streamUrl.substringAfter("stream-").substringBefore(".php").trim()
-                
-                if (id.isNotEmpty() && id.all { it.isDigit() }) {
-                    // CF Worker의 VLC-compatible 엔드포인트를 사용 (/play/:channelId)
-                    // Worker가 PoW 인증 및 AES 복호화를 백그라운드에서 전부 처리해줌
-                    val finalProxyUrl = "$workerBaseUrl/play/$id"
-                    
-                    debugLog("extractVideo SUCCESS: Assembled CF Worker Proxy URL -> $finalProxyUrl")
+                Log.d("DDL-DEBUG", "[DDL-DEBUG] WebView 가상 브라우저 해독 시작: $streamUrl")
 
+                // 스마트폰의 가상 웹뷰가 연산을 끝내고 phantemlis.top의 m3u8 주소를 호출하는 순간 가로챔
+                val interceptRegex = Regex("""(phantemlis\.top|tracks-v1a1).*?\.m3u8""")
+                
+                val response = app.get(
+                    streamUrl,
+                    interceptor = WebViewResolver(interceptRegex)
+                )
+                
+                val finalUrl = response.url
+
+                if (finalUrl.contains(".m3u8")) {
+                    Log.d("DDL-DEBUG", "[DDL-DEBUG] 토큰 주소 가로채기 성공: $finalUrl")
+                    
                     callback(
                         ExtractorLink(
-                            source = this.name,
-                            name = "$sourceName (Worker Proxy)",
-                            url = finalProxyUrl,
-                            referer = "",
+                            source = name,
+                            name = name,
+                            url = finalUrl,
+                            referer = streamUrl,
                             quality = Qualities.Unknown.value,
-                            type = ExtractorLinkType.M3U8
+                            type = ExtractorLinkType.M3U8,
+                            headers = mapOf(
+                                "Origin" to "https://player.videasy.net",
+                                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                            )
                         )
                     )
-                    successfullyExtractedCount++
                 } else {
-                    debugLog("extractVideo ERROR: Invalid or empty ID extracted from -> $streamUrl")
+                    Log.e("DDL-DEBUG", "[DDL-DEBUG] m3u8 추출 실패 (타임아웃)")
                 }
             } catch (e: Exception) {
-                debugLog("extractVideo EXCEPTION at target URL: $streamUrl", e)
+                Log.e("DDL-DEBUG", "[DDL-DEBUG] WebView 예외 발생: ${e.message}")
             }
         }
-        
-        debugLog("getUrl SUCCESS: Extracted $successfullyExtractedCount stream link(s).")
     }
 }
