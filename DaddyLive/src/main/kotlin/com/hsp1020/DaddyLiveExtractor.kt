@@ -104,7 +104,6 @@ class DaddyLiveExtractor : ExtractorApi() {
                 val newzarUrl = extractFromNewzar(url1, refererBase)
                 if (newzarUrl == null) {
                     debugLog("extractVideo: Newzar parser returned null. Falling back to generic HTML/Packer parser.")
-                    // Newzar 가 매칭되지 않는 일반 임베드 사이트일 경우 직접 HTML을 다운로드하여 복호화 및 직접 파싱 시도
                     val pageHtml = app.get(url1, headers = headers).body.string()
                     findM3u8InHtml(pageHtml)
                 } else {
@@ -315,7 +314,6 @@ class DaddyLiveExtractor : ExtractorApi() {
         }
     }
 
-    // 진법 변환 처리기 (Java/Kotlin 기본 toString()은 진법 36 까지만 지원하므로 Dean Edwards Unpacker에 필수적인 Base62 지원 구현)
     private fun encodeBase(num: Int, radix: Int): String {
         val chars = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
         if (radix <= 36) {
@@ -332,8 +330,8 @@ class DaddyLiveExtractor : ExtractorApi() {
 
     private fun findM3u8InHtml(html: String): String? {
         var unpackedHtml = html
-        // Dean Edwards Packed 자바스크립트 스크립트 해독 처리 [eval(function(p,a,c,k,e,d)...)]
-        val packedRegex = Regex("""eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,\s*[rd]\s*\).*?\}\s*\(\s*(['"])(.*?)\1\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(['"])(.*?)\5\.split""")
+        // 어떤 Packer 변수 조합([h,u,n,t,e,r] 등)도 안전하게 가로챌 수 있도록 정규식 구조 범용화
+        val packedRegex = Regex("""eval\s*\(\s*function\s*\(\s*[^)]+\s*\).*?\}\s*\(\s*(['"])(.*?)\1\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(['"])(.*?)\5\.split""")
         
         packedRegex.findAll(html).forEach { match ->
             try {
@@ -357,15 +355,17 @@ class DaddyLiveExtractor : ExtractorApi() {
             }
         }
 
-        // 압축이 전면 해제된 소스코드에서 미디어 HLS (.m3u8) 경로 최종 수집 및 문자열 탈출 가공
-        val m3u8Regex = Regex("""https?://[^\s"']+\.m3u8[^\s"']*""")
+        // 역슬래시(\/) 및 상대 경로(//), 백틱(``) 선언까지 포착할 수 있게 정규식 패턴 수정
+        val m3u8Regex = Regex("""(?:https?:)?//[^"'`\s]+\.m3u8[^"'`\s]*""", RegexOption.IGNORE_CASE)
         val match = m3u8Regex.find(unpackedHtml)
         if (match != null) {
-            val cleanUrl = match.value.replace("\\/", "/")
-            debugLog("findM3u8InHtml: Found .m3u8 URL: $cleanUrl")
-            return cleanUrl
+            val cleanUrl = match.value.replace("\\/", "/").trim()
+            val finalCleanUrl = if (cleanUrl.startsWith("//")) "https:$cleanUrl" else cleanUrl
+            debugLog("findM3u8InHtml: Found .m3u8 URL: $finalCleanUrl")
+            return finalCleanUrl
         }
         
+        debugLog("findM3u8InHtml: No .m3u8 found. HTML Sample (first 1000 chars): ${unpackedHtml.take(1000)}")
         return null
     }
 
