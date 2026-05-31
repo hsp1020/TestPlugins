@@ -14,6 +14,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
+import org.jsoup.Jsoup
 import java.net.URL
 
 class DaddyLiveExtractor : ExtractorApi() {
@@ -100,15 +101,8 @@ class DaddyLiveExtractor : ExtractorApi() {
                 debugLog("extractVideo: Vidembed signature matched. Executing extractFromVidembed.")
                 extractFromVidembed(url1)
             } else {
-                debugLog("extractVideo: Executing extractFromNewzar.")
-                val newzarUrl = extractFromNewzar(url1, refererBase)
-                if (newzarUrl == null) {
-                    debugLog("extractVideo: Newzar parser returned null. Falling back to generic HTML/Packer parser.")
-                    val pageHtml = app.get(url1, headers = headers).body.string()
-                    findM3u8InHtml(pageHtml)
-                } else {
-                    newzarUrl
-                }
+                debugLog("extractVideo: Routing to extractFromNewzar with HTML caching.")
+                extractFromNewzar(url1, refererBase)
             }
 
             if (finalUrl == null) {
@@ -172,142 +166,137 @@ class DaddyLiveExtractor : ExtractorApi() {
         return try {
             val pageResponse = app.get(urlNextPage, headers)
             debugLog("extractFromNewzar: Page response received with code ${pageResponse.code}")
-            val page = pageResponse.document
+            
+            // 이중 소비 에러 방지를 위해 원본 바디 스트림을 단 한 번만 읽어 캐싱 처리
+            val pageHtml = pageResponse.body.string()
+            val page = Jsoup.parse(pageHtml)
             
             val scriptElement = page.select("script").firstOrNull { 
                 it.data().contains("channelKey") || it.data().contains("CHANNEL_KEY") 
             }
             
-            if (scriptElement == null) {
-                debugLog("extractFromNewzar ERROR: Script containing CHANNEL_KEY was NOT found in the DOM.")
-                return null
-            }
-            val script = scriptElement.data()
-            debugLog("extractFromNewzar: Script payload identified. Length: ${script.length} characters.")
+            if (scriptElement != null) {
+                val script = scriptElement.data()
+                debugLog("extractFromNewzar: Script payload identified. Length: ${script.length} characters.")
 
-            // 1. 채널 키 동적 파싱
-            val channelKey = Regex("""channelKey\s*=\s*["']([^"']+)["']""").find(script)?.groupValues?.get(1)
-                ?: Regex("""CHANNEL_KEY\s*=\s*["']([^"']+)["']""").find(script)?.groupValues?.get(1)
-            
-            if (channelKey == null) {
-                debugLog("extractFromNewzar ERROR: FAILED to extract channelKey via regex. Payload script: $script")
-                return null
-            }
-            debugLog("extractFromNewzar: Successfully extracted channelKey: '$channelKey'")
+                // 1. 채널 키 동적 파싱
+                val channelKey = Regex("""channelKey\s*=\s*["']([^"']+)["']""").find(script)?.groupValues?.get(1)
+                    ?: Regex("""CHANNEL_KEY\s*=\s*["']([^"']+)["']""").find(script)?.groupValues?.get(1)
+                
+                if (channelKey != null) {
+                    debugLog("extractFromNewzar: Successfully extracted channelKey: '$channelKey'")
 
-            // 2. 인증 파라미터 동적 파싱 및 Fallback 처리
-            var authTs = Regex("""authTs\s*=\s*["']([^"']+)["']""").find(script)?.groupValues?.get(1)
-                ?: Regex("""authTs\s*=\s*([0-9]+)""").find(script)?.groupValues?.get(1)
-            var authRnd = Regex("""authRnd\s*=\s*["']([^"']+)["']""").find(script)?.groupValues?.get(1)
-            var authSig = Regex("""authSig\s*=\s*["']([^"']+)["']""").find(script)?.groupValues?.get(1)
+                    // 2. 인증 파라미터 동적 파싱 및 Fallback 처리
+                    var authTs = Regex("""authTs\s*=\s*["']([^"']+)["']""").find(script)?.groupValues?.get(1)
+                        ?: Regex("""authTs\s*=\s*([0-9]+)""").find(script)?.groupValues?.get(1)
+                    var authRnd = Regex("""authRnd\s*=\s*["']([^"']+)["']""").find(script)?.groupValues?.get(1)
+                    var authSig = Regex("""authSig\s*=\s*["']([^"']+)["']""").find(script)?.groupValues?.get(1)
 
-            if (authTs == null || authRnd == null || authSig == null) {
-                debugLog("extractFromNewzar: Direct authentication parameters are missing. Attempting IJXX bundle fallback parsing.")
-                val bundleBase64 = Regex("""IJXX\s*=\s*["']([^"']+)["']""").find(script)?.groupValues?.get(1)
-                if (bundleBase64 != null) {
-                    val bundle = base64Decode(bundleBase64)
-                    val bundleObj = tryParseJson<Bundle>(bundle)
-                    if (bundleObj != null) {
-                        authTs = base64Decode(bundleObj.bTs)
-                        authRnd = base64Decode(bundleObj.bRnd)
-                        authSig = base64Decode(bundleObj.bSig)
-                        debugLog("extractFromNewzar: Successfully recovered fallback parameters from IJXX bundle.")
-                    } else {
-                        debugLog("extractFromNewzar WARNING: Found IJXX bundle string but failed to parse JSON structure.")
+                    if (authTs == null || authRnd == null || authSig == null) {
+                        debugLog("extractFromNewzar: Direct authentication parameters are missing. Attempting IJXX bundle fallback parsing.")
+                        val bundleBase64 = Regex("""IJXX\s*=\s*["']([^"']+)["']""").find(script)?.groupValues?.get(1)
+                        if (bundleBase64 != null) {
+                            val bundle = base64Decode(bundleBase64)
+                            val bundleObj = tryParseJson<Bundle>(bundle)
+                            if (bundleObj != null) {
+                                authTs = base64Decode(bundleObj.bTs)
+                                authRnd = base64Decode(bundleObj.bRnd)
+                                authSig = base64Decode(bundleObj.bSig)
+                                debugLog("extractFromNewzar: Successfully recovered fallback parameters from IJXX bundle.")
+                            }
+                        }
                     }
-                } else {
-                    debugLog("extractFromNewzar WARNING: IJXX fallback string pattern is missing in source.")
+
+                    if (authTs != null && authRnd != null && authSig != null) {
+                        debugLog("extractFromNewzar: Active auth values: ts='$authTs', rnd='$authRnd', sig='$authSig'")
+
+                        val authHost = Regex("""(https?://[^\s]+/auth\.php\?channel_id=)""").find(script)?.groupValues?.get(1)
+                            ?: "https://top2new.newkso.ru/auth.php?channel_id="
+                        debugLog("extractFromNewzar: Designated validation endpoint: $authHost$channelKey")
+
+                        val params = mapOf(
+                            "channel_id" to channelKey,
+                            "ts" to authTs,
+                            "rnd" to authRnd,
+                            "sig" to authSig,
+                        )
+
+                        // 3. auth.php 세션 인증 트리거 호출
+                        val authResponse = app.get(
+                            "$authHost$channelKey",
+                            params = params,
+                            headers = mapOf(
+                                "User-Agent" to userAgent,
+                                "Referer" to "$serverUrl/",
+                                "Origin" to serverUrl,
+                                "Connection" to "Keep-Alive"
+                            )
+                        )
+                        debugLog("extractFromNewzar: auth.php execution finished. Server code: ${authResponse.code}")
+                        if (authResponse.code != 403) {
+                            // 4. server_lookup.php 호출
+                            val serverLookupUrl = "$serverUrl/server_lookup.php?channel_id=$channelKey"
+                            debugLog("extractFromNewzar: Fetching hosting key from: $serverLookupUrl")
+                            val serverKeyResp = app.get(serverLookupUrl).body.string()
+                            debugLog("extractFromNewzar: Received server key payload raw string: '$serverKeyResp'")
+                            
+                            val data = try { 
+                                parseJson<DataResponse>(serverKeyResp) 
+                            } catch (e: Exception) {
+                                null
+                            }
+
+                            if (data != null) {
+                                debugLog("extractFromNewzar: Extracted serverKey token: '${data.serverKey}'")
+
+                                // 5. iframe 내부의 HLS 호스트 주소 파싱
+                                val host = Regex("""serverKey\s*\+\s*["']([^"']+)["']""").find(script)?.groupValues?.get(1) 
+                                    ?: "new.newkso.ru"
+                                debugLog("extractFromNewzar: Extracted hosting domain suffix pattern: '$host'")
+
+                                val serverKey = data.serverKey
+                                val m3u8Url = if (serverKey == "top1/cdn") {
+                                    "https://top1.newkso.ru/top1/cdn/$channelKey/mono.m3u8"
+                                } else {
+                                    "https://${serverKey}$host/${serverKey}/$channelKey/mono.m3u8"
+                                }
+                                debugLog("extractFromNewzar: Successfully built initial m3u8 stream location: $m3u8Url")
+
+                                // 6. HTTP 리다이렉트(302) 추적하여 최종 md5 & expires 주소 도출
+                                val streamHeaders = mapOf(
+                                    "User-Agent" to userAgent,
+                                    "Referer" to "$serverUrl/",
+                                    "Origin" to serverUrl,
+                                    "Connection" to "Keep-Alive"
+                                )
+                                
+                                debugLog("extractFromNewzar: Initiating HTTP stream redirect analysis to capture secure tokens...")
+                                val streamResponse = app.get(m3u8Url, headers = streamHeaders, allowRedirects = false)
+                                val location = streamResponse.headers["Location"] ?: streamResponse.headers["location"]
+                                debugLog("extractFromNewzar: Redirect response status: ${streamResponse.code}. Redirect Location header: '$location'")
+                                
+                                val finalUrl = if (!location.isNullOrEmpty()) {
+                                    if (location.startsWith("/")) {
+                                        val parsedM3u8 = URL(m3u8Url)
+                                        "${parsedM3u8.protocol}://${parsedM3u8.host}$location"
+                                    } else {
+                                        location
+                                    }
+                                } else {
+                                    streamResponse.url
+                                }
+
+                                debugLog("extractFromNewzar SUCCESS: Resolved dynamic tokenized playback URL: $finalUrl")
+                                return finalUrl
+                            }
+                        }
+                    }
                 }
             }
 
-            if (authTs == null || authRnd == null || authSig == null) {
-                debugLog("extractFromNewzar ERROR: Failed to acquire valid TS, RND, SIG authorization variables.")
-                return null
-            }
-            debugLog("extractFromNewzar: Active auth values: ts='$authTs', rnd='$authRnd', sig='$authSig'")
-
-            val authHost = Regex("""(https?://[^\s]+/auth\.php\?channel_id=)""").find(script)?.groupValues?.get(1)
-                ?: "https://top2new.newkso.ru/auth.php?channel_id="
-            debugLog("extractFromNewzar: Designated validation endpoint: $authHost$channelKey")
-
-            val params = mapOf(
-                "channel_id" to channelKey,
-                "ts" to authTs,
-                "rnd" to authRnd,
-                "sig" to authSig,
-            )
-
-            // 3. auth.php 세션 인증 트리거 호출
-            val authResponse = app.get(
-                "$authHost$channelKey",
-                params = params,
-                headers = mapOf(
-                    "User-Agent" to userAgent,
-                    "Referer" to "$serverUrl/",
-                    "Origin" to serverUrl,
-                    "Connection" to "Keep-Alive"
-                )
-            )
-            debugLog("extractFromNewzar: auth.php execution finished. Server code: ${authResponse.code}")
-            if (authResponse.code == 403) {
-                debugLog("extractFromNewzar ERROR: auth.php rejected request with 403 Forbidden.")
-                return null
-            }
-
-            // 4. server_lookup.php 호출
-            val serverLookupUrl = "$serverUrl/server_lookup.php?channel_id=$channelKey"
-            debugLog("extractFromNewzar: Fetching hosting key from: $serverLookupUrl")
-            val serverKeyResp = app.get(serverLookupUrl).body.string()
-            debugLog("extractFromNewzar: Received server key payload raw string: '$serverKeyResp'")
-            
-            val data = try { 
-                parseJson<DataResponse>(serverKeyResp) 
-            } catch (e: Exception) {
-                debugLog("extractFromNewzar ERROR: FAILED to parse server key JSON data from response.", e)
-                return null
-            }
-            debugLog("extractFromNewzar: Extracted serverKey token: '${data.serverKey}'")
-
-            // 5. iframe 내부의 HLS 호스트 주소 파싱
-            val host = Regex("""serverKey\s*\+\s*["']([^"']+)["']""").find(script)?.groupValues?.get(1) 
-                ?: "new.newkso.ru"
-            debugLog("extractFromNewzar: Extracted hosting domain suffix pattern: '$host'")
-
-            val serverKey = data.serverKey
-            val m3u8Url = if (serverKey == "top1/cdn") {
-                "https://top1.newkso.ru/top1/cdn/$channelKey/mono.m3u8"
-            } else {
-                "https://${serverKey}$host/${serverKey}/$channelKey/mono.m3u8"
-            }
-            debugLog("extractFromNewzar: Successfully built initial m3u8 stream location: $m3u8Url")
-
-            // 6. HTTP 리다이렉트(302) 추적하여 최종 md5 & expires 주소 도출
-            val streamHeaders = mapOf(
-                "User-Agent" to userAgent,
-                "Referer" to "$serverUrl/",
-                "Origin" to serverUrl,
-                "Connection" to "Keep-Alive"
-            )
-            
-            debugLog("extractFromNewzar: Initiating HTTP stream redirect analysis to capture secure tokens...")
-            val streamResponse = app.get(m3u8Url, headers = streamHeaders, allowRedirects = false)
-            val location = streamResponse.headers["Location"] ?: streamResponse.headers["location"]
-            debugLog("extractFromNewzar: Redirect response status: ${streamResponse.code}. Redirect Location header: '$location'")
-            
-            val finalUrl = if (!location.isNullOrEmpty()) {
-                if (location.startsWith("/")) {
-                    val parsedM3u8 = URL(m3u8Url)
-                    "${parsedM3u8.protocol}://${parsedM3u8.host}$location"
-                } else {
-                    location
-                }
-            } else {
-                debugLog("extractFromNewzar WARNING: Redirect Location was empty. Defaulting to base stream URL.")
-                streamResponse.url
-            }
-
-            debugLog("extractFromNewzar SUCCESS: Resolved dynamic tokenized playback URL: $finalUrl")
-            return finalUrl
+            // Newzar 파싱에 실패하거나 해당 스크립트가 존재하지 않는 일반 플레이어일 경우 메모리상의 pageHtml로 가동
+            debugLog("extractFromNewzar: Script-based parsing skipped. Falling back to general HTML/Packer parser on cached DOM.")
+            findM3u8InHtml(pageHtml)
         } catch (e: Exception) {
             debugLog("extractFromNewzar EXCEPTION encountered during Newzar parsing.", e)
             null
@@ -330,7 +319,6 @@ class DaddyLiveExtractor : ExtractorApi() {
 
     private fun findM3u8InHtml(html: String): String? {
         var unpackedHtml = html
-        // 어떤 Packer 변수 조합([h,u,n,t,e,r] 등)도 안전하게 가로챌 수 있도록 정규식 구조 범용화
         val packedRegex = Regex("""eval\s*\(\s*function\s*\(\s*[^)]+\s*\).*?\}\s*\(\s*(['"])(.*?)\1\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(['"])(.*?)\5\.split""")
         
         packedRegex.findAll(html).forEach { match ->
@@ -355,7 +343,6 @@ class DaddyLiveExtractor : ExtractorApi() {
             }
         }
 
-        // 역슬래시(\/) 및 상대 경로(//), 백틱(``) 선언까지 포착할 수 있게 정규식 패턴 수정
         val m3u8Regex = Regex("""(?:https?:)?//[^"'`\s]+\.m3u8[^"'`\s]*""", RegexOption.IGNORE_CASE)
         val match = m3u8Regex.find(unpackedHtml)
         if (match != null) {
