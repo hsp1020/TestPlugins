@@ -1,4 +1,4 @@
-// v1.52
+// v1.53
 package com.ultimaevo
 
 import android.app.AlertDialog
@@ -90,7 +90,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             
             prefs.all.keys.forEach { key ->
                 if (key.startsWith("cat_toggle_${next}_") || key.startsWith("cat_rename_${next}_") || 
-                    key.startsWith("cat_order_${next}_") || key.startsWith("ext_toggle_${next}_")) {
+                    key.startsWith("cat_order_${next}_") || key.startsWith("ext_toggle_${next}_") ||
+                    key.startsWith("auto_add_${next}_")) {
                     val newKey = key.replaceFirst("_${next}_", "_${curr}_")
                     when (val value = prefs.all[key]) {
                         is Boolean -> editor.putBoolean(newKey, value)
@@ -107,7 +108,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         editor.remove("evo_active_cats_$latestCount")
         prefs.all.keys.forEach { key ->
             if (key.startsWith("cat_toggle_${latestCount}_") || key.startsWith("cat_rename_${latestCount}_") || 
-                key.startsWith("cat_order_${latestCount}_") || key.startsWith("ext_toggle_${latestCount}_")) {
+                key.startsWith("cat_order_${latestCount}_") || key.startsWith("ext_toggle_${latestCount}_") ||
+                key.startsWith("auto_add_${latestCount}_")) {
                 editor.remove(key)
             }
         }
@@ -147,7 +149,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             setPadding(0, 0, 0, 30)
         }
 
-        // [수정] EditText 높이 고정을 위한 변수 (250dp 변환)
         val pxHeight = (250 * ctx.resources.displayMetrics.density).toInt()
 
         val exportBtn = Button(ctx).apply {
@@ -165,7 +166,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     prefs.all.forEach { (key, value) -> json.put(key, value) }
                     val backupStr = Base64.encodeToString(json.toString().toByteArray(), Base64.NO_WRAP)
 
-                    // [수정] 텍스트 박스 UI 넘침 방지 설계
                     val et = EditText(ctx).apply {
                         setText(backupStr)
                         setTextColor(Color.WHITE)
@@ -211,7 +211,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 if (SystemClock.elapsedRealtime() - lastClickTime < 1000) return@setOnClickListener
                 lastClickTime = SystemClock.elapsedRealtime()
 
-                // [수정] 텍스트 박스 UI 넘침 방지 설계
                 val et = EditText(ctx).apply {
                     hint = "Paste backup string here..."
                     setHintTextColor(Color.GRAY)
@@ -309,41 +308,22 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
                 this.isEnabled = false
                 
-                viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
-                    val providers = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
-                    val total = providers.size
-                    var current = 0
-                    
-                    val semaphore = Semaphore(3)
-
-                    val syncJobs = providers.map { provider ->
-                        async {
-                            semaphore.withPermit {
-                                try {
-                                    val reqName = provider.mainPage.firstOrNull()?.name ?: "Home"
-                                    val reqData = provider.mainPage.firstOrNull()?.data ?: ""
-                                    val response = provider.getMainPage(1, MainPageRequest(reqName, reqData, false))
-                                    if (response != null && response.items.isNotEmpty()) {
-                                        val names = response.items.map { it.name }
-                                        prefs.edit().putString("dynamic_catalogs_${provider.name}", names.joinToString("|||")).apply() 
-                                    }
-                                } catch (e: Exception) { 
-                                    if (e is CancellationException) throw e
-                                }
-                                
-                                withContext(Dispatchers.Main) {
-                                    current++
-                                    this@apply.text = "Syncing... $current / $total"
-                                }
+                viewLifecycleOwner.lifecycleScope.launch {
+                    try {
+                        UltimaEvoSyncManager.performSync(ctx) { current, total ->
+                            withContext(Dispatchers.Main) {
+                                this@apply.text = "Syncing... $current / $total"
                             }
                         }
-                    }
-                    
-                    syncJobs.awaitAll()
-                    
-                    withContext(Dispatchers.Main) {
-                        this@apply.text = "✅ Sync Complete"
-                        this@apply.isEnabled = true
+                        withContext(Dispatchers.Main) {
+                            this@apply.text = "✅ Sync Complete"
+                            this@apply.isEnabled = true
+                        }
+                    } catch (e: Exception) {
+                        withContext(Dispatchers.Main) {
+                            this@apply.text = "❌ Sync Failed"
+                            this@apply.isEnabled = true
+                        }
                     }
                 }
             }
@@ -427,7 +407,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                                 editor.remove("evo_active_cats_$i")
                                 prefs.all.keys.forEach { key ->
                                     if (key.startsWith("cat_toggle_${i}_") || key.startsWith("cat_rename_${i}_") || 
-                                        key.startsWith("cat_order_${i}_") || key.startsWith("ext_toggle_${i}_")) {
+                                        key.startsWith("cat_order_${i}_") || key.startsWith("ext_toggle_${i}_") ||
+                                        key.startsWith("auto_add_${i}_")) {
                                         editor.remove(key)
                                     }
                                 }
@@ -607,7 +588,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                                 editor.remove("evo_active_cats_$i")
                                 prefs.all.keys.forEach { key ->
                                     if (key.startsWith("cat_toggle_${i}_") || key.startsWith("cat_rename_${i}_") || 
-                                        key.startsWith("cat_order_${i}_") || key.startsWith("ext_toggle_${i}_")) {
+                                        key.startsWith("cat_order_${i}_") || key.startsWith("ext_toggle_${i}_") ||
+                                        key.startsWith("auto_add_${i}_")) {
                                         editor.remove(key)
                                     }
                                 }
@@ -641,7 +623,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         return scrollView
     }
 
-        private fun showEditCatalogsDialog(instanceId: Int, ctx: Context) {
+    private fun showEditCatalogsDialog(instanceId: Int, ctx: Context) {
         val prefs = ctx.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
 
         val mainContainer = LinearLayout(ctx).apply {
@@ -670,6 +652,62 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val activeRows = mutableListOf<CatalogRow>()
 
         val allProviders = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
+        
+        // 🌟 최상단에 배치되는 프로바이더별 Auto-add 옵션 카드 설정
+        val providerSettingsCard = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(25, 25, 25, 25)
+            background = getCardBg()
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                setMargins(0, 0, 0, 20)
+            }
+        }
+        val providerSettingsTitle = TextView(ctx).apply {
+            text = "Provider Auto-Add Settings"
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            setPadding(0, 0, 0, 15)
+        }
+        providerSettingsCard.addView(providerSettingsTitle)
+
+        val tempAutoAddSettings = mutableMapOf<String, Boolean>()
+        val providerCheckBoxMap = mutableMapOf<String, MutableList<CheckBox>>()
+
+        for (provider in allProviders) {
+            val pName = provider.name
+            tempAutoAddSettings[pName] = prefs.getBoolean("auto_add_${instanceId}_$pName", false)
+            providerCheckBoxMap[pName] = mutableListOf()
+
+            val providerRow = LinearLayout(ctx).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, 8, 0, 8)
+            }
+            val providerLabel = TextView(ctx).apply {
+                text = pName
+                setTextColor(Color.LTGRAY)
+                textSize = 13f
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            val providerSwitch = Switch(ctx).apply {
+                text = "Auto-add"
+                textSize = 12f
+                isChecked = tempAutoAddSettings[pName] ?: false
+                setOnCheckedChangeListener { _, isChecked ->
+                    tempAutoAddSettings[pName] = isChecked
+                    // Auto-add 토글 작동 시 하단 플랫 리스트 속 해당 프로바이더 체크박스들을 실시간 일괄 연동 조작
+                    providerCheckBoxMap[pName]?.forEach { cb ->
+                        cb.isChecked = isChecked
+                    }
+                }
+            }
+            providerRow.addView(providerLabel)
+            providerRow.addView(providerSwitch)
+            providerSettingsCard.addView(providerRow)
+        }
+        listLayout.addView(providerSettingsCard)
+
         val allCatalogs = mutableListOf<Pair<String, String>>()
 
         for (provider in allProviders) {
@@ -688,9 +726,10 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
             for (i in activeRows.indices) {
                 val rowView = activeRows[i].view
-                if (listLayout.getChildAt(i) != rowView) {
+                val expectedIndex = i + 1 // 상단 카드가 0번 인덱스이므로 +1 보정 진행
+                if (listLayout.getChildAt(expectedIndex) != rowView) {
                     listLayout.removeView(rowView)
-                    listLayout.addView(rowView, i)
+                    listLayout.addView(rowView, expectedIndex)
                 }
             }
 
@@ -755,12 +794,14 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             }
 
             val cb = CheckBox(ctx).apply {
-                isChecked = prefs.getBoolean("cat_toggle_${instanceId}_${pName}_$cName", false)
+                val isAutoAddEnabled = tempAutoAddSettings[pName] ?: false
+                isChecked = prefs.getBoolean("cat_toggle_${instanceId}_${pName}_$cName", isAutoAddEnabled)
                 setPadding(0, 0, 0, 0)
                 layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                     setMargins(0, 0, 5, 0)
                 }
             }
+            providerCheckBoxMap[pName]?.add(cb)
             row.addView(cb)
 
             val etOrder = EditText(ctx).apply {
@@ -938,13 +979,23 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 }
             }
 
+            // 🌟 임시 저장 버퍼에 담긴 프로바이더별 Auto-add 옵션 일괄 트랜잭션 기록
+            tempAutoAddSettings.forEach { (pName, isChecked) ->
+                editor.putBoolean("auto_add_${instanceId}_$pName", isChecked)
+            }
+
             editor.putString("evo_active_cats_$instanceId", activeCatalogs.joinToString("%%%"))
             editor.apply()
+
+            APIHolder.allProviders.forEach { p ->
+                if (p is UltimaEvoProvider) {
+                    p.invalidateCache()
+                }
+            }
             dialog.dismiss()
         }
 
         closeBtn.setOnClickListener { dialog.dismiss() }
         dialog.show()
     }
-    
 }
