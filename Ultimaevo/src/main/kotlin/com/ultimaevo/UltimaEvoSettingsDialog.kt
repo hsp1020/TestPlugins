@@ -310,7 +310,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 
                 viewLifecycleOwner.lifecycleScope.launch {
                     try {
-                        UltimaEvoSyncManager.performSync(ctx) { current, total ->
+                        // 🌟 forceSyncAll = true 매개변수를 전달하여 새로 추가된 프로바이더까지 누락 없이 동기화합니다.
+                        UltimaEvoSyncManager.performSync(ctx, forceSyncAll = true) { current, total ->
                             withContext(Dispatchers.Main) {
                                 this@apply.text = "Syncing... $current / $total"
                             }
@@ -327,7 +328,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     }
                 }
             }
-        }
+        }       
+        
         mainLayout.addView(syncAllBtn)
 
         val countLayout = LinearLayout(ctx).apply { 
