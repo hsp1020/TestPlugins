@@ -94,6 +94,26 @@ object YoutubeUtils {
         }
     }
 
+    // 검색 결과 화면 전용 하단 크롭 정렬 추가 프록시 필터 (a=bottom)
+    fun getProxiedPosterBottom(poster: String?): String? {
+        if (poster.isNullOrBlank()) return null
+        return try {
+            "https://wsrv.nl/?url=${URLEncoder.encode(poster, "UTF-8")}&w=800&h=1200&fit=contain&cbg=black&a=bottom"
+        } catch (e: Exception) {
+            poster
+        }
+    }
+
+    // 홈 화면 및 추천목록 전용 일반 가로형 프록시 필터 (a=bottom 없음)
+    fun getProxiedPosterNormal(poster: String?): String? {
+        if (poster.isNullOrBlank()) return null
+        return try {
+            "https://wsrv.nl/?url=${URLEncoder.encode(poster, "UTF-8")}&w=800&h=1200&fit=contain&cbg=black"
+        } catch (e: Exception) {
+            poster
+        }
+    }
+
     // 검색 결과창 노출용 세로 규격 쇼츠 전용 커스텀 썸네일 변환기 (600x900)
     fun getShortsSearchPoster(videoId: String): String {
         return try {
@@ -441,7 +461,6 @@ class YoutubeProvider(
             var playbackUrl = buildTrackingUrl(playbackBaseUrl, cpn, cmt = "0.000", state = null, realTime = "0")
             var watchtimeUrl = buildTrackingUrl(watchtimeBaseUrl, cpn, cmt = "5.000", state = "playing", realTime = "5")
             
-            // 쇼츠 영상일 경우, 유튜브 로그 수집 서버에 일반 VOD가 아닌 쇼츠 전용 시청기록(el=shortspage)으로 기입되도록 트래킹 파라미터 변환
             if (isShort) {
                 playbackUrl = playbackUrl.replace("el=detailpage", "el=shortspage").replace("el=embedded", "el=shortspage")
                 if (!playbackUrl.contains("el=shortspage")) {
@@ -461,7 +480,6 @@ class YoutubeProvider(
         }
     }
 
-    
     private fun getSavedContinuationToken(key: String): String? {
         val hashedKey = YoutubeUtils.sha1(key)
         val cached = continuationTokenCache[hashedKey]
@@ -730,7 +748,8 @@ class YoutubeProvider(
 
     private fun collectFromRenderer(
         renderer: Map<*, *>?,
-        seenIds: MutableSet<String>
+        seenIds: MutableSet<String>,
+        playlistId: String? = null
     ): SearchResponse? {
         if (renderer == null) return null
 
@@ -750,17 +769,35 @@ class YoutubeProvider(
                 val title = getText(videoData.getMapKey("title")) ?: "Video"
                 val viewText = getText(videoData.getMapKey("viewCountText"))
                     ?: getText(videoData.getMapKey("shortViewCountText"))
+                
+                // .ifBlank 체인을 통해 엘비스 연산자 우회 및 수동 플레이리스트의 shortBylineText 채널명 정상 룩업 보장
                 val channel = getText(videoData.getMapKey("ownerText"))
-                    ?: getText(videoData.getMapKey("shortBylineText")) ?: ""
+                    .ifBlank { getText(videoData.getMapKey("shortBylineText")) }
+                    .ifBlank { getText(videoData.getMapKey("longBylineText")) }
+
                 val views = formatViews(viewText)
-                val finalTitle =
-                    if (channel.isNotBlank()) "{$channel | $views} $title" else "{$views} $title"
+                
+                // N/A 노출 분기를 전면 제거하여 가독성 강화
+                val finalTitle = when {
+                    channel.isNotBlank() && views != "N/A" -> "{$channel | $views} $title"
+                    channel.isNotBlank() -> "{$channel} $title"
+                    views != "N/A" -> "{$views} $title"
+                    else -> title
+                }
+
                 var poster = YoutubeUtils.getBestThumbnail(videoData.getMapKey("thumbnail"))
                 if (poster.isNullOrBlank()) poster = YoutubeUtils.buildThumbnailFromId(videoId)
                 
+                // 수동 플레이리스트 행일 경우 재생 주소 끝에 &list= 고유 아이디 결속 수행
+                val watchUrl = if (!playlistId.isNullOrBlank()) {
+                    "$mainUrl/watch?v=$videoId&list=$playlistId"
+                } else {
+                    "$mainUrl/watch?v=$videoId"
+                }
+
                 return newMovieSearchResponse(
                     finalTitle,
-                    "$mainUrl/watch?v=$videoId",
+                    watchUrl,
                     TvType.Movie
                 ) {
                     // 검색 결과 화면(isSearchContext = true)인 경우에만 wsrv.nl 프록시(&a=bottom 포함)를 적용하고, 홈 화면은 원본 이미지 적용
@@ -875,8 +912,12 @@ class YoutubeProvider(
                         "$mainUrl/$targetPath",
                         TvType.TvSeries
                     ) {
-                        // 검색 결과 화면(isSearchContext = true)인 경우에만 wsrv.nl 프록시(&a=bottom 포함)를 적용하고, 홈 화면은 원본 이미지 적용
-                        this.posterUrl = if (isSearchContext) YoutubeUtils.getProxiedPoster(poster) else poster
+                        // 검색 결과 화면(isSearchContext = true)인 경우에만 &a=bottom 프록시 적용, 홈 화면 및 추천목록은 일반 가로형 프록시(a=bottom 없음) 적용
+                        this.posterUrl = if (isSearchContext) {
+                            YoutubeUtils.getProxiedPosterBottom(poster)
+                        } else {
+                            YoutubeUtils.getProxiedPosterNormal(poster)
+                        }
                     }
                 }
             }
@@ -951,8 +992,12 @@ class YoutubeProvider(
                         "$mainUrl/watch?v=$videoId",
                         TvType.Movie
                     ) {
-                        // 검색 결과 화면(isSearchContext = true)인 경우에만 wsrv.nl 프록시(&a=bottom 포함)를 적용하고, 홈 화면은 원본 이미지 적용
-                        this.posterUrl = if (isSearchContext) YoutubeUtils.getProxiedPoster(poster) else poster
+                        // 검색 결과 화면(isSearchContext = true)인 경우에만 &a=bottom 프록시 적용, 홈 화면 및 추천목록은 일반 가로형 프록시(a=bottom 없음) 적용
+                        this.posterUrl = if (isSearchContext) {
+                            YoutubeUtils.getProxiedPosterBottom(poster)
+                        } else {
+                            YoutubeUtils.getProxiedPosterNormal(poster)
+                        }
                     }
                 }
             }
@@ -971,8 +1016,12 @@ class YoutubeProvider(
                     "$mainUrl/channel/$id",
                     TvType.Live
                 ) {
-                    // 검색 결과 화면(isSearchContext = true)인 경우에만 wsrv.nl 프록시(&a=bottom 포함)를 적용하고, 홈 화면은 원본 이미지 적용
-                    this.posterUrl = if (isSearchContext) YoutubeUtils.getProxiedPoster(poster) else poster
+                    // 검색 결과 화면(isSearchContext = true)인 경우에만 &a=bottom 프록시 적용, 홈 화면 및 추천목록은 일반 가로형 프록시(a=bottom 없음) 적용
+                    this.posterUrl = if (isSearchContext) {
+                        YoutubeUtils.getProxiedPosterBottom(poster)
+                    } else {
+                        YoutubeUtils.getProxiedPosterNormal(poster)
+                    }
                 }
             }
         }
@@ -984,11 +1033,12 @@ class YoutubeProvider(
         outList: MutableList<SearchResponse>,
         seenIds: MutableSet<String>,
         playlistMode: Boolean,
-        depth: Int = 0
+        depth: Int = 0,
+        playlistId: String? = null
     ) {
         if (data == null || depth > 32) return 
         if (data is Map<*, *>) {
-            val extracted = collectFromRenderer(data, seenIds)
+            val extracted = collectFromRenderer(data, seenIds, playlistId)
             if (extracted != null) {
                 if (!playlistMode || extracted.type == TvType.TvSeries) {
                     outList.add(extracted)
@@ -1001,20 +1051,20 @@ class YoutubeProvider(
             for (i in 0 until keysSize) {
                 val key = KEYS_TO_CHECK[i]
                 if (data.containsKey(key)) {
-                    processRecursive(data[key], outList, seenIds, playlistMode, depth + 1)
+                    processRecursive(data[key], outList, seenIds, playlistMode, depth + 1, playlistId)
                     foundContainer = true
                 }
             }
             if (!foundContainer) {
                 for (value in data.values) {
                     if (value is Map<*, *> || value is List<*>) {
-                        processRecursive(value, outList, seenIds, playlistMode, depth + 1)
+                        processRecursive(value, outList, seenIds, playlistMode, depth + 1, playlistId)
                     }
                 }
             }
         } else if (data is List<*>) {
             for (item in data) {
-                processRecursive(item, outList, seenIds, playlistMode, depth + 1)
+                processRecursive(item, outList, seenIds, playlistMode, depth + 1, playlistId)
             }
         }
     }
@@ -1280,7 +1330,13 @@ class YoutubeProvider(
                                 }
                             }
                         }
-                        processRecursive(initialData, results, seenIds, playlistMode = false)
+
+                        // 수동 추가 플레이리스트 행인 경우, URL 내부에서 playlistId 정밀 추출 수행
+                        val playlistId = if (requestData.contains("list=")) {
+                            requestData.substringAfter("list=", "").substringBefore("&")
+                        } else null
+
+                        processRecursive(initialData, results, seenIds, playlistMode = false, playlistId = playlistId)
                         nextContinuation = findTokenRecursive(initialData)
                     }
                 }
@@ -1331,7 +1387,12 @@ class YoutubeProvider(
                                         ?: innerResponse["onResponseReceivedCommands"] 
                                         ?: innerResponse["continuationContents"] 
                                         ?: innerResponse
-                                    processRecursive(actions, results, seenIds, playlistMode = false)
+                                    
+                                    val playlistId = if (requestData.contains("list=")) {
+                                        requestData.substringAfter("list=", "").substringBefore("&")
+                                    } else null
+
+                                    processRecursive(actions, results, seenIds, playlistMode = false, playlistId = playlistId)
                                     nextContinuation = findTokenRecursive(innerResponse)
                                 }
                             }
@@ -1362,7 +1423,12 @@ class YoutubeProvider(
                             ?: response["onResponseReceivedCommands"] 
                             ?: response["continuationContents"] 
                             ?: response
-                        processRecursive(actions, results, seenIds, playlistMode = false)
+
+                        val playlistId = if (requestData.contains("list=")) {
+                            requestData.substringAfter("list=", "").substringBefore("&")
+                        } else null
+
+                        processRecursive(actions, results, seenIds, playlistMode = false, playlistId = playlistId)
                         nextContinuation = findTokenRecursive(response)
                     }
                 }
@@ -1405,7 +1471,6 @@ class YoutubeProvider(
         }
 
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
-
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -2332,7 +2397,6 @@ class YoutubeProvider(
 
         var playerResponseText = ""
         try {
-            // 쇼츠일 경우 시청기록 수급 필드를 포함한 단독 엔드포인트(?%24fields=playerResponse) 지정
             val apiUrl = if (isShort) "$mainUrl/youtubei/v1/reel/reel_item_watch?%24fields=playerResponse" else "$mainUrl/youtubei/v1/player"
             val payload = if (isShort) {
                 mapOf(
@@ -2370,7 +2434,6 @@ class YoutubeProvider(
         if (playerResponseText.isNotBlank()) {
             try {
                 val root = org.json.JSONObject(playerResponseText)
-                // 쇼츠 전용 중첩 구조(playerResponse) 감지 시 한 단계를 벗겨내어 일반 VOD 구조와 일치화 처리
                 val targetJson = if (root.has("playerResponse")) {
                     root.getJSONObject("playerResponse").toString()
                 } else {
@@ -2378,7 +2441,6 @@ class YoutubeProvider(
                 }
                 val playerResponse = parseJson<PlayerResponse>(targetJson)
                 
-                // 쇼츠 전용 플래그 파라미터(isShort)를 이행하여 시청 기록을 쇼츠 전용 데이터로 적재
                 triggerPlaybackTracking(playerResponse.playbackTracking, videoId, isShort)
             } catch (e: Exception) {
                 logError(e)
