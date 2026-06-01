@@ -691,17 +691,15 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             }
             val providerSwitch = Switch(ctx).apply {
-                text = "Auto-add"
-                textSize = 12f
-                isChecked = tempAutoAddSettings[pName] ?: false
-                setOnCheckedChangeListener { _, isChecked ->
-                    tempAutoAddSettings[pName] = isChecked
-                    // Auto-add 토글 작동 시 하단 플랫 리스트 속 해당 프로바이더 체크박스들을 실시간 일괄 연동 조작
-                    providerCheckBoxMap[pName]?.forEach { cb ->
-                        cb.isChecked = isChecked
-                    }
+                    text = "Auto-add"
+                    textSize = 12f
+                    isChecked = tempAutoAddSettings[pName] ?: false
+                    setOnCheckedChangeListener { _, isChecked ->
+                        // 단순히 "자동 추가 설정"의 임시 버퍼 값만 갱신하고 끝냅니다. (하위 체크박스는 건드리지 않음)
+                        tempAutoAddSettings[pName] = isChecked
                 }
             }
+            
             providerRow.addView(providerLabel)
             providerRow.addView(providerSwitch)
             providerSettingsCard.addView(providerRow)
