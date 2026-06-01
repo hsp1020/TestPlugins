@@ -41,9 +41,10 @@ object UltimaEvoSyncManager {
         isSyncing = true
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                performSync(context, null)
+                // 백그라운드 주기 자동 싱크는 forceSyncAll = false 로 작동하여 불필요한 네트워크를 아낍니다.
+                performSync(context, forceSyncAll = false, null)
             } catch (e: Exception) {
-                // 백그라운드 작동 시 예외 무시
+                // 예외 무시
             } finally {
                 isSyncing = false
             }
@@ -52,29 +53,36 @@ object UltimaEvoSyncManager {
 
     suspend fun performSync(
         context: Context,
+        forceSyncAll: Boolean = false,
         onProgress: (suspend (current: Int, total: Int) -> Unit)? = null
     ) {
         val prefs = context.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
         val instanceCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
 
-        // 활성화되어 있거나 혹은 자동 추가가 On으로 켜진 프로바이더만 선별하여 동기화
-        val enabledProviders = APIHolder.allProviders.filter { provider ->
-            !provider.mainUrl.startsWith("ultima_evo") && provider.hasMainPage &&
-            (1..instanceCount).any { instId ->
-                prefs.getBoolean("ext_toggle_${instId}_${provider.name}", false) ||
-                prefs.getBoolean("auto_add_${instId}_${provider.name}", false)
+        // 🌟 수동 싱크와 자동 싱크의 대상을 스마트하게 분기합니다.
+        val targetProviders = if (forceSyncAll) {
+            // 수동 싱크 시: 새로 설치된 플러그인 목록까지 완벽히 발굴하기 위해 전체 대상 스캔
+            APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
+        } else {
+            // 백그라운드 싱크 시: 리소스 절약을 위해 사용자가 활성화한 프로바이더만 선별 스캔
+            APIHolder.allProviders.filter { provider ->
+                !provider.mainUrl.startsWith("ultima_evo") && provider.hasMainPage &&
+                (1..instanceCount).any { instId ->
+                    prefs.getBoolean("ext_toggle_${instId}_${provider.name}", false) ||
+                    prefs.getBoolean("auto_add_${instId}_${provider.name}", false)
+                }
             }
         }
 
-        if (enabledProviders.isEmpty()) return
+        if (targetProviders.isEmpty()) return
 
-        val total = enabledProviders.size
+        val total = targetProviders.size
         var current = 0
         val semaphore = Semaphore(3)
         var anyChange = false
 
         coroutineScope {
-            val syncJobs = enabledProviders.map { provider ->
+            val syncJobs = targetProviders.map { provider ->
                 async(Dispatchers.IO) {
                     semaphore.withPermit {
                         try {
@@ -116,6 +124,7 @@ object UltimaEvoSyncManager {
         }
     }
 }
+
 
 class UltimaEvoProvider(private val instanceId: Int, private val customName: String) : MainAPI() {
     override var mainUrl = "ultima_evo_$instanceId"
