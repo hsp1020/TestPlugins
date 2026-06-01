@@ -723,7 +723,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         }
 
         val toggleArrow = TextView(ctx).apply {
-            text = "▽" // 초기 상태: 접힘 (▽)
+            text = "▼" // 초기 상태: 접힘 (▽)
             setTextColor(Color.WHITE)
             textSize = 14f
             setPadding(15, 10, 15, 10)
@@ -745,7 +745,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         headerRow.setOnClickListener {
             if (providersContainer.visibility == View.VISIBLE) {
                 providersContainer.visibility = View.GONE
-                toggleArrow.text = "▽"
+                toggleArrow.text = "▼"
             } else {
                 providersContainer.visibility = View.VISIBLE
                 toggleArrow.text = "▲"
