@@ -475,9 +475,8 @@ class CUTVProvider : MainAPI() {
                 val targetMatch = matches.find { it["ssid"] == ssid }
                 
                 if (targetMatch != null) {
-                    // 블랙화면만 노출되던 hudtv 계열의 스트림 URL을 실시간 파싱 리스트 자체에서 영구히 필터링합니다.
                     val urls = listOfNotNull(targetMatch["surl"], targetMatch["surl2"], targetMatch["surl3"])
-                        .filter { it.isNotBlank() && !it.contains("hudtv", ignoreCase = true) }
+                        .filter { it.isNotBlank() }
                         .distinct()
 
                     urls.forEachIndexed { index, link ->
@@ -500,8 +499,18 @@ class CUTVProvider : MainAPI() {
                             } catch (e: Exception) {}
                         }
 
-                        // 분류 기준에서 hudtv 조건을 완전히 소거하여 오작동을 방지합니다.
+                        // hudtv 계열 도메인이 감지되면 작동이 검증된 oncahot.com 도메인으로 동적 치환합니다.
+                        // (hudtv01.com, hudtv.live 등 임의의 TLD 확장자 전체 대응)
+                        if (actualUrl.contains("hudtv", ignoreCase = true)) {
+                            val hudtvRegex = """hudtv[a-zA-Z0-9]*\.[a-zA-Z]{2,4}""".toRegex(RegexOption.IGNORE_CASE)
+                            val replacedUrl = actualUrl.replace(hudtvRegex, "oncahot.com")
+                            println("[CUTV_DEBUG] Domain Redirect: hudtv -> oncahot.com: $replacedUrl")
+                            actualUrl = replacedUrl
+                        }
+
+                        // 채널 이름 지정 시 원래 hudtv 소스였던 링크는 기존에 지정된 "채널 2" 명칭을 계승합니다.
                         val qualityName = if (link.contains("coupangstreaming")) "채널 1" 
+                                          else if (link.contains("hudtv")) "채널 2" 
                                           else "채널 ${index + 1}"
 
                         val isM3u8 = actualUrl.contains(".m3u8", ignoreCase = true)
@@ -532,8 +541,7 @@ class CUTVProvider : MainAPI() {
         } catch (e: Exception) {
             e.printStackTrace()
             return false
-        }
-
+        }        
         return true
     }
 }
