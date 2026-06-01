@@ -85,10 +85,20 @@ object YoutubeUtils {
     }
 
     // 일반영상 검색 결과 및 계속 시청 전용 하단 크롭 정렬 추가 프록시 필터 (a=bottom)
-    fun getProxiedPoster(poster: String?): String? {
+    fun getProxiedPosterBottom(poster: String?): String? {
         if (poster.isNullOrBlank()) return null
         return try {
-            "https://wsrv.nl/?url=${URLEncoder.encode(poster, "UTF-8")}&w=800&h=1200&fit=contain&cbg=black"
+            "https://wsrv.nl/?url=${URLEncoder.encode(poster, "UTF-8")}&w=300&h=450&fit=contain&cbg=black&a=bottom"
+        } catch (e: Exception) {
+            poster
+        }
+    }
+
+    // 그외 홈화면 및 에피소드/추천목록 전용 일반 가로형 프록시 필터 (a=bottom 제거)
+    fun getProxiedPosterNormal(poster: String?): String? {
+        if (poster.isNullOrBlank()) return null
+        return try {
+            "https://wsrv.nl/?url=${URLEncoder.encode(poster, "UTF-8")}&w=300&h=450&fit=contain&cbg=black"
         } catch (e: Exception) {
             poster
         }
@@ -99,7 +109,7 @@ object YoutubeUtils {
         return try {
             val targetUrl = "https://i.ytimg.com/vi/$videoId/oardefault.jpg?sqp=-oaymwEoCJUDENAFSFqQAgHyq4qpAxcIARUAAIhC2AEB4gEKCBgQAhgGOAFAAQ==&rs=AOn4CLDWlHo9hImueeIb7JfDzDGNRuQ5tg&usqp=CCk"
             val encoded = URLEncoder.encode(targetUrl, "UTF-8")
-            "https://wsrv.nl/?url=$encoded&w=800&h=1200&fit=contain&cbg=black"
+            "https://wsrv.nl/?url=$encoded&w=600&h=900&fit=contain&cbg=black"
         } catch (e: Exception) {
             "https://i.ytimg.com/vi/$videoId/oar2.jpg"
         }
@@ -730,7 +740,8 @@ class YoutubeProvider(
 
     private fun collectFromRenderer(
         renderer: Map<*, *>?,
-        seenIds: MutableSet<String>
+        seenIds: MutableSet<String>,
+        playlistId: String? = null
     ): SearchResponse? {
         if (renderer == null) return null
 
@@ -750,17 +761,32 @@ class YoutubeProvider(
                 val title = getText(videoData.getMapKey("title")) ?: "Video"
                 val viewText = getText(videoData.getMapKey("viewCountText"))
                     ?: getText(videoData.getMapKey("shortViewCountText"))
+                
                 val channel = getText(videoData.getMapKey("ownerText"))
-                    ?: getText(videoData.getMapKey("shortBylineText")) ?: ""
+                    .ifBlank { getText(videoData.getMapKey("shortBylineText")) }
+                    .ifBlank { getText(videoData.getMapKey("longBylineText")) }
+
                 val views = formatViews(viewText)
-                val finalTitle =
-                    if (channel.isNotBlank()) "{$channel | $views} $title" else "{$views} $title"
+                
+                val finalTitle = when {
+                    channel.isNotBlank() && views != "N/A" -> "{$channel | $views} $title"
+                    channel.isNotBlank() -> "{$channel} $title"
+                    views != "N/A" -> "{$views} $title"
+                    else -> title
+                }
+
                 var poster = YoutubeUtils.getBestThumbnail(videoData.getMapKey("thumbnail"))
                 if (poster.isNullOrBlank()) poster = YoutubeUtils.buildThumbnailFromId(videoId)
                 
+                val watchUrl = if (!playlistId.isNullOrBlank()) {
+                    "$mainUrl/watch?v=$videoId&list=$playlistId"
+                } else {
+                    "$mainUrl/watch?v=$videoId"
+                }
+
                 return newMovieSearchResponse(
                     finalTitle,
-                    "$mainUrl/watch?v=$videoId",
+                    watchUrl,
                     TvType.Movie
                 ) {
                     // 검색 결과 화면(isSearchContext = true)인 경우에만 wsrv.nl 프록시(&a=bottom 포함)를 적용하고, 홈 화면은 원본 이미지 적용
@@ -984,11 +1010,12 @@ class YoutubeProvider(
         outList: MutableList<SearchResponse>,
         seenIds: MutableSet<String>,
         playlistMode: Boolean,
-        depth: Int = 0
+        depth: Int = 0,
+        playlistId: String? = null
     ) {
         if (data == null || depth > 32) return 
         if (data is Map<*, *>) {
-            val extracted = collectFromRenderer(data, seenIds)
+            val extracted = collectFromRenderer(data, seenIds, playlistId)
             if (extracted != null) {
                 if (!playlistMode || extracted.type == TvType.TvSeries) {
                     outList.add(extracted)
@@ -1001,20 +1028,20 @@ class YoutubeProvider(
             for (i in 0 until keysSize) {
                 val key = KEYS_TO_CHECK[i]
                 if (data.containsKey(key)) {
-                    processRecursive(data[key], outList, seenIds, playlistMode, depth + 1)
+                    processRecursive(data[key], outList, seenIds, playlistMode, depth + 1, playlistId)
                     foundContainer = true
                 }
             }
             if (!foundContainer) {
                 for (value in data.values) {
                     if (value is Map<*, *> || value is List<*>) {
-                        processRecursive(value, outList, seenIds, playlistMode, depth + 1)
+                        processRecursive(value, outList, seenIds, playlistMode, depth + 1, playlistId)
                     }
                 }
             }
         } else if (data is List<*>) {
             for (item in data) {
-                processRecursive(item, outList, seenIds, playlistMode, depth + 1)
+                processRecursive(item, outList, seenIds, playlistMode, depth + 1, playlistId)
             }
         }
     }
@@ -1280,7 +1307,13 @@ class YoutubeProvider(
                                 }
                             }
                         }
-                        processRecursive(initialData, results, seenIds, playlistMode = false)
+
+                        // 수동 추가 플레이리스트 행인 경우, URL 내부에서 playlistId 정밀 추출 수행
+                        val playlistId = if (requestData.contains("list=")) {
+                            requestData.substringAfter("list=", "").substringBefore("&")
+                        } else null
+
+                        processRecursive(initialData, results, seenIds, playlistMode = false, playlistId = playlistId)
                         nextContinuation = findTokenRecursive(initialData)
                     }
                 }
@@ -1331,7 +1364,12 @@ class YoutubeProvider(
                                         ?: innerResponse["onResponseReceivedCommands"] 
                                         ?: innerResponse["continuationContents"] 
                                         ?: innerResponse
-                                    processRecursive(actions, results, seenIds, playlistMode = false)
+                                    
+                                    val playlistId = if (requestData.contains("list=")) {
+                                        requestData.substringAfter("list=", "").substringBefore("&")
+                                    } else null
+
+                                    processRecursive(actions, results, seenIds, playlistMode = false, playlistId = playlistId)
                                     nextContinuation = findTokenRecursive(innerResponse)
                                 }
                             }
@@ -1362,7 +1400,12 @@ class YoutubeProvider(
                             ?: response["onResponseReceivedCommands"] 
                             ?: response["continuationContents"] 
                             ?: response
-                        processRecursive(actions, results, seenIds, playlistMode = false)
+
+                        val playlistId = if (requestData.contains("list=")) {
+                            requestData.substringAfter("list=", "").substringBefore("&")
+                        } else null
+
+                        processRecursive(actions, results, seenIds, playlistMode = false, playlistId = playlistId)
                         nextContinuation = findTokenRecursive(response)
                     }
                 }
@@ -1382,8 +1425,6 @@ class YoutubeProvider(
             for (item in results) {
                 val isShort = item.url.contains("/shorts/")
                 if (isShort) {
-                    // 일반 영상을 보다가 다시 쇼츠가 등장했다는 것은 '새로운 날짜 섹션(새로운 날)'으로 진입했음을 의미함.
-                    // 따라서 이전 날짜 그룹의 정렬을 완료(일반 ➡️ 쇼츠 순)하여 sorted에 비우고 새로 수집 시작.
                     if (tempVods.isNotEmpty()) {
                         sorted.addAll(tempVods)
                         tempVods.clear()
@@ -1395,7 +1436,6 @@ class YoutubeProvider(
                     tempVods.add(item)
                 }
             }
-            // 미처 비워지지 않고 남아있는 마지막 날짜 섹션의 데이터를 순서대로 적재
             if (tempVods.isNotEmpty() || tempShorts.isNotEmpty()) {
                 sorted.addAll(tempVods)
                 sorted.addAll(tempShorts)
@@ -1405,7 +1445,6 @@ class YoutubeProvider(
         }
 
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
-
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -1696,6 +1735,9 @@ class YoutubeProvider(
     }
 
     override suspend fun load(url: String): LoadResponse {
+        // 세부 정보 진입 시 검색 컨텍스트 강제 초기화하여 추천 에피소드 목록에 bottom 정렬이 침범하는 현상 완벽 방어
+        isSearchContext = false
+        
         if (url.contains("/shorts/")) {
             val videoId = YoutubeUtils.extractYoutubeId(url) ?: "video"
             val useSearchList = url.contains("ctx=search")
@@ -1874,6 +1916,7 @@ class YoutubeProvider(
 
                 val allEpisodes = mutableListOf<Episode>()
 
+                // 1. 중첩 함수 선언부 (컴파일 순서 일치)
                 fun findContinuationItemsRecursive(obj: Any?, depth: Int = 0): List<*>? {
                     if (obj == null || depth > 32) return null
                     when (obj) {
@@ -1903,7 +1946,6 @@ class YoutubeProvider(
                 }
 
                 fun extractVideosFromItems(items: List<*>, collectTo: MutableList<Episode>) {
-                    
                     fun findAllRenderers(obj: Any?, results: MutableList<Map<*,*>>, depth: Int = 0) {
                         if (obj == null || depth > 32) return
                         when (obj) {
@@ -1979,6 +2021,17 @@ class YoutubeProvider(
                     }
                 }
 
+                fun findContinuationFromItems(items: List<*>?): String? {
+                    if (items == null) return null
+                    for (it in items) {
+                        val m = it as? Map<*, *> ?: continue
+                        val token = findTokenRecursive(m)
+                        if (!token.isNullOrBlank()) return token
+                    }
+                    return null
+                }
+
+                // 2. 변수 선언 및 유튜브 탭 구조 파싱부
                 var initialItems: List<*>? = null
                 val tabs = safeGet(data, "contents", "twoColumnBrowseResultsRenderer", "tabs") as? List<*>
                 if (tabs != null) {
@@ -2013,16 +2066,6 @@ class YoutubeProvider(
                 
                 if (initialItems != null) {
                     extractVideosFromItems(initialItems, allEpisodes)
-                }
-
-                fun findContinuationFromItems(items: List<*>?): String? {
-                    if (items == null) return null
-                    for (it in items) {
-                        val m = it as? Map<*, *> ?: continue
-                        val token = findTokenRecursive(m)
-                        if (!token.isNullOrBlank()) return token
-                    }
-                    return null
                 }
 
                 var currentToken: String? = findContinuationFromItems(initialItems)
@@ -2295,9 +2338,17 @@ class YoutubeProvider(
                 
                 var cleanName = rec.name.replaceFirst(Regex("^\\{.*?\\}\\s*"), "")
 
+                val isShort = rec.url.contains("/shorts/")
+                val posterUrl = if (isShort && recVidId != null) {
+                    YoutubeUtils.getShortsEpisodeThumbnail(recVidId)
+                } else {
+                    // 일반영상 추천 에피소드 리스트 썸네일은 a=bottom이 없는 일반 가로형 프록시를 보장 적용
+                    YoutubeUtils.getProxiedPosterNormal(rec.posterUrl)
+                }
+
                 episodes.add(newEpisode(rec.url) {
                     this.name = cleanName
-                    this.posterUrl = rec.posterUrl
+                    this.posterUrl = posterUrl
                     this.episode = epCount++
                     if (!extraMeta.isNullOrBlank()) {
                         this.description = extraMeta
@@ -2308,7 +2359,7 @@ class YoutubeProvider(
 
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
             // 계속 시청 썸네일도 wsrv.nl 적용 버전으로 수정
-            this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
+            this.posterUrl = YoutubeUtils.getProxiedPosterBottom(poster)
             this.plot = plot
 
             if (channelName.isNotBlank()) {
