@@ -40,10 +40,10 @@
     },
     {
         "iconUrl": "https://holyindia.org/assets/Pc/img/hd_logo.png",
-        "fileHash": "sha256-bb7ecb47de0fa4788d8f956af6aba3978906df45cabbd4a092dc4b67bce0737f",
+        "fileHash": "sha256-6470d7d42a1b99f6bc22ac8c0293e68b583b041a2b8cf7bbe7aa06e53556098a",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 28359,
+        "fileSize": 28448,
         "status": 1,
         "language": "ko",
         "authors": [
