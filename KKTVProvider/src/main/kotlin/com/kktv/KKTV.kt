@@ -450,6 +450,7 @@ class CUTVProvider : MainAPI() {
         }
     }
 
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -474,8 +475,9 @@ class CUTVProvider : MainAPI() {
                 val targetMatch = matches.find { it["ssid"] == ssid }
                 
                 if (targetMatch != null) {
+                    // 블랙화면만 노출되던 hudtv 계열의 스트림 URL을 실시간 파싱 리스트 자체에서 영구히 필터링합니다.
                     val urls = listOfNotNull(targetMatch["surl"], targetMatch["surl2"], targetMatch["surl3"])
-                        .filter { it.isNotBlank() }
+                        .filter { it.isNotBlank() && !it.contains("hudtv", ignoreCase = true) }
                         .distinct()
 
                     urls.forEachIndexed { index, link ->
@@ -498,8 +500,8 @@ class CUTVProvider : MainAPI() {
                             } catch (e: Exception) {}
                         }
 
+                        // 분류 기준에서 hudtv 조건을 완전히 소거하여 오작동을 방지합니다.
                         val qualityName = if (link.contains("coupangstreaming")) "채널 1" 
-                                          else if (link.contains("hudtv")) "채널 2" 
                                           else "채널 ${index + 1}"
 
                         val isM3u8 = actualUrl.contains(".m3u8", ignoreCase = true)
