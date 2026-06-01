@@ -1,4 +1,4 @@
-// v1.53
+// v1.54
 package com.ultimaevo
 
 import android.app.AlertDialog
@@ -38,6 +38,9 @@ import org.json.JSONObject
 class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
     private var lastClickTime: Long = 0
+    
+    // 🌟 중복 다중 팝업 생성을 원천 차단하기 위한 활성 다이얼로그 전역 참조 변수
+    private var activeAlertDialog: AlertDialog? = null
 
     private fun getDarkThemeBg(): GradientDrawable {
         return GradientDrawable().apply {
@@ -161,6 +164,9 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 if (SystemClock.elapsedRealtime() - lastClickTime < 1000) return@setOnClickListener
                 lastClickTime = SystemClock.elapsedRealtime()
 
+                // 🌟 백업 출력 시 다중 다이얼로그 중복 체크
+                if (activeAlertDialog?.isShowing == true) return@setOnClickListener
+
                 try {
                     val json = JSONObject()
                     prefs.all.forEach { (key, value) -> json.put(key, value) }
@@ -184,7 +190,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         addView(et)
                     }
                     
-                    AlertDialog.Builder(ctx)
+                    val dialog = AlertDialog.Builder(ctx)
                         .setTitle("Export Backup Data")
                         .setView(wrapper)
                         .setPositiveButton("Copy") { _, _ ->
@@ -194,7 +200,10 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                             Toast.makeText(ctx, "Copied to clipboard", Toast.LENGTH_SHORT).show()
                         }
                         .setNegativeButton("Close", null)
-                        .show()
+                        .create()
+                    
+                    activeAlertDialog = dialog
+                    dialog.show()
                 } catch (e: Exception) {
                     println("[UltimaEvo-Debug] [Export] 백업 인코딩 중 에러: ${e.message}")
                 }
@@ -210,6 +219,9 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             setOnClickListener {
                 if (SystemClock.elapsedRealtime() - lastClickTime < 1000) return@setOnClickListener
                 lastClickTime = SystemClock.elapsedRealtime()
+
+                // 🌟 임포트 팝업 시 다중 다이얼로그 중복 체크
+                if (activeAlertDialog?.isShowing == true) return@setOnClickListener
 
                 val et = EditText(ctx).apply {
                     hint = "Paste backup string here..."
@@ -228,7 +240,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     addView(et)
                 }
 
-                AlertDialog.Builder(ctx)
+                val dialog = AlertDialog.Builder(ctx)
                     .setTitle("Import Backup Data")
                     .setMessage("Warning: This will permanently overwrite all current settings.\nThe app must be restarted after import.")
                     .setView(wrapper)
@@ -274,11 +286,14 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                                 successMessage = "Import successful, but the following plugins are missing:\n\n$missingList\n\nTheir catalogs will be hidden until installed.\nPlease restart the app."
                             }
                             
-                            AlertDialog.Builder(ctx)
+                            val resultDialog = AlertDialog.Builder(ctx)
                                 .setTitle("Import Result")
                                 .setMessage(successMessage)
                                 .setPositiveButton("OK") { _, _ -> dismiss() }
-                                .show()
+                                .create()
+                            
+                            activeAlertDialog = resultDialog
+                            resultDialog.show()
 
                         } catch (e: Exception) {
                             Toast.makeText(ctx, "Invalid backup string format.", Toast.LENGTH_SHORT).show()
@@ -286,7 +301,10 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         }
                     }
                     .setNegativeButton("Cancel", null)
-                    .show()
+                    .create()
+                
+                activeAlertDialog = dialog
+                dialog.show()
             }
         }
         
@@ -310,7 +328,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 
                 viewLifecycleOwner.lifecycleScope.launch {
                     try {
-                        // 🌟 forceSyncAll = true 매개변수를 전달하여 새로 추가된 프로바이더까지 누락 없이 동기화합니다.
                         UltimaEvoSyncManager.performSync(ctx, forceSyncAll = true) { current, total ->
                             withContext(Dispatchers.Main) {
                                 this@apply.text = "Syncing... $current / $total"
@@ -328,8 +345,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     }
                 }
             }
-        }       
-        
+        }
         mainLayout.addView(syncAllBtn)
 
         val countLayout = LinearLayout(ctx).apply { 
@@ -395,7 +411,10 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 val newCount = instanceCountInput.text.toString().toIntOrNull() ?: oldCount
 
                 if (newCount < oldCount) {
-                    AlertDialog.Builder(requireContext())
+                    // 🌟 중복 팝업 체크
+                    if (activeAlertDialog?.isShowing == true) return@setOnFocusChangeListener
+
+                    val dialog = AlertDialog.Builder(requireContext())
                         .setTitle("Delete Instances")
                         .setMessage("Reducing instances from $oldCount to $newCount will delete the last ${oldCount - newCount} catalog(s).\nAre you sure?\n\nPlease restart the app for the changes to take effect.")
                         .setPositiveButton("Yes") { _, _ ->
@@ -423,7 +442,10 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         .setNegativeButton("No") { _, _ ->
                             instanceCountInput.setText(oldCount.toString())
                         }
-                        .show()
+                        .create()
+                    
+                    activeAlertDialog = dialog
+                    dialog.show()
                 } else if (newCount > oldCount) {
                     val editor = prefs.edit()
                     saveCurrentNamesToPrefs(editor, mainLayout)
@@ -536,8 +558,11 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 setOnClickListener {
                     if (SystemClock.elapsedRealtime() - lastClickTime < 1000) return@setOnClickListener
                     lastClickTime = SystemClock.elapsedRealtime()
+
+                    // 🌟 인스턴스 개별 삭제 시 다중 다이얼로그 중복 체크
+                    if (activeAlertDialog?.isShowing == true) return@setOnClickListener
                     
-                    AlertDialog.Builder(requireContext())
+                    val dialog = AlertDialog.Builder(requireContext())
                         .setTitle("Delete Catalog")
                         .setMessage("Are you sure you want to delete this catalog?\n\nPlease restart the app for the changes to take effect.")
                         .setPositiveButton("Yes") { _, _ ->
@@ -549,7 +574,10 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                             UltimaEvoSettingsDialog().show(act!!.supportFragmentManager, "UltimaEvoSettingsDialog")
                         }
                         .setNegativeButton("No", null)
-                        .show()
+                        .create()
+                    
+                    activeAlertDialog = dialog
+                    dialog.show()
                 }
             }
 
@@ -576,7 +604,10 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 val newCount = instanceCountInput.text.toString().toIntOrNull() ?: oldCount
 
                 if (newCount < oldCount) {
-                    AlertDialog.Builder(requireContext())
+                    // 🌟 저장 시 강제 축소 삭제 경고 팝업 시 다중 다이얼로그 중복 체크
+                    if (activeAlertDialog?.isShowing == true) return@setOnClickListener
+
+                    val dialog = AlertDialog.Builder(requireContext())
                         .setTitle("Delete Instances")
                         .setMessage("Reducing instances from $oldCount to $newCount will delete the last ${oldCount - newCount} catalog(s).\nAre you sure?\n\nPlease restart the app for the changes to take effect.")
                         .setPositiveButton("Yes") { _, _ ->
@@ -602,11 +633,17 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         .setNegativeButton("No") { _, _ ->
                             instanceCountInput.setText(oldCount.toString())
                         }
-                        .show()
+                        .create()
+                    
+                    activeAlertDialog = dialog
+                    dialog.show()
                     return@setOnClickListener
                 }
 
-                AlertDialog.Builder(requireContext())
+                // 🌟 재시작 필요 경고 팝업 시 다중 다이얼로그 중복 체크
+                if (activeAlertDialog?.isShowing == true) return@setOnClickListener
+
+                val dialog = AlertDialog.Builder(requireContext())
                     .setTitle("Restart Required")
                     .setMessage("Please restart the app for the changes to take effect.")
                     .setPositiveButton("OK") { _, _ ->
@@ -616,7 +653,10 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         editor.apply()
                         dismiss()
                     }
-                    .show()
+                    .create()
+                
+                activeAlertDialog = dialog
+                dialog.show()
             }
         }
         mainLayout.addView(saveBtn)
@@ -626,6 +666,9 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
     }
 
     private fun showEditCatalogsDialog(instanceId: Int, ctx: Context) {
+        // 🌟 프로바이더 카탈로그 개별 설정 진입 시 다중 다이얼로그 중복 체크
+        if (activeAlertDialog?.isShowing == true) return
+
         val prefs = ctx.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
 
         val mainContainer = LinearLayout(ctx).apply {
@@ -655,7 +698,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
         val allProviders = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
         
-        // 🌟 최상단에 배치되는 프로바이더별 Auto-add 옵션 카드 설정
+        // 🌟 접고 펼칠 수 있는 프로바이더별 Auto-add 옵션 카드 설정
         val providerSettingsCard = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(25, 25, 25, 25)
@@ -664,14 +707,50 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 setMargins(0, 0, 0, 20)
             }
         }
+
+        // 헤더 가로 레이아웃 (타이틀 + 화살표 토글)
+        val headerRow = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
         val providerSettingsTitle = TextView(ctx).apply {
             text = "Provider Auto-Add Settings"
             setTextColor(Color.WHITE)
             textSize = 14f
             typeface = android.graphics.Typeface.DEFAULT_BOLD
-            setPadding(0, 0, 0, 15)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
-        providerSettingsCard.addView(providerSettingsTitle)
+
+        val toggleArrow = TextView(ctx).apply {
+            text = "▽" // 초기 상태: 접힘 (▽)
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            setPadding(15, 10, 15, 10)
+        }
+
+        headerRow.addView(providerSettingsTitle)
+        headerRow.addView(toggleArrow)
+        providerSettingsCard.addView(headerRow)
+
+        // 🌟 프로바이더 목록 세로 레이아웃 컨테이너 (초기 상태 숨김: View.GONE)
+        val providersContainer = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            setPadding(0, 15, 0, 0)
+        }
+        providerSettingsCard.addView(providersContainer)
+
+        // 헤더 영역 탭 시 접고 펼치기 전환 리스너
+        headerRow.setOnClickListener {
+            if (providersContainer.visibility == View.VISIBLE) {
+                providersContainer.visibility = View.GONE
+                toggleArrow.text = "▽"
+            } else {
+                providersContainer.visibility = View.VISIBLE
+                toggleArrow.text = "▲"
+            }
+        }
 
         val tempAutoAddSettings = mutableMapOf<String, Boolean>()
         val providerCheckBoxMap = mutableMapOf<String, MutableList<CheckBox>>()
@@ -693,18 +772,18 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             }
             val providerSwitch = Switch(ctx).apply {
-                    text = "Auto-add"
-                    textSize = 12f
-                    isChecked = tempAutoAddSettings[pName] ?: false
-                    setOnCheckedChangeListener { _, isChecked ->
-                        // 단순히 "자동 추가 설정"의 임시 버퍼 값만 갱신하고 끝냅니다. (하위 체크박스는 건드리지 않음)
-                        tempAutoAddSettings[pName] = isChecked
+                text = "Auto-add"
+                textSize = 12f
+                isChecked = tempAutoAddSettings[pName] ?: false
+                setOnCheckedChangeListener { _, isChecked ->
+                    tempAutoAddSettings[pName] = isChecked
                 }
             }
-            
             providerRow.addView(providerLabel)
             providerRow.addView(providerSwitch)
-            providerSettingsCard.addView(providerRow)
+            
+            // 🌟 원래 card에 담았던 프로바이더 행을 접이식 컨테이너인 providersContainer에 위임합니다.
+            providersContainer.addView(providerRow)
         }
         listLayout.addView(providerSettingsCard)
 
@@ -979,7 +1058,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 }
             }
 
-            // 🌟 임시 저장 버퍼에 담긴 프로바이더별 Auto-add 옵션 일괄 트랜잭션 기록
             tempAutoAddSettings.forEach { (pName, isChecked) ->
                 editor.putBoolean("auto_add_${instanceId}_$pName", isChecked)
             }
@@ -996,6 +1074,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         }
 
         closeBtn.setOnClickListener { dialog.dismiss() }
+        
+        activeAlertDialog = dialog
         dialog.show()
     }
 }
