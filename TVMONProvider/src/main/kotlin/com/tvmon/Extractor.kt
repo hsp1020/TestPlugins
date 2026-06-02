@@ -53,13 +53,20 @@ class BunnyPoorCdn : ExtractorApi() {
         synchronized(this) { if (currentProxyServer != null) { currentProxyServer?.stop(); currentProxyServer = null } }
 
         var cleanUrl = url.replace(Regex("[\\r\\n\\s]"), "").trim()
-        val cleanReferer = referer?.replace(Regex("[\\r\\n\\s]"), "")?.trim() ?: "https://tvmon.site/"
+        val cleanReferer = if (referer.isNullOrEmpty() || (referer.contains("tvmon") && !referer.contains(TVMon.currentMainUrl))) {
+            TVMon.currentMainUrl + "/"
+        } else {
+            referer.replace(Regex("[\\r\\n\\s]"), "").trim()
+        }
         
         if (!cleanUrl.contains("v/f/") && !cleanUrl.contains("v/e/")) {
             try {
-                val refRes = app.get(cleanReferer)
-                Regex("""(?:src|data-player\d*)=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)?.let {
-                    cleanUrl = it.groupValues[1].replace("&amp;", "&").trim()
+                val refRes = app.get(cleanReferer, headers = mapOf("User-Agent" to DESKTOP_UA))
+                val iframeMatch = Regex("""src=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
+                    ?: Regex("""data-player\d*=['"](https://player\.bunny-frame\.online/[^"']+)['"]""").find(refRes.text)
+                
+                if (iframeMatch != null) {
+                    cleanUrl = iframeMatch.groupValues[1].replace("&amp;", "&").trim()
                 }
             } catch (e: Exception) {}
         }
@@ -226,9 +233,22 @@ class BunnyPoorCdn : ExtractorApi() {
                         if (reqUrl.contains("/c.html") && reqUrl.contains("token=")) {
                             detectedCUrl = reqUrl
                             view?.post { view.evaluateJavascript(hookScript, null) }
-                            handler.postDelayed({
-                                if (cont.isActive) { try { webView?.destroy(); webView = null } catch (e: Exception) {}; cont.resume(detectedCUrl) }
-                            }, 5000)
+                            
+                            if (sessionKeys.isNotEmpty() && cont.isActive) {
+                                handler.removeCallbacksAndMessages(null)
+                                handler.post {
+                                    try { webView?.destroy(); webView = null } catch (e: Exception) {}
+                                    cont.resume(detectedCUrl)
+                                }
+                            } else {
+                                handler.postDelayed({
+                                    if (cont.isActive) {
+                                        handler.removeCallbacksAndMessages(null)
+                                        try { webView?.destroy(); webView = null } catch (e: Exception) {}
+                                        cont.resume(detectedCUrl)
+                                    }
+                                }, 5000)
+                            }
                         }
                         return super.shouldInterceptRequest(view, request)
                     }
@@ -267,7 +287,6 @@ class BunnyPoorCdn : ExtractorApi() {
                     while (isRunning && serverSocket != null && !serverSocket!!.isClosed) { 
                         try { 
                             val socket = serverSocket!!.accept()
-                            // [수정: 블로킹 I/O 코루틴 스레드 풀 할당]
                             launch(Dispatchers.IO) { handleClient(socket) } 
                         } catch (e: Exception) {
                             delay(100L)
@@ -283,23 +302,29 @@ class BunnyPoorCdn : ExtractorApi() {
         fun setIv(iv: ByteArray) { currentIv = iv }
         fun setTestSegment(url: String) { if (testSegmentUrl == null) testSegmentUrl = url }
 
-        // [수정: 명시적 I/O 분리 컨텍스트 적용]
         private suspend fun handleClient(socket: Socket) = withContext(Dispatchers.IO) {
             try {
                 socket.soTimeout = 5000
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
-                val path = reader.readLine()?.split(" ")?.getOrNull(1) ?: return@withContext
+                val line = reader.readLine() ?: return@withContext
+                val parts = line.split(" ")
+                if (parts.size < 2) return@withContext
+                
+                val path = parts[1]
                 val output = socket.getOutputStream()
 
-                if (path.contains("playlist.m3u8")) {
-                    val payload = currentPlaylist.toByteArray()
-                    output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nConnection: close\r\nContent-Length: ${payload.size}\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
-                    output.write(payload)
-                } else if (path.contains("/key.bin")) {
-                    if (verifiedKey == null) verifiedKey = verifyMultipleKeys()
-                    val keyPayload = verifiedKey ?: ByteArray(16)
-                    output.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\nContent-Length: ${keyPayload.size}\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
-                    output.write(keyPayload)
+                when {
+                    path.contains("playlist.m3u8") -> {
+                        val payload = currentPlaylist.toByteArray()
+                        output.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nConnection: close\r\nContent-Length: ${payload.size}\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
+                        output.write(payload)
+                    }
+                    path.contains("/key.bin") -> {
+                        if (verifiedKey == null) verifiedKey = verifyMultipleKeys()
+                        val keyPayload = verifiedKey ?: ByteArray(16)
+                        output.write("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\nContent-Length: ${keyPayload.size}\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
+                        output.write(keyPayload)
+                    }
                 }
                 output.flush()
             } catch (e: Exception) { 
