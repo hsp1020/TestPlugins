@@ -34,7 +34,6 @@ class DaddyLiveScheduleProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Live)
     override var lang = "en"
     override val hasMainPage = true
-    override val vpnStatus = VPNStatus.MightBeNeeded
     override val hasDownloadSupport = false
     private val userAgent =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
