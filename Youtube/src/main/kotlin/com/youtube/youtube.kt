@@ -9,6 +9,8 @@ import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
+import com.fasterxml.jackson.module.kotlin.readValue
+import com.lagradost.cloudstream3.mapper
 import okhttp3.Interceptor
 import okhttp3.Response
 import java.net.URLEncoder
@@ -1136,7 +1138,8 @@ class YoutubeProvider(
                     val jsonString = extractBalancedJson(possibleJson)
                     if (jsonString != null) {
                         try {
-                            return parseJson<Map<String, Any>>(jsonString)
+                            return mapper.readValue<Map<String, Any>>(jsonString)
+                            
                         } catch (e: Exception) {
                         }
                     }
@@ -1200,7 +1203,7 @@ class YoutubeProvider(
             // 개별 칩들의 이름 기반 동적 매핑 테이블 구축
             val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
             val cachedChipsMap = try {
-                AppUtils.parseJson<List<CachedChip>>(cachedChipsJson).associateBy { it.name }
+                mapper.readValue<List<CachedChip>>(cachedChipsJson).associateBy { it.name }
             } catch (e: Exception) {
                 emptyMap()
             }
@@ -1239,7 +1242,7 @@ class YoutubeProvider(
     private fun getCustomHomepages(): List<CustomSection> {
         val json = appPrefs?.getString("custom_homepages_v3", "[]") ?: "[]"
         val currentList = try {
-            AppUtils.parseJson<List<CustomSection>>(json).toMutableList()
+            mapper.readValue<List<CustomSection>>(json).toMutableList()
         } catch (e: Exception) {
             mutableListOf()
         }
@@ -1260,7 +1263,7 @@ class YoutubeProvider(
         // 2. 홈화면 기동 시 캐싱되었던 "개별" 칩 필터 항목들(요리, 농구 등)을 독립된 채널 레이아웃 구성 요소로 등록 및 동기화
         val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
         try {
-            val cachedChips = AppUtils.parseJson<List<CachedChip>>(cachedChipsJson)
+            val cachedChips = mapper.readValue<List<CachedChip>>(cachedChipsJson)
             cachedChips.forEach { chip ->
                 val stableUrl = "chip_name_${chip.name}"
                 if (currentList.none { it.url == stableUrl }) {
@@ -2492,7 +2495,7 @@ class YoutubeProvider(
                 } else {
                     playerResponseText
                 }
-                val playerResponse = parseJson<PlayerResponse>(targetJson)
+                val playerResponse = mapper.readValue<PlayerResponse>(targetJson)
                 
                 triggerPlaybackTracking(playerResponse.playbackTracking, videoId, isShort)
             } catch (e: Exception) {
