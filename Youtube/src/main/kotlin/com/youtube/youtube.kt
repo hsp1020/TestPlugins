@@ -1274,12 +1274,13 @@ class YoutubeProvider(
 
         if (modified) {
             try {
-                val updatedJson = toJson(currentList)
+                val updatedJson = currentList.toJson()
                 appPrefs?.edit()?.putString("custom_homepages_v3", updatedJson)?.apply()
             } catch (e: Exception) {
                 logError(e)
             }
         }
+        
 
         return currentList
     }
