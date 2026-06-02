@@ -2,7 +2,8 @@ package com.linkkf
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.utils.AppUtils.parseJson
+import com.fasterxml.jackson.module.kotlin.readValue
+import com.lagradost.cloudstream3.mapper
 
 class LinkkfExtractor {
     private val SUBTITLE_BASE_URL = "https://k1.sub1.top/s"
@@ -19,7 +20,7 @@ class LinkkfExtractor {
             if (startIndex == -1 || endIndex == -1 || startIndex >= endIndex) return null
 
             // [고유 개선] 정규식 회피, 안전한 Json 파싱 적용
-            val playerData = parseJson<PlayerData>(scriptContent.substring(startIndex, endIndex + 1))
+            val playerData = mapper.readValue<PlayerData>(scriptContent.substring(startIndex, endIndex + 1))
             val actualUrl = playerData.actualUrl ?: return null
             val subUrl = if (playerData.url != null) "$SUBTITLE_BASE_URL/${playerData.url}.vtt" else ""
 
