@@ -520,7 +520,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
     override suspend fun load(url: String): LoadResponse = coroutineScope {
         val res: CatalogEntry = if (url.startsWith("{")) {
-            parseJson(url)
+            jsonMapper.readValue(url, CatalogEntry::class.java)
         } else {
             val responseText = customSession.get(url).text
             try {
@@ -678,7 +678,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
         }
 
-        val loadData = try { parseJson<LoadData>(data) } catch (e: Exception) { null } ?: return false
+        val loadData = try { jsonMapper.readValue(data, LoadData::class.java) } catch (e: Exception) { null } ?: return false
         
         val primaryId = if (loadData.id?.startsWith("tmdb:") == true && !loadData.imdbId.isNullOrBlank()) {
             loadData.imdbId
@@ -959,7 +959,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         private suspend fun fetchMetas(provider: StremioC, path: String): List<CatalogEntry> {
             return try {
                 val req = StremioC.customSession.get(provider.buildUrl(path), timeout = 120L)
-                if (req.isSuccessful && req.text.isNotBlank()) parseJson<CatalogResponse>(req.text).metas ?: emptyList() else emptyList()
+                if (req.isSuccessful && req.text.isNotBlank()) jsonMapper.readValue(req.text, CatalogResponse::class.java).metas ?: emptyList() else emptyList()
             } catch (e: Exception) { emptyList() }
         }
 
