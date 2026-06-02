@@ -879,7 +879,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             payload["kitsuId"] = if (isKitsuMedia) globalId?.substringAfter("kitsu:")?.substringAfter("mal:") else loadData.kitsuId
 
             withTimeoutOrNull(25000L) {
-                cineStreamProvider.loadLinks(payload.toJson(), isCasting, subtitleInterceptor, callback)
+                cineStreamProvider.loadLinks(payloadJson, isCasting, subtitleInterceptor, callback)
             }
         } catch (e: Exception) {
             e.printStackTrace()
@@ -913,7 +913,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             payload["aniId"] = loadData.anilistId?.toString()
 
             withTimeoutOrNull(25000L) {
-                streamPlayProvider.loadLinks(payload.toJson(), isCasting, subtitleCallback, callback)
+                streamPlayProvider.loadLinks(payloadJson, isCasting, subtitleCallback, callback)
             }
         } catch (e: Exception) {
             e.printStackTrace()
