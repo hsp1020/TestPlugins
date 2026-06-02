@@ -14,6 +14,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
+import com.fasterxml.jackson.module.kotlin.readValue
 
 class CUTVProvider : MainAPI() {
     override var mainUrl = "https://cu-tv.com"
@@ -298,7 +299,7 @@ class CUTVProvider : MainAPI() {
             
             if (matchResult != null) {
                 val jsonData = matchResult.groupValues[1]
-                val matches = json.decodeFromString<List<Map<String, String>>>(jsonData)
+                val matches = mapper.readValue<List<Map<String, String>>>(jsonData)
                 
                 // [우선순위 1]: 실시간 스트림 목록 중에서 썸네일을 실제 호스팅하는 oncahot.com 계열의 미디어 주소를 먼저 찾아 도메인을 추출합니다.
                 val firstOncahotUrl = matches.asSequence()
@@ -378,7 +379,7 @@ class CUTVProvider : MainAPI() {
             
             if (matchResult != null) {
                 val jsonData = matchResult.groupValues[1]
-                val matches = json.decodeFromString<List<Map<String, String>>>(jsonData)
+                val matches = mapper.readValue<List<Map<String, String>>>(jsonData)
                 
                 matches.forEach { matchItem ->
                     val ssid = matchItem["ssid"] ?: ""
@@ -470,7 +471,7 @@ class CUTVProvider : MainAPI() {
             
             if (matchResult != null) {
                 val jsonData = matchResult.groupValues[1]
-                val matches = json.decodeFromString<List<Map<String, String>>>(jsonData)
+                val matches = mapper.readValue<List<Map<String, String>>>(jsonData)
                 
                 val targetMatch = matches.find { it["ssid"] == ssid }
                 
