@@ -98,7 +98,7 @@ object YoutubeUtils {
     fun getProxiedPosterBottom(poster: String?): String? {
         if (poster.isNullOrBlank()) return null
         return try {
-            "https://wsrv.nl/?url=${URLEncoder.encode(poster, "UTF-8")}&w=800&h=1200&fit=contain&cbg=black"
+            "https://wsrv.nl/?url=${URLEncoder.encode(poster, "UTF-8")}&w=800&h=1200&fit=contain&cbg=black&a=bottom"
         } catch (e: Exception) {
             poster
         }
@@ -1190,32 +1190,42 @@ class YoutubeProvider(
     
     override val mainPage: List<MainPageData>
         get() {
-            val list = mutableListOf<MainPageData>()
-            val homeTitle = when(lang) {
-                "ko" -> "홈"
-                "ar" -> "الرئيسية"
-                else -> "Home"
-            }
-
-            if (appPrefs?.getBoolean("show_trending_home", true) == true) {
-                list.add(MainPageData(homeTitle, "Home", horizontalImages = true))
-                
-                val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
-                try {
-                    val chips: List<CachedChip> = AppUtils.parseJson(cachedChipsJson)
-                    chips.forEach { chip ->
-                        list.add(MainPageData(chip.name, "chip_${chip.token}", horizontalImages = true))
-                    }
-                } catch (e: Exception) {
-                    logError(e)
-                }
-            }
-
             val customSections = getCustomHomepages()
-            customSections.filter { it.isEnabled && it.url != "Home" }.forEach { section ->
-                var title = section.name
-                if (title.isBlank()) title = extractNameFromUrl(section.url)
-                list.add(MainPageData(title, section.url, horizontalImages = true))
+            val list = mutableListOf<MainPageData>()
+
+            // 개별 칩들의 이름 기반 동적 매핑 테이블 구축
+            val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
+            val cachedChipsMap = try {
+                AppUtils.parseJson<List<CachedChip>>(cachedChipsJson).associateBy { it.name }
+            } catch (e: Exception) {
+                emptyMap()
+            }
+
+            customSections.filter { it.isEnabled }.forEach { section ->
+                val url = section.url
+                when {
+                    url == "Home" -> {
+                        val homeTitle = when(lang) {
+                            "ko" -> "홈"
+                            "ar" -> "الرئيسية"
+                            else -> "Home"
+                        }
+                        list.add(MainPageData(homeTitle, "Home", horizontalImages = true))
+                    }
+                    url.startsWith("chip_name_") -> {
+                        val chipName = url.removePrefix("chip_name_")
+                        val activeChip = cachedChipsMap[chipName]
+                        if (activeChip != null) {
+                            // 안정적인 고유 칩 이름을 매개로 하여 유튜브로부터 발급받은 최신 active token을 실시간 기입
+                            list.add(MainPageData(activeChip.name, "chip_${activeChip.token}", horizontalImages = true))
+                        }
+                    }
+                    else -> {
+                        var title = section.name
+                        if (title.isBlank()) title = extractNameFromUrl(url)
+                        list.add(MainPageData(title, url, horizontalImages = true))
+                    }
+                }
             }
 
             return list
@@ -1223,11 +1233,50 @@ class YoutubeProvider(
 
     private fun getCustomHomepages(): List<CustomSection> {
         val json = appPrefs?.getString("custom_homepages_v3", "[]") ?: "[]"
-        return try {
-            AppUtils.parseJson<List<CustomSection>>(json)
+        val currentList = try {
+            AppUtils.parseJson<List<CustomSection>>(json).toMutableList()
         } catch (e: Exception) {
-            emptyList()
+            mutableListOf()
         }
+
+        var modified = false
+
+        // 1. 설정 관리 레이아웃에 기본 '홈(Home)' 팩터 영구 보장
+        if (currentList.none { it.url == "Home" }) {
+            val homeTitle = when(lang) {
+                "ko" -> "홈"
+                "ar" -> "الرئيسية"
+                else -> "Home"
+            }
+            currentList.add(0, CustomSection(name = homeTitle, url = "Home", isEnabled = true))
+            modified = true
+        }
+
+        // 2. 홈화면 기동 시 캐싱되었던 "개별" 칩 필터 항목들(요리, 농구 등)을 독립된 채널 레이아웃 구성 요소로 등록 및 동기화
+        val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
+        try {
+            val cachedChips = AppUtils.parseJson<List<CachedChip>>(cachedChipsJson)
+            cachedChips.forEach { chip ->
+                val stableUrl = "chip_name_${chip.name}"
+                if (currentList.none { it.url == stableUrl }) {
+                    currentList.add(CustomSection(name = chip.name, url = stableUrl, isEnabled = true))
+                    modified = true
+                }
+            }
+        } catch (e: Exception) {
+            logError(e)
+        }
+
+        if (modified) {
+            try {
+                val updatedJson = AppUtils.toJson(currentList)
+                appPrefs?.edit()?.putString("custom_homepages_v3", updatedJson)?.apply()
+            } catch (e: Exception) {
+                logError(e)
+            }
+        }
+
+        return currentList
     }
 
     private fun extractNameFromUrl(url: String): String {
@@ -1448,8 +1497,6 @@ class YoutubeProvider(
             for (item in results) {
                 val isShort = item.url.contains("/shorts/")
                 if (isShort) {
-                    // 일반 영상을 보다가 다시 쇼츠가 등장했다는 것은 '새로운 날짜 섹션(새로운 날)'으로 진입했음을 의미함.
-                    // 따라서 이전 날짜 그룹의 정렬을 완료(일반 ➡️ 쇼츠 순)하여 sorted에 비우고 새로 수집 시작.
                     if (tempVods.isNotEmpty()) {
                         sorted.addAll(tempVods)
                         tempVods.clear()
@@ -1461,7 +1508,6 @@ class YoutubeProvider(
                     tempVods.add(item)
                 }
             }
-            // 미처 비워지지 않고 남아있는 마지막 날짜 섹션의 데이터를 순서대로 적재
             if (tempVods.isNotEmpty() || tempShorts.isNotEmpty()) {
                 sorted.addAll(tempVods)
                 sorted.addAll(tempShorts)
