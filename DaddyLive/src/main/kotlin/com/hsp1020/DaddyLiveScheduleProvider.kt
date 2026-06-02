@@ -1,6 +1,7 @@
 package com.hsp1020
 
 import com.fasterxml.jackson.annotation.JsonProperty
+import com.fasterxml.jackson.core.type.TypeReference
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.HomePageList
 import com.lagradost.cloudstream3.HomePageResponse
@@ -17,9 +18,7 @@ import com.lagradost.cloudstream3.fixUrl
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newLiveSearchResponse
 import com.lagradost.cloudstream3.newLiveStreamLoadResponse
-import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
-import com.fasterxml.jackson.module.kotlin.readValue
-import com.lagradost.cloudstream3.mapper
+import com.lagradost.cloudstream3.utils.AppUtils.mapper
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import org.jsoup.nodes.Element
 import java.net.URLDecoder
@@ -35,6 +34,7 @@ class DaddyLiveScheduleProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Live)
     override var lang = "en"
     override val hasMainPage = true
+    override val vpnStatus = VPNStatus.MightBeNeeded
     override val hasDownloadSupport = false
     private val userAgent =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36"
@@ -174,8 +174,9 @@ class DaddyLiveScheduleProvider : MainAPI() {
                 debugLog("load: Extracted Channel Stream ID: $id")
                 
                 val channels = listOf(Channel(eventTitle, "$mainUrl/%s/stream-$id.php"))
-                debugLog("load SUCCESS: Built dynamic channel payload: ${channels.toJson()}")
-                return newLiveStreamLoadResponse(eventTitle, url, dataUrl = channels.toJson()) {
+                val channelsJson = mapper.writeValueAsString(channels) // 안전한 mapper 사용
+                debugLog("load SUCCESS: Built dynamic channel payload: $channelsJson")
+                return newLiveStreamLoadResponse(eventTitle, url, dataUrl = channelsJson) {
                     this.posterUrl = Companion.posterUrl
                 }
             }
@@ -211,13 +212,14 @@ class DaddyLiveScheduleProvider : MainAPI() {
                 val id = it.attr("href").substringAfter("id=")
                 Channel(it.text(), "$mainUrl/%s/stream-$id.php")
             }
+            val channelsJson = mapper.writeValueAsString(channels) // 안전한 mapper 사용
             debugLog("load SUCCESS: Matched title='$eventTitle', generated channels=${channels.size}")
-            Log.d("DDL Schedule - Channels", channels.toJson())
+            Log.d("DDL Schedule - Channels", channelsJson)
             
             val time = event.select(".schedule__time").text()
             val formattedTime = convertGMTToLocalTime(time)
             
-            newLiveStreamLoadResponse("$formattedTime - $eventTitle", url, dataUrl = channels.toJson()){
+            newLiveStreamLoadResponse("$formattedTime - $eventTitle", url, dataUrl = channelsJson){
                 this.posterUrl = Companion.posterUrl
             }
         } catch (e: Exception) {
@@ -236,7 +238,13 @@ class DaddyLiveScheduleProvider : MainAPI() {
         debugLog("loadLinks: Loading links using channel payload: $data")
         return try {
             val players = listOf("stream", "cast", "watch", "plus", "casting", "player")
-            val channels = mapper.readValue<List<Channel>>(data)
+            // AppUtils.parseJson 대신 mapper.readValue 안전 호출
+            val channels = try {
+                mapper.readValue(data, object : TypeReference<List<Channel>>() {})
+            } catch (e: Exception) {
+                debugLog("loadLinks: JSON Parsing Error", e)
+                emptyList()
+            }
             debugLog("loadLinks: Parsed channel count: ${channels.size}")
 
             val links = channels.map {
@@ -247,8 +255,9 @@ class DaddyLiveScheduleProvider : MainAPI() {
                 }
             }.flatten()
 
+            val linksJson = mapper.writeValueAsString(links) // 안전한 mapper 사용
             debugLog("loadLinks: Transporting generated payload to Extractor. URL count: ${links.size}")
-            DaddyLiveExtractor().getUrl(links.toJson(), null, subtitleCallback, callback)
+            DaddyLiveExtractor().getUrl(linksJson, null, subtitleCallback, callback)
             debugLog("loadLinks SUCCESS: Finished delegating links.")
             true
         } catch (e: Exception) {
