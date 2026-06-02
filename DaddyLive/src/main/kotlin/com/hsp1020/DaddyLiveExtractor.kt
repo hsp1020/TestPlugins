@@ -1,10 +1,11 @@
 package com.hsp1020
 
+import com.fasterxml.jackson.core.type.TypeReference
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.base64Decode
-import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
+import com.lagradost.cloudstream3.utils.AppUtils.mapper
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -34,7 +35,12 @@ class DaddyLiveExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val links = tryParseJson<List<Pair<String, String>>>(url)
+        // AppUtils.tryParseJson 대신 mapper 직접 사용
+        val links = try {
+            mapper.readValue(url, object : TypeReference<List<Pair<String, String>>>() {})
+        } catch (e: Exception) {
+            null
+        }
         
         // 단일 URL로 인입된 경우의 예외 처리
         if (links == null) {
