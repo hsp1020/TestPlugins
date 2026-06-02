@@ -1,8 +1,8 @@
 package com.linkkf
 
 import com.fasterxml.jackson.annotation.JsonProperty
+import com.fasterxml.jackson.core.type.TypeReference
 import com.lagradost.cloudstream3.app
-import com.fasterxml.jackson.module.kotlin.readValue
 import com.lagradost.cloudstream3.mapper
 
 class LinkkfExtractor {
@@ -19,8 +19,12 @@ class LinkkfExtractor {
             val endIndex = scriptContent.lastIndexOf("}")
             if (startIndex == -1 || endIndex == -1 || startIndex >= endIndex) return null
 
-            // [고유 개선] 정규식 회피, 안전한 Json 파싱 적용
-            val playerData = mapper.readValue<PlayerData>(scriptContent.substring(startIndex, endIndex + 1))
+            val jsonString = scriptContent.substring(startIndex, endIndex + 1)
+
+            // [고유 개선] 앱 업데이트 시 깨지는 inline 확장 함수(readValue<T>) 대신,
+            // 가장 원시적이고 안전한 TypeReference 직접 주입 방식으로 변경 (ABI 충돌 원천 차단)
+            val playerData = mapper.readValue(jsonString, object : TypeReference<PlayerData>() {})
+            
             val actualUrl = playerData.actualUrl ?: return null
             val subUrl = if (playerData.url != null) "$SUBTITLE_BASE_URL/${playerData.url}.vtt" else ""
 
