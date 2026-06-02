@@ -589,6 +589,18 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                     if (isChecked) holder.nameTxt.setTextColor(Color.WHITE) else holder.nameTxt.setTextColor(Color.GRAY)
                 }
 
+                // --- 시스템 통합 섹션(홈 및 개별 카테고리 칩) 여부 식별 및 예외 안전처리 가미 ---
+                val isSystem = section.url == "Home" || section.url.startsWith("chip_name_")
+                if (isSystem) {
+                    holder.editBtn.visibility = View.GONE
+                    holder.deleteBtn.visibility = View.GONE
+                    holder.urlTxt.setTextColor(Color.parseColor("#4CAF50")) // 시스템 전용 녹색 식별 라벨 지정
+                } else {
+                    holder.editBtn.visibility = View.VISIBLE
+                    holder.deleteBtn.visibility = View.VISIBLE
+                    holder.urlTxt.setTextColor(Color.parseColor("#90CAF9")) // 커스텀 URL 전용 하늘색 라벨 지정
+                }
+
                 holder.editBtn.setOnClickListener {
                     showAddEditDialog(section, holder.adapterPosition)
                 }
