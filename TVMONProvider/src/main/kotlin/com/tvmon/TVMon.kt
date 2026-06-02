@@ -1,6 +1,7 @@
 // 파일명: hsp1020/testplugins/TestPlugins-d1a26fae88cb55c8f1d621560cf4e45bd7fd78f6/TVMONProvider/src/main/kotlin/com/tvmon/TVMon.kt
 package com.tvmon
 
+import android.content.Context
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -16,26 +17,135 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CancellationException
 
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+
 class TVMon : MainAPI() {
-    override var mainUrl = "https://tvmon.site"
+    companion object {
+        var currentMainUrl = "https://tvmon1.com" 
+        var isDomainChecked = false 
+        private val domainMutex = Mutex()
+        private const val PREFS_NAME = "TVMon_Domain_Cache"
+        private const val PREF_KEY = "current_domain"
+    }
+
+    override var mainUrl = currentMainUrl
     override var name = "TVMON"
     override val hasMainPage = true
     override var lang = "ko"
     override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie, TvType.AsianDrama, TvType.Anime, TvType.AnimeMovie)
 
     private val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-    private val commonHeaders = mapOf("User-Agent" to USER_AGENT, "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8", "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7", "Referer" to "$mainUrl/", "Upgrade-Insecure-Requests" to "1")
+    
+    private val commonHeaders: Map<String, String>
+        get() = mapOf(
+            "User-Agent" to USER_AGENT,
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Referer" to "$mainUrl/",
+            "Upgrade-Insecure-Requests" to "1"
+        )
+
     private val tagCleanRegex = Regex("""\s*(한국|해외)?영화\s*\(\d{4}\).*""")
+    private val requestMutex = Mutex()
 
     data class SessionResponse(@JsonProperty("success") val success: Boolean, @JsonProperty("player_url") val playerUrl: String?, @JsonProperty("t") val t: String?, @JsonProperty("sig") val sig: String?)
 
     override val mainPage = mainPageOf("/kor_movie" to "영화", "/drama" to "드라마", "/ent" to "예능", "/sisa" to "시사/다큐", "/movie" to "해외영화", "/world" to "해외드라마", "/animation" to "애니메이션", "/ani_movie" to "극장판 애니", "/old_drama" to "추억의 드라마", "/old_ent" to "추억의 예능")
 
+    private suspend fun checkAndUpdateDomain() {
+        if (isDomainChecked) return
+
+        domainMutex.withLock {
+            if (isDomainChecked) return@withLock
+
+            val prefs = AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val rawCachedDomain = prefs?.getString(PREF_KEY, null)
+            val cachedDomain = rawCachedDomain?.replace("http://", "https://")
+            
+            if (cachedDomain != null && currentMainUrl == "https://tvmon1.com") {
+                currentMainUrl = cachedDomain
+                mainUrl = currentMainUrl
+            }
+
+            val testPath = "/drama"
+            
+            try {
+                val res = app.get("$currentMainUrl$testPath", headers = commonHeaders, timeout = 3L)
+                val extractedUrl = Regex("^https?://[^/]+").find(res.url)?.value ?: currentMainUrl
+                val finalUrl = extractedUrl.replace("http://", "https://")
+                
+                if (res.isSuccessful && (res.text.contains("mov_list") || res.text.contains("item"))) {
+                    if (currentMainUrl != finalUrl) {
+                        currentMainUrl = finalUrl
+                        mainUrl = currentMainUrl
+                        prefs?.edit()?.putString(PREF_KEY, currentMainUrl)?.apply()
+                    }
+                    isDomainChecked = true
+                    return@withLock
+                }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+            }
+
+            val match = Regex("tvmon(\\d+)").find(currentMainUrl)
+            val startNum = match?.groupValues?.get(1)?.toIntOrNull() ?: 1
+            
+            var foundDomain: String? = null
+            
+            coroutineScope {
+                val candidates = (startNum..startNum + 100).map { "https://tvmon$it.com" }
+                val chunks = candidates.chunked(5) 
+                
+                for (chunk in chunks) {
+                    val deferreds = chunk.map { testDomain ->
+                        async {
+                            val testUrl = "$testDomain$testPath"
+                            try {
+                                val res = app.get(testUrl, headers = commonHeaders, timeout = 3L)
+                                val extractedTestUrl = Regex("^https?://[^/]+").find(res.url)?.value ?: testDomain
+                                val testFinalUrl = extractedTestUrl.replace("http://", "https://")
+                                
+                                if (res.isSuccessful && (res.text.contains("mov_list") || res.text.contains("item"))) {
+                                    return@async testFinalUrl
+                                }
+                            } catch (e: Exception) {
+                                if (e is CancellationException) throw e
+                            }
+                            null
+                        }
+                    }
+                    
+                    val results = deferreds.awaitAll()
+                    foundDomain = results.firstOrNull { it != null }
+                    
+                    if (foundDomain != null) break
+                }
+            }
+            
+            if (foundDomain != null) {
+                currentMainUrl = foundDomain!!
+                mainUrl = currentMainUrl
+                isDomainChecked = true
+                prefs?.edit()?.putString(PREF_KEY, currentMainUrl)?.apply()
+                return@withLock
+            }
+            
+            isDomainChecked = true 
+        }
+    }
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        checkAndUpdateDomain()
         val url = "$mainUrl${request.data}?page=$page"
         return try {
             delay((200..800).random().toLong()) 
-            val doc = app.get(url, headers = commonHeaders).document
+            val doc = requestMutex.withLock {
+                app.get(url, headers = commonHeaders).document
+            }
             var elements = doc.select(".mov_list ul li")
             if (elements.isEmpty()) elements = doc.select(".item")
             if (elements.isEmpty()) elements = doc.select("li, div.item")
@@ -65,8 +175,10 @@ class TVMon : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
+        checkAndUpdateDomain()
+        val searchUrl = "$mainUrl/search?stx=$query"
         return try {
-            val doc = app.get("$mainUrl/search?stx=$query", headers = commonHeaders).document
+            val doc = app.get(searchUrl, headers = commonHeaders).document
             var items = doc.select("ul#mov_con_list li").mapNotNull { it.toSearchResponse() }
             if (items.isEmpty()) items = doc.select(".mov_list ul li, .item").mapNotNull { it.toSearchResponse() }
             items
@@ -76,10 +188,18 @@ class TVMon : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        var passedPoster: String? = null; var realUrl = url
+        checkAndUpdateDomain()
+        
+        var targetUrl = url
+        if (!targetUrl.startsWith(mainUrl) && targetUrl.contains("tvmon")) {
+            val path = targetUrl.replace(Regex("https?://[^/]+"), "")
+            targetUrl = mainUrl + path
+        }
+
+        var passedPoster: String? = null; var realUrl = targetUrl
         try {
-            val match = Regex("[?&]cw_poster=([^&]+)").find(url)
-            if (match != null) { passedPoster = URLDecoder.decode(match.groupValues[1], "UTF-8"); realUrl = url.replace(match.value, "").trimEnd('?', '&') }
+            val match = Regex("[?&]cw_poster=([^&]+)").find(targetUrl)
+            if (match != null) { passedPoster = URLDecoder.decode(match.groupValues[1], "UTF-8"); realUrl = targetUrl.replace(match.value, "").trimEnd('?', '&') }
         } catch (e: Exception) {}
 
         val doc = app.get(realUrl, headers = commonHeaders).document
@@ -114,24 +234,32 @@ class TVMon : MainAPI() {
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
-        val doc = try { app.get(data, headers = commonHeaders).document } catch (e: Exception) { if (e is CancellationException) throw e; return false }
+        checkAndUpdateDomain()
+        
+        var targetData = data
+        if (!targetData.startsWith(mainUrl) && targetData.contains("tvmon")) {
+            val path = targetData.replace(Regex("https?://[^/]+"), "")
+            targetData = mainUrl + path
+        }
+
+        val doc = try { app.get(targetData, headers = commonHeaders).document } catch (e: Exception) { if (e is CancellationException) throw e; return false }
 
         if (doc.text().contains("삭제된 영상") || doc.text().contains("존재하지 않는") || doc.text().contains("404")) return false
 
-        if (extractFromApi(doc, data, subtitleCallback, callback)) return true
+        if (extractFromApi(doc, targetData, subtitleCallback, callback)) return true
 
         val iframe = doc.selectFirst("iframe#view_iframe")
         if (iframe != null) {
             val playerUrl = iframe.attr("data-player1").ifEmpty { iframe.attr("data-player2") }.ifEmpty { iframe.attr("src") }
-            if (playerUrl.contains("player.bunny-frame.online")) if(BunnyPoorCdn().extract(fixUrl(playerUrl).replace("&amp;", "&"), data, subtitleCallback, callback, null)) return true
+            if (playerUrl.contains("player.bunny-frame.online")) if(BunnyPoorCdn().extract(fixUrl(playerUrl).replace("&amp;", "&"), targetData, subtitleCallback, callback, null)) return true
         }
 
         try {
-            val webViewDoc = app.get(data, headers = commonHeaders, interceptor = WebViewResolver(Regex("bunny-frame|googleapis"), timeout = 15000L)).document
+            val webViewDoc = app.get(targetData, headers = commonHeaders, interceptor = WebViewResolver(Regex("bunny-frame|googleapis"), timeout = 15000L)).document
             val wbIframe = webViewDoc.selectFirst("iframe#view_iframe") ?: webViewDoc.selectFirst("iframe[src*='bunny-frame']")
             if (wbIframe != null) {
                 val playerUrl = wbIframe.attr("src")
-                if (playerUrl.contains("player.bunny-frame.online")) if(BunnyPoorCdn().extract(fixUrl(playerUrl).replace("&amp;", "&"), data, subtitleCallback, callback, null)) return true
+                if (playerUrl.contains("player.bunny-frame.online")) if(BunnyPoorCdn().extract(fixUrl(playerUrl).replace("&amp;", "&"), targetData, subtitleCallback, callback, null)) return true
             }
         } catch (e: Exception) { if (e is CancellationException) throw e }
 
