@@ -1,4 +1,4 @@
-// 버전 정보: v1.7 - Jackson Tree Parser 통합 최적화, 클래스로더 고속 캐싱 및 스레드-세이프 동기화 보강 버전
+// 버전 정보: v1.9 - Jackson Tree Parser 통합 최적화, 인라인 함수(parsedSafe, getKey) 충돌 원천 차단 및 Throwable 방어막 적용본
 package com.hsp1020
 
 import android.content.Context
@@ -74,8 +74,8 @@ inline fun <T> runSuspendCatching(block: () -> T): Result<T> {
         Result.success(block())
     } catch (c: CancellationException) {
         throw c 
-    } catch (e: Exception) {
-        Result.failure(e)
+    } catch (t: Throwable) { // Exception 대신 Throwable로 변경하여 NoSuchMethodError(Error) 까지 씹고 넘기게 함
+        Result.failure(t)
     }
 }
 
@@ -93,7 +93,6 @@ private inline fun <T> lruSet(maxSize: Int): MutableSet<T> {
     }))
 }
 
-// Jackson용 고속 안전 타입 도우미 확장 함수
 private fun JsonNode?.textOrNull(): String? {
     if (this == null || this.isNull) return null
     return this.asText().takeIf { it.isNotBlank() && it != "null" }
@@ -180,11 +179,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
         @Volatile private var hasSyncedCineStreamSettings = false
         
-        // 클래스로더 조회 비용을 제거하기 위한 동적 리플렉션 캐싱
         @Volatile private var cachedClassLoader: ClassLoader? = null
 
-        // 대용량 데이터 로깅 전용 고속 Jackson 매퍼 사전 할당
-        private val jsonMapper: ObjectMapper by lazy {
+        val jsonMapper: ObjectMapper by lazy {
             jacksonObjectMapper()
                 .configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
         }
@@ -194,7 +191,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         private val kitsuMetaCache = ConcurrentHashMap<String, Pair<String, Long>>()
         private val tmdbFindCache = ConcurrentHashMap<String, Pair<Pair<String, String>?, Long>>()
         private val aniZipCache = ConcurrentHashMap<String, Pair<Pair<Int?, Int?>?, Long>>()
-        private const val METADATA_CACHE_TTL = 12 * 60 * 60 * 1000L // 12시간 로컬 캐싱 유지
+        private const val METADATA_CACHE_TTL = 12 * 60 * 60 * 1000L
 
         suspend fun getOrFetchKitsu(url: String): String? {
             val now = System.currentTimeMillis()
@@ -218,7 +215,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     maxRequests = 70
                     maxRequestsPerHost = 40
                 })
-                .connectionPool(ConnectionPool(45, 15, TimeUnit.SECONDS)) // Keep-Alive 시간을 단축시켜 소켓 누출 제어
+                .connectionPool(ConnectionPool(45, 15, TimeUnit.SECONDS))
                 .build()
                 
             Requests(newClient).apply {
@@ -233,15 +230,12 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
 
         fun loadProviderDynamically(pluginKeyword: String, className: String): MainAPI? {
-            // 캐시된 클래스로더가 있다면 즉시 리턴하여 무거운 리플렉션 무력화
             val loader = cachedClassLoader
             if (loader != null) {
                 try {
                     val clazz = loader.loadClass(className)
                     return clazz.newInstance() as? MainAPI
-                } catch (e: Exception) {
-                    // 클래스로더 미일치 시 풀백 스캔 작동
-                }
+                } catch (e: Exception) {}
             }
             try {
                 val pmClass = Class.forName("com.lagradost.cloudstream3.plugins.PluginManager")
@@ -320,7 +314,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
             }
 
-            // getOrPut은 원자적이며 절대 null을 반환하지 않음
             val mutex = cacheMutexes.getOrPut(key) { Mutex() }
 
             return mutex.withLock {
@@ -406,7 +399,10 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             return cachedManifest
         }
 
-        val res = runSuspendCatching { customSession.get(currentUrl, timeout = 120L).parsedSafe<Manifest>() }.getOrNull()
+        val res = runSuspendCatching { 
+            val text = customSession.get(currentUrl, timeout = 120L).text
+            if (text.isNotBlank()) jsonMapper.readValue(text, Manifest::class.java) else null
+        }.getOrNull()
 
         if (res != null && res.catalogs.isNotEmpty()) {
             cachedManifest = res
@@ -522,7 +518,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         } else {
             val responseText = customSession.get(url).text
             try {
-                // 이중 Jackson 파싱 구조 및 JSONObject 변환 병목 전면 차단
                 val rootNode = jsonMapper.readTree(responseText)
                 val metaNode = rootNode.get("meta") ?: rootNode
                 jsonMapper.treeToValue(metaNode, CatalogEntry::class.java) 
@@ -613,7 +608,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
         val addonDeferred = async(Dispatchers.IO) {
             runSuspendCatching {
-                val response = customSession.get(buildUrl("/meta/${res.type}/$encodedId.json")).parsedSafe<CatalogResponse>()
+                val text = customSession.get(buildUrl("/meta/${res.type}/$encodedId.json")).text
+                val response = if (text.isNotBlank()) jsonMapper.readValue(text, CatalogResponse::class.java) else null
                 response?.meta ?: response?.metas?.firstOrNull { it.id == res.id } ?: response?.metas?.firstOrNull()
             }.getOrNull()
         }
@@ -626,7 +622,10 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val mediaType = if (res.type == "movie") "movie" else "tv"
                 val detailAppend = if (mediaType == "movie") "release_dates,credits,images,videos,external_ids,recommendations,translations" else "content_ratings,credits,images,videos,external_ids,recommendations,translations"
                 val detailUrl = buildTmdbUrl("/$mediaType/$id", "append_to_response" to detailAppend)
-                runSuspendCatching { customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>() }.getOrNull()
+                runSuspendCatching { 
+                    val text = customSession.get(detailUrl).text
+                    if (text.isNotBlank()) jsonMapper.readValue(text, TmdbDetailResponse::class.java) else null
+                }.getOrNull()
             }
         }
 
@@ -662,15 +661,16 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
     
+        // 파괴적 인라인 함수 CloudStreamApp.getKey 에 대한 Throwable 방어막 적용
         runSuspendCatching {
-            val keys = CloudStreamApp.getKeys("download_header_cache") ?: emptyList()
+            val keys = try { CloudStreamApp.getKeys("download_header_cache") ?: emptyList() } catch (t: Throwable) { emptyList() }
             for (fullKey in keys) {
                 val realKey = fullKey.removePrefix("download_header_cache/")
                 if (realKey.isNotEmpty() && !realKey.all { it.isDigit() || it == '-' }) {
-                    val entry = CloudStreamApp.getKey<Map<String, Any>>("download_header_cache", realKey)
+                    val entry = try { CloudStreamApp.getKey<Map<String, Any>>("download_header_cache", realKey) } catch (t: Throwable) { null }
                     val entryId = entry?.get("id")?.toString()
                     if (entryId != null) {
-                        CloudStreamApp.setKey("download_header_cache", entryId, entry)
+                        try { CloudStreamApp.setKey("download_header_cache", entryId, entry) } catch (t: Throwable) {}
                     }
                 }
             }
@@ -721,7 +721,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             {
                 runSuspendCatching {
                     val url = buildUrl("/stream/$targetType/$encodedPrimaryId.json")
-                    val res = customSession.get(url, timeout = 120L).parsedSafe<StreamsResponse>()
+                    val text = customSession.get(url, timeout = 120L).text
+                    val res = if (text.isNotBlank()) jsonMapper.readValue(text, StreamsResponse::class.java) else null
                     res?.streams?.forEach { stream -> stream.runCallback(this@StremioC, subtitleCallback, wrappedCallback) }
                 }
             },
@@ -754,15 +755,17 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
             source.all.forEach { (key, value) ->
                 try {
-                    val currentValue = CloudStreamApp.getKey<Any>(key)
+                    val currentValue = try { CloudStreamApp.getKey<Any>(key) } catch (t: Throwable) { null }
                     if (currentValue != value) {
-                        when (value) {
-                            is Boolean -> CloudStreamApp.setKey(key, value)
-                            is String -> CloudStreamApp.setKey(key, value)
-                            is Int -> CloudStreamApp.setKey(key, value)
-                            is Long -> CloudStreamApp.setKey(key, value)
-                            is Float -> CloudStreamApp.setKey(key, value)
-                        }
+                        try {
+                            when (value) {
+                                is Boolean -> CloudStreamApp.setKey(key, value)
+                                is String -> CloudStreamApp.setKey(key, value)
+                                is Int -> CloudStreamApp.setKey(key, value)
+                                is Long -> CloudStreamApp.setKey(key, value)
+                                is Float -> CloudStreamApp.setKey(key, value)
+                            }
+                        } catch (t: Throwable) {}
                     }
                 } catch (e: Exception) {}
             }
@@ -844,7 +847,17 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 if (cachedCustomHosts != null && now - cachedCustomHostsTime < SETTINGS_CACHE_TTL) {
                     return@withContext cachedCustomHosts!!
                 }
-                val raw = CloudStreamApp.getKey<String>("stremio_addons") ?: ""
+                
+                val raw = try { 
+                    CloudStreamApp.getKey<String>("stremio_addons") ?: "" 
+                } catch (t: Throwable) {
+                    try {
+                        val prefs = CloudStreamApp.context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
+                        val v = prefs?.getString("stremio_addons", "") ?: ""
+                        if(v.startsWith("\"") && v.endsWith("\"")) v.substring(1, v.length-1) else v
+                    } catch(e: Exception) { "" }
+                }
+                
                 val hosts = raw.lines()
                     .filter { it.isNotBlank() }
                     .mapNotNull { runCatching { URI(it.split("|").getOrElse(1) { "" }).host }.getOrNull() }
@@ -871,7 +884,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
 
             val payload = buildBasePayload(loadData, targetType, globalId, globalSeason, globalEpisode)
-
+            
             val isKitsuMedia = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
             payload["id"] = payload["imdbId"] ?: ""
             payload["anilistId"] = loadData.anilistId
@@ -883,8 +896,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             withTimeoutOrNull(25000L) {
                 cineStreamProvider.loadLinks(payloadJson, isCasting, subtitleInterceptor, callback)
             }
-            
-        
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -909,7 +920,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             
             payload["id"] = loadData.tmdbId ?: loadData.imdbId ?: loadData.id
             payload["year"] = loadData.year ?: loadData.airedYear
-
+            
             if (payload["title"] == null || payload["title"] == "Unknown") {
                 payload["title"] = loadData.id ?: payload["id"]?.toString() ?: "Unknown Title"
             }
@@ -921,7 +932,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             withTimeoutOrNull(25000L) {
                 streamPlayProvider.loadLinks(payloadJson, isCasting, subtitleCallback, callback)
             }
-
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -963,9 +973,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
         private suspend fun fetchMetas(provider: StremioC, path: String): List<CatalogEntry> {
             return try {
-                val req = StremioC.customSession.get(provider.buildUrl(path), timeout = 120L)
-                if (req.isSuccessful && req.text.isNotBlank()) jsonMapper.readValue(req.text, CatalogResponse::class.java).metas ?: emptyList() else emptyList()
-            } catch (e: Exception) { emptyList() }
+                val text = StremioC.customSession.get(provider.buildUrl(path), timeout = 120L).text
+                if (text.isNotBlank()) jsonMapper.readValue(text, CatalogResponse::class.java).metas ?: emptyList() else emptyList()
+            } catch (e: Throwable) { emptyList() }
         }
 
         suspend fun search(query: String, provider: StremioC): List<SearchResponse> {
@@ -1086,7 +1096,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             } else {
                 val detailAppend = if (isMovie) "release_dates,credits,images,videos,external_ids,recommendations,translations" else "content_ratings,credits,images,videos,external_ids,recommendations,translations"
                 val detailUrl = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr", "append_to_response" to detailAppend)
-                val fetched = StremioC.customSession.get(detailUrl).parsedSafe<TmdbDetailResponse>()
+                val text = StremioC.customSession.get(detailUrl).text
+                val fetched = if (text.isNotBlank()) jsonMapper.readValue(text, TmdbDetailResponse::class.java) else null
                 if (fetched != null) {
                     tmdbDetailsCache[cacheKey] = Pair(fetched, System.currentTimeMillis())
                 }
@@ -1102,7 +1113,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             coroutineScope {
                 val shouldFetchEpisodes = (!isMovie && targetVideos.isNullOrEmpty()) || (stremioType == "other" && !isMovie)
                 
-                // 불필요한 계층적 async 래퍼와 대기 지연 제거
                 val episodeDeferred = if (shouldFetchEpisodes) {
                     var requiredSeasons = targetVideos?.mapNotNull { it.seasonNumber }?.filter { it > 0 }?.distinct() ?: emptyList()
                     if (requiredSeasons.isEmpty()) {
@@ -1120,7 +1130,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                                         val seasonRes = if (cachedSeason != null && System.currentTimeMillis() - cachedSeason.second < METADATA_CACHE_TTL) {
                                             cachedSeason.first
                                         } else {
-                                            val fetchedSeason = StremioC.customSession.get(provider.buildTmdbUrl("/tv/$tmdbIdStr/season/$seasonNum")).parsedSafe<TmdbSeasonDetail>()
+                                            val fetchedSeasonText = StremioC.customSession.get(provider.buildTmdbUrl("/tv/$tmdbIdStr/season/$seasonNum")).text
+                                            val fetchedSeason = if (fetchedSeasonText.isNotBlank()) jsonMapper.readValue(fetchedSeasonText, TmdbSeasonDetail::class.java) else null
                                             if (fetchedSeason != null) {
                                                 tmdbSeasonCache[seasonCacheKey] = Pair(fetchedSeason, System.currentTimeMillis())
                                             }
@@ -1138,13 +1149,14 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     if (isMovie && detailRes.belongs_to_collection?.id != null) {
                         runSuspendCatching {
                             val colUrl = provider.buildTmdbUrl("/collection/${detailRes.belongs_to_collection.id}")
-                            StremioC.customSession.get(colUrl).parsedSafe<TmdbCollectionDetail>()?.parts ?: emptyList()
+                            val colText = StremioC.customSession.get(colUrl).text
+                            if (colText.isNotBlank()) jsonMapper.readValue(colText, TmdbCollectionDetail::class.java).parts ?: emptyList() else emptyList()
                         }.getOrDefault(emptyList())
                     } else emptyList()
                 }
 
                 val collectionParts = collectionDeferred.await()
-                episodeDeferred?.awaitAll() // 평탄화된 비동기 풀의 동시 자원 조율 완료
+                episodeDeferred?.awaitAll()
 
                 val tmdbRecs = detailRes.recommendations?.results ?: emptyList()
                 val finalCombinedMedia = (collectionParts + tmdbRecs)
@@ -1166,7 +1178,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         this.posterUrl = customPosterUrl 
                     }
                 }.take(50)
-             
             }
 
             val fetchedAgeRating = if (isMovie) {
@@ -1294,7 +1305,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         cachedFind.first
                     } else {
                         val fetchedFind = runSuspendCatching {
-                            val findRes = StremioC.customSession.get(provider.buildTmdbUrl("/find/$finalImdbId", "external_source" to "imdb_id")).parsedSafe<TmdbFindResponse>()
+                            val fetchedFindText = StremioC.customSession.get(provider.buildTmdbUrl("/find/$finalImdbId", "external_source" to "imdb_id")).text
+                            val findRes = if (fetchedFindText.isNotBlank()) jsonMapper.readValue(fetchedFindText, TmdbFindResponse::class.java) else null
                             val movieMatch = findRes?.movie_results?.firstOrNull()
                             if (movieMatch?.id != null) Pair(movieMatch.id.toString(), "movie") else findRes?.tv_results?.firstOrNull()?.id?.let { Pair(it.toString(), "tv") }
                         }.getOrNull()
@@ -1378,7 +1390,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             var finalMalId = fetchedMalId
             var finalAniId = fetchedAniListId
 
-            // Ani.zip 비동기 병렬 매핑 최적화 구조 가동
             val aniZipDeferred = if (isAnimeMedia && finalImdbId != null) {
                 async(Dispatchers.IO) {
                     val cacheKey = finalImdbId
