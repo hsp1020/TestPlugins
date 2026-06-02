@@ -18,6 +18,8 @@ import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newLiveSearchResponse
 import com.lagradost.cloudstream3.newLiveStreamLoadResponse
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
+import com.fasterxml.jackson.module.kotlin.readValue
+import com.lagradost.cloudstream3.mapper
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import org.jsoup.nodes.Element
 import java.net.URLDecoder
@@ -234,7 +236,7 @@ class DaddyLiveScheduleProvider : MainAPI() {
         debugLog("loadLinks: Loading links using channel payload: $data")
         return try {
             val players = listOf("stream", "cast", "watch", "plus", "casting", "player")
-            val channels = parseJson<List<Channel>>(data)
+            val channels = mapper.readValue<List<Channel>>(data)
             debugLog("loadLinks: Parsed channel count: ${channels.size}")
 
             val links = channels.map {
