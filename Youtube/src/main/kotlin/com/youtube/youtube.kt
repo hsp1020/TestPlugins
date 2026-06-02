@@ -8,6 +8,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
+import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import okhttp3.Interceptor
 import okhttp3.Response
 import java.net.URLEncoder
@@ -19,6 +20,9 @@ import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
 import com.lagradost.cloudstream3.AcraApplication
 import androidx.preference.PreferenceManager
+
+
+
 
 object YoutubeUtils {
     const val CHROME_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
@@ -1231,6 +1235,7 @@ class YoutubeProvider(
             return list
         }
 
+
     private fun getCustomHomepages(): List<CustomSection> {
         val json = appPrefs?.getString("custom_homepages_v3", "[]") ?: "[]"
         val currentList = try {
@@ -1269,7 +1274,7 @@ class YoutubeProvider(
 
         if (modified) {
             try {
-                val updatedJson = AppUtils.toJson(currentList)
+                val updatedJson = toJson(currentList)
                 appPrefs?.edit()?.putString("custom_homepages_v3", updatedJson)?.apply()
             } catch (e: Exception) {
                 logError(e)
@@ -1278,6 +1283,7 @@ class YoutubeProvider(
 
         return currentList
     }
+
 
     private fun extractNameFromUrl(url: String): String {
         return when {
