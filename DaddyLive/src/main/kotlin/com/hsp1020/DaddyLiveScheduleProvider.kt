@@ -18,7 +18,8 @@ import com.lagradost.cloudstream3.fixUrl
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newLiveSearchResponse
 import com.lagradost.cloudstream3.newLiveStreamLoadResponse
-import com.lagradost.cloudstream3.utils.AppUtils.mapper
+import com.fasterxml.jackson.module.kotlin.readValue
+import com.lagradost.cloudstream3.mapper
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import org.jsoup.nodes.Element
 import java.net.URLDecoder
