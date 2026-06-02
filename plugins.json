@@ -21,10 +21,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/DaddyLive/live-streaming.png",
-        "fileHash": "sha256-4906c4a0821acb9477e2611f5d54ee7b32be74631affd0a1a2f55d440d1e080c",
+        "fileHash": "sha256-c4d0bd2f89cc9ded87dfd9e6714dd2b5681f02cde7d7bb6752f6e744ae669452",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 25651,
+        "fileSize": 25019,
         "status": 1,
         "authors": [
             "hsp1020"
@@ -83,10 +83,10 @@
     },
     {
         "iconUrl": "https://i.namu.wiki/i/4NbnTney9AChyoNRvChxbZQE806zcx9Z_wIjM32htHGOcp7ZOQWFvBCSyQfTu3NloC8WRcRE4hnGq2FNxOFdxjvYm82uiRnwMhu95ehEDONK8OSiIVctKBYVWmU7FjOItqs5Hf0OEZRbAbL9yE5a8w.webp",
-        "fileHash": "sha256-a999ca0fe401bc59fbb01bf969d5dbda2683e77bfd69d743acff274b020607d8",
+        "fileHash": "sha256-be448d6c4e4ee70b535a9e12c7268d7bb90b041cdb908664ec396d05ad542c7d",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 18766,
+        "fileSize": 18342,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -148,10 +148,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hexated/cloudstream-extensions-hexated/master/StremioX/icon.png",
-        "fileHash": "sha256-de1dcf74f9c248071fbe2dc9516752e60ba6dbabaab15d74e056f6af59db222e",
+        "fileHash": "sha256-777dbad78b10fb9c311b08aefaa2022209803c03e229d826e33997cbea714e1a",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 176838,
+        "fileSize": 176975,
         "status": 1,
         "language": "en",
         "authors": [
@@ -260,10 +260,10 @@
     },
     {
         "iconUrl": "https://upload.wikimedia.org/wikipedia/commons/thumb/0/09/YouTube_full-color_icon_%282017%29.svg/3840px-YouTube_full-color_icon_%282017%29.svg.png",
-        "fileHash": "sha256-df864df856d00233936ea5a4bf65d1694614dfa8224bd40ce1c0cdfd779289bd",
+        "fileHash": "sha256-87b7c47e03e1940f481cf5600668e2432bb9d64145c8bb4266fe474d5bd615d6",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 164275,
+        "fileSize": 164222,
         "status": 1,
         "authors": [
             "hsp1020"
