@@ -871,16 +871,20 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
 
             val payload = buildBasePayload(loadData, targetType, globalId, globalSeason, globalEpisode)
-            
+
             val isKitsuMedia = globalId?.startsWith("kitsu:") == true || globalId?.startsWith("mal:") == true
             payload["id"] = payload["imdbId"] ?: ""
             payload["anilistId"] = loadData.anilistId
             payload["isKitsu"] = isKitsuMedia
             payload["kitsuId"] = if (isKitsuMedia) globalId?.substringAfter("kitsu:")?.substringAfter("mal:") else loadData.kitsuId
 
+            val payloadJson = jsonMapper.writeValueAsString(payload)
+
             withTimeoutOrNull(25000L) {
                 cineStreamProvider.loadLinks(payloadJson, isCasting, subtitleInterceptor, callback)
             }
+            
+        
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -905,16 +909,19 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             
             payload["id"] = loadData.tmdbId ?: loadData.imdbId ?: loadData.id
             payload["year"] = loadData.year ?: loadData.airedYear
-            
+
             if (payload["title"] == null || payload["title"] == "Unknown") {
                 payload["title"] = loadData.id ?: payload["id"]?.toString() ?: "Unknown Title"
             }
             payload["lastSeason"] = 1 
             payload["aniId"] = loadData.anilistId?.toString()
 
+            val payloadJson = jsonMapper.writeValueAsString(payload)
+
             withTimeoutOrNull(25000L) {
                 streamPlayProvider.loadLinks(payloadJson, isCasting, subtitleCallback, callback)
             }
+
         } catch (e: Exception) {
             e.printStackTrace()
         }
@@ -1153,10 +1160,13 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     val customPosterUrl = "https://extendedratings.com/poster/tmdb:$posterType:$recTmdbId.jpg?config=61283890-4982-401b-8545-9ccb957ed4ca"
                     
                     val thinData = LoadData(id = "tmdb:${media.id}", type = outType)
-                    provider.newMovieSearchResponse(recTitle, thinData.toJson(), if (outType == "movie") TvType.Movie else TvType.TvSeries) { 
+                    val thinDataJson = jsonMapper.writeValueAsString(thinData)
+                    
+                    provider.newMovieSearchResponse(recTitle, thinDataJson, if (outType == "movie") TvType.Movie else TvType.TvSeries) { 
                         this.posterUrl = customPosterUrl 
                     }
                 }.take(50)
+             
             }
 
             val fetchedAgeRating = if (isMovie) {
