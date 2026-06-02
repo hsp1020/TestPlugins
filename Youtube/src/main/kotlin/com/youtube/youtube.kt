@@ -1275,7 +1275,7 @@ class YoutubeProvider(
 
         if (modified) {
             try {
-                val updatedJson = currentList.toJson()
+                val updatedJson = mapper.writeValueAsString(currentList) // 리플렉션 비용 제거
                 appPrefs?.edit()?.putString("custom_homepages_v3", updatedJson)?.apply()
             } catch (e: Exception) {
                 logError(e)
