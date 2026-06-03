@@ -364,8 +364,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
                         if (currentPlayer == null) {
                             consecutiveNulls++
-                            android.util.Log.w("StremioX-SYNC", "startMonitoring() - Player not found. Failure counter: $consecutiveNulls/5")
-                            if (consecutiveNulls >= 5) {
+                            android.util.Log.w("StremioX-SYNC", "startMonitoring() - Player not found. Failure counter: $consecutiveNulls/2")
+                            if (consecutiveNulls >= 2) { // 5초에서 2초(2회 미검출)로 단축하여 백그라운드 절전 진입 전 즉시 신호 전송
                                 android.util.Log.d("StremioX-SYNC", "startMonitoring() - Player missing limit reached. Triggering playback stop at: ${String.format("%.2f", lastKnownProgressPercent)}%")
                                 triggerPlaybackStop(lastKnownProgressPercent)
                                 break
@@ -394,6 +394,19 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         }
                     }
                 }
+            }
+
+            fun startNewSession(newSession: PlaybackSession) {
+                val oldSession = activeSession
+                if (oldSession != null && (oldSession.imdbId != newSession.imdbId || oldSession.season != newSession.season || oldSession.episode != newSession.episode)) {
+                    android.util.Log.d("StremioX-SYNC", "startNewSession() - Active session exists. Stopping old session first: IMDB=${oldSession.imdbId}, S=${oldSession.season}, E=${oldSession.episode} at ${String.format("%.2f", lastKnownProgressPercent)}%")
+                    
+                    activeSession = null
+                    triggerPlaybackStopExplicit(oldSession, lastKnownProgressPercent)
+                }
+                
+                activeSession = newSession
+                triggerPlaybackStart()
             }
 
             fun triggerPlaybackStart() {
@@ -453,7 +466,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         val simklClientId = getPrefString("simkl_client_id")
                         val simklToken = getPrefString("simkl_access_token")
 
-                        // 80% 미만일 때는 'pause'를 호출하여 이어보기 지점을 저장하고, 80% 이상일 때만 'stop'을 호출해 완료 처리합니다.
+                        // 80% 미만일 때는 'pause'를 호출해 대시보드 이어보기를 보장하고, 80% 이상일 때만 'stop'을 호출해 최종 완료(시청함) 처리합니다.
                         val action = if (progressPercent >= 80.0) "stop" else "pause"
 
                         if (traktToken.isNotBlank() && traktClientId.isNotBlank()) {
@@ -468,6 +481,29 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
             }
 
+            private fun triggerPlaybackStopExplicit(session: PlaybackSession, progressPercent: Double) {
+                android.util.Log.d("StremioX-SYNC", "triggerPlaybackStopExplicit() - Explicit final progress on stopping: ${String.format("%.2f", progressPercent)}%")
+
+                kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    runSuspendCatching {
+                        val traktClientId = getPrefString("trakt_client_id")
+                        val traktToken = getPrefString("trakt_access_token")
+                        val simklClientId = getPrefString("simkl_client_id")
+                        val simklToken = getPrefString("simkl_access_token")
+
+                        val action = if (progressPercent >= 80.0) "stop" else "pause"
+
+                        if (traktToken.isNotBlank() && traktClientId.isNotBlank()) {
+                            android.util.Log.d("StremioX-SYNC", "Calling sendTraktScrobble('$action') for old session")
+                            sendTraktScrobble(action, traktClientId, traktToken, session, progressPercent)
+                        }
+                        if (simklToken.isNotBlank() && simklClientId.isNotBlank()) {
+                            android.util.Log.d("StremioX-SYNC", "Calling sendSimklScrobble('$action') for old session")
+                            sendSimklScrobble(action, simklClientId, simklToken, session, progressPercent.toInt())
+                        }
+                    }
+                }
+            }
 
             private suspend fun sendTraktScrobble(action: String, clientId: String, token: String, session: PlaybackSession, progress: Double) {
                 val url = "https://api.trakt.tv/scrobble/$action"
@@ -1241,14 +1277,14 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
         val isMovieMedia = targetType == "movie" || (loadData.season == null && loadData.episode == null)
 
-        PlaybackSyncManager.activeSession = PlaybackSyncManager.PlaybackSession(
+        val newSession = PlaybackSyncManager.PlaybackSession(
             imdbId = loadData.imdbId ?: primaryId,
             tmdbId = loadData.tmdbId,
             season = globalSeason,
             episode = globalEpisode,
             isMovie = isMovieMedia
         )
-        PlaybackSyncManager.triggerPlaybackStart()
+        PlaybackSyncManager.startNewSession(newSession)
 
         return true
     }
