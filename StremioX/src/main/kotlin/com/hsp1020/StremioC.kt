@@ -219,6 +219,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             
             // 프리로드 누수를 차단하기 위해 실제 재생 시점에만 스크롤 시작 통신을 전송하기 위한 플래그
             @Volatile private var isScrobbleStarted = false
+
+            // 사용자가 영상 종료 전에 전원을 끄거나 오토플레이로 넘어가도 85% 돌파 시 선제적으로 stop scrobble을 쏘기 위한 플래그
+            @Volatile private var isScrobbleStopped = false
             
             // 리스너가 중복 등록되어 프래그먼트 감지가 오작동하는 것을 방지하는 정적 해시셋
             private val registeredActivities = ConcurrentHashMap.newKeySet<Int>()
@@ -451,6 +454,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                                     lastKnownProgressPercent = 0.0
                                     playerDetected = true
                                     isScrobbleStarted = false // 세션 복구 단계에서 전송 시작 상태 초기화
+                                    isScrobbleStopped = false // 종료 상태 플래그 초기화
                                 }
                             }
                             
@@ -473,6 +477,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                                     lastKnownProgressPercent = 0.0
                                     playerDetected = true
                                     isScrobbleStarted = false // 신규 화 전이 시 전송 시작 상태 초기화
+                                    isScrobbleStopped = false // 종료 상태 플래그 초기화
                                 }
                             }
 
@@ -480,7 +485,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                             if (activeSession != null) {
                                 playerDetected = true
                                 
-                                // [가장 핵심적 보완] 백그라운드 프리로드 플레이어의 가짜 작동을 차단하기 위해, 실제 비디오가 활성화(Play)된 시점에 최초 1회만 스크롤 전송 트리거 구동
+                                // 백그라운드 프리로드 플레이어의 가짜 작동을 차단하기 위해, 실제 비디오가 활성화(Play)된 시점에 최초 1회만 스크롤 전송 트리거 구동
                                 val playWhenReady = runCatching {
                                     currentPlayer.javaClass.getMethod("getPlayWhenReady").invoke(currentPlayer) as Boolean
                                 }.getOrDefault(true)
@@ -500,6 +505,13 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                                         if (duration > 0L) {
                                             lastKnownProgressPercent = (currentPos.toDouble() * 100.0) / duration.toDouble()
                                             android.util.Log.d("StremioX-SYNC", "Always-On Update: ${String.format("%.2f", lastKnownProgressPercent)}%")
+                                            
+                                            // [핵심 개선] 사용자가 85% 이상 감상 시, 영상 이탈 유무와 관계없이 선제적으로 DB에 영구 커밋 (Trakt/Simkl 동시 적용)
+                                            if (lastKnownProgressPercent >= 85.0 && !isScrobbleStopped) {
+                                                android.util.Log.d("StremioX-SYNC", "Always-On: Progress crossed 85%. Autoplay/Exit expected. Preemptively sending Scrobble Stop.")
+                                                sendPreemptiveStopScrobble(lastKnownProgressPercent)
+                                                isScrobbleStopped = true
+                                            }
                                         }
                                     }.onFailure { e ->
                                         android.util.Log.e("StremioX-SYNC", "Always-On: Property read failed. Resetting player reference: ${e.message}")
@@ -517,16 +529,24 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                                 if (consecutiveNulls >= 3) { // 3초 연속 플레이어 미감지 시 정지 처리
                                     val sessionToStop = activeSession
                                     if (sessionToStop != null) {
-                                        android.util.Log.d("StremioX-SYNC", "Always-On: Player lost. Triggering stop/pause. Progress: ${String.format("%.2f", lastKnownProgressPercent)}%")
-                                        triggerPlaybackStopOnly(lastKnownProgressPercent)
+                                        android.util.Log.d("StremioX-SYNC", "Always-On: Player lost.")
+                                        
+                                        if (isScrobbleStopped) {
+                                            // 85% 시점에서 이미 선제적으로 완료 통신을 쐈다면, 중복 호출 없이 메모리 자원만 정리하고 종료
+                                            android.util.Log.d("StremioX-SYNC", "Always-On: Preemptive stop was already sent. Clearing session silently.")
+                                            activeSession = null
+                                            pendingSession = null
+                                            activePlayer = null
+                                            cachedPlayerFragment = null
+                                            isScrobbleStarted = false
+                                            isScrobbleStopped = false
+                                        } else {
+                                            // 85% 미만 상태에서 시청을 일찍 종료한 경우 일반적인 pause/stop 통신 실행
+                                            triggerPlaybackStopOnly(lastKnownProgressPercent)
+                                        }
                                     }
-                                    activeSession = null
-                                    pendingSession = null
-                                    activePlayer = null
-                                    cachedPlayerFragment = null
                                     playerDetected = false
                                     consecutiveNulls = 0
-                                    isScrobbleStarted = false
                                 }
                             } else {
                                 // 무의미한 유휴(Idle) 상태 진입 시 누적 타이머 체크
@@ -542,6 +562,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                                     activePlayer = null
                                     cachedPlayerFragment = null
                                     isScrobbleStarted = false
+                                    isScrobbleStopped = false
                                     monitoringJob = null
                                     break // 루프를 완전히 빠져나가 고스트 코루틴 사멸 보장
                                 }
@@ -554,7 +575,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             fun startNewSession(newSession: PlaybackSession) {
                 val oldSession = activeSession
                 
-                // [대형 유출 오작동 원인 완벽 제어] 클래스로더 파괴로 인해 세션 변수가 밀렸더라도, 실제 전면에 플레이어 프래그먼트가 물리적으로 떠 있는지 강제 판독
+                // [대형 유출 오작동 원인 제어] 클래스로더 파괴로 인해 세션 변수가 밀렸더라도, 실제 전면에 플레이어 프래그먼트가 물리적으로 떠 있는지 강제 판독
                 val activity = resolveCurrentActivity()
                 val isPlayerFragmentActive = if (activity != null) {
                     val fragmentActivity = activity as? androidx.fragment.app.FragmentActivity
@@ -578,6 +599,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     activeSession = newSession
                     pendingSession = null
                     isScrobbleStarted = false // 신규 정상 셋업 시 전송 상태 초기화
+                    isScrobbleStopped = false // 종료 상태 초기화
                     startAlwaysOnMonitoring()
                 }
             }
@@ -615,7 +637,30 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 activePlayer = null
                 cachedPlayerFragment = null
                 isScrobbleStarted = false
+                isScrobbleStopped = false
 
+                kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    runSuspendCatching {
+                        val traktClientId = getPrefString("trakt_client_id")
+                        val traktToken = getPrefString("trakt_access_token")
+                        val simklClientId = getPrefString("simkl_client_id")
+                        val simklToken = getPrefString("simkl_access_token")
+
+                        val action = if (progressPercent >= 80.0) "stop" else "pause"
+
+                        if (traktToken.isNotBlank() && traktClientId.isNotBlank()) {
+                            sendTraktScrobble(action, traktClientId, traktToken, session, progressPercent)
+                        }
+                        if (simklToken.isNotBlank() && simklClientId.isNotBlank()) {
+                            sendSimklScrobble(action, simklClientId, simklToken, session, progressPercent.toInt())
+                        }
+                    }
+                }
+            }
+
+            // 85% 시점에서 감시 루프 내부에서 직접 호출되는 선제 완료 비동기 통신 함수 (세션 데이터는 루틴을 위해 비우지 않음)
+            private fun sendPreemptiveStopScrobble(progressPercent: Double) {
+                val session = activeSession ?: return
                 kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                     runSuspendCatching {
                         val traktClientId = getPrefString("trakt_client_id")
