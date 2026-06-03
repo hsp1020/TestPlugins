@@ -453,17 +453,21 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         val simklClientId = getPrefString("simkl_client_id")
                         val simklToken = getPrefString("simkl_access_token")
 
+                        // 80% 미만일 때는 'pause'를 호출하여 이어보기 지점을 저장하고, 80% 이상일 때만 'stop'을 호출해 완료 처리합니다.
+                        val action = if (progressPercent >= 80.0) "stop" else "pause"
+
                         if (traktToken.isNotBlank() && traktClientId.isNotBlank()) {
-                            android.util.Log.d("StremioX-SYNC", "Calling sendTraktScrobble('stop')")
-                            sendTraktScrobble("stop", traktClientId, traktToken, session, progressPercent)
+                            android.util.Log.d("StremioX-SYNC", "Calling sendTraktScrobble('$action')")
+                            sendTraktScrobble(action, traktClientId, traktToken, session, progressPercent)
                         }
                         if (simklToken.isNotBlank() && simklClientId.isNotBlank()) {
-                            android.util.Log.d("StremioX-SYNC", "Calling sendSimklScrobble('stop')")
-                            sendSimklScrobble("stop", simklClientId, simklToken, session, progressPercent.toInt())
+                            android.util.Log.d("StremioX-SYNC", "Calling sendSimklScrobble('$action')")
+                            sendSimklScrobble(action, simklClientId, simklToken, session, progressPercent.toInt())
                         }
                     }
                 }
             }
+
 
             private suspend fun sendTraktScrobble(action: String, clientId: String, token: String, session: PlaybackSession, progress: Double) {
                 val url = "https://api.trakt.tv/scrobble/$action"
