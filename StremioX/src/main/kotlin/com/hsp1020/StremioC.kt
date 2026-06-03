@@ -513,7 +513,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val url = "https://api.simkl.com/$mediaType/scrobble"
                 val headers = mapOf(
                     "Content-Type" to "application/json",
-                    "simkl-api-key" to clientId, // 🌟 FIXED: simkl-api-client에서 simkl-api-key로 정정
+                    "simkl-api-key" to clientId,
                     "Authorization" to "Bearer $token"
                 )
 
@@ -933,7 +933,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         var fetchedMalId: Int? = null
         var resolvedImdbId: String? = null
         var resolvedTmdbId: String? = null
-        var kitsuVideos: List<Video>? = null
+        var kitsuVideos: List<StremioVideo>? = null // 🌟 FIXED: Video -> StremioVideo
         
         if (isKitsuOrMal) {
             val targetType = if (res.type == "movie") "movie" else "series"
@@ -954,12 +954,12 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
                         metaObj.get("videos")?.let { arr ->
                             if (arr.isArray) {
-                                val vids = mutableListOf<Video>()
+                                val vids = mutableListOf<StremioVideo>() // 🌟 FIXED: Video -> StremioVideo
                                 for (i in 0 until arr.size()) {
                                     val v = arr.get(i)
                                     if (v != null) {
                                         runSuspendCatching {
-                                            val vid = Video(
+                                            val vid = StremioVideo( // 🌟 FIXED: Video -> StremioVideo
                                                 id = v.get("id").textOrNull(),
                                                 title = v.get("title").textOrNull(),
                                                 name = v.get("name").textOrNull(),
@@ -1459,7 +1459,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         @JsonProperty("description") val description: String? = null, 
         @JsonProperty("imdbRating") val imdbRating: String? = null, 
         @JsonProperty("type") val type: String? = null,
-        @JsonProperty("videos") val videos: List<Video>? = null, 
+        @JsonProperty("videos") val videos: List<StremioVideo>? = null, // 🌟 FIXED: Video -> StremioVideo
         @JsonProperty("genre") val genre: List<String>? = null, 
         @JsonProperty("genres") val genres: List<String> = emptyList(),
         @JsonProperty("cast") val cast: List<String> = emptyList(), 
@@ -1499,14 +1499,14 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
         }
         
-        private fun isSingleMovie(finalType: String?, finalVideos: List<Video>?): Boolean {
+        private fun isSingleMovie(finalType: String?, finalVideos: List<StremioVideo>?): Boolean { // 🌟 FIXED: Video -> StremioVideo
             return (finalType == "movie" && finalVideos?.size == 1 && finalVideos[0].seasonNumber == 1 && (finalVideos[0].episode == 1 || finalVideos[0].number == 1)) ||
                    (finalVideos?.size == 1 && (finalVideos[0].seasonNumber ?: 0) == 0 && (finalVideos[0].episode ?: finalVideos[0].number ?: 0) == 0)
         }
 
         private suspend fun fetchTmdbDetails(
             provider: StremioC, tmdbMediaType: String, tmdbIdStr: String, isMovie: Boolean, finalImdbId: String?,
-            stremioType: String?, targetVideos: List<Video>?, preFetchedDetail: TmdbDetailResponse? = null
+            stremioType: String?, targetVideos: List<StremioVideo>?, preFetchedDetail: TmdbDetailResponse? = null // 🌟 FIXED: Video -> StremioVideo
         ): FetchedTmdbData {
             var fetchedRecommendations: List<SearchResponse>? = null
             
@@ -1644,7 +1644,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             )
         }
 
-        private fun processEpisodes(provider: StremioC, finalImdbId: String?, episodeTmdbMeta: Map<String, TmdbEpisode>, targetVideos: List<Video>?, type: String?, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, originalTitle: String?, englishTitle: String?, aniListId: Int?, malId: Int?, kitsuId: String?): List<Episode> {
+        private fun processEpisodes(provider: StremioC, finalImdbId: String?, episodeTmdbMeta: Map<String, TmdbEpisode>, targetVideos: List<StremioVideo>?, type: String?, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, originalTitle: String?, englishTitle: String?, aniListId: Int?, malId: Int?, kitsuId: String?): List<Episode> { // 🌟 FIXED: Video -> StremioVideo
             val videos = targetVideos ?: emptyList()
             val sortedVideos = videos.groupBy { Pair(it.seasonNumber ?: 0, it.episode ?: it.number ?: 0) }.flatMap { (_, group) -> group.sortedBy { it.title ?: it.name ?: "" } }
             val maxRegularSeason = sortedVideos.mapNotNull { it.seasonNumber }.filter { it > 0 }.maxOrNull() ?: 0
@@ -1702,7 +1702,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             fetchedAniListId: Int? = null, 
             fetchedMalId: Int? = null, 
             resolvedTmdbId: String? = null,
-            kitsuVideos: List<Video>? = null
+            kitsuVideos: List<StremioVideo>? = null // 🌟 FIXED: Video -> StremioVideo
         ): LoadResponse = coroutineScope {
             val detailedEntry = addonDeferred?.await() ?: this@CatalogEntry
 
@@ -1782,7 +1782,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     if (parts.size == 2) {
                         val s = parts[0].toIntOrNull() ?: return@mapNotNull null
                         val e = parts[1].toIntOrNull() ?: return@mapNotNull null
-                        Video(
+                        StremioVideo( // 🌟 FIXED: Video -> StremioVideo
                             id = fallbackMovieId, 
                             title = tmdbEp.name,
                             seasonNumber = s,
@@ -1923,7 +1923,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
     }
 
-    private data class Video(
+    private data class StremioVideo( // 🌟 FIXED: Video -> StremioVideo
         @JsonProperty("id") val id: String? = null,
         @JsonProperty("title") val title: String? = null,
         @JsonProperty("name") val name: String? = null,
@@ -1942,7 +1942,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     ) {
         fun toEpisode(provider: StremioC, type: String?, imdbId: String?, tmdbMetaMap: Map<String, TmdbEpisode>, displaySeason: Int, displayEpisode: Int, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, imdbSeason: Int?, imdbEpisode: Int?, originalTitle: String?, englishTitle: String?, aniListId: Int?, malId: Int?, kitsuId: String?): Episode {
             val tmdbEp = tmdbMetaMap["${displaySeason}_${displayEpisode}"] ?: tmdbMetaMap["${seasonNumber ?: 0}_${episode ?: number ?: 0}"]
-            val finalAirDate = tmdbEp?.airDate?.takeIf { it.isNotBlank() } ?: this@Video.firstAired ?: this@Video.released
+            val finalAirDate = tmdbEp?.airDate?.takeIf { it.isNotBlank() } ?: this@StremioVideo.firstAired ?: this@StremioVideo.released // 🌟 FIXED: this@Video -> this@StremioVideo
             val airedYearInt = finalAirDate?.split("-")?.first()?.toIntOrNull()
             
             return provider.newEpisode(LoadData(
@@ -1967,13 +1967,13 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 malId = malId,
                 kitsuId = kitsuId
             )) {
-                val rawTitle = this@Video.name ?: this@Video.title ?: "Episode $displayEpisode"
+                val rawTitle = this@StremioVideo.name ?: this@StremioVideo.title ?: "Episode $displayEpisode" // 🌟 FIXED: this@Video -> this@StremioVideo
                 val cleanOriginalTitle = if (rawTitle.contains("📄")) rawTitle.substringAfter("📄").replace("\n", "").trim() else rawTitle.replace("\n", "").trim()
 
                 this.name = if (tmdbEp?.name != null) tmdbEp.name else cleanOriginalTitle
                 this.posterUrl = thumbnail ?: TRANSPARENT_PIXEL
                 
-                var finalEpDesc = (tmdbEp?.overview ?: this@Video.overview ?: this@Video.description)?.takeIf { it != "null" }
+                var finalEpDesc = (tmdbEp?.overview ?: this@StremioVideo.overview ?: this@StremioVideo.description)?.takeIf { it != "null" } // 🌟 FIXED: this@Video -> this@StremioVideo
                 if (type == "other") {
                     finalEpDesc = if (finalEpDesc.isNullOrBlank()) cleanOriginalTitle else "$finalEpDesc | $cleanOriginalTitle"
                 }
@@ -2133,7 +2133,7 @@ private data class TmdbCredits(@JsonProperty("cast") val cast: List<TmdbCast>? =
 private data class TmdbCast(@JsonProperty("name") val name: String?, @JsonProperty("original_name") val originalName: String?, @JsonProperty("character") val character: String?, @JsonProperty("profile_path") val profilePath: String?)
 private data class TmdbCrew(@JsonProperty("name") val name: String?, @JsonProperty("original_name") val originalName: String?, @JsonProperty("job") val job: String?, @JsonProperty("profile_path") val profilePath: String?)
 private data class TmdbSeasonDetail(@JsonProperty("episodes") val episodes: List<TmdbEpisode>? = null)
-private data class TmdbEpisode(@JsonProperty("name") val name: String?, @JsonProperty("overview") val episodeNumber: Int?, @JsonProperty("air_date") val airDate: String?, @JsonProperty("vote_average") val voteAverage: Double?, @JsonProperty("runtime") val runtime: Int?)
+private data class TmdbEpisode(@JsonProperty("name") val name: String?, @JsonProperty("overview") val overview: String?, @JsonProperty("episode_number") val episodeNumber: Int?, @JsonProperty("air_date") val airDate: String?, @JsonProperty("vote_average") val voteAverage: Double?, @JsonProperty("runtime") val runtime: Int?)
 
 data class Trailers(@JsonProperty("key") val key: String? = null, @JsonProperty("type") val type: String? = null, @JsonProperty("published_at") val publishedAt: String? = null)
 data class ResultsTrailer(@JsonProperty("results") val results: ArrayList<Trailers>? = arrayListOf())
