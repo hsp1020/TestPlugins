@@ -160,24 +160,25 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     companion object {
         private const val tmdbAPI = "https://api.themoviedb.org/3"
         private const val TRANSPARENT_PIXEL = "https://upload.wikimedia.org/wikipedia/commons/c/ca/1x1.png"
-        private const val TRAKT_CLIENT_ID = "6d8668915ed1953f5023ea090e206facc6261813243f567dea15a9a678783b6d" 
-        private const val SIMKL_CLIENT_ID = "f392628a1235f474859905f5453239c57715d9a197a89bd71cac975ddd9c4d39" 
         
-        // SharedPreferences에서 실시간 수동 기입한 TMDb API Key를 로드
-        private val apiKey: String
-            get() {
-                val context = CloudStreamApp.context ?: return ""
-                val possibleNames = listOf(
-                    "StremioX", "StremioX_preferences", "stremio_preferences", 
-                    "com.hsp1020_preferences", context.packageName + "_preferences"
-                )
-                for (name in possibleNames) {
-                    val prefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
-                    val key = prefs.getString("tmdb_api_key", "") ?: ""
-                    if (key.isNotBlank()) return key
-                }
-                return ""
+        // SharedPreferences에서 실시간 수동 저장한 환경 변수를 로드하는 정적 가변 헬퍼
+        private fun getPrefString(key: String): String {
+            val context = CloudStreamApp.context ?: return ""
+            val possibleNames = listOf(
+                "StremioX", "StremioX_preferences", "stremio_preferences", 
+                "com.hsp1020_preferences", context.packageName + "_preferences"
+            )
+            for (name in possibleNames) {
+                val prefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
+                val value = prefs.getString(key, "") ?: ""
+                if (value.isNotBlank()) return value
             }
+            return ""
+        }
+
+        // 런타임 수동 기입 TMDb API 키 동적 바인딩
+        private val apiKey: String
+            get() = getPrefString("tmdb_api_key")
 
         // ✨ 3in1 완결 동기화 플레이어 제어 오케스트레이션 매니저 객체 탑재
         object PlaybackSyncManager {
@@ -251,30 +252,16 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val session = activeSession ?: return
                 kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                     runSuspendCatching {
-                        val context = CloudStreamApp.context ?: return@runSuspendCatching
-                        val possibleNames = listOf(
-                            "StremioX", "StremioX_preferences", "stremio_preferences", 
-                            "com.hsp1020_preferences", context.packageName + "_preferences"
-                        )
-                        var traktToken = ""
-                        var simklToken = ""
-                        for (name in possibleNames) {
-                            val prefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
-                            if (prefs.contains("trakt_access_token")) {
-                                val t = prefs.getString("trakt_access_token", "") ?: ""
-                                if (t.isNotBlank()) traktToken = t
-                            }
-                            if (prefs.contains("simkl_access_token")) {
-                                val s = prefs.getString("simkl_access_token", "") ?: ""
-                                if (s.isNotBlank()) simklToken = s
-                            }
-                        }
+                        val traktClientId = getPrefString("trakt_client_id")
+                        val traktToken = getPrefString("trakt_access_token")
+                        val simklClientId = getPrefString("simkl_client_id")
+                        val simklToken = getPrefString("simkl_access_token")
 
-                        if (traktToken.isNotBlank()) {
-                            sendTraktScrobble("start", traktToken, session, 0.0)
+                        if (traktToken.isNotBlank() && traktClientId.isNotBlank()) {
+                            sendTraktScrobble("start", traktClientId, traktToken, session, 0.0)
                         }
-                        if (simklToken.isNotBlank()) {
-                            sendSimklScrobble("start", simklToken, session, 0)
+                        if (simklToken.isNotBlank() && simklClientId.isNotBlank()) {
+                            sendSimklScrobble("start", simklClientId, simklToken, session, 0)
                         }
                     }
                 }
@@ -291,41 +278,27 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
                 kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                     runSuspendCatching {
-                        val context = CloudStreamApp.context ?: return@runSuspendCatching
-                        val possibleNames = listOf(
-                            "StremioX", "StremioX_preferences", "stremio_preferences", 
-                            "com.hsp1020_preferences", context.packageName + "_preferences"
-                        )
-                        var traktToken = ""
-                        var simklToken = ""
-                        for (name in possibleNames) {
-                            val prefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
-                            if (prefs.contains("trakt_access_token")) {
-                                val t = prefs.getString("trakt_access_token", "") ?: ""
-                                if (t.isNotBlank()) traktToken = t
-                            }
-                            if (prefs.contains("simkl_access_token")) {
-                                val s = prefs.getString("simkl_access_token", "") ?: ""
-                                if (s.isNotBlank()) simklToken = s
-                            }
-                        }
+                        val traktClientId = getPrefString("trakt_client_id")
+                        val traktToken = getPrefString("trakt_access_token")
+                        val simklClientId = getPrefString("simkl_client_id")
+                        val simklToken = getPrefString("simkl_access_token")
 
-                        if (traktToken.isNotBlank()) {
-                            sendTraktScrobble("stop", traktToken, session, progressPercent)
+                        if (traktToken.isNotBlank() && traktClientId.isNotBlank()) {
+                            sendTraktScrobble("stop", traktClientId, traktToken, session, progressPercent)
                         }
-                        if (simklToken.isNotBlank()) {
-                            sendSimklScrobble("stop", simklToken, session, progressPercent.toInt())
+                        if (simklToken.isNotBlank() && simklClientId.isNotBlank()) {
+                            sendSimklScrobble("stop", simklClientId, simklToken, session, progressPercent.toInt())
                         }
                     }
                 }
             }
 
-            private suspend fun sendTraktScrobble(action: String, token: String, session: PlaybackSession, progress: Double) {
+            private suspend fun sendTraktScrobble(action: String, clientId: String, token: String, session: PlaybackSession, progress: Double) {
                 val url = "https://api.trakt.tv/scrobble/$action"
                 val headers = mapOf(
                     "Content-Type" to "application/json",
                     "trakt-api-version" to "2",
-                    "trakt-api-key" to TRAKT_CLIENT_ID,
+                    "trakt-api-key" to clientId,
                     "Authorization" to "Bearer $token"
                 )
 
@@ -347,12 +320,12 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 )
             }
 
-            private suspend fun sendSimklScrobble(action: String, token: String, session: PlaybackSession, progress: Int) {
+            private suspend fun sendSimklScrobble(action: String, clientId: String, token: String, session: PlaybackSession, progress: Int) {
                 val mediaType = if (session.isMovie) "movies" else "shows"
                 val url = "https://api.simkl.com/$mediaType/scrobble"
                 val headers = mapOf(
                     "Content-Type" to "application/json",
-                    "simkl-api-client" to SIMKL_CLIENT_ID,
+                    "simkl-api-client" to clientId,
                     "Authorization" to "Bearer $token"
                 )
 
