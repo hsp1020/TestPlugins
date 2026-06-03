@@ -141,7 +141,7 @@ class SettingsBottomFragment(
             throw Exception("saveIcon ImageView not found in bottom_sheet_layout", e)
         }
 
-        // XML 필드 참조 획득
+        // XML 설정 입력 컴포넌트 바인딩
         val etTmdbKey: EditText = try { view.findView("etTmdbKey") } catch (e: Throwable) {
             throw Exception("etTmdbKey EditText not found in bottom_sheet_layout", e)
         }
@@ -166,13 +166,14 @@ class SettingsBottomFragment(
         showlinks.makeTvCompatible()
         saveIcon.makeTvCompatible()
 
-        // 로컬 SharedPreferences 복원 바인딩
+        // SharedPreferences 데이터 수급 및 기입
         etTmdbKey.setText(sharedPref.getString("tmdb_api_key", ""))
         etTraktClientId.setText(sharedPref.getString("trakt_client_id", ""))
         etTraktToken.setText(sharedPref.getString("trakt_access_token", ""))
         etSimklClientId.setText(sharedPref.getString("simkl_client_id", ""))
         etSimklToken.setText(sharedPref.getString("simkl_access_token", ""))
 
+        // UI Initialization: Toggles
         setupToggle(view, "switchCineStream", SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, isCineStreamInstalled(), "CineStream")
         setupToggle(view, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
 
@@ -268,7 +269,7 @@ class SettingsBottomFragment(
                             (rv.adapter as? LinksAdapter)?.remove(itemToDelete)
                             showToast("Deleted")
                             if (updatedList.isEmpty()) {
-                                tvNoLinks.visibility = View.VISIBLE
+                                tvNoLinks.visibility = VISIBLE
                                 rv.visibility = View.GONE
                             }
                         }
@@ -287,7 +288,7 @@ class SettingsBottomFragment(
         saveIcon.setOnClickListener {
             val context = this.context ?: return@setOnClickListener
 
-            // SharedPreferences 일괄 가입 처리
+            // SharedPreferences에 수동 가입 API 환경 변수들 최종 커밋 적용
             sharedPref.edit {
                 putString("tmdb_api_key", etTmdbKey.text.toString().trim())
                 putString("trakt_client_id", etTraktClientId.text.toString().trim())
