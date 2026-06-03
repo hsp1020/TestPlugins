@@ -208,7 +208,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
         private val apiKey: String
             get() = getPrefString("tmdb_api_key")
-            
+        
         object PlaybackSyncManager {
             @Volatile var activeSession: PlaybackSession? = null
             @Volatile var pendingSession: PlaybackSession? = null
@@ -374,7 +374,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 startAlwaysOnMonitoring()
             }
 
-            // 상시 가동 백그라운드 모니터링 데몬 (약한 참조 수명주기 및 프리로드 완벽 대응 설계)
+            // 상시 가동 백그라운드 모니터링 데몬 (약한 참조 수명주기 및 가짜 재생 프리로드 필터 연동)
             fun startAlwaysOnMonitoring() {
                 if (monitoringJob?.isActive == true) {
                     return
@@ -480,26 +480,34 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                             if (activeSession != null) {
                                 playerDetected = true
                                 
-                                // [중요 보완] 백그라운드 프리로드의 가짜 호출을 차단하고, 실제 비디오가 활성화된 시점에 최초 1회만 스크롤 전송 트리거 구동
-                                if (!isScrobbleStarted) {
-                                    android.util.Log.d("StremioX-SYNC", "Always-On: Player is actively playing the matched stream. Sending Trakt/Simkl Scrobble Start.")
-                                    triggerPlaybackStartOnly()
-                                    isScrobbleStarted = true
-                                }
+                                // [가장 핵심적 보완] 백그라운드 프리로드 플레이어의 가짜 작동을 차단하기 위해, 실제 비디오가 활성화(Play)된 시점에 최초 1회만 스크롤 전송 트리거 구동
+                                val playWhenReady = runCatching {
+                                    currentPlayer.javaClass.getMethod("getPlayWhenReady").invoke(currentPlayer) as Boolean
+                                }.getOrDefault(true)
 
-                                runSuspendCatching {
-                                    val currentPosMethod = currentPlayer.javaClass.getMethod("getCurrentPosition")
-                                    val durationMethod = currentPlayer.javaClass.getMethod("getDuration")
-                                    val currentPos = currentPosMethod.invoke(currentPlayer) as Long
-                                    val duration = durationMethod.invoke(currentPlayer) as Long
-                                    if (duration > 0L) {
-                                        lastKnownProgressPercent = (currentPos.toDouble() * 100.0) / duration.toDouble()
-                                        android.util.Log.d("StremioX-SYNC", "Always-On Update: ${String.format("%.2f", lastKnownProgressPercent)}%")
+                                if (playWhenReady) {
+                                    if (!isScrobbleStarted) {
+                                        android.util.Log.d("StremioX-SYNC", "Always-On: Player is actively playing (playWhenReady=true). Sending Scrobble Start.")
+                                        triggerPlaybackStartOnly()
+                                        isScrobbleStarted = true
                                     }
-                                }.onFailure { e ->
-                                    android.util.Log.e("StremioX-SYNC", "Always-On: Property read failed. Resetting player reference: ${e.message}")
-                                    activePlayer = null
-                                    cachedPlayerFragment = null
+
+                                    runSuspendCatching {
+                                        val currentPosMethod = currentPlayer.javaClass.getMethod("getCurrentPosition")
+                                        val durationMethod = currentPlayer.javaClass.getMethod("getDuration")
+                                        val currentPos = currentPosMethod.invoke(currentPlayer) as Long
+                                        val duration = durationMethod.invoke(currentPlayer) as Long
+                                        if (duration > 0L) {
+                                            lastKnownProgressPercent = (currentPos.toDouble() * 100.0) / duration.toDouble()
+                                            android.util.Log.d("StremioX-SYNC", "Always-On Update: ${String.format("%.2f", lastKnownProgressPercent)}%")
+                                        }
+                                    }.onFailure { e ->
+                                        android.util.Log.e("StremioX-SYNC", "Always-On: Property read failed. Resetting player reference: ${e.message}")
+                                        activePlayer = null
+                                        cachedPlayerFragment = null
+                                    }
+                                } else {
+                                    android.util.Log.v("StremioX-SYNC", "Always-On: Player detected but paused or background preloading (playWhenReady=false). Ignoring start scrobble.")
                                 }
                             }
                         } else {
@@ -550,7 +558,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     pendingSession = newSession
                     pendingTimeMs = System.currentTimeMillis()
                 } else {
-                    // 프리로드 누수를 유발하는 즉각 API 전송 억제 및 세션 데이터 정렬 처리
+                    // 프리로드 누수를 유발하는 즉각 API 전송을 제어하고 대기 상태로 세팅
                     android.util.Log.d("StremioX-SYNC", "startNewSession() - Registering new session metadata (Awaiting actual player play): S=${newSession.season}, E=${newSession.episode}")
                     activeSession = newSession
                     pendingSession = null
@@ -560,7 +568,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
 
             fun triggerPlaybackStart() {
-                // startNewSession() 등과의 하위 호환성을 위한 래퍼 함수 (서버 통신은 데몬이 플레이어 활성화 검출 시 수행)
+                // startNewSession() 등과의 하위 호환성을 위한 래퍼 함수 (실제 서버 시작 전송은 플레이어 play 시점에 수행)
                 startAlwaysOnMonitoring()
             }
 
