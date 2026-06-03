@@ -510,7 +510,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
             private suspend fun sendSimklScrobble(action: String, clientId: String, token: String, session: PlaybackSession, progress: Int) {
                 val mediaType = if (session.isMovie) "movies" else "shows"
-                val url = "    val url = "https://api.simkl.com/scrobble/$action"
+                val url = "https://api.simkl.com/scrobble/$action"
                 val headers = mapOf(
                     "Content-Type" to "application/json",
                     "simkl-api-key" to clientId,
