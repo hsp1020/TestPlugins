@@ -660,21 +660,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
-    
-        // 파괴적 인라인 함수 CloudStreamApp.getKey 에 대한 Throwable 방어막 적용
-        runSuspendCatching {
-            val keys = try { CloudStreamApp.getKeys("download_header_cache") ?: emptyList() } catch (t: Throwable) { emptyList() }
-            for (fullKey in keys) {
-                val realKey = fullKey.removePrefix("download_header_cache/")
-                if (realKey.isNotEmpty() && !realKey.all { it.isDigit() || it == '-' }) {
-                    val entry = try { CloudStreamApp.getKey<Map<String, Any>>("download_header_cache", realKey) } catch (t: Throwable) { null }
-                    val entryId = entry?.get("id")?.toString()
-                    if (entryId != null) {
-                        try { CloudStreamApp.setKey("download_header_cache", entryId, entry) } catch (t: Throwable) {}
-                    }
-                }
-            }
-        }
+        // 불필요한 download_header_cache 루프 및 getKey 호출부를 통째로 삭제하여 
+        // 런타임 예외 발생 여지를 차단하고 무의미한 오버헤드를 제거했습니다.
 
         val loadData = try { jsonMapper.readValue(data, LoadData::class.java) } catch (e: Exception) { null } ?: return false
         
@@ -710,21 +697,19 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     "📋 Video ID: $copyId",
                     copyId,
                     ExtractorLinkType.VIDEO
-                )
-                {
-                        this.quality = 2160
-                    }
+                ) {
+                    this.quality = 2160
+                }
             )
         }
 
-        // --- Stremio 자막 애드온 호스트 및 전역 인터셉터 통합 설계 (getKey 우회 적용) ---
+        // --- Stremio 자막 애드온 설정 조회 및 인터셉터 통합 설계 (getKey 우회 적용) ---
         val customHosts = withContext(Dispatchers.IO) {
             val now = System.currentTimeMillis()
             if (cachedCustomHosts != null && now - cachedCustomHostsTime < SETTINGS_CACHE_TTL) {
                 return@withContext cachedCustomHosts!!
             }
             
-            // Cloudstream 코어 버그 방어막: inline getKey를 거치지 않고 SharedPreferences 파일에서 직접 스캔 및 파싱
             val raw = try { 
                 val context = CloudStreamApp.context
                 val rebuildPrefs = context?.getSharedPreferences("rebuild_key", Context.MODE_PRIVATE)
@@ -754,7 +739,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
         val builtInHosts = setOf("opensubtitles.stremio.homes", "subsense.nepiraw.com", "opensubtitles-v3.strem.io")
 
-        // 수집 대상 자막 URL의 파싱 상태 이상으로 전체 작업 스레드가 중단되지 않는 격리 필터 구성
         val subtitleInterceptor: (SubtitleFile) -> Unit = { sub ->
             try {
                 val host = try {
@@ -787,7 +771,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     val url = buildUrl("/stream/$targetType/$encodedPrimaryId.json")
                     val text = customSession.get(url, timeout = 120L).text
                     val res = if (text.isNotBlank()) jsonMapper.readValue(text, StreamsResponse::class.java) else null
-                    // 최상위 Stremio 수신 로직 스트림 자막 자막도 (Stremio) 라벨링 규칙 보장
                     res?.streams?.forEach { stream -> stream.runCallback(this@StremioC, subtitleInterceptor, wrappedCallback) }
                 }
             },
