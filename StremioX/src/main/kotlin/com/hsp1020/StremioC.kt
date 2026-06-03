@@ -211,9 +211,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
         object PlaybackSyncManager {
             @Volatile var activeSession: PlaybackSession? = null
+            @Volatile var pendingSession: PlaybackSession? = null
             @Volatile private var activePlayer: Any? = null
             private var isListenerRegistered = false
             @Volatile private var lastKnownProgressPercent: Double = 0.0
+            @Volatile var pendingTimeMs: Long = 0L
             
             // 전역 액티비티 주입 변수 및 스케줄러 Job
             @Volatile var currentActivity: android.app.Activity? = null
@@ -224,7 +226,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val tmdbId: Int?,
                 val season: Int?,
                 val episode: Int?,
-                val isMovie: Boolean
+                val isMovie: Boolean,
+                val resolvedUrls: MutableSet<String> = ConcurrentHashMap.newKeySet()
             )
 
             // 가상 리플렉션 기반 전면 액티비티 탐색기
@@ -377,6 +380,34 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                             consecutiveNulls = 0
                             activePlayer = currentPlayer
                             
+                            // 플레이어 재생 비디오 식별 로직을 통해 실제 감정 구분
+                            val playingUrl = getPlayerPlayingUrl(currentPlayer)
+                            val pSession = pendingSession
+                            
+                            if (pSession != null) {
+                                val isMatched = playingUrl != null && pSession.resolvedUrls.any { url ->
+                                    playingUrl.contains(url.substringBefore("?")) || url.contains(playingUrl.substringBefore("?"))
+                                }
+                                
+                                val shouldPromote = isMatched || (activeSession == null && (System.currentTimeMillis() - pendingTimeMs > 10000L))
+                                
+                                if (shouldPromote) {
+                                    android.util.Log.d("StremioX-SYNC", "startMonitoring() - Promoting pendingSession S=${pSession.season}, E=${pSession.episode} to activeSession. (isMatched=$isMatched)")
+                                    
+                                    val oldSession = activeSession
+                                    if (oldSession != null) {
+                                        android.util.Log.d("StremioX-SYNC", "startMonitoring() - Explicitly stopping old session S=${oldSession.season}, E=${oldSession.episode} first at ${String.format("%.2f", lastKnownProgressPercent)}%")
+                                        activeSession = null
+                                        triggerPlaybackStopExplicitSync(oldSession, lastKnownProgressPercent)
+                                    }
+                                    
+                                    activeSession = pSession
+                                    pendingSession = null
+                                    lastKnownProgressPercent = 0.0
+                                    triggerPlaybackStart()
+                                }
+                            }
+
                             runSuspendCatching {
                                 val currentPosMethod = currentPlayer::class.java.getMethod("getCurrentPosition")
                                 val durationMethod = currentPlayer::class.java.getMethod("getDuration")
@@ -398,15 +429,17 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
             fun startNewSession(newSession: PlaybackSession) {
                 val oldSession = activeSession
-                if (oldSession != null && (oldSession.imdbId != newSession.imdbId || oldSession.season != newSession.season || oldSession.episode != newSession.episode)) {
-                    android.util.Log.d("StremioX-SYNC", "startNewSession() - Active session exists. Stopping old session first: IMDB=${oldSession.imdbId}, S=${oldSession.season}, E=${oldSession.episode} at ${String.format("%.2f", lastKnownProgressPercent)}%")
-                    
-                    activeSession = null
-                    triggerPlaybackStopExplicit(oldSession, lastKnownProgressPercent)
-                }
                 
-                activeSession = newSession
-                triggerPlaybackStart()
+                // 만약 기존 세션이 존재하고, 다른 에피소드라면 pendingSession으로 이관하여 프리로드와 격리합니다.
+                if (oldSession != null && (oldSession.imdbId != newSession.imdbId || oldSession.season != newSession.season || oldSession.episode != newSession.episode)) {
+                    android.util.Log.d("StremioX-SYNC", "startNewSession() - Active session S=${oldSession.season}, E=${oldSession.episode} exists. Deferring new session S=${newSession.season}, E=${newSession.episode} to pendingSession.")
+                    pendingSession = newSession
+                    pendingTimeMs = System.currentTimeMillis()
+                } else {
+                    activeSession = newSession
+                    pendingSession = null
+                    triggerPlaybackStart()
+                }
             }
 
             fun triggerPlaybackStart() {
@@ -453,6 +486,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     return
                 }
                 activeSession = null
+                pendingSession = null // 대기중인 세션 완전 초기화
                 activePlayer = null
                 monitoringJob?.cancel()
                 monitoringJob = null
@@ -481,28 +515,36 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
             }
 
-            private fun triggerPlaybackStopExplicit(session: PlaybackSession, progressPercent: Double) {
-                android.util.Log.d("StremioX-SYNC", "triggerPlaybackStopExplicit() - Explicit final progress on stopping: ${String.format("%.2f", progressPercent)}%")
+            private suspend fun triggerPlaybackStopExplicitSync(session: PlaybackSession, progressPercent: Double) {
+                android.util.Log.d("StremioX-SYNC", "triggerPlaybackStopExplicitSync() - Starting sequential stop for old session: S=${session.season}, E=${session.episode} at ${String.format("%.2f", progressPercent)}%")
+                
+                val traktClientId = getPrefString("trakt_client_id")
+                val traktToken = getPrefString("trakt_access_token")
+                val simklClientId = getPrefString("simkl_client_id")
+                val simklToken = getPrefString("simkl_access_token")
 
-                kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                    runSuspendCatching {
-                        val traktClientId = getPrefString("trakt_client_id")
-                        val traktToken = getPrefString("trakt_access_token")
-                        val simklClientId = getPrefString("simkl_client_id")
-                        val simklToken = getPrefString("simkl_access_token")
+                val action = if (progressPercent >= 80.0) "stop" else "pause"
 
-                        val action = if (progressPercent >= 80.0) "stop" else "pause"
-
-                        if (traktToken.isNotBlank() && traktClientId.isNotBlank()) {
-                            android.util.Log.d("StremioX-SYNC", "Calling sendTraktScrobble('$action') for old session")
+                // 코루틴 동기 실행을 통해 이전 에피소드 종료가 완벽히 접수된 후 새 에피소드가 바인딩되도록 합니다.
+                coroutineScope {
+                    val jobs = mutableListOf<Deferred<Unit>>()
+                    
+                    if (traktToken.isNotBlank() && traktClientId.isNotBlank()) {
+                        jobs.add(async(Dispatchers.IO) {
+                            android.util.Log.d("StremioX-SYNC", "Calling sendTraktScrobble('$action') for old session (sync)")
                             sendTraktScrobble(action, traktClientId, traktToken, session, progressPercent)
-                        }
-                        if (simklToken.isNotBlank() && simklClientId.isNotBlank()) {
-                            android.util.Log.d("StremioX-SYNC", "Calling sendSimklScrobble('$action') for old session")
-                            sendSimklScrobble(action, simklClientId, simklToken, session, progressPercent.toInt())
-                        }
+                        })
                     }
+                    if (simklToken.isNotBlank() && simklClientId.isNotBlank()) {
+                        jobs.add(async(Dispatchers.IO) {
+                            android.util.Log.d("StremioX-SYNC", "Calling sendSimklScrobble('$action') for old session (sync)")
+                            sendSimklScrobble(action, simklClientId, simklToken, session, progressPercent.toInt())
+                        } as Deferred<Unit>)
+                    }
+                    
+                    runCatching { jobs.awaitAll() }
                 }
+                android.util.Log.d("StremioX-SYNC", "triggerPlaybackStopExplicitSync() - Sequential stop completed for old session.")
             }
 
             private suspend fun sendTraktScrobble(action: String, clientId: String, token: String, session: PlaybackSession, progress: Double) {
@@ -593,6 +635,24 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 } catch (e: Exception) {
                     android.util.Log.e("StremioX-SYNC", "Simkl API Request Exception ($action) -> ${e.message}", e)
                 }
+            }
+
+            private fun getPlayerPlayingUrl(player: Any?): String? {
+                if (player == null) return null
+                return runSuspendCatching {
+                    val mediaItemMethod = player.javaClass.getMethod("getCurrentMediaItem")
+                    val mediaItem = mediaItemMethod.invoke(player) ?: return null
+                    
+                    val localConfigField = mediaItem.javaClass.getDeclaredField("localConfiguration").apply { isAccessible = true }
+                    val localConfig = localConfigField.get(mediaItem) ?: return null
+                    
+                    val uriField = localConfig.javaClass.getDeclaredField("uri").apply { isAccessible = true }
+                    val uriObj = uriField.get(localConfig) ?: return null
+                    
+                    val urlStr = uriObj.toString()
+                    android.util.Log.d("StremioX-SYNC", "getPlayerPlayingUrl() - Detected playing URI: $urlStr")
+                    urlStr
+                }.getOrNull()
             }
 
             private fun findAndActiveSession(activity: Activity) {
@@ -1171,8 +1231,21 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         val encodedPrimaryId = primaryStremioId.urlEncode()
 
         val seenLinks = Collections.synchronizedSet(mutableSetOf<String>())
+        
+        val isMovieMedia = targetType == "movie" || (loadData.season == null && loadData.episode == null)
+
+        val newSession = PlaybackSyncManager.PlaybackSession(
+            imdbId = loadData.imdbId ?: primaryId,
+            tmdbId = loadData.tmdbId,
+            season = globalSeason,
+            episode = globalEpisode,
+            isMovie = isMovieMedia
+        )
+
         val wrappedCallback: (ExtractorLink) -> Unit = { link ->
             if (seenLinks.add(link.url)) {
+                // 수집되는 모든 재생 링크를 새로운 세션(newSession)의 resolvedUrls에 매핑합니다.
+                newSession.resolvedUrls.add(link.url)
                 callback(link)
             }
         }
@@ -1275,15 +1348,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             { invokeStreamPlay(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleInterceptor, wrappedCallback) }
         )
 
-        val isMovieMedia = targetType == "movie" || (loadData.season == null && loadData.episode == null)
-
-        val newSession = PlaybackSyncManager.PlaybackSession(
-            imdbId = loadData.imdbId ?: primaryId,
-            tmdbId = loadData.tmdbId,
-            season = globalSeason,
-            episode = globalEpisode,
-            isMovie = isMovieMedia
-        )
+        // 세션 전이 관리자를 통하여 프리로드 격리 및 재생 매칭 준비
         PlaybackSyncManager.startNewSession(newSession)
 
         return true
