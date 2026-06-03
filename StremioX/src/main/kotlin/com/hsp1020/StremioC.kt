@@ -342,12 +342,13 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     var playerDetected = false
                     var waitingTicks = 0
                     
-                    while (isActive) {
+                    // 기존 while (isActive) 에서 while (true) 로 변경
+                    while (true) {
                         kotlinx.coroutines.delay(1000)
                         
                         val activity = resolveCurrentActivity()
                         if (activity == null) continue
-
+                        
                         // 리플렉션 계층 탐색은 UI 정체 방지를 위해 Default 백그라운드 스레드에서 연산
                         val currentPlayer = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
                             getExoPlayer(activity)
