@@ -73,10 +73,6 @@ import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
-// 1. 임포트 영역 아래에 전역 캐시 변수 선언
-@Volatile private var currentActivityCache: android.app.Activity? = null
-
-
 inline fun <T> runSuspendCatching(block: () -> T): Result<T> {
     return try {
         Result.success(block())
@@ -109,93 +105,6 @@ private fun JsonNode?.textOrNull(): String? {
 private fun JsonNode?.intOrNull(): Int? {
     if (this == null || this.isNull) return null
     return this.asInt()
-}
-
-// 자식 프래그먼트 매니저(Child Fragment Manager)까지 포함하여 재귀적으로 탐색하는 헬퍼 함수
-private fun getAllFragments(fragmentManager: androidx.fragment.app.FragmentManager?): List<androidx.fragment.app.Fragment> {
-    if (fragmentManager == null) return emptyList()
-    val all = mutableListOf<androidx.fragment.app.Fragment>()
-    val fragments = runCatching { fragmentManager.fragments }.getOrNull() ?: return emptyList()
-    for (frag in fragments) {
-        if (frag != null) {
-            all.add(frag)
-            if (frag.isAdded) {
-                val childMgr = runCatching { frag.childFragmentManager }.getOrNull()
-                if (childMgr != null) {
-                    all.addAll(getAllFragments(childMgr))
-                }
-            }
-        }
-    }
-    return all
-}
-
-
-
-// 2. 예비 폴백 함수 수정 (try-catch 적용으로 타입 추론 Any 오류 해결)
-private fun getCurrentActivityFallback(): Activity? {
-    try {
-        val activityThreadClass = Class.forName("android.app.ActivityThread")
-        val currentActivityThreadMethod = activityThreadClass.getMethod("currentActivityThread")
-        val activityThread = currentActivityThreadMethod.invoke(null) ?: return null
-        val mActivitiesField = activityThreadClass.getDeclaredField("mActivities").apply { isAccessible = true }
-        val activities = mActivitiesField.get(activityThread) as? Map<*, *> ?: return null
-        for (activityRecord in activities.values) {
-            if (activityRecord == null) continue
-            val activityRecordClass = activityRecord.javaClass
-            val pausedField = activityRecordClass.getDeclaredField("paused").apply { isAccessible = true }
-            if (!pausedField.getBoolean(activityRecord)) {
-                val activityField = activityRecordClass.getDeclaredField("activity").apply { isAccessible = true }
-                val act = activityField.get(activityRecord) as? Activity
-                if (act != null) {
-                    android.util.Log.d("StremioX-SYNC", "getCurrentActivityFallback() - Resumed Activity resolved: ${act::class.java.name}")
-                    return act
-                }
-            }
-        }
-    } catch (e: Exception) {
-        android.util.Log.e("StremioX-SYNC", "getCurrentActivityFallback() - Error: ${e.message}", e)
-    }
-    return null
-}
-
-// 3. 메인 액티비티 획득 함수 수정 (Unresolved reference 'PlaybackSyncManager' 에러 해결)
-private fun getCurrentActivity(): Activity? {
-    android.util.Log.d("StremioX-SYNC", "getCurrentActivity() - Checking active context.")
-
-    // 1단계: CommonActivity 전역 인스턴스 확인
-    try {
-        val clazz = Class.forName("com.lagradost.cloudstream3.CommonActivity")
-        val instanceField = runCatching { clazz.getField("INSTANCE") }.getOrNull()
-        val instance = instanceField?.get(null)
-        val activityField = runCatching { clazz.getDeclaredField("activity") }.getOrNull()
-            ?: clazz.getField("activity")
-        activityField.isAccessible = true
-        val act = activityField.get(instance) as? Activity
-        if (act != null) {
-            android.util.Log.d("StremioX-SYNC", "getCurrentActivity() - Found active activity from CommonActivity: ${act::class.java.name}")
-            return act
-        }
-    } catch (e: Exception) {
-        android.util.Log.v("StremioX-SYNC", "getCurrentActivity() - CommonActivity reflection failed: ${e.message}")
-    }
-
-    // 2단계: Lifecycle Callback 전역 캐시 확인
-    val cachedAct = currentActivityCache
-    if (cachedAct != null) {
-        android.util.Log.d("StremioX-SYNC", "getCurrentActivity() - Found active activity from Lifecycle cache: ${cachedAct::class.java.name}")
-        return cachedAct
-    }
-
-    // 3단계: ActivityThread 예비 폴백 탐색
-    val fallbackAct = getCurrentActivityFallback()
-    if (fallbackAct != null) {
-        android.util.Log.d("StremioX-SYNC", "getCurrentActivity() - Found active activity from Fallback: ${fallbackAct::class.java.name}")
-        return fallbackAct
-    }
-
-    android.util.Log.e("StremioX-SYNC", "getCurrentActivity() - FAILED to secure any active Activity context.")
-    return null
 }
 
 class StremioC(override var mainUrl: String, override var name: String) : MainAPI() {
@@ -286,6 +195,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             @Volatile private var activePlayer: Any? = null
             private var isListenerRegistered = false
             @Volatile private var lastKnownProgressPercent: Double = 0.0
+            
+            // 전역 액티비티 주입 변수 및 스케줄러 Job
+            @Volatile var currentActivity: android.app.Activity? = null
             private var monitoringJob: kotlinx.coroutines.Job? = null
 
             data class PlaybackSession(
@@ -295,6 +207,91 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val episode: Int?,
                 val isMovie: Boolean
             )
+
+            // 프래그먼트 재귀 탐색 헬퍼 함수
+            private fun getAllFragments(fragmentManager: androidx.fragment.app.FragmentManager?): List<androidx.fragment.app.Fragment> {
+                if (fragmentManager == null) return emptyList()
+                val all = mutableListOf<androidx.fragment.app.Fragment>()
+                val fragments = runCatching { fragmentManager.fragments }.getOrNull() ?: return emptyList()
+                for (frag in fragments) {
+                    if (frag != null) {
+                        all.add(frag)
+                        if (frag.isAdded) {
+                            val childMgr = runCatching { frag.childFragmentManager }.getOrNull()
+                            if (childMgr != null) {
+                                all.addAll(getAllFragments(childMgr))
+                            }
+                        }
+                    }
+                }
+                return all
+            }
+
+            // 가상 리플렉션 기반 전면 액티비티 탐색기
+            private fun getCurrentActivityFallback(): Activity? {
+                try {
+                    val activityThreadClass = Class.forName("android.app.ActivityThread")
+                    val currentActivityThreadMethod = activityThreadClass.getMethod("currentActivityThread")
+                    val activityThread = currentActivityThreadMethod.invoke(null) ?: return null
+                    val mActivitiesField = activityThreadClass.getDeclaredField("mActivities").apply { isAccessible = true }
+                    val activities = mActivitiesField.get(activityThread) as? Map<*, *> ?: return null
+                    for (activityRecord in activities.values) {
+                        if (activityRecord == null) continue
+                        val activityRecordClass = activityRecord.javaClass
+                        val pausedField = activityRecordClass.getDeclaredField("paused").apply { isAccessible = true }
+                        if (!pausedField.getBoolean(activityRecord)) {
+                            val activityField = activityRecordClass.getDeclaredField("activity").apply { isAccessible = true }
+                            val act = activityField.get(activityRecord) as? Activity
+                            if (act != null) {
+                                android.util.Log.d("StremioX-SYNC", "getCurrentActivityFallback() - Found resumed Activity: ${act::class.java.name}")
+                                return act
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("StremioX-SYNC", "getCurrentActivityFallback() - Failed to resolve current activity: ${e.message}")
+                }
+                return null
+            }
+
+            // 최상위 액티비티 확인용 통합 메서드
+            private fun getCurrentActivity(): Activity? {
+                android.util.Log.d("StremioX-SYNC", "getCurrentActivity() - Starting active Context validation chain.")
+
+                // 1단계: 코어 앱 CommonActivity 전역 인스턴스 반영 시도 (가장 권장됨)
+                try {
+                    val clazz = Class.forName("com.lagradost.cloudstream3.CommonActivity")
+                    val instanceField = runCatching { clazz.getField("INSTANCE") }.getOrNull()
+                    val instance = instanceField?.get(null)
+                    val activityField = runCatching { clazz.getDeclaredField("activity") }.getOrNull()
+                        ?: clazz.getField("activity")
+                    activityField.isAccessible = true
+                    val act = activityField.get(instance) as? Activity
+                    if (act != null) {
+                        android.util.Log.d("StremioX-SYNC", "getCurrentActivity() - Successfully retrieved from CommonActivity.activity: ${act::class.java.name}")
+                        return act
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.v("StremioX-SYNC", "getCurrentActivity() - CommonActivity search skipped: ${e.message}")
+                }
+
+                // 2단계: 생명주기 리스너에 등록된 캐시 메모리 확인
+                val cachedAct = currentActivity
+                if (cachedAct != null) {
+                    android.util.Log.d("StremioX-SYNC", "getCurrentActivity() - Successfully retrieved from Lifecycle cache: ${cachedAct::class.java.name}")
+                    return cachedAct
+                }
+
+                // 3단계: 가상 리플렉션 탐색 시도
+                val fallbackAct = getCurrentActivityFallback()
+                if (fallbackAct != null) {
+                    android.util.Log.d("StremioX-SYNC", "getCurrentActivity() - Successfully retrieved from ActivityThread Fallback: ${fallbackAct::class.java.name}")
+                    return fallbackAct
+                }
+
+                android.util.Log.e("StremioX-SYNC", "getCurrentActivity() - FATAL: Unable to resolve any active Activity context.")
+                return null
+            }
 
             fun registerLifecycleListener(context: Context) {
                 if (isListenerRegistered) {
@@ -308,37 +305,179 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 isListenerRegistered = true
                 android.util.Log.d("StremioX-SYNC", "registerLifecycleListener() - Registering ActivityLifecycleCallbacks...")
 
-                currentActivityCache = getCurrentActivityFallback()
+                // 어태치 시점에서 전면 실행 상태인 액티비티를 선제 확보
+                currentActivity = getCurrentActivityFallback()
 
                 app.registerActivityLifecycleCallbacks(object : android.app.Application.ActivityLifecycleCallbacks {
                     override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
-                        currentActivityCache = activity
+                        currentActivity = activity
+                        android.util.Log.d("StremioX-SYNC", "onActivityCreated: ${activity::class.java.name}")
                     }
                     override fun onActivityStarted(activity: Activity) {
-                        currentActivityCache = activity
+                        currentActivity = activity
+                        android.util.Log.d("StremioX-SYNC", "onActivityStarted: ${activity::class.java.name}")
                     }
                     
                     override fun onActivityResumed(activity: Activity) {
                         android.util.Log.d("StremioX-SYNC", "onActivityResumed: ${activity::class.java.name}")
-                        currentActivityCache = activity
+                        currentActivity = activity
                         
+                        // 백그라운드 전환 후 복귀했을 때 액티브 세션이 있다면 모니터링 루프 복구
                         if (activeSession != null && (monitoringJob == null || monitoringJob?.isActive == false)) {
-                            android.util.Log.d("StremioX-SYNC", "onActivityResumed() - Active session detected on resume. Restarting monitoring.")
+                            android.util.Log.d("StremioX-SYNC", "onActivityResumed() - Restarting tracking due to active session recovery.")
                             startMonitoring(activity)
                         }
                     }
                     
-                    override fun onActivityPaused(activity: Activity) {}
-                    override fun onActivityStopped(activity: Activity) {}
+                    override fun onActivityPaused(activity: Activity) {
+                        android.util.Log.d("StremioX-SYNC", "onActivityPaused: ${activity::class.java.name}")
+                    }
+                    override fun onActivityStopped(activity: Activity) {
+                        android.util.Log.d("StremioX-SYNC", "onActivityStopped: ${activity::class.java.name}")
+                    }
                     override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
                     override fun onActivityDestroyed(activity: Activity) {
-                        if (currentActivityCache == activity) {
-                            currentActivityCache = null
+                        android.util.Log.d("StremioX-SYNC", "onActivityDestroyed: ${activity::class.java.name}")
+                        if (currentActivity == activity) {
+                            currentActivity = null
                         }
                     }
                 })
             }
 
+            private fun isPlayerObject(obj: Any): Boolean {
+                return runSuspendCatching {
+                    obj::class.java.getMethod("getCurrentPosition") != null &&
+                    obj::class.java.getMethod("getDuration") != null
+                }.getOrDefault(false)
+            }
+
+            private fun getExoPlayer(activity: android.app.Activity): Any? {
+                android.util.Log.v("StremioX-SYNC", "getExoPlayer() - Scanning fields for Player interface...")
+                return runSuspendCatching {
+                    val activityClass = activity::class.java
+                    
+                    for (f in activityClass.declaredFields) {
+                        f.isAccessible = true
+                        val obj = f.get(activity) ?: continue
+                        if (isPlayerObject(obj)) {
+                            android.util.Log.d("StremioX-SYNC", "getExoPlayer() - Found player directly in Activity: '${f.name}'")
+                            return obj
+                        }
+                    }
+
+                    if (activity is androidx.fragment.app.FragmentActivity) {
+                        val fragments = getAllFragments(activity.supportFragmentManager)
+                        android.util.Log.v("StremioX-SYNC", "getExoPlayer() - Recursive search found ${fragments.size} total sub-fragments.")
+                        for (frag in fragments) {
+                            val fragClass = frag::class.java
+                            android.util.Log.v("StremioX-SYNC", "getExoPlayer() - Searching fragment: ${fragClass.name}")
+                            for (f in fragClass.declaredFields) {
+                                f.isAccessible = true
+                                val obj = f.get(frag) ?: continue
+                                if (isPlayerObject(obj)) {
+                                    android.util.Log.d("StremioX-SYNC", "getExoPlayer() - Found Player in Fragment '${fragClass.simpleName}' -> Field: '${f.name}'")
+                                    return obj
+                                }
+                                
+                                val objClass = obj::class.java
+                                for (sf in objClass.declaredFields) {
+                                    sf.isAccessible = true
+                                    val subObj = sf.get(obj) ?: continue
+                                    if (isPlayerObject(subObj)) {
+                                        android.util.Log.d("StremioX-SYNC", "getExoPlayer() - Found Player in Fragment '${fragClass.simpleName}' -> Field: '${f.name}' -> Sub-Field: '${sf.name}'")
+                                        return subObj
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    android.util.Log.v("StremioX-SYNC", "getExoPlayer() - Player search frame ended without results.")
+                    null
+                }.getOrNull()
+            }
+
+            private fun extractSessionFromBundle(bundle: Bundle?): PlaybackSession? {
+                if (bundle == null) return null
+                return runSuspendCatching {
+                    android.util.Log.d("StremioX-SYNC", "Inspecting Bundle Keys...")
+                    for (key in bundle.keySet()) {
+                        android.util.Log.d("StremioX-SYNC", "Bundle Key: '$key' => type: ${bundle.get(key)?.javaClass?.name}")
+                    }
+
+                    val syncDataStr = bundle.getString("syncData") 
+                        ?: bundle.getBundle("syncData")?.toString()
+                        ?: bundle.get("syncData")?.toString()
+                        
+                    if (!syncDataStr.isNullOrBlank()) {
+                        android.util.Log.d("StremioX-SYNC", "Found syncData payload: $syncDataStr")
+                        val imdbId = Regex("""tt\d+""").find(syncDataStr)?.value
+                        val tmdbId = Regex("""\"tmdb\"[^:]*:\s*\"?(\d+)\"?""").find(syncDataStr)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                        
+                        val episode = bundle.getInt("episode", -1).takeIf { it > 0 }
+                            ?: bundle.getInt("episode_num", -1).takeIf { it > 0 }
+                            ?: Regex("""\"episode\"[^:]*:\s*(\d+)""").find(syncDataStr)?.groupValues?.getOrNull(1)?.toIntOrNull()
+                            
+                        val season = bundle.getInt("season", -1).takeIf { it > 0 }
+                            ?: bundle.getInt("season_num", -1).takeIf { it > 0 }
+                            ?: Regex("""\"season\"[^:]*:\s*(\d+)""").find(syncDataStr)?.groupValues?.getOrNull(1)?.toIntOrNull()
+
+                        val isMovie = (season == null && episode == null) || bundle.getBoolean("isMovie", false)
+
+                        if (imdbId != null || tmdbId != null) {
+                            val session = PlaybackSession(
+                                imdbId = imdbId,
+                                tmdbId = tmdbId,
+                                season = season,
+                                episode = episode,
+                                isMovie = isMovie
+                            )
+                            android.util.Log.d("StremioX-SYNC", "Reconstructed universal playback session: $session")
+                            return session
+                        }
+                    }
+
+                    val directImdb = bundle.getString("imdbId") ?: bundle.getString("imdb")
+                    val directTmdb = bundle.getInt("tmdbId", -1).takeIf { it > 0 } ?: bundle.getInt("tmdb", -1).takeIf { it > 0 }
+                    if (directImdb != null || directTmdb != null) {
+                        val season = bundle.getInt("season", -1).takeIf { it > 0 }
+                        val episode = bundle.getInt("episode", -1).takeIf { it > 0 }
+                        return PlaybackSession(
+                            imdbId = directImdb,
+                            tmdbId = directTmdb,
+                            season = season,
+                            episode = episode,
+                            isMovie = (season == null && episode == null)
+                        )
+                    }
+                    null
+                }.getOrNull()
+            }
+
+            private fun findAndActiveSession(activity: Activity) {
+                activity.intent?.extras?.let { bundle ->
+                    val session = extractSessionFromBundle(bundle)
+                    if (session != null) {
+                        activeSession = session
+                        return
+                    }
+                }
+
+                if (activity is androidx.fragment.app.FragmentActivity) {
+                    val fragments = getAllFragments(activity.supportFragmentManager)
+                    for (frag in fragments) {
+                        frag.arguments?.let { bundle ->
+                            val session = extractSessionFromBundle(bundle)
+                            if (session != null) {
+                                activeSession = session
+                                return
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 실시간 트래킹 및 진행률 폴링 루프 시작 함수
             fun startMonitoring(activity: Activity) {
                 android.util.Log.d("StremioX-SYNC", "startMonitoring() - Initializing real-time monitor job.")
                 monitoringJob?.cancel()
@@ -346,7 +485,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     android.util.Log.d("StremioX-SYNC", "startMonitoring() - Loop coroutine launched on Main thread successfully.")
                     lastKnownProgressPercent = 0.0
                     var consecutiveNulls = 0
-
+                    
                     while (true) {
                         kotlinx.coroutines.delay(1000)
                         
@@ -358,13 +497,16 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
                         if (currentPlayer == null) {
                             consecutiveNulls++
-                            android.util.Log.w("StremioX-SYNC", "startMonitoring() - Player not found. Failure strike counter: $consecutiveNulls/5")
+                            android.util.Log.w("StremioX-SYNC", "startMonitoring() - Player not found. Failure counter: $consecutiveNulls/5")
                             if (consecutiveNulls >= 5) {
-                                android.util.Log.d("StremioX-SYNC", "startMonitoring() - Player missing limit reached. Stopping loop with last known progress: ${String.format("%.2f", lastKnownProgressPercent)}%")
+                                android.util.Log.d("StremioX-SYNC", "startMonitoring() - Player missing limit reached. Triggering playback stop at: ${String.format("%.2f", lastKnownProgressPercent)}%")
                                 triggerPlaybackStop(lastKnownProgressPercent)
                                 break
                             }
                         } else {
+                            if (consecutiveNulls > 0) {
+                                android.util.Log.d("StremioX-SYNC", "startMonitoring() - Player recovered. Resetting failure counter.")
+                            }
                             consecutiveNulls = 0
                             activePlayer = currentPlayer
                             
@@ -375,7 +517,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                                 val duration = durationMethod.invoke(currentPlayer) as Long
                                 if (duration > 0L) {
                                     lastKnownProgressPercent = (currentPos.toDouble() * 100.0) / duration.toDouble()
-                                    android.util.Log.d("StremioX-SYNC", "startMonitoring() - Scrobbling tick: ${String.format("%.2f", lastKnownProgressPercent)}% ($currentPos ms / $duration ms)")
+                                    android.util.Log.d("StremioX-SYNC", "startMonitoring() - Tick update: ${String.format("%.2f", lastKnownProgressPercent)}% ($currentPos ms / $duration ms)")
+                                } else {
+                                    android.util.Log.v("StremioX-SYNC", "startMonitoring() - Player detected, but duration is 0.")
                                 }
                             }.onFailure { e ->
                                 android.util.Log.e("StremioX-SYNC", "startMonitoring() - Error retrieving player properties: ${e.message}", e)
@@ -394,7 +538,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 
                 val activity = getCurrentActivity()
                 if (activity != null) {
-                    currentActivityCache = activity
                     android.util.Log.d("StremioX-SYNC", "triggerPlaybackStart() - Active activity context secured: ${activity::class.java.name}. Starting monitor job.")
                     startMonitoring(activity)
                 } else {
@@ -543,7 +686,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     android.util.Log.e("StremioX-SYNC", "Simkl API Request Exception ($action) -> ${e.message}", e)
                 }
             }
-        }                 
+        }
 
         private val IMDB_ID_REGEX = "tt[0-9]+".toRegex()
         private val JSON_ID_EXTRACT_REGEX = "\"id\":\"([^\"]+)\"".toRegex()
