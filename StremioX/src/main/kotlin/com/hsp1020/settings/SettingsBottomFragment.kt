@@ -9,7 +9,6 @@ import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
-import android.os.SystemClock
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
@@ -27,6 +26,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import android.os.SystemClock
 import androidx.appcompat.app.AlertDialog
 import androidx.core.content.edit
 import androidx.fragment.app.DialogFragment
@@ -40,6 +40,12 @@ import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+
+// 🌟 [임포트 추가] 코루틴 관련 에러 해결을 위해 명시적 선언
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
 
 // ==========================================
 // Data & Repository Layer
@@ -196,7 +202,7 @@ class SettingsBottomFragment(
         setupToggle(view, "switchCineStream", SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, isCineStreamInstalled(), "CineStream")
         setupToggle(view, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
 
-        // 🌟 [UI 추가] 웹뷰 간편 로그인 전용 버튼 레이아웃 동적 생성 및 주입
+        // 🌟 웹뷰 간편 로그인 전용 버튼 레이아웃 동적 생성 및 주입
         val rootGroup = view as? ViewGroup
         if (rootGroup != null) {
             val context = view.context
@@ -212,7 +218,7 @@ class SettingsBottomFragment(
             
             // Trakt 간편 로그인 버튼
             val btnTraktLogin = Button(context).apply {
-                text = "Trakt Login"
+                text = "Trakt 웹뷰 간편 로그인"
                 setTextColor(Color.WHITE)
                 background = GradientDrawable().apply {
                     setColor(Color.parseColor("#ED2224")) // Trakt Red
@@ -237,7 +243,7 @@ class SettingsBottomFragment(
             
             // Simkl 간편 로그인 버튼
             val btnSimklLogin = Button(context).apply {
-                text = "Simkl Login"
+                text = "Simkl 웹뷰 간편 로그인"
                 setTextColor(Color.WHITE)
                 background = GradientDrawable().apply {
                     setColor(Color.parseColor("#E47E24")) // Simkl Orange
@@ -534,7 +540,6 @@ class SettingsBottomFragment(
         }
     }
 
-    // 🌟 [새 기능] Trakt, Simkl 자동 백그라운드 웹뷰 로그인 처리 클래스 추가
     class OAuthWebViewDialog(
         private val sharedPref: SharedPreferences,
         private val type: String, // "trakt" or "simkl"
@@ -625,7 +630,7 @@ class SettingsBottomFragment(
         }
 
         private fun performTokenExchange(code: String) {
-            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            GlobalScope.launch(Dispatchers.IO) {
                 try {
                     val url = if (type == "trakt") "https://api.trakt.tv/oauth/token" else "https://api.simkl.com/oauth/token"
                     val clientId = if (type == "trakt") TRAKT_CLIENT_ID else SIMKL_CLIENT_ID
@@ -660,7 +665,7 @@ class SettingsBottomFragment(
                                 }
                             }
                             
-                            withContext(kotlinx.coroutines.Dispatchers.Main) {
+                            withContext(Dispatchers.Main) {
                                 Toast.makeText(requireContext(), "${if(type == "trakt") "Trakt" else "Simkl"} Login Successful!", Toast.LENGTH_SHORT).show()
                                 onFinish(true)
                                 dismiss()
@@ -669,13 +674,13 @@ class SettingsBottomFragment(
                         }
                     }
                     
-                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    withContext(Dispatchers.Main) {
                         Toast.makeText(requireContext(), "Authentication failed. Please try again.", Toast.LENGTH_SHORT).show()
                         onFinish(false)
                         dismiss()
                     }
                 } catch (e: Exception) {
-                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    withContext(Dispatchers.Main) {
                         Toast.makeText(requireContext(), "Network error: ${e.message}", Toast.LENGTH_SHORT).show()
                         onFinish(false)
                         dismiss()
