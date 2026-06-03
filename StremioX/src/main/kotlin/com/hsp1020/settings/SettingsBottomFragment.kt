@@ -41,7 +41,6 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 
-// 🌟 [임포트 추가] 코루틴 관련 에러 해결을 위해 명시적 선언
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -202,73 +201,81 @@ class SettingsBottomFragment(
         setupToggle(view, "switchCineStream", SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, isCineStreamInstalled(), "CineStream")
         setupToggle(view, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
 
-        // 🌟 웹뷰 간편 로그인 전용 버튼 레이아웃 동적 생성 및 주입
+        // 🌟 [수정] ScrollView 단일 자식 규격을 우회하여 내측 레이아웃 컨테이너에 동적 버튼 추가
         val rootGroup = view as? ViewGroup
         if (rootGroup != null) {
-            val context = view.context
-            
-            val loginContainer = LinearLayout(context).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(30, 20, 30, 20)
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT, 
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                )
+            val targetContainer = if (rootGroup is android.widget.ScrollView || rootGroup is androidx.core.widget.NestedScrollView) {
+                if (rootGroup.childCount > 0) rootGroup.getChildAt(0) as? ViewGroup else rootGroup
+            } else {
+                rootGroup
             }
-            
-            // Trakt 간편 로그인 버튼
-            val btnTraktLogin = Button(context).apply {
-                text = "Trakt 웹뷰 간편 로그인"
-                setTextColor(Color.WHITE)
-                background = GradientDrawable().apply {
-                    setColor(Color.parseColor("#ED2224")) // Trakt Red
-                    cornerRadius = 20f
+
+            if (targetContainer != null) {
+                val context = view.context
+                
+                val loginContainer = LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(30, 20, 30, 20)
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, 
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    )
                 }
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT, 
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    setMargins(0, 10, 0, 10)
-                }
-                setOnClickListener {
-                    val dialog = OAuthWebViewDialog(sharedPref, "trakt") { success ->
-                        if (success) {
-                            etTraktToken.setText(sharedPref.getString("trakt_access_token", ""))
-                            etTraktClientId.setText(sharedPref.getString("trakt_client_id", ""))
-                        }
+                
+                // Trakt 간편 로그인 버튼
+                val btnTraktLogin = Button(context).apply {
+                    text = "Trakt 웹뷰 간편 로그인"
+                    setTextColor(Color.WHITE)
+                    background = GradientDrawable().apply {
+                        setColor(Color.parseColor("#ED2224")) // Trakt Red
+                        cornerRadius = 20f
                     }
-                    dialog.show(childFragmentManager, "trakt_login")
-                }
-            }
-            
-            // Simkl 간편 로그인 버튼
-            val btnSimklLogin = Button(context).apply {
-                text = "Simkl 웹뷰 간편 로그인"
-                setTextColor(Color.WHITE)
-                background = GradientDrawable().apply {
-                    setColor(Color.parseColor("#E47E24")) // Simkl Orange
-                    cornerRadius = 20f
-                }
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT, 
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply {
-                    setMargins(0, 10, 0, 10)
-                }
-                setOnClickListener {
-                    val dialog = OAuthWebViewDialog(sharedPref, "simkl") { success ->
-                        if (success) {
-                            etSimklToken.setText(sharedPref.getString("simkl_access_token", ""))
-                            etSimklClientId.setText(sharedPref.getString("simkl_client_id", ""))
-                        }
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, 
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply {
+                        setMargins(0, 10, 0, 10)
                     }
-                    dialog.show(childFragmentManager, "simkl_login")
+                    setOnClickListener {
+                        val dialog = OAuthWebViewDialog(sharedPref, "trakt") { success ->
+                            if (success) {
+                                etTraktToken.setText(sharedPref.getString("trakt_access_token", ""))
+                                etTraktClientId.setText(sharedPref.getString("trakt_client_id", ""))
+                            }
+                        }
+                        dialog.show(childFragmentManager, "trakt_login")
+                    }
                 }
+                
+                // Simkl 간편 로그인 버튼
+                val btnSimklLogin = Button(context).apply {
+                    text = "Simkl 웹뷰 간편 로그인"
+                    setTextColor(Color.WHITE)
+                    background = GradientDrawable().apply {
+                        setColor(Color.parseColor("#E47E24")) // Simkl Orange
+                        cornerRadius = 20f
+                    }
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, 
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    ).apply {
+                        setMargins(0, 10, 0, 10)
+                    }
+                    setOnClickListener {
+                        val dialog = OAuthWebViewDialog(sharedPref, "simkl") { success ->
+                            if (success) {
+                                etSimklToken.setText(sharedPref.getString("simkl_access_token", ""))
+                                etSimklClientId.setText(sharedPref.getString("simkl_client_id", ""))
+                            }
+                        }
+                        dialog.show(childFragmentManager, "simkl_login")
+                    }
+                }
+                
+                loginContainer.addView(btnTraktLogin)
+                loginContainer.addView(btnSimklLogin)
+                targetContainer.addView(loginContainer)
             }
-            
-            loginContainer.addView(btnTraktLogin)
-            loginContainer.addView(btnSimklLogin)
-            rootGroup.addView(loginContainer)
         }
 
         // Action: Add Link
