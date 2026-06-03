@@ -26,6 +26,9 @@ import com.lagradost.cloudstream3.CommonActivity.showToast
 import org.json.JSONArray
 import org.json.JSONObject
 
+// ==========================================
+// Data & Repository Layer
+// ==========================================
 data class LinkItem(
     val id: Long = System.currentTimeMillis(),
     val name: String,
@@ -84,6 +87,9 @@ object SettingsRepository {
     }
 }
 
+// ==========================================
+// UI Layer
+// ==========================================
 class SettingsBottomFragment(
     plugin: StremioXPlugin,
     private val sharedPref: SharedPreferences
@@ -141,7 +147,7 @@ class SettingsBottomFragment(
             throw Exception("saveIcon ImageView not found in bottom_sheet_layout", e)
         }
 
-        // XML 설정 입력 컴포넌트 바인딩
+        // 수동 입력 전용 텍스트 필드 바인딩
         val etTmdbKey: EditText = try { view.findView("etTmdbKey") } catch (e: Throwable) {
             throw Exception("etTmdbKey EditText not found in bottom_sheet_layout", e)
         }
@@ -166,7 +172,7 @@ class SettingsBottomFragment(
         showlinks.makeTvCompatible()
         saveIcon.makeTvCompatible()
 
-        // SharedPreferences 데이터 수급 및 기입
+        // SharedPreferences 데이터 수급 초기화
         etTmdbKey.setText(sharedPref.getString("tmdb_api_key", ""))
         etTraktClientId.setText(sharedPref.getString("trakt_client_id", ""))
         etTraktToken.setText(sharedPref.getString("trakt_access_token", ""))
@@ -269,7 +275,7 @@ class SettingsBottomFragment(
                             (rv.adapter as? LinksAdapter)?.remove(itemToDelete)
                             showToast("Deleted")
                             if (updatedList.isEmpty()) {
-                                tvNoLinks.visibility = VISIBLE
+                                tvNoLinks.visibility = View.VISIBLE
                                 rv.visibility = View.GONE
                             }
                         }
