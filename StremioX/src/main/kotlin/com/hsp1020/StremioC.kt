@@ -209,8 +209,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         private val apiKey: String
             get() = getPrefString("tmdb_api_key")
             
-
-
         object PlaybackSyncManager {
             @Volatile var activeSession: PlaybackSession? = null
             @Volatile var pendingSession: PlaybackSession? = null
@@ -296,11 +294,37 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 return currentActivity ?: getCurrentActivityFallback()
             }
 
+            // 프래그먼트 수명 주기 감시 콜백 안전 등록 메서드 (중복 등록 방지)
+            private fun registerFragmentCallbacks(activity: Activity) {
+                val activityHash = System.identityHashCode(activity)
+                if (registeredActivities.add(activityHash)) {
+                    val fragmentActivity = activity as? androidx.fragment.app.FragmentActivity
+                    fragmentActivity?.supportFragmentManager?.registerFragmentLifecycleCallbacks(
+                        object : androidx.fragment.app.FragmentManager.FragmentLifecycleCallbacks() {
+                            override fun onFragmentResumed(fm: androidx.fragment.app.FragmentManager, f: androidx.fragment.app.Fragment) {
+                                val name = f::class.java.name
+                                // GeneratorPlayer 및 Player 프래그먼트 노출 시 데몬 즉각 깨우기 가동
+                                if (name.contains("Player", ignoreCase = true) || name.contains("Generator", ignoreCase = true)) {
+                                    android.util.Log.d("StremioX-SYNC", "Fragment Lifecycle: Player Fragment Resumed: $name. Starting monitor daemon.")
+                                    startAlwaysOnMonitoring()
+                                }
+                            }
+                        }, true // 자식 FragmentManager까지 재귀 조사 허용
+                    )
+                    android.util.Log.d("StremioX-SYNC", "Registered FragmentLifecycleCallbacks for activity: ${activity::class.java.name}")
+                }
+            }
+
             fun registerLifecycleListener(context: Context) {
                 if (isListenerRegistered) return
                 isListenerRegistered = true
 
-                currentActivity = getCurrentActivityFallback()
+                // [핵심 보완] 플러그인 로드 즉시 현재 켜져 있는 MainActivity를 선제 확보하여 프래그먼트 콜백 강제 바인딩
+                val initActivity = getCurrentActivityFallback() ?: resolveCurrentActivity()
+                if (initActivity != null) {
+                    currentActivity = initActivity
+                    registerFragmentCallbacks(initActivity)
+                }
 
                 val app = context.applicationContext as? android.app.Application
                 app?.registerActivityLifecycleCallbacks(object : android.app.Application.ActivityLifecycleCallbacks {
@@ -313,24 +337,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     override fun onActivityResumed(activity: Activity) {
                         currentActivity = activity
                         
-                        // [핵심 보완] MainActivity 내에서 발생하는 프래그먼트의 부착/갱신을 모니터링하기 위한 콜백 무결성 등록
-                        val activityHash = System.identityHashCode(activity)
-                        if (registeredActivities.add(activityHash)) {
-                            val fragmentActivity = activity as? androidx.fragment.app.FragmentActivity
-                            fragmentActivity?.supportFragmentManager?.registerFragmentLifecycleCallbacks(
-                                object : androidx.fragment.app.FragmentManager.FragmentLifecycleCallbacks() {
-                                    override fun onFragmentResumed(fm: androidx.fragment.app.FragmentManager, f: androidx.fragment.app.Fragment) {
-                                        val name = f::class.java.name
-                                        // GeneratorPlayer 및 Player 프래그먼트 전면 노출 시 데몬 즉각 깨우기 가동
-                                        if (name.contains("Player", ignoreCase = true) || name.contains("Generator", ignoreCase = true)) {
-                                            android.util.Log.d("StremioX-SYNC", "Fragment Lifecycle: Player Fragment Resumed: $name. Starting monitor daemon.")
-                                            startAlwaysOnMonitoring()
-                                        }
-                                    }
-                                }, true // 자식 FragmentManager까지 재귀 조사 허용
-                            )
-                            android.util.Log.d("StremioX-SYNC", "Registered FragmentLifecycleCallbacks for activity: ${activity::class.java.name}")
-                        }
+                        // 액티비티 재개 시 감시 가드 확보
+                        registerFragmentCallbacks(activity)
 
                         val className = activity::class.java.name
                         val isPlayerActivity = className.contains("Player", ignoreCase = true) || 
@@ -356,7 +364,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     }
                 })
 
-                // 플러그인 최초 실행 단계에서 영구 감지 루프 데몬 가동
+                // 최초 실행 단계에서 영구 감지 루프 데몬 가동
                 startAlwaysOnMonitoring()
             }
 
