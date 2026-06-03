@@ -1,3 +1,4 @@
+// v1.2 (Feature: StremioX 의존성 제거 및 모든 저장된 링크를 StremioC로 구동하도록 변경)
 package com.hsp1020
 
 import android.content.Context
@@ -18,13 +19,7 @@ class StremioXPlugin : Plugin() {
     override fun load(context: Context) {
         println("[StremioXPlugin v1.2-TRACKING] load() 함수 호출됨")
         
-        // 🌟 플러그인 Context 주입 시점에 Playback Lifecycle Listener를 보장 등록하여 Null 방지
-        try {
-            StremioC.Companion.PlaybackSyncManager.registerLifecycleListener(context)
-            println("[StremioXPlugin-SYNC] PlaybackSyncManager.registerLifecycleListener() registered successfully!")
-        } catch (e: Exception) {
-            println("[StremioXPlugin-SYNC] Failed to register PlaybackSyncManager: ${e.message}")
-        }
+        println("[StremioXPlugin v1.2-TRACKING] 기본 StremioX, StremioC 카탈로그 등록 건너뜀")
 
         println("[StremioXPlugin v1.2-TRACKING] reload(context) 실행 시도")
         reload(context)
@@ -53,7 +48,7 @@ class StremioXPlugin : Plugin() {
                         id = obj.optLong("id", System.currentTimeMillis()),
                         name = obj.optString("name", ""),
                         link = obj.optString("link", ""),
-                        type = obj.optString("type", "StremioC")
+                        type = obj.optString("type", "StremioC") // [v1.2 수정] 파싱 시 기본값도 StremioC
                     )
                 )
             }
@@ -80,6 +75,7 @@ class StremioXPlugin : Plugin() {
                 } else {
                     try {
                         println("[StremioXPlugin v1.2-TRACKING] 새로운 확장 등록 시도: ${item.name} 타입: ${item.type}")
+                        // [v1.2 수정] 과거 데이터(StremioX)든 최신 데이터(StremioC)든 무조건 StremioC 객체로 통일하여 생성합니다.
                         when (item.type) {
                             "StremioX", "StremioC" -> {
                                 try {
@@ -119,5 +115,3 @@ class StremioXPlugin : Plugin() {
         val type: String
     )
 }
-
-
