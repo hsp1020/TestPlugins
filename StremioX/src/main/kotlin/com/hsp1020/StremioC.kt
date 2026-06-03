@@ -161,7 +161,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         private const val tmdbAPI = "https://api.themoviedb.org/3"
         private const val TRANSPARENT_PIXEL = "https://upload.wikimedia.org/wikipedia/commons/c/ca/1x1.png"
         
-        // SharedPreferences에서 실시간 수동 저장한 환경 변수를 로드하는 정적 가변 헬퍼
+        // SharedPreferences에서 수동 기입 저장한 환경 변수를 로드하는 정적 가변 헬퍼
         private fun getPrefString(key: String): String {
             val context = CloudStreamApp.context ?: return ""
             val possibleNames = listOf(
@@ -176,7 +176,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             return ""
         }
 
-        // 런타임 수동 기입 TMDb API 키 동적 바인딩
+        // 런타임 수동 기입 TMDb API 키 동적 바인딩 (하드코딩 제거 완료)
         private val apiKey: String
             get() = getPrefString("tmdb_api_key")
 
@@ -201,7 +201,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
                 app.registerActivityLifecycleCallbacks(object : android.app.Application.ActivityLifecycleCallbacks {
                     override fun onActivityCreated(activity: android.app.Activity, savedInstanceState: Bundle?) {}
-                    override fun onActivityStarted(activity: android.app.Activity) {}
+                    override fun onActivityStarted(activity: android.app.Activity, savedInstanceState: Bundle?) {}
                     override fun onActivityResumed(activity: android.app.Activity) {
                         // 플레이어 액티비티를 정밀 스캔하여 내부 리플렉션으로 ExoPlayer 인스턴스를 따옵니다.
                         if (activity::class.java.simpleName.contains("Player", ignoreCase = true)) {
@@ -1028,12 +1028,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         )
 
         // 3in1 동기화 세션 기입 및 플레이어 재생 개시 트리거 송신
-        val userUUID = Regex("/stremio/([^/]+)").find(mainUrl)?.groupValues?.get(1) ?: ""
         val isMovieMedia = targetType == "movie" || (loadData.season == null && loadData.episode == null)
 
         PlaybackSyncManager.activeSession = PlaybackSyncManager.PlaybackSession(
             imdbId = loadData.imdbId ?: primaryId,
-            tmdbId = loadData.tmdbId ?: cleanTmdbId?.toIntOrNull(),
+            tmdbId = loadData.tmdbId,
             season = globalSeason,
             episode = globalEpisode,
             isMovie = isMovieMedia
