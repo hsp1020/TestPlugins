@@ -209,6 +209,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         private val apiKey: String
             get() = getPrefString("tmdb_api_key")
             
+
+
         object PlaybackSyncManager {
             @Volatile var activeSession: PlaybackSession? = null
             @Volatile var pendingSession: PlaybackSession? = null
@@ -216,6 +218,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             
             // 캐시 유효성을 검증하기 위한 플레이어 소유 프래그먼트의 약한 참조(WeakReference)
             @Volatile private var cachedPlayerFragment: java.lang.ref.WeakReference<androidx.fragment.app.Fragment>? = null
+            
+            // 리스너가 중복 등록되어 프래그먼트 감지가 오작동하는 것을 방지하는 정적 해시셋
+            private val registeredActivities = ConcurrentHashMap.newKeySet<Int>()
             
             private var isListenerRegistered = false
             @Volatile private var lastKnownProgressPercent: Double = 0.0
@@ -307,6 +312,26 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     }
                     override fun onActivityResumed(activity: Activity) {
                         currentActivity = activity
+                        
+                        // [핵심 보완] MainActivity 내에서 발생하는 프래그먼트의 부착/갱신을 모니터링하기 위한 콜백 무결성 등록
+                        val activityHash = System.identityHashCode(activity)
+                        if (registeredActivities.add(activityHash)) {
+                            val fragmentActivity = activity as? androidx.fragment.app.FragmentActivity
+                            fragmentActivity?.supportFragmentManager?.registerFragmentLifecycleCallbacks(
+                                object : androidx.fragment.app.FragmentManager.FragmentLifecycleCallbacks() {
+                                    override fun onFragmentResumed(fm: androidx.fragment.app.FragmentManager, f: androidx.fragment.app.Fragment) {
+                                        val name = f::class.java.name
+                                        // GeneratorPlayer 및 Player 프래그먼트 전면 노출 시 데몬 즉각 깨우기 가동
+                                        if (name.contains("Player", ignoreCase = true) || name.contains("Generator", ignoreCase = true)) {
+                                            android.util.Log.d("StremioX-SYNC", "Fragment Lifecycle: Player Fragment Resumed: $name. Starting monitor daemon.")
+                                            startAlwaysOnMonitoring()
+                                        }
+                                    }
+                                }, true // 자식 FragmentManager까지 재귀 조사 허용
+                            )
+                            android.util.Log.d("StremioX-SYNC", "Registered FragmentLifecycleCallbacks for activity: ${activity::class.java.name}")
+                        }
+
                         val className = activity::class.java.name
                         val isPlayerActivity = className.contains("Player", ignoreCase = true) || 
                                                className.contains("Generator", ignoreCase = true)
@@ -324,6 +349,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     }
                     override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
                     override fun onActivityDestroyed(activity: Activity) {
+                        registeredActivities.remove(System.identityHashCode(activity))
                         if (currentActivity == activity) {
                             currentActivity = null
                         }
@@ -334,7 +360,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 startAlwaysOnMonitoring()
             }
 
-            // [상시 가동 데몬] 고스트 코루틴 방지 자가 소멸 엔진이 내장된 최종 안정화 루프
+            // 상시 가동 백그라운드 모니터링 데몬 (약한 참조 수명주기 및 고스트 자가소멸 기법 완벽 연동)
             fun startAlwaysOnMonitoring() {
                 if (monitoringJob?.isActive == true) {
                     return
@@ -345,17 +371,16 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     var consecutiveNulls = 0
                     var playerDetected = false
                     var hasPlayerBeenDetectedOnce = false
-                    var idleTicks = 0 // 상시 루프 누수 방지용 타이머
+                    var idleTicks = 0 // 상시 루프 누수 및 누적 부하 방지용 타이머
                     
                     while (true) {
-                        // 최적화 1: 평상시(플레이어 미감지)에는 검사 주기를 3초로 대폭 낮춤
+                        // 최적화 1: 평상시(플레이어 미감지)에는 검사 주기를 3초로 대폭 낮춰 부하 차단
                         val checkDelay = if (playerDetected) 1000L else 3000L
                         kotlinx.coroutines.delay(checkDelay)
                         
                         val activity = resolveCurrentActivity()
                         if (activity == null) {
                             idleTicks++
-                            // 액티비티 컨텍스트가 일정 시간 소실되면 고스트 루프로 판단하여 자가 소멸
                             if (idleTicks >= 15) { 
                                 android.util.Log.d("StremioX-SYNC", "Always-On: No active activity context for too long. Auto-terminating loop to prevent leak.")
                                 break
@@ -401,7 +426,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                             }
                             val cleanedUrl = cleanUrl(playingUrl)
                             
-                            // 캐시 바이패스 자동 감지: loadLinks() 가 아예 생략된 경우 (URL 역추적 연동)
+                            // 캐시 바이패스 자동 감지: loadLinks() 가 아예 생략된 경우 (URL 역추적 연동) [2]
                             if (activeSession == null && cleanedUrl != null) {
                                 val matchedSession = globalUrlRegistry[cleanedUrl]
                                     ?: globalUrlRegistry.entries.find { cleanedUrl.contains(it.key) || it.key.contains(cleanedUrl) }?.value
@@ -748,6 +773,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 return null
             }
         }
+        
 
         private val IMDB_ID_REGEX = "tt[0-9]+".toRegex()
         private val JSON_ID_EXTRACT_REGEX = "\"id\":\"([^\"]+)\"".toRegex()
