@@ -122,7 +122,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
 
     init {
-        // 백그라운드 바인딩 시도 (보조적 수단)
         CloudStreamApp.context?.let { PlaybackSyncManager.registerLifecycleListener(it) }
     }
 
@@ -224,14 +223,12 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     override fun onActivityResumed(activity: Activity) {
                         android.util.Log.d("StremioX-SYNC", "onActivityResumed: ${activity::class.java.name}")
                         
-                        // Single-Activity 구조 대응을 위한 비동기 모니터링 루프 시작
                         kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.Main) {
                             var playerAndSessionBound = false
                             var scanAttempts = 0
                             
                             android.util.Log.d("StremioX-SYNC", "Starting player detection loop...")
                             
-                            // 1단계: 플레이어 객체 및 재생 세션 정보가 메모리에 올라올 때까지 최대 10초 대기 검색
                             while (scanAttempts < 20) {
                                 val player = getExoPlayer(activity)
                                 findAndActiveSession(activity)
@@ -247,7 +244,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                                 scanAttempts++
                             }
                             
-                            // 2단계: 바인딩 성공 시 1초마다 재생율 트래킹 진행 및 종료 감시
                             if (playerAndSessionBound) {
                                 android.util.Log.d("StremioX-SYNC", "Monitoring loop started for active player session...")
                                 lastKnownProgressPercent = 0.0
@@ -262,7 +258,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                                         activePlayer = null
                                         break
                                     } else {
-                                        // 실시간 진행률 캐싱 (안정적인 종료 스크로블 보장)
                                         runSuspendCatching {
                                             val currentPosMethod = currentPlayer::class.java.getMethod("getCurrentPosition")
                                             val durationMethod = currentPlayer::class.java.getMethod("getDuration")
@@ -304,14 +299,12 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 return runSuspendCatching {
                     val activityClass = activity::class.java
                     
-                    // 액티비티 직접 멤버 필드 스캔
                     for (f in activityClass.declaredFields) {
                         f.isAccessible = true
                         val obj = f.get(activity) ?: continue
                         if (isPlayerObject(obj)) return obj
                     }
 
-                    // 프래그먼트 내부 깊은 리플렉션 탐색
                     if (activity is androidx.fragment.app.FragmentActivity) {
                         val fragments = activity.supportFragmentManager.fragments
                         for (frag in fragments) {
@@ -321,7 +314,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                                 val obj = f.get(frag) ?: continue
                                 if (isPlayerObject(obj)) return obj
                                 
-                                // 중첩된 뷰모델 혹은 내부 헬퍼 객체 1단계 세부 탐색
                                 val objClass = obj::class.java
                                 for (sf in objClass.declaredFields) {
                                     sf.isAccessible = true
@@ -338,7 +330,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             private fun extractSessionFromBundle(bundle: Bundle?): PlaybackSession? {
                 if (bundle == null) return null
                 return runSuspendCatching {
-                    // 전달인자 원시 데이터 가시 로깅
                     android.util.Log.d("StremioX-SYNC", "Inspecting Bundle Keys...")
                     for (key in bundle.keySet()) {
                         android.util.Log.d("StremioX-SYNC", "Bundle Key: '$key' => type: ${bundle.get(key)?.javaClass?.name}")
@@ -376,7 +367,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         }
                     }
 
-                    // 예외 폴백: 키가 직접 풀려있는 경우
                     val directImdb = bundle.getString("imdbId") ?: bundle.getString("imdb")
                     val directTmdb = bundle.getInt("tmdbId", -1).takeIf { it > 0 } ?: bundle.getInt("tmdb", -1).takeIf { it > 0 }
                     if (directImdb != null || directTmdb != null) {
@@ -395,7 +385,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
 
             private fun findAndActiveSession(activity: Activity) {
-                // 액티비티 인텐트 스캔
                 activity.intent?.extras?.let { bundle ->
                     val session = extractSessionFromBundle(bundle)
                     if (session != null) {
@@ -404,7 +393,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     }
                 }
 
-                // 프래그먼트 인자 스캔 (재생 모듈 핵심 타겟)
                 if (activity is androidx.fragment.app.FragmentActivity) {
                     val fragments = activity.supportFragmentManager.fragments
                     for (frag in fragments) {
@@ -525,7 +513,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val url = "https://api.simkl.com/$mediaType/scrobble"
                 val headers = mapOf(
                     "Content-Type" to "application/json",
-                    "simkl-api-client" to clientId,
+                    "simkl-api-key" to clientId, // 🌟 FIXED: simkl-api-client에서 simkl-api-key로 정정
                     "Authorization" to "Bearer $token"
                 )
 
@@ -565,8 +553,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 }
             }
         }
-
-    
 
         private val IMDB_ID_REGEX = "tt[0-9]+".toRegex()
         private val JSON_ID_EXTRACT_REGEX = "\"id\":\"([^\"]+)\"".toRegex()
@@ -1196,7 +1182,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             { invokeStreamPlay(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleInterceptor, wrappedCallback) }
         )
 
-        // 3in1 동기화 세션 기입 및 플레이어 재생 개시 트리거 송신
         val isMovieMedia = targetType == "movie" || (loadData.season == null && loadData.episode == null)
 
         PlaybackSyncManager.activeSession = PlaybackSyncManager.PlaybackSession(
@@ -2148,7 +2133,7 @@ private data class TmdbCredits(@JsonProperty("cast") val cast: List<TmdbCast>? =
 private data class TmdbCast(@JsonProperty("name") val name: String?, @JsonProperty("original_name") val originalName: String?, @JsonProperty("character") val character: String?, @JsonProperty("profile_path") val profilePath: String?)
 private data class TmdbCrew(@JsonProperty("name") val name: String?, @JsonProperty("original_name") val originalName: String?, @JsonProperty("job") val job: String?, @JsonProperty("profile_path") val profilePath: String?)
 private data class TmdbSeasonDetail(@JsonProperty("episodes") val episodes: List<TmdbEpisode>? = null)
-private data class TmdbEpisode(@JsonProperty("name") val name: String?, @JsonProperty("overview") val overview: String?, @JsonProperty("episode_number") val episodeNumber: Int?, @JsonProperty("air_date") val airDate: String?, @JsonProperty("vote_average") val voteAverage: Double?, @JsonProperty("runtime") val runtime: Int?)
+private data class TmdbEpisode(@JsonProperty("name") val name: String?, @JsonProperty("overview") val episodeNumber: Int?, @JsonProperty("air_date") val airDate: String?, @JsonProperty("vote_average") val voteAverage: Double?, @JsonProperty("runtime") val runtime: Int?)
 
 data class Trailers(@JsonProperty("key") val key: String? = null, @JsonProperty("type") val type: String? = null, @JsonProperty("published_at") val publishedAt: String? = null)
 data class ResultsTrailer(@JsonProperty("results") val results: ArrayList<Trailers>? = arrayListOf())
