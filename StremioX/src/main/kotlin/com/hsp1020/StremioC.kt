@@ -554,6 +554,57 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     android.util.Log.e("StremioX-SYNC", "Simkl API Request Exception ($action) -> ${e.message}", e)
                 }
             }
+
+            private fun findAndActiveSession(activity: Activity) {
+                val player = getExoPlayer(activity) ?: return
+                activePlayer = player
+                android.util.Log.d("StremioX-SYNC", "findAndActiveSession() - Re-associated activePlayer from activity.")
+            }
+
+            private fun getExoPlayer(activity: Activity): Any? {
+                try {
+                    val fragmentActivity = activity as? androidx.fragment.app.FragmentActivity ?: return null
+                    val fragments = getAllFragments(fragmentActivity.supportFragmentManager)
+                    for (frag in fragments) {
+                        val fragClassName = frag::class.java.name
+                        if (fragClassName.contains("GeneratorPlayer", ignoreCase = true) || 
+                            fragClassName.contains("Player", ignoreCase = true)) {
+                            
+                            val fields = mutableListOf<java.lang.reflect.Field>()
+                            var currentClass: Class<*>? = frag::class.java
+                            while (currentClass != null && currentClass != Any::class.java) {
+                                fields.addAll(currentClass.declaredFields)
+                                currentClass = currentClass.superclass
+                            }
+                            
+                            for (field in fields) {
+                                runCatching {
+                                    field.isAccessible = true
+                                    val obj = field.get(frag) ?: return@runCatching
+                                    val objClass = obj::class.java
+                                    
+                                    if (objClass.name.contains("CS3IPlayer", ignoreCase = true)) {
+                                        for (f in objClass.declaredFields) {
+                                            f.isAccessible = true
+                                            val innerObj = f.get(obj) ?: continue
+                                            if (innerObj::class.java.methods.any { it.name == "getCurrentPosition" }) {
+                                                return innerObj
+                                            }
+                                        }
+                                    }
+                                    
+                                    if (objClass.methods.any { it.name == "getCurrentPosition" }) {
+                                        return obj
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("StremioX-SYNC", "getExoPlayer() - Error: ${e.message}", e)
+                }
+                return null
+            }
         }
 
         private val IMDB_ID_REGEX = "tt[0-9]+".toRegex()
