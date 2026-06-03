@@ -2,6 +2,7 @@ package com.hsp1020
 
 import android.content.Context
 import android.os.Bundle
+import android.app.Activity
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -204,18 +205,19 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 isListenerRegistered = true
 
                 app.registerActivityLifecycleCallbacks(object : android.app.Application.ActivityLifecycleCallbacks {
-                    override fun onActivityCreated(activity: android.app.Activity, savedInstanceState: Bundle?) {}
-                    override fun onActivityStarted(activity: android.app.Activity, savedInstanceState: Bundle?) {}
-                    override fun onActivityResumed(activity: android.app.Activity) {
+                    // android.app.Activity 대신 단축 명칭 Activity를 사용합니다.
+                    override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
+                    override fun onActivityStarted(activity: Activity) {}
+                    override fun onActivityResumed(activity: Activity) {
                         // 플레이어 액티비티를 스캔하여 리플렉션으로 ExoPlayer 인스턴스를 따옵니다.
                         if (activity::class.java.simpleName.contains("Player", ignoreCase = true)) {
                             activePlayer = getExoPlayer(activity)
                         }
                     }
-                    override fun onActivityPaused(activity: android.app.Activity) {}
-                    override fun onActivityStopped(activity: android.app.Activity) {}
-                    override fun onActivitySaveInstanceState(activity: android.app.Activity, outState: Bundle) {}
-                    override fun onActivityDestroyed(activity: android.app.Activity) {
+                    override fun onActivityPaused(activity: Activity) {}
+                    override fun onActivityStopped(activity: Activity) {}
+                    override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
+                    override fun onActivityDestroyed(activity: Activity) {
                         if (activity::class.java.simpleName.contains("Player", ignoreCase = true)) {
                             triggerPlaybackStop()
                             activePlayer = null
@@ -223,6 +225,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     }
                 })
             }
+
 
             // 형변환 충돌을 피하기 위해 리플렉션으로 필드를 순회하여 'Player'가 들어간 인스턴스를 찾습니다.
             private fun getExoPlayer(activity: android.app.Activity): Any? {
