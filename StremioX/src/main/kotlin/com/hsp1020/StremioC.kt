@@ -1,4 +1,4 @@
-// 버전 정보: v1.9.3 - inline getKey 크래시 우회 및 [STREMIOSUB] 자막 디버그 로그 재조정 버전
+// 버전 정보: v1.9.4 - SharedPreferences 다중 폴백 경로 보완 및 [STREMIOSUB] 디버깅 강화 버전
 package com.hsp1020
 
 import android.content.Context
@@ -733,16 +733,23 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
 
             val raw = try { 
-                val rebuildPrefs = context?.getSharedPreferences("rebuild_key", Context.MODE_PRIVATE)
-                val rawValue = rebuildPrefs?.getString("stremio_addons", "") ?: ""
-                println("[STREMIOSUB] Attempt 1 (rebuild_key) -> raw value length: ${rawValue.length}, data: $rawValue")
+                // [원인 분석]: 로컬 SharedPreferences 이름이 구버전명인 "rebuild_key"가 아닌 "rebuild_preference"로 생성되어 있어, 1순위 타겟 이름을 수정합니다.
+                val rebuildPrefs = context?.getSharedPreferences("rebuild_preference", Context.MODE_PRIVATE)
+                var rawValue = rebuildPrefs?.getString("stremio_addons", "") ?: ""
+                
+                if (rawValue.isBlank()) {
+                    val rebuildPrefsBackup = context?.getSharedPreferences("rebuild_key", Context.MODE_PRIVATE)
+                    rawValue = rebuildPrefsBackup?.getString("stremio_addons", "") ?: ""
+                }
+                
+                println("[STREMIOSUB] Attempt 1 (rebuild_preference/key) -> raw value length: ${rawValue.length}, data: $rawValue")
                 if (rawValue.startsWith("\"") && rawValue.endsWith("\"") && rawValue.length >= 2) {
                     rawValue.substring(1, rawValue.length - 1)
                 } else {
                     rawValue
                 }
             } catch (t: Throwable) {
-                println("[STREMIOSUB] Attempt 1 (rebuild_key) Crash: ${t.message}. Trying Fallback.")
+                println("[STREMIOSUB] Attempt 1 (rebuild_preference) Crash: ${t.message}. Trying Fallback.")
                 try {
                     val prefs = CloudStreamApp.context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
                     val v = prefs?.getString("stremio_addons", "") ?: ""
@@ -771,9 +778,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             println("[STREMIOSUB] Interceptor Triggered -> lang: '${sub.lang}', url: '${sub.url}'")
             try {
                 val host = try {
-                    val h = sub.url.toHttpUrlOrNull()?.host ?: URI(sub.url).host ?: ""
-                    println("[STREMIOSUB] Host Parse Success: '$h'")
-                    h
+                    sub.url.toHttpUrlOrNull()?.host ?: URI(sub.url).host ?: ""
                 } catch (t: Throwable) {
                     val fallback = try {
                         sub.url.substringAfter("://").substringBefore("/").substringBefore(":")
