@@ -208,6 +208,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
         private val apiKey: String
             get() = getPrefString("tmdb_api_key")
+            
         
         object PlaybackSyncManager {
             @Volatile var activeSession: PlaybackSession? = null
@@ -553,8 +554,23 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
             fun startNewSession(newSession: PlaybackSession) {
                 val oldSession = activeSession
-                if (oldSession != null && (oldSession.imdbId != newSession.imdbId || oldSession.season != newSession.season || oldSession.episode != newSession.episode)) {
-                    android.util.Log.d("StremioX-SYNC", "startNewSession() - Active session S=${oldSession.season}, E=${oldSession.episode} exists. Deferring.")
+                
+                // [대형 유출 오작동 원인 완벽 제어] 클래스로더 파괴로 인해 세션 변수가 밀렸더라도, 실제 전면에 플레이어 프래그먼트가 물리적으로 떠 있는지 강제 판독
+                val activity = resolveCurrentActivity()
+                val isPlayerFragmentActive = if (activity != null) {
+                    val fragmentActivity = activity as? androidx.fragment.app.FragmentActivity
+                    val fragments = fragmentActivity?.supportFragmentManager?.fragments ?: emptyList()
+                    fragments.any { frag ->
+                        val name = frag?.javaClass?.name ?: ""
+                        name.contains("GeneratorPlayer", ignoreCase = true) || name.contains("Player", ignoreCase = true)
+                    }
+                } else false
+
+                val shouldDefer = oldSession != null || isPlayerFragmentActive
+
+                if (shouldDefer && (oldSession?.imdbId != newSession.imdbId || oldSession?.season != newSession.season || oldSession?.episode != newSession.episode)) {
+                    // 실제 플레이어가 가동 중인 경우 무조건 다음 화 프리로드를 pendingSession 으로 강제 유예 (유출 완전 격리)
+                    android.util.Log.d("StremioX-SYNC", "startNewSession() - Player fragment is active. Deferring background preload S=${newSession.season}, E=${newSession.episode}")
                     pendingSession = newSession
                     pendingTimeMs = System.currentTimeMillis()
                 } else {
@@ -743,8 +759,25 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     val mediaItemMethod = player.javaClass.getMethod("getCurrentMediaItem")
                     val mediaItem = mediaItemMethod.invoke(player) ?: return null
                     
-                    val localConfigField = mediaItem.javaClass.getDeclaredField("localConfiguration").apply { isAccessible = true }
-                    val localConfig = localConfigField.get(mediaItem) ?: return null
+                    // 미디어3(localConfiguration)과 에코플레이어2(playbackProperties) 필드명 호환 처리
+                    val localConfig = runCatching {
+                        val field = mediaItem.javaClass.getDeclaredField("localConfiguration").apply { isAccessible = true }
+                        field.get(mediaItem)
+                    }.getOrNull() ?: runCatching {
+                        val field = mediaItem.javaClass.getDeclaredField("playbackProperties").apply { isAccessible = true }
+                        field.get(mediaItem)
+                    }.getOrNull()
+
+                    if (localConfig == null) {
+                        // 두 필드 모두 실패 시 최종 수단으로 toString()에서 URI 파싱 시도 (100% 검출 예방책)
+                        val toStringVal = mediaItem.toString()
+                        if (toStringVal.contains("uri=")) {
+                            val parsedUri = toStringVal.substringAfter("uri=").substringBefore(",").substringBefore(")")
+                            android.util.Log.d("StremioX-SYNC", "getPlayerPlayingUrl() - Fallback Parsed URI: $parsedUri")
+                            return parsedUri
+                        }
+                        return null
+                    }
                     
                     val uriField = localConfig.javaClass.getDeclaredField("uri").apply { isAccessible = true }
                     val uriObj = uriField.get(localConfig) ?: return null
