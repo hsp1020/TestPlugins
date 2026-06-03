@@ -148,5 +148,95 @@
                 android:padding="5dp" />
         </LinearLayout>
 
+        <ImageView
+            android:src="@android:drawable/divider_horizontal_dark"
+            android:layout_width="fill_parent"
+            android:layout_height="wrap_content"
+            android:scaleType="fitXY"
+            android:paddingLeft="2dp"
+            android:paddingRight="2dp"
+            android:layout_marginBottom="10dp"
+            android:layout_marginTop="15dp" />
+
+        <!-- API Integration Section (Manual Inputs) -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="API Integrations (Manual)"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:textColor="#88C0D0"
+            android:layout_marginTop="5dp"
+            android:layout_marginBottom="10dp" />
+
+        <!-- TMDB API Key -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginTop="8dp">
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="TMDb API Key"
+                android:textSize="12sp"
+                android:textColor="#D8DEE9" />
+            <EditText
+                android:id="@+id/etTmdbKey"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="Enter TMDb API Key"
+                android:textColor="@android:color/white"
+                android:textColorHint="#4C566A"
+                android:textSize="14sp"
+                android:singleLine="true" />
+        </LinearLayout>
+
+        <!-- Trakt Token -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginTop="8dp">
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Trakt Access Token"
+                android:textSize="12sp"
+                android:textColor="#D8DEE9" />
+            <EditText
+                android:id="@+id/etTraktToken"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="Enter Trakt Access Token"
+                android:textColor="@android:color/white"
+                android:textColorHint="#4C566A"
+                android:textSize="14sp"
+                android:singleLine="true" />
+        </LinearLayout>
+
+        <!-- Simkl Token -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginTop="8dp">
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Simkl Access Token"
+                android:textSize="12sp"
+                android:textColor="#D8DEE9" />
+            <EditText
+                android:id="@+id/etSimklToken"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="Enter Simkl Access Token"
+                android:textColor="@android:color/white"
+                android:textColorHint="#4C566A"
+                android:textSize="14sp"
+                android:singleLine="true" />
+        </LinearLayout>
+
     </LinearLayout>
 </androidx.core.widget.NestedScrollView>
