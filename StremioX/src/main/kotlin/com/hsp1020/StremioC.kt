@@ -209,7 +209,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         private val apiKey: String
             get() = getPrefString("tmdb_api_key")
             
-    object PlaybackSyncManager {
+        object PlaybackSyncManager {
             @Volatile var activeSession: PlaybackSession? = null
             @Volatile var pendingSession: PlaybackSession? = null
             @Volatile private var activePlayer: Any? = null
