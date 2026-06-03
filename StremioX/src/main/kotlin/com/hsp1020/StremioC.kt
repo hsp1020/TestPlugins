@@ -1,4 +1,3 @@
-// 버전 정보: v1.9.4 - SharedPreferences 다중 폴백 경로 보완 및 [STREMIOSUB] 디버깅 강화 버전
 package com.hsp1020
 
 import android.content.Context
@@ -117,6 +116,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private val pageMutex = Mutex()
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
 
+    init {
+        // ✨ 핵심: StremioC 로딩 시점에 플레이어 모니터링 라이프사이클을 바인딩합니다.
+        CloudStreamApp.context?.let { PlaybackSyncManager.registerLifecycleListener(it) }
+    }
+
     private fun getCineStreamProvider(forceSearch: Boolean = false): MainAPI? {
         if (cachedCineStreamProvider != null) return cachedCustomCineStreamProvider()
         if (!forceSearch && hasSearchedCineStream) return null
@@ -155,10 +159,224 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
     companion object {
         private const val tmdbAPI = "https://api.themoviedb.org/3"
-        private const val apiKey = "cc9982c4801545a1481d167137ea7b53"
         private const val TRANSPARENT_PIXEL = "https://upload.wikimedia.org/wikipedia/commons/c/ca/1x1.png"
         private const val TRAKT_CLIENT_ID = "6d8668915ed1953f5023ea090e206facc6261813243f567dea15a9a678783b6d" 
         private const val SIMKL_CLIENT_ID = "f392628a1235f474859905f5453239c57715d9a197a89bd71cac975ddd9c4d39" 
+        
+        // SharedPreferences에서 실시간 수동 기입한 TMDb API Key를 로드
+        private val apiKey: String
+            get() {
+                val context = CloudStreamApp.context ?: return ""
+                val possibleNames = listOf(
+                    "StremioX", "StremioX_preferences", "stremio_preferences", 
+                    "com.hsp1020_preferences", context.packageName + "_preferences"
+                )
+                for (name in possibleNames) {
+                    val prefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
+                    val key = prefs.getString("tmdb_api_key", "") ?: ""
+                    if (key.isNotBlank()) return key
+                }
+                return ""
+            }
+
+        // ✨ 3in1 완결 동기화 플레이어 제어 오케스트레이션 매니저 객체 탑재
+        object PlaybackSyncManager {
+            @Volatile var activeSession: PlaybackSession? = null
+            @Volatile private var activePlayer: Any? = null
+            private var isListenerRegistered = false
+
+            data class PlaybackSession(
+                val imdbId: String?,
+                val tmdbId: Int?,
+                val season: Int?,
+                val episode: Int?,
+                val isMovie: Boolean
+            )
+
+            fun registerLifecycleListener(context: Context) {
+                if (isListenerRegistered) return
+                val app = context.applicationContext as? android.app.Application ?: return
+                isListenerRegistered = true
+
+                app.registerActivityLifecycleCallbacks(object : android.app.Application.ActivityLifecycleCallbacks {
+                    override fun onActivityCreated(activity: android.app.Activity, savedInstanceState: Bundle?) {}
+                    override fun onActivityStarted(activity: android.app.Activity) {}
+                    override fun onActivityResumed(activity: android.app.Activity) {
+                        // 플레이어 액티비티를 정밀 스캔하여 내부 리플렉션으로 ExoPlayer 인스턴스를 따옵니다.
+                        if (activity::class.java.simpleName.contains("Player", ignoreCase = true)) {
+                            activePlayer = getExoPlayer(activity)
+                        }
+                    }
+                    override fun onActivityPaused(activity: android.app.Activity) {}
+                    override fun onActivityStopped(activity: android.app.Activity) {}
+                    override fun onActivitySaveInstanceState(activity: android.app.Activity, outState: Bundle) {}
+                    override fun onActivityDestroyed(activity: android.app.Activity) {
+                        if (activity::class.java.simpleName.contains("Player", ignoreCase = true)) {
+                            triggerPlaybackStop()
+                            activePlayer = null
+                        }
+                    }
+                })
+            }
+
+            // 형변환 충돌을 피하기 위해 리플렉션으로 필드를 순회하여 'Player'가 들어간 인스턴스를 찾습니다.
+            private fun getExoPlayer(activity: android.app.Activity): Any? {
+                return runSuspendCatching {
+                    val fields = activity::class.java.declaredFields
+                    for (f in fields) {
+                        if (f.type.name.contains("Player", ignoreCase = true)) {
+                            f.isAccessible = true
+                            val obj = f.get(activity)
+                            if (obj != null) return obj
+                        }
+                    }
+                    null
+                }.getOrNull()
+            }
+
+            // 재생 구간 획득 (리플렉션 호출을 통해 Media3 / ExoPlayer 패키지 차이에 완벽 대응)
+            private fun getPlaybackProgress(): Pair<Long, Long>? {
+                val player = activePlayer ?: return null
+                return runSuspendCatching {
+                    val currentPosMethod = player::class.java.getMethod("getCurrentPosition")
+                    val durationMethod = player::class.java.getMethod("getDuration")
+                    val currentPos = currentPosMethod.invoke(player) as Long
+                    val duration = durationMethod.invoke(player) as Long
+                    Pair(currentPos, duration)
+                }.getOrNull()
+            }
+
+            // 재생 시작 API 발송
+            fun triggerPlaybackStart() {
+                val session = activeSession ?: return
+                kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    runSuspendCatching {
+                        val context = CloudStreamApp.context ?: return@runSuspendCatching
+                        val possibleNames = listOf(
+                            "StremioX", "StremioX_preferences", "stremio_preferences", 
+                            "com.hsp1020_preferences", context.packageName + "_preferences"
+                        )
+                        var traktToken = ""
+                        var simklToken = ""
+                        for (name in possibleNames) {
+                            val prefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
+                            if (prefs.contains("trakt_access_token")) {
+                                val t = prefs.getString("trakt_access_token", "") ?: ""
+                                if (t.isNotBlank()) traktToken = t
+                            }
+                            if (prefs.contains("simkl_access_token")) {
+                                val s = prefs.getString("simkl_access_token", "") ?: ""
+                                if (s.isNotBlank()) simklToken = s
+                            }
+                        }
+
+                        if (traktToken.isNotBlank()) {
+                            sendTraktScrobble("start", traktToken, session, 0.0)
+                        }
+                        if (simklToken.isNotBlank()) {
+                            sendSimklScrobble("start", simklToken, session, 0)
+                        }
+                    }
+                }
+            }
+
+            private fun triggerPlaybackStop() {
+                val session = activeSession ?: return
+                activeSession = null
+
+                val progressPair = getPlaybackProgress()
+                val currentPos = progressPair?.first ?: 0L
+                val duration = progressPair?.second ?: 0L
+                val progressPercent = if (duration > 0L) (currentPos.toDouble() * 100.0) / duration.toDouble() else 95.0
+
+                kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    runSuspendCatching {
+                        val context = CloudStreamApp.context ?: return@runSuspendCatching
+                        val possibleNames = listOf(
+                            "StremioX", "StremioX_preferences", "stremio_preferences", 
+                            "com.hsp1020_preferences", context.packageName + "_preferences"
+                        )
+                        var traktToken = ""
+                        var simklToken = ""
+                        for (name in possibleNames) {
+                            val prefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
+                            if (prefs.contains("trakt_access_token")) {
+                                val t = prefs.getString("trakt_access_token", "") ?: ""
+                                if (t.isNotBlank()) traktToken = t
+                            }
+                            if (prefs.contains("simkl_access_token")) {
+                                val s = prefs.getString("simkl_access_token", "") ?: ""
+                                if (s.isNotBlank()) simklToken = s
+                            }
+                        }
+
+                        if (traktToken.isNotBlank()) {
+                            sendTraktScrobble("stop", traktToken, session, progressPercent)
+                        }
+                        if (simklToken.isNotBlank()) {
+                            sendSimklScrobble("stop", simklToken, session, progressPercent.toInt())
+                        }
+                    }
+                }
+            }
+
+            private suspend fun sendTraktScrobble(action: String, token: String, session: PlaybackSession, progress: Double) {
+                val url = "https://api.trakt.tv/scrobble/$action"
+                val headers = mapOf(
+                    "Content-Type" to "application/json",
+                    "trakt-api-version" to "2",
+                    "trakt-api-key" to TRAKT_CLIENT_ID,
+                    "Authorization" to "Bearer $token"
+                )
+
+                val idsJson = org.json.JSONObject().apply {
+                    val cleanImdb = session.imdbId?.substringBefore(":")
+                    if (!cleanImdb.isNullOrBlank() && cleanImdb.startsWith("tt")) put("imdb", cleanImdb)
+                    if (session.tmdbId != null && session.tmdbId > 0) put("tmdb", session.tmdbId)
+                }
+
+                val payload = org.json.JSONObject().apply {
+                    put(if (session.isMovie) "movie" else "episode", org.json.JSONObject().apply { put("ids", idsJson) })
+                    put("progress", progress)
+                }
+
+                customSession.post(
+                    url,
+                    headers = headers,
+                    requestBody = okhttp3.RequestBody.create(okhttp3.MediaType.parse("application/json"), payload.toString())
+                )
+            }
+
+            private suspend fun sendSimklScrobble(action: String, token: String, session: PlaybackSession, progress: Int) {
+                val mediaType = if (session.isMovie) "movies" else "shows"
+                val url = "https://api.simkl.com/$mediaType/scrobble"
+                val headers = mapOf(
+                    "Content-Type" to "application/json",
+                    "simkl-api-client" to SIMKL_CLIENT_ID,
+                    "Authorization" to "Bearer $token"
+                )
+
+                val idsJson = org.json.JSONObject().apply {
+                    val cleanImdb = session.imdbId?.substringBefore(":")
+                    if (!cleanImdb.isNullOrBlank() && cleanImdb.startsWith("tt")) put("imdb", cleanImdb)
+                    if (session.tmdbId != null && session.tmdbId > 0) put("tmdb", session.tmdbId)
+                }
+
+                val payload = org.json.JSONObject().apply {
+                    put(if (session.isMovie) "movie" else "show", org.json.JSONObject().apply { put("ids", idsJson) })
+                    if (!session.isMovie) {
+                        put("episode", org.json.JSONObject().apply { put("number", session.episode ?: 1) })
+                    }
+                    put("progress", progress)
+                }
+
+                customSession.post(
+                    url,
+                    headers = headers,
+                    requestBody = okhttp3.RequestBody.create(okhttp3.MediaType.parse("application/json"), payload.toString())
+                )
+            }
+        }
         
         private val IMDB_ID_REGEX = "tt[0-9]+".toRegex()
         private val JSON_ID_EXTRACT_REGEX = "\"id\":\"([^\"]+)\"".toRegex()
@@ -835,6 +1053,20 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 invokeStreamPlay(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleInterceptor, wrappedCallback) 
             }
         )
+
+        // 3in1 동기화 세션 기입 및 플레이어 재생 개시 트리거 송신
+        val userUUID = Regex("/stremio/([^/]+)").find(mainUrl)?.groupValues?.get(1) ?: ""
+        val isMovieMedia = targetType == "movie" || (loadData.season == null && loadData.episode == null)
+
+        PlaybackSyncManager.activeSession = PlaybackSyncManager.PlaybackSession(
+            imdbId = loadData.imdbId ?: primaryId,
+            tmdbId = loadData.tmdbId ?: cleanTmdbId?.toIntOrNull(),
+            season = globalSeason,
+            episode = globalEpisode,
+            isMovie = isMovieMedia
+        )
+        PlaybackSyncManager.triggerPlaybackStart()
+
         return true
     }
 
@@ -1258,7 +1490,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
             val castList = detailRes.credits?.cast?.mapNotNull { cast ->
                 val actorName = cast.name ?: cast.originalName ?: return@mapNotNull null
-                val profileImg = cast.profilePath?.let { provider.getActorUrl(it) } ?: TRANSPARENT_PIXEL
+                val profileImg = cast.profilePath?.let { profile -> provider.getActorUrl(profile) } ?: TRANSPARENT_PIXEL
                 ActorData(Actor(actorName, profileImg), roleString = cast.character)
             } ?: emptyList()
 
