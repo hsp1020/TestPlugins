@@ -209,7 +209,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         private val apiKey: String
             get() = getPrefString("tmdb_api_key")
             
-        object PlaybackSyncManager {
+    object PlaybackSyncManager {
             @Volatile var activeSession: PlaybackSession? = null
             @Volatile var pendingSession: PlaybackSession? = null
             @Volatile private var activePlayer: Any? = null
@@ -334,7 +334,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 startAlwaysOnMonitoring()
             }
 
-            // 상시 가동 백그라운드 모니터링 데몬 (약한 참조 수명주기 결합 최적화 반영)
+            // [상시 가동 데몬] 고스트 코루틴 방지 자가 소멸 엔진이 내장된 최종 안정화 루프
             fun startAlwaysOnMonitoring() {
                 if (monitoringJob?.isActive == true) {
                     return
@@ -344,15 +344,22 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 monitoringJob = kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.Main) {
                     var consecutiveNulls = 0
                     var playerDetected = false
+                    var hasPlayerBeenDetectedOnce = false
+                    var idleTicks = 0 // 상시 루프 누수 방지용 타이머
                     
                     while (true) {
-                        // 최적화 1: 평상시(플레이어 미감지)에는 검사 주기를 3초로 대폭 낮춰 부하 차단
+                        // 최적화 1: 평상시(플레이어 미감지)에는 검사 주기를 3초로 대폭 낮춤
                         val checkDelay = if (playerDetected) 1000L else 3000L
                         kotlinx.coroutines.delay(checkDelay)
                         
                         val activity = resolveCurrentActivity()
                         if (activity == null) {
-                            kotlinx.coroutines.delay(2000L)
+                            idleTicks++
+                            // 액티비티 컨텍스트가 일정 시간 소실되면 고스트 루프로 판단하여 자가 소멸
+                            if (idleTicks >= 15) { 
+                                android.util.Log.d("StremioX-SYNC", "Always-On: No active activity context for too long. Auto-terminating loop to prevent leak.")
+                                break
+                            }
                             continue
                         }
 
@@ -366,7 +373,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         var currentPlayer = if (isFragmentValid) activePlayer else null
                         
                         if (currentPlayer == null) {
-                            // 프래그먼트가 이탈했거나 캐시가 만료된 경우 메모리를 환원하고 1회성 스캔 재가동
+                            // 프래그먼트가 이탈했거나 캐시가 만료된 경우 캐시 파괴 및 재스캔
                             activePlayer = null
                             cachedPlayerFragment = null
                             
@@ -384,6 +391,10 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
 
                         if (currentPlayer != null) {
                             consecutiveNulls = 0
+                            idleTicks = 0 // 유효 액션 발생 시 타이머 완전 초기화
+                            if (!hasPlayerBeenDetectedOnce) {
+                                hasPlayerBeenDetectedOnce = true
+                            }
                             
                             val playingUrl = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
                                 getPlayerPlayingUrl(currentPlayer)
@@ -460,6 +471,22 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                                     cachedPlayerFragment = null
                                     playerDetected = false
                                     consecutiveNulls = 0
+                                }
+                            } else {
+                                // 무의미한 유휴(Idle) 상태 진입 시 누적 타이머 체크
+                                idleTicks++
+                                
+                                // 최적화 4: 한 번이라도 플레이어가 켜진 적이 있었다면 종료 후 12초(4 ticks * 3초) 동안 아무것도 검출되지 않을 시 코루틴 완전 소멸(고스트 방지)
+                                // 단, 플레이어가 최초로 켜지기를 대기하는 중(스크래핑/버퍼링)에는 최대 60초(20 ticks * 3초) 동안 대기 허용
+                                val maxIdleTicks = if (hasPlayerBeenDetectedOnce) 4 else 20
+                                if (idleTicks >= maxIdleTicks) {
+                                    android.util.Log.d("StremioX-SYNC", "Always-On: No player detected (Idle timeout). Auto-terminating loop to prevent classloader leak.")
+                                    activeSession = null
+                                    pendingSession = null
+                                    activePlayer = null
+                                    cachedPlayerFragment = null
+                                    monitoringJob = null
+                                    break // 루프를 완전히 빠져나가 고스트 코루틴 사멸 보장
                                 }
                             }
                         }
