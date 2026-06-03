@@ -141,12 +141,18 @@ class SettingsBottomFragment(
             throw Exception("saveIcon ImageView not found in bottom_sheet_layout", e)
         }
 
-        // XML에 새로 정의된 수동 입력 뷰 참조 획득
+        // XML 필드 참조 획득
         val etTmdbKey: EditText = try { view.findView("etTmdbKey") } catch (e: Throwable) {
             throw Exception("etTmdbKey EditText not found in bottom_sheet_layout", e)
         }
+        val etTraktClientId: EditText = try { view.findView("etTraktClientId") } catch (e: Throwable) {
+            throw Exception("etTraktClientId EditText not found in bottom_sheet_layout", e)
+        }
         val etTraktToken: EditText = try { view.findView("etTraktToken") } catch (e: Throwable) {
             throw Exception("etTraktToken EditText not found in bottom_sheet_layout", e)
+        }
+        val etSimklClientId: EditText = try { view.findView("etSimklClientId") } catch (e: Throwable) {
+            throw Exception("etSimklClientId EditText not found in bottom_sheet_layout", e)
         }
         val etSimklToken: EditText = try { view.findView("etSimklToken") } catch (e: Throwable) {
             throw Exception("etSimklToken EditText not found in bottom_sheet_layout", e)
@@ -160,9 +166,11 @@ class SettingsBottomFragment(
         showlinks.makeTvCompatible()
         saveIcon.makeTvCompatible()
 
-        // SharedPreferences에 저장된 사용자 API Key/Token 로드 및 바인딩
+        // 로컬 SharedPreferences 복원 바인딩
         etTmdbKey.setText(sharedPref.getString("tmdb_api_key", ""))
+        etTraktClientId.setText(sharedPref.getString("trakt_client_id", ""))
         etTraktToken.setText(sharedPref.getString("trakt_access_token", ""))
+        etSimklClientId.setText(sharedPref.getString("simkl_client_id", ""))
         etSimklToken.setText(sharedPref.getString("simkl_access_token", ""))
 
         setupToggle(view, "switchCineStream", SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, isCineStreamInstalled(), "CineStream")
@@ -279,10 +287,12 @@ class SettingsBottomFragment(
         saveIcon.setOnClickListener {
             val context = this.context ?: return@setOnClickListener
 
-            // SharedPreferences DB 파일에 API 키들과 토큰 값 일괄 플러시 적용
+            // SharedPreferences 일괄 가입 처리
             sharedPref.edit {
                 putString("tmdb_api_key", etTmdbKey.text.toString().trim())
+                putString("trakt_client_id", etTraktClientId.text.toString().trim())
                 putString("trakt_access_token", etTraktToken.text.toString().trim())
+                putString("simkl_client_id", etSimklClientId.text.toString().trim())
                 putString("simkl_access_token", etSimklToken.text.toString().trim())
             }
 
