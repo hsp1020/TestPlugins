@@ -1,4 +1,4 @@
-// 버전 정보: v1.9.2 - inline getKey 크래시 우회 및 자막 인터셉터 전역 통합 최적화 버전
+// 버전 정보: v1.9.3 - inline getKey 크래시 우회 및 [STREMIOSUB] 자막 디버그 로그 재조정 버전
 package com.hsp1020
 
 import android.content.Context
@@ -118,11 +118,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
 
     private fun getCineStreamProvider(forceSearch: Boolean = false): MainAPI? {
-        if (cachedCineStreamProvider != null) return cachedCineStreamProvider
+        if (cachedCineStreamProvider != null) return cachedCustomCineStreamProvider()
         if (!forceSearch && hasSearchedCineStream) return null
 
         synchronized(StremioC::class.java) {
-            if (cachedCineStreamProvider != null) return cachedCineStreamProvider
+            if (cachedCineStreamProvider != null) return cachedCustomCineStreamProvider()
             hasSearchedCineStream = true
 
             val provider = APIHolder.allProviders.find { it.name.equals("CineStream", true) }
@@ -133,12 +133,14 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         }
     }
 
+    private fun cachedCustomCineStreamProvider(): MainAPI? = cachedCineStreamProvider
+
     private fun getStreamPlayProvider(forceSearch: Boolean = false): MainAPI? {
-        if (cachedStreamPlayProvider != null) return cachedStreamPlayProvider
+        if (cachedStreamPlayProvider != null) return cachedCustomStreamPlayProvider()
         if (!forceSearch && hasSearchedStreamPlay) return null
 
         synchronized(StremioC::class.java) {
-            if (cachedStreamPlayProvider != null) return cachedStreamPlayProvider
+            if (cachedStreamPlayProvider != null) return cachedCustomStreamPlayProvider()
             hasSearchedStreamPlay = true
 
             val provider = APIHolder.allProviders.find { it.name.equals("StreamPlay", true) }
@@ -148,6 +150,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             return provider
         }
     }
+
+    private fun cachedCustomStreamPlayProvider(): MainAPI? = cachedStreamPlayProvider
 
     companion object {
         private const val tmdbAPI = "https://api.themoviedb.org/3"
@@ -660,9 +664,6 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
-        // 불필요한 download_header_cache 루프 및 getKey 호출부를 통째로 삭제하여 
-        // 런타임 예외 발생 여지를 차단하고 무의미한 오버헤드를 제거했습니다.
-
         val loadData = try { jsonMapper.readValue(data, LoadData::class.java) } catch (e: Exception) { null } ?: return false
         
         val primaryId = if (loadData.id?.startsWith("tmdb:") == true && !loadData.imdbId.isNullOrBlank()) {
@@ -697,34 +698,58 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     "📋 Video ID: $copyId",
                     copyId,
                     ExtractorLinkType.VIDEO
-                ) {
-                    this.quality = 2160
-                }
+                )
+                {
+                        this.quality = 2160
+                    }
             )
         }
 
-        // --- Stremio 자막 애드온 설정 조회 및 인터셉터 통합 설계 (getKey 우회 적용) ---
+        // --- Stremio 자막 애드온 설정 수집 및 정밀 디버깅 로그 구조 ---
         val customHosts = withContext(Dispatchers.IO) {
             val now = System.currentTimeMillis()
             if (cachedCustomHosts != null && now - cachedCustomHostsTime < SETTINGS_CACHE_TTL) {
                 return@withContext cachedCustomHosts!!
             }
             
+            val context = CloudStreamApp.context
+            
+            // 모든 SharedPreferences 파일을 전 탐색하여 stremio_addons 키가 어디에 있는지 정적 로깅
+            try {
+                if (context != null) {
+                    val sharedPrefsDir = java.io.File(context.applicationInfo.dataDir, "shared_prefs")
+                    if (sharedPrefsDir.exists() && sharedPrefsDir.isDirectory) {
+                        sharedPrefsDir.listFiles()?.forEach { file ->
+                            val name = file.name.removeSuffix(".xml")
+                            val p = context.getSharedPreferences(name, Context.MODE_PRIVATE)
+                            if (p.contains("stremio_addons")) {
+                                println("[STREMIOSUB] Setup Scan: Found 'stremio_addons' key in file: '$name' -> value = ${p.getString("stremio_addons", "")}")
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                println("[STREMIOSUB] Setup Scan Warning: ${e.message}")
+            }
+
             val raw = try { 
-                val context = CloudStreamApp.context
                 val rebuildPrefs = context?.getSharedPreferences("rebuild_key", Context.MODE_PRIVATE)
                 val rawValue = rebuildPrefs?.getString("stremio_addons", "") ?: ""
+                println("[STREMIOSUB] Attempt 1 (rebuild_key) -> raw value length: ${rawValue.length}, data: $rawValue")
                 if (rawValue.startsWith("\"") && rawValue.endsWith("\"") && rawValue.length >= 2) {
                     rawValue.substring(1, rawValue.length - 1)
                 } else {
                     rawValue
                 }
             } catch (t: Throwable) {
+                println("[STREMIOSUB] Attempt 1 (rebuild_key) Crash: ${t.message}. Trying Fallback.")
                 try {
                     val prefs = CloudStreamApp.context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
                     val v = prefs?.getString("stremio_addons", "") ?: ""
+                    println("[STREMIOSUB] Attempt 2 (default SharedPreferences) -> length: ${v.length}, data: $v")
                     if (v.startsWith("\"") && v.endsWith("\"") && v.length >= 2) v.substring(1, v.length - 1) else v
                 } catch (e: Exception) {
+                    println("[STREMIOSUB] Attempt 2 (default SharedPreferences) Failed: ${e.message}")
                     ""
                 }
             }
@@ -733,34 +758,50 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 .filter { it.isNotBlank() }
                 .mapNotNull { runCatching { URI(it.split("|").getOrElse(1) { "" }).host }.getOrNull() }
                 .toSet() 
+                
+            println("[STREMIOSUB] Final parsed customHosts list: $hosts")
             cachedCustomHosts = hosts
             cachedCustomHostsTime = now
             hosts
         }
         val builtInHosts = setOf("opensubtitles.stremio.homes", "subsense.nepiraw.com", "opensubtitles-v3.strem.io")
 
+        // 자막 필터링 및 매칭 과정을 하나도 놓치지 않고 수집하는 디버깅 인터셉터
         val subtitleInterceptor: (SubtitleFile) -> Unit = { sub ->
+            println("[STREMIOSUB] Interceptor Triggered -> lang: '${sub.lang}', url: '${sub.url}'")
             try {
                 val host = try {
-                    sub.url.toHttpUrlOrNull()?.host ?: URI(sub.url).host ?: ""
+                    val h = sub.url.toHttpUrlOrNull()?.host ?: URI(sub.url).host ?: ""
+                    println("[STREMIOSUB] Host Parse Success: '$h'")
+                    h
                 } catch (t: Throwable) {
-                    try {
+                    val fallback = try {
                         sub.url.substringAfter("://").substringBefore("/").substringBefore(":")
                     } catch (ex: Exception) {
                         ""
                     }
+                    println("[STREMIOSUB] Host Parse Error, Fallback parsing used: '$fallback'. Error: ${t.message}")
+                    fallback
                 }
                 
-                val isStremio = customHosts.contains(host) || 
-                                 builtInHosts.contains(host) || 
-                                 host.contains("strem", ignoreCase = true)
+                val isCustom = customHosts.contains(host)
+                val isBuiltIn = builtInHosts.contains(host)
+                val isContainsStrem = host.contains("strem", ignoreCase = true)
+                
+                println("[STREMIOSUB] Match Check -> host: '$host', isCustom: $isCustom, isBuiltIn: $isBuiltIn, isContainsStrem: $isContainsStrem")
+                
+                val isStremio = isCustom || isBuiltIn || isContainsStrem
                 
                 if (isStremio && !sub.lang.contains("(Stremio)", ignoreCase = true)) {
-                    subtitleCallback.invoke(SubtitleFile("${sub.lang} (Stremio)", sub.url))
+                    val newLang = "${sub.lang} (Stremio)"
+                    println("[STREMIOSUB] Target Matched! Renaming subtitle label: '${sub.lang}' -> '$newLang'")
+                    subtitleCallback.invoke(SubtitleFile(newLang, sub.url))
                 } else {
+                    println("[STREMIOSUB] Target Skipped -> Passing raw subtitle")
                     subtitleCallback.invoke(sub)
                 }
             } catch (e: Exception) {
+                println("[STREMIOSUB] Interceptor Crash: ${e.message}")
                 subtitleCallback.invoke(sub)
             }
         }
@@ -769,15 +810,25 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             {
                 runSuspendCatching {
                     val url = buildUrl("/stream/$targetType/$encodedPrimaryId.json")
+                    println("[STREMIOSUB] Requesting primary streams from url: $url")
                     val text = customSession.get(url, timeout = 120L).text
                     val res = if (text.isNotBlank()) jsonMapper.readValue(text, StreamsResponse::class.java) else null
-                    res?.streams?.forEach { stream -> stream.runCallback(this@StremioC, subtitleInterceptor, wrappedCallback) }
+                    println("[STREMIOSUB] Primary streams count returned: ${res?.streams?.size ?: 0}")
+                    res?.streams?.forEach { stream -> 
+                        stream.runCallback(this@StremioC, subtitleInterceptor, wrappedCallback) 
+                    }
                 }
             },
             { invokeWatchsomuch(loadData.imdbId, globalSeason, globalEpisode, subtitleCallback) },
             { invokeOpenSubs(loadData.imdbId, globalSeason, globalEpisode, subtitleCallback) },
-            { invokeCineStream(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleInterceptor, wrappedCallback) },
-            { invokeStreamPlay(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleInterceptor, wrappedCallback) }
+            { 
+                println("[STREMIOSUB] Initiating invokeCineStream")
+                invokeCineStream(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleInterceptor, wrappedCallback) 
+            },
+            { 
+                println("[STREMIOSUB] Initiating invokeStreamPlay")
+                invokeStreamPlay(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleInterceptor, wrappedCallback) 
+            }
         )
         return true
     }
@@ -881,7 +932,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         globalSeason: Int?,
         globalEpisode: Int?,
         isCasting: Boolean,
-        subtitleCallback: (SubtitleFile) -> Unit, // loadLinks로부터 주입된 subtitleInterceptor를 수신하여 중복 제거
+        subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
         if (!isIntegrationEnabled("cinestream_integration_enabled")) return
@@ -915,7 +966,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         globalSeason: Int?,
         globalEpisode: Int?,
         isCasting: Boolean,
-        subtitleCallback: (SubtitleFile) -> Unit, // loadLinks로부터 주입된 subtitleInterceptor를 수신하여 중복 제거
+        subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
         if (!isIntegrationEnabled("streamplay_integration_enabled")) return
@@ -1603,7 +1654,14 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     this.quality = getQuality(listOf(description, title, name))
                     this.headers = behaviorHints?.proxyHeaders?.request ?: behaviorHints?.headers ?: mapOf()
                 })
-                subtitles.map { sub -> val lang = sub.lang ?: sub.lang_code ?: "Unknown"; subtitleCallback.invoke(newSubtitleFile(SubtitleHelper.fromTagToEnglishLanguageName(lang) ?: lang, sub.url ?: return@map)) }
+                
+                println("[STREMIOSUB] Stream.runCallback matched subtitles list. Count: ${subtitles.size}")
+                subtitles.map { sub -> 
+                    val lang = sub.lang ?: sub.lang_code ?: "Unknown"
+                    val parsedLang = SubtitleHelper.fromTagToEnglishLanguageName(lang) ?: lang
+                    println("[STREMIOSUB] Stream.runCallback invoking subtitleCallback with parsedLang: '$parsedLang', url: '${sub.url}'")
+                    subtitleCallback.invoke(newSubtitleFile(parsedLang, sub.url ?: return@map)) 
+                }
             }
             if (ytId != null) loadExtractor("https://m.youtube.com/watch?v=$ytId", subtitleCallback, callback)
             if (externalUrl != null) loadExtractor(externalUrl, subtitleCallback, callback)
