@@ -217,6 +217,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             // 캐시 유효성을 검증하기 위한 플레이어 소유 프래그먼트의 약한 참조(WeakReference)
             @Volatile private var cachedPlayerFragment: java.lang.ref.WeakReference<androidx.fragment.app.Fragment>? = null
             
+            // 프리로드 누수를 차단하기 위해 실제 재생 시점에만 스크롤 시작 통신을 전송하기 위한 플래그
+            @Volatile private var isScrobbleStarted = false
+            
             // 리스너가 중복 등록되어 프래그먼트 감지가 오작동하는 것을 방지하는 정적 해시셋
             private val registeredActivities = ConcurrentHashMap.newKeySet<Int>()
             
@@ -303,9 +306,12 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         object : androidx.fragment.app.FragmentManager.FragmentLifecycleCallbacks() {
                             override fun onFragmentResumed(fm: androidx.fragment.app.FragmentManager, f: androidx.fragment.app.Fragment) {
                                 val name = f::class.java.name
-                                // GeneratorPlayer 및 Player 프래그먼트 노출 시 데몬 즉각 깨우기 가동
-                                if (name.contains("Player", ignoreCase = true) || name.contains("Generator", ignoreCase = true)) {
-                                    android.util.Log.d("StremioX-SYNC", "Fragment Lifecycle: Player Fragment Resumed: $name. Starting monitor daemon.")
+                                // 예고편 재생 프래그먼트 오탐지를 방지하는 필터 추가
+                                val isRealPlayer = (name.contains("Player", ignoreCase = true) || name.contains("Generator", ignoreCase = true)) && 
+                                                   !name.contains("Trailer", ignoreCase = true)
+
+                                if (isRealPlayer) {
+                                    android.util.Log.d("StremioX-SYNC", "Fragment Lifecycle: Real Player Fragment Resumed: $name. Starting monitor daemon.")
                                     startAlwaysOnMonitoring()
                                 }
                             }
@@ -319,7 +325,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 if (isListenerRegistered) return
                 isListenerRegistered = true
 
-                // [핵심 보완] 플러그인 로드 즉시 현재 켜져 있는 MainActivity를 선제 확보하여 프래그먼트 콜백 강제 바인딩
+                // 플러그인 로드 즉시 현재 켜져 있는 MainActivity를 선제 확보하여 프래그먼트 콜백 강제 바인딩 (2차 재생 가드 누락 해소)
                 val initActivity = getCurrentActivityFallback() ?: resolveCurrentActivity()
                 if (initActivity != null) {
                     currentActivity = initActivity
@@ -368,7 +374,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 startAlwaysOnMonitoring()
             }
 
-            // 상시 가동 백그라운드 모니터링 데몬 (약한 참조 수명주기 및 고스트 자가소멸 기법 완벽 연동)
+            // 상시 가동 백그라운드 모니터링 데몬 (약한 참조 수명주기 및 프리로드 완벽 대응 설계)
             fun startAlwaysOnMonitoring() {
                 if (monitoringJob?.isActive == true) {
                     return
@@ -444,7 +450,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                                     activeSession = matchedSession
                                     lastKnownProgressPercent = 0.0
                                     playerDetected = true
-                                    triggerPlaybackStartOnly()
+                                    isScrobbleStarted = false // 세션 복구 단계에서 전송 시작 상태 초기화
                                 }
                             }
                             
@@ -466,13 +472,21 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                                     pendingSession = null
                                     lastKnownProgressPercent = 0.0
                                     playerDetected = true
-                                    triggerPlaybackStartOnly()
+                                    isScrobbleStarted = false // 신규 화 전이 시 전송 시작 상태 초기화
                                 }
                             }
 
                             // 재생 상태 추적 및 서버 전송
                             if (activeSession != null) {
                                 playerDetected = true
+                                
+                                // [중요 보완] 백그라운드 프리로드의 가짜 호출을 차단하고, 실제 비디오가 활성화된 시점에 최초 1회만 스크롤 전송 트리거 구동
+                                if (!isScrobbleStarted) {
+                                    android.util.Log.d("StremioX-SYNC", "Always-On: Player is actively playing the matched stream. Sending Trakt/Simkl Scrobble Start.")
+                                    triggerPlaybackStartOnly()
+                                    isScrobbleStarted = true
+                                }
+
                                 runSuspendCatching {
                                     val currentPosMethod = currentPlayer.javaClass.getMethod("getCurrentPosition")
                                     val durationMethod = currentPlayer.javaClass.getMethod("getDuration")
@@ -504,6 +518,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                                     cachedPlayerFragment = null
                                     playerDetected = false
                                     consecutiveNulls = 0
+                                    isScrobbleStarted = false
                                 }
                             } else {
                                 // 무의미한 유휴(Idle) 상태 진입 시 누적 타이머 체크
@@ -518,6 +533,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                                     pendingSession = null
                                     activePlayer = null
                                     cachedPlayerFragment = null
+                                    isScrobbleStarted = false
                                     monitoringJob = null
                                     break // 루프를 완전히 빠져나가 고스트 코루틴 사멸 보장
                                 }
@@ -534,18 +550,17 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     pendingSession = newSession
                     pendingTimeMs = System.currentTimeMillis()
                 } else {
-                    android.util.Log.d("StremioX-SYNC", "startNewSession() - Starting new session S=${newSession.season}, E=${newSession.episode}")
+                    // 프리로드 누수를 유발하는 즉각 API 전송 억제 및 세션 데이터 정렬 처리
+                    android.util.Log.d("StremioX-SYNC", "startNewSession() - Registering new session metadata (Awaiting actual player play): S=${newSession.season}, E=${newSession.episode}")
                     activeSession = newSession
                     pendingSession = null
-                    
-                    // 신규 세션 진입 시 통신을 즉시 수행하고 데몬 구동 보장
-                    triggerPlaybackStartOnly()
+                    isScrobbleStarted = false // 신규 정상 셋업 시 전송 상태 초기화
                     startAlwaysOnMonitoring()
                 }
             }
 
             fun triggerPlaybackStart() {
-                triggerPlaybackStartOnly()
+                // startNewSession() 등과의 하위 호환성을 위한 래퍼 함수 (서버 통신은 데몬이 플레이어 활성화 검출 시 수행)
                 startAlwaysOnMonitoring()
             }
 
@@ -576,6 +591,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 pendingSession = null
                 activePlayer = null
                 cachedPlayerFragment = null
+                isScrobbleStarted = false
 
                 kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                     runSuspendCatching {
