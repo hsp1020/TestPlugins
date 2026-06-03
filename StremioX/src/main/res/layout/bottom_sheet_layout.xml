@@ -169,7 +169,7 @@
             android:layout_marginTop="5dp"
             android:layout_marginBottom="10dp" />
 
-        <!-- TMDB API Key -->
+        <!-- TMDb API Key -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -192,7 +192,30 @@
                 android:singleLine="true" />
         </LinearLayout>
 
-        <!-- Trakt Token -->
+        <!-- Trakt Client ID -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginTop="8dp">
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Trakt Client ID"
+                android:textSize="12sp"
+                android:textColor="#D8DEE9" />
+            <EditText
+                android:id="@+id/etTraktClientId"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="Enter Trakt Client ID"
+                android:textColor="@android:color/white"
+                android:textColorHint="#4C566A"
+                android:textSize="14sp"
+                android:singleLine="true" />
+        </LinearLayout>
+
+        <!-- Trakt Access Token -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -215,7 +238,30 @@
                 android:singleLine="true" />
         </LinearLayout>
 
-        <!-- Simkl Token -->
+        <!-- Simkl Client ID -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginTop="8dp">
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Simkl Client ID"
+                android:textSize="12sp"
+                android:textColor="#D8DEE9" />
+            <EditText
+                android:id="@+id/etSimklClientId"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="Enter Simkl Client ID"
+                android:textColor="@android:color/white"
+                android:textColorHint="#4C566A"
+                android:textSize="14sp"
+                android:singleLine="true" />
+        </LinearLayout>
+
+        <!-- Simkl Access Token -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
