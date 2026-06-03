@@ -1,4 +1,3 @@
-// 파일명: hsp1020/testplugins/TestPlugins-d1a26fae88cb55c8f1d621560cf4e45bd7fd78f6/StremioX/src/main/kotlin/com/hsp1020/settings/SettingsBottomFragment.kt
 package com.hsp1020
 
 import android.annotation.SuppressLint
@@ -27,9 +26,6 @@ import com.lagradost.cloudstream3.CommonActivity.showToast
 import org.json.JSONArray
 import org.json.JSONObject
 
-// ==========================================
-// Data & Repository Layer
-// ==========================================
 data class LinkItem(
     val id: Long = System.currentTimeMillis(),
     val name: String,
@@ -60,7 +56,6 @@ object SettingsRepository {
             }
             list
         } catch (e: Exception) {
-            // FIX: Cloudstream Log.e accepts only 2 arguments (String, String)
             Log.e("SettingsRepository", "Failed to parse links: ${e.message}")
             mutableListOf()
         }
@@ -89,9 +84,6 @@ object SettingsRepository {
     }
 }
 
-// ==========================================
-// UI Layer
-// ==========================================
 class SettingsBottomFragment(
     plugin: StremioXPlugin,
     private val sharedPref: SharedPreferences
@@ -122,7 +114,6 @@ class SettingsBottomFragment(
         return inflater.inflate(layout, container, false)
     }
 
-    // [수정: 의존성 에러 교정] 정적 호출 불가 함수를 APIHolder와 공개된 동적 로더로 우회 검증
     private fun isCineStreamInstalled(): Boolean {
         return APIHolder.allProviders.any { it.name.equals("CineStream", true) } ||
                StremioC.loadProviderDynamically("megix", "com.megix.CineStreamProvider") != null
@@ -150,6 +141,17 @@ class SettingsBottomFragment(
             throw Exception("saveIcon ImageView not found in bottom_sheet_layout", e)
         }
 
+        // XML에 새로 정의된 수동 입력 뷰 참조 획득
+        val etTmdbKey: EditText = try { view.findView("etTmdbKey") } catch (e: Throwable) {
+            throw Exception("etTmdbKey EditText not found in bottom_sheet_layout", e)
+        }
+        val etTraktToken: EditText = try { view.findView("etTraktToken") } catch (e: Throwable) {
+            throw Exception("etTraktToken EditText not found in bottom_sheet_layout", e)
+        }
+        val etSimklToken: EditText = try { view.findView("etSimklToken") } catch (e: Throwable) {
+            throw Exception("etSimklToken EditText not found in bottom_sheet_layout", e)
+        }
+
         addlinks.setImageDrawable(getDrawable("settings_icon"))
         showlinks.setImageDrawable(getDrawable("settings_icon"))
         saveIcon.setImageDrawable(getDrawable("save_icon"))
@@ -158,7 +160,11 @@ class SettingsBottomFragment(
         showlinks.makeTvCompatible()
         saveIcon.makeTvCompatible()
 
-        // UI Initialization: Toggles
+        // SharedPreferences에 저장된 사용자 API Key/Token 로드 및 바인딩
+        etTmdbKey.setText(sharedPref.getString("tmdb_api_key", ""))
+        etTraktToken.setText(sharedPref.getString("trakt_access_token", ""))
+        etSimklToken.setText(sharedPref.getString("simkl_access_token", ""))
+
         setupToggle(view, "switchCineStream", SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, isCineStreamInstalled(), "CineStream")
         setupToggle(view, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
 
@@ -273,6 +279,13 @@ class SettingsBottomFragment(
         saveIcon.setOnClickListener {
             val context = this.context ?: return@setOnClickListener
 
+            // SharedPreferences DB 파일에 API 키들과 토큰 값 일괄 플러시 적용
+            sharedPref.edit {
+                putString("tmdb_api_key", etTmdbKey.text.toString().trim())
+                putString("trakt_access_token", etTraktToken.text.toString().trim())
+                putString("simkl_access_token", etSimklToken.text.toString().trim())
+            }
+
             AlertDialog.Builder(context)
                 .setTitle("Save & Reload")
                 .setMessage("Changes have been saved. Do you want to restart the app to apply them?")
@@ -377,9 +390,6 @@ class SettingsBottomFragment(
         }
     }
 
-    // ==========================================
-    // RecyclerView Adapter
-    // ==========================================
     inner class LinksAdapter(
         private val items: MutableList<LinkItem>,
         private val onDelete: (LinkItem) -> Unit,
