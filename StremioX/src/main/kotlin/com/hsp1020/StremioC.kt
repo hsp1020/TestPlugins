@@ -229,7 +229,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             private val globalUrlRegistry = Collections.synchronizedMap(
                 object : java.util.LinkedHashMap<String, PlaybackSession>(100, 0.75f, true) {
                     override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, PlaybackSession>): Boolean {
-                        return size > 100
+                        return size > 1000
                     }
                 }
             )
