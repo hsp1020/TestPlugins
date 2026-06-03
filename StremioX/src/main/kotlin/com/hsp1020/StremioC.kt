@@ -1,6 +1,7 @@
 package com.hsp1020
 
 import android.content.Context
+import android.os.Bundle
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -58,10 +59,13 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.launch
 import okhttp3.ConnectionPool
 import okhttp3.Dispatcher
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Protocol
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.net.URI
 import java.net.URLEncoder
 import java.util.Collections
@@ -314,10 +318,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     put("progress", progress)
                 }
 
+                
                 customSession.post(
                     url,
                     headers = headers,
-                    requestBody = okhttp3.RequestBody.create(okhttp3.MediaType.parse("application/json"), payload.toString())
+                    requestBody = payload.toString().toRequestBody("application/json".toMediaTypeOrNull())
                 )
             }
 
@@ -347,7 +352,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 customSession.post(
                     url,
                     headers = headers,
-                    requestBody = okhttp3.RequestBody.create(okhttp3.MediaType.parse("application/json"), payload.toString())
+                    requestBody = payload.toString().toRequestBody("application/json".toMediaTypeOrNull())
                 )
             }
         }
