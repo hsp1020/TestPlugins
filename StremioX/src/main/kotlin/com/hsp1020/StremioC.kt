@@ -122,7 +122,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
 
     init {
-        // ✨ 핵심: StremioC 로딩 시점에 플레이어 모니터링 라이프사이클을 바인딩합니다.
+        // 백그라운드 바인딩 시도 (보조적 수단)
         CloudStreamApp.context?.let { PlaybackSyncManager.registerLifecycleListener(it) }
     }
 
@@ -166,9 +166,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         private const val tmdbAPI = "https://api.themoviedb.org/3"
         private const val TRANSPARENT_PIXEL = "https://upload.wikimedia.org/wikipedia/commons/c/ca/1x1.png"
         
-        // SharedPreferences에서 실시간 수동 저장한 환경 변수를 로드하는 정적 가변 헬퍼
         private fun getPrefString(key: String): String {
-            val context = CloudStreamApp.context ?: return ""
+            val context = CloudStreamApp.context ?: run {
+                android.util.Log.e("StremioX-SYNC", "getPrefString() - CloudStreamApp.context is NULL")
+                return ""
+            }
             val possibleNames = listOf(
                 "StremioX", "StremioX_preferences", "stremio_preferences", 
                 "com.hsp1020_preferences", context.packageName + "_preferences"
@@ -176,15 +178,18 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             for (name in possibleNames) {
                 val prefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
                 val value = prefs.getString(key, "") ?: ""
-                if (value.isNotBlank()) return value
+                android.util.Log.d("StremioX-SYNC", "Checking Pref File: '$name' for key: '$key'. Result length: ${value.length}")
+                if (value.isNotBlank()) {
+                    android.util.Log.d("StremioX-SYNC", "Found preference for key '$key' in file '$name'")
+                    return value
+                }
             }
+            android.util.Log.w("StremioX-SYNC", "Preference for key '$key' not found in any potential files.")
             return ""
         }
 
-        // 런타임 수동 기입 TMDb API 키 동적 바인딩
         private val apiKey: String
             get() = getPrefString("tmdb_api_key")
-
 
         object PlaybackSyncManager {
             @Volatile var activeSession: PlaybackSession? = null
@@ -200,25 +205,39 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             )
 
             fun registerLifecycleListener(context: Context) {
-                if (isListenerRegistered) return
-                val app = context.applicationContext as? android.app.Application ?: return
+                if (isListenerRegistered) {
+                    android.util.Log.d("StremioX-SYNC", "registerLifecycleListener() - Already registered, ignoring.")
+                    return
+                }
+                val app = context.applicationContext as? android.app.Application ?: run {
+                    android.util.Log.e("StremioX-SYNC", "registerLifecycleListener() - FAILED to get Application context!")
+                    return
+                }
                 isListenerRegistered = true
+                android.util.Log.d("StremioX-SYNC", "registerLifecycleListener() - Registering ActivityLifecycleCallbacks...")
 
                 app.registerActivityLifecycleCallbacks(object : android.app.Application.ActivityLifecycleCallbacks {
-                    // android.app.Activity 대신 단축 명칭 Activity를 사용합니다.
                     override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
                     override fun onActivityStarted(activity: Activity) {}
                     override fun onActivityResumed(activity: Activity) {
-                        // 플레이어 액티비티를 스캔하여 리플렉션으로 ExoPlayer 인스턴스를 따옵니다.
+                        android.util.Log.d("StremioX-SYNC", "onActivityResumed: ${activity::class.java.name}")
                         if (activity::class.java.simpleName.contains("Player", ignoreCase = true)) {
+                            android.util.Log.d("StremioX-SYNC", "PlayerActivity resumed! Scanning for Player instance...")
                             activePlayer = getExoPlayer(activity)
+                            android.util.Log.d("StremioX-SYNC", "Player instance found state: ${activePlayer != null}")
                         }
                     }
-                    override fun onActivityPaused(activity: Activity) {}
-                    override fun onActivityStopped(activity: Activity) {}
+                    override fun onActivityPaused(activity: Activity) {
+                        android.util.Log.d("StremioX-SYNC", "onActivityPaused: ${activity::class.java.name}")
+                    }
+                    override fun onActivityStopped(activity: Activity) {
+                        android.util.Log.d("StremioX-SYNC", "onActivityStopped: ${activity::class.java.name}")
+                    }
                     override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
                     override fun onActivityDestroyed(activity: Activity) {
+                        android.util.Log.d("StremioX-SYNC", "onActivityDestroyed: ${activity::class.java.name}")
                         if (activity::class.java.simpleName.contains("Player", ignoreCase = true)) {
+                            android.util.Log.d("StremioX-SYNC", "PlayerActivity destroyed! Triggering sync stop.")
                             triggerPlaybackStop()
                             activePlayer = null
                         }
@@ -226,49 +245,116 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 })
             }
 
-
-            // 형변환 충돌을 피하기 위해 리플렉션으로 필드를 순회하여 'Player'가 들어간 인스턴스를 찾습니다.
             private fun getExoPlayer(activity: android.app.Activity): Any? {
+                android.util.Log.d("StremioX-SYNC", "getExoPlayer() - Scanning activity: ${activity::class.java.name}")
                 return runSuspendCatching {
-                    val fields = activity::class.java.declaredFields
-                    for (f in fields) {
-                        if (f.type.name.contains("Player", ignoreCase = true)) {
+                    val activityClass = activity::class.java
+                    for (f in activityClass.declaredFields) {
+                        android.util.Log.d("StremioX-SYNC", "Activity Field: ${f.name} (Type: ${f.type.name})")
+                        if (f.type.name.contains("Player", ignoreCase = true) || f.type.name.contains("Exo", ignoreCase = true)) {
                             f.isAccessible = true
                             val obj = f.get(activity)
-                            if (obj != null) return obj
+                            if (obj != null) {
+                                val hasMethods = runSuspendCatching {
+                                    obj::class.java.getMethod("getCurrentPosition") != null &&
+                                    obj::class.java.getMethod("getDuration") != null
+                                }.getOrDefault(false)
+                                if (hasMethods) {
+                                    android.util.Log.d("StremioX-SYNC", "ExoPlayer found directly in Activity field: ${f.name}")
+                                    return obj
+                                }
+                            }
+                        }
+                    }
+
+                    if (activity is androidx.fragment.app.FragmentActivity) {
+                        android.util.Log.d("StremioX-SYNC", "Scanning FragmentActivity supportFragmentManager...")
+                        val fragments = activity.supportFragmentManager.fragments
+                        for (frag in fragments) {
+                            android.util.Log.d("StremioX-SYNC", "Found Fragment: ${frag::class.java.name}")
+                            val fragClass = frag::class.java
+                            for (f in fragClass.declaredFields) {
+                                android.util.Log.d("StremioX-SYNC", "Fragment Field: ${f.name} (Type: ${f.type.name})")
+                                if (f.type.name.contains("Player", ignoreCase = true) || f.type.name.contains("Exo", ignoreCase = true)) {
+                                    f.isAccessible = true
+                                    val obj = f.get(frag)
+                                    if (obj != null) {
+                                        val hasMethods = runSuspendCatching {
+                                            obj::class.java.getMethod("getCurrentPosition") != null &&
+                                            obj::class.java.getMethod("getDuration") != null
+                                        }.getOrDefault(false)
+                                        
+                                        if (hasMethods) {
+                                            android.util.Log.d("StremioX-SYNC", "ExoPlayer found in Fragment field: ${f.name}")
+                                            return obj
+                                        } else {
+                                            android.util.Log.d("StremioX-SYNC", "Fragment field ${f.name} doesn't have direct position methods. Checking sub-fields...")
+                                            for (sf in obj::class.java.declaredFields) {
+                                                if (sf.type.name.contains("Player", ignoreCase = true) || sf.type.name.contains("Exo", ignoreCase = true)) {
+                                                    sf.isAccessible = true
+                                                    val subObj = sf.get(obj)
+                                                    if (subObj != null) {
+                                                        val subHasMethods = runSuspendCatching {
+                                                            subObj::class.java.getMethod("getCurrentPosition") != null &&
+                                                            subObj::class.java.getMethod("getDuration") != null
+                                                        }.getOrDefault(false)
+                                                        if (subHasMethods) {
+                                                            android.util.Log.d("StremioX-SYNC", "ExoPlayer found inside nested field: ${f.name}.${sf.name}")
+                                                            return subObj
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     null
                 }.getOrNull()
             }
 
-            // 재생 구간 획득 (리플렉션 호출을 통해 Media3 / ExoPlayer 패키지 차이에 완벽 대응)
             private fun getPlaybackProgress(): Pair<Long, Long>? {
-                val player = activePlayer ?: return null
+                val player = activePlayer ?: run {
+                    android.util.Log.e("StremioX-SYNC", "getPlaybackProgress() - activePlayer is NULL!")
+                    return null
+                }
                 return runSuspendCatching {
                     val currentPosMethod = player::class.java.getMethod("getCurrentPosition")
                     val durationMethod = player::class.java.getMethod("getDuration")
                     val currentPos = currentPosMethod.invoke(player) as Long
                     val duration = durationMethod.invoke(player) as Long
+                    android.util.Log.d("StremioX-SYNC", "getPlaybackProgress() - currentPos: $currentPos, duration: $duration")
                     Pair(currentPos, duration)
-                }.getOrNull()
+                }.getOrElse { t ->
+                    android.util.Log.e("StremioX-SYNC", "getPlaybackProgress() - Error retrieving progress: ${t.message}", t)
+                    null
+                }
             }
 
-            // 재생 시작 API 발송
             fun triggerPlaybackStart() {
-                val session = activeSession ?: return
+                val session = activeSession ?: run {
+                    android.util.Log.w("StremioX-SYNC", "triggerPlaybackStart() called but activeSession is NULL!")
+                    return
+                }
+                android.util.Log.d("StremioX-SYNC", "triggerPlaybackStart() - Session: IMDB=${session.imdbId}, TMDB=${session.tmdbId}, S=${session.season}, E=${session.episode}, isMovie=${session.isMovie}")
                 kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                     runSuspendCatching {
-                        // 수동 기입된 로컬 데이터만으로 통신 진행 (하드코딩 키 완전 제거)
                         val traktClientId = getPrefString("trakt_client_id")
                         val traktToken = getPrefString("trakt_access_token")
                         val simklClientId = getPrefString("simkl_client_id")
                         val simklToken = getPrefString("simkl_access_token")
 
+                        android.util.Log.d("StremioX-SYNC", "triggerPlaybackStart() - Trakt Keys: ID=${traktClientId.isNotBlank()}, Token=${traktToken.isNotBlank()}")
+                        android.util.Log.d("StremioX-SYNC", "triggerPlaybackStart() - Simkl Keys: ID=${simklClientId.isNotBlank()}, Token=${simklToken.isNotBlank()}")
+
                         if (traktToken.isNotBlank() && traktClientId.isNotBlank()) {
+                            android.util.Log.d("StremioX-SYNC", "Calling sendTraktScrobble('start')")
                             sendTraktScrobble("start", traktClientId, traktToken, session, 0.0)
                         }
                         if (simklToken.isNotBlank() && simklClientId.isNotBlank()) {
+                            android.util.Log.d("StremioX-SYNC", "Calling sendSimklScrobble('start')")
                             sendSimklScrobble("start", simklClientId, simklToken, session, 0)
                         }
                     }
@@ -276,13 +362,18 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             }
 
             private fun triggerPlaybackStop() {
-                val session = activeSession ?: return
+                val session = activeSession ?: run {
+                    android.util.Log.w("StremioX-SYNC", "triggerPlaybackStop() called but activeSession is NULL!")
+                    return
+                }
                 activeSession = null
 
                 val progressPair = getPlaybackProgress()
                 val currentPos = progressPair?.first ?: 0L
                 val duration = progressPair?.second ?: 0L
                 val progressPercent = if (duration > 0L) (currentPos.toDouble() * 100.0) / duration.toDouble() else 95.0
+
+                android.util.Log.d("StremioX-SYNC", "triggerPlaybackStop() - Progress: $currentPos / $duration (${String.format("%.2f", progressPercent)}%)")
 
                 kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                     runSuspendCatching {
@@ -292,9 +383,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                         val simklToken = getPrefString("simkl_access_token")
 
                         if (traktToken.isNotBlank() && traktClientId.isNotBlank()) {
+                            android.util.Log.d("StremioX-SYNC", "Calling sendTraktScrobble('stop')")
                             sendTraktScrobble("stop", traktClientId, traktToken, session, progressPercent)
                         }
                         if (simklToken.isNotBlank() && simklClientId.isNotBlank()) {
+                            android.util.Log.d("StremioX-SYNC", "Calling sendSimklScrobble('stop')")
                             sendSimklScrobble("stop", simklClientId, simklToken, session, progressPercent.toInt())
                         }
                     }
@@ -316,17 +409,35 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     if (session.tmdbId != null && session.tmdbId > 0) put("tmdb", session.tmdbId)
                 }
 
+                // 🌟 Trakt TV 에피소드 스크로블 스펙 오류 완벽 정정
                 val payload = org.json.JSONObject().apply {
-                    put(if (session.isMovie) "movie" else "episode", org.json.JSONObject().apply { put("ids", idsJson) })
+                    if (session.isMovie) {
+                        put("movie", org.json.JSONObject().apply { put("ids", idsJson) })
+                    } else {
+                        put("show", org.json.JSONObject().apply { put("ids", idsJson) })
+                        put("episode", org.json.JSONObject().apply {
+                            put("season", session.season ?: 1)
+                            put("number", session.episode ?: 1)
+                        })
+                    }
                     put("progress", progress)
                 }
 
-                
-                customSession.post(
-                    url,
-                    headers = headers,
-                    requestBody = payload.toString().toRequestBody("application/json".toMediaTypeOrNull())
-                )
+                android.util.Log.d("StremioX-SYNC", "Trakt API Request ($action) -> URL: $url")
+                android.util.Log.d("StremioX-SYNC", "Trakt API Headers -> $headers")
+                android.util.Log.d("StremioX-SYNC", "Trakt API Payload -> ${payload.toString(2)}")
+
+                try {
+                    val response = customSession.post(
+                        url,
+                        headers = headers,
+                        requestBody = payload.toString().toRequestBody("application/json".toMediaTypeOrNull())
+                    )
+                    android.util.Log.d("StremioX-SYNC", "Trakt API Response Code -> ${response.code}")
+                    android.util.Log.d("StremioX-SYNC", "Trakt API Response Body -> ${response.text}")
+                } catch (e: Exception) {
+                    android.util.Log.e("StremioX-SYNC", "Trakt API Request Exception -> ${e.message}", e)
+                }
             }
 
             private suspend fun sendSimklScrobble(action: String, clientId: String, token: String, session: PlaybackSession, progress: Int) {
@@ -344,24 +455,38 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     if (session.tmdbId != null && session.tmdbId > 0) put("tmdb", session.tmdbId)
                 }
 
+                // 🌟 Simkl TV 에피소드 스크로블 스펙 오류 완벽 정정
                 val payload = org.json.JSONObject().apply {
-                    put(if (session.isMovie) "movie" else "show", org.json.JSONObject().apply { put("ids", idsJson) })
-                    if (!session.isMovie) {
-                        put("episode", org.json.JSONObject().apply { put("number", session.episode ?: 1) })
+                    if (session.isMovie) {
+                        put("movie", org.json.JSONObject().apply { put("ids", idsJson) })
+                    } else {
+                        put("show", org.json.JSONObject().apply { put("ids", idsJson) })
+                        put("episode", org.json.JSONObject().apply {
+                            put("season", session.season ?: 1)
+                            put("number", session.episode ?: 1)
+                        })
                     }
                     put("progress", progress)
                 }
 
-                customSession.post(
-                    url,
-                    headers = headers,
-                    requestBody = payload.toString().toRequestBody("application/json".toMediaTypeOrNull())
-                )
+                android.util.Log.d("StremioX-SYNC", "Simkl API Request ($action) -> URL: $url")
+                android.util.Log.d("StremioX-SYNC", "Simkl API Headers -> $headers")
+                android.util.Log.d("StremioX-SYNC", "Simkl API Payload -> ${payload.toString(2)}")
+
+                try {
+                    val response = customSession.post(
+                        url,
+                        headers = headers,
+                        requestBody = payload.toString().toRequestBody("application/json".toMediaTypeOrNull())
+                    )
+                    android.util.Log.d("StremioX-SYNC", "Simkl API Response Code -> ${response.code}")
+                    android.util.Log.d("StremioX-SYNC", "Simkl API Response Body -> ${response.text}")
+                } catch (e: Exception) {
+                    android.util.Log.e("StremioX-SYNC", "Simkl API Request Exception -> ${e.message}", e)
+                }
             }
         }
 
-
-        
         private val IMDB_ID_REGEX = "tt[0-9]+".toRegex()
         private val JSON_ID_EXTRACT_REGEX = "\"id\":\"([^\"]+)\"".toRegex()
         
@@ -900,42 +1025,19 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     "📋 Video ID: $copyId",
                     copyId,
                     ExtractorLinkType.VIDEO
-                )
-                {
-                        this.quality = 2160
-                    }
+                ) {
+                    this.quality = 2160
+                }
             )
         }
 
-        // --- Stremio 자막 애드온 설정 수집 및 정밀 디버깅 로그 구조 ---
         val customHosts = withContext(Dispatchers.IO) {
             val now = System.currentTimeMillis()
             if (cachedCustomHosts != null && now - cachedCustomHostsTime < SETTINGS_CACHE_TTL) {
                 return@withContext cachedCustomHosts!!
             }
-            
             val context = CloudStreamApp.context
-            
-            // 모든 SharedPreferences 파일을 전 탐색하여 stremio_addons 키가 어디에 있는지 정적 로깅
-            try {
-                if (context != null) {
-                    val sharedPrefsDir = java.io.File(context.applicationInfo.dataDir, "shared_prefs")
-                    if (sharedPrefsDir.exists() && sharedPrefsDir.isDirectory) {
-                        sharedPrefsDir.listFiles()?.forEach { file ->
-                            val name = file.name.removeSuffix(".xml")
-                            val p = context.getSharedPreferences(name, Context.MODE_PRIVATE)
-                            if (p.contains("stremio_addons")) {
-                                println("[STREMIOSUB] Setup Scan: Found 'stremio_addons' key in file: '$name' -> value = ${p.getString("stremio_addons", "")}")
-                            }
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                println("[STREMIOSUB] Setup Scan Warning: ${e.message}")
-            }
-
             val raw = try { 
-                // [원인 분석]: 로컬 SharedPreferences 이름이 구버전명인 "rebuild_key"가 아닌 "rebuild_preference"로 생성되어 있어, 1순위 타겟 이름을 수정합니다.
                 val rebuildPrefs = context?.getSharedPreferences("rebuild_preference", Context.MODE_PRIVATE)
                 var rawValue = rebuildPrefs?.getString("stremio_addons", "") ?: ""
                 
@@ -944,40 +1046,31 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     rawValue = rebuildPrefsBackup?.getString("stremio_addons", "") ?: ""
                 }
                 
-                println("[STREMIOSUB] Attempt 1 (rebuild_preference/key) -> raw value length: ${rawValue.length}, data: $rawValue")
                 if (rawValue.startsWith("\"") && rawValue.endsWith("\"") && rawValue.length >= 2) {
                     rawValue.substring(1, rawValue.length - 1)
                 } else {
                     rawValue
                 }
             } catch (t: Throwable) {
-                println("[STREMIOSUB] Attempt 1 (rebuild_preference) Crash: ${t.message}. Trying Fallback.")
                 try {
                     val prefs = CloudStreamApp.context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
                     val v = prefs?.getString("stremio_addons", "") ?: ""
-                    println("[STREMIOSUB] Attempt 2 (default SharedPreferences) -> length: ${v.length}, data: $v")
                     if (v.startsWith("\"") && v.endsWith("\"") && v.length >= 2) v.substring(1, v.length - 1) else v
                 } catch (e: Exception) {
-                    println("[STREMIOSUB] Attempt 2 (default SharedPreferences) Failed: ${e.message}")
                     ""
                 }
             }
-            
             val hosts = raw.lines()
                 .filter { it.isNotBlank() }
                 .mapNotNull { runCatching { URI(it.split("|").getOrElse(1) { "" }).host }.getOrNull() }
                 .toSet() 
-                
-            println("[STREMIOSUB] Final parsed customHosts list: $hosts")
             cachedCustomHosts = hosts
             cachedCustomHostsTime = now
             hosts
         }
         val builtInHosts = setOf("opensubtitles.stremio.homes", "subsense.nepiraw.com", "opensubtitles-v3.strem.io")
 
-        // 자막 필터링 및 매칭 과정을 하나도 놓치지 않고 수집하는 디버깅 인터셉터
         val subtitleInterceptor: (SubtitleFile) -> Unit = { sub ->
-            println("[STREMIOSUB] Interceptor Triggered -> lang: '${sub.lang}', url: '${sub.url}'")
             try {
                 val host = try {
                     sub.url.toHttpUrlOrNull()?.host ?: URI(sub.url).host ?: ""
@@ -987,28 +1080,20 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     } catch (ex: Exception) {
                         ""
                     }
-                    println("[STREMIOSUB] Host Parse Error, Fallback parsing used: '$fallback'. Error: ${t.message}")
                     fallback
                 }
-                
                 val isCustom = customHosts.contains(host)
                 val isBuiltIn = builtInHosts.contains(host)
                 val isContainsStrem = host.contains("strem", ignoreCase = true)
-                
-                println("[STREMIOSUB] Match Check -> host: '$host', isCustom: $isCustom, isBuiltIn: $isBuiltIn, isContainsStrem: $isContainsStrem")
-                
                 val isStremio = isCustom || isBuiltIn || isContainsStrem
                 
                 if (isStremio && !sub.lang.contains("(Stremio)", ignoreCase = true)) {
                     val newLang = "${sub.lang} (Stremio)"
-                    println("[STREMIOSUB] Target Matched! Renaming subtitle label: '${sub.lang}' -> '$newLang'")
                     subtitleCallback.invoke(SubtitleFile(newLang, sub.url))
                 } else {
-                    println("[STREMIOSUB] Target Skipped -> Passing raw subtitle")
                     subtitleCallback.invoke(sub)
                 }
             } catch (e: Exception) {
-                println("[STREMIOSUB] Interceptor Crash: ${e.message}")
                 subtitleCallback.invoke(sub)
             }
         }
@@ -1017,10 +1102,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             {
                 runSuspendCatching {
                     val url = buildUrl("/stream/$targetType/$encodedPrimaryId.json")
-                    println("[STREMIOSUB] Requesting primary streams from url: $url")
                     val text = customSession.get(url, timeout = 120L).text
                     val res = if (text.isNotBlank()) jsonMapper.readValue(text, StreamsResponse::class.java) else null
-                    println("[STREMIOSUB] Primary streams count returned: ${res?.streams?.size ?: 0}")
                     res?.streams?.forEach { stream -> 
                         stream.runCallback(this@StremioC, subtitleInterceptor, wrappedCallback) 
                     }
@@ -1028,14 +1111,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             },
             { invokeWatchsomuch(loadData.imdbId, globalSeason, globalEpisode, subtitleCallback) },
             { invokeOpenSubs(loadData.imdbId, globalSeason, globalEpisode, subtitleCallback) },
-            { 
-                println("[STREMIOSUB] Initiating invokeCineStream")
-                invokeCineStream(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleInterceptor, wrappedCallback) 
-            },
-            { 
-                println("[STREMIOSUB] Initiating invokeStreamPlay")
-                invokeStreamPlay(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleInterceptor, wrappedCallback) 
-            }
+            { invokeCineStream(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleInterceptor, wrappedCallback) },
+            { invokeStreamPlay(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleInterceptor, wrappedCallback) }
         )
 
         // 3in1 동기화 세션 기입 및 플레이어 재생 개시 트리거 송신
@@ -1875,11 +1952,9 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     this.headers = behaviorHints?.proxyHeaders?.request ?: behaviorHints?.headers ?: mapOf()
                 })
                 
-                println("[STREMIOSUB] Stream.runCallback matched subtitles list. Count: ${subtitles.size}")
                 subtitles.map { sub -> 
                     val lang = sub.lang ?: sub.lang_code ?: "Unknown"
                     val parsedLang = SubtitleHelper.fromTagToEnglishLanguageName(lang) ?: lang
-                    println("[STREMIOSUB] Stream.runCallback invoking subtitleCallback with parsedLang: '$parsedLang', url: '${sub.url}'")
                     subtitleCallback.invoke(newSubtitleFile(parsedLang, sub.url ?: return@map)) 
                 }
             }
