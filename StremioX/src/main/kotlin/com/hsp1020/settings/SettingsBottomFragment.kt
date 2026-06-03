@@ -1,28 +1,43 @@
 package com.hsp1020
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
+import android.os.SystemClock
+import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
+import android.webkit.WebResourceRequest
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.widget.Button
 import android.widget.CompoundButton
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
-import com.google.android.material.bottomsheet.BottomSheetDialogFragment
-import androidx.core.net.toUri
 import androidx.core.content.edit
+import androidx.fragment.app.DialogFragment
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CommonActivity.showToast
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -147,7 +162,7 @@ class SettingsBottomFragment(
             throw Exception("saveIcon ImageView not found in bottom_sheet_layout", e)
         }
 
-        // 수동 입력 전용 텍스트 필드 바인딩
+        // 수동 입력용 텍스트 필드 바인딩
         val etTmdbKey: EditText = try { view.findView("etTmdbKey") } catch (e: Throwable) {
             throw Exception("etTmdbKey EditText not found in bottom_sheet_layout", e)
         }
@@ -172,16 +187,83 @@ class SettingsBottomFragment(
         showlinks.makeTvCompatible()
         saveIcon.makeTvCompatible()
 
-        // SharedPreferences 데이터 수급 초기화
         etTmdbKey.setText(sharedPref.getString("tmdb_api_key", ""))
         etTraktClientId.setText(sharedPref.getString("trakt_client_id", ""))
         etTraktToken.setText(sharedPref.getString("trakt_access_token", ""))
         etSimklClientId.setText(sharedPref.getString("simkl_client_id", ""))
         etSimklToken.setText(sharedPref.getString("simkl_access_token", ""))
 
-        // UI Initialization: Toggles
         setupToggle(view, "switchCineStream", SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, isCineStreamInstalled(), "CineStream")
         setupToggle(view, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
+
+        // 🌟 [UI 추가] 웹뷰 간편 로그인 전용 버튼 레이아웃 동적 생성 및 주입
+        val rootGroup = view as? ViewGroup
+        if (rootGroup != null) {
+            val context = view.context
+            
+            val loginContainer = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(30, 20, 30, 20)
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, 
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                )
+            }
+            
+            // Trakt 간편 로그인 버튼
+            val btnTraktLogin = Button(context).apply {
+                text = "Trakt Login"
+                setTextColor(Color.WHITE)
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#ED2224")) // Trakt Red
+                    cornerRadius = 20f
+                }
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, 
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    setMargins(0, 10, 0, 10)
+                }
+                setOnClickListener {
+                    val dialog = OAuthWebViewDialog(sharedPref, "trakt") { success ->
+                        if (success) {
+                            etTraktToken.setText(sharedPref.getString("trakt_access_token", ""))
+                            etTraktClientId.setText(sharedPref.getString("trakt_client_id", ""))
+                        }
+                    }
+                    dialog.show(childFragmentManager, "trakt_login")
+                }
+            }
+            
+            // Simkl 간편 로그인 버튼
+            val btnSimklLogin = Button(context).apply {
+                text = "Simkl Login"
+                setTextColor(Color.WHITE)
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#E47E24")) // Simkl Orange
+                    cornerRadius = 20f
+                }
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, 
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    setMargins(0, 10, 0, 10)
+                }
+                setOnClickListener {
+                    val dialog = OAuthWebViewDialog(sharedPref, "simkl") { success ->
+                        if (success) {
+                            etSimklToken.setText(sharedPref.getString("simkl_access_token", ""))
+                            etSimklClientId.setText(sharedPref.getString("simkl_client_id", ""))
+                        }
+                    }
+                    dialog.show(childFragmentManager, "simkl_login")
+                }
+            }
+            
+            loginContainer.addView(btnTraktLogin)
+            loginContainer.addView(btnSimklLogin)
+            rootGroup.addView(loginContainer)
+        }
 
         // Action: Add Link
         addlinks.setOnClickListener {
@@ -216,7 +298,7 @@ class SettingsBottomFragment(
                     }
 
                     val valid = try {
-                        val uri = link.toUri()
+                        val uri = android.net.Uri.parse(link)
                         val scheme = uri.scheme?.lowercase()
                         scheme == "http" || scheme == "https"
                     } catch (_: Exception) {
@@ -294,7 +376,6 @@ class SettingsBottomFragment(
         saveIcon.setOnClickListener {
             val context = this.context ?: return@setOnClickListener
 
-            // SharedPreferences에 수동 가입 API 환경 변수들 최종 커밋 적용
             sharedPref.edit {
                 putString("tmdb_api_key", etTmdbKey.text.toString().trim())
                 putString("trakt_client_id", etTraktClientId.text.toString().trim())
@@ -335,9 +416,7 @@ class SettingsBottomFragment(
                 val statusText = if (isChecked) "Enabled" else "Disabled"
                 showToast("$displayName Integration $statusText")
             }
-        } catch (e: Throwable) {
-            // Log.w("SettingsBottomFragment", "View $viewId not found in XML. Skipping toggle setup.")
-        }
+        } catch (e: Throwable) {}
     }
 
     private fun showEditDialog(itemToEdit: LinkItem, position: Int, rv: RecyclerView) {
@@ -451,6 +530,157 @@ class SettingsBottomFragment(
             if (position in items.indices) {
                 items[position] = newItem
                 notifyItemChanged(position)
+            }
+        }
+    }
+
+    // 🌟 [새 기능] Trakt, Simkl 자동 백그라운드 웹뷰 로그인 처리 클래스 추가
+    class OAuthWebViewDialog(
+        private val sharedPref: SharedPreferences,
+        private val type: String, // "trakt" or "simkl"
+        private val onFinish: (Boolean) -> Unit
+    ) : DialogFragment() {
+
+        private lateinit var webView: WebView
+        
+        private val TRAKT_CLIENT_ID = "6d8668915ed1953f5023ea090e206facc6261813243f567dea15a9a678783b6d"
+        private val TRAKT_CLIENT_SECRET = "86a36b2cfb73a9424b528089289a27d2a3dde5b62be6d9bd250476438160613e"
+        
+        private val SIMKL_CLIENT_ID = "8423f7ac58b77798ff3137b389aa8c5d5cdaaa118e52ab260b9c772428ebef42"
+        private val SIMKL_CLIENT_SECRET = "a1ac111d79b4ea67ffa82d685595ecc7d9dc937d85644b3b6f47a180143b924c"
+
+        override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
+            val ctx = requireContext()
+            val root = LinearLayout(ctx).apply {
+                orientation = LinearLayout.VERTICAL
+                layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+                setBackgroundColor(Color.parseColor("#121212"))
+            }
+
+            val toolbar = LinearLayout(ctx).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(30, 30, 30, 30)
+                setBackgroundColor(Color.parseColor("#1E1E1E"))
+                gravity = Gravity.CENTER_VERTICAL
+            }
+
+            val titleView = TextView(ctx).apply {
+                text = if (type == "trakt") "Trakt Login" else "Simkl Login"
+                textSize = 18f
+                setTextColor(Color.WHITE)
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            }
+
+            val closeBtn = Button(ctx).apply {
+                text = "Close"
+                setTextColor(Color.WHITE)
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#333333"))
+                    cornerRadius = 15f
+                }
+                setPadding(30, 15, 30, 15)
+                setOnClickListener { dismiss() }
+            }
+
+            toolbar.addView(titleView)
+            toolbar.addView(closeBtn)
+            root.addView(toolbar)
+
+            val webContainer = FrameLayout(ctx).apply {
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+            }
+
+            webView = WebView(ctx).apply {
+                layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true
+                settings.userAgentString = "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"
+                
+                webViewClient = object : WebViewClient() {
+                    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                        val url = request?.url?.toString() ?: ""
+                        
+                        if (url.startsWith("https://google.com") && url.contains("code=")) {
+                            val code = url.substringAfter("code=").substringBefore("&")
+                            performTokenExchange(code)
+                            return true
+                        }
+                        return false
+                    }
+                }
+            }
+
+            val authUrl = if (type == "trakt") {
+                "https://trakt.tv/oauth/authorize?response_type=code&client_id=$TRAKT_CLIENT_ID&redirect_uri=https://google.com"
+            } else {
+                "https://simkl.com/oauth/authorize?response_type=code&client_id=$SIMKL_CLIENT_ID&redirect_uri=https://google.com"
+            }
+
+            webView.loadUrl(authUrl)
+            webContainer.addView(webView)
+            root.addView(webContainer)
+
+            return root
+        }
+
+        private fun performTokenExchange(code: String) {
+            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    val url = if (type == "trakt") "https://api.trakt.tv/oauth/token" else "https://api.simkl.com/oauth/token"
+                    val clientId = if (type == "trakt") TRAKT_CLIENT_ID else SIMKL_CLIENT_ID
+                    val clientSecret = if (type == "trakt") TRAKT_CLIENT_SECRET else SIMKL_CLIENT_SECRET
+
+                    val payload = JSONObject().apply {
+                        put("code", code)
+                        put("client_id", clientId)
+                        put("client_secret", clientSecret)
+                        put("redirect_uri", "https://google.com")
+                        put("grant_type", "authorization_code")
+                    }
+
+                    val response = StremioC.customSession.post(
+                        url,
+                        headers = mapOf("Content-Type" to "application/json"),
+                        requestBody = payload.toString().toRequestBody("application/json".toMediaTypeOrNull())
+                    )
+
+                    if (response.isSuccessful) {
+                        val json = JSONObject(response.text)
+                        val accessToken = json.optString("access_token")
+
+                        if (!accessToken.isNullOrBlank()) {
+                            sharedPref.edit {
+                                if (type == "trakt") {
+                                    putString("trakt_client_id", clientId)
+                                    putString("trakt_access_token", accessToken)
+                                } else {
+                                    putString("simkl_client_id", clientId)
+                                    putString("simkl_access_token", accessToken)
+                                }
+                            }
+                            
+                            withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                Toast.makeText(requireContext(), "${if(type == "trakt") "Trakt" else "Simkl"} Login Successful!", Toast.LENGTH_SHORT).show()
+                                onFinish(true)
+                                dismiss()
+                            }
+                            return@launch
+                        }
+                    }
+                    
+                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        Toast.makeText(requireContext(), "Authentication failed. Please try again.", Toast.LENGTH_SHORT).show()
+                        onFinish(false)
+                        dismiss()
+                    }
+                } catch (e: Exception) {
+                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        Toast.makeText(requireContext(), "Network error: ${e.message}", Toast.LENGTH_SHORT).show()
+                        onFinish(false)
+                        dismiss()
+                    }
+                }
             }
         }
     }
