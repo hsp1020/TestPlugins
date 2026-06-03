@@ -161,7 +161,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
         private const val tmdbAPI = "https://api.themoviedb.org/3"
         private const val TRANSPARENT_PIXEL = "https://upload.wikimedia.org/wikipedia/commons/c/ca/1x1.png"
         
-        // SharedPreferences에서 수동 기입 저장한 환경 변수를 로드하는 정적 가변 헬퍼
+        // SharedPreferences에서 실시간 수동 저장한 환경 변수를 로드하는 정적 가변 헬퍼
         private fun getPrefString(key: String): String {
             val context = CloudStreamApp.context ?: return ""
             val possibleNames = listOf(
@@ -176,11 +176,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             return ""
         }
 
-        // 런타임 수동 기입 TMDb API 키 동적 바인딩 (하드코딩 제거 완료)
+        // 런타임 수동 기입 TMDb API 키 동적 바인딩
         private val apiKey: String
             get() = getPrefString("tmdb_api_key")
 
-        // ✨ 3in1 완결 동기화 플레이어 제어 오케스트레이션 매니저 객체 탑재
+
         object PlaybackSyncManager {
             @Volatile var activeSession: PlaybackSession? = null
             @Volatile private var activePlayer: Any? = null
@@ -203,7 +203,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     override fun onActivityCreated(activity: android.app.Activity, savedInstanceState: Bundle?) {}
                     override fun onActivityStarted(activity: android.app.Activity, savedInstanceState: Bundle?) {}
                     override fun onActivityResumed(activity: android.app.Activity) {
-                        // 플레이어 액티비티를 정밀 스캔하여 내부 리플렉션으로 ExoPlayer 인스턴스를 따옵니다.
+                        // 플레이어 액티비티를 스캔하여 리플렉션으로 ExoPlayer 인스턴스를 따옵니다.
                         if (activity::class.java.simpleName.contains("Player", ignoreCase = true)) {
                             activePlayer = getExoPlayer(activity)
                         }
@@ -252,6 +252,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 val session = activeSession ?: return
                 kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                     runSuspendCatching {
+                        // 수동 기입된 로컬 데이터만으로 통신 진행 (하드코딩 키 완전 제거)
                         val traktClientId = getPrefString("trakt_client_id")
                         val traktToken = getPrefString("trakt_access_token")
                         val simklClientId = getPrefString("simkl_client_id")
@@ -350,6 +351,8 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                 )
             }
         }
+
+
         
         private val IMDB_ID_REGEX = "tt[0-9]+".toRegex()
         private val JSON_ID_EXTRACT_REGEX = "\"id\":\"([^\"]+)\"".toRegex()
