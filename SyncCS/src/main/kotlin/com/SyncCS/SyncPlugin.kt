@@ -76,13 +76,17 @@ class SyncPlugin : Plugin() {
         MainActivity.reloadHomeEvent.plusAssign(backupTrigger)
         MainActivity.reloadAccountEvent.plusAssign(backupTrigger)
 
-        openSettings = {
-            // [버그 수정] 사용자가 톱니바퀴를 누른 시점의 '진짜 화면(this)'을 즉시 잡아채서 설정창을 띄웁니다.
-            val currentActivity = this as? AppCompatActivity
+        // [문제의 원인 해결]
+        // this(SyncPlugin)가 아닌, 클릭하는 순간 앱이 넘겨주는 ctx(Context)를 받아 Activity로 변환합니다.
+        openSettings = { ctx ->
+            val currentActivity = ctx as? AppCompatActivity 
+                ?: AcraApplication.context as? AppCompatActivity 
+                ?: CloudStreamApp.context as? AppCompatActivity
+
             if (currentActivity != null && !currentActivity.isDestroyed && !currentActivity.isFinishing) {
                 SyncSettingsFragment(this@SyncPlugin).show(currentActivity.supportFragmentManager, "Sync")
             } else {
-                Log.e("SyncCS", "Failed to open settings: Activity is null or destroyed.")
+                Log.e("SyncCS", "Failed to open settings: Activity context is invalid.")
             }
         }
     }
@@ -90,7 +94,7 @@ class SyncPlugin : Plugin() {
     fun triggerBackupDebounced() {
         backupDebounceJob?.cancel()
         backupDebounceJob = pluginScope.launch {
-            delay(15000L) // 15 seconds debounce
+            delay(15000L) // 15초 디바운스
             backupDevice()
         }
     }
