@@ -17,7 +17,6 @@ import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import androidx.core.content.res.ResourcesCompat
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
-import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.plugins.Plugin
 import kotlinx.coroutines.CoroutineScope
@@ -91,7 +90,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
         val backupSwitch = findView<Switch>(configLayout, "backup_device")
         val restoreSwitch = findView<Switch>(configLayout, "restore_device")
 
-        val pref = com.lagradost.cloudstream3.utils.DataStore.getSharedPrefs(ctx)
+        val pref = SharedPrefsHelper.getPrefs(ctx)
 
         val syncPluginsSwitch = Switch(ctx).apply {
             text = "Automated Plugin Sync"
@@ -103,13 +102,13 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
             text = "Force Sync Now"
             setOnClickListener {
                 CoroutineScope(Dispatchers.Main).launch {
-                    CommonActivity.showToast("Manual sync started...")
+                    CommonActivity.showToast("Manual sync started...", null)
                     withContext(Dispatchers.IO) {
                         val pluginInstance = plugin as? SyncPlugin
                         pluginInstance?.triggerBackupDebounced()
                         pluginInstance?.restoreDevice()
                     }
-                    CommonActivity.showToast("Sync completed!")
+                    CommonActivity.showToast("Sync completed!", null)
                 }
             }
         }
@@ -155,7 +154,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                                     ApiUtils.apiCall(query, token)
                                     withContext(Dispatchers.Main) {
                                         row.visibility = View.GONE
-                                        CommonActivity.showToast("Device removed")
+                                        CommonActivity.showToast("Device removed", null)
                                     }
                                 }
                             }
@@ -188,24 +187,27 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                 val projectNum = projectNumInput.text.toString().trim()
 
                 if (token.isEmpty() || projectNum.isEmpty()) {
-                    CommonActivity.showToast("Please fill in all information")
+                    CommonActivity.showToast("Please fill in all information", null)
                     return@setPositiveButton
                 }
 
                 loadingDialog.show()
 
-                AcraApplication.setKey("sync_token", token)
-                AcraApplication.setKey("sync_project_num", projectNum)
-                AcraApplication.setKey("backup_device", backupSwitch.isChecked.toString())
-                AcraApplication.setKey("restore_device", restoreSwitch.isChecked.toString())
-                AcraApplication.setKey("sync_plugins_enabled", syncPluginsSwitch.isChecked.toString())
+                // Cloudstream 내부 API(AcraApplication.setKey) 사용을 배제하고 안전한 네이티브 객체 직접 반영
+                pref.edit()
+                    .putString("sync_token", token)
+                    .putString("sync_project_num", projectNum)
+                    .putString("backup_device", backupSwitch.isChecked.toString())
+                    .putString("restore_device", restoreSwitch.isChecked.toString())
+                    .putString("sync_plugins_enabled", syncPluginsSwitch.isChecked.toString())
+                    .apply()
 
                 CoroutineScope(Dispatchers.IO).launch {
                     try {
                         val result = ApiUtils.syncProjectDetails(ctx)
                         CoroutineScope(Dispatchers.Main).launch {
                             loadingDialog.dismiss()
-                            CommonActivity.showToast(result.second)
+                            CommonActivity.showToast(result.second, null)
                             if (result.first) {
                                 dismiss()
                             }
@@ -213,18 +215,21 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                     } catch (e: Exception) {
                         CoroutineScope(Dispatchers.Main).launch {
                             loadingDialog.dismiss()
-                            CommonActivity.showToast("Error syncing: ${e.message}")
+                            CommonActivity.showToast("Error syncing: ${e.message}", null)
                         }
                     }
                 }
             }
             .setNegativeButton("Reset") { _, _ ->
-                AcraApplication.setKey("sync_token", "")
-                AcraApplication.setKey("sync_project_num", "")
-                AcraApplication.setKey("sync_project_id", "")
-                AcraApplication.setKey("sync_item_id", "")
-                AcraApplication.setKey("last_sync_timestamp", "0")
-                CommonActivity.showToast("Credentials removed")
+                pref.edit()
+                    .putString("sync_token", "")
+                    .putString("sync_project_num", "")
+                    .putString("sync_project_id", "")
+                    .putString("sync_item_id", "")
+                    .putLong("last_sync_timestamp", 0L)
+                    .apply()
+                
+                CommonActivity.showToast("Credentials removed", null)
                 dismiss()
             }
             .show()
