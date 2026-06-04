@@ -1,17 +1,16 @@
 package com.SyncCS
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.os.Build
 import android.provider.Settings
 import android.util.Base64
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
-import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.utils.DataStoreHelper.ResumeWatchingResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -22,11 +21,23 @@ import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import kotlin.text.Charsets.UTF_8
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.RequestBody.Companion.toRequestBody
 
 // =========================================================================
-// [1] Models Area
+// [1] Native SharedPreferences Helper (DataStore 의존성 및 빌드에러 완벽 차단)
+// =========================================================================
+
+object SharedPrefsHelper {
+    fun getPrefs(context: Context): SharedPreferences {
+        return context.getSharedPreferences("DataStore", Context.MODE_PRIVATE)
+    }
+
+    fun getDefaultPrefs(context: Context): SharedPreferences {
+        return context.getSharedPreferences(context.packageName + "_preferences", Context.MODE_PRIVATE)
+    }
+}
+
+// =========================================================================
+// [2] Models Area
 // =========================================================================
 
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -122,7 +133,7 @@ data class SyncDevice(
 )
 
 // =========================================================================
-// [2] Util Area
+// [3] Util Area
 // =========================================================================
 
 object Util {
@@ -220,7 +231,7 @@ object Util {
 }
 
 // =========================================================================
-// [3] BackupUtils Area
+// [4] BackupUtils Area
 // =========================================================================
 
 object BackupUtils {
@@ -248,8 +259,8 @@ object BackupUtils {
     }
 
     fun getDeltaBackup(context: Context, lastSyncTime: Long, syncPlugins: Boolean = false): BackupFile? {
-        val pref = com.lagradost.cloudstream3.utils.DataStore.getSharedPrefs(context)
-        val defaultPref = com.lagradost.cloudstream3.utils.DataStore.getDefaultSharedPrefs(context)
+        val pref = SharedPrefsHelper.getPrefs(context)
+        val defaultPref = SharedPrefsHelper.getDefaultPrefs(context)
 
         fun getDeltaMap(all: Map<String, *>): Map<String, Any?> {
             return all.filter { (key, value) ->
@@ -290,10 +301,9 @@ object BackupUtils {
         )
     }
 
-    // 제네릭 식별자 소거 후 공변 상위 클래스 선언 (타입 추론 오류 완벽 해결)
-    fun restoreMap(context: Context, incoming: Map<String, Any?>?, isAppSettings: Boolean, syncPlugins: Boolean = false) {
+    fun restoreMap(context: Context, incoming: Map<String, out Any?>?, isAppSettings: Boolean, syncPlugins: Boolean = false) {
         if (incoming.isNullOrEmpty()) return
-        val pref = if (isAppSettings) com.lagradost.cloudstream3.utils.DataStore.getDefaultSharedPrefs(context) else com.lagradost.cloudstream3.utils.DataStore.getSharedPrefs(context)
+        val pref = if (isAppSettings) SharedPrefsHelper.getDefaultPrefs(context) else SharedPrefsHelper.getPrefs(context)
         val editor = pref.edit()
 
         for ((key, incomingValue) in incoming) {
@@ -356,7 +366,7 @@ object BackupUtils {
 }
 
 // =========================================================================
-// [4] ApiUtils Area
+// [5] ApiUtils Area
 // =========================================================================
 
 object ApiUtils {
@@ -364,7 +374,7 @@ object ApiUtils {
 
     fun isLoggedIn(): Boolean {
         val context = AcraApplication.context ?: CloudStreamApp.context ?: return false
-        val pref = com.lagradost.cloudstream3.utils.DataStore.getSharedPrefs(context)
+        val pref = SharedPrefsHelper.getPrefs(context)
         val token = pref.getString("sync_token", null)
         val projectNum = pref.getString("sync_project_num", null)
         val projectId = pref.getString("sync_project_id", null)
@@ -375,12 +385,8 @@ object ApiUtils {
         try {
             val formattedQuery = query.replace("\n", " ").replace(Regex("\\s+"), " ")
             val bodyMap = mapOf("query" to formattedQuery)
-            val bodyStr = mapper.writeValueAsString(bodyMap)
 
-            // String 형변환 에러 해소 (OkHttp requestBody 규격 매핑)
-            val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
-            val requestBody = bodyStr.toRequestBody(mediaType)
-
+            // json 매개변수를 직접 활용하여 타입 에러 원천 차단
             val response = app.post(
                 url = "https://api.github.com/graphql",
                 headers = mapOf(
@@ -388,7 +394,7 @@ object ApiUtils {
                     "Content-Type" to "application/json",
                     "User-Agent" to "Cloudstream-Sync"
                 ),
-                requestBody = requestBody
+                json = bodyMap
             ).text
 
             mapper.readValue(response, APIRes::class.java)
@@ -399,7 +405,7 @@ object ApiUtils {
 
     suspend fun syncProjectDetails(context: Context?): Pair<Boolean, String> {
         if (context == null) return Pair(false, "No context")
-        val pref = com.lagradost.cloudstream3.utils.DataStore.getSharedPrefs(context)
+        val pref = SharedPrefsHelper.getPrefs(context)
         val token = pref.getString("sync_token", null)?.replace("\"", "") ?: return Pair(false, "Missing token")
         val projectNum = pref.getString("sync_project_num", null)?.replace("\"", "")?.toIntOrNull() ?: return Pair(false, "Invalid project number")
 
@@ -429,15 +435,13 @@ object ApiUtils {
         val project = res?.data?.viewer?.projectV2 ?: return Pair(false, "Failed to connect to GitHub or project not found")
         val projectId = project.id ?: return Pair(false, "Project ID not found")
 
-        pref.edit()
-            .putString("sync_project_id", projectId)
-            .apply()
+        pref.edit().putString("sync_project_id", projectId).apply()
 
         return Pair(true, "Successfully linked to GitHub Project!")
     }
 
     suspend fun syncThisDevice(syncData: String, context: Context): Pair<Boolean, String> {
-        val pref = com.lagradost.cloudstream3.utils.DataStore.getSharedPrefs(context)
+        val pref = SharedPrefsHelper.getPrefs(context)
         val token = pref.getString("sync_token", null)?.replace("\"", "") ?: return Pair(false, "Missing token")
         val projectId = pref.getString("sync_project_id", null)?.replace("\"", "") ?: return Pair(false, "Missing Project ID")
         val deviceName = pref.getString("device_name", android.os.Build.MODEL) ?: android.os.Build.MODEL
@@ -483,7 +487,7 @@ object ApiUtils {
     }
 
     suspend fun fetchDevices(context: Context): List<SyncDevice> {
-        val pref = com.lagradost.cloudstream3.utils.DataStore.getSharedPrefs(context)
+        val pref = SharedPrefsHelper.getPrefs(context)
         val token = pref.getString("sync_token", null)?.replace("\"", "") ?: return emptyList()
         val projectNum = pref.getString("sync_project_num", null)?.replace("\"", "")?.toIntOrNull() ?: return emptyList()
 
