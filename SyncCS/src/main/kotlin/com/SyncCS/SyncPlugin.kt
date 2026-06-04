@@ -74,9 +74,11 @@ class SyncPlugin : Plugin() {
         MainActivity.reloadHomeEvent.plusAssign(backupTrigger)
         MainActivity.reloadAccountEvent.plusAssign(backupTrigger)
 
-        val activity = context as? AppCompatActivity ?: return
         openSettings = {
-            SyncSettingsFragment(this).show(activity.supportFragmentManager, "Sync")
+            val currentActivity = AcraApplication.context as? AppCompatActivity ?: CloudStreamApp.context as? AppCompatActivity
+            if (currentActivity != null && !currentActivity.isDestroyed && !currentActivity.isFinishing) {
+                SyncSettingsFragment(this).show(currentActivity.supportFragmentManager, "Sync")
+            }
         }
     }
 
@@ -95,12 +97,10 @@ class SyncPlugin : Plugin() {
         val syncPluginsEnabled = pref.getString("sync_plugins_enabled", "false") == "true"
 
         if (backupEnabled && ApiUtils.isLoggedIn()) {
-            // 원본의 데이터 증발 방지를 위해 전체 덤프를 수집
-            val backupFile = BackupUtils.getFullBackup(context, syncPluginsEnabled)
-            if (backupFile == null) return@withContext
+            // 차분 동기화를 폐기하고 원본처럼 Full Backup을 돌려 누락되는 데이터 차단
+            val backupFile = BackupUtils.getFullBackup(context, syncPluginsEnabled) ?: return@withContext
             
             val json = mapper.writeValueAsString(backupFile)
-
             if (json.isNotEmpty()) {
                 val compressed = Util.compressJsonToString(Util.cleanedSyncData(json))
                 ApiUtils.syncThisDevice(compressed, context)
