@@ -31,12 +31,13 @@ import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
 
 // =========================================================================
-// [1] Native SharedPreferences Helper
+// [1] Native SharedPreferences Helper (경로 오류 수정 완벽 반영)
 // =========================================================================
 
 object SharedPrefsHelper {
     fun getPrefs(context: Context): SharedPreferences {
-        return context.getSharedPreferences("DataStore", Context.MODE_PRIVATE)
+        // "DataStore"가 아닌 CloudStream 고유의 패키지명 DB를 열어야 시청기록과 플러그인이 보입니다.
+        return context.getSharedPreferences(context.packageName, Context.MODE_PRIVATE)
     }
 
     fun getDefaultPrefs(context: Context): SharedPreferences {
@@ -82,7 +83,7 @@ data class APIRes(
                             @JsonProperty("id") var id: String? = null,
                             @JsonProperty("title") var title: String? = null,
                             @JsonProperty("bodyText") var bodyText: String? = null,
-                            @JsonProperty("body") var body: String? = null // GitHub API 업데이트 대응 (body / bodyText 유연성 확보)
+                            @JsonProperty("body") var body: String? = null
                         )
                     }
                 }
@@ -157,13 +158,10 @@ object Util {
         }
     }
 
-    fun restoreText(str: String): String {
-        return str
-    }
+    fun restoreText(str: String): String = str
 
     fun compressJsonToString(str: String): String {
-        val bytes = str.toByteArray(UTF_8)
-        return Base64.encodeToString(bytes, Base64.NO_WRAP or Base64.NO_PADDING)
+        return Base64.encodeToString(str.toByteArray(UTF_8), Base64.NO_WRAP or Base64.NO_PADDING)
     }
 
     fun decompressJsonFromString(str: String): String {
@@ -220,17 +218,7 @@ object Util {
 
     fun getDeviceId(packageName: String, context: Context): String {
         val androidId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
-        if (!androidId.isNullOrEmpty()) {
-            return md5(packageName + androidId)
-        }
-        val serial = if (Build.VERSION.SDK_INT >= 26) {
-            try { Build.getSerial() } catch (e: SecurityException) { "" }
-        } else {
-            Build.SERIAL
-        }
-        if (!serial.isNullOrEmpty() && serial != "unknown") {
-            return md5(packageName + serial)
-        }
+        if (!androidId.isNullOrEmpty()) return md5(packageName + androidId)
         val fallback = "${Build.BRAND}_${Build.MODEL}_${Build.DEVICE}"
         return md5(packageName + UUID.nameUUIDFromBytes(fallback.toByteArray(UTF_8)).toString())
     }
@@ -243,7 +231,7 @@ object Util {
 }
 
 // =========================================================================
-// [4] BackupUtils Area
+// [4] BackupUtils Area (로깅 추가 및 Delta Sync 버그 해결)
 // =========================================================================
 
 object BackupUtils {
@@ -274,27 +262,41 @@ object BackupUtils {
         val pref = SharedPrefsHelper.getPrefs(context)
         val defaultPref = SharedPrefsHelper.getDefaultPrefs(context)
 
-        fun getDeltaMap(all: Map<String, *>): Map<String, Any?> {
-            return all.filter { (key, value) ->
+        Log.d("SyncCS", "--- [START EXTRACTING BACKUP DATA] ---")
+        Log.d("SyncCS", "Total DataStore Keys: ${pref.all.size}")
+        Log.d("SyncCS", "Total AppSettings Keys: ${defaultPref.all.size}")
+
+        fun getDeltaMap(all: Map<String, *>, type: String): Map<String, Any?> {
+            val delta = all.filter { (key, value) ->
                 if (!isResume(key, syncPlugins)) return@filter false
                 if (value is String) {
                     try {
                         val obj = JSONObject(value)
-                        val updateTime = obj.optLong("latestUpdatedTime", obj.optLong("bookmarkedTime", 0L))
-                        updateTime > lastSyncTime
+                        // 플러그인 데이터 등 시간값이 없는 JSON은 강제 포함시키도록 예외 처리
+                        if (obj.has("latestUpdatedTime") || obj.has("bookmarkedTime")) {
+                            val updateTime = obj.optLong("latestUpdatedTime", obj.optLong("bookmarkedTime", 0L))
+                            updateTime >= lastSyncTime
+                        } else {
+                            true
+                        }
                     } catch (e: Exception) {
-                        true
+                        true // JSON이 아닌 일반 문자열도 무조건 포함
                     }
                 } else {
-                    true
+                    true // Boolean, Int, Set 등은 포함
                 }
             }
+            Log.d("SyncCS", "$type Delta filtered: ${delta.size} keys out of ${all.size} will be uploaded.")
+            return delta
         }
 
-        val deltaPrefs = getDeltaMap(pref.all)
-        val deltaDefaultPrefs = getDeltaMap(defaultPref.all)
+        val deltaPrefs = getDeltaMap(pref.all, "DataStore")
+        val deltaDefaultPrefs = getDeltaMap(defaultPref.all, "AppSettings")
 
-        if (deltaPrefs.isEmpty() && deltaDefaultPrefs.isEmpty()) return null
+        if (deltaPrefs.isEmpty() && deltaDefaultPrefs.isEmpty()) {
+            Log.d("SyncCS", "No new changes detected since last backup. Aborting upload.")
+            return null
+        }
 
         fun splitVars(map: Map<String, Any?>): BackupVars {
             return BackupVars(
@@ -307,6 +309,7 @@ object BackupUtils {
             )
         }
 
+        Log.d("SyncCS", "--- [END EXTRACTING BACKUP DATA] ---")
         return BackupFile(
             datastore = splitVars(deltaPrefs),
             settings = splitVars(deltaDefaultPrefs)
@@ -318,6 +321,9 @@ object BackupUtils {
         val pref = if (isAppSettings) SharedPrefsHelper.getDefaultPrefs(context) else SharedPrefsHelper.getPrefs(context)
         val editor = pref.edit()
 
+        Log.d("SyncCS", "Restoring ${incoming.size} keys into ${if(isAppSettings) "AppSettings" else "DataStore"}...")
+
+        var restoredCount = 0
         for ((key, incomingValue) in incoming) {
             if (!isResume(key, syncPlugins)) continue
 
@@ -325,6 +331,8 @@ object BackupUtils {
             if (localValue != null && incomingValue is String && localValue is String) {
                 val merged = resolveConflict(localValue, incomingValue)
                 editor.putString(key, merged)
+                restoredCount++
+                Log.d("SyncCS", "Restored/Merged Key: $key")
             } else {
                 when (incomingValue) {
                     is Boolean -> editor.putBoolean(key, incomingValue)
@@ -337,9 +345,12 @@ object BackupUtils {
                         editor.putStringSet(key, incomingValue as Set<String>)
                     }
                 }
+                restoredCount++
+                Log.d("SyncCS", "Restored New Key: $key")
             }
         }
         editor.apply()
+        Log.d("SyncCS", "Successfully applied $restoredCount keys to storage.")
     }
 
     private fun resolveConflict(localStr: String, incomingStr: String): String {
@@ -358,7 +369,9 @@ object BackupUtils {
 
     fun restore(context: Context?, backupFile: BackupFile, restoreSettings: Boolean, restoreDataStore: Boolean, syncPlugins: Boolean = false) {
         if (context == null) return
+        Log.d("SyncCS", "--- [START RESTORE PROCESS] ---")
         if (restoreSettings) {
+            Log.d("SyncCS", "Restoring Settings...")
             restoreMap(context, backupFile.settings.bool, true, syncPlugins)
             restoreMap(context, backupFile.settings.int, true, syncPlugins)
             restoreMap(context, backupFile.settings.string, true, syncPlugins)
@@ -367,6 +380,7 @@ object BackupUtils {
             restoreMap(context, backupFile.settings.stringSet, true, syncPlugins)
         }
         if (restoreDataStore) {
+            Log.d("SyncCS", "Restoring DataStore (History/Bookmarks/Plugins)...")
             restoreMap(context, backupFile.datastore.bool, false, syncPlugins)
             restoreMap(context, backupFile.datastore.int, false, syncPlugins)
             restoreMap(context, backupFile.datastore.string, false, syncPlugins)
@@ -374,6 +388,7 @@ object BackupUtils {
             restoreMap(context, backupFile.datastore.long, false, syncPlugins)
             restoreMap(context, backupFile.datastore.stringSet, false, syncPlugins)
         }
+        Log.d("SyncCS", "--- [END RESTORE PROCESS] ---")
     }
 }
 
@@ -413,13 +428,10 @@ object ApiUtils {
 
     suspend fun apiCall(query: String, token: String): APIRes? = withContext(Dispatchers.IO) {
         try {
-            Log.d("SyncCS", "--- [API CALL START] ---")
+            Log.d("SyncCS", "Executing GraphQL Query...")
             val formattedQuery = query.replace("\n", " ").replace(Regex("\\s+"), " ")
             val bodyMap = mapOf("query" to formattedQuery)
             val bodyStr = mapper.writeValueAsString(bodyMap)
-
-            Log.d("SyncCS", "Request Body: $bodyStr")
-            Log.d("SyncCS", "Token used: ${token.take(6)}...")
 
             val requestBody = bodyStr.toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull())
             val request = Request.Builder()
@@ -434,15 +446,10 @@ object ApiUtils {
             val code = response.code
             val responseBody = response.body?.string() ?: ""
 
-            Log.d("SyncCS", "HTTP Response Code: $code")
-            Log.d("SyncCS", "Raw Server Response: $responseBody")
-            Log.d("SyncCS", "--- [API CALL END] ---")
-
             if (code != 200) {
-                Log.e("SyncCS", "Server returned error code: $code")
+                Log.e("SyncCS", "GitHub API Failed with Code: $code, Response: $responseBody")
                 return@withContext null
             }
-
             mapper.readValue(responseBody, APIRes::class.java)
         } catch (e: Exception) {
             Log.e("SyncCS", "Network Exception in apiCall", e)
@@ -451,13 +458,11 @@ object ApiUtils {
     }
 
     suspend fun syncProjectDetails(context: Context?): Pair<Boolean, String> {
-        Log.d("SyncCS", "syncProjectDetails Called")
         if (context == null) return Pair(false, "No context")
         val pref = SharedPrefsHelper.getPrefs(context)
         val token = pref.getString("sync_token", null)?.replace("\"", "") ?: return Pair(false, "Missing token")
         val projectNum = pref.getString("sync_project_num", null)?.replace("\"", "")?.toIntOrNull() ?: return Pair(false, "Invalid project number")
 
-        // 타입 오류 수정: ... on ProjectV2ItemDraftIssue -> ... on DraftIssue 로 전면 수정
         val query = """
             query {
                 viewer {
@@ -482,31 +487,19 @@ object ApiUtils {
 
         val res = apiCall(query, token)
         
-        if (res == null) {
-            Log.e("SyncCS", "Response object is completely null")
-            return Pair(false, "Failed to connect to GitHub. Check Logcat.")
-        }
-
+        if (res == null) return Pair(false, "Failed to connect to GitHub.")
         if (res.errors != null && res.errors!!.isNotEmpty()) {
             val errorMsg = res.errors!!.joinToString(", ") { it.message ?: "Unknown Error" }
-            Log.e("SyncCS", "GraphQL returned Errors: $errorMsg")
+            Log.e("SyncCS", "GraphQL Errors: $errorMsg")
             return Pair(false, "GitHub Error: $errorMsg")
         }
 
         val project = res.data?.viewer?.projectV2
-        if (project == null) {
-            Log.e("SyncCS", "viewer.projectV2 is null. Check Project Number, or your token permissions.")
-            return Pair(false, "Failed to connect to GitHub or project not found")
-        }
+        if (project == null) return Pair(false, "Project not found or check PAT permissions.")
 
-        val projectId = project.id
-        if (projectId.isNullOrEmpty()) {
-            Log.e("SyncCS", "Project ID missing from JSON")
-            return Pair(false, "Project ID not found in response")
-        }
-
+        val projectId = project.id ?: return Pair(false, "Project ID not found in response")
         pref.edit().putString("sync_project_id", projectId).apply()
-        Log.d("SyncCS", "Successfully found Project ID: $projectId")
+        Log.d("SyncCS", "Project Linked! ID: $projectId")
 
         return Pair(true, "Successfully linked to GitHub Project!")
     }
@@ -550,9 +543,11 @@ object ApiUtils {
 
         if (!newItemId.isNullOrEmpty()) {
             pref.edit().putString("sync_item_id", newItemId).apply()
+            Log.d("SyncCS", "Cloud Upload Successful! New Draft Issue ID: $newItemId")
             return Pair(true, "Sync completed successfully")
         }
 
+        Log.e("SyncCS", "Cloud Upload Failed. newItemId was null.")
         return Pair(false, "Sync failed during upload")
     }
 
@@ -561,7 +556,6 @@ object ApiUtils {
         val token = pref.getString("sync_token", null)?.replace("\"", "") ?: return emptyList()
         val projectNum = pref.getString("sync_project_num", null)?.replace("\"", "")?.toIntOrNull() ?: return emptyList()
 
-        // 타입 오류 수정: ... on ProjectV2ItemDraftIssue -> ... on DraftIssue 로 전면 수정
         val query = """
             query {
                 viewer {
@@ -591,8 +585,6 @@ object ApiUtils {
         for (node in nodes) {
             val itemId = node.id ?: continue
             val title = node.content?.title ?: continue
-            
-            // bodyText가 아닌 바뀐 스키마인 body로 추출
             val body = node.content?.body ?: node.content?.bodyText ?: ""
 
             val parts = title.split("|")
@@ -600,6 +592,7 @@ object ApiUtils {
                 list.add(SyncDevice(parts[0], parts[1], itemId, Util.decrypt(body, token)))
             }
         }
+        Log.d("SyncCS", "Fetched ${list.size} remote devices from GitHub.")
         return list
     }
 }
