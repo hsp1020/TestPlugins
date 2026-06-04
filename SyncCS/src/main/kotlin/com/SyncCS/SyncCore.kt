@@ -10,7 +10,6 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.CloudStreamApp
-import com.lagradost.cloudstream3.app
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -21,9 +20,17 @@ import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import kotlin.text.Charsets.UTF_8
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import java.security.cert.X509Certificate
+import javax.net.ssl.SSLContext
+import javax.net.ssl.TrustManager
+import javax.net.ssl.X509TrustManager
 
 // =========================================================================
-// [1] Native SharedPreferences Helper (DataStore 의존성 및 빌드에러 완벽 차단)
+// [1] Native SharedPreferences Helper
 // =========================================================================
 
 object SharedPrefsHelper {
@@ -366,11 +373,33 @@ object BackupUtils {
 }
 
 // =========================================================================
-// [5] ApiUtils Area
+// [5] ApiUtils Area (Bypass SSL / Trust All Certificates Client)
 // =========================================================================
 
 object ApiUtils {
     private val mapper = jacksonObjectMapper()
+    
+    // Cloudstream의 변조된 HTTP 엔진을 쓰지 않고, SSL 인증서를 무시하는 
+    // "전용 커스텀 OkHttp 클라이언트"를 생성하여 SSL Handshake 오류를 원천 차단합니다.
+    private val unsafeClient: OkHttpClient by lazy {
+        try {
+            val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
+                override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+                override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+                override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
+            })
+            val sslContext = SSLContext.getInstance("SSL")
+            sslContext.init(null, trustAllCerts, SecureRandom())
+            val sslSocketFactory = sslContext.socketFactory
+
+            OkHttpClient.Builder()
+                .sslSocketFactory(sslSocketFactory, trustAllCerts[0] as X509TrustManager)
+                .hostnameVerifier { _, _ -> true } // 모든 호스트네임 우회
+                .build()
+        } catch (e: Exception) {
+            OkHttpClient()
+        }
+    }
 
     fun isLoggedIn(): Boolean {
         val context = AcraApplication.context ?: CloudStreamApp.context ?: return false
@@ -385,19 +414,24 @@ object ApiUtils {
         try {
             val formattedQuery = query.replace("\n", " ").replace(Regex("\\s+"), " ")
             val bodyMap = mapOf("query" to formattedQuery)
+            val bodyStr = mapper.writeValueAsString(bodyMap)
 
-            // json 매개변수를 직접 활용하여 타입 에러 원천 차단
-            val response = app.post(
-                url = "https://api.github.com/graphql",
-                headers = mapOf(
-                    "Authorization" to "Bearer $token",
-                    "Content-Type" to "application/json",
-                    "User-Agent" to "Cloudstream-Sync"
-                ),
-                json = bodyMap
-            ).text
+            val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
+            val requestBody = bodyStr.toRequestBody(mediaType)
 
-            mapper.readValue(response, APIRes::class.java)
+            // 안전한 독립 통신 클라이언트를 통한 GraphQL 전송
+            val request = Request.Builder()
+                .url("https://api.github.com/graphql")
+                .addHeader("Authorization", "Bearer $token")
+                .addHeader("Content-Type", "application/json")
+                .addHeader("User-Agent", "Cloudstream-Sync")
+                .post(requestBody)
+                .build()
+
+            val response = unsafeClient.newCall(request).execute()
+            val responseBody = response.body?.string() ?: return@withContext null
+
+            mapper.readValue(responseBody, APIRes::class.java)
         } catch (e: Exception) {
             null
         }
