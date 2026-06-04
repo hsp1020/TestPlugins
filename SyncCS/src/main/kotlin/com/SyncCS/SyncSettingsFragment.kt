@@ -1,9 +1,9 @@
 package com.SyncCS
 
 import android.annotation.SuppressLint
-import android.app.Dialog
 import android.graphics.Color
 import android.os.Bundle
+import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -21,8 +21,7 @@ import kotlinx.coroutines.withContext
 
 class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragment() {
 
-    // BottomSheet의 동작을 강제하여 화면에 보이도록(Expanded) 설정
-    override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
+    override fun onCreateDialog(savedInstanceState: Bundle?): android.app.Dialog {
         val dialog = super.onCreateDialog(savedInstanceState) as BottomSheetDialog
         dialog.setOnShowListener {
             val bottomSheet = dialog.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet) as? FrameLayout
@@ -38,7 +37,6 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
         val ctx = requireContext()
 
-        // 최상단 컨테이너: 사이즈를 명시적으로 잡기 위해 LayoutParams 설정
         val layout = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(50, 50, 50, 50)
@@ -82,10 +80,10 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
     private fun showGuideDialog() {
         val ctx = context ?: return
         val textView = TextView(ctx).apply {
-            text = "1. Go to GitHub and create a Personal Access Token (PAT) with 'project' permissions.\n\n" +
-                   "2. Create a Project V2 on GitHub and obtain its project number.\n\n" +
-                   "3. Enter the PAT and Project Number in the Configuration menu.\n\n" +
-                   "4. Enable Backup/Restore and plugin sync as needed."
+            text = "1. GitHub에서 'project' 권한이 체크된 PAT 토큰을 발급하세요.\n\n" +
+                   "2. GitHub 프로필에서 Project V2를 생성하고 프로젝트 번호를 확인하세요.\n\n" +
+                   "3. Configuration 메뉴에 토큰과 번호를 입력한 뒤 'Save'를 누르세요.\n\n" +
+                   "4. 동기화 후 앱을 완전히 종료(스와이프)하고 다시 켜야 데이터가 화면에 표시됩니다."
             setPadding(60, 60, 60, 60)
             textSize = 15f
         }
@@ -150,21 +148,38 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
         }
         layout.addView(syncPluginsSwitch)
 
-        val manualSyncBtn = Button(ctx).apply {
-            text = "Force Sync Now"
+        // [수정됨] 직관적인 다운로드/업로드 수동 컨트롤 버튼 2개
+        val pullBtn = Button(ctx).apply {
+            text = "⬇️ PULL: Download from Cloud"
             setOnClickListener {
                 CoroutineScope(Dispatchers.Main).launch {
-                    CommonActivity.showToast("Manual sync started...", null)
-                    withContext(Dispatchers.IO) {
-                        val pluginInstance = plugin as? SyncPlugin
-                        pluginInstance?.triggerBackupDebounced()
-                        pluginInstance?.restoreDevice()
+                    CommonActivity.showToast("Downloading data from GitHub...", null)
+                    val success = withContext(Dispatchers.IO) {
+                        (plugin as? SyncPlugin)?.restoreDevice()
                     }
-                    CommonActivity.showToast("Sync completed!", null)
+                    if (success == true) {
+                        CommonActivity.showToast("Success! Please restart the app to see changes.", null)
+                    } else {
+                        CommonActivity.showToast("Failed to pull data.", null)
+                    }
                 }
             }
         }
-        layout.addView(manualSyncBtn)
+        layout.addView(pullBtn)
+
+        val pushBtn = Button(ctx).apply {
+            text = "⬆️ PUSH: Upload to Cloud"
+            setOnClickListener {
+                CoroutineScope(Dispatchers.Main).launch {
+                    CommonActivity.showToast("Uploading data to GitHub...", null)
+                    withContext(Dispatchers.IO) {
+                        (plugin as? SyncPlugin)?.forceBackupNow()
+                    }
+                    CommonActivity.showToast("Upload completed!", null)
+                }
+            }
+        }
+        layout.addView(pushBtn)
 
         val deviceTitle = TextView(ctx).apply {
             text = "Registered Devices (Device Manager)"
