@@ -1,19 +1,16 @@
 package com.SyncCS
 
 import android.annotation.SuppressLint
+import android.app.Dialog
 import android.graphics.Color
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.widget.Button
-import android.widget.EditText
-import android.widget.LinearLayout
-import android.widget.ProgressBar
-import android.widget.ScrollView
-import android.widget.Switch
-import android.widget.TextView
+import android.widget.*
 import androidx.appcompat.app.AlertDialog
+import com.google.android.material.bottomsheet.BottomSheetBehavior
+import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.plugins.Plugin
@@ -24,12 +21,31 @@ import kotlinx.coroutines.withContext
 
 class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragment() {
 
+    // BottomSheet의 동작을 강제하여 화면에 보이도록(Expanded) 설정
+    override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
+        val dialog = super.onCreateDialog(savedInstanceState) as BottomSheetDialog
+        dialog.setOnShowListener {
+            val bottomSheet = dialog.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet) as? FrameLayout
+            bottomSheet?.let {
+                val behavior = BottomSheetBehavior.from(it)
+                behavior.state = BottomSheetBehavior.STATE_EXPANDED
+                behavior.skipCollapsed = true
+            }
+        }
+        return dialog
+    }
+
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
         val ctx = requireContext()
 
+        // 최상단 컨테이너: 사이즈를 명시적으로 잡기 위해 LayoutParams 설정
         val layout = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(50, 50, 50, 50)
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
         }
 
         val title = TextView(ctx).apply {
@@ -42,12 +58,20 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
 
         val configBtn = Button(ctx).apply {
             text = "Configuration (Setup Sync)"
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, 10, 0, 10) }
             setOnClickListener { showConfigDialog() }
         }
         layout.addView(configBtn)
 
         val guideBtn = Button(ctx).apply {
             text = "Read Guide"
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, 10, 0, 10) }
             setOnClickListener { showGuideDialog() }
         }
         layout.addView(guideBtn)
@@ -87,6 +111,10 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
         val tokenInput = EditText(ctx).apply {
             hint = "GitHub PAT Token (ghp_...)"
             setText(pref.getString("sync_token", ""))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
         }
         layout.addView(tokenInput)
 
@@ -94,6 +122,10 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
             hint = "GitHub Project Number (ex: 1)"
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
             setText(pref.getString("sync_project_num", ""))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
         }
         layout.addView(projectNumInput)
 
@@ -135,7 +167,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
         layout.addView(manualSyncBtn)
 
         val deviceTitle = TextView(ctx).apply {
-            text = "Registered Devices"
+            text = "Registered Devices (Device Manager)"
             textSize = 16f
             setPadding(0, 40, 0, 10)
         }
@@ -230,7 +262,9 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                         withContext(Dispatchers.Main) {
                             loadingDialog.dismiss()
                             CommonActivity.showToast(result.second, null)
-                            if (result.first) dismiss()
+                            if (result.first) {
+                                dismiss()
+                            }
                         }
                     } catch (e: Exception) {
                         withContext(Dispatchers.Main) {
@@ -246,7 +280,9 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                     .putString("sync_project_num", "")
                     .putString("sync_project_id", "")
                     .putString("sync_item_id", "")
+                    .putLong("last_sync_timestamp", 0L)
                     .apply()
+
                 CommonActivity.showToast("Credentials removed", null)
                 dismiss()
             }
