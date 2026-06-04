@@ -10,9 +10,7 @@ import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.ui.home.HomeViewModel
-import com.lagradost.cloudstream3.utils.AppUtils
-import com.lagradost.cloudstream3.utils.DataStore
-import com.lagradost.cloudstream3.utils.DataStoreHelper.ResumeWatchingResult
+import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import kotlinx.coroutines.*
 
 @CloudstreamPlugin
@@ -20,6 +18,7 @@ class SyncPlugin : Plugin() {
 
     private val handler = Handler(Looper.getMainLooper())
     private val pluginScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val mapper = jacksonObjectMapper()
 
     private var lastResumeWatching: List<ResumeWatchingResult>? = null
     private var counterBackup = 0
@@ -90,14 +89,14 @@ class SyncPlugin : Plugin() {
 
     private suspend fun backupDevice() = withContext(Dispatchers.IO) {
         val context = AcraApplication.context ?: CloudStreamApp.context ?: return@withContext
-        val pref = DataStore.getSharedPrefs(context)
+        val pref = com.lagradost.cloudstream3.utils.DataStore.getSharedPrefs(context)
         val backupEnabled = pref.getString("backup_device", "false") == "true"
         val syncPluginsEnabled = pref.getString("sync_plugins_enabled", "false") == "true"
 
         if (backupEnabled && ApiUtils.isLoggedIn()) {
             val lastSyncTime = pref.getLong("last_sync_timestamp", 0L)
             val backupFile = BackupUtils.getDeltaBackup(context, lastSyncTime, syncPluginsEnabled) ?: return@withContext
-            val json = AppUtils.toJson(backupFile)
+            val json = mapper.writeValueAsString(backupFile)
 
             if (json.isNotEmpty()) {
                 val compressed = Util.compressJsonToString(Util.cleanedSyncData(json))
@@ -111,7 +110,7 @@ class SyncPlugin : Plugin() {
 
     suspend fun restoreDevice(): Boolean = withContext(Dispatchers.IO) {
         val context = AcraApplication.context ?: CloudStreamApp.context ?: return@withContext false
-        val pref = DataStore.getSharedPrefs(context)
+        val pref = com.lagradost.cloudstream3.utils.DataStore.getSharedPrefs(context)
         val restoreEnabled = pref.getString("restore_device", "false") == "true"
         val syncPluginsEnabled = pref.getString("sync_plugins_enabled", "false") == "true"
 
@@ -126,7 +125,7 @@ class SyncPlugin : Plugin() {
                     val syncedData = device.syncedData ?: continue
                     if (syncedData.isNotEmpty()) {
                         val decompressed = Util.restoreText(Util.decompressJsonFromString(syncedData))
-                        val backupFile = AppUtils.parseJson<BackupFile>(decompressed)
+                        val backupFile = mapper.readValue(decompressed, BackupFile::class.java)
 
                         if (backupFile != null) {
                             withContext(Dispatchers.Main) {
