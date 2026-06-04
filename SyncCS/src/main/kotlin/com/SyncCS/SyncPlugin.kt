@@ -20,7 +20,8 @@ class SyncPlugin : Plugin() {
     private val pluginScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val mapper = jacksonObjectMapper()
 
-    private var lastResumeWatching: List<ResumeWatchingResult>? = null
+    // ResumeWatchingResult 클래스 미인식 에러를 방지하기 위해 List<Any>로 추상화 처리
+    private var lastResumeWatching: List<Any>? = null
     private var counterBackup = 0
     private var backupDebounceJob: Job? = null
 
@@ -32,7 +33,7 @@ class SyncPlugin : Plugin() {
         override fun run() {
             pluginScope.launch {
                 try {
-                    val list = HomeViewModel.Companion.getResumeWatching()
+                    val list = HomeViewModel.getResumeWatching() as? List<Any>
                     val listTake = list?.take(10)
                     if (listTake != lastResumeWatching) {
                         triggerBackupDebounced()
@@ -60,7 +61,7 @@ class SyncPlugin : Plugin() {
 
     override fun load(context: Context) {
         val deviceId = Util.getDeviceId(context.packageName, context)
-        AcraApplication.setKey("device_id", deviceId)
+        SharedPrefsHelper.getPrefs(context).edit().putString("device_id", deviceId).apply()
 
         pluginScope.launch { restoreDevice() }
 
@@ -89,13 +90,17 @@ class SyncPlugin : Plugin() {
 
     private suspend fun backupDevice() = withContext(Dispatchers.IO) {
         val context = AcraApplication.context ?: CloudStreamApp.context ?: return@withContext
-        val pref = com.lagradost.cloudstream3.utils.DataStore.getSharedPrefs(context)
+        val pref = SharedPrefsHelper.getPrefs(context)
         val backupEnabled = pref.getString("backup_device", "false") == "true"
         val syncPluginsEnabled = pref.getString("sync_plugins_enabled", "false") == "true"
 
         if (backupEnabled && ApiUtils.isLoggedIn()) {
             val lastSyncTime = pref.getLong("last_sync_timestamp", 0L)
-            val backupFile = BackupUtils.getDeltaBackup(context, lastSyncTime, syncPluginsEnabled) ?: return@withContext
+            val backupFile = BackupUtils.getDeltaBackup(context, lastSyncTime, syncPluginsEnabled)
+            
+            // 엘비스 연산자(WHEN_CALL) 붕괴 오류를 막기 위해 명시적 Null 처리
+            if (backupFile == null) return@withContext
+            
             val json = mapper.writeValueAsString(backupFile)
 
             if (json.isNotEmpty()) {
@@ -110,7 +115,7 @@ class SyncPlugin : Plugin() {
 
     suspend fun restoreDevice(): Boolean = withContext(Dispatchers.IO) {
         val context = AcraApplication.context ?: CloudStreamApp.context ?: return@withContext false
-        val pref = com.lagradost.cloudstream3.utils.DataStore.getSharedPrefs(context)
+        val pref = SharedPrefsHelper.getPrefs(context)
         val restoreEnabled = pref.getString("restore_device", "false") == "true"
         val syncPluginsEnabled = pref.getString("sync_plugins_enabled", "false") == "true"
 
