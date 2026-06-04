@@ -76,8 +76,6 @@ class SyncPlugin : Plugin() {
         MainActivity.reloadHomeEvent.plusAssign(backupTrigger)
         MainActivity.reloadAccountEvent.plusAssign(backupTrigger)
 
-        // [문제의 원인 해결]
-        // this(SyncPlugin)가 아닌, 클릭하는 순간 앱이 넘겨주는 ctx(Context)를 받아 Activity로 변환합니다.
         openSettings = { ctx ->
             val currentActivity = ctx as? AppCompatActivity 
                 ?: AcraApplication.context as? AppCompatActivity 
@@ -94,9 +92,16 @@ class SyncPlugin : Plugin() {
     fun triggerBackupDebounced() {
         backupDebounceJob?.cancel()
         backupDebounceJob = pluginScope.launch {
-            delay(15000L) // 15초 디바운스
+            delay(15000L)
             backupDevice()
         }
+    }
+
+    // [수정됨] 비동기로 흐르지 않고 확실하게 완료를 기다리도록 suspend fun으로 변경
+    suspend fun forceBackupNow() {
+        backupDebounceJob?.cancel()
+        Log.d("SyncCS", "Manual Push (Backup) Triggered!")
+        backupDevice()
     }
 
     private suspend fun backupDevice() = withContext(Dispatchers.IO) {
