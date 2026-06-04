@@ -20,7 +20,6 @@ import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.plugins.Plugin
-import com.lagradost.cloudstream3.utils.DataStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -92,7 +91,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
         val backupSwitch = findView<Switch>(configLayout, "backup_device")
         val restoreSwitch = findView<Switch>(configLayout, "restore_device")
 
-        val pref = DataStore.getSharedPrefs(ctx)
+        val pref = com.lagradost.cloudstream3.utils.DataStore.getSharedPrefs(ctx)
 
         val syncPluginsSwitch = Switch(ctx).apply {
             text = "Automated Plugin Sync"
@@ -104,13 +103,13 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
             text = "Force Sync Now"
             setOnClickListener {
                 CoroutineScope(Dispatchers.Main).launch {
-                    CommonActivity.showToast("Manual sync started...", null)
+                    CommonActivity.showToast("Manual sync started...")
                     withContext(Dispatchers.IO) {
                         val pluginInstance = plugin as? SyncPlugin
                         pluginInstance?.triggerBackupDebounced()
                         pluginInstance?.restoreDevice()
                     }
-                    CommonActivity.showToast("Sync completed!", null)
+                    CommonActivity.showToast("Sync completed!")
                 }
             }
         }
@@ -156,7 +155,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                                     ApiUtils.apiCall(query, token)
                                     withContext(Dispatchers.Main) {
                                         row.visibility = View.GONE
-                                        CommonActivity.showToast("Device removed", null)
+                                        CommonActivity.showToast("Device removed")
                                     }
                                 }
                             }
@@ -189,7 +188,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                 val projectNum = projectNumInput.text.toString().trim()
 
                 if (token.isEmpty() || projectNum.isEmpty()) {
-                    CommonActivity.showToast("Please fill in all information", null)
+                    CommonActivity.showToast("Please fill in all information")
                     return@setPositiveButton
                 }
 
@@ -206,7 +205,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                         val result = ApiUtils.syncProjectDetails(ctx)
                         CoroutineScope(Dispatchers.Main).launch {
                             loadingDialog.dismiss()
-                            CommonActivity.showToast(result.second, null)
+                            CommonActivity.showToast(result.second)
                             if (result.first) {
                                 dismiss()
                             }
@@ -214,7 +213,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                     } catch (e: Exception) {
                         CoroutineScope(Dispatchers.Main).launch {
                             loadingDialog.dismiss()
-                            CommonActivity.showToast("Error syncing: ${e.message}", null)
+                            CommonActivity.showToast("Error syncing: ${e.message}")
                         }
                     }
                 }
@@ -225,7 +224,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                 AcraApplication.setKey("sync_project_id", "")
                 AcraApplication.setKey("sync_item_id", "")
                 AcraApplication.setKey("last_sync_timestamp", "0")
-                CommonActivity.showToast("Credentials removed", null)
+                CommonActivity.showToast("Credentials removed")
                 dismiss()
             }
             .show()
