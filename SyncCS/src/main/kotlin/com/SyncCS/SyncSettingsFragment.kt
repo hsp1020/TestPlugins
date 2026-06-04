@@ -1,4 +1,4 @@
-package com.anhdaden
+package com.SyncCS
 
 import android.annotation.SuppressLint
 import android.content.Context
@@ -32,23 +32,23 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
     private val res: Resources = plugin.resources ?: throw Exception("Unable to read resources")
 
     private fun <T : View> findView(view: View, name: String): T {
-        val id = res.getIdentifier(name, "id", "com.anhdaden")
+        val id = res.getIdentifier(name, "id", "com.SyncCS")
         return view.findViewById(id) as T
     }
 
     private fun getLayout(name: String, inflater: LayoutInflater, container: ViewGroup?): View {
-        val id = res.getIdentifier(name, "layout", "com.anhdaden")
+        val id = res.getIdentifier(name, "layout", "com.SyncCS")
         val parser = res.getLayout(id)
         return inflater.inflate(parser as XmlPullParser, container, false)
     }
 
     private fun getDrawable(name: String): Drawable? {
-        val id = res.getIdentifier(name, "drawable", "com.anhdaden")
+        val id = res.getIdentifier(name, "drawable", "com.SyncCS")
         return ResourcesCompat.getDrawable(res, id, null)
     }
 
     private fun makeTvCompatible(view: View) {
-        val id = res.getIdentifier("outline", "drawable", "com.anhdaden")
+        val id = res.getIdentifier("outline", "drawable", "com.SyncCS")
         view.background = ResourcesCompat.getDrawable(res, id, null)
     }
 
@@ -92,34 +92,30 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
         val backupSwitch = findView<Switch>(configLayout, "backup_device")
         val restoreSwitch = findView<Switch>(configLayout, "restore_device")
 
-        val dataStore = DataStore.INSTANCE
-        val pref = dataStore.getSharedPrefs(ctx)
+        val pref = DataStore.getSharedPrefs(ctx)
 
-        // 1. 자동 플러그인 동기화 제어 스위치 레이아웃 추가
         val syncPluginsSwitch = Switch(ctx).apply {
             text = "Automated Plugin Sync"
             isChecked = pref.getString("sync_plugins_enabled", "false") == "true"
         }
         configLayout.addView(syncPluginsSwitch)
 
-        // 2. 즉시 수동 동기화 작동 단추 추가
         val manualSyncBtn = Button(ctx).apply {
             text = "Force Sync Now"
             setOnClickListener {
                 CoroutineScope(Dispatchers.Main).launch {
-                    CommonActivity.showToast(CommonActivity.INSTANCE, "Manual sync started...", null)
+                    CommonActivity.showToast("Manual sync started...", null)
                     withContext(Dispatchers.IO) {
                         val pluginInstance = plugin as? SyncPlugin
                         pluginInstance?.triggerBackupDebounced()
                         pluginInstance?.restoreDevice()
                     }
-                    CommonActivity.showToast(CommonActivity.INSTANCE, "Sync completed!", null)
+                    CommonActivity.showToast("Sync completed!", null)
                 }
             }
         }
         configLayout.addView(manualSyncBtn)
 
-        // 3. 현재 등록 기기 조회를 통한 연결 해제 관리 레이아웃 (Device Manager) 추가
         val deviceManagerContainer = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(10, 20, 10, 10)
@@ -160,7 +156,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                                     ApiUtils.apiCall(query, token)
                                     withContext(Dispatchers.Main) {
                                         row.visibility = View.GONE
-                                        CommonActivity.showToast(CommonActivity.INSTANCE, "Device removed", null)
+                                        CommonActivity.showToast("Device removed", null)
                                     }
                                 }
                             }
@@ -193,24 +189,24 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                 val projectNum = projectNumInput.text.toString().trim()
 
                 if (token.isEmpty() || projectNum.isEmpty()) {
-                    CommonActivity.showToast(CommonActivity.INSTANCE, "Please fill in all information", null)
+                    CommonActivity.showToast("Please fill in all information", null)
                     return@setPositiveButton
                 }
 
                 loadingDialog.show()
 
-                AcraApplication.Companion.setKey("sync_token", token)
-                AcraApplication.Companion.setKey("sync_project_num", projectNum)
-                AcraApplication.Companion.setKey("backup_device", backupSwitch.isChecked.toString())
-                AcraApplication.Companion.setKey("restore_device", restoreSwitch.isChecked.toString())
-                AcraApplication.Companion.setKey("sync_plugins_enabled", syncPluginsSwitch.isChecked.toString())
+                AcraApplication.setKey("sync_token", token)
+                AcraApplication.setKey("sync_project_num", projectNum)
+                AcraApplication.setKey("backup_device", backupSwitch.isChecked.toString())
+                AcraApplication.setKey("restore_device", restoreSwitch.isChecked.toString())
+                AcraApplication.setKey("sync_plugins_enabled", syncPluginsSwitch.isChecked.toString())
 
                 CoroutineScope(Dispatchers.IO).launch {
                     try {
                         val result = ApiUtils.syncProjectDetails(ctx)
                         CoroutineScope(Dispatchers.Main).launch {
                             loadingDialog.dismiss()
-                            CommonActivity.showToast(CommonActivity.INSTANCE, result.second, null)
+                            CommonActivity.showToast(result.second, null)
                             if (result.first) {
                                 dismiss()
                             }
@@ -218,18 +214,18 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                     } catch (e: Exception) {
                         CoroutineScope(Dispatchers.Main).launch {
                             loadingDialog.dismiss()
-                            CommonActivity.showToast(CommonActivity.INSTANCE, "Error syncing: ${e.message}", null)
+                            CommonActivity.showToast("Error syncing: ${e.message}", null)
                         }
                     }
                 }
             }
             .setNegativeButton("Reset") { _, _ ->
-                AcraApplication.Companion.setKey("sync_token", "")
-                AcraApplication.Companion.setKey("sync_project_num", "")
-                AcraApplication.Companion.setKey("sync_project_id", "")
-                AcraApplication.Companion.setKey("sync_item_id", "")
-                AcraApplication.Companion.setKey("last_sync_timestamp", "0")
-                CommonActivity.showToast(CommonActivity.INSTANCE, "Credentials removed", null)
+                AcraApplication.setKey("sync_token", "")
+                AcraApplication.setKey("sync_project_num", "")
+                AcraApplication.setKey("sync_project_id", "")
+                AcraApplication.setKey("sync_item_id", "")
+                AcraApplication.setKey("last_sync_timestamp", "0")
+                CommonActivity.showToast("Credentials removed", null)
                 dismiss()
             }
             .show()
