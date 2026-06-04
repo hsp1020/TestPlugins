@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import android.os.Build
 import android.provider.Settings
 import android.util.Base64
+import android.util.Log
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -168,6 +169,7 @@ object Util {
         return try {
             String(Base64.decode(str, Base64.NO_WRAP or Base64.NO_PADDING), UTF_8)
         } catch (e: Exception) {
+            Log.e("SyncCS", "Decompression Error", e)
             ""
         }
     }
@@ -186,6 +188,7 @@ object Util {
             System.arraycopy(encryptedBytes, 0, combined, iv.size, encryptedBytes.size)
             Base64.encodeToString(combined, Base64.NO_WRAP or Base64.NO_PADDING)
         } catch (e: Exception) {
+            Log.e("SyncCS", "Encryption Error", e)
             str
         }
     }
@@ -204,6 +207,7 @@ object Util {
             cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(128, iv))
             String(cipher.doFinal(encryptedBytes), UTF_8)
         } catch (e: Exception) {
+            Log.e("SyncCS", "Decryption Error", e)
             str
         }
     }
@@ -243,7 +247,7 @@ object Util {
 
 object BackupUtils {
 
-    val nonTransferableKeys = listOf(
+    private val nonTransferableKeys = listOf(
         "anilist_unixtime", "anilist_token", "anilist_user", "anilist_cached_list", "anilist_accounts", "anilist_active",
         "mal_user", "mal_cached_list", "mal_unixtime", "mal_refresh_token", "mal_token", "mal_accounts", "mal_active",
         "simkl_token", "simkl_user", "simkl_cached_list", "simkl_cached_time", "simkl_accounts", "simkl_active",
@@ -373,14 +377,12 @@ object BackupUtils {
 }
 
 // =========================================================================
-// [5] ApiUtils Area (Bypass SSL / Trust All Certificates Client)
+// [5] ApiUtils Area
 // =========================================================================
 
 object ApiUtils {
     private val mapper = jacksonObjectMapper()
-    
-    // Cloudstream의 변조된 HTTP 엔진을 쓰지 않고, SSL 인증서를 무시하는 
-    // "전용 커스텀 OkHttp 클라이언트"를 생성하여 SSL Handshake 오류를 원천 차단합니다.
+
     private val unsafeClient: OkHttpClient by lazy {
         try {
             val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
@@ -390,11 +392,9 @@ object ApiUtils {
             })
             val sslContext = SSLContext.getInstance("SSL")
             sslContext.init(null, trustAllCerts, SecureRandom())
-            val sslSocketFactory = sslContext.socketFactory
-
             OkHttpClient.Builder()
-                .sslSocketFactory(sslSocketFactory, trustAllCerts[0] as X509TrustManager)
-                .hostnameVerifier { _, _ -> true } // 모든 호스트네임 우회
+                .sslSocketFactory(sslContext.socketFactory, trustAllCerts[0] as X509TrustManager)
+                .hostnameVerifier { _, _ -> true }
                 .build()
         } catch (e: Exception) {
             OkHttpClient()
@@ -412,14 +412,15 @@ object ApiUtils {
 
     suspend fun apiCall(query: String, token: String): APIRes? = withContext(Dispatchers.IO) {
         try {
+            Log.d("SyncCS", "--- [API CALL START] ---")
             val formattedQuery = query.replace("\n", " ").replace(Regex("\\s+"), " ")
             val bodyMap = mapOf("query" to formattedQuery)
             val bodyStr = mapper.writeValueAsString(bodyMap)
 
-            val mediaType = "application/json; charset=utf-8".toMediaTypeOrNull()
-            val requestBody = bodyStr.toRequestBody(mediaType)
+            Log.d("SyncCS", "Request Body: $bodyStr")
+            Log.d("SyncCS", "Token used: ${token.take(6)}...")
 
-            // 안전한 독립 통신 클라이언트를 통한 GraphQL 전송
+            val requestBody = bodyStr.toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull())
             val request = Request.Builder()
                 .url("https://api.github.com/graphql")
                 .addHeader("Authorization", "Bearer $token")
@@ -429,15 +430,27 @@ object ApiUtils {
                 .build()
 
             val response = unsafeClient.newCall(request).execute()
-            val responseBody = response.body?.string() ?: return@withContext null
+            val code = response.code
+            val responseBody = response.body?.string() ?: ""
+
+            Log.d("SyncCS", "HTTP Response Code: $code")
+            Log.d("SyncCS", "Raw Server Response: $responseBody")
+            Log.d("SyncCS", "--- [API CALL END] ---")
+
+            if (code != 200) {
+                Log.e("SyncCS", "Server returned error code: $code")
+                return@withContext null
+            }
 
             mapper.readValue(responseBody, APIRes::class.java)
         } catch (e: Exception) {
+            Log.e("SyncCS", "Network Exception in apiCall", e)
             null
         }
     }
 
     suspend fun syncProjectDetails(context: Context?): Pair<Boolean, String> {
+        Log.d("SyncCS", "syncProjectDetails Called")
         if (context == null) return Pair(false, "No context")
         val pref = SharedPrefsHelper.getPrefs(context)
         val token = pref.getString("sync_token", null)?.replace("\"", "") ?: return Pair(false, "Missing token")
@@ -466,10 +479,32 @@ object ApiUtils {
         """.trimIndent()
 
         val res = apiCall(query, token)
-        val project = res?.data?.viewer?.projectV2 ?: return Pair(false, "Failed to connect to GitHub or project not found")
-        val projectId = project.id ?: return Pair(false, "Project ID not found")
+        
+        if (res == null) {
+            Log.e("SyncCS", "Response object is completely null")
+            return Pair(false, "Failed to connect to GitHub. Check Logcat.")
+        }
+
+        if (res.errors != null && res.errors!!.isNotEmpty()) {
+            val errorMsg = res.errors!!.joinToString(", ") { it.message ?: "Unknown Error" }
+            Log.e("SyncCS", "GraphQL returned Errors: $errorMsg")
+            return Pair(false, "GitHub Error: $errorMsg")
+        }
+
+        val project = res.data?.viewer?.projectV2
+        if (project == null) {
+            Log.e("SyncCS", "viewer.projectV2 is null. The Project Number might be wrong, or your token doesn't have 'project' scope, or the project belongs to an Organization.")
+            return Pair(false, "Failed to connect to GitHub or project not found")
+        }
+
+        val projectId = project.id
+        if (projectId.isNullOrEmpty()) {
+            Log.e("SyncCS", "Project ID missing from JSON")
+            return Pair(false, "Project ID not found in response")
+        }
 
         pref.edit().putString("sync_project_id", projectId).apply()
+        Log.d("SyncCS", "Successfully found Project ID: $projectId")
 
         return Pair(true, "Successfully linked to GitHub Project!")
     }
@@ -495,7 +530,6 @@ object ApiUtils {
         }
 
         val encryptedPayload = Util.encrypt(syncData, token)
-
         val escapedPayload = encryptedPayload.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
         val escapedName = "$deviceName|$deviceId".replace("\"", "\\\"")
 
@@ -558,11 +592,7 @@ object ApiUtils {
 
             val parts = title.split("|")
             if (parts.size >= 2) {
-                val name = parts[0]
-                val devId = parts[1]
-
-                val decryptedPayload = Util.decrypt(body, token)
-                list.add(SyncDevice(name, devId, itemId, decryptedPayload))
+                list.add(SyncDevice(parts[0], parts[1], itemId, Util.decrypt(body, token)))
             }
         }
         return list
