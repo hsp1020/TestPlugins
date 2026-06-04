@@ -1,255 +1,157 @@
 package com.SyncCS
 
-import android.annotation.SuppressLint
-import android.graphics.Color
-import android.os.Bundle
-import android.view.LayoutInflater
-import android.view.View
-import android.view.ViewGroup
-import android.widget.Button
-import android.widget.EditText
-import android.widget.LinearLayout
-import android.widget.ProgressBar
-import android.widget.ScrollView
-import android.widget.Switch
-import android.widget.TextView
-import androidx.appcompat.app.AlertDialog
-import com.google.android.material.bottomsheet.BottomSheetDialogFragment
-import com.lagradost.cloudstream3.CommonActivity
+import android.content.Context
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+import androidx.appcompat.app.AppCompatActivity
+import com.lagradost.cloudstream3.AcraApplication
+import com.lagradost.cloudstream3.CloudStreamApp
+import com.lagradost.cloudstream3.MainActivity
+import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import com.lagradost.cloudstream3.ui.home.HomeViewModel
+import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import kotlinx.coroutines.*
 
-class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragment() {
+@CloudstreamPlugin
+class SyncPlugin : Plugin() {
 
-    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
-        val ctx = requireContext()
+    private val handler = Handler(Looper.getMainLooper())
+    private val pluginScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val mapper = jacksonObjectMapper()
 
-        val layout = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(50, 50, 50, 50)
-        }
+    private var lastResumeWatching: List<Any>? = null
+    private var counterBackup = 0
+    private var backupDebounceJob: Job? = null
 
-        val title = TextView(ctx).apply {
-            text = "Cloudstream Sync Plugin"
-            textSize = 20f
-            setTextColor(Color.WHITE)
-            setPadding(0, 0, 0, 40)
-        }
-        layout.addView(title)
+    private var currentPollingInterval = 5000L
+    private val minPollingInterval = 5000L
+    private val maxPollingInterval = 60000L
 
-        val configBtn = Button(ctx).apply {
-            text = "Configuration (Setup Sync)"
-            setOnClickListener { showConfigDialog() }
-        }
-        layout.addView(configBtn)
-
-        val guideBtn = Button(ctx).apply {
-            text = "Read Guide"
-            setOnClickListener { showGuideDialog() }
-        }
-        layout.addView(guideBtn)
-
-        return layout
-    }
-
-    private fun showGuideDialog() {
-        val ctx = context ?: return
-        val textView = TextView(ctx).apply {
-            text = "1. Go to GitHub and create a Personal Access Token (PAT) with 'project' permissions.\n\n" +
-                   "2. Create a Project V2 on GitHub and obtain its project number.\n\n" +
-                   "3. Enter the PAT and Project Number in the Configuration menu.\n\n" +
-                   "4. Enable Backup/Restore and plugin sync as needed."
-            setPadding(60, 60, 60, 60)
-            textSize = 15f
-        }
-        AlertDialog.Builder(ctx)
-            .setTitle("How to setup")
-            .setView(textView)
-            .setPositiveButton("Close", null)
-            .show()
-    }
-
-    @SuppressLint("SetTextI18n")
-    private fun showConfigDialog() {
-        val ctx = context ?: return
-        val pref = SharedPrefsHelper.getPrefs(ctx)
-
-        val layout = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(50, 50, 50, 50)
-        }
-        val scrollView = ScrollView(ctx)
-        scrollView.addView(layout)
-
-        val tokenInput = EditText(ctx).apply {
-            hint = "GitHub PAT Token (ghp_...)"
-            setText(pref.getString("sync_token", ""))
-        }
-        layout.addView(tokenInput)
-
-        val projectNumInput = EditText(ctx).apply {
-            hint = "GitHub Project Number (ex: 1)"
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER
-            setText(pref.getString("sync_project_num", ""))
-        }
-        layout.addView(projectNumInput)
-
-        val backupSwitch = Switch(ctx).apply {
-            text = "Backup data to Cloud"
-            isChecked = pref.getString("backup_device", "false") == "true"
-            setPadding(0, 30, 0, 30)
-        }
-        layout.addView(backupSwitch)
-
-        val restoreSwitch = Switch(ctx).apply {
-            text = "Restore data from Cloud"
-            isChecked = pref.getString("restore_device", "false") == "true"
-            setPadding(0, 0, 0, 30)
-        }
-        layout.addView(restoreSwitch)
-
-        val syncPluginsSwitch = Switch(ctx).apply {
-            text = "Automated Plugin Sync"
-            isChecked = pref.getString("sync_plugins_enabled", "false") == "true"
-            setPadding(0, 0, 0, 30)
-        }
-        layout.addView(syncPluginsSwitch)
-
-        val manualSyncBtn = Button(ctx).apply {
-            text = "Force Sync Now"
-            setOnClickListener {
-                CoroutineScope(Dispatchers.Main).launch {
-                    CommonActivity.showToast("Manual sync started...", null)
-                    withContext(Dispatchers.IO) {
-                        val pluginInstance = plugin as? SyncPlugin
-                        pluginInstance?.triggerBackupDebounced()
-                        pluginInstance?.restoreDevice()
+    private val runnable = object : Runnable {
+        override fun run() {
+            pluginScope.launch {
+                try {
+                    val list = HomeViewModel.getResumeWatching() as? List<Any>
+                    val listTake = list?.take(10)
+                    if (listTake != lastResumeWatching) {
+                        Log.d("SyncCS", "Watch history change detected. Triggering Debounce Backup...")
+                        triggerBackupDebounced()
+                        lastResumeWatching = listTake
                     }
-                    CommonActivity.showToast("Sync completed!", null)
-                }
-            }
-        }
-        layout.addView(manualSyncBtn)
 
-        val deviceTitle = TextView(ctx).apply {
-            text = "Registered Devices"
-            textSize = 16f
-            setPadding(0, 40, 0, 10)
-        }
-        layout.addView(deviceTitle)
-
-        val deviceManagerContainer = LinearLayout(ctx).apply {
-            orientation = LinearLayout.VERTICAL
-        }
-        layout.addView(deviceManagerContainer)
-
-        CoroutineScope(Dispatchers.IO).launch {
-            if (ApiUtils.isLoggedIn()) {
-                val devices = ApiUtils.fetchDevices(ctx)
-                withContext(Dispatchers.Main) {
-                    if (devices.isEmpty()) {
-                        deviceManagerContainer.addView(TextView(ctx).apply { text = "No devices found." })
+                    if (counterBackup >= 15) {
+                        val success = restoreDevice()
+                        if (success) {
+                            currentPollingInterval = minPollingInterval
+                        } else {
+                            currentPollingInterval = (currentPollingInterval * 2).coerceAtMost(maxPollingInterval)
+                        }
+                        counterBackup = 0
                     } else {
-                        for (device in devices) {
-                            val row = LinearLayout(ctx).apply {
-                                orientation = LinearLayout.HORIZONTAL
-                                setPadding(0, 10, 0, 10)
-                            }
-                            val nameText = TextView(ctx).apply {
-                                text = device.name
-                                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                            }
-                            val deleteBtn = Button(ctx).apply {
-                                text = "Unlink"
-                                setOnClickListener {
-                                    CoroutineScope(Dispatchers.IO).launch {
-                                        val token = pref.getString("sync_token", null)?.replace("\"", "") ?: return@launch
-                                        val projectId = pref.getString("sync_project_id", null)?.replace("\"", "") ?: return@launch
-                                        val query = """
-                                            mutation {
-                                                deleteProjectV2Item(input: {projectId: "$projectId", itemId: "${device.itemId}"}) {
-                                                    deletedItemId
-                                                }
-                                            }
-                                        """.trimIndent()
-                                        ApiUtils.apiCall(query, token)
-                                        withContext(Dispatchers.Main) {
-                                            row.visibility = View.GONE
-                                            CommonActivity.showToast("Device removed", null)
-                                        }
-                                    }
-                                }
-                            }
-                            row.addView(nameText)
-                            row.addView(deleteBtn)
-                            deviceManagerContainer.addView(row)
-                        }
+                        counterBackup++
                     }
+                } catch (e: Exception) {
+                    currentPollingInterval = (currentPollingInterval * 2).coerceAtMost(maxPollingInterval)
                 }
+            }
+            handler.postDelayed(this, currentPollingInterval)
+        }
+    }
+
+    override fun load(context: Context) {
+        val deviceId = Util.getDeviceId(context.packageName, context)
+        SharedPrefsHelper.getPrefs(context).edit().putString("device_id", deviceId).apply()
+        Log.d("SyncCS", "Plugin Loaded. This Device ID: $deviceId")
+
+        pluginScope.launch { restoreDevice() }
+
+        handler.post(runnable)
+
+        val backupTrigger = { _: Boolean -> triggerBackupDebounced() }
+        MainActivity.bookmarksUpdatedEvent.plusAssign(backupTrigger)
+        MainActivity.afterPluginsLoadedEvent.plusAssign(backupTrigger)
+        MainActivity.mainPluginsLoadedEvent.plusAssign(backupTrigger)
+        MainActivity.reloadHomeEvent.plusAssign(backupTrigger)
+        MainActivity.reloadAccountEvent.plusAssign(backupTrigger)
+
+        openSettings = {
+            // [버그 수정] 사용자가 톱니바퀴를 누른 시점의 '진짜 화면(this)'을 즉시 잡아채서 설정창을 띄웁니다.
+            val currentActivity = this as? AppCompatActivity
+            if (currentActivity != null && !currentActivity.isDestroyed && !currentActivity.isFinishing) {
+                SyncSettingsFragment(this@SyncPlugin).show(currentActivity.supportFragmentManager, "Sync")
             } else {
-                withContext(Dispatchers.Main) {
-                    deviceManagerContainer.addView(TextView(ctx).apply { text = "Please save token and project number first." })
+                Log.e("SyncCS", "Failed to open settings: Activity is null or destroyed.")
+            }
+        }
+    }
+
+    fun triggerBackupDebounced() {
+        backupDebounceJob?.cancel()
+        backupDebounceJob = pluginScope.launch {
+            delay(15000L) // 15 seconds debounce
+            backupDevice()
+        }
+    }
+
+    private suspend fun backupDevice() = withContext(Dispatchers.IO) {
+        val context = AcraApplication.context ?: CloudStreamApp.context ?: return@withContext
+        val pref = SharedPrefsHelper.getPrefs(context)
+        val backupEnabled = pref.getString("backup_device", "false") == "true"
+        val syncPluginsEnabled = pref.getString("sync_plugins_enabled", "false") == "true"
+
+        if (backupEnabled && ApiUtils.isLoggedIn()) {
+            val backupFile = BackupUtils.getFullBackup(context, syncPluginsEnabled)
+            if (backupFile == null) return@withContext
+            
+            val json = mapper.writeValueAsString(backupFile)
+
+            if (json.isNotEmpty()) {
+                val compressed = Util.compressJsonToString(Util.cleanedSyncData(json))
+                Log.d("SyncCS", "Compressed Payload Size: ${compressed.length} characters")
+                val result = ApiUtils.syncThisDevice(compressed, context)
+                if (result.first) {
+                    pref.edit().putLong("last_sync_timestamp", System.currentTimeMillis()).apply()
+                    Log.d("SyncCS", "Backup Complete. Timestamp updated.")
                 }
             }
         }
+    }
 
-        val loadingView = ProgressBar(ctx).apply { setPadding(50, 50, 50, 50) }
-        val loadingDialog = AlertDialog.Builder(ctx)
-            .setView(loadingView)
-            .setCancelable(false)
-            .create()
+    suspend fun restoreDevice(): Boolean = withContext(Dispatchers.IO) {
+        val context = AcraApplication.context ?: CloudStreamApp.context ?: return@withContext false
+        val pref = SharedPrefsHelper.getPrefs(context)
+        val restoreEnabled = pref.getString("restore_device", "false") == "true"
+        val syncPluginsEnabled = pref.getString("sync_plugins_enabled", "false") == "true"
 
-        AlertDialog.Builder(ctx)
-            .setTitle("Configuration")
-            .setView(scrollView)
-            .setPositiveButton("Save") { _, _ ->
-                val token = tokenInput.text.toString().trim()
-                val projectNum = projectNumInput.text.toString().trim()
+        if (restoreEnabled && ApiUtils.isLoggedIn()) {
+            Log.d("SyncCS", "--- Initiating Restore Process ---")
+            try {
+                val devices = ApiUtils.fetchDevices(context)
+                val thisDeviceId = Util.getDeviceId(context.packageName, context)
 
-                if (token.isEmpty() || projectNum.isEmpty()) {
-                    CommonActivity.showToast("Please fill in all information", null)
-                    return@setPositiveButton
-                }
+                for (device in devices) {
+                    if (device.deviceId == thisDeviceId) continue
 
-                loadingDialog.show()
+                    val syncedData = device.syncedData ?: continue
+                    if (syncedData.isNotEmpty()) {
+                        val decompressed = Util.restoreText(Util.decompressJsonFromString(syncedData))
+                        val backupFile = mapper.readValue(decompressed, BackupFile::class.java)
 
-                pref.edit()
-                    .putString("sync_token", token)
-                    .putString("sync_project_num", projectNum)
-                    .putString("backup_device", backupSwitch.isChecked.toString())
-                    .putString("restore_device", restoreSwitch.isChecked.toString())
-                    .putString("sync_plugins_enabled", syncPluginsSwitch.isChecked.toString())
-                    .apply()
-
-                CoroutineScope(Dispatchers.IO).launch {
-                    try {
-                        val result = ApiUtils.syncProjectDetails(ctx)
-                        withContext(Dispatchers.Main) {
-                            loadingDialog.dismiss()
-                            CommonActivity.showToast(result.second, null)
-                            if (result.first) dismiss()
-                        }
-                    } catch (e: Exception) {
-                        withContext(Dispatchers.Main) {
-                            loadingDialog.dismiss()
-                            CommonActivity.showToast("Error syncing: ${e.message}", null)
+                        if (backupFile != null) {
+                            withContext(Dispatchers.Main) {
+                                BackupUtils.restore(context, backupFile, true, true, syncPluginsEnabled)
+                            }
                         }
                     }
                 }
+                return@withContext true
+            } catch (e: Exception) {
+                Log.e("SyncCS", "Restore Process Failed", e)
+                return@withContext false
             }
-            .setNegativeButton("Reset") { _, _ ->
-                pref.edit()
-                    .putString("sync_token", "")
-                    .putString("sync_project_num", "")
-                    .putString("sync_project_id", "")
-                    .putString("sync_item_id", "")
-                    .apply()
-                CommonActivity.showToast("Credentials removed", null)
-                dismiss()
-            }
-            .show()
+        }
+        return@withContext true
     }
 }
