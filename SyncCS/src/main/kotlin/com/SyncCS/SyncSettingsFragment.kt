@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Color
 import android.os.Bundle
+import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -28,7 +29,6 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
         val ctx = requireContext()
 
-        // XML 없이 코드로 직접 "메인 설정 화면" 그리기
         val layout = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(50, 50, 50, 50)
@@ -79,7 +79,6 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
         val ctx = context ?: return
         val pref = SharedPrefsHelper.getPrefs(ctx)
 
-        // XML 없이 코드로 직접 "Config 팝업창" 그리기
         val layout = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(50, 50, 50, 50)
@@ -138,7 +137,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
         layout.addView(manualSyncBtn)
 
         val deviceTitle = TextView(ctx).apply {
-            text = "Registered Devices (Device Manager)"
+            text = "Registered Devices"
             textSize = 16f
             setPadding(0, 40, 0, 10)
         }
@@ -149,7 +148,6 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
         }
         layout.addView(deviceManagerContainer)
 
-        // 기기 관리자(Device Manager) 목록 불러오기
         CoroutineScope(Dispatchers.IO).launch {
             if (ApiUtils.isLoggedIn()) {
                 val devices = ApiUtils.fetchDevices(ctx)
@@ -200,7 +198,6 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
             }
         }
 
-        // 로딩 프로그레스바 다이얼로그
         val loadingView = ProgressBar(ctx).apply { setPadding(50, 50, 50, 50) }
         val loadingDialog = AlertDialog.Builder(ctx)
             .setView(loadingView)
@@ -220,6 +217,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                 }
 
                 loadingDialog.show()
+                Log.d("SyncCS", "Save Button Clicked. Starting syncProjectDetails()...")
 
                 pref.edit()
                     .putString("sync_token", token)
@@ -235,27 +233,19 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                         withContext(Dispatchers.Main) {
                             loadingDialog.dismiss()
                             CommonActivity.showToast(result.second, null)
-                            if (result.first) {
-                                dismiss()
-                            }
+                            if (result.first) dismiss()
                         }
                     } catch (e: Exception) {
+                        Log.e("SyncCS", "Exception triggered during Save", e)
                         withContext(Dispatchers.Main) {
                             loadingDialog.dismiss()
-                            CommonActivity.showToast("Error syncing: ${e.message}", null)
+                            CommonActivity.showToast("Critical Error: ${e.message}", null)
                         }
                     }
                 }
             }
             .setNegativeButton("Reset") { _, _ ->
-                pref.edit()
-                    .putString("sync_token", "")
-                    .putString("sync_project_num", "")
-                    .putString("sync_project_id", "")
-                    .putString("sync_item_id", "")
-                    .putLong("last_sync_timestamp", 0L)
-                    .apply()
-
+                pref.edit().clear().apply()
                 CommonActivity.showToast("Credentials removed", null)
                 dismiss()
             }
