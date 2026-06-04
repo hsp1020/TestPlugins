@@ -20,7 +20,6 @@ class SyncPlugin : Plugin() {
     private val pluginScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val mapper = jacksonObjectMapper()
 
-    // ResumeWatchingResult 클래스 미인식 에러를 방지하기 위해 List<Any>로 추상화 처리
     private var lastResumeWatching: List<Any>? = null
     private var counterBackup = 0
     private var backupDebounceJob: Job? = null
@@ -98,7 +97,6 @@ class SyncPlugin : Plugin() {
             val lastSyncTime = pref.getLong("last_sync_timestamp", 0L)
             val backupFile = BackupUtils.getDeltaBackup(context, lastSyncTime, syncPluginsEnabled)
             
-            // 엘비스 연산자(WHEN_CALL) 붕괴 오류를 막기 위해 명시적 Null 처리
             if (backupFile == null) return@withContext
             
             val json = mapper.writeValueAsString(backupFile)
