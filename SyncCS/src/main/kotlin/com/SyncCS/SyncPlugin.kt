@@ -36,7 +36,6 @@ class SyncPlugin : Plugin() {
                     val list = HomeViewModel.getResumeWatching() as? List<Any>
                     val listTake = list?.take(10)
                     if (listTake != lastResumeWatching) {
-                        Log.d("SyncCS", "Watch history change detected. Triggering Debounce Backup...")
                         triggerBackupDebounced()
                         lastResumeWatching = listTake
                     }
@@ -63,7 +62,6 @@ class SyncPlugin : Plugin() {
     override fun load(context: Context) {
         val deviceId = Util.getDeviceId(context.packageName, context)
         SharedPrefsHelper.getPrefs(context).edit().putString("device_id", deviceId).apply()
-        Log.d("SyncCS", "Plugin Loaded. This Device ID: $deviceId")
 
         pluginScope.launch { restoreDevice() }
 
@@ -85,7 +83,7 @@ class SyncPlugin : Plugin() {
     fun triggerBackupDebounced() {
         backupDebounceJob?.cancel()
         backupDebounceJob = pluginScope.launch {
-            delay(15000L) // 15 seconds debounce
+            delay(15000L)
             backupDevice()
         }
     }
@@ -97,22 +95,15 @@ class SyncPlugin : Plugin() {
         val syncPluginsEnabled = pref.getString("sync_plugins_enabled", "false") == "true"
 
         if (backupEnabled && ApiUtils.isLoggedIn()) {
-            val lastSyncTime = pref.getLong("last_sync_timestamp", 0L)
-            Log.d("SyncCS", "--- Initiating Backup Process ---")
-            val backupFile = BackupUtils.getDeltaBackup(context, lastSyncTime, syncPluginsEnabled)
-            
+            // 원본의 데이터 증발 방지를 위해 전체 덤프를 수집
+            val backupFile = BackupUtils.getFullBackup(context, syncPluginsEnabled)
             if (backupFile == null) return@withContext
             
             val json = mapper.writeValueAsString(backupFile)
 
             if (json.isNotEmpty()) {
                 val compressed = Util.compressJsonToString(Util.cleanedSyncData(json))
-                Log.d("SyncCS", "Compressed Payload Size: ${compressed.length} characters")
-                val result = ApiUtils.syncThisDevice(compressed, context)
-                if (result.first) {
-                    pref.edit().putLong("last_sync_timestamp", System.currentTimeMillis()).apply()
-                    Log.d("SyncCS", "Backup Complete. Timestamp updated.")
-                }
+                ApiUtils.syncThisDevice(compressed, context)
             }
         }
     }
@@ -124,7 +115,6 @@ class SyncPlugin : Plugin() {
         val syncPluginsEnabled = pref.getString("sync_plugins_enabled", "false") == "true"
 
         if (restoreEnabled && ApiUtils.isLoggedIn()) {
-            Log.d("SyncCS", "--- Initiating Restore Process ---")
             try {
                 val devices = ApiUtils.fetchDevices(context)
                 val thisDeviceId = Util.getDeviceId(context.packageName, context)
@@ -146,7 +136,6 @@ class SyncPlugin : Plugin() {
                 }
                 return@withContext true
             } catch (e: Exception) {
-                Log.e("SyncCS", "Restore Process Failed", e)
                 return@withContext false
             }
         }
