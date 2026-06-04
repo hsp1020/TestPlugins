@@ -1,10 +1,8 @@
 package com.SyncCS
 
 import android.annotation.SuppressLint
-import android.content.Context
 import android.graphics.Color
 import android.os.Bundle
-import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -217,7 +215,6 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                 }
 
                 loadingDialog.show()
-                Log.d("SyncCS", "Save Button Clicked. Starting syncProjectDetails()...")
 
                 pref.edit()
                     .putString("sync_token", token)
@@ -236,16 +233,20 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                             if (result.first) dismiss()
                         }
                     } catch (e: Exception) {
-                        Log.e("SyncCS", "Exception triggered during Save", e)
                         withContext(Dispatchers.Main) {
                             loadingDialog.dismiss()
-                            CommonActivity.showToast("Critical Error: ${e.message}", null)
+                            CommonActivity.showToast("Error syncing: ${e.message}", null)
                         }
                     }
                 }
             }
             .setNegativeButton("Reset") { _, _ ->
-                pref.edit().clear().apply()
+                pref.edit()
+                    .putString("sync_token", "")
+                    .putString("sync_project_num", "")
+                    .putString("sync_project_id", "")
+                    .putString("sync_item_id", "")
+                    .apply()
                 CommonActivity.showToast("Credentials removed", null)
                 dismiss()
             }
