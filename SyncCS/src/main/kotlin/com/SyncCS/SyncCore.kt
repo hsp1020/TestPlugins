@@ -30,14 +30,25 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
 
+// =========================================================================
+// [1] Native SharedPreferences Helper (DataStore 이름 정확히 조준)
+// =========================================================================
+
 object SharedPrefsHelper {
     fun getPrefs(context: Context): SharedPreferences {
-        return context.getSharedPreferences(context.packageName, Context.MODE_PRIVATE)
+        // [수정됨] 패키지명이 아닌 "DataStore"에 시청기록과 플러그인이 보관됩니다.
+        return context.getSharedPreferences("DataStore", Context.MODE_PRIVATE)
     }
+
     fun getDefaultPrefs(context: Context): SharedPreferences {
+        // 일반 설정(테마 등)은 패키지명_preferences 에 보관됩니다.
         return context.getSharedPreferences(context.packageName + "_preferences", Context.MODE_PRIVATE)
     }
 }
+
+// =========================================================================
+// [2] Models Area
+// =========================================================================
 
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class APIRes(
@@ -129,8 +140,13 @@ data class SyncDevice(
     @JsonProperty("syncedData") var syncedData: String? = null
 )
 
+// =========================================================================
+// [3] Util Area
+// =========================================================================
+
 object Util {
-    // 원본의 100+개 압축 키를 1:1 완벽하게 이식하여 GitHub 용량 초과 방지
+
+    // [중요] 원본의 1대1 압축 해제 딕셔너리 완벽 부활 (데이터 증발 해결)
     private val minifyDict = listOf(
         "/result_resume_watching_2/" to "/k1/", "/video_pos_dur/" to "/k2/", "download_header_cache/" to "/k3/",
         "/result_watch_state/" to "/k4/", "/result_watch_state_data/" to "/k5/", "/result_season/" to "/k6/",
@@ -191,15 +207,21 @@ object Util {
     }
 
     fun restoreText(str: String): String {
-        var result = str
-        for ((old, new) in minifyDict) {
-            result = result.replace(new, old)
+        return try {
+            var result = str
+            for ((old, new) in minifyDict) {
+                // 압축 해제: new(짧은 키)를 old(긴 키)로 되돌림
+                result = result.replace(new, old)
+            }
+            result
+        } catch (e: Exception) {
+            str
         }
-        return result
     }
 
     fun compressJsonToString(str: String): String {
-        return Base64.encodeToString(str.toByteArray(UTF_8), Base64.NO_WRAP or Base64.NO_PADDING)
+        val bytes = str.toByteArray(UTF_8)
+        return Base64.encodeToString(bytes, Base64.NO_WRAP or Base64.NO_PADDING)
     }
 
     fun decompressJsonFromString(str: String): String {
@@ -265,6 +287,10 @@ object Util {
     }
 }
 
+// =========================================================================
+// [4] BackupUtils Area
+// =========================================================================
+
 object BackupUtils {
 
     private val nonTransferableKeys = listOf(
@@ -289,7 +315,8 @@ object BackupUtils {
         return nonTransferableKeys.none { key.contains(it) }
     }
 
-    // 누락 없이 원본처럼 전체를 수집하는 백업 메서드로 복구 (데이터 증발 방지)
+    // [수정됨] 무결성 보장을 위해 델타 동기화가 아닌 원본 전체 동기화로 롤백 
+    // (이 방식만이 타임스탬프가 없는 플러그인 데이터를 살릴 수 있습니다)
     fun getFullBackup(context: Context, syncPlugins: Boolean = false): BackupFile? {
         val pref = SharedPrefsHelper.getPrefs(context)
         val defaultPref = SharedPrefsHelper.getDefaultPrefs(context)
@@ -306,7 +333,7 @@ object BackupUtils {
                 string = map.filterValues { it is String }.mapValues { it.value as String },
                 float = map.filterValues { it is Float }.mapValues { it.value as Float },
                 long = map.filterValues { it is Long }.mapValues { it.value as Long },
-                stringSet = map.filterValues { it is Set<*> }.mapValues { it.value as Set<String> }
+                stringSet = map.filterValues { it is Set<*> }.mapValues { @Suppress("UNCHECKED_CAST") (it.value as Set<String>) }
             )
         }
 
@@ -320,6 +347,8 @@ object BackupUtils {
         if (incoming.isNullOrEmpty()) return
         val pref = if (isAppSettings) SharedPrefsHelper.getDefaultPrefs(context) else SharedPrefsHelper.getPrefs(context)
         val editor = pref.edit()
+
+        Log.d("SyncCS", "Restoring ${incoming.size} keys to ${if(isAppSettings) "Settings" else "DataStore"}")
 
         for ((key, incomingValue) in incoming) {
             if (!isResume(key, syncPlugins)) continue
@@ -378,6 +407,10 @@ object BackupUtils {
     }
 }
 
+// =========================================================================
+// [5] ApiUtils Area
+// =========================================================================
+
 object ApiUtils {
     private val mapper = jacksonObjectMapper()
 
@@ -413,6 +446,7 @@ object ApiUtils {
             val formattedQuery = query.replace("\n", " ").replace(Regex("\\s+"), " ")
             val bodyMap = mapOf("query" to formattedQuery)
             val bodyStr = mapper.writeValueAsString(bodyMap)
+
             val requestBody = bodyStr.toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull())
             val request = Request.Builder()
                 .url("https://api.github.com/graphql")
@@ -425,14 +459,19 @@ object ApiUtils {
             val response = unsafeClient.newCall(request).execute()
             val code = response.code
             val responseBody = response.body?.string() ?: ""
-            if (code != 200) return@withContext null
+
+            if (code != 200) {
+                Log.e("SyncCS", "API Failed. Code: $code, Res: $responseBody")
+                return@withContext null
+            }
+
             mapper.readValue(responseBody, APIRes::class.java)
         } catch (e: Exception) {
+            Log.e("SyncCS", "apiCall Error", e)
             null
         }
     }
 
-    // 에러를 내던 'ProjectV2ItemDraftIssue'를 올바른 'DraftIssue'로 교체한 GraphQL 쿼리
     suspend fun syncProjectDetails(context: Context?): Pair<Boolean, String> {
         if (context == null) return Pair(false, "No context")
         val pref = SharedPrefsHelper.getPrefs(context)
@@ -463,7 +502,7 @@ object ApiUtils {
 
         val res = apiCall(query, token)
         
-        if (res == null) return Pair(false, "Failed to connect to GitHub. Please check internet connection.")
+        if (res == null) return Pair(false, "Failed to connect to GitHub. Check Logcat.")
         if (res.errors != null && res.errors!!.isNotEmpty()) {
             val errorMsg = res.errors!!.joinToString(", ") { it.message ?: "Unknown Error" }
             return Pair(false, "GitHub Error: $errorMsg")
@@ -515,6 +554,7 @@ object ApiUtils {
 
         if (!newItemId.isNullOrEmpty()) {
             pref.edit().putString("sync_item_id", newItemId).apply()
+            Log.d("SyncCS", "Sync completed successfully. Uploaded to GitHub.")
             return Pair(true, "Sync completed successfully")
         }
 
