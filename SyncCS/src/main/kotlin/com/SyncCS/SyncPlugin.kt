@@ -36,6 +36,7 @@ class SyncPlugin : Plugin() {
                     val list = HomeViewModel.getResumeWatching() as? List<Any>
                     val listTake = list?.take(10)
                     if (listTake != lastResumeWatching) {
+                        Log.d("SyncCS", "Watch history change detected. Triggering Debounce Backup...")
                         triggerBackupDebounced()
                         lastResumeWatching = listTake
                     }
@@ -62,6 +63,7 @@ class SyncPlugin : Plugin() {
     override fun load(context: Context) {
         val deviceId = Util.getDeviceId(context.packageName, context)
         SharedPrefsHelper.getPrefs(context).edit().putString("device_id", deviceId).apply()
+        Log.d("SyncCS", "Plugin Loaded. This Device ID: $deviceId")
 
         pluginScope.launch { restoreDevice() }
 
@@ -75,9 +77,12 @@ class SyncPlugin : Plugin() {
         MainActivity.reloadAccountEvent.plusAssign(backupTrigger)
 
         openSettings = {
-            val currentActivity = AcraApplication.context as? AppCompatActivity ?: CloudStreamApp.context as? AppCompatActivity
+            // [버그 수정] 사용자가 톱니바퀴를 누른 시점의 '진짜 화면(this)'을 즉시 잡아채서 설정창을 띄웁니다.
+            val currentActivity = this as? AppCompatActivity
             if (currentActivity != null && !currentActivity.isDestroyed && !currentActivity.isFinishing) {
-                SyncSettingsFragment(this).show(currentActivity.supportFragmentManager, "Sync")
+                SyncSettingsFragment(this@SyncPlugin).show(currentActivity.supportFragmentManager, "Sync")
+            } else {
+                Log.e("SyncCS", "Failed to open settings: Activity is null or destroyed.")
             }
         }
     }
@@ -85,7 +90,7 @@ class SyncPlugin : Plugin() {
     fun triggerBackupDebounced() {
         backupDebounceJob?.cancel()
         backupDebounceJob = pluginScope.launch {
-            delay(15000L)
+            delay(15000L) // 15 seconds debounce
             backupDevice()
         }
     }
@@ -97,13 +102,19 @@ class SyncPlugin : Plugin() {
         val syncPluginsEnabled = pref.getString("sync_plugins_enabled", "false") == "true"
 
         if (backupEnabled && ApiUtils.isLoggedIn()) {
-            // 차분 동기화를 폐기하고 원본처럼 Full Backup을 돌려 누락되는 데이터 차단
-            val backupFile = BackupUtils.getFullBackup(context, syncPluginsEnabled) ?: return@withContext
+            val backupFile = BackupUtils.getFullBackup(context, syncPluginsEnabled)
+            if (backupFile == null) return@withContext
             
             val json = mapper.writeValueAsString(backupFile)
+
             if (json.isNotEmpty()) {
                 val compressed = Util.compressJsonToString(Util.cleanedSyncData(json))
-                ApiUtils.syncThisDevice(compressed, context)
+                Log.d("SyncCS", "Compressed Payload Size: ${compressed.length} characters")
+                val result = ApiUtils.syncThisDevice(compressed, context)
+                if (result.first) {
+                    pref.edit().putLong("last_sync_timestamp", System.currentTimeMillis()).apply()
+                    Log.d("SyncCS", "Backup Complete. Timestamp updated.")
+                }
             }
         }
     }
@@ -115,6 +126,7 @@ class SyncPlugin : Plugin() {
         val syncPluginsEnabled = pref.getString("sync_plugins_enabled", "false") == "true"
 
         if (restoreEnabled && ApiUtils.isLoggedIn()) {
+            Log.d("SyncCS", "--- Initiating Restore Process ---")
             try {
                 val devices = ApiUtils.fetchDevices(context)
                 val thisDeviceId = Util.getDeviceId(context.packageName, context)
@@ -136,6 +148,7 @@ class SyncPlugin : Plugin() {
                 }
                 return@withContext true
             } catch (e: Exception) {
+                Log.e("SyncCS", "Restore Process Failed", e)
                 return@withContext false
             }
         }
