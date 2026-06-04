@@ -30,24 +30,14 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
 
-// =========================================================================
-// [1] Native SharedPreferences Helper (경로 오류 수정 완벽 반영)
-// =========================================================================
-
 object SharedPrefsHelper {
     fun getPrefs(context: Context): SharedPreferences {
-        // "DataStore"가 아닌 CloudStream 고유의 패키지명 DB를 열어야 시청기록과 플러그인이 보입니다.
         return context.getSharedPreferences(context.packageName, Context.MODE_PRIVATE)
     }
-
     fun getDefaultPrefs(context: Context): SharedPreferences {
         return context.getSharedPreferences(context.packageName + "_preferences", Context.MODE_PRIVATE)
     }
 }
-
-// =========================================================================
-// [2] Models Area
-// =========================================================================
 
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class APIRes(
@@ -83,13 +73,12 @@ data class APIRes(
                             @JsonProperty("id") var id: String? = null,
                             @JsonProperty("title") var title: String? = null,
                             @JsonProperty("bodyText") var bodyText: String? = null,
-                            @JsonProperty("body") var body: String? = null
+                            @JsonProperty("body") var body: String? = null 
                         )
                     }
                 }
             }
         }
-
         @JsonIgnoreProperties(ignoreUnknown = true)
         data class Issue(
             @JsonProperty("projectItem") var projectItem: ProjectItem? = null
@@ -105,13 +94,11 @@ data class APIRes(
                 )
             }
         }
-
         @JsonIgnoreProperties(ignoreUnknown = true)
         data class DelItem(
             @JsonProperty("deletedItemId") var deletedItemId: String? = null
         )
     }
-
     @JsonIgnoreProperties(ignoreUnknown = true)
     data class Error(
         @JsonProperty("message") var message: String? = null
@@ -142,23 +129,74 @@ data class SyncDevice(
     @JsonProperty("syncedData") var syncedData: String? = null
 )
 
-// =========================================================================
-// [3] Util Area
-// =========================================================================
-
 object Util {
+    // 원본의 100+개 압축 키를 1:1 완벽하게 이식하여 GitHub 용량 초과 방지
+    private val minifyDict = listOf(
+        "/result_resume_watching_2/" to "/k1/", "/video_pos_dur/" to "/k2/", "download_header_cache/" to "/k3/",
+        "/result_watch_state/" to "/k4/", "/result_watch_state_data/" to "/k5/", "/result_season/" to "/k6/",
+        "/result_episode/" to "/k7/", "/result_dub/" to "/k8/", "/search_history/" to "/k9/",
+        "/video_quality_priority/" to "/k10/", "/video_profile_name/" to "/k11/", "/home_bookmarked_last_list" to "/k12",
+        "user_custom_sites" to "k13", "/search_pref_tags" to "/k14", "/search_pref_providers" to "/k15",
+        "resize_mode" to "k16", "/duration_mode" to "/k17", "REPOSITORIES_KEY" to "k18", "subtitle_settings" to "k19",
+        "/results_sorting_mode" to "/k20", "/home_pref_homepage" to "/k21", "/playback_speed" to "/k22",
+        "fshare_username" to "k23", "fshare_password" to "k24", "monplayer_links" to "k25", "xtream_iptv_links" to "k26",
+        "iptv_links" to "k27", "/library_sorting_mode" to "/k28", "subs_auto_select" to "k29",
+        "\\\"bookmarkedTime\\\"" to "\\\"v1\\\"", "\\\"latestUpdatedTime\\\"" to "\\\"v2\\\"", "\\\"name\\\"" to "\\\"v3\\\"",
+        "\\\"url\\\"" to "\\\"v4\\\"", "\\\"type\\\"" to "\\\"v5\\\"", "\\\"apiName\\\"" to "\\\"v6\\\"",
+        "\\\"posterUrl\\\"" to "\\\"v7\\\"", "\\\"year\\\"" to "\\\"v8\\\"", "\\\"syncData\\\"" to "\\\"v9\\\"",
+        "\\\"quality\\\"" to "\\\"v10\\\"", "\\\"posterHeaders\\\"" to "\\\"v11\\\"", "\\\"plot\\\"" to "\\\"v12\\\"",
+        "\\\"rating\\\"" to "\\\"v13\\\"", "\\\"tags\\\"" to "\\\"v14\\\"", "\\\"searchedAt\\\"" to "\\\"v15\\\"",
+        "\\\"searchText\\\"" to "\\\"v16\\\"", "\\\"parentId\\\"" to "\\\"v17\\\"", "\\\"episodeId\\\"" to "\\\"v18\\\"",
+        "\\\"episode\\\"" to "\\\"v19\\\"", "\\\"season\\\"" to "\\\"v20\\\"", "\\\"updateTime\\\"" to "\\\"v21\\\"",
+        "\\\"isFromDownload\\\"" to "\\\"v22\\\"", "\\\"position\\\"" to "\\\"v23\\\"", "\\\"duration\\\"" to "\\\"v24\\\"",
+        "\\\"mainUrl\\\"" to "\\\"v25\\\"", "\\\"searchUrl\\\"" to "\\\"v26\\\"", "\\\"cacheTime\\\"" to "\\\"v27\\\"",
+        "\\\"title\\\"" to "\\\"v28\\\"", "\\\"poster\\\"" to "\\\"v29\\\"", "\\\"TvSeries\\\"" to "\\\"v30\\\"",
+        "\\\"Movie\\\"" to "\\\"v31\\\"", "\\\"NSFW\\\"" to "\\\"v32\\\"", "\\\"Anime\\\"" to "\\\"v33\\\"",
+        "\\\"Live\\\"" to "\\\"v34\\\"", "\\\"AnimeMovie\\\"" to "\\\"v35\\\"", "\\\"AsianDrama\\\"" to "\\\"v36\\\"",
+        "\\\"Cartoon\\\"" to "\\\"v37\\\"", "\\\"Torrent\\\"" to "\\\"v38\\\"", "\\\"slug\\\"" to "\\\"v39\\\"",
+        "\\\"https://" to "\\\"h//", "\\\":null," to "\\\":n,", "\\\":false}" to "\\\":f}", "\\\":true}" to "\\\":t}",
+        "\"_Bool\"" to "\"s1\"", "\"_Int\"" to "\"s2\"", "\"_String\"" to "\"s3\"", "\"_Float\"" to "\"s4\"",
+        "\"_Long\"" to "\"s5\"", "\"_StringSet\"" to "\"s6\"", "\"swipe_enabled_key\"" to "\"s7\"",
+        "\"skip_startup_account_select_key\"" to "\"s8\"", "\"auto_update\"" to "\"s9\"", "\"rotate_video_key\"" to "\"s10\"",
+        "\"auto_download_plugins_key\"" to "\"s11\"", "\"auto_update_plugins\"" to "\"s12\"", "\"player_resize_enabled_key\"" to "\"s13\"",
+        "\"bg_startup_tracing\"" to "\"s14\"", "\"playback_speed_enabled_key\"" to "\"s15\"", "\"acra.disable\"" to "\"s16\"",
+        "\"enable_nsfw_on_providers_key\"" to "\"s17\"", "\"preview_seekbar_key\"" to "\"s18\"", "\"show_trailers_key\"" to "\"s19\"",
+        "\"show_fillers_key\"" to "\"s20\"", "\"random_button_key\"" to "\"s21\"", "\"swipe_vertical_enabled_key\"" to "\"s22\"",
+        "\"bottom_title_key\"" to "\"s23\"", "\"auto_rotate_video_key\"" to "\"s24\"", "\"advanced_search\"" to "\"s25\"",
+        "\"speedup_key\"" to "\"s26\"", "\"episode_sync_enabled_key\"" to "\"s27\"", "\"hide_player_control_names_key\"" to "\"s28\"",
+        "\"show_kitsu_posters_key\"" to "\"s29\"", "\"double_tap_enabled_key\"" to "\"s30\"", "\"pip_enabled_key\"" to "\"s31\"",
+        "\"double_tap_pause_enabled_key\"" to "\"s32\"", "\"enable_skip_op_from_database\"" to "\"s33\"", "\"autoplay_next_key\"" to "\"s34\"",
+        "\"android_tv_interface_off_seek_key\"" to "\"s35\"", "\"DNS over HTTPS\"" to "\"s36\"", "\"double_tap_seek_time_key2\"" to "\"s37\"",
+        "\"auto_download_plugins_key2\"" to "\"s38\"", "\"automatic_backup_key\"" to "\"s39\"", "\"download_concurrent_key\"" to "\"s40\"",
+        "\"com.facebook.appevents.SessionInfo.interruptionCount\"" to "\"s41\"", "\"download_parallel_key\"" to "\"s42\"",
+        "\"android_tv_interface_on_seek_key\"" to "\"s43\"", "\"app_layout_key\"" to "\"s44\"", "\"backup_dir_key\"" to "\"s45\"",
+        "\"com.applovin.sdk.impl.isFirstRun\"" to "\"s46\"", "\"com.facebook.appevents.SessionInfo.sessionId\"" to "\"s47\"",
+        "\"primary_color_key\"" to "\"s48\"", "\"app_theme_key\"" to "\"s49\"", "\"app_locale\"" to "\"s50\"",
+        "\"com.facebook.appevents.SessionInfo.sessionEndTime\"" to "\"s51\"", "\"com.facebook.appevents.SessionInfo.sessionStartTime\"" to "\"s52\"",
+        "\"prefer_media_type_key_2\"" to "\"s53\"", "\"datastore\"" to "\"s54\""
+    )
 
     fun cleanedSyncData(str: String): String {
         return try {
-            str.replace(Regex("\\\\\\\"overview\\\\\\\"\\s*:\\s*\\\\\\\"(.*?)(?<!\\\\)\\\\\\\""), "\\\\\\\"overview\\\\\\\":\\\\\\\"\\\\\\\"")
-               .replace(Regex("\\\\\\\"plot\\\\\\\"\\s*:\\s*\\\\\\\"(.*?)(?<!\\\\)\\\\\\\""), "\\\\\\\"plot\\\\\\\":\\\\\\\"\\\\\\\"")
-               .replace(Regex("\\\\\\\"tags\\\\\\\"\\s*:\\s*\\[.*?]"), "\\\\\\\"tags\\\\\\\":[]")
+            var result = str.replace(Regex("\\\\\\\"overview\\\\\\\"\\s*:\\s*\\\\\\\"(.*?)(?<!\\\\)\\\\\\\""), "\\\\\\\"overview\\\\\\\":\\\\\\\"\\\\\\\"")
+                            .replace(Regex("\\\\\\\"plot\\\\\\\"\\s*:\\s*\\\\\\\"(.*?)(?<!\\\\)\\\\\\\""), "\\\\\\\"plot\\\\\\\":\\\\\\\"\\\\\\\"")
+                            .replace(Regex("\\\\\\\"tags\\\\\\\"\\s*:\\s*\\[.*?]"), "\\\\\\\"tags\\\\\\\":[]")
+            for ((old, new) in minifyDict) {
+                result = result.replace(old, new)
+            }
+            result
         } catch (e: Exception) {
             str
         }
     }
 
-    fun restoreText(str: String): String = str
+    fun restoreText(str: String): String {
+        var result = str
+        for ((old, new) in minifyDict) {
+            result = result.replace(new, old)
+        }
+        return result
+    }
 
     fun compressJsonToString(str: String): String {
         return Base64.encodeToString(str.toByteArray(UTF_8), Base64.NO_WRAP or Base64.NO_PADDING)
@@ -168,7 +206,6 @@ object Util {
         return try {
             String(Base64.decode(str, Base64.NO_WRAP or Base64.NO_PADDING), UTF_8)
         } catch (e: Exception) {
-            Log.e("SyncCS", "Decompression Error", e)
             ""
         }
     }
@@ -187,7 +224,6 @@ object Util {
             System.arraycopy(encryptedBytes, 0, combined, iv.size, encryptedBytes.size)
             Base64.encodeToString(combined, Base64.NO_WRAP or Base64.NO_PADDING)
         } catch (e: Exception) {
-            Log.e("SyncCS", "Encryption Error", e)
             str
         }
     }
@@ -206,7 +242,6 @@ object Util {
             cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(128, iv))
             String(cipher.doFinal(encryptedBytes), UTF_8)
         } catch (e: Exception) {
-            Log.e("SyncCS", "Decryption Error", e)
             str
         }
     }
@@ -229,10 +264,6 @@ object Util {
         return bytes.joinToString("") { "%02x".format(it) }
     }
 }
-
-// =========================================================================
-// [4] BackupUtils Area (로깅 추가 및 Delta Sync 버그 해결)
-// =========================================================================
 
 object BackupUtils {
 
@@ -258,45 +289,15 @@ object BackupUtils {
         return nonTransferableKeys.none { key.contains(it) }
     }
 
-    fun getDeltaBackup(context: Context, lastSyncTime: Long, syncPlugins: Boolean = false): BackupFile? {
+    // 누락 없이 원본처럼 전체를 수집하는 백업 메서드로 복구 (데이터 증발 방지)
+    fun getFullBackup(context: Context, syncPlugins: Boolean = false): BackupFile? {
         val pref = SharedPrefsHelper.getPrefs(context)
         val defaultPref = SharedPrefsHelper.getDefaultPrefs(context)
 
-        Log.d("SyncCS", "--- [START EXTRACTING BACKUP DATA] ---")
-        Log.d("SyncCS", "Total DataStore Keys: ${pref.all.size}")
-        Log.d("SyncCS", "Total AppSettings Keys: ${defaultPref.all.size}")
+        val validPrefs = pref.all.filter { isResume(it.key, syncPlugins) }
+        val validDefaultPrefs = defaultPref.all.filter { isResume(it.key, syncPlugins) }
 
-        fun getDeltaMap(all: Map<String, *>, type: String): Map<String, Any?> {
-            val delta = all.filter { (key, value) ->
-                if (!isResume(key, syncPlugins)) return@filter false
-                if (value is String) {
-                    try {
-                        val obj = JSONObject(value)
-                        // 플러그인 데이터 등 시간값이 없는 JSON은 강제 포함시키도록 예외 처리
-                        if (obj.has("latestUpdatedTime") || obj.has("bookmarkedTime")) {
-                            val updateTime = obj.optLong("latestUpdatedTime", obj.optLong("bookmarkedTime", 0L))
-                            updateTime >= lastSyncTime
-                        } else {
-                            true
-                        }
-                    } catch (e: Exception) {
-                        true // JSON이 아닌 일반 문자열도 무조건 포함
-                    }
-                } else {
-                    true // Boolean, Int, Set 등은 포함
-                }
-            }
-            Log.d("SyncCS", "$type Delta filtered: ${delta.size} keys out of ${all.size} will be uploaded.")
-            return delta
-        }
-
-        val deltaPrefs = getDeltaMap(pref.all, "DataStore")
-        val deltaDefaultPrefs = getDeltaMap(defaultPref.all, "AppSettings")
-
-        if (deltaPrefs.isEmpty() && deltaDefaultPrefs.isEmpty()) {
-            Log.d("SyncCS", "No new changes detected since last backup. Aborting upload.")
-            return null
-        }
+        if (validPrefs.isEmpty() && validDefaultPrefs.isEmpty()) return null
 
         fun splitVars(map: Map<String, Any?>): BackupVars {
             return BackupVars(
@@ -309,10 +310,9 @@ object BackupUtils {
             )
         }
 
-        Log.d("SyncCS", "--- [END EXTRACTING BACKUP DATA] ---")
         return BackupFile(
-            datastore = splitVars(deltaPrefs),
-            settings = splitVars(deltaDefaultPrefs)
+            datastore = splitVars(validPrefs),
+            settings = splitVars(validDefaultPrefs)
         )
     }
 
@@ -321,9 +321,6 @@ object BackupUtils {
         val pref = if (isAppSettings) SharedPrefsHelper.getDefaultPrefs(context) else SharedPrefsHelper.getPrefs(context)
         val editor = pref.edit()
 
-        Log.d("SyncCS", "Restoring ${incoming.size} keys into ${if(isAppSettings) "AppSettings" else "DataStore"}...")
-
-        var restoredCount = 0
         for ((key, incomingValue) in incoming) {
             if (!isResume(key, syncPlugins)) continue
 
@@ -331,8 +328,6 @@ object BackupUtils {
             if (localValue != null && incomingValue is String && localValue is String) {
                 val merged = resolveConflict(localValue, incomingValue)
                 editor.putString(key, merged)
-                restoredCount++
-                Log.d("SyncCS", "Restored/Merged Key: $key")
             } else {
                 when (incomingValue) {
                     is Boolean -> editor.putBoolean(key, incomingValue)
@@ -345,22 +340,17 @@ object BackupUtils {
                         editor.putStringSet(key, incomingValue as Set<String>)
                     }
                 }
-                restoredCount++
-                Log.d("SyncCS", "Restored New Key: $key")
             }
         }
         editor.apply()
-        Log.d("SyncCS", "Successfully applied $restoredCount keys to storage.")
     }
 
     private fun resolveConflict(localStr: String, incomingStr: String): String {
         return try {
             val localObj = JSONObject(localStr)
             val incomingObj = JSONObject(incomingStr)
-
             val localTime = localObj.optLong("latestUpdatedTime", localObj.optLong("bookmarkedTime", 0L))
             val incomingTime = incomingObj.optLong("latestUpdatedTime", incomingObj.optLong("bookmarkedTime", 0L))
-
             if (incomingTime >= localTime) incomingStr else localStr
         } catch (e: Exception) {
             incomingStr
@@ -369,9 +359,7 @@ object BackupUtils {
 
     fun restore(context: Context?, backupFile: BackupFile, restoreSettings: Boolean, restoreDataStore: Boolean, syncPlugins: Boolean = false) {
         if (context == null) return
-        Log.d("SyncCS", "--- [START RESTORE PROCESS] ---")
         if (restoreSettings) {
-            Log.d("SyncCS", "Restoring Settings...")
             restoreMap(context, backupFile.settings.bool, true, syncPlugins)
             restoreMap(context, backupFile.settings.int, true, syncPlugins)
             restoreMap(context, backupFile.settings.string, true, syncPlugins)
@@ -380,7 +368,6 @@ object BackupUtils {
             restoreMap(context, backupFile.settings.stringSet, true, syncPlugins)
         }
         if (restoreDataStore) {
-            Log.d("SyncCS", "Restoring DataStore (History/Bookmarks/Plugins)...")
             restoreMap(context, backupFile.datastore.bool, false, syncPlugins)
             restoreMap(context, backupFile.datastore.int, false, syncPlugins)
             restoreMap(context, backupFile.datastore.string, false, syncPlugins)
@@ -388,13 +375,8 @@ object BackupUtils {
             restoreMap(context, backupFile.datastore.long, false, syncPlugins)
             restoreMap(context, backupFile.datastore.stringSet, false, syncPlugins)
         }
-        Log.d("SyncCS", "--- [END RESTORE PROCESS] ---")
     }
 }
-
-// =========================================================================
-// [5] ApiUtils Area
-// =========================================================================
 
 object ApiUtils {
     private val mapper = jacksonObjectMapper()
@@ -428,11 +410,9 @@ object ApiUtils {
 
     suspend fun apiCall(query: String, token: String): APIRes? = withContext(Dispatchers.IO) {
         try {
-            Log.d("SyncCS", "Executing GraphQL Query...")
             val formattedQuery = query.replace("\n", " ").replace(Regex("\\s+"), " ")
             val bodyMap = mapOf("query" to formattedQuery)
             val bodyStr = mapper.writeValueAsString(bodyMap)
-
             val requestBody = bodyStr.toRequestBody("application/json; charset=utf-8".toMediaTypeOrNull())
             val request = Request.Builder()
                 .url("https://api.github.com/graphql")
@@ -445,18 +425,14 @@ object ApiUtils {
             val response = unsafeClient.newCall(request).execute()
             val code = response.code
             val responseBody = response.body?.string() ?: ""
-
-            if (code != 200) {
-                Log.e("SyncCS", "GitHub API Failed with Code: $code, Response: $responseBody")
-                return@withContext null
-            }
+            if (code != 200) return@withContext null
             mapper.readValue(responseBody, APIRes::class.java)
         } catch (e: Exception) {
-            Log.e("SyncCS", "Network Exception in apiCall", e)
             null
         }
     }
 
+    // 에러를 내던 'ProjectV2ItemDraftIssue'를 올바른 'DraftIssue'로 교체한 GraphQL 쿼리
     suspend fun syncProjectDetails(context: Context?): Pair<Boolean, String> {
         if (context == null) return Pair(false, "No context")
         val pref = SharedPrefsHelper.getPrefs(context)
@@ -487,20 +463,16 @@ object ApiUtils {
 
         val res = apiCall(query, token)
         
-        if (res == null) return Pair(false, "Failed to connect to GitHub.")
+        if (res == null) return Pair(false, "Failed to connect to GitHub. Please check internet connection.")
         if (res.errors != null && res.errors!!.isNotEmpty()) {
             val errorMsg = res.errors!!.joinToString(", ") { it.message ?: "Unknown Error" }
-            Log.e("SyncCS", "GraphQL Errors: $errorMsg")
             return Pair(false, "GitHub Error: $errorMsg")
         }
 
-        val project = res.data?.viewer?.projectV2
-        if (project == null) return Pair(false, "Project not found or check PAT permissions.")
-
+        val project = res.data?.viewer?.projectV2 ?: return Pair(false, "Failed to connect to GitHub or project not found")
         val projectId = project.id ?: return Pair(false, "Project ID not found in response")
-        pref.edit().putString("sync_project_id", projectId).apply()
-        Log.d("SyncCS", "Project Linked! ID: $projectId")
 
+        pref.edit().putString("sync_project_id", projectId).apply()
         return Pair(true, "Successfully linked to GitHub Project!")
     }
 
@@ -543,11 +515,9 @@ object ApiUtils {
 
         if (!newItemId.isNullOrEmpty()) {
             pref.edit().putString("sync_item_id", newItemId).apply()
-            Log.d("SyncCS", "Cloud Upload Successful! New Draft Issue ID: $newItemId")
             return Pair(true, "Sync completed successfully")
         }
 
-        Log.e("SyncCS", "Cloud Upload Failed. newItemId was null.")
         return Pair(false, "Sync failed during upload")
     }
 
@@ -592,7 +562,6 @@ object ApiUtils {
                 list.add(SyncDevice(parts[0], parts[1], itemId, Util.decrypt(body, token)))
             }
         }
-        Log.d("SyncCS", "Fetched ${list.size} remote devices from GitHub.")
         return list
     }
 }
