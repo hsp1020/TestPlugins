@@ -81,7 +81,8 @@ data class APIRes(
                         data class Content(
                             @JsonProperty("id") var id: String? = null,
                             @JsonProperty("title") var title: String? = null,
-                            @JsonProperty("bodyText") var bodyText: String? = null
+                            @JsonProperty("bodyText") var bodyText: String? = null,
+                            @JsonProperty("body") var body: String? = null // GitHub API 업데이트 대응 (body / bodyText 유연성 확보)
                         )
                     }
                 }
@@ -456,6 +457,7 @@ object ApiUtils {
         val token = pref.getString("sync_token", null)?.replace("\"", "") ?: return Pair(false, "Missing token")
         val projectNum = pref.getString("sync_project_num", null)?.replace("\"", "")?.toIntOrNull() ?: return Pair(false, "Invalid project number")
 
+        // 타입 오류 수정: ... on ProjectV2ItemDraftIssue -> ... on DraftIssue 로 전면 수정
         val query = """
             query {
                 viewer {
@@ -465,10 +467,10 @@ object ApiUtils {
                             nodes {
                                 id
                                 content {
-                                    ... on ProjectV2ItemDraftIssue {
+                                    ... on DraftIssue {
                                         id
                                         title
-                                        bodyText
+                                        body
                                     }
                                 }
                             }
@@ -493,7 +495,7 @@ object ApiUtils {
 
         val project = res.data?.viewer?.projectV2
         if (project == null) {
-            Log.e("SyncCS", "viewer.projectV2 is null. The Project Number might be wrong, or your token doesn't have 'project' scope, or the project belongs to an Organization.")
+            Log.e("SyncCS", "viewer.projectV2 is null. Check Project Number, or your token permissions.")
             return Pair(false, "Failed to connect to GitHub or project not found")
         }
 
@@ -559,6 +561,7 @@ object ApiUtils {
         val token = pref.getString("sync_token", null)?.replace("\"", "") ?: return emptyList()
         val projectNum = pref.getString("sync_project_num", null)?.replace("\"", "")?.toIntOrNull() ?: return emptyList()
 
+        // 타입 오류 수정: ... on ProjectV2ItemDraftIssue -> ... on DraftIssue 로 전면 수정
         val query = """
             query {
                 viewer {
@@ -568,10 +571,10 @@ object ApiUtils {
                             nodes {
                                 id
                                 content {
-                                    ... on ProjectV2ItemDraftIssue {
+                                    ... on DraftIssue {
                                         id
                                         title
-                                        bodyText
+                                        body
                                     }
                                 }
                             }
@@ -588,7 +591,9 @@ object ApiUtils {
         for (node in nodes) {
             val itemId = node.id ?: continue
             val title = node.content?.title ?: continue
-            val body = node.content?.bodyText ?: ""
+            
+            // bodyText가 아닌 바뀐 스키마인 body로 추출
+            val body = node.content?.body ?: node.content?.bodyText ?: ""
 
             val parts = title.split("|")
             if (parts.size >= 2) {
