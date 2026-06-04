@@ -10,5 +10,5 @@ cloudstream {
         "Other"
     )
     
-    iconUrl = "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/SyncCS/icons8-cloud-sync-96.png"
+    iconUrl = "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/SyncCS/cloud-sync.png"
 }
