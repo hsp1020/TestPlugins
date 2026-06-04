@@ -1,4 +1,4 @@
-package com.anhdaden
+package com.SyncCS
 
 import android.content.Context
 import android.os.Build
@@ -6,11 +6,13 @@ import android.provider.Settings
 import android.util.Base64
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.lagradost.cloudstream3.AcraApplication
-import com.lagradost.cloudstream3.MainAPIKt
+import com.lagradost.cloudstream3.CloudStreamApp
+import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.DataStore
 import com.lagradost.cloudstream3.utils.DataStoreHelper.ResumeWatchingResult
-import com.lagradost.nicehttp.NiceHttp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -23,7 +25,7 @@ import javax.crypto.spec.SecretKeySpec
 import kotlin.text.Charsets.UTF_8
 
 // =========================================================================
-// [1] Models Area (데이터 구조 및 GraphQL 규격 데이터 클래스 정의 영역)
+// [1] Models (Jackson JSON mapping & Data structure)
 // =========================================================================
 
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -119,7 +121,7 @@ data class SyncDevice(
 )
 
 // =========================================================================
-// [2] Util Area (최적화 가공, 단말 디바이스 식별 및 암호화 구현 영역)
+// [2] Util (Obfuscation, Hardware Identifier & GCM AES-256 Engine)
 // =========================================================================
 
 object Util {
@@ -217,7 +219,7 @@ object Util {
 }
 
 // =========================================================================
-// [3] BackupUtils Area (차분 동기화 추출 및 로컬 데이터 동적 병합 영역)
+// [3] BackupUtils (Selective delta-sync and Conflict merge resolution)
 // =========================================================================
 
 object BackupUtils {
@@ -245,9 +247,8 @@ object BackupUtils {
     }
 
     fun getDeltaBackup(context: Context, lastSyncTime: Long, syncPlugins: Boolean = false): BackupFile? {
-        val dataStore = DataStore.INSTANCE
-        val pref = dataStore.getSharedPrefs(context)
-        val defaultPref = dataStore.getDefaultSharedPrefs(context)
+        val pref = DataStore.getSharedPrefs(context)
+        val defaultPref = DataStore.getDefaultSharedPrefs(context)
 
         fun getDeltaMap(all: Map<String, *>): Map<String, Any?> {
             return all.filter { (key, value) ->
@@ -288,9 +289,9 @@ object BackupUtils {
         )
     }
 
-    fun <T> restoreMap(context: Context, incoming: Map<String, T>?, isAppSettings: Boolean, syncPlugins: Boolean = false) {
+    fun restoreMap(context: Context, incoming: Map<String, Any?>?, isAppSettings: Boolean, syncPlugins: Boolean = false) {
         if (incoming.isNullOrEmpty()) return
-        val pref = if (isAppSettings) DataStore.INSTANCE.getDefaultSharedPrefs(context) else DataStore.INSTANCE.getSharedPrefs(context)
+        val pref = if (isAppSettings) DataStore.getDefaultSharedPrefs(context) else DataStore.getSharedPrefs(context)
         val editor = pref.edit()
 
         for ((key, incomingValue) in incoming) {
@@ -353,15 +354,15 @@ object BackupUtils {
 }
 
 // =========================================================================
-// [4] ApiUtils Area (GitHub API 연계 및 GraphQL 네트워크 엔진 영역)
+// [4] ApiUtils (Networking, Personal Token Verification & Projects query)
 // =========================================================================
 
 object ApiUtils {
-    private val http = NiceHttp()
+    private val mapper = jacksonObjectMapper()
 
     fun isLoggedIn(): Boolean {
-        val context = AcraApplication.Companion.getContext() ?: return false
-        val pref = DataStore.INSTANCE.getSharedPrefs(context)
+        val context = AcraApplication.context ?: CloudStreamApp.context ?: return false
+        val pref = DataStore.getSharedPrefs(context)
         val token = pref.getString("sync_token", null)
         val projectNum = pref.getString("sync_project_num", null)
         val projectId = pref.getString("sync_project_id", null)
@@ -372,9 +373,9 @@ object ApiUtils {
         try {
             val formattedQuery = query.replace("\n", " ").replace(Regex("\\s+"), " ")
             val bodyMap = mapOf("query" to formattedQuery)
-            val bodyStr = MainAPIKt.getMapper().writeValueAsString(bodyMap)
+            val bodyStr = mapper.writeValueAsString(bodyMap)
 
-            val response = http.post(
+            val response = app.post(
                 url = "https://api.github.com/graphql",
                 headers = mapOf(
                     "Authorization" to "Bearer $token",
@@ -384,7 +385,7 @@ object ApiUtils {
                 data = bodyStr
             ).text
 
-            MainAPIKt.getMapper().readValue(response, APIRes::class.java)
+            mapper.readValue(response, APIRes::class.java)
         } catch (e: Exception) {
             null
         }
@@ -392,7 +393,7 @@ object ApiUtils {
 
     suspend fun syncProjectDetails(context: Context?): Pair<Boolean, String> {
         if (context == null) return Pair(false, "No context")
-        val pref = DataStore.INSTANCE.getSharedPrefs(context)
+        val pref = DataStore.getSharedPrefs(context)
         val token = pref.getString("sync_token", null)?.replace("\"", "") ?: return Pair(false, "Missing token")
         val projectNum = pref.getString("sync_project_num", null)?.replace("\"", "")?.toIntOrNull() ?: return Pair(false, "Invalid project number")
 
@@ -430,7 +431,7 @@ object ApiUtils {
     }
 
     suspend fun syncThisDevice(syncData: String, context: Context): Pair<Boolean, String> {
-        val pref = DataStore.INSTANCE.getSharedPrefs(context)
+        val pref = DataStore.getSharedPrefs(context)
         val token = pref.getString("sync_token", null)?.replace("\"", "") ?: return Pair(false, "Missing token")
         val projectId = pref.getString("sync_project_id", null)?.replace("\"", "") ?: return Pair(false, "Missing Project ID")
         val deviceName = pref.getString("device_name", android.os.Build.MODEL) ?: android.os.Build.MODEL
@@ -476,7 +477,7 @@ object ApiUtils {
     }
 
     suspend fun fetchDevices(context: Context): List<SyncDevice> {
-        val pref = DataStore.INSTANCE.getSharedPrefs(context)
+        val pref = DataStore.getSharedPrefs(context)
         val token = pref.getString("sync_token", null)?.replace("\"", "") ?: return emptyList()
         val projectNum = pref.getString("sync_project_num", null)?.replace("\"", "")?.toIntOrNull() ?: return emptyList()
 
