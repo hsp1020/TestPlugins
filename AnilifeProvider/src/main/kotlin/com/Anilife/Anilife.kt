@@ -4,6 +4,7 @@ import android.util.Base64
 import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.network.WebViewResolver // 클라우드플레어 우회용 인터셉터
 import org.jsoup.nodes.Document
 import kotlinx.coroutines.CancellationException
 
@@ -14,24 +15,16 @@ class Anilife : MainAPI() {
     override var lang = "ko"
     override val supportedTypes = setOf(TvType.Anime)
 
-    private val TAG = "AnilifeDebug"
+    private val TAG = "AnilifeProvider"
+    private val pcUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
-    // 일반 PC 브라우저와 완전히 동일한 지문을 남기기 위한 극한의 헤더 셋업
-    private val chromeHeaders = mapOf(
-        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-        "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Sec-Ch-Ua" to "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\", \"Not-A.Brand\";v=\"99\"",
-        "Sec-Ch-Ua-Mobile" to "?0",
-        "Sec-Ch-Ua-Platform" to "\"Windows\"",
-        "Sec-Fetch-Dest" to "document",
-        "Sec-Fetch-Mode" to "navigate",
-        "Sec-Fetch-Site" to "none",
-        "Sec-Fetch-User" to "?1",
-        "Upgrade-Insecure-Requests" to "1",
-        "Connection" to "keep-alive",
-        "Referer" to "$mainUrl/" // 레퍼러 강제 삽입
+    private val commonHeaders = mapOf(
+        "User-Agent" to pcUserAgent,
+        "Referer" to "$mainUrl/"
     )
+
+    // 핵심: anilife.live 도메인으로 가는 요청은 실제 숨겨진 브라우저(WebView)를 태워서 통과시킴
+    private val cfInterceptor = WebViewResolver(Regex("""anilife\.live"""))
 
     override val mainPage = mainPageOf(
         "/top20" to "실시간 TOP 20",
@@ -50,40 +43,23 @@ class Anilife : MainAPI() {
         val url = if (request.name.contains("TOP 20")) "$mainUrl${request.data}" 
                   else "$mainUrl${request.data.substringBeforeLast("/")}/$page"
         
-        Log.d(TAG, "===============================================")
-        Log.d(TAG, "[getMainPage] 데이터 요청 시작 -> $url")
-        Log.d(TAG, "[getMainPage] 주입된 헤더: $chromeHeaders")
+        Log.d(TAG, "[getMainPage] 웹뷰 인터셉터 적용 통신 시도 -> $url")
         
         return try {
-            val response = app.get(url, headers = chromeHeaders)
-            Log.d(TAG, "[getMainPage] 서버 응답 코드: ${response.code}") 
+            // interceptor 파라미터에 cfInterceptor 주입
+            val response = app.get(url, headers = commonHeaders, interceptor = cfInterceptor)
+            Log.d(TAG, "[getMainPage] 응답 코드: ${response.code}") 
             
-            // 만약 클라우드플레어 차단 페이지가 뜬다면 여기서 감지됩니다.
-            if (response.code == 403 || response.text.contains("Cloudflare")) {
-                Log.e(TAG, "[getMainPage] 클라우드플레어 403 봇 방어막에 차단됨!")
-            }
-
             val doc = response.document
             val items = parseCommonList(doc)
-            Log.d(TAG, "[getMainPage] 파싱 성공 아이템 수: ${items.size}개")
+            Log.d(TAG, "[getMainPage] 파싱 성공: ${items.size}개")
             
             val hasNextPage = if (request.name.contains("TOP 20")) false else items.isNotEmpty()
             
             newHomePageResponse(request.name, items, hasNext = hasNextPage)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            
-            Log.e(TAG, "[getMainPage] ❌ 통신 에러 발생 ❌")
-            Log.e(TAG, "[getMainPage] 에러 종류: ${e.javaClass.simpleName}")
-            Log.e(TAG, "[getMainPage] 에러 메시지: ${e.message}")
-            
-            // 핸드셰이크 단계 에러인지 판별
-            if (e.stackTraceToString().contains("doHandshake")) {
-                Log.e(TAG, "🚨 분석 결과: 서버에 헤더(Referer 등)를 보내기도 전에 SSL Handshake 단계에서 연결이 끊어졌습니다. (클라우드플레어 TLS 지문 차단 또는 ECH 부재로 인한 망 차단)")
-            } else {
-                Log.e(TAG, "🚨 분석 결과: 연결은 성공했으나 다른 문제가 발생했습니다.")
-            }
-            
+            Log.e(TAG, "[getMainPage] 웹뷰 우회 실패", e)
             newHomePageResponse(request.name, emptyList(), hasNext = false)
         }
     }
@@ -110,19 +86,21 @@ class Anilife : MainAPI() {
                 
                 newAnimeSearchResponse(title, finalHref, TvType.Anime) {
                     this.posterUrl = poster
-                    this.posterHeaders = chromeHeaders
+                    this.posterHeaders = commonHeaders
                 }
             } catch (e: Exception) { null }
         }
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
+        val url = "$mainUrl/search?keyword=$query"
+        Log.d(TAG, "[search] 웹뷰 인터셉터 적용 통신 시도 -> $url")
         return try {
-            val doc = app.get("$mainUrl/search?keyword=$query", headers = chromeHeaders).document
+            val doc = app.get(url, headers = commonHeaders, interceptor = cfInterceptor).document
             parseCommonList(doc)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            Log.e(TAG, "[search] 에러 발생: ${e.message}")
+            Log.e(TAG, "[search] 에러 발생", e)
             emptyList()
         }
     }
@@ -135,8 +113,10 @@ class Anilife : MainAPI() {
             url.substringBefore("?poster=")
         } else url
 
+        Log.d(TAG, "[load] 웹뷰 인터셉터 적용 통신 시도 -> $cleanUrl")
+
         try {
-            val response = app.get(cleanUrl, headers = chromeHeaders)
+            val response = app.get(cleanUrl, headers = commonHeaders, interceptor = cfInterceptor)
             val doc = response.document
             val finalUrl = response.url
             val encodedRef = Base64.encodeToString(finalUrl.toByteArray(), Base64.NO_WRAP)
@@ -177,14 +157,14 @@ class Anilife : MainAPI() {
 
             return newAnimeLoadResponse(title, cleanUrl, TvType.Anime) {
                 this.posterUrl = doc.selectFirst(".thumb img")?.attr("src") ?: tunnelingPoster
-                this.posterHeaders = chromeHeaders
+                this.posterHeaders = commonHeaders
                 this.plot = plot
                 this.tags = tags
                 addEpisodes(DubStatus.Subbed, episodes)
             }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            Log.e(TAG, "[load] 에러 발생: ${e.message}")
+            Log.e(TAG, "[load] 에러 발생", e)
             throw e
         }
     }
@@ -208,12 +188,13 @@ class Anilife : MainAPI() {
         val videoIdMatch = Regex("""(?:id|provider)/([^/?]+)""").find(cleanData)
         val videoId = videoIdMatch?.groupValues?.get(1) ?: "unknown_id"
 
+        Log.d(TAG, "[loadLinks] 웹뷰 인터셉터 적용 통신 시도 -> $cleanData")
+
         try {
-            // loadLinks에는 해당 상세 페이지의 레퍼러를 동적으로 덮어씌웁니다.
-            val linkHeaders = chromeHeaders.toMutableMap()
+            val linkHeaders = commonHeaders.toMutableMap()
             linkHeaders["Referer"] = detailReferer
 
-            val webResponse = app.get(cleanData, headers = linkHeaders)
+            val webResponse = app.get(cleanData, headers = linkHeaders, interceptor = cfInterceptor)
             val playerUrl = AnilifeProxyExtractor().extractPlayerUrl(webResponse.text, mainUrl) ?: return false
 
             return AnilifeProxyExtractor().extractWithProxy(
@@ -228,7 +209,7 @@ class Anilife : MainAPI() {
             )
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            Log.e(TAG, "[loadLinks] 에러 발생: ${e.message}")
+            Log.e(TAG, "[loadLinks] 에러 발생", e)
         }
         return false
     }
