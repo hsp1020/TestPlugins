@@ -198,7 +198,7 @@ object Util {
         }
     }
 
-    // GZIP 압축 후 Base64 인코딩 (압축 오류 발생 시 명확히 파악할 수 있도록 로깅 강화)
+    // GZIP 압축 후 Base64 인코딩
     fun compressJsonToString(str: String): String {
         return try {
             val bos = ByteArrayOutputStream()
@@ -250,7 +250,7 @@ object Util {
 }
 
 // =========================================================================
-// [4] BackupUtils Area
+// [4] BackupUtils Area (누락된 대용량 제외 키 일괄 복원)
 // =========================================================================
 object BackupUtils {
     private val nonTransferableKeys = listOf(
@@ -265,11 +265,21 @@ object BackupUtils {
         "checkbox_fsharesheet", "checkbox_fsharefavourite", "checkbox_fsharehdvn", "checkbox_timfshare",
         "bluphim_token", "device_id", "device_name", "sync_token", "sync_project_num", "sync_project_id",
         "sync_item_id", "sync_device_id", "restore_device", "backup_device", "sync_plugins_enabled", "movie_active", "dns_active",
-        "last_sync_timestamp"
+        "last_sync_timestamp",
+        // [복원] 이전 코틀린 마이그레이션 과정에서 누락되어 대용량 에러를 유발한 원본 제외 키 목록
+        "ULTIMA_CURRENT_META_PROVIDERS", "ULTIMA_EXTENSIONS_LIST", "ULTIMA_CURRENT_MEDIA_PROVIDERS", "ULTIMA_WATCH_SYNC_CREDS",
+        "used_fstream_providers_v3", "fstream_version", "Aniyomi_Plugin_Successful_Install", "enable_support_by_bongngotv",
+        "download_info", "download_resume", "download_q_resume", "download_episode_cache", "download_header_cache",
+        "prerelease_update", "data_store_helper/account_key_index", "VERSION_NAME", "FILES_TO_DELETE_KEY", 
+        "HAS_DONE_SETUP", "video_source_priority", "preferred_audio_language"
     )
 
     fun isResume(key: String, syncPlugins: Boolean = false): Boolean {
         if (!syncPlugins && (key.contains("PLUGINS_KEY") || key.contains("PLUGINS_KEY_LOCAL"))) return false
+        
+        // 추가적인 메모리 누수 방지: 다운로드 캐시 및 대형 캐시 키를 사전에 원천 차단합니다.
+        if (key.contains("cache") || key.contains("CACHE") || key.contains("download_")) return false
+        
         return nonTransferableKeys.none { key.contains(it) }
     }
 
@@ -365,7 +375,7 @@ object BackupUtils {
 }
 
 // =========================================================================
-// [5] ApiUtils Area (페이로드 크기 트래킹 및 리포팅 내장)
+// [5] ApiUtils Area
 // =========================================================================
 object ApiUtils {
     private val mapper = jacksonObjectMapper()
@@ -494,7 +504,6 @@ object ApiUtils {
         val escapedPayload = encryptedPayload.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
         val escapedName = "$deviceName|$deviceId".replace("\"", "\\\"")
 
-        // 깃허브로 실제 전송하는 이스케이프된 문자열 최종 크기를 계산합니다.
         val payloadLength = escapedPayload.length
         Log.d("SyncCS", "Uploading payload to GitHub. Escaped Length: $payloadLength chars")
 
@@ -511,14 +520,14 @@ object ApiUtils {
 
         if (res.errors != null && res.errors!!.isNotEmpty()) {
             val errorMsg = res.errors!!.joinToString(", ") { it.message ?: "Unknown Error" }
-            return Pair(false, "GitHub Error: $errorMsg (Payload: $payloadLength chars)")
+            return Pair(false, "GitHub Error: $errorMsg")
         }
 
         val newItemId = res.data?.issue?.projectItem?.id
         if (!newItemId.isNullOrEmpty()) {
             pref.edit().putString("sync_item_id", newItemId).apply()
             Log.d("SyncCS", "Sync completed successfully. Uploaded to GitHub.")
-            return Pair(true, "Sync completed successfully (Payload: $payloadLength chars)")
+            return Pair(true, "Sync completed successfully")
         }
 
         return Pair(false, "Failed to get project item ID from GitHub. (Payload: $payloadLength chars)")
