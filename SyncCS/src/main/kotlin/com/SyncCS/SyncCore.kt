@@ -10,7 +10,7 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.lagradost.cloudstream3.AcraApplication
-import com.lagradost.cloudstream3.utils.DataStore // 메인 앱의 DataStore 클래스를 정석적으로 임포트
+import com.lagradost.cloudstream3.utils.DataStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -34,14 +34,12 @@ object SharedPrefsHelper {
     val appContext: Context
         get() = AcraApplication.context ?: throw IllegalStateException("Cloudstream App context is null")
 
-    // 본체 DataStore 내부의 Context 확장 함수를 코틀린 전용 수신 객체 지정 함수(with)를 통해 정상 호출합니다.
     fun getPrefs(): SharedPreferences {
         return with(DataStore) {
             appContext.getSharedPrefs()
         }
     }
 
-    // 본체 DataStore 내부의 Context 확장 함수를 코틀린 전용 수신 객체 지정 함수(with)를 통해 정상 호출합니다.
     fun getDefaultPrefs(): SharedPreferences {
         return with(DataStore) {
             appContext.getDefaultSharedPrefs()
@@ -348,7 +346,7 @@ object BackupUtils {
 }
 
 // =========================================================================
-// [5] ApiUtils Area
+// [5] ApiUtils Area (정밀 에러 리포팅 적용 완료)
 // =========================================================================
 object ApiUtils {
     private val mapper = jacksonObjectMapper()
@@ -396,9 +394,21 @@ object ApiUtils {
             val code = response.code
             val responseBody = response.body?.string() ?: ""
 
-            if (code != 200) return@withContext null
-            mapper.readValue(responseBody, APIRes::class.java)
-        } catch (e: Exception) { null }
+            if (code != 200) {
+                Log.e("SyncCS", "API Failed. HTTP Code: $code, Res: $responseBody")
+                return@withContext null
+            }
+
+            val res = mapper.readValue(responseBody, APIRes::class.java)
+            if (res.errors != null && res.errors!!.isNotEmpty()) {
+                val errorMsg = res.errors!!.joinToString(", ") { it.message ?: "Unknown Error" }
+                Log.e("SyncCS", "GitHub GraphQL Error: $errorMsg")
+            }
+            res
+        } catch (e: Exception) {
+            Log.e("SyncCS", "apiCall Error", e)
+            null
+        }
     }
 
     suspend fun syncProjectDetails(): Pair<Boolean, String> {
@@ -422,11 +432,16 @@ object ApiUtils {
             }
         """.trimIndent()
 
-        val res = apiCall(query, token) ?: return Pair(false, "Failed to connect to GitHub. Check Logcat.")
-        if (res.errors?.isNotEmpty() == true) return Pair(false, "GitHub Error")
+        val res = apiCall(query, token)
+        if (res == null) return Pair(false, "Failed to connect to GitHub. Check Logcat or Network.")
+        
+        if (res.errors != null && res.errors!!.isNotEmpty()) {
+            val errorMsg = res.errors!!.joinToString(", ") { it.message ?: "Unknown Error" }
+            return Pair(false, "GitHub Error: $errorMsg")
+        }
 
-        val project = res.data?.viewer?.projectV2 ?: return Pair(false, "Failed to connect to GitHub or project not found")
-        val projectId = project.id ?: return Pair(false, "Project ID not found in response")
+        val project = res.data?.viewer?.projectV2 ?: return Pair(false, "Project not found or lacks permissions.")
+        val projectId = project.id ?: return Pair(false, "Project ID not found in response.")
 
         pref.edit().putString("sync_project_id", projectId).apply()
         return Pair(true, "Successfully linked to GitHub Project!")
@@ -438,11 +453,22 @@ object ApiUtils {
         val projectId = pref.getString("sync_project_id", null)?.replace("\"", "") ?: return Pair(false, "Missing Project ID")
         val deviceName = pref.getString("device_name", Build.MODEL) ?: Build.MODEL
         val deviceId = Util.getDeviceId()
+
         val storedItemId = pref.getString("sync_item_id", null)?.replace("\"", "")
 
         if (!storedItemId.isNullOrEmpty()) {
-            val delQuery = "mutation { deleteProjectV2Item(input: {projectId: \"$projectId\", itemId: \"$storedItemId\"}) { deletedItemId } }"
-            apiCall(delQuery, token)
+            val delQuery = """
+                mutation {
+                    deleteProjectV2Item(input: {projectId: "$projectId", itemId: "$storedItemId"}) {
+                        deletedItemId
+                    }
+                }
+            """.trimIndent()
+            val delRes = apiCall(delQuery, token)
+            if (delRes?.errors != null && delRes.errors!!.isNotEmpty()) {
+                val errorMsg = delRes.errors!!.joinToString(", ") { it.message ?: "Unknown Error" }
+                Log.w("SyncCS", "Item deletion warning (Safe to ignore): $errorMsg")
+            }
         }
 
         val encryptedPayload = Util.encrypt(syncData, token)
@@ -458,13 +484,21 @@ object ApiUtils {
         """.trimIndent()
 
         val res = apiCall(addQuery, token)
-        val newItemId = res?.data?.issue?.projectItem?.id
+        if (res == null) return Pair(false, "Network error or connection failed.")
 
+        if (res.errors != null && res.errors!!.isNotEmpty()) {
+            val errorMsg = res.errors!!.joinToString(", ") { it.message ?: "Unknown Error" }
+            return Pair(false, "GitHub Error: $errorMsg")
+        }
+
+        val newItemId = res.data?.issue?.projectItem?.id
         if (!newItemId.isNullOrEmpty()) {
             pref.edit().putString("sync_item_id", newItemId).apply()
+            Log.d("SyncCS", "Sync completed successfully. Uploaded to GitHub.")
             return Pair(true, "Sync completed successfully")
         }
-        return Pair(false, "Sync failed during upload")
+
+        return Pair(false, "Failed to get project item ID from GitHub.")
     }
 
     suspend fun fetchDevices(): List<SyncDevice> {
