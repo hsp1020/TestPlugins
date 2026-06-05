@@ -10,6 +10,7 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.lagradost.cloudstream3.AcraApplication
+import com.lagradost.cloudstream3.utils.DataStore // AndroidX 대신 본체의 진짜 DataStore 클래스를 참조하여 Unresolved 에러 및 수집 누락 해결
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -33,12 +34,14 @@ object SharedPrefsHelper {
     val appContext: Context
         get() = AcraApplication.context ?: throw IllegalStateException("Cloudstream App context is null")
 
+    // 메인 앱 본체의 오리지널 API를 직접 호출하여 실제 시청 기록 데이터(DataStore)에 접근합니다.
     fun getPrefs(): SharedPreferences {
-        return appContext.getSharedPreferences("DataStore", Context.MODE_PRIVATE)
+        return DataStore.getSharedPrefs(appContext)
     }
 
+    // 메인 앱 본체의 오리지널 API를 직접 호출하여 실제 설정 데이터(_preferences)에 접근합니다.
     fun getDefaultPrefs(): SharedPreferences {
-        return appContext.getSharedPreferences("${appContext.packageName}_preferences", Context.MODE_PRIVATE)
+        return DataStore.getDefaultSharedPrefs(appContext)
     }
 }
 
@@ -200,12 +203,12 @@ object Util {
         } catch (e: Exception) { "" }
     }
 
-    // [디버깅 우회] 암호화 단계를 건너뛰고 평문 문자열을 그대로 반환합니다.
+    // [디버깅 우회] 암호화를 생략하고 평문을 즉시 리턴
     fun encrypt(str: String, keySeed: String): String {
         return str
     }
 
-    // [디버깅 우회] 복호화 단계를 건너뛰고 평문 문자열을 그대로 반환합니다.
+    // [디버깅 우회] 복호화를 생략하고 평문을 즉시 리턴
     fun decrypt(str: String, keySeed: String): String {
         return str
     }
