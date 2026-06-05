@@ -43,7 +43,7 @@ class SyncPlugin : Plugin() {
         }
     }
 
-    private fun backupDevice(unused: Boolean) {
+    fun backupDevice(unused: Boolean) {
         try {
             this.counterBackup = 0
             CoroutineScope(Dispatchers.IO).launch {
@@ -72,7 +72,7 @@ class SyncPlugin : Plugin() {
         }
     }
 
-    private fun restoreDevice(unused: Boolean) {
+    fun restoreDevice(unused: Boolean) {
         try {
             CoroutineScope(Dispatchers.IO).launch {
                 val context = AcraApplication.context
