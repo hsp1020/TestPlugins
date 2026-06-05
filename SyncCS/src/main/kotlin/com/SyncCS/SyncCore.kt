@@ -146,7 +146,7 @@ data class SyncDevice(
 )
 
 // =========================================================================
-// [3] Util Area (GZIP with plain Base64 Fallback Decoder)
+// [3] Util Area (Robust Base64 HTML/Whitespace Cleaner Included)
 // =========================================================================
 object Util {
     private val minifyDict = listOf(
@@ -238,12 +238,15 @@ object Util {
 
     fun decompressJsonFromString(str: String): String {
         return try {
-            val bytes = Base64.decode(str, Base64.NO_WRAP or Base64.NO_PADDING)
+            // Strip HTML tags and whitespaces
+            val cleanStr = str.replace(Regex("<[^>]*>"), "").replace(Regex("\\s+"), "").trim()
+            val bytes = Base64.decode(cleanStr, Base64.NO_WRAP or Base64.NO_PADDING)
             val bis = java.io.ByteArrayInputStream(bytes)
             java.util.zip.GZIPInputStream(bis).bufferedReader(UTF_8).use { it.readText() }
         } catch (e: Exception) {
             try {
-                val bytes = Base64.decode(str, 10)
+                val cleanStr = str.replace(Regex("<[^>]*>"), "").replace(Regex("\\s+"), "").trim()
+                val bytes = Base64.decode(cleanStr, 10)
                 String(bytes, UTF_8)
             } catch (ex: Exception) {
                 Log.e("SyncCS", "All decompression methods failed.", ex)
