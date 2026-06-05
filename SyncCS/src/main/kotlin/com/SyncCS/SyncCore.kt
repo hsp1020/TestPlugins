@@ -26,6 +26,10 @@ import java.security.cert.X509Certificate
 import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
+import java.io.ByteArrayOutputStream
+import java.io.ByteArrayInputStream
+import java.util.zip.GZIPOutputStream
+import java.util.zip.GZIPInputStream
 
 // =========================================================================
 // [1] Native SharedPreferences Helper
@@ -194,15 +198,29 @@ object Util {
         }
     }
 
+    // GZIP 압축 후 Base64 인코딩
     fun compressJsonToString(str: String): String {
-        val bytes = str.toByteArray(UTF_8)
-        return Base64.encodeToString(bytes, Base64.NO_WRAP or Base64.NO_PADDING)
+        return try {
+            val bos = ByteArrayOutputStream()
+            GZIPOutputStream(bos).use { gzos ->
+                gzos.write(str.toByteArray(UTF_8))
+            }
+            Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP or Base64.NO_PADDING)
+        } catch (e: Exception) {
+            val bytes = str.toByteArray(UTF_8)
+            Base64.encodeToString(bytes, Base64.NO_WRAP or Base64.NO_PADDING)
+        }
     }
 
+    // GZIP 압축 해제
     fun decompressJsonFromString(str: String): String {
         return try {
-            String(Base64.decode(str, Base64.NO_WRAP or Base64.NO_PADDING), UTF_8)
-        } catch (e: Exception) { "" }
+            val bytes = Base64.decode(str, Base64.NO_WRAP or Base64.NO_PADDING)
+            val bis = ByteArrayInputStream(bytes)
+            GZIPInputStream(bis).bufferedReader(UTF_8).use { it.readText() }
+        } catch (e: Exception) {
+            ""
+        }
     }
 
     // [디버깅 우회] 암호화를 생략하고 평문을 즉시 리턴
@@ -346,7 +364,7 @@ object BackupUtils {
 }
 
 // =========================================================================
-// [5] ApiUtils Area (정밀 에러 리포팅 적용 완료)
+// [5] ApiUtils Area
 // =========================================================================
 object ApiUtils {
     private val mapper = jacksonObjectMapper()
