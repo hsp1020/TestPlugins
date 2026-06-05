@@ -97,7 +97,6 @@ class SyncPlugin : Plugin() {
         }
     }
 
-    // [개선] UI 단으로 동기화의 상세 리포팅 성공/실패 여부를 직접 반환합니다.
     suspend fun forceBackupNow(): Pair<Boolean, String> {
         backupDebounceJob?.cancel()
         Log.d("SyncCS", "Manual Push (Backup) Triggered!")
@@ -125,18 +124,25 @@ class SyncPlugin : Plugin() {
             return@withContext Pair(false, "Backup payload is empty.")
         }
 
-        val compressed = Util.compressJsonToString(Util.cleanedSyncData(json))
-        Log.d("SyncCS", "Compressed Payload Size: ${compressed.length} characters")
+        val cleaned = Util.cleanedSyncData(json)
+        val originalLength = cleaned.length
+
+        // 깃허브 업로드용 초고압축 수행 및 글자 수 수치화
+        val compressed = Util.compressJsonToString(cleaned)
+        val compressedLength = compressed.length
+        Log.d("SyncCS", "Original Size: $originalLength chars, Compressed Size: $compressedLength chars")
         
         val result = ApiUtils.syncThisDevice(compressed)
         if (result.first) {
             pref.edit().putLong("last_sync_timestamp", System.currentTimeMillis()).apply()
             Log.d("SyncCS", "Backup Complete. Timestamp updated.")
+            return@withContext Pair(true, "Backup Succeeded! (Original: $originalLength -> Compressed: $compressedLength chars)")
+        } else {
+            // 실패 시 원본 크기와 실제 압축된 페이로드 크기 정보를 에러 메시지와 함께 반환합니다.
+            return@withContext Pair(false, "${result.second} (Original: $originalLength -> Compressed: $compressedLength chars)")
         }
-        return@withContext result
     }
 
-    // [개선] 단순 중도이탈인 경우 성공 처리를 하지 않고 실패 사유를 구체적으로 리턴합니다.
     suspend fun restoreDevice(): Pair<Boolean, String> = withContext(Dispatchers.IO) {
         val context = AcraApplication.context ?: CloudStreamApp.context ?: return@withContext Pair(false, "Context is null")
         val pref = SharedPrefsHelper.getPrefs()
@@ -173,7 +179,7 @@ class SyncPlugin : Plugin() {
                 }
             }
             if (restoredAny) {
-                return@withContext Pair(true, "Restore completed. Please restart the app to see changes.")
+                return@withContext Pair(true, "Restore completed. Please restart the app.")
             } else {
                 return@withContext Pair(false, "No other device backups found on GitHub Project.")
             }
