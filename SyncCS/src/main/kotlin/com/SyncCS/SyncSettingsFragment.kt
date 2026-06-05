@@ -152,11 +152,11 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
             setOnClickListener {
                 CoroutineScope(Dispatchers.Main).launch {
                     CommonActivity.showToast("Downloading data from GitHub...", null)
-                    val success = withContext(Dispatchers.IO) {
+                    val result = withContext(Dispatchers.IO) {
                         (plugin as? SyncPlugin)?.restoreDevice()
                     }
-                    if (success == true) {
-                        CommonActivity.showToast("Success! Please restart the app to see changes.", null)
+                    if (result != null) {
+                        CommonActivity.showToast(result.second, null) // 백엔드 수집 결과에 기반한 토스트 출력
                     } else {
                         CommonActivity.showToast("Failed to pull data.", null)
                     }
@@ -170,10 +170,14 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
             setOnClickListener {
                 CoroutineScope(Dispatchers.Main).launch {
                     CommonActivity.showToast("Uploading data to GitHub...", null)
-                    withContext(Dispatchers.IO) {
+                    val result = withContext(Dispatchers.IO) {
                         (plugin as? SyncPlugin)?.forceBackupNow()
                     }
-                    CommonActivity.showToast("Upload completed!", null)
+                    if (result != null) {
+                        CommonActivity.showToast(result.second, null) // 백엔드 통신 에러/결과를 정확하게 토스트로 노출
+                    } else {
+                        CommonActivity.showToast("Upload failed.", null)
+                    }
                 }
             }
         }
