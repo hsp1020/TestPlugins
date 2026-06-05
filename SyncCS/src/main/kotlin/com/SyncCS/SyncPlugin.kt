@@ -1,4 +1,4 @@
-package com.anhdaden
+package com.SyncCS
 
 import android.content.Context
 import android.os.Handler
@@ -8,6 +8,7 @@ import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.MainActivity
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
+import com.lagradost.cloudstream3.utils.DataStore
 import com.lagradost.cloudstream3.utils.DataStoreHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -16,8 +17,8 @@ import kotlinx.coroutines.withContext
 
 @CloudstreamPlugin
 class SyncPlugin : Plugin() {
-    private var counterBackup = 0
-    private var lastResumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null
+    var counterBackup = 0
+    var lastResumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null
     private val handler = Handler(Looper.getMainLooper())
 
     private val runnable = object : Runnable {
@@ -45,20 +46,19 @@ class SyncPlugin : Plugin() {
         try {
             this.counterBackup = 0
             CoroutineScope(Dispatchers.IO).launch {
-                val context = AcraApplication.Companion.getContext()
+                val context = AcraApplication.context
                 var backupDeviceStr: String? = null
                 if (context != null) {
-                    val dataStore = com.lagradost.cloudstream3.utils.DataStore.INSTANCE
                     try {
-                        val raw = dataStore.getSharedPrefs(context).getString("backup_device", null)
+                        val raw = with(DataStore) { context.getSharedPrefs().getString("backup_device", null) }
                         if (raw != null) {
-                            backupDeviceStr = dataStore.getMapper().readValue(raw, String::class.java)
+                            backupDeviceStr = DataStore.mapper.readValue(raw, String::class.java)
                         }
                     } catch (unused2: Exception) {
                     }
                 }
                 if (backupDeviceStr == "true") {
-                    val context2 = AcraApplication.Companion.getContext()
+                    val context2 = AcraApplication.context
                     val resumeWatching = com.lagradost.cloudstream3.ui.home.HomeViewModel.Companion.getResumeWatching()
                     val backupFile = BackupUtils.getBackup(context2, resumeWatching)
                     val json = if (backupFile != null) {
@@ -74,21 +74,20 @@ class SyncPlugin : Plugin() {
     private fun restoreDevice(unused: Boolean) {
         try {
             CoroutineScope(Dispatchers.IO).launch {
-                val context = AcraApplication.Companion.getContext()
+                val context = AcraApplication.context
                 var restoreDeviceStr: String? = null
                 if (context != null) {
-                    val dataStore = com.lagradost.cloudstream3.utils.DataStore.INSTANCE
                     try {
-                        val raw = dataStore.getSharedPrefs(context).getString("restore_device", null)
+                        val raw = with(DataStore) { context.getSharedPrefs().getString("restore_device", null) }
                         if (raw != null) {
-                            restoreDeviceStr = dataStore.getMapper().readValue(raw, String::class.java)
+                            restoreDeviceStr = DataStore.mapper.readValue(raw, String::class.java)
                         }
                     } catch (unused2: Exception) {
                     }
                 }
                 if (restoreDeviceStr == "true" && ApiUtils.INSTANCE.isLoggedIn()) {
                     val devices = ApiUtils.INSTANCE.fetchDevices()
-                    val context2 = AcraApplication.Companion.getContext()
+                    val context2 = AcraApplication.context
                     val thisDeviceId = if (context2 != null) {
                         UtilKt.getDeviceId(context2.packageName, context2)
                     } else ""
@@ -98,7 +97,7 @@ class SyncPlugin : Plugin() {
                                 val syncedData = device.syncedData
                                 if (!syncedData.isNullOrEmpty()) {
                                     val json = UtilKt.restoreText(UtilKt.decompressJsonFromString(syncedData))
-                                    val mapper = com.lagradost.cloudstream3.utils.DataStore.INSTANCE.getMapper()
+                                    val mapper = DataStore.mapper
                                     val backupFile = mapper.readValue(json, BackupFile::class.java)
                                     if (backupFile != null && context2 != null) {
                                         withContext(Dispatchers.Main) {
@@ -126,9 +125,8 @@ class SyncPlugin : Plugin() {
         MainActivity.Companion.reloadAccountEvent.plusAssign { backupDevice(it) }
 
         val appCompatActivity = context as AppCompatActivity
-        setOpenSettings { ctx ->
+        openSettings = { ctx ->
             SyncSettingsFragment(this).show(appCompatActivity.supportFragmentManager, "Sync")
-            kotlin.Unit
         }
     }
 }
