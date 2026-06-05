@@ -26,6 +26,10 @@ import java.security.cert.X509Certificate
 import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
+import java.io.ByteArrayOutputStream
+import java.io.ByteArrayInputStream
+import java.util.zip.GZIPOutputStream
+import java.util.zip.GZIPInputStream
 
 // =========================================================================
 // [1] Native SharedPreferences Helper
@@ -120,7 +124,7 @@ data class SyncDevice(
 )
 
 // =========================================================================
-// [3] Util Area (GZIP 및 쓸데없는 호환성 로직 제거, 완전 평문 Base64 적용)
+// [3] Util Area
 // =========================================================================
 object Util {
     private val minifyDict = listOf(
@@ -145,7 +149,7 @@ object Util {
         "\\\"title\\\"" to "\\\"v28\\\"", "\\\"poster\\\"" to "\\\"v29\\\"", "\\\"TvSeries\\\"" to "\\\"v30\\\"",
         "\\\"Movie\\\"" to "\\\"v31\\\"", "\\\"NSFW\\\"" to "\\\"v32\\\"", "\\\"Anime\\\"" to "\\\"v33\\\"",
         "\\\"Live\\\"" to "\\\"v34\\\"", "\\\"AnimeMovie\\\"" to "\\\"v35\\\"", "\\\"AsianDrama\\\"" to "\\\"v36\\\"",
-        "\\\"Cartoon\\\"" to "\\\"v37\\\"", "\\\"Torrent\\\"" to "\\\"v37\\\"", "\\\"slug\\\"" to "\\\"v39\\\"",
+        "\\\"Cartoon\\\"" to "\\\"v37\\\"", "\\\"Torrent\\\"" to "\\\"v38\\\"", "\\\"slug\\\"" to "\\\"v39\\\"",
         "\\\"https://" to "\\\"h//", "\\\":null," to "\\\":n,", "\\\":false}" to "\\\":f}", "\\\":true}" to "\\\":t}",
         "\"_Bool\"" to "\"s1\"", "\"_Int\"" to "\"s2\"", "\"_String\"" to "\"s3\"", "\"_Float\"" to "\"s4\"",
         "\"_Long\"" to "\"s5\"", "\"_StringSet\"" to "\"s6\"", "\"swipe_enabled_key\"" to "\"s7\"",
@@ -168,6 +172,7 @@ object Util {
         "\"prefer_media_type_key_2\"" to "\"s53\"", "\"datastore\"" to "\"s54\""
     )
 
+    // [개선] 정규식 파싱 오류 위험을 우회하고 단순 일대일 매핑 치환만 고속으로 처리합니다.
     fun cleanedSyncData(str: String): String {
         return try {
             var result = str
@@ -192,17 +197,27 @@ object Util {
         }
     }
 
-    // [디버깅 개편] GZIP 복잡성을 아예 없애고, 디버깅을 위해 순수 Base64로만 인코딩합니다.
+    // GZIP 압축 후 Base64 인코딩
     fun compressJsonToString(str: String): String {
-        val bytes = str.toByteArray(UTF_8)
-        return Base64.encodeToString(bytes, Base64.NO_WRAP or Base64.NO_PADDING)
+        return try {
+            val bos = ByteArrayOutputStream()
+            GZIPOutputStream(bos).use { gzos ->
+                gzos.write(str.toByteArray(UTF_8))
+            }
+            Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP or Base64.NO_PADDING)
+        } catch (e: Exception) {
+            Log.e("SyncCS", "GZIP Compression Failed! Fallback to plain Base64.", e)
+            val bytes = str.toByteArray(UTF_8)
+            Base64.encodeToString(bytes, Base64.NO_WRAP or Base64.NO_PADDING)
+        }
     }
 
-    // [디버깅 개편] 순수 Base64 문자열을 원본 평문 JSON 문자열로만 단순 디코딩합니다.
+    // GZIP 압축 해제
     fun decompressJsonFromString(str: String): String {
         return try {
             val bytes = Base64.decode(str, Base64.NO_WRAP or Base64.NO_PADDING)
-            String(bytes, UTF_8)
+            val bis = ByteArrayInputStream(bytes)
+            GZIPInputStream(bis).bufferedReader(UTF_8).use { it.readText() }
         } catch (e: Exception) {
             ""
         }
@@ -234,7 +249,7 @@ object Util {
 }
 
 // =========================================================================
-// [4] BackupUtils Area (메타데이터 및 용량 유발 필드 완전 적출 제거형 개편)
+// [4] BackupUtils Area (순정 JSONObject 라이브러리를 통한 대용량 필드 완전 적출)
 // =========================================================================
 object BackupUtils {
     private val nonTransferableKeys = listOf(
@@ -270,28 +285,16 @@ object BackupUtils {
         val pref = SharedPrefsHelper.getPrefs()
         val defaultPref = SharedPrefsHelper.getDefaultPrefs()
 
+        // [중요] 1번 기기(태블릿)의 원본 데이터를 가공하며 대용량 텍스트 유발 필드(overview, plot, tags)를 네이티브 레벨에서 강제 박멸
         val rawPrefs = pref.all.filter { isResume(it.key, syncPlugins) }
-        
-        // [중요] 동기화에는 불필요하지만 문자열 크기를 가중시키는 대용량 필드들을 네이티브 수준에서 완벽하게 박멸(Prun)합니다.
         val validPrefs = rawPrefs.mapValues { entry ->
             val value = entry.value
             if (value is String && (entry.key.contains("result_resume_watching") || entry.key.contains("result_watch_state"))) {
                 try {
                     val jsonObj = JSONObject(value)
-                    
-                    // 핵심 메타데이터 트래킹 필드 외의 무거운 부가 데이터(포스터 헤더, 시놉시스, 줄거리 등)를 일체 삭제
-                    val keysToKeep = listOf("name", "url", "apiName", "type", "latestUpdatedTime", "bookmarkedTime", "position", "duration", "season", "episode")
-                    val keys = jsonObj.keys()
-                    val toRemove = mutableListOf<String>()
-                    while (keys.hasNext()) {
-                        val key = keys.next()
-                        if (!keysToKeep.contains(key)) {
-                            toRemove.add(key)
-                        }
-                    }
-                    for (k in toRemove) {
-                        jsonObj.remove(k)
-                    }
+                    jsonObj.remove("overview")
+                    jsonObj.remove("plot")
+                    jsonObj.remove("tags")
                     jsonObj.toString()
                 } catch (e: Exception) {
                     value
@@ -321,7 +324,7 @@ object BackupUtils {
         )
     }
 
-    fun restoreMap(context: Context, incoming: Map<String, out Any?>?, isAppSettings: Boolean, syncPlugins: Boolean = false) {
+    fun restoreMap(incoming: Map<String, out Any?>?, isAppSettings: Boolean, syncPlugins: Boolean = false) {
         if (incoming.isNullOrEmpty()) return
         val pref = if (isAppSettings) SharedPrefsHelper.getDefaultPrefs() else SharedPrefsHelper.getPrefs()
         val editor = pref.edit()
@@ -368,20 +371,20 @@ object BackupUtils {
 
     fun restore(backupFile: BackupFile, restoreSettings: Boolean, restoreDataStore: Boolean, syncPlugins: Boolean = false) {
         if (restoreSettings) {
-            restoreMap(SharedPrefsHelper.appContext, backupFile.settings.bool, true, syncPlugins)
-            restoreMap(SharedPrefsHelper.appContext, backupFile.settings.int, true, syncPlugins)
-            restoreMap(SharedPrefsHelper.appContext, backupFile.settings.string, true, syncPlugins)
-            restoreMap(SharedPrefsHelper.appContext, backupFile.settings.float, true, syncPlugins)
-            restoreMap(SharedPrefsHelper.appContext, backupFile.settings.long, true, syncPlugins)
-            restoreMap(SharedPrefsHelper.appContext, backupFile.settings.stringSet, true, syncPlugins)
+            restoreMap(backupFile.settings.bool, true, syncPlugins)
+            restoreMap(backupFile.settings.int, true, syncPlugins)
+            restoreMap(backupFile.settings.string, true, syncPlugins)
+            restoreMap(backupFile.settings.float, true, syncPlugins)
+            restoreMap(backupFile.settings.long, true, syncPlugins)
+            restoreMap(backupFile.settings.stringSet, true, syncPlugins)
         }
         if (restoreDataStore) {
-            restoreMap(SharedPrefsHelper.appContext, backupFile.datastore.bool, false, syncPlugins)
-            restoreMap(SharedPrefsHelper.appContext, backupFile.datastore.int, false, syncPlugins)
-            restoreMap(SharedPrefsHelper.appContext, backupFile.datastore.string, false, syncPlugins)
-            restoreMap(SharedPrefsHelper.appContext, backupFile.datastore.float, false, syncPlugins)
-            restoreMap(SharedPrefsHelper.appContext, backupFile.datastore.long, false, syncPlugins)
-            restoreMap(SharedPrefsHelper.appContext, backupFile.datastore.stringSet, false, syncPlugins)
+            restoreMap(backupFile.datastore.bool, false, syncPlugins)
+            restoreMap(backupFile.datastore.int, false, syncPlugins)
+            restoreMap(backupFile.datastore.string, false, syncPlugins)
+            restoreMap(backupFile.datastore.float, false, syncPlugins)
+            restoreMap(backupFile.datastore.long, false, syncPlugins)
+            restoreMap(backupFile.datastore.stringSet, false, syncPlugins)
         }
     }
 }
