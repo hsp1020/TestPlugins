@@ -61,8 +61,8 @@ class SyncPlugin : Plugin() {
     }
 
     override fun load(context: Context) {
-        val deviceId = Util.getDeviceId(context.packageName, context)
-        SharedPrefsHelper.getPrefs(context).edit().putString("device_id", deviceId).apply()
+        val deviceId = Util.getDeviceId()
+        SharedPrefsHelper.getPrefs().edit().putString("device_id", deviceId).apply()
         Log.d("SyncCS", "Plugin Loaded. This Device ID: $deviceId")
 
         pluginScope.launch { restoreDevice() }
@@ -97,7 +97,6 @@ class SyncPlugin : Plugin() {
         }
     }
 
-    // [수정됨] 비동기로 흐르지 않고 확실하게 완료를 기다리도록 suspend fun으로 변경
     suspend fun forceBackupNow() {
         backupDebounceJob?.cancel()
         Log.d("SyncCS", "Manual Push (Backup) Triggered!")
@@ -105,13 +104,12 @@ class SyncPlugin : Plugin() {
     }
 
     private suspend fun backupDevice() = withContext(Dispatchers.IO) {
-        val context = AcraApplication.context ?: CloudStreamApp.context ?: return@withContext
-        val pref = SharedPrefsHelper.getPrefs(context)
+        val pref = SharedPrefsHelper.getPrefs()
         val backupEnabled = pref.getString("backup_device", "false") == "true"
         val syncPluginsEnabled = pref.getString("sync_plugins_enabled", "false") == "true"
 
         if (backupEnabled && ApiUtils.isLoggedIn()) {
-            val backupFile = BackupUtils.getFullBackup(context, syncPluginsEnabled)
+            val backupFile = BackupUtils.getFullBackup(syncPluginsEnabled)
             if (backupFile == null) return@withContext
             
             val json = mapper.writeValueAsString(backupFile)
@@ -119,7 +117,7 @@ class SyncPlugin : Plugin() {
             if (json.isNotEmpty()) {
                 val compressed = Util.compressJsonToString(Util.cleanedSyncData(json))
                 Log.d("SyncCS", "Compressed Payload Size: ${compressed.length} characters")
-                val result = ApiUtils.syncThisDevice(compressed, context)
+                val result = ApiUtils.syncThisDevice(compressed)
                 if (result.first) {
                     pref.edit().putLong("last_sync_timestamp", System.currentTimeMillis()).apply()
                     Log.d("SyncCS", "Backup Complete. Timestamp updated.")
@@ -129,16 +127,15 @@ class SyncPlugin : Plugin() {
     }
 
     suspend fun restoreDevice(): Boolean = withContext(Dispatchers.IO) {
-        val context = AcraApplication.context ?: CloudStreamApp.context ?: return@withContext false
-        val pref = SharedPrefsHelper.getPrefs(context)
+        val pref = SharedPrefsHelper.getPrefs()
         val restoreEnabled = pref.getString("restore_device", "false") == "true"
         val syncPluginsEnabled = pref.getString("sync_plugins_enabled", "false") == "true"
 
         if (restoreEnabled && ApiUtils.isLoggedIn()) {
             Log.d("SyncCS", "--- Initiating Restore Process ---")
             try {
-                val devices = ApiUtils.fetchDevices(context)
-                val thisDeviceId = Util.getDeviceId(context.packageName, context)
+                val devices = ApiUtils.fetchDevices()
+                val thisDeviceId = Util.getDeviceId()
 
                 for (device in devices) {
                     if (device.deviceId == thisDeviceId) continue
@@ -150,7 +147,7 @@ class SyncPlugin : Plugin() {
 
                         if (backupFile != null) {
                             withContext(Dispatchers.Main) {
-                                BackupUtils.restore(context, backupFile, true, true, syncPluginsEnabled)
+                                BackupUtils.restore(backupFile, true, true, syncPluginsEnabled)
                             }
                         }
                     }
