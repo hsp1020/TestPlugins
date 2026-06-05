@@ -10,7 +10,7 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.lagradost.cloudstream3.AcraApplication
-import com.lagradost.cloudstream3.utils.DataStore // AndroidX 대신 본체의 진짜 DataStore 클래스를 참조하여 Unresolved 에러 및 수집 누락 해결
+import com.lagradost.cloudstream3.utils.DataStore // 메인 앱의 DataStore 클래스를 정석적으로 임포트
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -34,14 +34,18 @@ object SharedPrefsHelper {
     val appContext: Context
         get() = AcraApplication.context ?: throw IllegalStateException("Cloudstream App context is null")
 
-    // 메인 앱 본체의 오리지널 API를 직접 호출하여 실제 시청 기록 데이터(DataStore)에 접근합니다.
+    // 본체 DataStore 내부의 Context 확장 함수를 코틀린 전용 수신 객체 지정 함수(with)를 통해 정상 호출합니다.
     fun getPrefs(): SharedPreferences {
-        return DataStore.getSharedPrefs(appContext)
+        return with(DataStore) {
+            appContext.getSharedPrefs()
+        }
     }
 
-    // 메인 앱 본체의 오리지널 API를 직접 호출하여 실제 설정 데이터(_preferences)에 접근합니다.
+    // 본체 DataStore 내부의 Context 확장 함수를 코틀린 전용 수신 객체 지정 함수(with)를 통해 정상 호출합니다.
     fun getDefaultPrefs(): SharedPreferences {
-        return DataStore.getDefaultSharedPrefs(appContext)
+        return with(DataStore) {
+            appContext.getDefaultSharedPrefs()
+        }
     }
 }
 
