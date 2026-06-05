@@ -1,8 +1,11 @@
 package com.anilife
 
 import android.util.Base64
+import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.network.WebViewResolver // 클라우드플레어 우회용 인터셉터
+import com.lagradost.cloudstream3.network.NiceResponse
 import org.jsoup.nodes.Document
 import kotlinx.coroutines.CancellationException
 
@@ -13,13 +16,20 @@ class Anilife : MainAPI() {
     override var lang = "ko"
     override val supportedTypes = setOf(TvType.Anime)
 
-    private val TAG = "[Anilife]"
-    private val pcUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
+    private val TAG = "AnilifeProvider"
+    
+    // 모바일 기기 및 안드로이드 WebView의 실제 TLS 핑거프린트와 정합성을 맞추기 위해 모바일 크롬 UA 적용
+    private val mobileUserAgent = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
     private val commonHeaders = mapOf(
-        "User-Agent" to pcUserAgent,
+        "User-Agent" to mobileUserAgent,
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
         "Referer" to "$mainUrl/"
     )
+
+    // 핵심: anilife.live 도메인으로 가는 요청은 실제 숨겨진 브라우저(WebView)를 태워서 통과시킴
+    private val cfInterceptor = WebViewResolver(Regex("""anilife\.live"""))
 
     override val mainPage = mainPageOf(
         "/top20" to "실시간 TOP 20",
@@ -30,6 +40,28 @@ class Anilife : MainAPI() {
         "/vodtype/categorize/Movie/1" to "극장판"
     )
 
+    /**
+     * OkHttp 다이렉트 통신을 1차 시도하고, 
+     * 실패 또는 검증 요구 발생 시 WebViewResolver를 2차로 우회 호출하는 Resilient 모듈
+     */
+    private suspend fun requestWithFallback(url: String, headers: Map<String, String> = commonHeaders): NiceResponse {
+        return try {
+            // 1차 시도: 일반 OkHttp 통신 (매우 신속하며 WebView의 SSL 버그 자체를 원천 회피)
+            val response = app.get(url, headers = headers)
+            if (response.code == 200) {
+                Log.d(TAG, "[requestWithFallback] 일반 OkHttp 통신 성공 -> $url")
+                response
+            } else {
+                throw Exception("Response code ${response.code}")
+            }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            Log.w(TAG, "[requestWithFallback] 일반 통신 실패 (${e.message}). WebViewResolver 우회 작동 시도 -> $url")
+            // 2차 시도: WebViewResolver 사용 (모바일 UA 대조를 통해 완벽한 핸드셰이크 조율 제공)
+            app.get(url, headers = headers, interceptor = cfInterceptor)
+        }
+    }
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         if (request.name.contains("TOP 20") && page > 1) {
             return newHomePageResponse(request.name, emptyList(), hasNext = false)
@@ -38,20 +70,29 @@ class Anilife : MainAPI() {
         val url = if (request.name.contains("TOP 20")) "$mainUrl${request.data}" 
                   else "$mainUrl${request.data.substringBeforeLast("/")}/$page"
         
+        Log.d(TAG, "[getMainPage] 데이터 로드 시도 -> $url")
+        
         return try {
-            val doc = app.get(url, headers = commonHeaders).document
+            val response = requestWithFallback(url, commonHeaders)
+            Log.d(TAG, "[getMainPage] 응답 코드: ${response.code}") 
+            
+            val doc = response.document
             val items = parseCommonList(doc)
+            Log.d(TAG, "[getMainPage] 파싱 성공: ${items.size}개")
+            
             val hasNextPage = if (request.name.contains("TOP 20")) false else items.isNotEmpty()
             
             newHomePageResponse(request.name, items, hasNext = hasNextPage)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
+            Log.e(TAG, "[getMainPage] 페이지 획득 최종 실패", e)
             newHomePageResponse(request.name, emptyList(), hasNext = false)
         }
     }
 
     private fun parseCommonList(doc: Document): List<SearchResponse> {
-        return doc.select(".listupd > article.bs").mapNotNull { element ->
+        val elements = doc.select(".listupd > article.bs")
+        return elements.mapNotNull { element ->
             try {
                 val aTag = element.selectFirst("div.bsx > a") ?: return@mapNotNull null
                 val rawHref = fixUrl(aTag.attr("href"))
@@ -78,10 +119,14 @@ class Anilife : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
+        val url = "$mainUrl/search?keyword=$query"
+        Log.d(TAG, "[search] 검색 시도 -> $url")
         return try {
-            parseCommonList(app.get("$mainUrl/search?keyword=$query", headers = commonHeaders).document)
+            val response = requestWithFallback(url, commonHeaders)
+            parseCommonList(response.document)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
+            Log.e(TAG, "[search] 검색 최종 에러 발생", e)
             emptyList()
         }
     }
@@ -94,8 +139,10 @@ class Anilife : MainAPI() {
             url.substringBefore("?poster=")
         } else url
 
+        Log.d(TAG, "[load] 상세 정보 획득 시도 -> $cleanUrl")
+
         try {
-            val response = app.get(cleanUrl, headers = commonHeaders)
+            val response = requestWithFallback(cleanUrl, commonHeaders)
             val doc = response.document
             val finalUrl = response.url
             val encodedRef = Base64.encodeToString(finalUrl.toByteArray(), Base64.NO_WRAP)
@@ -143,6 +190,7 @@ class Anilife : MainAPI() {
             }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
+            Log.e(TAG, "[load] 상세 정보 로드 최종 에러", e)
             throw e
         }
     }
@@ -166,12 +214,13 @@ class Anilife : MainAPI() {
         val videoIdMatch = Regex("""(?:id|provider)/([^/?]+)""").find(cleanData)
         val videoId = videoIdMatch?.groupValues?.get(1) ?: "unknown_id"
 
-        try {
-            val webResponse = app.get(
-                cleanData, 
-                headers = mapOf("Referer" to detailReferer, "User-Agent" to pcUserAgent)
-            )
+        Log.d(TAG, "[loadLinks] 동영상 링크 로드 시도 -> $cleanData")
 
+        try {
+            val linkHeaders = commonHeaders.toMutableMap()
+            linkHeaders["Referer"] = detailReferer
+
+            val webResponse = requestWithFallback(cleanData, linkHeaders)
             val playerUrl = AnilifeProxyExtractor().extractPlayerUrl(webResponse.text, mainUrl) ?: return false
 
             return AnilifeProxyExtractor().extractWithProxy(
@@ -184,9 +233,9 @@ class Anilife : MainAPI() {
                 videoId = videoId,
                 callback = callback
             )
-
         } catch (e: Exception) {
             if (e is CancellationException) throw e
+            Log.e(TAG, "[loadLinks] 링크 분석 최종 에러", e)
         }
         return false
     }
