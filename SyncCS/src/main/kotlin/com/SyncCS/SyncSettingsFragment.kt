@@ -96,7 +96,6 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
     @SuppressLint("SetTextI18n")
     private fun showConfigDialog() {
         val ctx = context ?: return
-        val pref = SharedPrefsHelper.getPrefs()
 
         val layout = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
@@ -107,7 +106,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
 
         val tokenInput = EditText(ctx).apply {
             hint = "GitHub PAT Token (ghp_...)"
-            setText(pref.getString("sync_token", ""))
+            setText(SharedPrefsHelper.getKey("sync_token", String::class.java, "", ctx))
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
@@ -118,7 +117,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
         val projectNumInput = EditText(ctx).apply {
             hint = "GitHub Project Number (ex: 1)"
             inputType = android.text.InputType.TYPE_CLASS_NUMBER
-            setText(pref.getString("sync_project_num", ""))
+            setText(SharedPrefsHelper.getKey("sync_project_num", String::class.java, "", ctx))
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
@@ -128,21 +127,21 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
 
         val backupSwitch = Switch(ctx).apply {
             text = "Backup data to Cloud"
-            isChecked = pref.getString("backup_device", "false") == "true"
+            isChecked = SharedPrefsHelper.getKey("backup_device", String::class.java, "false", ctx) == "true"
             setPadding(0, 30, 0, 30)
         }
         layout.addView(backupSwitch)
 
         val restoreSwitch = Switch(ctx).apply {
             text = "Restore data from Cloud"
-            isChecked = pref.getString("restore_device", "false") == "true"
+            isChecked = SharedPrefsHelper.getKey("restore_device", String::class.java, "false", ctx) == "true"
             setPadding(0, 0, 0, 30)
         }
         layout.addView(restoreSwitch)
 
         val syncPluginsSwitch = Switch(ctx).apply {
             text = "Automated Plugin Sync"
-            isChecked = pref.getString("sync_plugins_enabled", "false") == "true"
+            isChecked = SharedPrefsHelper.getKey("sync_plugins_enabled", String::class.java, "false", ctx) == "true"
             setPadding(0, 0, 0, 30)
         }
         layout.addView(syncPluginsSwitch)
@@ -156,7 +155,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                         (plugin as? SyncPlugin)?.restoreDevice()
                     }
                     if (result != null) {
-                        CommonActivity.showToast(result.second, null) // 백엔드 수집 결과에 기반한 토스트 출력
+                        CommonActivity.showToast(result.second, null)
                     } else {
                         CommonActivity.showToast("Failed to pull data.", null)
                     }
@@ -174,7 +173,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                         (plugin as? SyncPlugin)?.forceBackupNow()
                     }
                     if (result != null) {
-                        CommonActivity.showToast(result.second, null) // 백엔드 통신 에러/결과를 정확하게 토스트로 노출
+                        CommonActivity.showToast(result.second, null)
                     } else {
                         CommonActivity.showToast("Upload failed.", null)
                     }
@@ -196,8 +195,8 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
         layout.addView(deviceManagerContainer)
 
         CoroutineScope(Dispatchers.IO).launch {
-            if (ApiUtils.isLoggedIn()) {
-                val devices = ApiUtils.fetchDevices()
+            if (ApiUtils.isLoggedIn(ctx)) {
+                val devices = ApiUtils.fetchDevices(ctx)
                 withContext(Dispatchers.Main) {
                     if (devices.isEmpty()) {
                         deviceManagerContainer.addView(TextView(ctx).apply { text = "No devices found." })
@@ -215,8 +214,8 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                                 text = "Unlink"
                                 setOnClickListener {
                                     CoroutineScope(Dispatchers.IO).launch {
-                                        val token = pref.getString("sync_token", null)?.replace("\"", "") ?: return@launch
-                                        val projectId = pref.getString("sync_project_id", null)?.replace("\"", "") ?: return@launch
+                                        val token = SharedPrefsHelper.getKey("sync_token", String::class.java, context = ctx) ?: return@launch
+                                        val projectId = SharedPrefsHelper.getKey("sync_project_id", String::class.java, context = ctx) ?: return@launch
                                         val query = """
                                             mutation {
                                                 deleteProjectV2Item(input: {projectId: "$projectId", itemId: "${device.itemId}"}) {
@@ -265,17 +264,15 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
 
                 loadingDialog.show()
 
-                pref.edit()
-                    .putString("sync_token", token)
-                    .putString("sync_project_num", projectNum)
-                    .putString("backup_device", backupSwitch.isChecked.toString())
-                    .putString("restore_device", restoreSwitch.isChecked.toString())
-                    .putString("sync_plugins_enabled", syncPluginsSwitch.isChecked.toString())
-                    .apply()
+                SharedPrefsHelper.setKey("sync_token", token, ctx)
+                SharedPrefsHelper.setKey("sync_project_num", projectNum, ctx)
+                SharedPrefsHelper.setKey("backup_device", backupSwitch.isChecked.toString(), ctx)
+                SharedPrefsHelper.setKey("restore_device", restoreSwitch.isChecked.toString(), ctx)
+                SharedPrefsHelper.setKey("sync_plugins_enabled", syncPluginsSwitch.isChecked.toString(), ctx)
 
                 CoroutineScope(Dispatchers.IO).launch {
                     try {
-                        val result = ApiUtils.syncProjectDetails()
+                        val result = ApiUtils.syncProjectDetails(ctx)
                         withContext(Dispatchers.Main) {
                             loadingDialog.dismiss()
                             CommonActivity.showToast(result.second, null)
@@ -292,13 +289,11 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                 }
             }
             .setNegativeButton("Reset") { _, _ ->
-                pref.edit()
-                    .putString("sync_token", "")
-                    .putString("sync_project_num", "")
-                    .putString("sync_project_id", "")
-                    .putString("sync_item_id", "")
-                    .putLong("last_sync_timestamp", 0L)
-                    .apply()
+                SharedPrefsHelper.setKey("sync_token", "", ctx)
+                SharedPrefsHelper.setKey("sync_project_num", "", ctx)
+                SharedPrefsHelper.setKey("sync_project_id", "", ctx)
+                SharedPrefsHelper.setKey("sync_item_id", "", ctx)
+                SharedPrefsHelper.setKey("last_sync_timestamp", 0L, ctx)
 
                 CommonActivity.showToast("Credentials removed", null)
                 dismiss()
