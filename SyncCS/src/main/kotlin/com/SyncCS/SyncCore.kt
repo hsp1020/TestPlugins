@@ -10,6 +10,7 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.lagradost.cloudstream3.AcraApplication
+import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.utils.DataStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -26,27 +27,48 @@ import java.security.cert.X509Certificate
 import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
-import java.io.ByteArrayOutputStream
-import java.io.ByteArrayInputStream
-import java.util.zip.GZIPOutputStream
-import java.util.zip.GZIPInputStream
 
 // =========================================================================
-// [1] Native SharedPreferences Helper
+// [1] SharedPreferences Helper (Exact Jackson Handling)
 // =========================================================================
 object SharedPrefsHelper {
-    val appContext: Context
-        get() = AcraApplication.context ?: throw IllegalStateException("Cloudstream App context is null")
+    private val mapper = jacksonObjectMapper()
 
-    fun getPrefs(): SharedPreferences {
+    fun getPrefs(context: Context? = null): SharedPreferences {
+        val ctx = context ?: AcraApplication.context ?: CloudStreamApp.context ?: throw IllegalStateException("Context is null")
         return with(DataStore) {
-            appContext.getSharedPrefs()
+            ctx.getSharedPrefs()
         }
     }
 
-    fun getDefaultPrefs(): SharedPreferences {
+    fun getDefaultPrefs(context: Context? = null): SharedPreferences {
+        val ctx = context ?: AcraApplication.context ?: CloudStreamApp.context ?: throw IllegalStateException("Context is null")
         return with(DataStore) {
-            appContext.getDefaultSharedPrefs()
+            ctx.getDefaultSharedPrefs()
+        }
+    }
+
+    fun <T> getKey(key: String, clazz: Class<T>, defValue: T? = null, context: Context? = null): T? {
+        return try {
+            val pref = getPrefs(context)
+            val json = pref.getString(key, null) ?: return defValue
+            mapper.readValue(json, clazz)
+        } catch (e: Exception) {
+            defValue
+        }
+    }
+
+    fun setKey(key: String, value: Any?, context: Context? = null) {
+        try {
+            val pref = getPrefs(context)
+            if (value == null) {
+                pref.edit().remove(key).apply()
+            } else {
+                val json = mapper.writeValueAsString(value)
+                pref.edit().putString(key, json).apply()
+            }
+        } catch (e: Exception) {
+            Log.e("SyncCS", "Failed to save key: $key", e)
         }
     }
 }
@@ -149,7 +171,7 @@ object Util {
         "\\\"title\\\"" to "\\\"v28\\\"", "\\\"poster\\\"" to "\\\"v29\\\"", "\\\"TvSeries\\\"" to "\\\"v30\\\"",
         "\\\"Movie\\\"" to "\\\"v31\\\"", "\\\"NSFW\\\"" to "\\\"v32\\\"", "\\\"Anime\\\"" to "\\\"v33\\\"",
         "\\\"Live\\\"" to "\\\"v34\\\"", "\\\"AnimeMovie\\\"" to "\\\"v35\\\"", "\\\"AsianDrama\\\"" to "\\\"v36\\\"",
-        "\\\"Cartoon\\\"" to "\\\"v37\\\"", "\\\"Torrent\\\"" to "\\\"v37\\\"", "\\\"slug\\\"" to "\\\"v39\\\"",
+        "\\\"Cartoon\\\"" to "\\\"v37\\\"", "\\\"Torrent\\\"" to "\\\"v38\\\"", "\\\"slug\\\"" to "\\\"v39\\\"",
         "\\\"https://" to "\\\"h//", "\\\":null," to "\\\":n,", "\\\":false}" to "\\\":f}", "\\\":true}" to "\\\":t}",
         "\"_Bool\"" to "\"s1\"", "\"_Int\"" to "\"s2\"", "\"_String\"" to "\"s3\"", "\"_Float\"" to "\"s4\"",
         "\"_Long\"" to "\"s5\"", "\"_StringSet\"" to "\"s6\"", "\"swipe_enabled_key\"" to "\"s7\"",
@@ -175,6 +197,11 @@ object Util {
     fun cleanedSyncData(str: String): String {
         return try {
             var result = str
+            // Regex patterns to clean heavy metadata
+            result = Regex("""\\\"overview\\\"\s*:\s*\\\"(.*?)(?<!\\)\\\"""").replace(result, """\\\"overview\\\":\\\"\\\"""")
+            result = Regex("""\\\"plot\\\"\s*:\s*\\\"(.*?)(?<!\\)\\\"""").replace(result, """\\\"plot\\\":\\\"\\\"""")
+            result = Regex("""\\\"tags\\\"\s*:\s*\[.*?]""").replace(result, """\\\"tags\\\":[]""")
+
             for ((old, new) in minifyDict) {
                 result = result.replace(old, new)
             }
@@ -196,48 +223,39 @@ object Util {
         }
     }
 
-    // GZIP 압축 후 Base64 인코딩
+    // Matching the original Base64 conversion (Android Base64 Flag 10 = NO_WRAP or URL_SAFE)
     fun compressJsonToString(str: String): String {
         return try {
-            val bos = ByteArrayOutputStream()
-            GZIPOutputStream(bos).use { gzos ->
-                gzos.write(str.toByteArray(UTF_8))
-            }
-            Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP or Base64.NO_PADDING)
-        } catch (e: Exception) {
-            Log.e("SyncCS", "GZIP Compression Failed! Fallback to plain Base64.", e)
             val bytes = str.toByteArray(UTF_8)
-            Base64.encodeToString(bytes, Base64.NO_WRAP or Base64.NO_PADDING)
-        }
-    }
-
-    // GZIP 압축 해제
-    fun decompressJsonFromString(str: String): String {
-        return try {
-            val bytes = Base64.decode(str, Base64.NO_WRAP or Base64.NO_PADDING)
-            val bis = ByteArrayInputStream(bytes)
-            GZIPInputStream(bis).bufferedReader(UTF_8).use { it.readText() }
+            Base64.encodeToString(bytes, 10)
         } catch (e: Exception) {
             ""
         }
     }
 
-    // [디버깅 우회] 암호화를 생략하고 평문을 즉시 리턴
+    fun decompressJsonFromString(str: String): String {
+        return try {
+            val bytes = Base64.decode(str, 10)
+            String(bytes, UTF_8)
+        } catch (e: Exception) {
+            ""
+        }
+    }
+
     fun encrypt(str: String, keySeed: String): String {
         return str
     }
 
-    // [디버깅 우회] 복호화를 생략하고 평문을 즉시 리턴
     fun decrypt(str: String, keySeed: String): String {
         return str
     }
 
-    fun getDeviceId(): String {
-        val context = SharedPrefsHelper.appContext
-        val androidId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
-        if (!androidId.isNullOrEmpty()) return md5(context.packageName + androidId)
+    fun getDeviceId(context: Context? = null): String {
+        val ctx = context ?: AcraApplication.context ?: CloudStreamApp.context ?: return ""
+        val androidId = Settings.Secure.getString(ctx.contentResolver, Settings.Secure.ANDROID_ID)
+        if (!androidId.isNullOrEmpty()) return md5(ctx.packageName + androidId)
         val fallback = "${Build.BRAND}_${Build.MODEL}_${Build.DEVICE}"
-        return md5(context.packageName + UUID.nameUUIDFromBytes(fallback.toByteArray(UTF_8)).toString())
+        return md5(ctx.packageName + UUID.nameUUIDFromBytes(fallback.toByteArray(UTF_8)).toString())
     }
 
     fun md5(input: String): String {
@@ -248,7 +266,7 @@ object Util {
 }
 
 // =========================================================================
-// [4] BackupUtils Area (카테고리 메타데이터 대용량 파일 전용 예외 필터 완비)
+// [4] BackupUtils Area (Optimized Filter Controls)
 // =========================================================================
 object BackupUtils {
     private val nonTransferableKeys = listOf(
@@ -257,7 +275,7 @@ object BackupUtils {
         "simkl_token", "simkl_user", "simkl_cached_list", "simkl_cached_time", "simkl_accounts", "simkl_active",
         "SIMKL_API_CACHE", "ANIWAVE_SIMKL_SYNC", "open_subtitles_user", "opensubtitles_accounts", "opensubtitles_active",
         "subdl_user", "subdl_accounts", "subdl_active", "biometric_key", "nginx_user", "download_path_key",
-        "download_path_key_visual", "backup_path_key", "backup_dir_path_key", "cs3-votes",
+        "download_path_key_visual", "backup_path_key", "backup_dir_path_key", "PLUGINS_KEY", "PLUGINS_KEY_LOCAL", "cs3-votes",
         "last_sync_api", "last_click_action", "last_opened_id", "library_folder", "result_resume_watching_migrated",
         "jsdelivr_proxy_key", "fshare_setup", "fshare_token", "checkbox_fsharehd", "checkbox_fsharecine",
         "checkbox_fsharesheet", "checkbox_fsharefavourite", "checkbox_fsharehdvn", "checkbox_timfshare",
@@ -272,23 +290,41 @@ object BackupUtils {
     )
 
     fun isResume(key: String, syncPlugins: Boolean = false): Boolean {
-        if (!syncPlugins && (key.contains("PLUGINS_KEY") || key.contains("PLUGINS_KEY_LOCAL"))) return false
+        // Safe check plugins early to bypass nonTransferableKeys lists
+        if (key.contains("PLUGINS_KEY") || key.contains("PLUGINS_KEY_LOCAL")) {
+            return syncPlugins
+        }
         
-        // 다운로드 캐시 및 대형 캐시 키를 수집 대상에서 원천 차단합니다.
         if (key.contains("cache") || key.contains("CACHE") || key.contains("download_")) return false
-
-        // [용량 초과 극단적 최적화] 기기별로 상이하고 용량이 수십만 자에 달하는 홈 화면 카테고리 표시 설정을 전면 동기화에서 제외합니다.
         if (key.startsWith("cat_") || key.contains("cat_toggle") || key.contains("cat_order") || key.contains("cat_rename")) return false
         
         return nonTransferableKeys.none { key.contains(it) }
     }
 
-    fun getFullBackup(syncPlugins: Boolean = false): BackupFile? {
-        val pref = SharedPrefsHelper.getPrefs()
-        val defaultPref = SharedPrefsHelper.getDefaultPrefs()
+    fun isBackup(key: String, resumeWatching: List<Any>? = null, syncPlugins: Boolean = false): Boolean {
+        if (!isResume(key, syncPlugins)) return false
+        
+        // Exact watch states filter mapping
+        if (key.contains("result_resume_watching") || key.contains("result_watch_state") || 
+            key.contains("result_season") || key.contains("result_episode") || key.contains("result_dub")) {
+            if (resumeWatching == null) return false // Prevent backup if resume list isn't provided
+            
+            val parts = key.split("/")
+            if (parts.size < 2) return false
+            val mediaId = parts.lastOrNull() ?: return false
+            
+            return resumeWatching.any { item ->
+                item.toString().contains(mediaId)
+            }
+        }
+        return true
+    }
 
-        // 1번 기기(태블릿)의 데이터를 가공하며 줄거리(overview/plot/tags) 등 대용량 메타데이터를 네이티브 레벨에서 강제 탈락
-        val rawPrefs = pref.all.filter { isResume(it.key, syncPlugins) }
+    fun getFullBackup(context: Context, resumeWatching: List<Any>? = null, syncPlugins: Boolean = false): BackupFile? {
+        val pref = SharedPrefsHelper.getPrefs(context)
+        val defaultPref = SharedPrefsHelper.getDefaultPrefs(context)
+
+        val rawPrefs = pref.all.filter { isBackup(it.key, resumeWatching, syncPlugins) }
         val validPrefs = rawPrefs.mapValues { entry ->
             val value = entry.value
             if (value is String && (entry.key.contains("result_resume_watching") || entry.key.contains("result_watch_state"))) {
@@ -305,7 +341,7 @@ object BackupUtils {
                 value
             }
         }
-        val validDefaultPrefs = defaultPref.all.filter { isResume(it.key, syncPlugins) }
+        val validDefaultPrefs = defaultPref.all.filter { isBackup(it.key, resumeWatching, syncPlugins) }
 
         if (validPrefs.isEmpty() && validDefaultPrefs.isEmpty()) return null
 
@@ -326,9 +362,9 @@ object BackupUtils {
         )
     }
 
-    fun restoreMap(incoming: Map<String, out Any?>?, isAppSettings: Boolean, syncPlugins: Boolean = false) {
+    fun restoreMap(context: Context, incoming: Map<String, out Any?>?, isAppSettings: Boolean, syncPlugins: Boolean = false) {
         if (incoming.isNullOrEmpty()) return
-        val pref = if (isAppSettings) SharedPrefsHelper.getDefaultPrefs() else SharedPrefsHelper.getPrefs()
+        val pref = if (isAppSettings) SharedPrefsHelper.getDefaultPrefs(context) else SharedPrefsHelper.getPrefs(context)
         val editor = pref.edit()
 
         Log.d("SyncCS", "Restoring ${incoming.size} keys to ${if(isAppSettings) "Settings" else "DataStore"}")
@@ -371,22 +407,22 @@ object BackupUtils {
         }
     }
 
-    fun restore(backupFile: BackupFile, restoreSettings: Boolean, restoreDataStore: Boolean, syncPlugins: Boolean = false) {
+    fun restore(context: Context, backupFile: BackupFile, restoreSettings: Boolean, restoreDataStore: Boolean, syncPlugins: Boolean = false) {
         if (restoreSettings) {
-            restoreMap(backupFile.settings.bool, true, syncPlugins)
-            restoreMap(backupFile.settings.int, true, syncPlugins)
-            restoreMap(backupFile.settings.string, true, syncPlugins)
-            restoreMap(backupFile.settings.float, true, syncPlugins)
-            restoreMap(backupFile.settings.long, true, syncPlugins)
-            restoreMap(backupFile.settings.stringSet, true, syncPlugins)
+            restoreMap(context, backupFile.settings.bool, true, syncPlugins)
+            restoreMap(context, backupFile.settings.int, true, syncPlugins)
+            restoreMap(context, backupFile.settings.string, true, syncPlugins)
+            restoreMap(context, backupFile.settings.float, true, syncPlugins)
+            restoreMap(context, backupFile.settings.long, true, syncPlugins)
+            restoreMap(context, backupFile.settings.stringSet, true, syncPlugins)
         }
         if (restoreDataStore) {
-            restoreMap(backupFile.datastore.bool, false, syncPlugins)
-            restoreMap(backupFile.datastore.int, false, syncPlugins)
-            restoreMap(backupFile.datastore.string, false, syncPlugins)
-            restoreMap(backupFile.datastore.float, false, syncPlugins)
-            restoreMap(backupFile.datastore.long, false, syncPlugins)
-            restoreMap(backupFile.datastore.stringSet, false, syncPlugins)
+            restoreMap(context, backupFile.datastore.bool, false, syncPlugins)
+            restoreMap(context, backupFile.datastore.int, false, syncPlugins)
+            restoreMap(context, backupFile.datastore.string, false, syncPlugins)
+            restoreMap(context, backupFile.datastore.float, false, syncPlugins)
+            restoreMap(context, backupFile.datastore.long, false, syncPlugins)
+            restoreMap(context, backupFile.datastore.stringSet, false, syncPlugins)
         }
     }
 }
@@ -413,11 +449,10 @@ object ApiUtils {
         } catch (e: Exception) { OkHttpClient() }
     }
 
-    fun isLoggedIn(): Boolean {
-        val pref = SharedPrefsHelper.getPrefs()
-        val token = pref.getString("sync_token", null)
-        val projectNum = pref.getString("sync_project_num", null)
-        val projectId = pref.getString("sync_project_id", null)
+    fun isLoggedIn(context: Context? = null): Boolean {
+        val token = SharedPrefsHelper.getKey("sync_token", String::class.java, context = context)
+        val projectNum = SharedPrefsHelper.getKey("sync_project_num", String::class.java, context = context)
+        val projectId = SharedPrefsHelper.getKey("sync_project_id", String::class.java, context = context)
         return !token.isNullOrEmpty() && !projectNum.isNullOrEmpty() && !projectId.isNullOrEmpty()
     }
 
@@ -457,10 +492,10 @@ object ApiUtils {
         }
     }
 
-    suspend fun syncProjectDetails(): Pair<Boolean, String> {
-        val pref = SharedPrefsHelper.getPrefs()
-        val token = pref.getString("sync_token", null)?.replace("\"", "") ?: return Pair(false, "Missing token")
-        val projectNum = pref.getString("sync_project_num", null)?.replace("\"", "")?.toIntOrNull() ?: return Pair(false, "Invalid project number")
+    suspend fun syncProjectDetails(context: Context? = null): Pair<Boolean, String> {
+        val token = SharedPrefsHelper.getKey("sync_token", String::class.java, context = context) ?: return Pair(false, "Missing token")
+        val projectNumStr = SharedPrefsHelper.getKey("sync_project_num", String::class.java, context = context) ?: return Pair(false, "Missing project number")
+        val projectNum = projectNumStr.toIntOrNull() ?: return Pair(false, "Invalid project number")
 
         val query = """
             query {
@@ -489,18 +524,17 @@ object ApiUtils {
         val project = res.data?.viewer?.projectV2 ?: return Pair(false, "Project not found or lacks permissions.")
         val projectId = project.id ?: return Pair(false, "Project ID not found in response.")
 
-        pref.edit().putString("sync_project_id", projectId).apply()
+        SharedPrefsHelper.setKey("sync_project_id", projectId, context)
         return Pair(true, "Successfully linked to GitHub Project!")
     }
 
-    suspend fun syncThisDevice(syncData: String): Pair<Boolean, String> {
-        val pref = SharedPrefsHelper.getPrefs()
-        val token = pref.getString("sync_token", null)?.replace("\"", "") ?: return Pair(false, "Missing token")
-        val projectId = pref.getString("sync_project_id", null)?.replace("\"", "") ?: return Pair(false, "Missing Project ID")
-        val deviceName = pref.getString("device_name", Build.MODEL) ?: Build.MODEL
-        val deviceId = Util.getDeviceId()
+    suspend fun syncThisDevice(syncData: String, context: Context? = null): Pair<Boolean, String> {
+        val token = SharedPrefsHelper.getKey("sync_token", String::class.java, context = context) ?: return Pair(false, "Missing token")
+        val projectId = SharedPrefsHelper.getKey("sync_project_id", String::class.java, context = context) ?: return Pair(false, "Missing Project ID")
+        val deviceName = SharedPrefsHelper.getKey("device_name", String::class.java, context = context) ?: Build.MODEL
+        val deviceId = Util.getDeviceId(context)
 
-        val storedItemId = pref.getString("sync_item_id", null)?.replace("\"", "")
+        val storedItemId = SharedPrefsHelper.getKey("sync_item_id", String::class.java, context = context)
 
         if (!storedItemId.isNullOrEmpty()) {
             val delQuery = """
@@ -513,7 +547,7 @@ object ApiUtils {
             val delRes = apiCall(delQuery, token)
             if (delRes?.errors != null && delRes.errors!!.isNotEmpty()) {
                 val errorMsg = delRes.errors!!.joinToString(", ") { it.message ?: "Unknown Error" }
-                Log.w("SyncCS", "Item deletion warning (Safe to ignore): $errorMsg")
+                Log.w("SyncCS", "Item deletion warning: $errorMsg")
             }
         }
 
@@ -522,7 +556,7 @@ object ApiUtils {
         val escapedName = "$deviceName|$deviceId".replace("\"", "\\\"")
 
         val payloadLength = escapedPayload.length
-        Log.d("SyncCS", "Uploading payload to GitHub. Escaped Length: $payloadLength chars")
+        Log.d("SyncCS", "Uploading payload. Escaped Length: $payloadLength")
 
         val addQuery = """
             mutation {
@@ -542,18 +576,18 @@ object ApiUtils {
 
         val newItemId = res.data?.issue?.projectItem?.id
         if (!newItemId.isNullOrEmpty()) {
-            pref.edit().putString("sync_item_id", newItemId).apply()
-            Log.d("SyncCS", "Sync completed successfully. Uploaded to GitHub.")
+            SharedPrefsHelper.setKey("sync_item_id", newItemId, context)
+            Log.d("SyncCS", "Sync completed successfully.")
             return Pair(true, "Sync completed successfully")
         }
 
         return Pair(false, "Failed to get project item ID from GitHub. (Payload: $payloadLength chars)")
     }
 
-    suspend fun fetchDevices(): List<SyncDevice> {
-        val pref = SharedPrefsHelper.getPrefs()
-        val token = pref.getString("sync_token", null)?.replace("\"", "") ?: return emptyList()
-        val projectNum = pref.getString("sync_project_num", null)?.replace("\"", "")?.toIntOrNull() ?: return emptyList()
+    suspend fun fetchDevices(context: Context? = null): List<SyncDevice> {
+        val token = SharedPrefsHelper.getKey("sync_token", String::class.java, context = context) ?: return emptyList()
+        val projectNumStr = SharedPrefsHelper.getKey("sync_project_num", String::class.java, context = context) ?: return emptyList()
+        val projectNum = projectNumStr.toIntOrNull() ?: return emptyList()
 
         val query = """
             query {
@@ -576,7 +610,10 @@ object ApiUtils {
             val body = node.content?.body ?: node.content?.bodyText ?: ""
             val parts = title.split("|")
             if (parts.size >= 2) {
-                list.add(SyncDevice(parts[0], parts[1], itemId, Util.decrypt(body, token)))
+                val decrypted = Util.decrypt(body, token)
+                val decompressed = Util.decompressJsonFromString(decrypted)
+                val restored = Util.restoreText(decompressed)
+                list.add(SyncDevice(parts[0], parts[1], itemId, restored))
             }
         }
         return list
