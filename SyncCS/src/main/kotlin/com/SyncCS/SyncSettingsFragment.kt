@@ -21,6 +21,7 @@ import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.DataStore
+import com.lagradost.cloudstream3.mapper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -86,7 +87,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                 try {
                     val raw = with(DataStore) { context.getSharedPrefs().getString("sync_token", null) }
                     if (raw != null) {
-                        tokenVal = DataStore.mapper.readValue(raw, String::class.java)
+                        tokenVal = mapper.readValue(raw, String::class.java)
                     }
                 } catch (unused: Exception) {
                 }
@@ -100,7 +101,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                 try {
                     val raw = with(DataStore) { context2.getSharedPrefs().getString("sync_project_num", null) }
                     if (raw != null) {
-                        projectNumVal = DataStore.mapper.readValue(raw, String::class.java)
+                        projectNumVal = mapper.readValue(raw, String::class.java)
                     }
                 } catch (unused: Exception) {
                 }
@@ -115,7 +116,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                 try {
                     val raw = with(DataStore) { context3.getSharedPrefs().getString("backup_device", null) }
                     if (raw != null) {
-                        backupVal = DataStore.mapper.readValue(raw, String::class.java)
+                        backupVal = mapper.readValue(raw, String::class.java)
                     }
                 } catch (unused: Exception) {
                 }
@@ -130,7 +131,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                 try {
                     val raw = with(DataStore) { context4.getSharedPrefs().getString("restore_device", null) }
                     if (raw != null) {
-                        restoreVal = DataStore.mapper.readValue(raw, String::class.java)
+                        restoreVal = mapper.readValue(raw, String::class.java)
                     }
                 } catch (unused: Exception) {
                 }
