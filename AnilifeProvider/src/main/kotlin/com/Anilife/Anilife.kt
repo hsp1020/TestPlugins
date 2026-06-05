@@ -1,10 +1,8 @@
 package com.anilife
 
 import android.util.Base64
-import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.network.WebViewResolver // 클라우드플레어 우회용 인터셉터
 import org.jsoup.nodes.Document
 import kotlinx.coroutines.CancellationException
 
@@ -15,16 +13,13 @@ class Anilife : MainAPI() {
     override var lang = "ko"
     override val supportedTypes = setOf(TvType.Anime)
 
-    private val TAG = "AnilifeProvider"
-    private val pcUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    private val TAG = "[Anilife]"
+    private val pcUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
 
     private val commonHeaders = mapOf(
         "User-Agent" to pcUserAgent,
         "Referer" to "$mainUrl/"
     )
-
-    // 핵심: anilife.live 도메인으로 가는 요청은 실제 숨겨진 브라우저(WebView)를 태워서 통과시킴
-    private val cfInterceptor = WebViewResolver(Regex("""anilife\.live"""))
 
     override val mainPage = mainPageOf(
         "/top20" to "실시간 TOP 20",
@@ -43,30 +38,20 @@ class Anilife : MainAPI() {
         val url = if (request.name.contains("TOP 20")) "$mainUrl${request.data}" 
                   else "$mainUrl${request.data.substringBeforeLast("/")}/$page"
         
-        Log.d(TAG, "[getMainPage] 웹뷰 인터셉터 적용 통신 시도 -> $url")
-        
         return try {
-            // interceptor 파라미터에 cfInterceptor 주입
-            val response = app.get(url, headers = commonHeaders, interceptor = cfInterceptor)
-            Log.d(TAG, "[getMainPage] 응답 코드: ${response.code}") 
-            
-            val doc = response.document
+            val doc = app.get(url, headers = commonHeaders).document
             val items = parseCommonList(doc)
-            Log.d(TAG, "[getMainPage] 파싱 성공: ${items.size}개")
-            
             val hasNextPage = if (request.name.contains("TOP 20")) false else items.isNotEmpty()
             
             newHomePageResponse(request.name, items, hasNext = hasNextPage)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            Log.e(TAG, "[getMainPage] 웹뷰 우회 실패", e)
             newHomePageResponse(request.name, emptyList(), hasNext = false)
         }
     }
 
     private fun parseCommonList(doc: Document): List<SearchResponse> {
-        val elements = doc.select(".listupd > article.bs")
-        return elements.mapNotNull { element ->
+        return doc.select(".listupd > article.bs").mapNotNull { element ->
             try {
                 val aTag = element.selectFirst("div.bsx > a") ?: return@mapNotNull null
                 val rawHref = fixUrl(aTag.attr("href"))
@@ -93,14 +78,10 @@ class Anilife : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val url = "$mainUrl/search?keyword=$query"
-        Log.d(TAG, "[search] 웹뷰 인터셉터 적용 통신 시도 -> $url")
         return try {
-            val doc = app.get(url, headers = commonHeaders, interceptor = cfInterceptor).document
-            parseCommonList(doc)
+            parseCommonList(app.get("$mainUrl/search?keyword=$query", headers = commonHeaders).document)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            Log.e(TAG, "[search] 에러 발생", e)
             emptyList()
         }
     }
@@ -113,10 +94,8 @@ class Anilife : MainAPI() {
             url.substringBefore("?poster=")
         } else url
 
-        Log.d(TAG, "[load] 웹뷰 인터셉터 적용 통신 시도 -> $cleanUrl")
-
         try {
-            val response = app.get(cleanUrl, headers = commonHeaders, interceptor = cfInterceptor)
+            val response = app.get(cleanUrl, headers = commonHeaders)
             val doc = response.document
             val finalUrl = response.url
             val encodedRef = Base64.encodeToString(finalUrl.toByteArray(), Base64.NO_WRAP)
@@ -164,7 +143,6 @@ class Anilife : MainAPI() {
             }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            Log.e(TAG, "[load] 에러 발생", e)
             throw e
         }
     }
@@ -188,13 +166,12 @@ class Anilife : MainAPI() {
         val videoIdMatch = Regex("""(?:id|provider)/([^/?]+)""").find(cleanData)
         val videoId = videoIdMatch?.groupValues?.get(1) ?: "unknown_id"
 
-        Log.d(TAG, "[loadLinks] 웹뷰 인터셉터 적용 통신 시도 -> $cleanData")
-
         try {
-            val linkHeaders = commonHeaders.toMutableMap()
-            linkHeaders["Referer"] = detailReferer
+            val webResponse = app.get(
+                cleanData, 
+                headers = mapOf("Referer" to detailReferer, "User-Agent" to pcUserAgent)
+            )
 
-            val webResponse = app.get(cleanData, headers = linkHeaders, interceptor = cfInterceptor)
             val playerUrl = AnilifeProxyExtractor().extractPlayerUrl(webResponse.text, mainUrl) ?: return false
 
             return AnilifeProxyExtractor().extractWithProxy(
@@ -207,9 +184,9 @@ class Anilife : MainAPI() {
                 videoId = videoId,
                 callback = callback
             )
+
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            Log.e(TAG, "[loadLinks] 에러 발생", e)
         }
         return false
     }
