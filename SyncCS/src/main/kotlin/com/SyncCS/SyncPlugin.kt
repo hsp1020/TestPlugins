@@ -21,8 +21,8 @@ class SyncPlugin : Plugin() {
     private val pluginScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val mapper = jacksonObjectMapper()
 
-    private var lastResumeWatching: List<Any>? = null
-    private var counterBackup = 0
+    var lastResumeWatching: List<Any>? = null
+    var counterBackup = 0
     private var backupDebounceJob: Job? = null
 
     private var currentPollingInterval = 5000L
@@ -61,8 +61,8 @@ class SyncPlugin : Plugin() {
     }
 
     override fun load(context: Context) {
-        val deviceId = Util.getDeviceId()
-        SharedPrefsHelper.getPrefs().edit().putString("device_id", deviceId).apply()
+        val deviceId = Util.getDeviceId(context)
+        SharedPrefsHelper.setKey("device_id", deviceId, context)
         Log.d("SyncCS", "Plugin Loaded. This Device ID: $deviceId")
 
         pluginScope.launch { restoreDevice() }
@@ -70,11 +70,11 @@ class SyncPlugin : Plugin() {
         handler.post(runnable)
 
         val backupTrigger = { _: Boolean -> triggerBackupDebounced() }
-        MainActivity.bookmarksUpdatedEvent.plusAssign(backupTrigger)
-        MainActivity.afterPluginsLoadedEvent.plusAssign(backupTrigger)
-        MainActivity.mainPluginsLoadedEvent.plusAssign(backupTrigger)
-        MainActivity.reloadHomeEvent.plusAssign(backupTrigger)
-        MainActivity.reloadAccountEvent.plusAssign(backupTrigger)
+        MainActivity.Companion.bookmarksUpdatedEvent.plusAssign(backupTrigger)
+        MainActivity.Companion.afterPluginsLoadedEvent.plusAssign(backupTrigger)
+        MainActivity.Companion.mainPluginsLoadedEvent.plusAssign(backupTrigger)
+        MainActivity.Companion.reloadHomeEvent.plusAssign(backupTrigger)
+        MainActivity.Companion.reloadAccountEvent.plusAssign(backupTrigger)
 
         openSettings = { ctx ->
             val currentActivity = ctx as? AppCompatActivity 
@@ -105,18 +105,25 @@ class SyncPlugin : Plugin() {
 
     private suspend fun backupDevice(): Pair<Boolean, String> = withContext(Dispatchers.IO) {
         val context = AcraApplication.context ?: CloudStreamApp.context ?: return@withContext Pair(false, "Context is null")
-        val pref = SharedPrefsHelper.getPrefs()
-        val backupEnabled = pref.getString("backup_device", "false") == "true"
-        val syncPluginsEnabled = pref.getString("sync_plugins_enabled", "false") == "true"
+        val backupEnabled = SharedPrefsHelper.getKey("backup_device", String::class.java, "false", context) == "true"
+        val syncPluginsEnabled = SharedPrefsHelper.getKey("sync_plugins_enabled", String::class.java, "false", context) == "true"
 
         if (!backupEnabled) {
             return@withContext Pair(false, "Backup is disabled in settings. Enable 'Backup data to Cloud' first.")
         }
-        if (!ApiUtils.isLoggedIn()) {
+        if (!ApiUtils.isLoggedIn(context)) {
             return@withContext Pair(false, "Not logged in or missing project details. Save credentials first.")
         }
 
-        val backupFile = BackupUtils.getFullBackup(syncPluginsEnabled)
+        // Properly get and limit resumeWatching list (max 50 to prevent overflow)
+        val rawResumeWatching = try {
+            HomeViewModel.getResumeWatching()
+        } catch (e: Exception) {
+            null
+        }
+        val resumeWatching = rawResumeWatching?.take(50)
+
+        val backupFile = BackupUtils.getFullBackup(context, resumeWatching, syncPluginsEnabled)
             ?: return@withContext Pair(false, "No valid data found to backup.")
         
         val json = mapper.writeValueAsString(backupFile)
@@ -127,39 +134,37 @@ class SyncPlugin : Plugin() {
         val cleaned = Util.cleanedSyncData(json)
         val originalLength = cleaned.length
 
-        // 초고압축 및 최종 페이로드 크기 계산
+        // Correctly match the original Base64 encoding structure (Flag 10)
         val compressed = Util.compressJsonToString(cleaned)
         val compressedLength = compressed.length
         Log.d("SyncCS", "Original Size: $originalLength chars, Compressed Size: $compressedLength chars")
         
-        val result = ApiUtils.syncThisDevice(compressed)
+        val result = ApiUtils.syncThisDevice(compressed, context)
         if (result.first) {
-            pref.edit().putLong("last_sync_timestamp", System.currentTimeMillis()).apply()
+            SharedPrefsHelper.setKey("last_sync_timestamp", System.currentTimeMillis(), context)
             Log.d("SyncCS", "Backup Complete. Timestamp updated.")
             return@withContext Pair(true, "Backup Succeeded! (Original: $originalLength -> Compressed: $compressedLength chars)")
         } else {
-            // 실패 시 원본 크기와 압축 후 크기를 실시간 토스트로 전달하여 업로드 중단 원인을 즉시 알립니다.
             return@withContext Pair(false, "${result.second} (Original: $originalLength -> Compressed: $compressedLength chars)")
         }
     }
 
     suspend fun restoreDevice(): Pair<Boolean, String> = withContext(Dispatchers.IO) {
         val context = AcraApplication.context ?: CloudStreamApp.context ?: return@withContext Pair(false, "Context is null")
-        val pref = SharedPrefsHelper.getPrefs()
-        val restoreEnabled = pref.getString("restore_device", "false") == "true"
-        val syncPluginsEnabled = pref.getString("sync_plugins_enabled", "false") == "true"
+        val restoreEnabled = SharedPrefsHelper.getKey("restore_device", String::class.java, "false", context) == "true"
+        val syncPluginsEnabled = SharedPrefsHelper.getKey("sync_plugins_enabled", String::class.java, "false", context) == "true"
 
         if (!restoreEnabled) {
             return@withContext Pair(false, "Restore is disabled in settings. Enable 'Restore data from Cloud' first.")
         }
-        if (!ApiUtils.isLoggedIn()) {
+        if (!ApiUtils.isLoggedIn(context)) {
             return@withContext Pair(false, "Not logged in or missing project details. Save credentials first.")
         }
 
         Log.d("SyncCS", "--- Initiating Restore Process ---")
         try {
-            val devices = ApiUtils.fetchDevices()
-            val thisDeviceId = Util.getDeviceId()
+            val devices = ApiUtils.fetchDevices(context)
+            val thisDeviceId = Util.getDeviceId(context)
             var restoredAny = false
 
             for (device in devices) {
@@ -172,7 +177,7 @@ class SyncPlugin : Plugin() {
 
                     if (backupFile != null) {
                         withContext(Dispatchers.Main) {
-                            BackupUtils.restore(backupFile, true, true, syncPluginsEnabled)
+                            BackupUtils.restore(context, backupFile, true, true, syncPluginsEnabled)
                         }
                         restoredAny = true
                     }
