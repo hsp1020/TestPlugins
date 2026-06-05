@@ -8,6 +8,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceError
+import android.webkit.WebResourceResponse
 import android.net.http.SslError
 import android.webkit.SslErrorHandler
 import com.lagradost.cloudstream3.*
@@ -18,9 +19,12 @@ import org.jsoup.nodes.Document
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlin.coroutines.resume
 import android.os.Handler
 import android.os.Looper
+import java.io.ByteArrayInputStream
 import java.util.concurrent.CancellationException
 
 class Anilife : MainAPI() {
@@ -30,17 +34,20 @@ class Anilife : MainAPI() {
     override var lang = "ko"
     override val supportedTypes = setOf(TvType.Anime)
 
-    private val TAG = "AnilifeProvider"
-    
-    private val mobileUserAgent = "Mozilla/5.0 (Linux; Android 13; SM-S901B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+    private val TAG = "[Anilife]"
+    // 구버전 고유 UA 사용
+    private val pcUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
 
-    // 이미지 403 우회 및 웹 챌린지 대응용 공용 고신뢰도 헤더 설정
+    // 이미지 403 차단 회피 및 이미지 서버의 엄격한 WAF 통과용 레퍼러 결합 헤더 [1.1, 1.3]
     private val commonHeaders = mapOf(
-        "User-Agent" to mobileUserAgent,
-        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Referer" to "$mainUrl/" // 이미지 로더가 사용할 핵심 레퍼러 주입
+        "User-Agent" to pcUserAgent,
+        "Referer" to "$mainUrl/"
     )
+
+    companion object {
+        // [병렬 렉 방어] 6개 카테고리가 동시에 요청될 때 기기 사양에 맞춰 최대 2개만 차례로 실행하도록 세마포어 제어
+        private val webViewSemaphore = Semaphore(2)
+    }
 
     override val mainPage = mainPageOf(
         "/top20" to "실시간 TOP 20",
@@ -52,52 +59,53 @@ class Anilife : MainAPI() {
     )
 
     /**
-     * 메인 주소의 완벽한 렌더링을 감시하고, 
-     * 오류(SSL/Connection reset) 발생 시 즉시 예외를 발생시켜 디버깅을 원활히 돕는 쌩웹뷰 엔진
+     * [극효율 최적화 쌩웹뷰 단일 로더]
+     * 하드웨어 가속 강제 해제, 리소스 다운로드 차단, 사후 소멸 처리가 적용된 핵심 엔진
      */
     @SuppressLint("SetJavaScriptEnabled")
-    private suspend fun getDocumentWithRawWebView(url: String): Document {
-        Log.d(TAG, "[RawWebView] === 쌩웹뷰 HTML 로딩 프로세스 시작 ===")
-        Log.d(TAG, "[RawWebView] 대상 주소: $url")
-        
-        val ctx = CloudStreamApp.context ?: throw Exception("Android Context가 Null 상태입니다. 로더를 가동할 수 없습니다.")
+    private suspend fun getDoc(url: String): Document {
+        Log.d(TAG, "[RawWebView] 수집 시작 -> $url")
+        val ctx = CloudStreamApp.context ?: throw Exception("Context가 Null입니다.")
 
         return withContext(Dispatchers.Main) {
             suspendCancellableCoroutine { continuation ->
                 val webView = WebView(ctx)
                 var isResumed = false
 
-                // 리소스 누수 방지용 웹뷰 파괴 헬퍼
+                // 렉, 발열, 메모리 누수를 완전히 방지하는 웹뷰 강제 소멸자 함수
                 fun cleanup() {
                     Handler(Looper.getMainLooper()).post {
                         try {
-                            webView.stopLoading()
-                            webView.destroy()
-                            Log.d(TAG, "[RawWebView] 사용 완료된 쌩웹뷰 정상 파괴 완료")
-                        } catch (e: Exception) {
-                            Log.e(TAG, "[RawWebView] 웹뷰 파괴 중 오류 발생", e)
-                        }
+                            webView.stopLoading() // 네트워크 세션 즉시 타절 [1.1, 1.3]
+                            webView.clearHistory()
+                            webView.loadUrl("about:blank") // 영구 동작 중인 백그라운드 JS 루프 제거
+                            webView.destroy() // 메모리 OS 즉각 반환 [1.1, 1.3]
+                            Log.d(TAG, "[RawWebView] 웹뷰 정상 소멸 완료")
+                        } catch (e: Exception) { }
                     }
                 }
 
-                // 자바스크립트 통신 인터페이스 클래스 정의
                 class HtmlExtractor {
                     @JavascriptInterface
                     fun processHTML(html: String) {
                         if (!isResumed) {
                             isResumed = true
-                            Log.d(TAG, "[RawWebView] 자바스크립트로 HTML 수집 성공 (추출 크기: ${html.length}자)")
                             cleanup()
                             continuation.resume(Jsoup.parse(html, url))
                         }
                     }
                 }
 
+                // [렌더링 최적화] GPU 가속을 완전히 해제하여 CPU/GPU 가용 자원 절약 [1.1, 1.3]
+                webView.setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
+
                 webView.settings.apply {
                     javaScriptEnabled = true
                     domStorageEnabled = true
                     databaseEnabled = true
-                    userAgentString = mobileUserAgent
+                    userAgentString = pcUserAgent
+                    loadsImagesAutomatically = false // [대역폭 최적화] 무단 이미지 로딩 자동 거부 [1.1, 1.3]
+                    mediaPlaybackRequiresUserGesture = true
                 }
 
                 webView.addJavascriptInterface(HtmlExtractor(), "HTMLOUT")
@@ -105,58 +113,64 @@ class Anilife : MainAPI() {
                 webView.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView?, url: String?) {
                         if (isResumed) return
-                        Log.d(TAG, "[RawWebView] 웹뷰 로딩 완료됨 -> 수집 스크립트 실행")
                         view?.loadUrl("javascript:window.HTMLOUT.processHTML(document.documentElement.outerHTML);")
                     }
 
-                    // 구형 에러 핸들러 백업
+                    // [데이터 다이어트 최적화] 파싱에 필요없는 미디어, 이미지, 폰트, CSS 수신 즉시 폐기 [1.1, 1.2, 1.3]
+                    override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                        val resourceUrl = request?.url?.toString()?.lowercase() ?: return null
+                        val isHeavy = resourceUrl.endsWith(".png") || resourceUrl.endsWith(".jpg") ||
+                                      resourceUrl.endsWith(".jpeg") || resourceUrl.endsWith(".webp") ||
+                                      resourceUrl.endsWith(".gif") || resourceUrl.endsWith(".svg") ||
+                                      resourceUrl.endsWith(".woff") || resourceUrl.endsWith(".woff2") ||
+                                      resourceUrl.endsWith(".ttf") || resourceUrl.endsWith(".css") ||
+                                      resourceUrl.endsWith(".mp4") || resourceUrl.contains("analytics") ||
+                                      resourceUrl.contains("google")
+
+                        if (isHeavy) {
+                            // 빈 가상 응답 객체를 반환하여 실제 통신 전송 및 다운로드를 취소 [1.1]
+                            return WebResourceResponse("text/plain", "UTF-8", ByteArrayInputStream(ByteArray(0)))
+                        }
+                        return super.shouldInterceptRequest(view, request)
+                    }
+
                     @Deprecated("Deprecated in Java")
                     override fun onReceivedError(view: WebView?, errorCode: Int, description: String?, failingUrl: String?) {
-                        Log.e(TAG, "[RawWebView] [구형에러] 코드: $errorCode, 내용: $description, 주소: $failingUrl")
                         if (failingUrl == url && !isResumed) {
                             isResumed = true
                             cleanup()
-                            continuation.resumeWith(Result.failure(Exception("[RawWebView] 접속 에러 발생: $description ($errorCode)")))
+                            continuation.resumeWith(Result.failure(Exception("접속 실패: $description ($errorCode)")))
                         }
                     }
 
-                    // 신형 에러 핸들러 (오직 메인 도메인의 차단/실패만 정확히 판별하여 탈출)
                     override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
-                        val errorCode = error?.errorCode ?: -1
-                        val description = error?.description?.toString() ?: "Unknown"
-                        val failingUrl = request?.url?.toString() ?: ""
-                        Log.e(TAG, "[RawWebView] [신형에러] 코드: $errorCode, 내용: $description, 주소: $failingUrl")
-
                         if (request?.isForMainFrame == true && !isResumed) {
+                            val errorCode = error?.errorCode ?: -1
+                            val description = error?.description?.toString() ?: "Unknown"
                             isResumed = true
                             cleanup()
-                            continuation.resumeWith(Result.failure(Exception("[RawWebView] 메인 프레임 로딩 실패: $description ($errorCode)")))
+                            continuation.resumeWith(Result.failure(Exception("접속 실패: $description ($errorCode)")))
                         }
                     }
 
-                    // SSL 핸드셰이크 예외 감시 및 차단 인터셉터
                     override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: SslError?) {
-                        val sslErrorDesc = error?.toString() ?: "Unknown SSL Error"
-                        Log.e(TAG, "[RawWebView] SSL 핸드셰이크 에러 발생: $sslErrorDesc")
-                        handler?.cancel() // 즉시 안전 종료
-                        
+                        handler?.cancel()
                         if (!isResumed) {
                             isResumed = true
                             cleanup()
-                            continuation.resumeWith(Result.failure(Exception("[RawWebView] SSL 연결 수립 실패: $sslErrorDesc")))
+                            continuation.resumeWith(Result.failure(Exception("SSL 핸드셰이크 실패: ${error?.toString()}")))
                         }
                     }
                 }
 
-                Log.d(TAG, "[RawWebView] 쌩웹뷰에 URL 주입 및 호출 시작")
                 webView.loadUrl(url)
 
-                // 타임아웃 백업 강제 탈출 구성 (30초 만료 시)
+                // 30초 대기 안전 강제 탈출 장치
                 Handler(Looper.getMainLooper()).postDelayed({
                     if (!isResumed) {
                         isResumed = true
                         cleanup()
-                        continuation.resumeWith(Result.failure(Exception("[RawWebView] 쌩웹뷰 응답 대기시간 30초 초과")))
+                        continuation.resumeWith(Result.failure(Exception("응답 시간 초과 (30초)")))
                     }
                 }, 30000)
 
@@ -168,9 +182,6 @@ class Anilife : MainAPI() {
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        Log.d(TAG, "[getMainPage] =========================================")
-        Log.d(TAG, "[getMainPage] 카테고리: ${request.name}, 페이지: $page")
-
         if (request.name.contains("TOP 20") && page > 1) {
             return newHomePageResponse(request.name, emptyList(), hasNext = false)
         }
@@ -178,34 +189,23 @@ class Anilife : MainAPI() {
         val url = if (request.name.contains("TOP 20")) "$mainUrl${request.data}" 
                   else "$mainUrl${request.data.substringBeforeLast("/")}/$page"
         
-        Log.d(TAG, "[getMainPage] 쌩웹뷰 대상 URL 생성 완료: $url")
-        
         return try {
-            val doc = getDocumentWithRawWebView(url)
+            // [병렬 최적화] 세마포어 한도 내에서 안전하게 정렬하여 쌩웹뷰 전용 호출
+            val doc = webViewSemaphore.withPermit { getDoc(url) }
             val items = parseCommonList(doc)
-            Log.d(TAG, "[getMainPage] 최종 수집 성공 수량: ${items.size}개")
-            
             val hasNextPage = if (request.name.contains("TOP 20")) false else items.isNotEmpty()
+            
             newHomePageResponse(request.name, items, hasNext = hasNextPage)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            Log.e(TAG, "[getMainPage] 페이지 최종 수집 실패 스택:\n${Log.getStackTraceString(e)}")
             newHomePageResponse(request.name, emptyList(), hasNext = false)
         }
     }
 
     private fun parseCommonList(doc: Document): List<SearchResponse> {
-        Log.d(TAG, "[parseCommonList] 파싱 가공 절차 개시")
-        val elements = doc.select(".listupd > article.bs")
-        Log.d(TAG, "[parseCommonList] 검색된 요소 (.listupd > article.bs) 개수: ${elements.size}개")
-        
-        val parsedList = elements.mapNotNull { element ->
+        return doc.select(".listupd > article.bs").mapNotNull { element ->
             try {
-                val aTag = element.selectFirst("div.bsx > a")
-                if (aTag == null) {
-                    Log.w(TAG, "[parseCommonList] div.bsx > a 태그를 누락했습니다. HTML:\n${element.outerHtml()}")
-                    return@mapNotNull null
-                }
+                val aTag = element.selectFirst("div.bsx > a") ?: return@mapNotNull null
                 val rawHref = fixUrl(aTag.attr("href"))
                 val title = (element.selectFirst(".tt h2") ?: element.selectFirst(".tt"))?.text()?.trim() ?: "Unknown"
                 val imgTag = element.selectFirst("img")
@@ -221,107 +221,80 @@ class Anilife : MainAPI() {
                     if (rawHref.contains("?")) "$rawHref&poster=$encoded" else "$rawHref?poster=$encoded"
                 } else rawHref
                 
-                Log.d(TAG, "[parseCommonList] 요소 획득 -> 제목: $title, 경로: $finalHref")
-                
                 newAnimeSearchResponse(title, finalHref, TvType.Anime) {
                     this.posterUrl = poster
-                    this.posterHeaders = commonHeaders // 레퍼러가 보완된 공용 헤더로 지정하여 403 전면 우회
+                    this.posterHeaders = commonHeaders // 레퍼러가 포함된 완전한 공용 헤더로 이미지 403을 전면 우회 [1.1, 1.3]
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "[parseCommonList] 가공 도중 예외 발생", e)
-                null
-            }
+            } catch (e: Exception) { null }
         }
-        return parsedList
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val url = "$mainUrl/search?keyword=$query"
-        Log.d(TAG, "[search] =========================================")
-        Log.d(TAG, "[search] 검색 요청어: $query, 요청 URL: $url")
         return try {
-            val doc = getDocumentWithRawWebView(url)
-            val results = parseCommonList(doc)
-            Log.d(TAG, "[search] 검색 매칭 수량: ${results.size}개")
-            results
+            val doc = webViewSemaphore.withPermit { getDoc("$mainUrl/search?keyword=$query") }
+            parseCommonList(doc)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            Log.e(TAG, "[search] 검색 실패 트레이스:\n${Log.getStackTraceString(e)}")
             emptyList()
         }
     }
 
     override suspend fun load(url: String): LoadResponse {
-        Log.d(TAG, "[load] =========================================")
-        Log.d(TAG, "[load] 진입 URL: $url")
-
         var tunnelingPoster: String? = null
         val cleanUrl = if (url.contains("poster=")) {
             val posterParam = url.substringAfter("poster=")
             tunnelingPoster = String(Base64.decode(posterParam.substringBefore("&"), Base64.NO_WRAP))
-            Log.d(TAG, "[load] 포스터 복원 성공: $tunnelingPoster")
             url.substringBefore("?poster=")
         } else url
 
-        Log.d(TAG, "[load] 파싱 타겟 정제 URL: $cleanUrl")
-
         try {
-            val doc = getDocumentWithRawWebView(cleanUrl)
+            val doc = webViewSemaphore.withPermit { getDoc(cleanUrl) }
             val finalUrl = doc.location()
             val encodedRef = Base64.encodeToString(finalUrl.toByteArray(), Base64.NO_WRAP)
 
             val title = doc.selectFirst(".entry-title")?.text()?.trim() ?: "Unknown"
             val plot = doc.selectFirst(".synp .entry-content")?.text()?.trim()
             val tags = doc.select(".genxed a").map { it.text() }
-            Log.d(TAG, "[load] 상세 메타 가공 -> 타이틀: $title, 줄거리 글자수: ${plot?.length ?: 0}, 태그목록: $tags")
 
             var currentEpisodeNumber = 0
             val numRegex = Regex("[^0-9.]") 
 
             val elements = doc.select(".eplister > ul > li > a").reversed()
-            Log.d(TAG, "[load] 에피소드 DOM 영역 획득 수량: ${elements.size}개")
-
             val episodes = elements.mapNotNull { element ->
-                try {
-                    val rawHref = fixUrl(element.attr("href"))
-                    val numText = element.selectFirst(".epl-num")?.text()?.trim() ?: ""
-                    val epTitle = element.selectFirst(".epl-title")?.text()?.trim() ?: ""
-                    
-                    val fullName = if (numText.isNotEmpty()) "${numText}화 - $epTitle" else epTitle
-                    val finalHref = if (rawHref.contains("?")) "$rawHref&ref=$encodedRef" else "$rawHref?ref=$encodedRef"
-                    
-                    val parsedNum = numText.replace(numRegex, "").toFloatOrNull()?.toInt() ?: 0
+                val rawHref = fixUrl(element.attr("href"))
+                val numText = element.selectFirst(".epl-num")?.text()?.trim() ?: ""
+                val epTitle = element.selectFirst(".epl-title")?.text()?.trim() ?: ""
+                
+                val fullName = if (numText.isNotEmpty()) "${numText}화 - $epTitle" else epTitle
+                val finalHref = if (rawHref.contains("?")) "$rawHref&ref=$encodedRef" else "$rawHref?ref=$encodedRef"
+                
+                val parsedNum = numText.replace(numRegex, "").toFloatOrNull()?.toInt() ?: 0
 
-                    if (currentEpisodeNumber == 0) {
-                        currentEpisodeNumber = if (parsedNum > 0) parsedNum else 1
+                if (currentEpisodeNumber == 0) {
+                    currentEpisodeNumber = if (parsedNum > 0) parsedNum else 1
+                } else {
+                    if (parsedNum > currentEpisodeNumber) {
+                        currentEpisodeNumber = parsedNum
                     } else {
-                        if (parsedNum > currentEpisodeNumber) {
-                            currentEpisodeNumber = parsedNum
-                        } else {
-                            currentEpisodeNumber++
-                        }
+                        currentEpisodeNumber++
                     }
+                }
 
-                    newEpisode(finalHref) {
-                        this.name = fullName
-                        this.episode = currentEpisodeNumber
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "[load] 개별 에피소드 가공 예외 발생", e)
-                    null
+                newEpisode(finalHref) {
+                    this.name = fullName
+                    this.episode = currentEpisodeNumber
                 }
             }
 
             return newAnimeLoadResponse(title, cleanUrl, TvType.Anime) {
                 this.posterUrl = doc.selectFirst(".thumb img")?.attr("src") ?: tunnelingPoster
-                this.posterHeaders = commonHeaders // 레퍼러가 보완된 공용 헤더로 지정하여 상세 페이지 이미지 403도 회피
+                this.posterHeaders = commonHeaders // 상세 페이지 이미지 403 우회 적용 [1.3]
                 this.plot = plot
                 this.tags = tags
                 addEpisodes(DubStatus.Subbed, episodes)
             }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            Log.e(TAG, "[load] 상세 정보 획득 중단 오류:\n${Log.getStackTraceString(e)}")
             throw e
         }
     }
@@ -332,40 +305,24 @@ class Anilife : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        Log.d(TAG, "[loadLinks] =========================================")
-        Log.d(TAG, "[loadLinks] 링크 파라미터 수령: $data")
-
         var cleanData = data.substringBefore("?poster=")
         var detailReferer = "$mainUrl/"
         if (cleanData.contains("ref=")) {
             try {
                 val refEncoded = cleanData.substringAfter("ref=").substringBefore("&")
                 detailReferer = String(Base64.decode(refEncoded, Base64.NO_WRAP))
-                Log.d(TAG, "[loadLinks] 복원된 연결 레퍼러: $detailReferer")
                 cleanData = cleanData.substringBefore("?ref=").substringBefore("&ref=")
-            } catch (e: Exception) {
-                Log.e(TAG, "[loadLinks] 레퍼러 디코딩 에러 발생", e)
-            }
+            } catch (e: Exception) { }
         }
 
         val videoIdMatch = Regex("""(?:id|provider)/([^/?]+)""").find(cleanData)
         val videoId = videoIdMatch?.groupValues?.get(1) ?: "unknown_id"
-        Log.d(TAG, "[loadLinks] 정제 주소: $cleanData, 비디오 ID: $videoId")
 
         try {
-            Log.d(TAG, "[loadLinks] 쌩웹뷰로 플레이어 프레임 페이지 로딩 요청 시작...")
-            val doc = getDocumentWithRawWebView(cleanData)
-            
-            Log.d(TAG, "[loadLinks] 로드된 본문을 기준으로 프레임 소스 추출 진행...")
-            val playerUrl = AnilifeProxyExtractor().extractPlayerUrl(doc.outerHtml(), mainUrl)
-            Log.d(TAG, "[loadLinks] 최종 확정 플레이어 내부 타겟 주소: $playerUrl")
+            val doc = webViewSemaphore.withPermit { getDoc(cleanData) }
 
-            if (playerUrl == null) {
-                Log.w(TAG, "[loadLinks] 플레이어 주소 획득 실패")
-                return false
-            }
+            val playerUrl = AnilifeProxyExtractor().extractPlayerUrl(doc.outerHtml(), mainUrl) ?: return false
 
-            Log.d(TAG, "[loadLinks] ProxyExtractor 연동 분석 프로세스 실행")
             return AnilifeProxyExtractor().extractWithProxy(
                 m3u8Url = "",
                 playerUrl = playerUrl,
@@ -376,9 +333,9 @@ class Anilife : MainAPI() {
                 videoId = videoId,
                 callback = callback
             )
+
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            Log.e(TAG, "[loadLinks] 링크 수집 실패 스택:\n${Log.getStackTraceString(e)}")
         }
         return false
     }
