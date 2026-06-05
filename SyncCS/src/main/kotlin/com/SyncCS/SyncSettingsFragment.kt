@@ -1,4 +1,4 @@
-package com.anhdaden
+package com.SyncCS
 
 import android.annotation.SuppressLint
 import android.content.Context
@@ -21,10 +21,6 @@ import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.DataStore
-import kotlin.coroutines.CoroutineContext
-import kotlin.jvm.internal.Intrinsics
-import kotlin.text.StringsKt
-import kotlinx.coroutines.BuildersKt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -41,28 +37,28 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
 
     @Suppress("UNCHECKED_CAST")
     private fun <T : View> findView(view: View, str: String): T {
-        return view.findViewById(this.res.getIdentifier(str, "id", "com.anhdaden")) as T
+        return view.findViewById(this.res.getIdentifier(str, "id", "com.SyncCS")) as T
     }
 
     private fun getLayout(name: String, inflater: LayoutInflater, container: ViewGroup?): View {
-        val id = this.res.getIdentifier(name, "layout", "com.anhdaden")
+        val id = this.res.getIdentifier(name, "layout", "com.SyncCS")
         val parser = this.res.getLayout(id)
         return inflater.inflate(parser as XmlPullParser, container, false)
     }
 
     private fun getDrawable(name: String): Drawable? {
-        val id = this.res.getIdentifier(name, "drawable", "com.anhdaden")
+        val id = this.res.getIdentifier(name, "drawable", "com.SyncCS")
         return ResourcesCompat.getDrawable(this.res, id, null)
     }
 
     private fun getString(name: String): String {
-        val id = this.res.getIdentifier(name, "string", "com.anhdaden")
+        val id = this.res.getIdentifier(name, "string", "com.SyncCS")
         return this.res.getString(id)
     }
 
     @Suppress("DEPRECATION")
     private fun makeTvCompatible(view: View) {
-        val id = this.res.getIdentifier("outline", "drawable", "com.anhdaden")
+        val id = this.res.getIdentifier("outline", "drawable", "com.SyncCS")
         view.background = this.res.getDrawable(id, null)
     }
 
@@ -84,14 +80,13 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
             val layoutConfig = getLayout("config", inflater, container)
             val tokenInput = findView<EditText>(layoutConfig, "token")
             
-            val context = AcraApplication.Companion.getContext()
+            val context = AcraApplication.context
             var tokenVal: String? = null
             if (context != null) {
-                val dataStore = DataStore.INSTANCE
                 try {
-                    val raw = dataStore.getSharedPrefs(context).getString("sync_token", null)
+                    val raw = with(DataStore) { context.getSharedPrefs().getString("sync_token", null) }
                     if (raw != null) {
-                        tokenVal = dataStore.getMapper().readValue(raw, String::class.java)
+                        tokenVal = DataStore.mapper.readValue(raw, String::class.java)
                     }
                 } catch (unused: Exception) {
                 }
@@ -100,13 +95,12 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
             
             val projectNumInput = findView<EditText>(layoutConfig, "project_num")
             var projectNumVal: String? = null
-            val context2 = AcraApplication.Companion.getContext()
+            val context2 = AcraApplication.context
             if (context2 != null) {
-                val dataStore = DataStore.INSTANCE
                 try {
-                    val raw = dataStore.getSharedPrefs(context2).getString("sync_project_num", null)
+                    val raw = with(DataStore) { context2.getSharedPrefs().getString("sync_project_num", null) }
                     if (raw != null) {
-                        projectNumVal = dataStore.getMapper().readValue(raw, String::class.java)
+                        projectNumVal = DataStore.mapper.readValue(raw, String::class.java)
                     }
                 } catch (unused: Exception) {
                 }
@@ -116,13 +110,12 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
             val backupSwitch = findView<Switch>(layoutConfig, "backup_device")
             backupSwitch.text = "Backup data to the cloud"
             var backupVal: String? = null
-            val context3 = AcraApplication.Companion.getContext()
+            val context3 = AcraApplication.context
             if (context3 != null) {
-                val dataStore = DataStore.INSTANCE
                 try {
-                    val raw = dataStore.getSharedPrefs(context3).getString("backup_device", null)
+                    val raw = with(DataStore) { context3.getSharedPrefs().getString("backup_device", null) }
                     if (raw != null) {
-                        backupVal = dataStore.getMapper().readValue(raw, String::class.java)
+                        backupVal = DataStore.mapper.readValue(raw, String::class.java)
                     }
                 } catch (unused: Exception) {
                 }
@@ -132,13 +125,12 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
             val restoreSwitch = findView<Switch>(layoutConfig, "restore_device")
             restoreSwitch.text = "Recover data from cloud"
             var restoreVal: String? = null
-            val context4 = AcraApplication.Companion.getContext()
+            val context4 = AcraApplication.context
             if (context4 != null) {
-                val dataStore = DataStore.INSTANCE
                 try {
-                    val raw = dataStore.getSharedPrefs(context4).getString("restore_device", null)
+                    val raw = with(DataStore) { context4.getSharedPrefs().getString("restore_device", null) }
                     if (raw != null) {
-                        restoreVal = dataStore.getMapper().readValue(raw, String::class.java)
+                        restoreVal = DataStore.mapper.readValue(raw, String::class.java)
                     }
                 } catch (unused: Exception) {
                 }
