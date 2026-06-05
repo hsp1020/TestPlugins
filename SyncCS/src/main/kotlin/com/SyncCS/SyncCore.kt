@@ -10,6 +10,7 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.utils.DataStore
 import com.lagradost.cloudstream3.utils.DataStoreHelper
+import com.lagradost.cloudstream3.mapper
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -252,7 +253,7 @@ class ApiUtils private constructor() {
         val INSTANCE = ApiUtils()
     }
 
-    private val mapper = DataStore.mapper
+    private val mapper = com.lagradost.cloudstream3.mapper
 
     private val unsafeClient: OkHttpClient by lazy {
         try {
