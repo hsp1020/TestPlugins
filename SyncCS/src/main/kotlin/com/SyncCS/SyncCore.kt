@@ -14,6 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.security.MessageDigest
+import java.security.SecureRandom
 import java.util.UUID
 import kotlin.text.Charsets.UTF_8
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
@@ -114,7 +115,7 @@ data class SyncDevice(
 )
 
 // =========================================================================
-// [3] Util Area (암호화 우회 처리 완료)
+// [3] Util Area
 // =========================================================================
 object Util {
     private val minifyDict = listOf(
