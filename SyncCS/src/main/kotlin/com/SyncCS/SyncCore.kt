@@ -146,7 +146,7 @@ data class SyncDevice(
 )
 
 // =========================================================================
-// [3] Util Area
+// [3] Util Area (GZIP with plain Base64 Fallback Decoder)
 // =========================================================================
 object Util {
     private val minifyDict = listOf(
@@ -197,7 +197,6 @@ object Util {
     fun cleanedSyncData(str: String): String {
         return try {
             var result = str
-            // Regex patterns to clean heavy metadata
             result = Regex("""\\\"overview\\\"\s*:\s*\\\"(.*?)(?<!\\)\\\"""").replace(result, """\\\"overview\\\":\\\"\\\"""")
             result = Regex("""\\\"plot\\\"\s*:\s*\\\"(.*?)(?<!\\)\\\"""").replace(result, """\\\"plot\\\":\\\"\\\"""")
             result = Regex("""\\\"tags\\\"\s*:\s*\[.*?]""").replace(result, """\\\"tags\\\":[]""")
@@ -223,22 +222,33 @@ object Util {
         }
     }
 
-    // Matching the original Base64 conversion (Android Base64 Flag 10 = NO_WRAP or URL_SAFE)
     fun compressJsonToString(str: String): String {
         return try {
+            val bos = java.io.ByteArrayOutputStream()
+            java.util.zip.GZIPOutputStream(bos).use { gzos ->
+                gzos.write(str.toByteArray(UTF_8))
+            }
+            Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP or Base64.NO_PADDING)
+        } catch (e: Exception) {
+            Log.e("SyncCS", "GZIP Compression failed. Falling back to plain Base64.", e)
             val bytes = str.toByteArray(UTF_8)
             Base64.encodeToString(bytes, 10)
-        } catch (e: Exception) {
-            ""
         }
     }
 
     fun decompressJsonFromString(str: String): String {
         return try {
-            val bytes = Base64.decode(str, 10)
-            String(bytes, UTF_8)
+            val bytes = Base64.decode(str, Base64.NO_WRAP or Base64.NO_PADDING)
+            val bis = java.io.ByteArrayInputStream(bytes)
+            java.util.zip.GZIPInputStream(bis).bufferedReader(UTF_8).use { it.readText() }
         } catch (e: Exception) {
-            ""
+            try {
+                val bytes = Base64.decode(str, 10)
+                String(bytes, UTF_8)
+            } catch (ex: Exception) {
+                Log.e("SyncCS", "All decompression methods failed.", ex)
+                ""
+            }
         }
     }
 
@@ -290,7 +300,6 @@ object BackupUtils {
     )
 
     fun isResume(key: String, syncPlugins: Boolean = false): Boolean {
-        // Safe check plugins early to bypass nonTransferableKeys lists
         if (key.contains("PLUGINS_KEY") || key.contains("PLUGINS_KEY_LOCAL")) {
             return syncPlugins
         }
@@ -304,10 +313,9 @@ object BackupUtils {
     fun isBackup(key: String, resumeWatching: List<Any>? = null, syncPlugins: Boolean = false): Boolean {
         if (!isResume(key, syncPlugins)) return false
         
-        // Exact watch states filter mapping
         if (key.contains("result_resume_watching") || key.contains("result_watch_state") || 
             key.contains("result_season") || key.contains("result_episode") || key.contains("result_dub")) {
-            if (resumeWatching == null) return false // Prevent backup if resume list isn't provided
+            if (resumeWatching == null) return false
             
             val parts = key.split("/")
             if (parts.size < 2) return false
