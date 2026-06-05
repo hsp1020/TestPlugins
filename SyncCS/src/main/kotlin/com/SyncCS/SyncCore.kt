@@ -146,7 +146,7 @@ data class SyncDevice(
 )
 
 // =========================================================================
-// [3] Util Area (GZIP with plain Base64 Fallback Decoder + HTML tag stripping)
+// [3] Util Area (GZIP with plain Base64 Fallback Decoder + HTML entity unescaping)
 // =========================================================================
 object Util {
     private val minifyDict = listOf(
@@ -230,14 +230,26 @@ object Util {
             }
             Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP or Base64.NO_PADDING)
         } catch (e: Exception) {
-            Log.e("SyncCS", "GZIP Compression failed. Falling back to plain Base64.", e)
+            Log.e("SyncCS", "GZIP Compression failed. Falling back to Base64.", e)
             val bytes = str.toByteArray(UTF_8)
             Base64.encodeToString(bytes, 10)
         }
     }
 
     fun decompressJsonFromString(str: String): String {
-        val cleanStr = str.replace(Regex("<[^>]*>"), "").replace(Regex("\\s+"), "").trim()
+        // Strip HTML entities first (e.g. &quot; -> ", &amp; -> &) to preserve Base64 alphabets
+        val unescaped = try {
+            android.text.Html.fromHtml(str, android.text.Html.FROM_HTML_MODE_LEGACY).toString()
+        } catch (e: NoSuchMethodError) {
+            @Suppress("DEPRECATION")
+            android.text.Html.fromHtml(str).toString()
+        } catch (e: Exception) {
+            str
+        }
+
+        // Clean remaining HTML tags and any whitespaces
+        val cleanStr = unescaped.replace(Regex("<[^>]*>"), "").replace(Regex("\\s+"), "").trim()
+
         return try {
             val bytes = Base64.decode(cleanStr, Base64.NO_WRAP or Base64.NO_PADDING)
             val bis = java.io.ByteArrayInputStream(bytes)
@@ -603,7 +615,7 @@ object ApiUtils {
                 viewer {
                     projectV2(number: $projectNum) {
                         id
-                        items(first: 100) { nodes { id content { ... on DraftIssue { id title body } } } }
+                        items(first: 100) { nodes { id content { ... on DraftIssue { id title body bodyText } } } }
                     }
                 }
             }
@@ -616,7 +628,9 @@ object ApiUtils {
         for (node in nodes) {
             val itemId = node.id ?: continue
             val title = node.content?.title ?: continue
-            val body = node.content?.body ?: node.content?.bodyText ?: ""
+            
+            // Prefer bodyText over body to bypass raw HTML encoding of Base64 chars
+            val body = if (!node.content?.bodyText.isNullOrEmpty()) node.content?.bodyText!! else node.content?.body ?: ""
             val parts = title.split("|")
             if (parts.size >= 2) {
                 val decrypted = Util.decrypt(body, token)
