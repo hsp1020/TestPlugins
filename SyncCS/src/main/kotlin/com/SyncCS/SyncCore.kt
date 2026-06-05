@@ -1,30 +1,29 @@
-package com.anhdaden
+package com.SyncCS
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.os.Build
 import android.provider.Settings
 import android.util.Base64
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.lagradost.cloudstream3.AcraApplication
-import com.lagradost.cloudstream3.MainAPIKt
 import com.lagradost.cloudstream3.utils.DataStore
 import com.lagradost.cloudstream3.utils.DataStoreHelper
-import java.security.MessageDigest
-import java.security.SecureRandom
-import java.util.UUID
-import kotlin.text.Charsets.UTF_8
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.security.MessageDigest
+import java.security.SecureRandom
+import java.util.UUID
+import kotlin.text.Charsets.UTF_8
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.security.cert.X509Certificate
 import javax.net.ssl.SSLContext
 import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
-import android.content.SharedPreferences
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 
 // =========================================================================
 // [1] Jackson Models Area
@@ -183,8 +182,8 @@ object BackupUtils {
         if (context == null) return null
         val listTake = resumeWatching?.take(50)
         
-        val pref = DataStore.INSTANCE.getSharedPrefs(context)
-        val defaultPref = DataStore.INSTANCE.getDefaultSharedPrefs(context)
+        val pref = with(DataStore) { context.getSharedPrefs() }
+        val defaultPref = with(DataStore) { context.getDefaultSharedPrefs() }
         
         val filteredPref = pref.all.filterKeys { isBackup(it, listTake) }
         val filteredDefaultPref = defaultPref.all.filterKeys { isBackup(it, listTake) }
@@ -203,13 +202,17 @@ object BackupUtils {
         return BackupFile(splitVars(filteredPref), splitVars(filteredDefaultPref))
     }
 
-    fun editor(context: Context, isEditingAppSettings: Boolean): Editor {
-        val prefs = if (isEditingAppSettings) DataStore.INSTANCE.getDefaultSharedPrefs(context) else DataStore.INSTANCE.getSharedPrefs(context)
-        return Editor(prefs.edit())
+    fun getEditor(context: Context, isEditingAppSettings: Boolean): com.SyncCS.Editor {
+        val prefs = if (isEditingAppSettings) {
+            with(DataStore) { context.getDefaultSharedPrefs() }
+        } else {
+            with(DataStore) { context.getSharedPrefs() }
+        }
+        return com.SyncCS.Editor(prefs.edit())
     }
 
     fun <T> restoreMap(context: Context, map: Map<String, T>?, isEditingAppSettings: Boolean) {
-        val edit = editor(context, isEditingAppSettings)
+        val edit = getEditor(context, isEditingAppSettings)
         if (map != null) {
             for ((key, value) in map) {
                 if (isResume(key)) {
@@ -249,7 +252,7 @@ class ApiUtils private constructor() {
         val INSTANCE = ApiUtils()
     }
 
-    private val mapper = MainAPIKt.getMapper()
+    private val mapper = DataStore.mapper
 
     private val unsafeClient: OkHttpClient by lazy {
         try {
@@ -301,8 +304,8 @@ class ApiUtils private constructor() {
     }
 
     private fun getSavedValue(key: String): String? {
-        val context = AcraApplication.Companion.getContext() ?: return null
-        val raw = DataStore.INSTANCE.getSharedPrefs(context).getString(key, null) ?: return null
+        val context = AcraApplication.context ?: return null
+        val raw = with(DataStore) { context.getSharedPrefs().getString(key, null) } ?: return null
         return try {
             mapper.readValue(raw, String::class.java)
         } catch (e: Exception) {
@@ -349,7 +352,7 @@ class ApiUtils private constructor() {
     suspend fun syncThisDevice(syncData: String): Pair<Boolean, String>? = withContext(Dispatchers.IO) {
         val token = getSavedValue("sync_token")?.replace("\"", "") ?: return@withContext Pair(false, "Missing token")
         val projectId = getSavedValue("sync_project_id")?.replace("\"", "") ?: return@withContext Pair(false, "Missing Project ID")
-        val context = AcraApplication.Companion.getContext() ?: return@withContext Pair(false, "Missing Context")
+        val context = AcraApplication.context ?: return@withContext Pair(false, "Missing Context")
         
         val deviceName = getSavedValue("device_name") ?: Build.MODEL
         val deviceId = UtilKt.getDeviceId(context.packageName, context)
