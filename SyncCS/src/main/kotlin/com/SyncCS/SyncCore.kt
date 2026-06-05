@@ -1,6 +1,5 @@
 package com.SyncCS
 
-
 import android.content.Context
 import android.content.SharedPreferences
 import android.os.Build
@@ -199,7 +198,6 @@ object Util {
         }
     }
 
-    // GZIP 압축 후 Base64 인코딩
     fun compressJsonToString(str: String): String {
         return try {
             val bos = ByteArrayOutputStream()
@@ -213,7 +211,6 @@ object Util {
         }
     }
 
-    // GZIP 압축 해제
     fun decompressJsonFromString(str: String): String {
         return try {
             val bytes = Base64.decode(str, Base64.NO_WRAP or Base64.NO_PADDING)
@@ -250,7 +247,7 @@ object Util {
 }
 
 // =========================================================================
-// [4] BackupUtils Area
+// [4] BackupUtils Area (오리지널 플러그인의 전체 블랙리스트 완벽 복원)
 // =========================================================================
 object BackupUtils {
     private val nonTransferableKeys = listOf(
@@ -259,13 +256,17 @@ object BackupUtils {
         "simkl_token", "simkl_user", "simkl_cached_list", "simkl_cached_time", "simkl_accounts", "simkl_active",
         "SIMKL_API_CACHE", "ANIWAVE_SIMKL_SYNC", "open_subtitles_user", "opensubtitles_accounts", "opensubtitles_active",
         "subdl_user", "subdl_accounts", "subdl_active", "biometric_key", "nginx_user", "download_path_key",
-        "download_path_key_visual", "backup_path_key", "backup_dir_path_key", "cs3-votes",
+        "download_path_key_visual", "backup_path_key", "backup_dir_path_key", "PLUGINS_KEY", "PLUGINS_KEY_LOCAL", "cs3-votes",
         "last_sync_api", "last_click_action", "last_opened_id", "library_folder", "result_resume_watching_migrated",
         "jsdelivr_proxy_key", "fshare_setup", "fshare_token", "checkbox_fsharehd", "checkbox_fsharecine",
         "checkbox_fsharesheet", "checkbox_fsharefavourite", "checkbox_fsharehdvn", "checkbox_timfshare",
         "bluphim_token", "device_id", "device_name", "sync_token", "sync_project_num", "sync_project_id",
         "sync_item_id", "sync_device_id", "restore_device", "backup_device", "sync_plugins_enabled", "movie_active", "dns_active",
-        "last_sync_timestamp"
+        "ULTIMA_CURRENT_META_PROVIDERS", "ULTIMA_EXTENSIONS_LIST", "ULTIMA_CURRENT_MEDIA_PROVIDERS", "ULTIMA_WATCH_SYNC_CREDS",
+        "used_fstream_providers_v3", "fstream_version", "Aniyomi_Plugin_Successful_Install", "enable_support_by_bongngotv",
+        "download_info", "download_resume", "download_q_resume", "download_episode_cache", "prerelease_update",
+        "data_store_helper/account_key_index", "VERSION_NAME", "FILES_TO_DELETE_KEY", "HAS_DONE_SETUP",
+        "video_source_priority", "preferred_audio_language", "last_sync_timestamp"
     )
 
     fun isResume(key: String, syncPlugins: Boolean = false): Boolean {
