@@ -5,7 +5,7 @@ import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.network.WebViewResolver // 클라우드플레어 우회용 인터셉터
-import com.lagradost.cloudstream3.network.NiceResponse
+import com.lagradost.nicehttp.NiceResponse // 올바른 NiceResponse 패키지 경로 수입
 import org.jsoup.nodes.Document
 import kotlinx.coroutines.CancellationException
 
