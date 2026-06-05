@@ -1,6 +1,5 @@
 package com.anilife
 
-import android.annotation.SuppressLint
 import android.util.Base64
 import android.util.Log
 import android.webkit.JavascriptInterface
@@ -16,6 +15,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import android.os.Handler
 import android.os.Looper
+import java.util.concurrent.CancellationException // 검증된 JVM 표준 패키지로 교체
 
 class Anilife : MainAPI() {
     override var mainUrl = "https://anilife.live"
@@ -46,7 +46,8 @@ class Anilife : MainAPI() {
         Log.d(TAG, "[RawWebView] === 쌩웹뷰 HTML 로딩 프로세스 시작 ===")
         Log.d(TAG, "[RawWebView] 대상 주소: $url")
         
-        val ctx = context ?: throw Exception("Android Context가 Null 상태입니다. 로더를 가동할 수 없습니다.")
+        // this.context 지정을 통해 예약어 충돌 및 오인식 완전 해결
+        val ctx = this.context ?: throw Exception("Android Context가 Null 상태입니다. 로더를 가동할 수 없습니다.")
 
         return withContext(Dispatchers.Main) {
             suspendCancellableCoroutine { continuation ->
@@ -91,7 +92,7 @@ class Anilife : MainAPI() {
                 webView.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView?, url: String?) {
                         Log.d(TAG, "[RawWebView] 웹뷰 로딩 완료됨 -> 수집 스크립트 실행")
-                        // 렌더링이 완전히 끝난 돔 트리의 HTML 원본을 자바스크립트로 안전하게 낚아챔
+                        // 렌더링이 완전히 끝난 돔 트리의 HTML 원본을 자바스크립트로 안전하게 낚아챕니다.
                         view?.loadUrl("javascript:window.HTMLOUT.processHTML(document.documentElement.outerHTML);")
                     }
 
