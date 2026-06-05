@@ -1,6 +1,5 @@
 package com.SyncCS
 
-
 import android.content.Context
 import android.content.SharedPreferences
 import android.os.Build
