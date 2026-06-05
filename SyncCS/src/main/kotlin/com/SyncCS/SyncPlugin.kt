@@ -127,7 +127,7 @@ class SyncPlugin : Plugin() {
         val cleaned = Util.cleanedSyncData(json)
         val originalLength = cleaned.length
 
-        // 초고압축 및 최종 페이로드 크기 계산
+        // [디버깅 정상화] 평문 상태로 업로드하기 위해 GZIP 라이브러리를 아예 거치지 않고, Base64 인코딩만 수행
         val compressed = Util.compressJsonToString(cleaned)
         val compressedLength = compressed.length
         Log.d("SyncCS", "Original Size: $originalLength chars, Compressed Size: $compressedLength chars")
@@ -136,10 +136,9 @@ class SyncPlugin : Plugin() {
         if (result.first) {
             pref.edit().putLong("last_sync_timestamp", System.currentTimeMillis()).apply()
             Log.d("SyncCS", "Backup Complete. Timestamp updated.")
-            return@withContext Pair(true, "Backup Succeeded! (Original: $originalLength -> Compressed: $compressedLength chars)")
+            return@withContext Pair(true, "Backup Succeeded! (Original: $originalLength -> Base64: $compressedLength chars)")
         } else {
-            // 실패 시 원본 크기와 압축 후 크기를 실시간 토스트로 전달하여 업로드 중단 원인을 즉시 알립니다.
-            return@withContext Pair(false, "${result.second} (Original: $originalLength -> Compressed: $compressedLength chars)")
+            return@withContext Pair(false, "${result.second} (Original: $originalLength -> Base64: $compressedLength chars)")
         }
     }
 
