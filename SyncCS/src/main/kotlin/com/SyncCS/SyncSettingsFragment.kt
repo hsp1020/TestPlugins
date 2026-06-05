@@ -21,6 +21,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.xmlpull.v1.XmlPullParser
 
 class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragment() {
 
@@ -247,8 +248,21 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                                 text = "Unlink"
                                 setOnClickListener {
                                     CoroutineScope(Dispatchers.IO).launch {
-                                        val token = SharedPrefsHelper.getKey("sync_token", String::class.java, context = ctx) ?: return@launch
-                                        val projectId = SharedPrefsHelper.getKey("sync_project_id", String::class.java, context = ctx) ?: return@launch
+                                        var token: String? = null
+                                        var projectId: String? = null
+                                        try {
+                                            val rawToken = with(DataStore) { ctx.getSharedPrefs().getString("sync_token", null) }
+                                            if (rawToken != null) {
+                                                token = mapper.readValue(rawToken, String::class.java)
+                                            }
+                                            val rawProjectId = with(DataStore) { ctx.getSharedPrefs().getString("sync_project_id", null) }
+                                            if (rawProjectId != null) {
+                                                projectId = mapper.readValue(rawProjectId, String::class.java)
+                                            }
+                                        } catch (e: Exception) {
+                                        }
+                                        if (token.isNullOrEmpty() || projectId.isNullOrEmpty()) return@launch
+
                                         val query = """
                                             mutation {
                                                 deleteProjectV2Item(input: {projectId: "$projectId", itemId: "${device.itemId}"}) {
