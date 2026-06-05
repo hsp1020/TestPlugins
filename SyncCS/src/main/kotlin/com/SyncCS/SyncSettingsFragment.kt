@@ -3,7 +3,6 @@ package com.SyncCS
 import android.annotation.SuppressLint
 import android.graphics.Color
 import android.os.Bundle
-import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -97,7 +96,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
     @SuppressLint("SetTextI18n")
     private fun showConfigDialog() {
         val ctx = context ?: return
-        val pref = SharedPrefsHelper.getPrefs(ctx)
+        val pref = SharedPrefsHelper.getPrefs()
 
         val layout = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
@@ -148,7 +147,6 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
         }
         layout.addView(syncPluginsSwitch)
 
-        // [수정됨] 직관적인 다운로드/업로드 수동 컨트롤 버튼 2개
         val pullBtn = Button(ctx).apply {
             text = "⬇️ PULL: Download from Cloud"
             setOnClickListener {
@@ -195,7 +193,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
 
         CoroutineScope(Dispatchers.IO).launch {
             if (ApiUtils.isLoggedIn()) {
-                val devices = ApiUtils.fetchDevices(ctx)
+                val devices = ApiUtils.fetchDevices()
                 withContext(Dispatchers.Main) {
                     if (devices.isEmpty()) {
                         deviceManagerContainer.addView(TextView(ctx).apply { text = "No devices found." })
@@ -273,7 +271,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
 
                 CoroutineScope(Dispatchers.IO).launch {
                     try {
-                        val result = ApiUtils.syncProjectDetails(ctx)
+                        val result = ApiUtils.syncProjectDetails()
                         withContext(Dispatchers.Main) {
                             loadingDialog.dismiss()
                             CommonActivity.showToast(result.second, null)
