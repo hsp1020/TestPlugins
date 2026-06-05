@@ -1,25 +1,36 @@
 package com.anilife
 
 import android.util.Base64
-import android.util.Log // Log 임포트 추가
+import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Document
 import kotlinx.coroutines.CancellationException
 
 class Anilife : MainAPI() {
-    override var mainUrl = "https://anilife.live" // 통신사 차단시 https://kr1.anilife.app 등 접속 가능한 도메인으로 변경 테스트
+    override var mainUrl = "https://anilife.live"
     override var name = "Anilife"
     override val hasMainPage = true
     override var lang = "ko"
     override val supportedTypes = setOf(TvType.Anime)
 
-    private val TAG = "AnilifeProvider" // 디버그 태그 설정
-    private val pcUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
+    private val TAG = "AnilifeDebug"
 
-    private val commonHeaders = mapOf(
-        "User-Agent" to pcUserAgent,
-        "Referer" to "$mainUrl/"
+    // 일반 PC 브라우저와 완전히 동일한 지문을 남기기 위한 극한의 헤더 셋업
+    private val chromeHeaders = mapOf(
+        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Sec-Ch-Ua" to "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\", \"Not-A.Brand\";v=\"99\"",
+        "Sec-Ch-Ua-Mobile" to "?0",
+        "Sec-Ch-Ua-Platform" to "\"Windows\"",
+        "Sec-Fetch-Dest" to "document",
+        "Sec-Fetch-Mode" to "navigate",
+        "Sec-Fetch-Site" to "none",
+        "Sec-Fetch-User" to "?1",
+        "Upgrade-Insecure-Requests" to "1",
+        "Connection" to "keep-alive",
+        "Referer" to "$mainUrl/" // 레퍼러 강제 삽입
     )
 
     override val mainPage = mainPageOf(
@@ -39,41 +50,51 @@ class Anilife : MainAPI() {
         val url = if (request.name.contains("TOP 20")) "$mainUrl${request.data}" 
                   else "$mainUrl${request.data.substringBeforeLast("/")}/$page"
         
-        Log.d(TAG, "getMainPage 통신 시도 URL: $url")
+        Log.d(TAG, "===============================================")
+        Log.d(TAG, "[getMainPage] 데이터 요청 시작 -> $url")
+        Log.d(TAG, "[getMainPage] 주입된 헤더: $chromeHeaders")
         
         return try {
-            val response = app.get(url, headers = commonHeaders)
-            Log.d(TAG, "getMainPage 응답 코드: ${response.code}") // 상태 코드 확인
+            val response = app.get(url, headers = chromeHeaders)
+            Log.d(TAG, "[getMainPage] 서버 응답 코드: ${response.code}") 
             
+            // 만약 클라우드플레어 차단 페이지가 뜬다면 여기서 감지됩니다.
+            if (response.code == 403 || response.text.contains("Cloudflare")) {
+                Log.e(TAG, "[getMainPage] 클라우드플레어 403 봇 방어막에 차단됨!")
+            }
+
             val doc = response.document
             val items = parseCommonList(doc)
-            Log.d(TAG, "getMainPage 파싱된 아이템 수: ${items.size}개")
+            Log.d(TAG, "[getMainPage] 파싱 성공 아이템 수: ${items.size}개")
             
             val hasNextPage = if (request.name.contains("TOP 20")) false else items.isNotEmpty()
             
             newHomePageResponse(request.name, items, hasNext = hasNextPage)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            // 에러를 무시하지 않고 로그캣에 출력합니다. (Connection reset인지 여부 확인)
-            Log.e(TAG, "getMainPage 네트워크 또는 파싱 에러 (URL: $url)", e)
-            e.printStackTrace()
+            
+            Log.e(TAG, "[getMainPage] ❌ 통신 에러 발생 ❌")
+            Log.e(TAG, "[getMainPage] 에러 종류: ${e.javaClass.simpleName}")
+            Log.e(TAG, "[getMainPage] 에러 메시지: ${e.message}")
+            
+            // 핸드셰이크 단계 에러인지 판별
+            if (e.stackTraceToString().contains("doHandshake")) {
+                Log.e(TAG, "🚨 분석 결과: 서버에 헤더(Referer 등)를 보내기도 전에 SSL Handshake 단계에서 연결이 끊어졌습니다. (클라우드플레어 TLS 지문 차단 또는 ECH 부재로 인한 망 차단)")
+            } else {
+                Log.e(TAG, "🚨 분석 결과: 연결은 성공했으나 다른 문제가 발생했습니다.")
+            }
+            
             newHomePageResponse(request.name, emptyList(), hasNext = false)
         }
     }
 
     private fun parseCommonList(doc: Document): List<SearchResponse> {
         val elements = doc.select(".listupd > article.bs")
-        Log.d(TAG, "parseCommonList 찾은 문서 요소(article.bs) 갯수: ${elements.size}개")
-        
         return elements.mapNotNull { element ->
             try {
-                val aTag = element.selectFirst("div.bsx > a") ?: run {
-                    Log.w(TAG, "a 태그를 찾지 못함")
-                    return@mapNotNull null
-                }
+                val aTag = element.selectFirst("div.bsx > a") ?: return@mapNotNull null
                 val rawHref = fixUrl(aTag.attr("href"))
                 val title = (element.selectFirst(".tt h2") ?: element.selectFirst(".tt"))?.text()?.trim() ?: "Unknown"
-                
                 val imgTag = element.selectFirst("img")
                 var poster = imgTag?.attr("src") ?: imgTag?.attr("data-src") ?: ""
                 poster = fixUrl(poster)
@@ -87,32 +108,21 @@ class Anilife : MainAPI() {
                     if (rawHref.contains("?")) "$rawHref&poster=$encoded" else "$rawHref?poster=$encoded"
                 } else rawHref
                 
-                Log.d(TAG, "파싱 성공 -> 제목: $title, 링크: $rawHref")
-                
                 newAnimeSearchResponse(title, finalHref, TvType.Anime) {
                     this.posterUrl = poster
-                    this.posterHeaders = commonHeaders
+                    this.posterHeaders = chromeHeaders
                 }
-            } catch (e: Exception) { 
-                Log.e(TAG, "개별 아이템 파싱 중 에러", e)
-                null 
-            }
+            } catch (e: Exception) { null }
         }
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val url = "$mainUrl/search?keyword=$query"
-        Log.d(TAG, "search 통신 시도 URL: $url")
-        
         return try {
-            val doc = app.get(url, headers = commonHeaders).document
-            val items = parseCommonList(doc)
-            Log.d(TAG, "search 파싱된 아이템 수: ${items.size}개")
-            items
+            val doc = app.get("$mainUrl/search?keyword=$query", headers = chromeHeaders).document
+            parseCommonList(doc)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            Log.e(TAG, "search 네트워크 또는 파싱 에러 (Query: $query)", e)
-            e.printStackTrace()
+            Log.e(TAG, "[search] 에러 발생: ${e.message}")
             emptyList()
         }
     }
@@ -125,12 +135,8 @@ class Anilife : MainAPI() {
             url.substringBefore("?poster=")
         } else url
 
-        Log.d(TAG, "load 통신 시도 URL: $cleanUrl")
-
         try {
-            val response = app.get(cleanUrl, headers = commonHeaders)
-            Log.d(TAG, "load 응답 코드: ${response.code}")
-            
+            val response = app.get(cleanUrl, headers = chromeHeaders)
             val doc = response.document
             val finalUrl = response.url
             val encodedRef = Base64.encodeToString(finalUrl.toByteArray(), Base64.NO_WRAP)
@@ -143,8 +149,6 @@ class Anilife : MainAPI() {
             val numRegex = Regex("[^0-9.]") 
 
             val elements = doc.select(".eplister > ul > li > a").reversed()
-            Log.d(TAG, "load 에피소드 갯수: ${elements.size}개 (제목: $title)")
-
             val episodes = elements.mapNotNull { element ->
                 val rawHref = fixUrl(element.attr("href"))
                 val numText = element.selectFirst(".epl-num")?.text()?.trim() ?: ""
@@ -173,15 +177,14 @@ class Anilife : MainAPI() {
 
             return newAnimeLoadResponse(title, cleanUrl, TvType.Anime) {
                 this.posterUrl = doc.selectFirst(".thumb img")?.attr("src") ?: tunnelingPoster
-                this.posterHeaders = commonHeaders
+                this.posterHeaders = chromeHeaders
                 this.plot = plot
                 this.tags = tags
                 addEpisodes(DubStatus.Subbed, episodes)
             }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            Log.e(TAG, "load 중 예외 발생 (URL: $cleanUrl)", e)
-            e.printStackTrace()
+            Log.e(TAG, "[load] 에러 발생: ${e.message}")
             throw e
         }
     }
@@ -205,21 +208,13 @@ class Anilife : MainAPI() {
         val videoIdMatch = Regex("""(?:id|provider)/([^/?]+)""").find(cleanData)
         val videoId = videoIdMatch?.groupValues?.get(1) ?: "unknown_id"
 
-        Log.d(TAG, "loadLinks 통신 시도 URL: $cleanData (Referer: $detailReferer)")
-
         try {
-            val webResponse = app.get(
-                cleanData, 
-                headers = mapOf("Referer" to detailReferer, "User-Agent" to pcUserAgent)
-            )
+            // loadLinks에는 해당 상세 페이지의 레퍼러를 동적으로 덮어씌웁니다.
+            val linkHeaders = chromeHeaders.toMutableMap()
+            linkHeaders["Referer"] = detailReferer
 
-            val playerUrl = AnilifeProxyExtractor().extractPlayerUrl(webResponse.text, mainUrl)
-            Log.d(TAG, "loadLinks 추출된 플레이어 URL: $playerUrl")
-            
-            if (playerUrl == null) {
-                Log.w(TAG, "플레이어 URL을 찾지 못함")
-                return false
-            }
+            val webResponse = app.get(cleanData, headers = linkHeaders)
+            val playerUrl = AnilifeProxyExtractor().extractPlayerUrl(webResponse.text, mainUrl) ?: return false
 
             return AnilifeProxyExtractor().extractWithProxy(
                 m3u8Url = "",
@@ -231,11 +226,9 @@ class Anilife : MainAPI() {
                 videoId = videoId,
                 callback = callback
             )
-
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            Log.e(TAG, "loadLinks 중 예외 발생", e)
-            e.printStackTrace()
+            Log.e(TAG, "[loadLinks] 에러 발생: ${e.message}")
         }
         return false
     }
