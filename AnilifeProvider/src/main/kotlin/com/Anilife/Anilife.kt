@@ -1,5 +1,6 @@
 package com.anilife
 
+import android.annotation.SuppressLint // 누락된 수입(Import) 정상 추가
 import android.util.Base64
 import android.util.Log
 import android.webkit.JavascriptInterface
@@ -7,6 +8,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.CloudStreamApp // 전역 컨텍스트 액세스용 패키지 수입
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import kotlinx.coroutines.Dispatchers
@@ -15,7 +17,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import android.os.Handler
 import android.os.Looper
-import java.util.concurrent.CancellationException // 검증된 JVM 표준 패키지로 교체
+import java.util.concurrent.CancellationException
 
 class Anilife : MainAPI() {
     override var mainUrl = "https://anilife.live"
@@ -46,8 +48,8 @@ class Anilife : MainAPI() {
         Log.d(TAG, "[RawWebView] === 쌩웹뷰 HTML 로딩 프로세스 시작 ===")
         Log.d(TAG, "[RawWebView] 대상 주소: $url")
         
-        // this.context 지정을 통해 예약어 충돌 및 오인식 완전 해결
-        val ctx = this.context ?: throw Exception("Android Context가 Null 상태입니다. 로더를 가동할 수 없습니다.")
+        // CloudStreamApp 전역 Companion 컨텍스트를 안전하게 호출하여 참조 정합성 보장
+        val ctx = CloudStreamApp.context ?: throw Exception("Android Context가 Null 상태입니다. 로더를 가동할 수 없습니다.")
 
         return withContext(Dispatchers.Main) {
             suspendCancellableCoroutine { continuation ->
