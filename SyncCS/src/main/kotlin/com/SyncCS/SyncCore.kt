@@ -172,11 +172,10 @@ object Util {
         "\"prefer_media_type_key_2\"" to "\"s53\"", "\"datastore\"" to "\"s54\""
     )
 
+    // [개선] 정규식 파싱 오류 위험을 우회하고 단순 일대일 매핑 치환만 고속으로 처리합니다.
     fun cleanedSyncData(str: String): String {
         return try {
-            var result = str.replace(Regex("\\\\\\\"overview\\\\\\\"\\s*:\\s*\\\\\\\"(.*?)(?<!\\\\)\\\\\\\""), "\\\\\\\"overview\\\\\\\":\\\\\\\"\\\\\\\"")
-                            .replace(Regex("\\\\\\\"plot\\\\\\\"\\s*:\\s*\\\\\\\"(.*?)(?<!\\\\)\\\\\\\""), "\\\\\\\"plot\\\\\\\":\\\\\\\"\\\\\\\"")
-                            .replace(Regex("\\\\\\\"tags\\\\\\\"\\s*:\\s*\\[.*?]"), "\\\\\\\"tags\\\\\\\":[]")
+            var result = str
             for ((old, new) in minifyDict) {
                 result = result.replace(old, new)
             }
@@ -250,7 +249,7 @@ object Util {
 }
 
 // =========================================================================
-// [4] BackupUtils Area (누락된 대용량 제외 키 일괄 복원)
+// [4] BackupUtils Area (순정 JSONObject 라이브러리를 통한 대용량 필드 완전 적출)
 // =========================================================================
 object BackupUtils {
     private val nonTransferableKeys = listOf(
@@ -266,7 +265,6 @@ object BackupUtils {
         "bluphim_token", "device_id", "device_name", "sync_token", "sync_project_num", "sync_project_id",
         "sync_item_id", "sync_device_id", "restore_device", "backup_device", "sync_plugins_enabled", "movie_active", "dns_active",
         "last_sync_timestamp",
-        // [복원] 이전 코틀린 마이그레이션 과정에서 누락되어 대용량 에러를 유발한 원본 제외 키 목록
         "ULTIMA_CURRENT_META_PROVIDERS", "ULTIMA_EXTENSIONS_LIST", "ULTIMA_CURRENT_MEDIA_PROVIDERS", "ULTIMA_WATCH_SYNC_CREDS",
         "used_fstream_providers_v3", "fstream_version", "Aniyomi_Plugin_Successful_Install", "enable_support_by_bongngotv",
         "download_info", "download_resume", "download_q_resume", "download_episode_cache", "download_header_cache",
@@ -277,7 +275,7 @@ object BackupUtils {
     fun isResume(key: String, syncPlugins: Boolean = false): Boolean {
         if (!syncPlugins && (key.contains("PLUGINS_KEY") || key.contains("PLUGINS_KEY_LOCAL"))) return false
         
-        // 추가적인 메모리 누수 방지: 다운로드 캐시 및 대형 캐시 키를 사전에 원천 차단합니다.
+        // 다운로드 캐시 및 대형 캐시 키를 수집 대상에서 원천 차단합니다.
         if (key.contains("cache") || key.contains("CACHE") || key.contains("download_")) return false
         
         return nonTransferableKeys.none { key.contains(it) }
@@ -287,7 +285,24 @@ object BackupUtils {
         val pref = SharedPrefsHelper.getPrefs()
         val defaultPref = SharedPrefsHelper.getDefaultPrefs()
 
-        val validPrefs = pref.all.filter { isResume(it.key, syncPlugins) }
+        // [중요] 1번 기기(태블릿)의 원본 데이터를 가공하며 대용량 텍스트 유발 필드(overview, plot, tags)를 네이티브 레벨에서 강제 박멸
+        val rawPrefs = pref.all.filter { isResume(it.key, syncPlugins) }
+        val validPrefs = rawPrefs.mapValues { entry ->
+            val value = entry.value
+            if (value is String && (entry.key.contains("result_resume_watching") || entry.key.contains("result_watch_state"))) {
+                try {
+                    val jsonObj = JSONObject(value)
+                    jsonObj.remove("overview")
+                    jsonObj.remove("plot")
+                    jsonObj.remove("tags")
+                    jsonObj.toString()
+                } catch (e: Exception) {
+                    value
+                }
+            } else {
+                value
+            }
+        }
         val validDefaultPrefs = defaultPref.all.filter { isResume(it.key, syncPlugins) }
 
         if (validPrefs.isEmpty() && validDefaultPrefs.isEmpty()) return null
