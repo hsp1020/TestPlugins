@@ -34,6 +34,14 @@ class Anilife : MainAPI() {
     
     private val mobileUserAgent = "Mozilla/5.0 (Linux; Android 13; SM-S901B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
 
+    // 이미지 403 우회 및 웹 챌린지 대응용 공용 고신뢰도 헤더 설정
+    private val commonHeaders = mapOf(
+        "User-Agent" to mobileUserAgent,
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer" to "$mainUrl/" // 이미지 로더가 사용할 핵심 레퍼러 주입
+    )
+
     override val mainPage = mainPageOf(
         "/top20" to "실시간 TOP 20",
         "/vodtype/categorize/TV/1" to "TV 애니메이션",
@@ -217,7 +225,7 @@ class Anilife : MainAPI() {
                 
                 newAnimeSearchResponse(title, finalHref, TvType.Anime) {
                     this.posterUrl = poster
-                    this.posterHeaders = mapOf("User-Agent" to mobileUserAgent)
+                    this.posterHeaders = commonHeaders // 레퍼러가 보완된 공용 헤더로 지정하여 403 전면 우회
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "[parseCommonList] 가공 도중 예외 발생", e)
@@ -306,7 +314,7 @@ class Anilife : MainAPI() {
 
             return newAnimeLoadResponse(title, cleanUrl, TvType.Anime) {
                 this.posterUrl = doc.selectFirst(".thumb img")?.attr("src") ?: tunnelingPoster
-                this.posterHeaders = mapOf("User-Agent" to mobileUserAgent)
+                this.posterHeaders = commonHeaders // 레퍼러가 보완된 공용 헤더로 지정하여 상세 페이지 이미지 403도 회피
                 this.plot = plot
                 this.tags = tags
                 addEpisodes(DubStatus.Subbed, episodes)
