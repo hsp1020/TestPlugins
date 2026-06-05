@@ -43,7 +43,7 @@ class SyncPlugin : Plugin() {
 
                     if (counterBackup >= 15) {
                         val success = restoreDevice()
-                        if (success) {
+                        if (success.first) {
                             currentPollingInterval = minPollingInterval
                         } else {
                             currentPollingInterval = (currentPollingInterval * 2).coerceAtMost(maxPollingInterval)
@@ -97,67 +97,89 @@ class SyncPlugin : Plugin() {
         }
     }
 
-    suspend fun forceBackupNow() {
+    // [개선] UI 단으로 동기화의 상세 리포팅 성공/실패 여부를 직접 반환합니다.
+    suspend fun forceBackupNow(): Pair<Boolean, String> {
         backupDebounceJob?.cancel()
         Log.d("SyncCS", "Manual Push (Backup) Triggered!")
-        backupDevice()
+        return backupDevice()
     }
 
-    private suspend fun backupDevice() = withContext(Dispatchers.IO) {
+    private suspend fun backupDevice(): Pair<Boolean, String> = withContext(Dispatchers.IO) {
+        val context = AcraApplication.context ?: CloudStreamApp.context ?: return@withContext Pair(false, "Context is null")
         val pref = SharedPrefsHelper.getPrefs()
         val backupEnabled = pref.getString("backup_device", "false") == "true"
         val syncPluginsEnabled = pref.getString("sync_plugins_enabled", "false") == "true"
 
-        if (backupEnabled && ApiUtils.isLoggedIn()) {
-            val backupFile = BackupUtils.getFullBackup(syncPluginsEnabled)
-            if (backupFile == null) return@withContext
-            
-            val json = mapper.writeValueAsString(backupFile)
-
-            if (json.isNotEmpty()) {
-                val compressed = Util.compressJsonToString(Util.cleanedSyncData(json))
-                Log.d("SyncCS", "Compressed Payload Size: ${compressed.length} characters")
-                val result = ApiUtils.syncThisDevice(compressed)
-                if (result.first) {
-                    pref.edit().putLong("last_sync_timestamp", System.currentTimeMillis()).apply()
-                    Log.d("SyncCS", "Backup Complete. Timestamp updated.")
-                }
-            }
+        if (!backupEnabled) {
+            return@withContext Pair(false, "Backup is disabled in settings. Enable 'Backup data to Cloud' first.")
         }
+        if (!ApiUtils.isLoggedIn()) {
+            return@withContext Pair(false, "Not logged in or missing project details. Save credentials first.")
+        }
+
+        val backupFile = BackupUtils.getFullBackup(syncPluginsEnabled)
+            ?: return@withContext Pair(false, "No valid data found to backup.")
+        
+        val json = mapper.writeValueAsString(backupFile)
+        if (json.isEmpty()) {
+            return@withContext Pair(false, "Backup payload is empty.")
+        }
+
+        val compressed = Util.compressJsonToString(Util.cleanedSyncData(json))
+        Log.d("SyncCS", "Compressed Payload Size: ${compressed.length} characters")
+        
+        val result = ApiUtils.syncThisDevice(compressed)
+        if (result.first) {
+            pref.edit().putLong("last_sync_timestamp", System.currentTimeMillis()).apply()
+            Log.d("SyncCS", "Backup Complete. Timestamp updated.")
+        }
+        return@withContext result
     }
 
-    suspend fun restoreDevice(): Boolean = withContext(Dispatchers.IO) {
+    // [개선] 단순 중도이탈인 경우 성공 처리를 하지 않고 실패 사유를 구체적으로 리턴합니다.
+    suspend fun restoreDevice(): Pair<Boolean, String> = withContext(Dispatchers.IO) {
+        val context = AcraApplication.context ?: CloudStreamApp.context ?: return@withContext Pair(false, "Context is null")
         val pref = SharedPrefsHelper.getPrefs()
         val restoreEnabled = pref.getString("restore_device", "false") == "true"
         val syncPluginsEnabled = pref.getString("sync_plugins_enabled", "false") == "true"
 
-        if (restoreEnabled && ApiUtils.isLoggedIn()) {
-            Log.d("SyncCS", "--- Initiating Restore Process ---")
-            try {
-                val devices = ApiUtils.fetchDevices()
-                val thisDeviceId = Util.getDeviceId()
+        if (!restoreEnabled) {
+            return@withContext Pair(false, "Restore is disabled in settings. Enable 'Restore data from Cloud' first.")
+        }
+        if (!ApiUtils.isLoggedIn()) {
+            return@withContext Pair(false, "Not logged in or missing project details. Save credentials first.")
+        }
 
-                for (device in devices) {
-                    if (device.deviceId == thisDeviceId) continue
+        Log.d("SyncCS", "--- Initiating Restore Process ---")
+        try {
+            val devices = ApiUtils.fetchDevices()
+            val thisDeviceId = Util.getDeviceId()
+            var restoredAny = false
 
-                    val syncedData = device.syncedData ?: continue
-                    if (syncedData.isNotEmpty()) {
-                        val decompressed = Util.restoreText(Util.decompressJsonFromString(syncedData))
-                        val backupFile = mapper.readValue(decompressed, BackupFile::class.java)
+            for (device in devices) {
+                if (device.deviceId == thisDeviceId) continue
 
-                        if (backupFile != null) {
-                            withContext(Dispatchers.Main) {
-                                BackupUtils.restore(backupFile, true, true, syncPluginsEnabled)
-                            }
+                val syncedData = device.syncedData ?: continue
+                if (syncedData.isNotEmpty()) {
+                    val decompressed = Util.restoreText(Util.decompressJsonFromString(syncedData))
+                    val backupFile = mapper.readValue(decompressed, BackupFile::class.java)
+
+                    if (backupFile != null) {
+                        withContext(Dispatchers.Main) {
+                            BackupUtils.restore(backupFile, true, true, syncPluginsEnabled)
                         }
+                        restoredAny = true
                     }
                 }
-                return@withContext true
-            } catch (e: Exception) {
-                Log.e("SyncCS", "Restore Process Failed", e)
-                return@withContext false
             }
+            if (restoredAny) {
+                return@withContext Pair(true, "Restore completed. Please restart the app to see changes.")
+            } else {
+                return@withContext Pair(false, "No other device backups found on GitHub Project.")
+            }
+        } catch (e: Exception) {
+            Log.e("SyncCS", "Restore Process Failed", e)
+            return@withContext Pair(false, "Restore failed: ${e.message}")
         }
-        return@withContext true
     }
 }
