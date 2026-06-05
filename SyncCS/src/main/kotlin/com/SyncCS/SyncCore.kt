@@ -149,7 +149,7 @@ object Util {
         "\\\"title\\\"" to "\\\"v28\\\"", "\\\"poster\\\"" to "\\\"v29\\\"", "\\\"TvSeries\\\"" to "\\\"v30\\\"",
         "\\\"Movie\\\"" to "\\\"v31\\\"", "\\\"NSFW\\\"" to "\\\"v32\\\"", "\\\"Anime\\\"" to "\\\"v33\\\"",
         "\\\"Live\\\"" to "\\\"v34\\\"", "\\\"AnimeMovie\\\"" to "\\\"v35\\\"", "\\\"AsianDrama\\\"" to "\\\"v36\\\"",
-        "\\\"Cartoon\\\"" to "\\\"v37\\\"", "\\\"Torrent\\\"" to "\\\"v38\\\"", "\\\"slug\\\"" to "\\\"v39\\\"",
+        "\\\"Cartoon\\\"" to "\\\"v37\\\"", "\\\"Torrent\\\"" to "\\\"v37\\\"", "\\\"slug\\\"" to "\\\"v39\\\"",
         "\\\"https://" to "\\\"h//", "\\\":null," to "\\\":n,", "\\\":false}" to "\\\":f}", "\\\":true}" to "\\\":t}",
         "\"_Bool\"" to "\"s1\"", "\"_Int\"" to "\"s2\"", "\"_String\"" to "\"s3\"", "\"_Float\"" to "\"s4\"",
         "\"_Long\"" to "\"s5\"", "\"_StringSet\"" to "\"s6\"", "\"swipe_enabled_key\"" to "\"s7\"",
@@ -172,7 +172,6 @@ object Util {
         "\"prefer_media_type_key_2\"" to "\"s53\"", "\"datastore\"" to "\"s54\""
     )
 
-    // [개선] 정규식 파싱 오류 위험을 우회하고 단순 일대일 매핑 치환만 고속으로 처리합니다.
     fun cleanedSyncData(str: String): String {
         return try {
             var result = str
@@ -249,7 +248,7 @@ object Util {
 }
 
 // =========================================================================
-// [4] BackupUtils Area (순정 JSONObject 라이브러리를 통한 대용량 필드 완전 적출)
+// [4] BackupUtils Area (카테고리 메타데이터 대용량 파일 전용 예외 필터 완비)
 // =========================================================================
 object BackupUtils {
     private val nonTransferableKeys = listOf(
@@ -277,6 +276,9 @@ object BackupUtils {
         
         // 다운로드 캐시 및 대형 캐시 키를 수집 대상에서 원천 차단합니다.
         if (key.contains("cache") || key.contains("CACHE") || key.contains("download_")) return false
+
+        // [용량 초과 극단적 최적화] 기기별로 상이하고 용량이 수십만 자에 달하는 홈 화면 카테고리 표시 설정을 전면 동기화에서 제외합니다.
+        if (key.startsWith("cat_") || key.contains("cat_toggle") || key.contains("cat_order") || key.contains("cat_rename")) return false
         
         return nonTransferableKeys.none { key.contains(it) }
     }
@@ -285,7 +287,7 @@ object BackupUtils {
         val pref = SharedPrefsHelper.getPrefs()
         val defaultPref = SharedPrefsHelper.getDefaultPrefs()
 
-        // [중요] 1번 기기(태블릿)의 원본 데이터를 가공하며 대용량 텍스트 유발 필드(overview, plot, tags)를 네이티브 레벨에서 강제 박멸
+        // 1번 기기(태블릿)의 데이터를 가공하며 줄거리(overview/plot/tags) 등 대용량 메타데이터를 네이티브 레벨에서 강제 탈락
         val rawPrefs = pref.all.filter { isResume(it.key, syncPlugins) }
         val validPrefs = rawPrefs.mapValues { entry ->
             val value = entry.value
