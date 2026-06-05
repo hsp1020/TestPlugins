@@ -10,7 +10,6 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.lagradost.cloudstream3.AcraApplication
-import com.lagradost.cloudstream3.CloudStreamApp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -31,25 +30,24 @@ import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
 
 // =========================================================================
-// [1] Native SharedPreferences Helper (DataStore 이름 정확히 조준)
+// [1] Native SharedPreferences Helper
 // =========================================================================
-
 object SharedPrefsHelper {
-    fun getPrefs(context: Context): SharedPreferences {
-        // [수정됨] 패키지명이 아닌 "DataStore"에 시청기록과 플러그인이 보관됩니다.
-        return context.getSharedPreferences("DataStore", Context.MODE_PRIVATE)
+    val appContext: Context
+        get() = AcraApplication.context ?: throw IllegalStateException("Cloudstream App context is null")
+
+    fun getPrefs(): SharedPreferences {
+        return appContext.getSharedPreferences("DataStore", Context.MODE_PRIVATE)
     }
 
-    fun getDefaultPrefs(context: Context): SharedPreferences {
-        // 일반 설정(테마 등)은 패키지명_preferences 에 보관됩니다.
-        return context.getSharedPreferences(context.packageName + "_preferences", Context.MODE_PRIVATE)
+    fun getDefaultPrefs(): SharedPreferences {
+        return appContext.getSharedPreferences("${appContext.packageName}_preferences", Context.MODE_PRIVATE)
     }
 }
 
 // =========================================================================
 // [2] Models Area
 // =========================================================================
-
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class APIRes(
     @JsonProperty("data") var data: Data? = null,
@@ -62,58 +60,37 @@ data class APIRes(
         @JsonProperty("deleteProjectV2Item") var delItem: DelItem? = null
     ) {
         @JsonIgnoreProperties(ignoreUnknown = true)
-        data class Viewer(
-            @JsonProperty("projectV2") var projectV2: ProjectV2? = null
-        ) {
+        data class Viewer(@JsonProperty("projectV2") var projectV2: ProjectV2? = null) {
             @JsonIgnoreProperties(ignoreUnknown = true)
-            data class ProjectV2(
-                @JsonProperty("id") var id: String? = null,
-                @JsonProperty("items") var items: Items? = null
-            ) {
+            data class ProjectV2(@JsonProperty("id") var id: String? = null, @JsonProperty("items") var items: Items? = null) {
                 @JsonIgnoreProperties(ignoreUnknown = true)
-                data class Items(
-                    @JsonProperty("nodes") var nodes: Array<Node>? = null
-                ) {
+                data class Items(@JsonProperty("nodes") var nodes: Array<Node>? = null) {
                     @JsonIgnoreProperties(ignoreUnknown = true)
-                    data class Node(
-                        @JsonProperty("id") var id: String? = null,
-                        @JsonProperty("content") var content: Content? = null
-                    ) {
+                    data class Node(@JsonProperty("id") var id: String? = null, @JsonProperty("content") var content: Content? = null) {
                         @JsonIgnoreProperties(ignoreUnknown = true)
                         data class Content(
                             @JsonProperty("id") var id: String? = null,
                             @JsonProperty("title") var title: String? = null,
                             @JsonProperty("bodyText") var bodyText: String? = null,
-                            @JsonProperty("body") var body: String? = null 
+                            @JsonProperty("body") var body: String? = null
                         )
                     }
                 }
             }
         }
         @JsonIgnoreProperties(ignoreUnknown = true)
-        data class Issue(
-            @JsonProperty("projectItem") var projectItem: ProjectItem? = null
-        ) {
+        data class Issue(@JsonProperty("projectItem") var projectItem: ProjectItem? = null) {
             @JsonIgnoreProperties(ignoreUnknown = true)
-            data class ProjectItem(
-                @JsonProperty("id") var id: String? = null,
-                @JsonProperty("content") var content: Content? = null
-            ) {
+            data class ProjectItem(@JsonProperty("id") var id: String? = null, @JsonProperty("content") var content: Content? = null) {
                 @JsonIgnoreProperties(ignoreUnknown = true)
-                data class Content(
-                    @JsonProperty("id") var id: String? = null
-                )
+                data class Content(@JsonProperty("id") var id: String? = null)
             }
         }
         @JsonIgnoreProperties(ignoreUnknown = true)
-        data class DelItem(
-            @JsonProperty("deletedItemId") var deletedItemId: String? = null
-        )
+        data class DelItem(@JsonProperty("deletedItemId") var deletedItemId: String? = null)
     }
     @JsonIgnoreProperties(ignoreUnknown = true)
-    data class Error(
-        @JsonProperty("message") var message: String? = null
-    )
+    data class Error(@JsonProperty("message") var message: String? = null)
 }
 
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -143,10 +120,7 @@ data class SyncDevice(
 // =========================================================================
 // [3] Util Area
 // =========================================================================
-
 object Util {
-
-    // [중요] 원본의 1대1 압축 해제 딕셔너리 완벽 부활 (데이터 증발 해결)
     private val minifyDict = listOf(
         "/result_resume_watching_2/" to "/k1/", "/video_pos_dur/" to "/k2/", "download_header_cache/" to "/k3/",
         "/result_watch_state/" to "/k4/", "/result_watch_state_data/" to "/k5/", "/result_season/" to "/k6/",
@@ -210,7 +184,6 @@ object Util {
         return try {
             var result = str
             for ((old, new) in minifyDict) {
-                // 압축 해제: new(짧은 키)를 old(긴 키)로 되돌림
                 result = result.replace(new, old)
             }
             result
@@ -227,9 +200,7 @@ object Util {
     fun decompressJsonFromString(str: String): String {
         return try {
             String(Base64.decode(str, Base64.NO_WRAP or Base64.NO_PADDING), UTF_8)
-        } catch (e: Exception) {
-            ""
-        }
+        } catch (e: Exception) { "" }
     }
 
     fun encrypt(str: String, keySeed: String): String {
@@ -240,14 +211,11 @@ object Util {
             val iv = ByteArray(12).apply { SecureRandom().nextBytes(this) }
             cipher.init(Cipher.ENCRYPT_MODE, secretKey, GCMParameterSpec(128, iv))
             val encryptedBytes = cipher.doFinal(str.toByteArray(UTF_8))
-            
             val combined = ByteArray(iv.size + encryptedBytes.size)
             System.arraycopy(iv, 0, combined, 0, iv.size)
             System.arraycopy(encryptedBytes, 0, combined, iv.size, encryptedBytes.size)
             Base64.encodeToString(combined, Base64.NO_WRAP or Base64.NO_PADDING)
-        } catch (e: Exception) {
-            str
-        }
+        } catch (e: Exception) { str }
     }
 
     fun decrypt(str: String, keySeed: String): String {
@@ -257,15 +225,12 @@ object Util {
             val encryptedBytes = ByteArray(combined.size - 12)
             System.arraycopy(combined, 0, iv, 0, 12)
             System.arraycopy(combined, 12, encryptedBytes, 0, encryptedBytes.size)
-
             val keyBytes = sha256(keySeed)
             val secretKey = SecretKeySpec(keyBytes, "AES")
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(128, iv))
             String(cipher.doFinal(encryptedBytes), UTF_8)
-        } catch (e: Exception) {
-            str
-        }
+        } catch (e: Exception) { str }
     }
 
     private fun sha256(input: String): ByteArray {
@@ -273,11 +238,12 @@ object Util {
         return digest.digest(input.toByteArray(UTF_8))
     }
 
-    fun getDeviceId(packageName: String, context: Context): String {
+    fun getDeviceId(): String {
+        val context = SharedPrefsHelper.appContext
         val androidId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
-        if (!androidId.isNullOrEmpty()) return md5(packageName + androidId)
+        if (!androidId.isNullOrEmpty()) return md5(context.packageName + androidId)
         val fallback = "${Build.BRAND}_${Build.MODEL}_${Build.DEVICE}"
-        return md5(packageName + UUID.nameUUIDFromBytes(fallback.toByteArray(UTF_8)).toString())
+        return md5(context.packageName + UUID.nameUUIDFromBytes(fallback.toByteArray(UTF_8)).toString())
     }
 
     fun md5(input: String): String {
@@ -290,9 +256,7 @@ object Util {
 // =========================================================================
 // [4] BackupUtils Area
 // =========================================================================
-
 object BackupUtils {
-
     private val nonTransferableKeys = listOf(
         "anilist_unixtime", "anilist_token", "anilist_user", "anilist_cached_list", "anilist_accounts", "anilist_active",
         "mal_user", "mal_cached_list", "mal_unixtime", "mal_refresh_token", "mal_token", "mal_accounts", "mal_active",
@@ -309,17 +273,13 @@ object BackupUtils {
     )
 
     fun isResume(key: String, syncPlugins: Boolean = false): Boolean {
-        if (syncPlugins && (key.contains("PLUGINS_KEY") || key.contains("PLUGINS_KEY_LOCAL"))) {
-            return true
-        }
+        if (!syncPlugins && (key.contains("PLUGINS_KEY") || key.contains("PLUGINS_KEY_LOCAL"))) return false
         return nonTransferableKeys.none { key.contains(it) }
     }
 
-    // [수정됨] 무결성 보장을 위해 델타 동기화가 아닌 원본 전체 동기화로 롤백 
-    // (이 방식만이 타임스탬프가 없는 플러그인 데이터를 살릴 수 있습니다)
-    fun getFullBackup(context: Context, syncPlugins: Boolean = false): BackupFile? {
-        val pref = SharedPrefsHelper.getPrefs(context)
-        val defaultPref = SharedPrefsHelper.getDefaultPrefs(context)
+    fun getFullBackup(syncPlugins: Boolean = false): BackupFile? {
+        val pref = SharedPrefsHelper.getPrefs()
+        val defaultPref = SharedPrefsHelper.getDefaultPrefs()
 
         val validPrefs = pref.all.filter { isResume(it.key, syncPlugins) }
         val validDefaultPrefs = defaultPref.all.filter { isResume(it.key, syncPlugins) }
@@ -343,9 +303,9 @@ object BackupUtils {
         )
     }
 
-    fun restoreMap(context: Context, incoming: Map<String, out Any?>?, isAppSettings: Boolean, syncPlugins: Boolean = false) {
+    fun restoreMap(incoming: Map<String, out Any?>?, isAppSettings: Boolean, syncPlugins: Boolean = false) {
         if (incoming.isNullOrEmpty()) return
-        val pref = if (isAppSettings) SharedPrefsHelper.getDefaultPrefs(context) else SharedPrefsHelper.getPrefs(context)
+        val pref = if (isAppSettings) SharedPrefsHelper.getDefaultPrefs() else SharedPrefsHelper.getPrefs()
         val editor = pref.edit()
 
         Log.d("SyncCS", "Restoring ${incoming.size} keys to ${if(isAppSettings) "Settings" else "DataStore"}")
@@ -354,9 +314,10 @@ object BackupUtils {
             if (!isResume(key, syncPlugins)) continue
 
             val localValue = pref.all[key]
+            
             if (localValue != null && incomingValue is String && localValue is String) {
-                val merged = resolveConflict(localValue, incomingValue)
-                editor.putString(key, merged)
+                val mergedValue = resolveConflict(localValue, incomingValue)
+                editor.putString(key, mergedValue)
             } else {
                 when (incomingValue) {
                     is Boolean -> editor.putBoolean(key, incomingValue)
@@ -380,29 +341,29 @@ object BackupUtils {
             val incomingObj = JSONObject(incomingStr)
             val localTime = localObj.optLong("latestUpdatedTime", localObj.optLong("bookmarkedTime", 0L))
             val incomingTime = incomingObj.optLong("latestUpdatedTime", incomingObj.optLong("bookmarkedTime", 0L))
+            
             if (incomingTime >= localTime) incomingStr else localStr
         } catch (e: Exception) {
             incomingStr
         }
     }
 
-    fun restore(context: Context?, backupFile: BackupFile, restoreSettings: Boolean, restoreDataStore: Boolean, syncPlugins: Boolean = false) {
-        if (context == null) return
+    fun restore(backupFile: BackupFile, restoreSettings: Boolean, restoreDataStore: Boolean, syncPlugins: Boolean = false) {
         if (restoreSettings) {
-            restoreMap(context, backupFile.settings.bool, true, syncPlugins)
-            restoreMap(context, backupFile.settings.int, true, syncPlugins)
-            restoreMap(context, backupFile.settings.string, true, syncPlugins)
-            restoreMap(context, backupFile.settings.float, true, syncPlugins)
-            restoreMap(context, backupFile.settings.long, true, syncPlugins)
-            restoreMap(context, backupFile.settings.stringSet, true, syncPlugins)
+            restoreMap(backupFile.settings.bool, true, syncPlugins)
+            restoreMap(backupFile.settings.int, true, syncPlugins)
+            restoreMap(backupFile.settings.string, true, syncPlugins)
+            restoreMap(backupFile.settings.float, true, syncPlugins)
+            restoreMap(backupFile.settings.long, true, syncPlugins)
+            restoreMap(backupFile.settings.stringSet, true, syncPlugins)
         }
         if (restoreDataStore) {
-            restoreMap(context, backupFile.datastore.bool, false, syncPlugins)
-            restoreMap(context, backupFile.datastore.int, false, syncPlugins)
-            restoreMap(context, backupFile.datastore.string, false, syncPlugins)
-            restoreMap(context, backupFile.datastore.float, false, syncPlugins)
-            restoreMap(context, backupFile.datastore.long, false, syncPlugins)
-            restoreMap(context, backupFile.datastore.stringSet, false, syncPlugins)
+            restoreMap(backupFile.datastore.bool, false, syncPlugins)
+            restoreMap(backupFile.datastore.int, false, syncPlugins)
+            restoreMap(backupFile.datastore.string, false, syncPlugins)
+            restoreMap(backupFile.datastore.float, false, syncPlugins)
+            restoreMap(backupFile.datastore.long, false, syncPlugins)
+            restoreMap(backupFile.datastore.stringSet, false, syncPlugins)
         }
     }
 }
@@ -410,7 +371,6 @@ object BackupUtils {
 // =========================================================================
 // [5] ApiUtils Area
 // =========================================================================
-
 object ApiUtils {
     private val mapper = jacksonObjectMapper()
 
@@ -427,14 +387,11 @@ object ApiUtils {
                 .sslSocketFactory(sslContext.socketFactory, trustAllCerts[0] as X509TrustManager)
                 .hostnameVerifier { _, _ -> true }
                 .build()
-        } catch (e: Exception) {
-            OkHttpClient()
-        }
+        } catch (e: Exception) { OkHttpClient() }
     }
 
     fun isLoggedIn(): Boolean {
-        val context = AcraApplication.context ?: CloudStreamApp.context ?: return false
-        val pref = SharedPrefsHelper.getPrefs(context)
+        val pref = SharedPrefsHelper.getPrefs()
         val token = pref.getString("sync_token", null)
         val projectNum = pref.getString("sync_project_num", null)
         val projectId = pref.getString("sync_project_id", null)
@@ -460,21 +417,13 @@ object ApiUtils {
             val code = response.code
             val responseBody = response.body?.string() ?: ""
 
-            if (code != 200) {
-                Log.e("SyncCS", "API Failed. Code: $code, Res: $responseBody")
-                return@withContext null
-            }
-
+            if (code != 200) return@withContext null
             mapper.readValue(responseBody, APIRes::class.java)
-        } catch (e: Exception) {
-            Log.e("SyncCS", "apiCall Error", e)
-            null
-        }
+        } catch (e: Exception) { null }
     }
 
-    suspend fun syncProjectDetails(context: Context?): Pair<Boolean, String> {
-        if (context == null) return Pair(false, "No context")
-        val pref = SharedPrefsHelper.getPrefs(context)
+    suspend fun syncProjectDetails(): Pair<Boolean, String> {
+        val pref = SharedPrefsHelper.getPrefs()
         val token = pref.getString("sync_token", null)?.replace("\"", "") ?: return Pair(false, "Missing token")
         val projectNum = pref.getString("sync_project_num", null)?.replace("\"", "")?.toIntOrNull() ?: return Pair(false, "Invalid project number")
 
@@ -486,13 +435,7 @@ object ApiUtils {
                         items(first: 100) {
                             nodes {
                                 id
-                                content {
-                                    ... on DraftIssue {
-                                        id
-                                        title
-                                        body
-                                    }
-                                }
+                                content { ... on DraftIssue { id title body } }
                             }
                         }
                     }
@@ -500,13 +443,8 @@ object ApiUtils {
             }
         """.trimIndent()
 
-        val res = apiCall(query, token)
-        
-        if (res == null) return Pair(false, "Failed to connect to GitHub. Check Logcat.")
-        if (res.errors != null && res.errors!!.isNotEmpty()) {
-            val errorMsg = res.errors!!.joinToString(", ") { it.message ?: "Unknown Error" }
-            return Pair(false, "GitHub Error: $errorMsg")
-        }
+        val res = apiCall(query, token) ?: return Pair(false, "Failed to connect to GitHub. Check Logcat.")
+        if (res.errors?.isNotEmpty() == true) return Pair(false, "GitHub Error")
 
         val project = res.data?.viewer?.projectV2 ?: return Pair(false, "Failed to connect to GitHub or project not found")
         val projectId = project.id ?: return Pair(false, "Project ID not found in response")
@@ -515,23 +453,16 @@ object ApiUtils {
         return Pair(true, "Successfully linked to GitHub Project!")
     }
 
-    suspend fun syncThisDevice(syncData: String, context: Context): Pair<Boolean, String> {
-        val pref = SharedPrefsHelper.getPrefs(context)
+    suspend fun syncThisDevice(syncData: String): Pair<Boolean, String> {
+        val pref = SharedPrefsHelper.getPrefs()
         val token = pref.getString("sync_token", null)?.replace("\"", "") ?: return Pair(false, "Missing token")
         val projectId = pref.getString("sync_project_id", null)?.replace("\"", "") ?: return Pair(false, "Missing Project ID")
-        val deviceName = pref.getString("device_name", android.os.Build.MODEL) ?: android.os.Build.MODEL
-        val deviceId = Util.getDeviceId(context.packageName, context)
-
+        val deviceName = pref.getString("device_name", Build.MODEL) ?: Build.MODEL
+        val deviceId = Util.getDeviceId()
         val storedItemId = pref.getString("sync_item_id", null)?.replace("\"", "")
 
         if (!storedItemId.isNullOrEmpty()) {
-            val delQuery = """
-                mutation {
-                    deleteProjectV2Item(input: {projectId: "$projectId", itemId: "$storedItemId"}) {
-                        deletedItemId
-                    }
-                }
-            """.trimIndent()
+            val delQuery = "mutation { deleteProjectV2Item(input: {projectId: \"$projectId\", itemId: \"$storedItemId\"}) { deletedItemId } }"
             apiCall(delQuery, token)
         }
 
@@ -542,9 +473,7 @@ object ApiUtils {
         val addQuery = """
             mutation {
                 addProjectV2DraftIssue(input: {projectId: "$projectId", title: "$escapedName", body: "$escapedPayload"}) {
-                    projectItem {
-                        id
-                    }
+                    projectItem { id }
                 }
             }
         """.trimIndent()
@@ -554,15 +483,13 @@ object ApiUtils {
 
         if (!newItemId.isNullOrEmpty()) {
             pref.edit().putString("sync_item_id", newItemId).apply()
-            Log.d("SyncCS", "Sync completed successfully. Uploaded to GitHub.")
             return Pair(true, "Sync completed successfully")
         }
-
         return Pair(false, "Sync failed during upload")
     }
 
-    suspend fun fetchDevices(context: Context): List<SyncDevice> {
-        val pref = SharedPrefsHelper.getPrefs(context)
+    suspend fun fetchDevices(): List<SyncDevice> {
+        val pref = SharedPrefsHelper.getPrefs()
         val token = pref.getString("sync_token", null)?.replace("\"", "") ?: return emptyList()
         val projectNum = pref.getString("sync_project_num", null)?.replace("\"", "")?.toIntOrNull() ?: return emptyList()
 
@@ -571,18 +498,7 @@ object ApiUtils {
                 viewer {
                     projectV2(number: $projectNum) {
                         id
-                        items(first: 100) {
-                            nodes {
-                                id
-                                content {
-                                    ... on DraftIssue {
-                                        id
-                                        title
-                                        body
-                                    }
-                                }
-                            }
-                        }
+                        items(first: 100) { nodes { id content { ... on DraftIssue { id title body } } } }
                     }
                 }
             }
@@ -596,7 +512,6 @@ object ApiUtils {
             val itemId = node.id ?: continue
             val title = node.content?.title ?: continue
             val body = node.content?.body ?: node.content?.bodyText ?: ""
-
             val parts = title.split("|")
             if (parts.size >= 2) {
                 list.add(SyncDevice(parts[0], parts[1], itemId, Util.decrypt(body, token)))
