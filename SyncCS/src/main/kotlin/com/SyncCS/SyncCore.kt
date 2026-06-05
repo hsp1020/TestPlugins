@@ -14,11 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.security.MessageDigest
-import java.security.SecureRandom
 import java.util.UUID
-import javax.crypto.Cipher
-import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.SecretKeySpec
 import kotlin.text.Charsets.UTF_8
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
@@ -118,7 +114,7 @@ data class SyncDevice(
 )
 
 // =========================================================================
-// [3] Util Area
+// [3] Util Area (암호화 우회 처리 완료)
 // =========================================================================
 object Util {
     private val minifyDict = listOf(
@@ -203,39 +199,14 @@ object Util {
         } catch (e: Exception) { "" }
     }
 
+    // [디버깅 우회] 암호화 단계를 건너뛰고 평문 문자열을 그대로 반환합니다.
     fun encrypt(str: String, keySeed: String): String {
-        return try {
-            val keyBytes = sha256(keySeed)
-            val secretKey = SecretKeySpec(keyBytes, "AES")
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            val iv = ByteArray(12).apply { SecureRandom().nextBytes(this) }
-            cipher.init(Cipher.ENCRYPT_MODE, secretKey, GCMParameterSpec(128, iv))
-            val encryptedBytes = cipher.doFinal(str.toByteArray(UTF_8))
-            val combined = ByteArray(iv.size + encryptedBytes.size)
-            System.arraycopy(iv, 0, combined, 0, iv.size)
-            System.arraycopy(encryptedBytes, 0, combined, iv.size, encryptedBytes.size)
-            Base64.encodeToString(combined, Base64.NO_WRAP or Base64.NO_PADDING)
-        } catch (e: Exception) { str }
+        return str
     }
 
+    // [디버깅 우회] 복호화 단계를 건너뛰고 평문 문자열을 그대로 반환합니다.
     fun decrypt(str: String, keySeed: String): String {
-        return try {
-            val combined = Base64.decode(str, Base64.NO_WRAP or Base64.NO_PADDING)
-            val iv = ByteArray(12)
-            val encryptedBytes = ByteArray(combined.size - 12)
-            System.arraycopy(combined, 0, iv, 0, 12)
-            System.arraycopy(combined, 12, encryptedBytes, 0, encryptedBytes.size)
-            val keyBytes = sha256(keySeed)
-            val secretKey = SecretKeySpec(keyBytes, "AES")
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(128, iv))
-            String(cipher.doFinal(encryptedBytes), UTF_8)
-        } catch (e: Exception) { str }
-    }
-
-    private fun sha256(input: String): ByteArray {
-        val digest = MessageDigest.getInstance("SHA-256")
-        return digest.digest(input.toByteArray(UTF_8))
+        return str
     }
 
     fun getDeviceId(): String {
