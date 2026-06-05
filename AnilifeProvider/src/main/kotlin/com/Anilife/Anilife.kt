@@ -1,14 +1,18 @@
 package com.anilife
 
-import android.annotation.SuppressLint // 누락된 수입(Import) 정상 추가
+import android.annotation.SuppressLint
 import android.util.Base64
 import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceError
+import android.net.http.SslError
+import android.webkit.SslErrorHandler
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.CloudStreamApp // 전역 컨텍스트 액세스용 패키지 수입
+import com.lagradost.cloudstream3.CloudStreamApp
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import kotlinx.coroutines.Dispatchers
@@ -40,15 +44,14 @@ class Anilife : MainAPI() {
     )
 
     /**
-     * 쌩웹뷰를 백그라운드에 생성하여 페이지를 완벽 로드한 뒤, 
-     * Cloudflare가 검증 완료한 최종 완성 HTML을 자바스크립트로 직접 안전하게 추출하는 로더
+     * 메인 주소의 완벽한 렌더링을 감시하고, 
+     * 오류(SSL/Connection reset) 발생 시 즉시 예외를 발생시켜 디버깅을 원활히 돕는 쌩웹뷰 엔진
      */
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun getDocumentWithRawWebView(url: String): Document {
         Log.d(TAG, "[RawWebView] === 쌩웹뷰 HTML 로딩 프로세스 시작 ===")
         Log.d(TAG, "[RawWebView] 대상 주소: $url")
         
-        // CloudStreamApp 전역 Companion 컨텍스트를 안전하게 호출하여 참조 정합성 보장
         val ctx = CloudStreamApp.context ?: throw Exception("Android Context가 Null 상태입니다. 로더를 가동할 수 없습니다.")
 
         return withContext(Dispatchers.Main) {
@@ -93,14 +96,47 @@ class Anilife : MainAPI() {
 
                 webView.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView?, url: String?) {
+                        if (isResumed) return
                         Log.d(TAG, "[RawWebView] 웹뷰 로딩 완료됨 -> 수집 스크립트 실행")
-                        // 렌더링이 완전히 끝난 돔 트리의 HTML 원본을 자바스크립트로 안전하게 낚아챕니다.
                         view?.loadUrl("javascript:window.HTMLOUT.processHTML(document.documentElement.outerHTML);")
                     }
 
+                    // 구형 에러 핸들러 백업
                     @Deprecated("Deprecated in Java")
                     override fun onReceivedError(view: WebView?, errorCode: Int, description: String?, failingUrl: String?) {
-                        Log.e(TAG, "[RawWebView] 에러 발생 코드: $errorCode, 내용: $description")
+                        Log.e(TAG, "[RawWebView] [구형에러] 코드: $errorCode, 내용: $description, 주소: $failingUrl")
+                        if (failingUrl == url && !isResumed) {
+                            isResumed = true
+                            cleanup()
+                            continuation.resumeWith(Result.failure(Exception("[RawWebView] 접속 에러 발생: $description ($errorCode)")))
+                        }
+                    }
+
+                    // 신형 에러 핸들러 (오직 메인 도메인의 차단/실패만 정확히 판별하여 탈출)
+                    override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                        val errorCode = error?.errorCode ?: -1
+                        val description = error?.description?.toString() ?: "Unknown"
+                        val failingUrl = request?.url?.toString() ?: ""
+                        Log.e(TAG, "[RawWebView] [신형에러] 코드: $errorCode, 내용: $description, 주소: $failingUrl")
+
+                        if (request?.isForMainFrame == true && !isResumed) {
+                            isResumed = true
+                            cleanup()
+                            continuation.resumeWith(Result.failure(Exception("[RawWebView] 메인 프레임 로딩 실패: $description ($errorCode)")))
+                        }
+                    }
+
+                    // SSL 핸드셰이크 예외 감시 및 차단 인터셉터
+                    override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: SslError?) {
+                        val sslErrorDesc = error?.toString() ?: "Unknown SSL Error"
+                        Log.e(TAG, "[RawWebView] SSL 핸드셰이크 에러 발생: $sslErrorDesc")
+                        handler?.cancel() // 즉시 안전 종료
+                        
+                        if (!isResumed) {
+                            isResumed = true
+                            cleanup()
+                            continuation.resumeWith(Result.failure(Exception("[RawWebView] SSL 연결 수립 실패: $sslErrorDesc")))
+                        }
                     }
                 }
 
