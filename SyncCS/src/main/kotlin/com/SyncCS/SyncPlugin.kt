@@ -115,7 +115,6 @@ class SyncPlugin : Plugin() {
             return@withContext Pair(false, "Not logged in or missing project details. Save credentials first.")
         }
 
-        // Properly get and limit resumeWatching list (max 50 to prevent overflow)
         val rawResumeWatching = try {
             HomeViewModel.getResumeWatching()
         } catch (e: Exception) {
@@ -134,7 +133,6 @@ class SyncPlugin : Plugin() {
         val cleaned = Util.cleanedSyncData(json)
         val originalLength = cleaned.length
 
-        // Correctly match the original Base64 encoding structure (Flag 10)
         val compressed = Util.compressJsonToString(cleaned)
         val compressedLength = compressed.length
         Log.d("SyncCS", "Original Size: $originalLength chars, Compressed Size: $compressedLength chars")
