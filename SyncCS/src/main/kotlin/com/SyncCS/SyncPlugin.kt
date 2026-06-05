@@ -10,6 +10,7 @@ import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.utils.DataStore
 import com.lagradost.cloudstream3.utils.DataStoreHelper
+import com.lagradost.cloudstream3.mapper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -17,8 +18,8 @@ import kotlinx.coroutines.withContext
 
 @CloudstreamPlugin
 class SyncPlugin : Plugin() {
-    var counterBackup = 0
-    var lastResumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null
+    private var counterBackup = 0
+    private var lastResumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null
     private val handler = Handler(Looper.getMainLooper())
 
     private val runnable = object : Runnable {
@@ -52,7 +53,7 @@ class SyncPlugin : Plugin() {
                     try {
                         val raw = with(DataStore) { context.getSharedPrefs().getString("backup_device", null) }
                         if (raw != null) {
-                            backupDeviceStr = DataStore.mapper.readValue(raw, String::class.java)
+                            backupDeviceStr = mapper.readValue(raw, String::class.java)
                         }
                     } catch (unused2: Exception) {
                     }
@@ -62,7 +63,7 @@ class SyncPlugin : Plugin() {
                     val resumeWatching = com.lagradost.cloudstream3.ui.home.HomeViewModel.Companion.getResumeWatching()
                     val backupFile = BackupUtils.getBackup(context2, resumeWatching)
                     val json = if (backupFile != null) {
-                        com.lagradost.cloudstream3.utils.AppUtils.INSTANCE.toJson(backupFile) ?: ""
+                        mapper.writeValueAsString(backupFile) ?: ""
                     } else ""
                     ApiUtils.INSTANCE.syncThisDevice(json)
                 }
@@ -80,7 +81,7 @@ class SyncPlugin : Plugin() {
                     try {
                         val raw = with(DataStore) { context.getSharedPrefs().getString("restore_device", null) }
                         if (raw != null) {
-                            restoreDeviceStr = DataStore.mapper.readValue(raw, String::class.java)
+                            restoreDeviceStr = mapper.readValue(raw, String::class.java)
                         }
                     } catch (unused2: Exception) {
                     }
@@ -97,7 +98,6 @@ class SyncPlugin : Plugin() {
                                 val syncedData = device.syncedData
                                 if (!syncedData.isNullOrEmpty()) {
                                     val json = UtilKt.restoreText(UtilKt.decompressJsonFromString(syncedData))
-                                    val mapper = DataStore.mapper
                                     val backupFile = mapper.readValue(json, BackupFile::class.java)
                                     if (backupFile != null && context2 != null) {
                                         withContext(Dispatchers.Main) {
