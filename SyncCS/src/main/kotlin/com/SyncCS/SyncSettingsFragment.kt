@@ -1,6 +1,7 @@
 package com.SyncCS
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.graphics.drawable.Drawable
 import android.os.Build
 import android.os.Bundle
@@ -22,12 +23,16 @@ import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.mapper
 import com.lagradost.cloudstream3.plugins.Plugin
-import com.lagradost.cloudstream3.ui.home.HomeViewModel
 import com.lagradost.cloudstream3.utils.DataStore
+
+// ★ 해결: 누락되었던 코루틴 핵심 임포트 구문들을 추가했습니다.
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragment() {
 
-    // ★ 복원: StremioX와 동일하게 plugin.resources를 사용하여 안전하게 리소스를 획득합니다.
     private val res = plugin.resources ?: error("Resources not found")
     private val resPackageName = "com.SyncCS"
 
@@ -52,7 +57,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
     private fun makeTvCompatible(view: View) {
         val id = res.getIdentifier("outline", "drawable", resPackageName)
         if (id != 0) {
-            view.background = ResourcesCompat.getDrawable(res, id, null)
+            view.background = res.getDrawable(id, null)
         }
     }
 
@@ -124,7 +129,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                     CoroutineScope(Dispatchers.IO).launch {
                         try {
                             Log.d("SYNC", "[SyncSettingsFragment] Verifying project details...")
-                            val (success, msg) = ApiUtils.syncProjectDetails(requireContext())
+                            val (success, msg) = ApiUtils.syncProjectDetails(context)
                             if (!success) {
                                 Log.d("SYNC", "[SyncSettingsFragment] Project verification failed: $msg")
                                 withContext(Dispatchers.Main) {
@@ -135,7 +140,6 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                                 return@launch
                             }
 
-                            Log.d("SYNC", "[SyncSettingsFragment] Checking for duplicate device names...")
                             val devices = ApiUtils.fetchDevices()
                             val currentDeviceId = UtilKt.getDeviceId(resPackageName, requireContext())
                             val isDuplicate = devices.any { it.name == deviceName && it.deviceId != currentDeviceId }
