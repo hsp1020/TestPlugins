@@ -20,7 +20,7 @@ buildscript {
         println("[Debug] buildscript 의존성 설정 시작")
         // 기존부터 사용하던 AGP 8.x 환경 유지 (R8 버그 방지를 위해 8.8.2로 상향한 상태 유지)
         classpath("com.android.tools.build:gradle:8.8.2")
-        classpath("com.github.recloudstream:gradle:81b1d424d2d")
+        classpath("com.github.recloudstream:gradle:master-SNAPSHOT")
         
         // 메타데이터 컴파일 에러 해결을 위해 맞춘 Kotlin 2.3.0 유지
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.3.0")
