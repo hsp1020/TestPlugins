@@ -12,11 +12,15 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mapper
 import com.lagradost.cloudstream3.utils.DataStore
 import com.lagradost.cloudstream3.utils.DataStoreHelper
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.zip.GZIPInputStream
+import java.util.zip.GZIPOutputStream
 
 // ==========================================
-// Data Models
+// Data Models (파싱 에러 방지를 위해 모두 Nullable 처리)
 // ==========================================
 
 data class APIRes(
@@ -30,18 +34,18 @@ data class APIRes(
     ) {
         data class Viewer(@JsonProperty("projectV2") var projectV2: ProjectV2?) {
             data class ProjectV2(
-                @JsonProperty("id") var id: String,
+                @JsonProperty("id") var id: String? = null,
                 @JsonProperty("items") var items: Items? = null
             ) {
                 data class Items(@JsonProperty("nodes") var nodes: List<Node>? = null) {
                     data class Node(
-                        @JsonProperty("id") var id: String,
-                        @JsonProperty("content") var content: Content
+                        @JsonProperty("id") var id: String? = null,
+                        @JsonProperty("content") var content: Content? = null
                     ) {
                         data class Content(
-                            @JsonProperty("id") var id: String?,
-                            @JsonProperty("title") var title: String?,
-                            @JsonProperty("bodyText") var bodyText: String?
+                            @JsonProperty("id") var id: String? = null,
+                            @JsonProperty("title") var title: String? = null,
+                            @JsonProperty("bodyText") var bodyText: String? = null
                         )
                     }
                 }
@@ -49,13 +53,13 @@ data class APIRes(
         }
         data class Issue(@JsonProperty("projectItem") var projectItem: ProjectItem?) {
             data class ProjectItem(
-                @JsonProperty("id") var id: String,
-                @JsonProperty("content") var content: Content?
+                @JsonProperty("id") var id: String? = null,
+                @JsonProperty("content") var content: Content? = null
             ) {
-                data class Content(@JsonProperty("id") var id: String?)
+                data class Content(@JsonProperty("id") var id: String? = null)
             }
         }
-        data class DelItem(@JsonProperty("deletedItemId") var deletedItemId: String?)
+        data class DelItem(@JsonProperty("deletedItemId") var deletedItemId: String? = null)
     }
     data class Error(@JsonProperty("message") var message: String? = null)
 }
@@ -277,15 +281,16 @@ object ApiUtils {
         val numStr = prefs.getString("sync_project_num", null)?.let { mapper.readValue<String>(it) } ?: return emptyList()
         val num = numStr.toIntOrNull() ?: return emptyList()
         
-        val query = """query(${'$'}num: Int!) { viewer { projectV2(number: ${'$'}num) { items(first: 100) { nodes { id content { ... on DraftIssue { id title bodyText } } } } } } }"""
+        // id 필드를 명시적으로 요청하여 파싱 에러 방지
+        val query = """query(${'$'}num: Int!) { viewer { projectV2(number: ${'$'}num) { id items(first: 100) { nodes { id content { ... on DraftIssue { id title bodyText } } } } } } }"""
         val res = apiCall(query, mapOf("num" to num))
         
         val nodes = res?.data?.viewer?.projectV2?.items?.nodes ?: return emptyList()
         
         return nodes.mapNotNull { node ->
-            val title = node.content.title ?: "Unknown"
-            val body = node.content.bodyText ?: ""
-            val itemId = node.id
+            val title = node.content?.title ?: "Unknown"
+            val body = node.content?.bodyText ?: ""
+            val itemId = node.id ?: return@mapNotNull null
             
             val parts = title.split("|")
             if (parts.size >= 2) {
@@ -296,7 +301,6 @@ object ApiUtils {
         }
     }
 
-    // [추가됨] 기기 삭제 API
     suspend fun deleteDevice(projectId: String, itemId: String): Boolean {
         val delQuery = """mutation(${'$'}projectId: ID!, ${'$'}itemId: ID!) { deleteProjectV2Item(input: {projectId: ${'$'}projectId, itemId: ${'$'}itemId}) { deletedItemId } }"""
         val res = apiCall(delQuery, mapOf("projectId" to projectId, "itemId" to itemId))
@@ -311,6 +315,7 @@ object ApiUtils {
         val deviceId = prefs.getString("device_id", null)?.let { mapper.readValue<String>(it) } ?: return Pair(false, "Device ID missing")
         val deviceName = prefs.getString("device_name", null)?.let { mapper.readValue<String>(it) } ?: Build.MODEL
         
+        // GZIP 압축 적용
         val compressedData = UtilKt.compressJsonToString(UtilKt.cleanedSyncData(backupData))
         
         val devices = fetchDevices()
@@ -496,14 +501,24 @@ object UtilKt {
         return result
     }
 
+    // ★★★ 핵심 수정: 실제 GZIP 압축 적용 (64KB 제한 우회) ★★★
     fun compressJsonToString(json: String): String {
-        val bytes = json.toByteArray(Charsets.UTF_8)
-        return Base64.encodeToString(bytes, Base64.NO_WRAP or Base64.URL_SAFE)
+        val bos = ByteArrayOutputStream()
+        GZIPOutputStream(bos).use { it.write(json.toByteArray(Charsets.UTF_8)) }
+        return Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP or Base64.URL_SAFE)
     }
 
+    // ★★★ 핵심 수정: GZIP 압축 해제 (구버전 Base64 호환성 유지) ★★★
     fun decompressJsonFromString(encoded: String): String {
         return try {
-            String(Base64.decode(encoded, Base64.NO_WRAP or Base64.URL_SAFE), Charsets.UTF_8)
+            val bytes = Base64.decode(encoded, Base64.NO_WRAP or Base64.URL_SAFE)
+            try {
+                val bis = ByteArrayInputStream(bytes)
+                GZIPInputStream(bis).bufferedReader(Charsets.UTF_8).use { it.readText() }
+            } catch (e: Exception) {
+                // GZIP이 아닌 예전 방식(순수 Base64)으로 업로드된 데이터 호환성 처리
+                String(bytes, Charsets.UTF_8)
+            }
         } catch (e: Exception) {
             ""
         }
