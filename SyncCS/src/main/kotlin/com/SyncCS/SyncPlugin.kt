@@ -22,9 +22,7 @@ import kotlinx.coroutines.launch
 class SyncPlugin : Plugin() {
     private var counterBackup = 0
     private var lastResumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null
-    
     private var syncJob: Job? = null
-    private var backupJob: Job? = null // ★ 중복 실행 방지를 위한 Job 변수 추가
 
     private fun startSyncLoop() {
         syncJob?.cancel()
@@ -33,12 +31,17 @@ class SyncPlugin : Plugin() {
                 try {
                     val resumeWatching = HomeViewModel.getResumeWatching()
                     val listTake = resumeWatching?.take(10)
+                    
+                    // ★ 원본 로직: 시청 기록에 변화가 생겼을 때만 백업 실행
                     if (listTake != lastResumeWatching) {
                         backupDevice()
                         lastResumeWatching = listTake
                     }
+                    
+                    // ★ 원본 로직: 15번(75초)마다 다른 기기의 데이터를 가져옴
                     if (counterBackup >= 15) {
                         restoreDevice()
+                        counterBackup = 0 // 카운터 초기화
                     }
                     counterBackup++
                 } catch (e: Exception) {
@@ -50,11 +53,7 @@ class SyncPlugin : Plugin() {
     }
 
     private fun backupDevice() {
-        // ★ 핵심 수정: 이미 실행 대기 중인 백업이 있다면 취소하고 타이머를 초기화 (Debounce)
-        backupJob?.cancel()
-        backupJob = CoroutineScope(Dispatchers.IO).launch {
-            delay(3000L) // 3초 동안 추가 이벤트가 없어야만 실제 업로드 실행
-            
+        CoroutineScope(Dispatchers.IO).launch {
             try {
                 counterBackup = 0
                 val context = AcraApplication.context ?: return@launch
