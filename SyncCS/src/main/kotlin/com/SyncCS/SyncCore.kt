@@ -340,20 +340,20 @@ object ApiUtils {
             val deviceId = prefs.getString("device_id", null)?.let { mapper.readValue<String>(it) } ?: return Pair(false, "Device ID missing")
             val deviceName = prefs.getString("device_name", null)?.let { mapper.readValue<String>(it) } ?: Build.MODEL
             
-            // ★ 해결: cleanedSyncData 호출 및 치환 과정 완전 제거! 순수 backupData를 그대로 3000자씩 분할 출력
+            val cleanedData = UtilKt.cleanedSyncData(backupData)
+            
             Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA START ==========")
             val chunkSize = 3000
-            for (i in 0..backupData.length / chunkSize) {
+            for (i in 0..cleanedData.length / chunkSize) {
                 val start = i * chunkSize
-                val end = minOf((i + 1) * chunkSize, backupData.length)
+                val end = minOf((i + 1) * chunkSize, cleanedData.length)
                 if (start < end) {
-                    
+                    Log.d("SYNC_JSON", cleanedData.substring(start, end))
                 }
             }
             Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA END ==========")
 
-            // ★ 해결: cleanedSyncData 치환 과정 없이 다이렉트로 GZIP 압축 실행!
-            val compressedData = UtilKt.compressJsonToString(backupData)
+            val compressedData = UtilKt.compressJsonToString(cleanedData)
             
             if (compressedData.length > 65000) {
                 return Pair(false, "Data too large (${compressedData.length} chars).")
@@ -382,14 +382,12 @@ object ApiUtils {
                 val addRes = apiCall(addQuery, mapOf("projectId" to projectId, "title" to title, "body" to compressedData))
                 
                 if (addRes?.errors?.isNotEmpty() == true) {
-                    Log.d("SYNC", "[ApiUtils] Upload Error: ${addRes.errors!!.first().message}")
                     return Pair(false, "Upload Error: ${addRes.errors!!.first().message}")
                 }
                 
                 val newItemId = addRes?.data?.issue?.projectItem?.id
                 if (newItemId != null) {
                     AcraApplication.setKey("sync_item_id", newItemId)
-                    Log.d("SYNC", "[ApiUtils] Upload successful! New Item ID: $newItemId")
                     return Pair(true, "Data synced successfully to GitHub!")
                 }
                 return Pair(false, "Failed to upload data to GitHub.")
@@ -411,14 +409,21 @@ object UtilKt {
         return Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
     }
 
+    // ★ 해결: 폰과 태블릿의 Base64 디코딩 불일치 문제를 해결하기 위해, 
+    // 문자열 패턴을 선제적으로 분석하고 전용 디코더를 연결하여 데이터 깨짐(GZIP 오류)을 완벽히 방지합니다.
     fun decompressJsonFromString(encoded: String): String {
         return try {
-            val bytes = Base64.decode(encoded, Base64.DEFAULT)
-            if (bytes.size >= 2 && bytes[0] == 0x1F.toByte() && bytes[1] == 0x8B.toByte()) {
-                val bis = ByteArrayInputStream(bytes)
+            val decodedBytes = if (encoded.contains("-") || encoded.contains("_")) {
+                Base64.decode(encoded, Base64.URL_SAFE)
+            } else {
+                Base64.decode(encoded, Base64.DEFAULT)
+            }
+
+            if (decodedBytes.size >= 2 && decodedBytes[0] == 0x1F.toByte() && decodedBytes[1] == 0x8B.toByte()) {
+                val bis = ByteArrayInputStream(decodedBytes)
                 GZIPInputStream(bis).bufferedReader(Charsets.UTF_8).use { it.readText() }
             } else {
-                String(bytes, Charsets.UTF_8)
+                String(decodedBytes, Charsets.UTF_8)
             }
         } catch (e: Exception) {
             Log.d("SYNC", "[UtilKt] Failed to decompress: ${e.message}")
