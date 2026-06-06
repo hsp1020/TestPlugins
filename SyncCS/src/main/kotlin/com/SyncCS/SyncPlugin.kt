@@ -11,6 +11,7 @@ import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.ui.home.HomeViewModel
 import com.lagradost.cloudstream3.utils.DataStore
+import com.lagradost.cloudstream3.utils.DataStoreHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -30,27 +31,22 @@ class SyncPlugin : Plugin() {
     private val restoredDeviceTimestamps = mutableMapOf<String, String>()
 
     private fun startSyncLoop() {
-        Log.d("SYNC", "[SyncPlugin] startSyncLoop() initiated.")
         syncJob?.cancel()
         syncJob = CoroutineScope(Dispatchers.IO).launch {
             while (isActive) {
                 try {
                     val currentResumeState = HomeViewModel.getResumeWatching()?.take(10).toString()
                     if (currentResumeState != lastResumeWatching) {
-                        Log.d("SYNC", "[SyncPlugin] Watch history changed. Triggering backupDevice().")
                         backupDevice()
                         lastResumeWatching = currentResumeState
                     }
                     
-                    Log.d("SYNC", "[SyncPlugin] Sync loop tick. counterBackup: $counterBackup")
                     if (counterBackup >= 15) {
-                        Log.d("SYNC", "[SyncPlugin] counterBackup reached 15. Triggering restoreDevice().")
                         restoreDevice()
                         counterBackup = 0
                     }
                     counterBackup++
                 } catch (e: Exception) {
-                    Log.d("SYNC", "[SyncPlugin] Exception in sync loop: ${e.message}")
                     e.printStackTrace()
                 }
                 delay(5000L)
@@ -60,13 +56,12 @@ class SyncPlugin : Plugin() {
 
     @Synchronized
     private fun backupDevice() {
-        Log.d("SYNC", "[SyncPlugin] backupDevice() called. Debouncing for 3 seconds...")
         backupJob?.cancel()
         backupJob = CoroutineScope(Dispatchers.IO).launch {
-            delay(3000L)
+            delay(3000L) // 3초 디바운스
             
             try {
-                Log.d("SYNC", "[SyncPlugin] Executing backupDevice() logic...")
+                counterBackup = 0
                 val context = AcraApplication.context ?: return@launch
                 val prefs = with(DataStore) { context.getSharedPrefs() }
                 
@@ -75,22 +70,20 @@ class SyncPlugin : Plugin() {
                 }
                 
                 if (isBackupEnabled == "true") {
-                    val backupFile = BackupUtils.getBackup(context)
+                    val resumeWatching = HomeViewModel.getResumeWatching()
+                    val backupFile = BackupUtils.getBackup(context, resumeWatching)
                     val backupJson = mapper.writeValueAsString(backupFile)
-                    Log.d("SYNC", "[SyncPlugin] Backup JSON created. Calling ApiUtils.syncThisDevice().")
                     ApiUtils.syncThisDevice(backupJson, context)
-                } else {
-                    Log.d("SYNC", "[SyncPlugin] Backup is disabled in settings.")
                 }
             } catch (e: Exception) {
-                Log.d("SYNC", "[SyncPlugin] Exception in backupDevice: ${e.message}")
                 e.printStackTrace()
             }
         }
     }
 
     private fun restoreDevice() {
-        Log.d("SYNC", "[SyncPlugin] restoreDevice() called.")
+        // ★ 핵심 추가: 태블릿과 폰이 실제로 다른 기기 데이터를 확인하러 들어가는 시점을 로깅
+        Log.d("SYNC", "[Sync] Checking for remote updates on GitHub Project...")
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val context = AcraApplication.context ?: return@launch
@@ -106,16 +99,14 @@ class SyncPlugin : Plugin() {
                     var dataRestored = false
                     
                     devices.forEach { device ->
-                        if (device.deviceId == currentDeviceId) {
-                            Log.d("SYNC", "[SyncPlugin] Skipping own device: ${device.name}")
-                            return@forEach
-                        }
+                        if (device.deviceId == currentDeviceId) return@forEach
                         
                         val lastUpdatedKey = "sync_last_updated_${device.deviceId}"
                         val lastUpdated = prefs.getString(lastUpdatedKey, "")
                         
                         if (lastUpdated != device.updatedAt) {
-                            Log.d("SYNC", "[SyncPlugin] New data found for device: ${device.name}. Merging...")
+                            // ★ 핵심 추가: 상대방의 새로운 시청 기록 변경점을 정확히 감지한 순간 로깅
+                            Log.d("SYNC", "[Sync] New update detected from other device: ${device.name} (Last Updated: ${device.updatedAt}). Merging...")
                             device.syncedData?.let { encoded ->
                                 val decoded = UtilKt.restoreText(UtilKt.decompressJsonFromString(encoded))
                                 if (decoded.isNotBlank()) {
@@ -124,39 +115,36 @@ class SyncPlugin : Plugin() {
                                     
                                     prefs.edit().putString(lastUpdatedKey, device.updatedAt ?: "").apply()
                                     dataRestored = true
-                                    Log.d("SYNC", "[SyncPlugin] Merge successful for device: ${device.name}")
+                                    // ★ 핵심 추가: 상대방의 데이터가 내 저장소에 안전하게 합쳐진 순간 로깅
+                                    Log.d("SYNC", "[Sync] Successfully merged ${device.name}'s data with local storage.")
                                 }
                             }
-                        } else {
-                            Log.d("SYNC", "[SyncPlugin] Device ${device.name} is already up-to-date.")
                         }
                     }
 
                     if (dataRestored) {
-                        Log.d("SYNC", "[SyncPlugin] Data restored. Triggering UI reload and backupDevice().")
+                        // ★ 핵심 추가: 병합이 끝나고 UI 새로고침 및 내 카드 재생성이 예약되는 최종 순간 로깅
+                        Log.d("SYNC", "[Sync] Merge complete! Triggering UI reload and final upload...")
                         withContext(Dispatchers.Main) {
                             try {
                                 MainActivity.reloadHomeEvent.invoke(true)
                                 MainActivity.bookmarksUpdatedEvent.invoke(true)
                             } catch (e: Exception) {
-                                Log.d("SYNC", "[SyncPlugin] Exception during UI reload: ${e.message}")
                                 e.printStackTrace()
                             }
                         }
                         backupDevice()
+                    } else {
+                        Log.d("SYNC", "[Sync] All other devices are already up-to-date. No merge needed.")
                     }
-                } else {
-                    Log.d("SYNC", "[SyncPlugin] Restore is disabled in settings.")
                 }
             } catch (e: Exception) {
-                Log.d("SYNC", "[SyncPlugin] Exception in restoreDevice: ${e.message}")
                 e.printStackTrace()
             }
         }
     }
 
     override fun load(context: Context) {
-        Log.d("SYNC", "[SyncPlugin] load() called.")
         AcraApplication.setKey("device_id", UtilKt.getDeviceId(context.packageName, context))
         restoreDevice()
         startSyncLoop()
@@ -170,8 +158,6 @@ class SyncPlugin : Plugin() {
         openSettings = { activityContext ->
             val appCompatActivity = activityContext as? AppCompatActivity
             appCompatActivity?.let {
-                Log.d("SYNC", "[SyncPlugin] Opening SyncSettingsFragment.")
-                // ★ 해결: 다시 context 인자를 빼고 오직 plugin(this)만 안전하게 넘기도록 복구했습니다.
                 SyncSettingsFragment(this).show(it.supportFragmentManager, "Sync")
             }
         }
