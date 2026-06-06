@@ -3,19 +3,18 @@ package com.SyncCS
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
 import androidx.appcompat.app.AppCompatActivity
 import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.MainActivity
+import com.lagradost.cloudstream3.mapper
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
+import com.lagradost.cloudstream3.ui.home.HomeViewModel
 import com.lagradost.cloudstream3.utils.DataStore
 import com.lagradost.cloudstream3.utils.DataStoreHelper
-import com.lagradost.cloudstream3.mapper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 @CloudstreamPlugin
 class SyncPlugin : Plugin() {
@@ -27,8 +26,8 @@ class SyncPlugin : Plugin() {
         override fun run() {
             try {
                 CoroutineScope(Dispatchers.IO).launch {
-                    val list = com.lagradost.cloudstream3.ui.home.HomeViewModel.Companion.getResumeWatching()
-                    val listTake = list?.take(10)
+                    val resumeWatching = HomeViewModel.resumeWatching
+                    val listTake = resumeWatching?.take(10)
                     if (listTake != lastResumeWatching) {
                         backupDevice(true)
                         lastResumeWatching = listTake
@@ -38,109 +37,77 @@ class SyncPlugin : Plugin() {
                     }
                     counterBackup++
                 }
-                handler.postDelayed(this, 5000)
-            } catch (unused: Exception) {
+                handler.postDelayed(this, 5000L)
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
         }
     }
 
-    fun backupDevice(unused: Boolean) {
+    private fun backupDevice(unused: Boolean) {
         try {
-            this.counterBackup = 0
+            counterBackup = 0
             CoroutineScope(Dispatchers.IO).launch {
-                val context = AcraApplication.context
-                var backupDeviceStr: String? = null
-                if (context != null) {
-                    try {
-                        val raw = with(DataStore) { context.getSharedPrefs().getString("backup_device", null) }
-                        if (raw != null) {
-                            backupDeviceStr = mapper.readValue(raw, String::class.java)
-                        }
-                    } catch (unused2: Exception) {
-                    }
+                val context = AcraApplication.context ?: return@launch
+                val prefs = with(DataStore) { context.getSharedPrefs() }
+                val isBackupEnabled = prefs.getString("backup_device", null)?.let {
+                    mapper.readValue(it, String::class.java)
                 }
-                if (backupDeviceStr == "true") {
-                    val context2 = AcraApplication.context
-                    val resumeWatching = com.lagradost.cloudstream3.ui.home.HomeViewModel.Companion.getResumeWatching()
-                    val backupFile = BackupUtils.getBackup(context2, resumeWatching)
-                    val json = if (backupFile != null) {
-                        mapper.writeValueAsString(backupFile) ?: ""
-                    } else ""
+                
+                if (isBackupEnabled == "true") {
+                    val resumeWatching = HomeViewModel.resumeWatching
+                    val backupFile = BackupUtils.getBackup(context, resumeWatching)
+                    val backupJson = backupFile?.let { mapper.writeValueAsString(it) } ?: ""
+                    ApiUtils.syncThisDevice(backupJson, context)
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun restoreDevice(unused: Boolean) {
+        try {
+            CoroutineScope(Dispatchers.IO).launch {
+                val context = AcraApplication.context ?: return@launch
+                val prefs = with(DataStore) { context.getSharedPrefs() }
+                val isRestoreEnabled = prefs.getString("restore_device", null)?.let {
+                    mapper.readValue(it, String::class.java)
+                }
+                
+                if (isRestoreEnabled == "true") {
+                    val devices = ApiUtils.fetchDevices()
+                    val currentDeviceId = UtilKt.getDeviceId(context.packageName, context)
+                    val targetDevice = devices.firstOrNull { it.deviceId == currentDeviceId } ?: devices.firstOrNull()
                     
-                    if (json.isNotEmpty()) {
-                        val cleaned = UtilKt.cleanedSyncData(json)
-                        val compressed = UtilKt.compressJsonToString(cleaned)
-                        ApiUtils.INSTANCE.syncThisDevice(compressed)
-                    }
-                }
-            }
-        } catch (unused: Exception) {
-        }
-    }
-
-    fun restoreDevice(unused: Boolean) {
-        try {
-            CoroutineScope(Dispatchers.IO).launch {
-                val context = AcraApplication.context
-                var restoreDeviceStr: String? = null
-                if (context != null) {
-                    try {
-                        val raw = with(DataStore) { context.getSharedPrefs().getString("restore_device", null) }
-                        if (raw != null) {
-                            restoreDeviceStr = mapper.readValue(raw, String::class.java)
-                        }
-                    } catch (unused2: Exception) {
-                    }
-                }
-                if (restoreDeviceStr == "true" && ApiUtils.INSTANCE.isLoggedIn()) {
-                    val devices = ApiUtils.INSTANCE.fetchDevices()
-                    val context2 = AcraApplication.context
-                    val thisDeviceId = if (context2 != null) {
-                        UtilKt.getDeviceId(context2.packageName, context2)
-                    } else ""
-                    if (devices != null) {
-                        for (device in devices) {
-                            if (device.deviceId != thisDeviceId) {
-                                val syncedData = device.syncedData
-                                if (!syncedData.isNullOrEmpty()) {
-                                    val decompressed = UtilKt.decompressJsonFromString(syncedData)
-                                    if (decompressed.isNotEmpty()) {
-                                        val json = UtilKt.restoreText(decompressed)
-                                        if (json.isNotEmpty()) {
-                                            try {
-                                                val backupFile = mapper.readValue(json, BackupFile::class.java)
-                                                if (backupFile != null && context2 != null) {
-                                                    withContext(Dispatchers.Main) {
-                                                        BackupUtils.restore(context2, backupFile, true, true)
-                                                    }
-                                                }
-                                            } catch (e: Exception) {
-                                                Log.e("SyncCS", "Error mapping device JSON: ${e.message}")
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                    targetDevice?.syncedData?.let { encoded ->
+                        val decoded = UtilKt.restoreText(UtilKt.decompressJsonFromString(encoded))
+                        if (decoded.isNotBlank()) {
+                            val backupFile = mapper.readValue(decoded, BackupFile::class.java)
+                            BackupUtils.restore(context, backupFile, restoreSettings = true, restoreDataStore = true)
                         }
                     }
                 }
             }
-        } catch (unused: Exception) {
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
     }
 
     override fun load(context: Context) {
-        AcraApplication.Companion.setKey("device_id", UtilKt.getDeviceId(context.packageName, context))
+        AcraApplication.setKey("device_id", UtilKt.getDeviceId(context.packageName, context))
         restoreDevice(true)
         handler.post(runnable)
-        MainActivity.Companion.bookmarksUpdatedEvent.plusAssign { backupDevice(it) }
-        MainActivity.Companion.afterPluginsLoadedEvent.plusAssign { backupDevice(it) }
-        MainActivity.Companion.mainPluginsLoadedEvent.plusAssign { backupDevice(it) }
-        MainActivity.Companion.reloadHomeEvent.plusAssign { backupDevice(it) }
-        MainActivity.Companion.reloadAccountEvent.plusAssign { backupDevice(it) }
+
+        // [핵심 제약조건 준수] 람다 대입 구문으로 1:1 매핑
+        MainActivity.bookmarksUpdatedEvent += { backupDevice(true) }
+        MainActivity.afterPluginsLoadedEvent += { backupDevice(true) }
+        MainActivity.mainPluginsLoadedEvent += { backupDevice(true) }
+        MainActivity.reloadHomeEvent += { backupDevice(true) }
+        MainActivity.reloadAccountEvent += { backupDevice(true) }
 
         val appCompatActivity = context as AppCompatActivity
-        openSettings = { ctx ->
+        openSettings = { _ ->
             SyncSettingsFragment(this).show(appCompatActivity.supportFragmentManager, "Sync")
         }
     }
