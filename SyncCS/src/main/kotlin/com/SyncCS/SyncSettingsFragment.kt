@@ -1,6 +1,7 @@
 package com.SyncCS
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.graphics.drawable.Drawable
 import android.os.Bundle
 import android.view.LayoutInflater
@@ -23,11 +24,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragment() {
+class SyncSettingsFragment(
+    private val plugin: Plugin,
+    private val pluginContext: Context // Plugin에서 넘겨받은 리소스 컨텍스트
+) : BottomSheetDialogFragment() {
 
-    private val res = plugin.resources ?: throw Exception("Unable to read resources")
+    // plugin.resources 대신 pluginContext.resources를 사용합니다.
+    private val res = pluginContext.resources
 
-    // [핵심 제약조건 준수] 런타임 클래스로더 패키지명 동적 바인딩
     private fun <T : View> findView(view: View, name: String): T {
         val id = res.getIdentifier(name, "id", plugin.javaClass.packageName)
         return view.findViewById(id)
@@ -35,17 +39,21 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
 
     private fun getLayout(name: String, inflater: LayoutInflater, container: ViewGroup?): View {
         val id = res.getIdentifier(name, "layout", plugin.javaClass.packageName)
-        return inflater.inflate(res.getLayout(id), container, false)
+        // 핵심: Inflater에 플러그인 컨텍스트를 입혀서 XML을 파싱하도록 합니다.
+        val pluginInflater = inflater.cloneInContext(pluginContext)
+        return pluginInflater.inflate(id, container, false)
     }
 
     private fun getDrawable(name: String): Drawable? {
         val id = res.getIdentifier(name, "drawable", plugin.javaClass.packageName)
-        return ResourcesCompat.getDrawable(res, id, null)
+        return if (id != 0) ResourcesCompat.getDrawable(res, id, null) else null
     }
 
     private fun makeTvCompatible(view: View) {
         val id = res.getIdentifier("outline", "drawable", plugin.javaClass.packageName)
-        view.background = res.getDrawable(id, null)
+        if (id != 0) {
+            view.background = ResourcesCompat.getDrawable(res, id, null)
+        }
     }
 
     @SuppressLint("UseSwitchCompatOrMaterialCode")
