@@ -10,7 +10,6 @@ import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import com.lagradost.cloudstream3.ui.home.HomeViewModel
 import com.lagradost.cloudstream3.utils.DataStore
-import com.lagradost.cloudstream3.utils.DataStoreHelper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -22,26 +21,23 @@ import kotlinx.coroutines.withContext
 @CloudstreamPlugin
 class SyncPlugin : Plugin() {
     private var counterBackup = 0
-    private var lastResumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null
+    private var lastResumeWatching: String? = null
     
     private var syncJob: Job? = null
     private var backupJob: Job? = null
-    
-    // ★ 추가됨: 무한 새로고침을 막기 위해 각 기기별 마지막 동기화 시간을 기억합니다.
-    private val restoredDeviceTimestamps = mutableMapOf<String, String>()
 
     private fun startSyncLoop() {
         syncJob?.cancel()
         syncJob = CoroutineScope(Dispatchers.IO).launch {
             while (isActive) {
                 try {
-                    val resumeWatching = HomeViewModel.getResumeWatching()
-                    val listTake = resumeWatching?.take(10)
-                    if (listTake != lastResumeWatching) {
+                    // ★ 핵심 수정: HomeViewModel에 의존하지 않고, DB에 저장된 시청 기록의 상태를 직접 해시로 비교합니다.
+                    val currentResumeState = HomeViewModel.getResumeWatching()?.take(10).toString()
+                    if (currentResumeState != lastResumeWatching) {
                         backupDevice()
-                        lastResumeWatching = listTake
+                        lastResumeWatching = currentResumeState
                     }
-                    // 75초(5초 * 15번)마다 다른 기기의 데이터를 확인하고 다운로드합니다.
+                    
                     if (counterBackup >= 15) {
                         restoreDevice()
                         counterBackup = 0
@@ -58,7 +54,7 @@ class SyncPlugin : Plugin() {
     private fun backupDevice() {
         backupJob?.cancel()
         backupJob = CoroutineScope(Dispatchers.IO).launch {
-            delay(3000L) // 3초 디바운스 (동시 실행 방지)
+            delay(3000L) // 3초 디바운스
             
             try {
                 counterBackup = 0
@@ -70,8 +66,8 @@ class SyncPlugin : Plugin() {
                 }
                 
                 if (isBackupEnabled == "true") {
-                    val resumeWatching = HomeViewModel.getResumeWatching()
-                    val backupFile = BackupUtils.getBackup(context, resumeWatching)
+                    // ★ 핵심 수정: HomeViewModel을 거치지 않고 DB에서 직접 모든 시청 기록을 긁어옵니다.
+                    val backupFile = BackupUtils.getBackup(context)
                     val backupJson = mapper.writeValueAsString(backupFile)
                     ApiUtils.syncThisDevice(backupJson, context)
                 }
@@ -96,9 +92,9 @@ class SyncPlugin : Plugin() {
                     var dataRestored = false
                     
                     devices.forEach { device ->
-                        val lastUpdated = restoredDeviceTimestamps[device.deviceId]
+                        val lastUpdatedKey = "sync_last_updated_${device.deviceId}"
+                        val lastUpdated = prefs.getString(lastUpdatedKey, "")
                         
-                        // ★ 핵심: GitHub의 데이터가 내가 마지막으로 받은 데이터보다 최신일 때만 병합 진행
                         if (lastUpdated != device.updatedAt) {
                             device.syncedData?.let { encoded ->
                                 val decoded = UtilKt.restoreText(UtilKt.decompressJsonFromString(encoded))
@@ -106,15 +102,14 @@ class SyncPlugin : Plugin() {
                                     val backupFile = mapper.readValue<BackupFile>(decoded)
                                     BackupUtils.restore(context, backupFile, restoreSettings = true, restoreDataStore = true)
                                     
-                                    restoredDeviceTimestamps[device.deviceId] = device.updatedAt ?: ""
+                                    prefs.edit().putString(lastUpdatedKey, device.updatedAt ?: "").apply()
                                     dataRestored = true
                                 }
                             }
                         }
                     }
 
-                    // ★ 가장 중요한 부분: 디스크에 병합이 끝났으면 앱의 메모리를 새로고침하여 병합된 데이터를 인식시킵니다.
-                    // 이 새로고침 이벤트가 발생하면 앱은 즉시 병합된 데이터를 GitHub에 다시 업로드합니다.
+                    // ★ 핵심 수정: 병합이 완료되면 앱 화면을 새로고침하여 병합된 데이터를 인식시킵니다.
                     if (dataRestored) {
                         withContext(Dispatchers.Main) {
                             try {
