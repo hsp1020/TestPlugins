@@ -55,8 +55,11 @@ class Anilife : MainAPI() {
         "/vodtype/categorize/Movie/1" to "극장판"
     )
 
+    /**
+     * 레퍼러 검증 우회를 위해 호출 시점에 추가 HTTP 헤더맵을 동적으로 WebView에 주입하는 리졸버
+     */
     @SuppressLint("SetJavaScriptEnabled")
-    private suspend fun getDoc(url: String): Document {
+    private suspend fun getDoc(url: String, headers: Map<String, String> = commonHeaders): Document {
         Log.d(TAG, "[RawWebView] 웹뷰 기동 -> $url")
         val ctx = CloudStreamApp.context ?: throw Exception("Context가 Null입니다.")
 
@@ -151,7 +154,8 @@ class Anilife : MainAPI() {
                     }
                 }
 
-                webView.loadUrl(url)
+                // [최적화 우회 핵심] 망 우회를 위해 loadUrl 시점에 동적 HTTP Headers를 탑재하여 요청 [1.1]
+                webView.loadUrl(url, headers)
 
                 Handler(Looper.getMainLooper()).postDelayed({
                     if (!isResumed) {
@@ -312,8 +316,12 @@ class Anilife : MainAPI() {
         println("[DEBUG-loadLinks] 가공 데이터: $cleanData, 비디오 고유 ID: $videoId")
 
         try {
+            val linkHeaders = commonHeaders.toMutableMap()
+            linkHeaders["Referer"] = detailReferer // 동적 레퍼러 헤더 설정
+
             println("[DEBUG-loadLinks] 쌩웹뷰로 비디오 프록시 HTML 수집 개시 -> $cleanData")
-            val doc = webViewSemaphore.withPermit { getDoc(cleanData) }
+            // [최적화 우회 연동]: 웹뷰 loadUrl 전송 시점에 정적 레퍼러를 탑재하여 서버 보안 검증 해제 [1.1]
+            val doc = webViewSemaphore.withPermit { getDoc(cleanData, linkHeaders) }
             val docLocation = doc.location()
             val docHtmlLen = doc.outerHtml().length
             println("[DEBUG-loadLinks] 웹뷰 호출 완수. 리다이렉트 도달 주소: $docLocation, 원본 HTML 크기: $docHtmlLen 자")
