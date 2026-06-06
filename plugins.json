@@ -1,10 +1,10 @@
 [
     {
         "iconUrl": "https://anilife.live/assets/img/animestream.png",
-        "fileHash": "sha256-5a9f1a08d9c3302ea9ee7b202d6fbf3d31eede3c7927965ff54a9c93c21bfef9",
+        "fileHash": "sha256-7eb0788d60a032f444b28c20dcd358d45cf406fb47b10f8c2830c5362e79cd91",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 36999,
+        "fileSize": 37880,
         "status": 1,
         "language": "ko",
         "authors": [
