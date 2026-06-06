@@ -26,8 +26,9 @@ class SyncPlugin : Plugin() {
         override fun run() {
             try {
                 CoroutineScope(Dispatchers.IO).launch {
-                    val resumeWatching = HomeViewModel.resumeWatching
-                    val listTake = resumeWatching?.take(10)
+                    // 수정됨: 프로퍼티가 아닌 suspend 함수 호출
+                    val resumeWatching = HomeViewModel.getResumeWatching()
+                    val listTake = resumeWatching.take(10)
                     if (listTake != lastResumeWatching) {
                         backupDevice(true)
                         lastResumeWatching = listTake
@@ -55,7 +56,8 @@ class SyncPlugin : Plugin() {
                 }
                 
                 if (isBackupEnabled == "true") {
-                    val resumeWatching = HomeViewModel.resumeWatching
+                    // 수정됨: 프로퍼티가 아닌 suspend 함수 호출
+                    val resumeWatching = HomeViewModel.getResumeWatching()
                     val backupFile = BackupUtils.getBackup(context, resumeWatching)
                     val backupJson = backupFile?.let { mapper.writeValueAsString(it) } ?: ""
                     ApiUtils.syncThisDevice(backupJson, context)
@@ -99,7 +101,6 @@ class SyncPlugin : Plugin() {
         restoreDevice(true)
         handler.post(runnable)
 
-        // [핵심 제약조건 준수] 람다 대입 구문으로 1:1 매핑
         MainActivity.bookmarksUpdatedEvent += { backupDevice(true) }
         MainActivity.afterPluginsLoadedEvent += { backupDevice(true) }
         MainActivity.mainPluginsLoadedEvent += { backupDevice(true) }
