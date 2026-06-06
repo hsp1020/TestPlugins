@@ -22,8 +22,6 @@ import kotlinx.coroutines.launch
 class SyncPlugin : Plugin() {
     private var counterBackup = 0
     private var lastResumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null
-    
-    // Java의 Handler, Looper, Runnable을 완전히 폐기하고 Kotlin Coroutine Job으로 대체
     private var syncJob: Job? = null
 
     private fun startSyncLoop() {
@@ -44,7 +42,7 @@ class SyncPlugin : Plugin() {
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
-                delay(5000L) // Kotlin Coroutine의 비동기 지연 함수 사용
+                delay(5000L)
             }
         }
     }
@@ -56,7 +54,6 @@ class SyncPlugin : Plugin() {
                 val context = AcraApplication.context ?: return@launch
                 val prefs = with(DataStore) { context.getSharedPrefs() }
                 
-                // Java의 String::class.java 대신 Kotlin Reified Type 사용
                 val isBackupEnabled = prefs.getString("backup_device", null)?.let {
                     mapper.readValue<String>(it)
                 }
@@ -116,7 +113,7 @@ class SyncPlugin : Plugin() {
         openSettings = { activityContext ->
             val appCompatActivity = activityContext as? AppCompatActivity
             appCompatActivity?.let {
-                SyncSettingsFragment(this, context).show(it.supportFragmentManager, "Sync")
+                SyncSettingsFragment(this).show(it.supportFragmentManager, "Sync")
             }
         }
     }
