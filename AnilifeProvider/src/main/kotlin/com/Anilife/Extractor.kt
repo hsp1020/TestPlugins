@@ -68,7 +68,7 @@ class AnilifeProxyExtractor : ExtractorApi() {
 
     /**
      * [재생 링크 추출 전용 극효율 쌩웹뷰]
-     * 이중 파싱 전달 규격으로 완벽 보완
+     * resumeWith 및 자바스크립트 리다이렉트 최종 경로 추적 패키지 수립 완료
      */
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun getDoc(url: String): Document {
@@ -85,8 +85,8 @@ class AnilifeProxyExtractor : ExtractorApi() {
                         try {
                             webView.stopLoading()
                             webView.clearHistory()
-                            webView.loadUrl("about:blank") // 백그라운드 악성 자바스크립트 루프 처형
-                            webView.destroy() // 메모리 자원 완전 소멸 반환 [1.1, 1.3]
+                            webView.loadUrl("about:blank")
+                            webView.destroy()
                         } catch (e: Exception) { }
                     }
                 }
@@ -97,7 +97,7 @@ class AnilifeProxyExtractor : ExtractorApi() {
                         if (!isResumed) {
                             isResumed = true
                             cleanup()
-                            // resumeWith를 사용하여 컴파일 에러 해결 및 최종 리다이렉트 주소 결합 수립
+                            // Jsoup.parse에 리다이렉트 완료 주소인 finalUrl을 바인딩하여 resumeWith 리턴 처리
                             continuation.resumeWith(Result.success(Jsoup.parse(html, finalUrl)))
                         }
                     }
@@ -110,7 +110,7 @@ class AnilifeProxyExtractor : ExtractorApi() {
                     domStorageEnabled = true
                     databaseEnabled = true
                     userAgentString = DESKTOP_UA
-                    loadsImagesAutomatically = false // 이미지 다운로드 전면 차단 [1.1, 1.3]
+                    loadsImagesAutomatically = false
                     mediaPlaybackRequiresUserGesture = true
                 }
 
@@ -206,6 +206,11 @@ class AnilifeProxyExtractor : ExtractorApi() {
         videoId: String = "unknown_id",
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        println("[DEBUG-Extractor] =========================================")
+        println("[DEBUG-Extractor] extractWithProxy 실행 개시")
+        println("[DEBUG-Extractor] 📥 매개변수 playerUrl: $playerUrl")
+        println("[DEBUG-Extractor] 📥 매개변수 videoId: $videoId")
+
         val cleanHeaders = mapOf(
             "User-Agent" to DESKTOP_UA,
             "Referer" to "https://anilife.live/",
@@ -215,59 +220,88 @@ class AnilifeProxyExtractor : ExtractorApi() {
 
         try {
             var finalM3u8 = ""
-            // [최적화 우회 적용] 차단 및 우회 챌린지가 존재하는 playerUrl 페이지를 극효율 쌩웹뷰 모듈로 우회 획득 [1.1]
+            // [우회 적용]: 차단 장막이 있는 플레이어 수집 경로를 쌩웹뷰로 호출 우회 [1.1]
+            println("[DEBUG-Extractor] 쌩웹뷰로 playerUrl 수집 호출 시작...")
             val playerDoc = getDoc(playerUrl)
             // Jsoup의 완전한 HTML 코드를 수취하기 위해 .outerHtml() 호출 적용 [1.1]
             val playerHtml = playerDoc.outerHtml()
+            println("[DEBUG-Extractor] 수집 완료된 playerHtml 전체 길이: ${playerHtml.length} 자")
 
+            println("[DEBUG-Extractor] _aldata 매칭 정규식 검사 개시")
             val aldataRegex = Regex("""_aldata\s*=\s*['"]([^'"]+)['"]""")
             val match = aldataRegex.find(playerHtml)
+            println("[DEBUG-Extractor] _aldata 정규식 검사 결과 존재 여부: ${match != null}")
             
             if (match != null) {
                 val b64 = match.groupValues[1]
+                println("[DEBUG-Extractor] 인코딩 b64 데이터 추출 성공 (글자수: ${b64.length}자)")
+                
                 val decoded = String(Base64.decode(b64, Base64.DEFAULT))
+                println("[DEBUG-Extractor] b64 문자열 디코딩 완수. 디코딩 데이터 크기: ${decoded.length}자")
+                
                 val vid1080Regex = Regex(""""vid_url_1080"\s*:\s*"([^"]+)"""")
                 val vid720Regex = Regex(""""vid_url_720"\s*:\s*"([^"]+)"""")
                 
                 var apiUrl = vid1080Regex.find(decoded)?.groupValues?.get(1)
+                println("[DEBUG-Extractor] vid_url_1080 정규식 매치 결과: $apiUrl")
+                
                 if (apiUrl.isNullOrBlank() || apiUrl == "none") {
                     apiUrl = vid720Regex.find(decoded)?.groupValues?.get(1)
+                    println("[DEBUG-Extractor] vid_url_1080 실패로 인한 vid_url_720 재대조 결과: $apiUrl")
                 }
                 
                 apiUrl = apiUrl?.replace("\\/", "/")
+                println("[DEBUG-Extractor] 포맷 정제 완료된 apiUrl: $apiUrl")
                 
                 if (!apiUrl.isNullOrBlank() && apiUrl != "none") {
                     val fullApiUrl = if (apiUrl.startsWith("http")) apiUrl else "https://$apiUrl"
+                    println("[DEBUG-Extractor] fullApiUrl 최종 API 주소 직접 호출 개시: $fullApiUrl")
+                    
                     val apiRes = app.get(fullApiUrl, headers = cleanHeaders).text
+                    println("[DEBUG-Extractor] API 서버 응답 수집 성공. 응답 본문 크기: ${apiRes.length}자, 본문 내용: $apiRes")
+                    
                     val urlRegex = Regex(""""url"\s*:\s*"([^"]+)"""")
                     val extractedUrl = urlRegex.find(apiRes)?.groupValues?.get(1)
+                    println("[DEBUG-Extractor] apiRes 본문 내 url 주소 정규식 추출 결과: $extractedUrl")
                     
                     if (!extractedUrl.isNullOrBlank()) {
                         finalM3u8 = extractedUrl.replace("\\/", "/")
+                        println("[DEBUG-Extractor] 최종 타겟 finalM3u8 주소 도출 성공: $finalM3u8")
                     }
                 }
             }
 
-            if (finalM3u8.isBlank()) return false
+            if (finalM3u8.isBlank()) {
+                println("[DEBUG-Extractor] 에러: 비디오 스트리밍 m3u8 주소를 획득하지 못했습니다.")
+                return false
+            }
 
+            println("[DEBUG-Extractor] finalM3u8 플레이리스트 텍스트 수집 개시 -> $finalM3u8")
             var m3u8Content = app.get(finalM3u8, headers = cleanHeaders).text
+            println("[DEBUG-Extractor] 수집 완료된 m3u8 텍스트 크기: ${m3u8Content.length}자")
             var baseUri = try { URI(finalM3u8) } catch (e: Exception) { null }
 
             if (m3u8Content.contains("#EXT-X-STREAM-INF")) {
+                println("[DEBUG-Extractor] 멀티 화질 인덱스(#EXT-X-STREAM-INF) 규격 감지. 하위 화질 플레이리스트 주소 추적 개시")
                 val subUrlLine = m3u8Content.lines().lastOrNull { it.isNotBlank() && !it.startsWith("#") }
+                println("[DEBUG-Extractor] 탐색된 타겟 하위 m3u8 주소줄: $subUrlLine")
                 if (subUrlLine != null) {
                     finalM3u8 = resolveUrl(baseUri, finalM3u8, subUrlLine)
+                    println("[DEBUG-Extractor] 절대 경로 조율된 하위 m3u8 주소: $finalM3u8")
                     m3u8Content = app.get(finalM3u8, headers = cleanHeaders).text
+                    println("[DEBUG-Extractor] 하위 플레이리스트 수집 완료. 텍스트 크기: ${m3u8Content.length}자")
                     baseUri = try { URI(finalM3u8) } catch (e: Exception) { null }
                 }
             }
 
+            println("[DEBUG-Extractor] 로컬 가상 프록시 매핑을 위한 리스트 파싱 및 절대경로 재조합 시작...")
             val sb = StringBuilder()
             for (lineText in m3u8Content.lines()) {
                 val trimmed = lineText.trim()
                 if (trimmed.isEmpty()) continue
                 
                 if (trimmed.startsWith("#EXT-X-KEY")) {
+                    println("[DEBUG-Extractor] 암호화 키 정의 라인(#EXT-X-KEY) 발견. 프록시 흐름 보장을 위해 의도적 필터 탈거")
                     continue
                 } else if (trimmed.startsWith("#")) {
                     sb.append(trimmed).append("\n")
@@ -278,24 +312,36 @@ class AnilifeProxyExtractor : ExtractorApi() {
             }
 
             val processedPlaylist = sb.toString()
+            println("[DEBUG-Extractor] 조율된 로컬 프록시용 데이터 생성 성공 (전체 크기: ${processedPlaylist.length}자)")
 
-            synchronized(this) { currentProxyServer?.stop(); currentProxyServer = null }
+            println("[DEBUG-Extractor] 프록시 가상 웹 서버(ProxyWebServer) 구동 준비...")
+            synchronized(this) { 
+                currentProxyServer?.stop()
+                currentProxyServer = null 
+                println("[DEBUG-Extractor] 기존 활성화 중이던 프록시 웹 서버 중단 완료")
+            }
+            
             val proxy = ProxyWebServer().apply { 
                 updatePlaylist(processedPlaylist)
                 start() 
             }
             currentProxyServer = proxy
+            println("[DEBUG-Extractor] 로컬 웹 프록시 서버 정상 구동 (자동 바인딩 포트: ${proxy.port})")
 
             val proxyUrl = "http://127.0.0.1:${proxy.port}/$videoId/playlist.m3u8"
+            println("[DEBUG-Extractor] 최종 앱 프레임워크 콜백 ExtractorLink 발행 주소: $proxyUrl")
             
             callback(newExtractorLink(name, name, proxyUrl, ExtractorLinkType.M3U8) {
                 this.referer = "https://anilife.live/"
                 this.headers = cleanHeaders
             })
             
+            println("[DEBUG-Extractor] === extractWithProxy 수립 완료 및 성공 종료 ===")
             return true
 
         } catch (e: Exception) {
+            println("[DEBUG-Extractor] 예외 발생에 따른 스택 트레이스 추적:")
+            e.printStackTrace()
             return false
         }
     }
