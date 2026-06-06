@@ -13,6 +13,7 @@ import android.widget.Switch
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import androidx.core.content.res.ResourcesCompat
+import com.fasterxml.jackson.module.kotlin.readValue
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.CommonActivity
@@ -26,22 +27,22 @@ import kotlinx.coroutines.withContext
 
 class SyncSettingsFragment(
     private val plugin: Plugin,
-    private val pluginContext: Context // Plugin에서 넘겨받은 리소스 컨텍스트
+    private val pluginContext: Context
 ) : BottomSheetDialogFragment() {
 
     private val res = pluginContext.resources
-    // 핵심 수정: Kotlin 클래스의 패키지명이 아닌, 실제 안드로이드 Context의 패키지명을 사용합니다.
     private val resPackageName = pluginContext.packageName
 
     private fun <T : View> findView(view: View, name: String): T {
         val id = res.getIdentifier(name, "id", resPackageName)
-        if (id == 0) throw RuntimeException("View ID not found: $name")
+        // Java의 RuntimeException 대신 Kotlin의 error() 함수 사용
+        if (id == 0) error("View ID not found: $name")
         return view.findViewById(id)
     }
 
     private fun getLayout(name: String, inflater: LayoutInflater, container: ViewGroup?): View {
         val id = res.getIdentifier(name, "layout", resPackageName)
-        if (id == 0) throw RuntimeException("Layout XML not found: $name")
+        if (id == 0) error("Layout XML not found: $name")
         
         val pluginInflater = inflater.cloneInContext(pluginContext)
         return pluginInflater.inflate(id, container, false)
@@ -80,10 +81,11 @@ class SyncSettingsFragment(
             val ctx = AcraApplication.context
             if (ctx != null) {
                 val prefs = with(DataStore) { ctx.getSharedPrefs() }
-                tokenEdit.setText(prefs.getString("sync_token", null)?.let { mapper.readValue(it, String::class.java) })
-                projectNumEdit.setText(prefs.getString("sync_project_num", null)?.let { mapper.readValue(it, String::class.java) })
-                backupSwitch.isChecked = prefs.getString("backup_device", null)?.let { mapper.readValue(it, String::class.java) } == "true"
-                restoreSwitch.isChecked = prefs.getString("restore_device", null)?.let { mapper.readValue(it, String::class.java) } == "true"
+                // Java의 String::class.java 대신 Kotlin Reified Type 사용
+                tokenEdit.setText(prefs.getString("sync_token", null)?.let { mapper.readValue<String>(it) })
+                projectNumEdit.setText(prefs.getString("sync_project_num", null)?.let { mapper.readValue<String>(it) })
+                backupSwitch.isChecked = prefs.getString("backup_device", null)?.let { mapper.readValue<String>(it) } == "true"
+                restoreSwitch.isChecked = prefs.getString("restore_device", null)?.let { mapper.readValue<String>(it) } == "true"
             }
 
             backupSwitch.text = "Backup data to the cloud"
