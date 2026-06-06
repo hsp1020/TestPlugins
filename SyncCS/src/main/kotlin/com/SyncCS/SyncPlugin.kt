@@ -25,13 +25,14 @@ class SyncPlugin : Plugin() {
     
     private var syncJob: Job? = null
     private var backupJob: Job? = null
+    
+    private val restoredDeviceTimestamps = mutableMapOf<String, String>()
 
     private fun startSyncLoop() {
         syncJob?.cancel()
         syncJob = CoroutineScope(Dispatchers.IO).launch {
             while (isActive) {
                 try {
-                    // ★ 핵심 수정: HomeViewModel에 의존하지 않고, DB에 저장된 시청 기록의 상태를 직접 해시로 비교합니다.
                     val currentResumeState = HomeViewModel.getResumeWatching()?.take(10).toString()
                     if (currentResumeState != lastResumeWatching) {
                         backupDevice()
@@ -66,7 +67,6 @@ class SyncPlugin : Plugin() {
                 }
                 
                 if (isBackupEnabled == "true") {
-                    // ★ 핵심 수정: HomeViewModel을 거치지 않고 DB에서 직접 모든 시청 기록을 긁어옵니다.
                     val backupFile = BackupUtils.getBackup(context)
                     val backupJson = mapper.writeValueAsString(backupFile)
                     ApiUtils.syncThisDevice(backupJson, context)
@@ -89,9 +89,13 @@ class SyncPlugin : Plugin() {
                 
                 if (isRestoreEnabled == "true") {
                     val devices = ApiUtils.fetchDevices()
+                    val currentDeviceId = UtilKt.getDeviceId(context.packageName, context)
                     var dataRestored = false
                     
                     devices.forEach { device ->
+                        // ★ 핵심 수정: 내 기기의 옛날 데이터는 절대 다운로드하지 않고 무시합니다! (자폭 방지)
+                        if (device.deviceId == currentDeviceId) return@forEach
+                        
                         val lastUpdatedKey = "sync_last_updated_${device.deviceId}"
                         val lastUpdated = prefs.getString(lastUpdatedKey, "")
                         
@@ -109,7 +113,6 @@ class SyncPlugin : Plugin() {
                         }
                     }
 
-                    // ★ 핵심 수정: 병합이 완료되면 앱 화면을 새로고침하여 병합된 데이터를 인식시킵니다.
                     if (dataRestored) {
                         withContext(Dispatchers.Main) {
                             try {
@@ -119,6 +122,8 @@ class SyncPlugin : Plugin() {
                                 e.printStackTrace()
                             }
                         }
+                        // ★ 핵심 수정: 다른 기기의 데이터를 병합 완료했으면, 즉시 내 카드를 GitHub에 업데이트합니다.
+                        backupDevice()
                     }
                 }
             } catch (e: Exception) {
