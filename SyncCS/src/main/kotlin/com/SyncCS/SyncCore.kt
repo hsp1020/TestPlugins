@@ -136,7 +136,8 @@ object BackupUtils {
         "result_season/",
         "result_episode/",
         "result_dub/",
-        "video_source_priority"
+        "video_source_priority",
+        "download_header_cache/" // 이 라인을 추가하여 포스터, 제목, API 정보를 함께 동기화합니다.
     )
 
     private fun isAllowed(str: String): Boolean {
