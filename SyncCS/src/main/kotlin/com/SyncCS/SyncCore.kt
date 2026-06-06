@@ -127,44 +127,33 @@ class Editor(private val editor: SharedPreferences.Editor) {
 // ==========================================
 
 object BackupUtils {
-    private val nonTransferableKeys = listOf(
-        "anilist_unixtime", "anilist_token", "anilist_user", "anilist_cached_list", "anilist_accounts", "anilist_active",
-        "mal_user", "mal_cached_list", "mal_unixtime", "mal_refresh_token", "mal_token", "mal_accounts", "mal_active",
-        "simkl_token", "simkl_user", "simkl_cached_list", "simkl_cached_time", "simkl_accounts", "simkl_active",
-        "SIMKL_API_CACHE", "ANIWAVE_SIMKL_SYNC", "open_subtitles_user", "opensubtitles_accounts", "opensubtitles_active",
-        "subdl_user", "subdl_accounts", "subdl_active", "biometric_key", "nginx_user", "download_path_key",
-        "download_path_key_visual", "backup_path_key", "backup_dir_path_key", "PLUGINS_KEY", "PLUGINS_KEY_LOCAL",
-        "cs3-votes", "last_sync_api", "last_click_action", "last_opened_id", "library_folder", "result_resume_watching_migrated",
-        "jsdelivr_proxy_key", "fshare_setup", "fshare_token", "checkbox_fsharehd", "checkbox_fsharecine", "checkbox_fsharesheet",
-        "checkbox_fsharefavourite", "checkbox_fsharehdvn", "checkbox_timfshare", "bluphim_token", "device_id", "device_name",
-        "sync_token", "sync_project_num", "sync_project_id", "sync_item_id", "sync_device_id", "restore_device", "backup_device",
-        "movie_active", "dns_active", "ULTIMA_CURRENT_META_PROVIDERS", "ULTIMA_EXTENSIONS_LIST", "ULTIMA_CURRENT_MEDIA_PROVIDERS",
-        "ULTIMA_WATCH_SYNC_CREDS", "used_fstream_providers_v3", "fstream_version", "Aniyomi_Plugin_Successful_Install",
-        "enable_support_by_bongngotv", "prerelease_update", "data_store_helper/account_key_index", "VERSION_NAME", 
-        "FILES_TO_DELETE_KEY", "HAS_DONE_SETUP", "video_source_priority", "preferred_audio_language",
-        "episode_parent_index_", "download_header_cache", "BACKUP_download_header_cache",
-        "CONTENT_URI_", "download_status", "search_history", "download_info", "download_resume",
-        "download_q_resume", "download_episode_cache",
-        
-        // ★ 추가 해결 3: 방대한 양의 플러그인 토글 및 플러그인 목록 동기화 차단
-        "cat_toggle_",
-        "ext_toggle_",
-        "show_ext_",
-        "PLUGINS_KEY",
-        "PLUGINS_KEY_LOCAL"
+    // 화이트리스트 키값 선언 (동기화할 데이터)
+    private val whitelistKeys = listOf(
+        "result_resume_watching_2/",
+        "video_pos_dur/",
+        "result_watch_state/",
+        "result_watch_state_data/",
+        "result_season/",
+        "result_episode/",
+        "result_dub/",
+        "video_source_priority"
     )
 
-    private fun isBackup(str: String): Boolean {
-        return nonTransferableKeys.none { str.contains(it, ignoreCase = true) }
+    private fun isAllowed(str: String): Boolean {
+        return whitelistKeys.any { str.contains(it, ignoreCase = true) }
     }
 
     @Suppress("UNCHECKED_CAST")
     fun getBackup(context: Context, resumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null): BackupFile {
-        Log.d("SYNC", "[BackupUtils] getBackup() called. Backing up all valid watch history...")
+        Log.d("SYNC", "[BackupUtils] getBackup() called (Strict Whitelist Mode).")
         
         val prefs = with(DataStore) { context.getSharedPrefs() }.all
+        val defaultPrefs = with(DataStore) { context.getDefaultSharedPrefs() }.all
 
-        val filteredPrefs = prefs.filterKeys { isBackup(it) }
+        val filteredPrefs = prefs.filterKeys { isAllowed(it) }
+        val filteredDefaultPrefs = defaultPrefs.filterKeys { isAllowed(it) }
+
+        Log.d("SYNC", "[BackupUtils] Whitelist Filtered -> Datastore: ${filteredPrefs.size} keys, DefaultPrefs: ${filteredDefaultPrefs.size} keys")
 
         fun buildVars(map: Map<String, Any?>): BackupVars {
             return BackupVars(
@@ -177,36 +166,50 @@ object BackupUtils {
             )
         }
 
-        // ★ 추가 해결 1: 앱 자체 설정이 공유되는 것을 막기 위해 settings 백업 강제 차단 (빈 값 전송)
-        return BackupFile(buildVars(filteredPrefs), BackupVars())
+        return BackupFile(buildVars(filteredPrefs), buildVars(filteredDefaultPrefs))
     }
 
-    private fun <T> restoreMap(context: Context, map: Map<String, T>?) {
+    private fun <T> restoreMap(context: Context, map: Map<String, T>?, isEditingAppSettings: Boolean) {
         if (map == null) return
         
-        // ★ 추가 해결 4: SharedPreferences 에디터를 우회하여 DataStore.setKey API 직접 호출 (UI 즉시 갱신 보장)
-        for ((key, value) in map) {
-            if (isBackup(key)) {
-                try {
-                    DataStore.setKey(key, value)
-                } catch (e: Exception) {
-                    Log.d("SYNC", "Failed to restore key via DataStore: $key")
+        if (isEditingAppSettings) {
+            val defaultEditor = with(DataStore) { context.getDefaultSharedPrefs() }.edit()
+            for ((key, value) in map) {
+                if (isAllowed(key)) {
+                    Editor(defaultEditor).setKeyRaw(key, value)
+                }
+            }
+            defaultEditor.apply()
+        } else {
+            for ((key, value) in map) {
+                if (isAllowed(key)) {
+                    try {
+                        DataStore.setKey(key, value)
+                    } catch (e: Exception) {
+                        Log.d("SYNC", "Failed to restore key via DataStore: $key")
+                    }
                 }
             }
         }
     }
 
     fun restore(context: Context, backupFile: BackupFile, restoreSettings: Boolean, restoreDataStore: Boolean) {
-        Log.d("SYNC", "[BackupUtils] restore() started. restoreSettings=$restoreSettings, restoreDataStore=$restoreDataStore")
+        Log.d("SYNC", "[BackupUtils] restore() started (Strict Whitelist Mode).")
         
-        // ★ 추가 해결 1: 앱 자체 설정 복원 강제 차단 (restoreSettings 플래그가 넘어오더라도 무시함)
+        restoreMap(context, backupFile.settings.bool, true)
+        restoreMap(context, backupFile.settings.int, true)
+        restoreMap(context, backupFile.settings.string, true)
+        restoreMap(context, backupFile.settings.float, true)
+        restoreMap(context, backupFile.settings.long, true)
+        restoreMap(context, backupFile.settings.stringSet, true)
+
         if (restoreDataStore) {
-            restoreMap(context, backupFile.datastore.bool)
-            restoreMap(context, backupFile.datastore.int)
-            restoreMap(context, backupFile.datastore.string)
-            restoreMap(context, backupFile.datastore.float)
-            restoreMap(context, backupFile.datastore.long)
-            restoreMap(context, backupFile.datastore.stringSet)
+            restoreMap(context, backupFile.datastore.bool, false)
+            restoreMap(context, backupFile.datastore.int, false)
+            restoreMap(context, backupFile.datastore.string, false)
+            restoreMap(context, backupFile.datastore.float, false)
+            restoreMap(context, backupFile.datastore.long, false)
+            restoreMap(context, backupFile.datastore.stringSet, false)
         }
         Log.d("SYNC", "[BackupUtils] restore() finished.")
     }
@@ -330,20 +333,19 @@ object ApiUtils {
             val deviceId = prefs.getString("device_id", null)?.let { mapper.readValue<String>(it) } ?: return Pair(false, "Device ID missing")
             val deviceName = prefs.getString("device_name", null)?.let { mapper.readValue<String>(it) } ?: Build.MODEL
             
-            val cleanedData = UtilKt.cleanedSyncData(backupData)
-            
             Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA START ==========")
             val chunkSize = 3000
-            for (i in 0..cleanedData.length / chunkSize) {
+            for (i in 0..backupData.length / chunkSize) {
                 val start = i * chunkSize
-                val end = minOf((i + 1) * chunkSize, cleanedData.length)
+                val end = minOf((i + 1) * chunkSize, backupData.length)
                 if (start < end) {
-                    Log.d("SYNC_JSON", cleanedData.substring(start, end))
+                    Log.d("SYNC_JSON", backupData.substring(start, end))
                 }
             }
             Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA END ==========")
 
-            val compressedData = UtilKt.compressJsonToString(cleanedData)
+            // 치환 과정 없이 순수 백업 데이터를 다이렉트로 GZIP 압축 및 인코딩 실행!
+            val compressedData = UtilKt.compressJsonToString(backupData)
             
             if (compressedData.length > 65000) {
                 return Pair(false, "Data too large (${compressedData.length} chars).")
@@ -389,178 +391,27 @@ object ApiUtils {
 }
 
 // ==========================================
-// String & Compression Utilities
+// String & Compression Utilities (replacementMap 완전 삭제)
 // ==========================================
 
 object UtilKt {
-    private val replacementMap = listOf(
-        "\"result_resume_watching_2/" to "\"k1/",
-        "\"video_pos_dur/" to "\"k2/",
-        "\"result_watch_state/" to "\"k4/",
-        "\"result_watch_state_data/" to "\"k5/",
-        "\"result_season/" to "\"k6/",
-        "\"result_episode/" to "\"k7/",
-        "\"result_dub/" to "\"k8/",
-        "\"search_history/" to "\"k9/",
-        "\"video_quality_priority/" to "\"k10/",
-        "\"video_profile_name/" to "\"k11/",
-        "\"home_bookmarked_last_list" to "\"k12",
-        "\"user_custom_sites" to "\"k13",
-        "\"search_pref_tags" to "\"k14",
-        "\"search_pref_providers" to "\"k15",
-        "\"resize_mode" to "\"k16",
-        "\"duration_mode" to "\"k17",
-        "\"REPOSITORIES_KEY" to "\"k18",
-        "\"subtitle_settings" to "\"k19",
-        "\"results_sorting_mode" to "\"k20",
-        "\"home_pref_homepage" to "\"k21",
-        "\"playback_speed" to "\"k22",
-        "\"fshare_username" to "\"k23",
-        "\"fshare_password" to "\"k24",
-        "\"monplayer_links" to "\"k25",
-        "\"xtream_iptv_links" to "\"k26",
-        "\"iptv_links" to "\"k27",
-        "\"library_sorting_mode" to "\"k28",
-        "\"subs_auto_select" to "\"k29",
-        "\"bookmarkedTime\"" to "\"v1\"",
-        "\"latestUpdatedTime\"" to "\"v2\"",
-        "\"name\"" to "\"v3\"",
-        "\"url\"" to "\"v4\"",
-        "\"type\"" to "\"v5\"",
-        "\"apiName\"" to "\"v6\"",
-        "\"posterUrl\"" to "\"v7\"",
-        "\"year\"" to "\"v8\"",
-        "\"syncData\"" to "\"v9\"",
-        "\"quality\"" to "\"v10\"",
-        "\"posterHeaders\"" to "\"v11\"",
-        "\"plot\"" to "\"v12\"",
-        "\"rating\"" to "\"v13\"",
-        "\"tags\"" to "\"v14\"",
-        "\"searchedAt\"" to "\"v15\"",
-        "\"searchText\"" to "\"v16\"",
-        "\"parentId\"" to "\"v17\"",
-        "\"episodeId\"" to "\"v18\"",
-        "\"episode\"" to "\"v19\"",
-        "\"season\"" to "\"v20\"",
-        "\"updateTime\"" to "\"v21\"",
-        "\"isFromDownload\"" to "\"v22\"",
-        "\"position\"" to "\"v23\"",
-        "\"duration\"" to "\"v24\"",
-        "\"mainUrl\"" to "\"v25\"",
-        "\"searchUrl\"" to "\"v26\"",
-        "\"cacheTime\"" to "\"v27\"",
-        "\"title\"" to "\"v28\"",
-        "\"poster\"" to "\"v29\"",
-        "\"TvSeries\"" to "\"v30\"",
-        "\"Movie\"" to "\"v31\"",
-        "\"NSFW\"" to "\"v32\"",
-        "\"Anime\"" to "\"v33\"",
-        "\"Live\"" to "\"v34\"",
-        "\"AnimeMovie\"" to "\"v35\"",
-        "\"AsianDrama\"" to "\"v36\"",
-        "\"Cartoon\"" to "\"v37\"",
-        "\"Torrent\"" to "\"v38\"",
-        "\"slug\"" to "\"v39\"",
-        "\"https://" to "\"h//",
-        "\":null," to "\":n,",
-        "\":false}" to "\":f}",
-        "\":true}" to "\":t}",
-        "\"_Bool\"" to "\"s1\"",
-        "\"_Int\"" to "\"s2\"",
-        "\"_String\"" to "\"s3\"",
-        "\"_Float\"" to "\"s4\"",
-        "\"_Long\"" to "\"s5\"",
-        "\"_StringSet\"" to "\"s6\"",
-        "\"swipe_enabled_key\"" to "\"s7\"",
-        "\"skip_startup_account_select_key\"" to "\"s8\"",
-        "\"auto_update\"" to "\"s9\"",
-        "\"rotate_video_key\"" to "\"s10\"",
-        "\"auto_download_plugins_key\"" to "\"s11\"",
-        "\"auto_update_plugins\"" to "\"s12\"",
-        "\"player_resize_enabled_key\"" to "\"s13\"",
-        "\"bg_startup_tracing\"" to "\"s14\"",
-        "\"playback_speed_enabled_key\"" to "\"s15\"",
-        "\"acra.disable\"" to "\"s16\"",
-        "\"enable_nsfw_on_providers_key\"" to "\"s17\"",
-        "\"preview_seekbar_key\"" to "\"s18\"",
-        "\"show_trailers_key\"" to "\"s19\"",
-        "\"show_fillers_key\"" to "\"s20\"",
-        "\"random_button_key\"" to "\"s21\"",
-        "\"swipe_vertical_enabled_key\"" to "\"s22\"",
-        "\"bottom_title_key\"" to "\"s23\"",
-        "\"auto_rotate_video_key\"" to "\"s24\"",
-        "\"advanced_search\"" to "\"s25\"",
-        "\"speedup_key\"" to "\"s26\"",
-        "\"episode_sync_enabled_key\"" to "\"s27\"",
-        "\"hide_player_control_names_key\"" to "\"s28\"",
-        "\"show_kitsu_posters_key\"" to "\"s29\"",
-        "\"double_tap_enabled_key\"" to "\"s30\"",
-        "\"pip_enabled_key\"" to "\"s31\"",
-        "\"double_tap_pause_enabled_key\"" to "\"s32\"",
-        "\"enable_skip_op_from_database\"" to "\"s33\"",
-        "\"autoplay_next_key\"" to "\"s34\"",
-        "\"android_tv_interface_off_seek_key\"" to "\"s35\"",
-        "\"DNS over HTTPS\"" to "\"s36\"",
-        "\"double_tap_seek_time_key2\"" to "\"s37\"",
-        "\"auto_download_plugins_key2\"" to "\"s38\"",
-        "\"automatic_backup_key\"" to "\"s39\"",
-        "\"download_concurrent_key\"" to "\"s40\"",
-        "\"com.facebook.appevents.SessionInfo.interruptionCount\"" to "\"s41\"",
-        "\"download_parallel_key\"" to "\"s42\"",
-        "\"android_tv_interface_on_seek_key\"" to "\"s43\"",
-        "\"app_layout_key\"" to "\"s44\"",
-        "\"backup_dir_key\"" to "\"s45\"",
-        "\"com.applovin.sdk.impl.isFirstRun\"" to "\"s46\"",
-        "\"com.facebook.appevents.SessionInfo.sessionId\"" to "\"s47\"",
-        "\"primary_color_key\"" to "\"s48\"",
-        "\"app_theme_key\"" to "\"s49\"",
-        "\"app_locale\"" to "\"s50\"",
-        "\"com.facebook.appevents.SessionInfo.sessionEndTime\"" to "\"s51\"",
-        "\"com.facebook.appevents.SessionInfo.sessionStartTime\"" to "\"s52\"",
-        "\"prefer_media_type_key_2\"" to "\"s53\"",
-        "\"datastore\"" to "\"s54\""
-    )
-
-    fun cleanedSyncData(syncData: String): String {
-        return try {
-            var result = syncData
-                .replace(Regex("\\\\\"tags\\\\\"\\s*:\\s*\\[.*?]"), "\\\\\"tags\\\\\":[]")
-                .replace(Regex("\\\\\"plot\\\\\"\\s*:\\s*\\\\\"(.*?)(?<!\\\\)\\\\\""), "\\\\\"plot\\\\\":\\\\\"\\\\\"")
-                .replace(Regex("\\\\\"overview\\\\\"\\s*:\\s*\\\\\"(.*?)(?<!\\\\)\\\\\""), "\\\\\"overview\\\\\":\\\\\"\\\\\"")
-            
-            for ((old, new) in replacementMap) {
-                result = result.replace(old, new)
-            }
-            result
-        } catch (e: Exception) {
-            syncData
-        }
-    }
-
-    fun restoreText(minified: String): String {
-        var result = minified
-        for ((old, new) in replacementMap) {
-            result = result.replace(new, old)
-        }
-        return result
-    }
-
     fun compressJsonToString(json: String): String {
         val bos = ByteArrayOutputStream()
         GZIPOutputStream(bos).use { it.write(json.toByteArray(Charsets.UTF_8)) }
-        return Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP or Base64.URL_SAFE)
+        return Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
     }
 
     fun decompressJsonFromString(encoded: String): String {
         return try {
-            val bytes = Base64.decode(encoded, Base64.NO_WRAP or Base64.URL_SAFE)
-            try {
+            val bytes = Base64.decode(encoded, Base64.DEFAULT)
+            if (bytes.size >= 2 && bytes[0] == 0x1F.toByte() && bytes[1] == 0x8B.toByte()) {
                 val bis = ByteArrayInputStream(bytes)
                 GZIPInputStream(bis).bufferedReader(Charsets.UTF_8).use { it.readText() }
-            } catch (e: Exception) {
+            } else {
                 String(bytes, Charsets.UTF_8)
             }
         } catch (e: Exception) {
+            Log.d("SYNC", "[UtilKt] Failed to decompress: ${e.message}")
             ""
         }
     }
