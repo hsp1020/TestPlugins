@@ -1,6 +1,7 @@
 package com.SyncCS
 
 import android.content.Context
+import android.util.Log
 import androidx.appcompat.app.AppCompatActivity
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.lagradost.cloudstream3.AcraApplication
@@ -29,22 +30,27 @@ class SyncPlugin : Plugin() {
     private val restoredDeviceTimestamps = mutableMapOf<String, String>()
 
     private fun startSyncLoop() {
+        Log.d("SYNC", "[SyncPlugin] startSyncLoop() initiated.")
         syncJob?.cancel()
         syncJob = CoroutineScope(Dispatchers.IO).launch {
             while (isActive) {
                 try {
                     val currentResumeState = HomeViewModel.getResumeWatching()?.take(10).toString()
                     if (currentResumeState != lastResumeWatching) {
+                        Log.d("SYNC", "[SyncPlugin] Watch history changed. Triggering backupDevice().")
                         backupDevice()
                         lastResumeWatching = currentResumeState
                     }
                     
+                    Log.d("SYNC", "[SyncPlugin] Sync loop tick. counterBackup: $counterBackup")
                     if (counterBackup >= 15) {
+                        Log.d("SYNC", "[SyncPlugin] counterBackup reached 15. Triggering restoreDevice().")
                         restoreDevice()
                         counterBackup = 0
                     }
                     counterBackup++
                 } catch (e: Exception) {
+                    Log.d("SYNC", "[SyncPlugin] Exception in sync loop: ${e.message}")
                     e.printStackTrace()
                 }
                 delay(5000L)
@@ -53,12 +59,14 @@ class SyncPlugin : Plugin() {
     }
 
     private fun backupDevice() {
+        Log.d("SYNC", "[SyncPlugin] backupDevice() called. Debouncing for 3 seconds...")
         backupJob?.cancel()
         backupJob = CoroutineScope(Dispatchers.IO).launch {
             delay(3000L)
             
             try {
-                counterBackup = 0
+                // ★ 해결 2: counterBackup = 0 삭제 (타이머 초기화 버그 해결)
+                Log.d("SYNC", "[SyncPlugin] Executing backupDevice() logic...")
                 val context = AcraApplication.context ?: return@launch
                 val prefs = with(DataStore) { context.getSharedPrefs() }
                 
@@ -67,17 +75,23 @@ class SyncPlugin : Plugin() {
                 }
                 
                 if (isBackupEnabled == "true") {
-                    val backupFile = BackupUtils.getBackup(context)
+                    val resumeWatching = HomeViewModel.getResumeWatching()
+                    val backupFile = BackupUtils.getBackup(context, resumeWatching)
                     val backupJson = mapper.writeValueAsString(backupFile)
+                    Log.d("SYNC", "[SyncPlugin] Backup JSON created. Calling ApiUtils.syncThisDevice().")
                     ApiUtils.syncThisDevice(backupJson, context)
+                } else {
+                    Log.d("SYNC", "[SyncPlugin] Backup is disabled in settings.")
                 }
             } catch (e: Exception) {
+                Log.d("SYNC", "[SyncPlugin] Exception in backupDevice: ${e.message}")
                 e.printStackTrace()
             }
         }
     }
 
     private fun restoreDevice() {
+        Log.d("SYNC", "[SyncPlugin] restoreDevice() called.")
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val context = AcraApplication.context ?: return@launch
@@ -93,12 +107,16 @@ class SyncPlugin : Plugin() {
                     var dataRestored = false
                     
                     devices.forEach { device ->
-                        if (device.deviceId == currentDeviceId) return@forEach
+                        if (device.deviceId == currentDeviceId) {
+                            Log.d("SYNC", "[SyncPlugin] Skipping own device: ${device.name}")
+                            return@forEach
+                        }
                         
                         val lastUpdatedKey = "sync_last_updated_${device.deviceId}"
                         val lastUpdated = prefs.getString(lastUpdatedKey, "")
                         
                         if (lastUpdated != device.updatedAt) {
+                            Log.d("SYNC", "[SyncPlugin] New data found for device: ${device.name}. Merging...")
                             device.syncedData?.let { encoded ->
                                 val decoded = UtilKt.restoreText(UtilKt.decompressJsonFromString(encoded))
                                 if (decoded.isNotBlank()) {
@@ -107,30 +125,39 @@ class SyncPlugin : Plugin() {
                                     
                                     prefs.edit().putString(lastUpdatedKey, device.updatedAt ?: "").apply()
                                     dataRestored = true
+                                    Log.d("SYNC", "[SyncPlugin] Merge successful for device: ${device.name}")
                                 }
                             }
+                        } else {
+                            Log.d("SYNC", "[SyncPlugin] Device ${device.name} is already up-to-date.")
                         }
                     }
 
                     if (dataRestored) {
+                        Log.d("SYNC", "[SyncPlugin] Data restored. Triggering UI reload and backupDevice().")
                         withContext(Dispatchers.Main) {
                             try {
                                 MainActivity.reloadHomeEvent.invoke(true)
                                 MainActivity.bookmarksUpdatedEvent.invoke(true)
                             } catch (e: Exception) {
+                                Log.d("SYNC", "[SyncPlugin] Exception during UI reload: ${e.message}")
                                 e.printStackTrace()
                             }
                         }
                         backupDevice()
                     }
+                } else {
+                    Log.d("SYNC", "[SyncPlugin] Restore is disabled in settings.")
                 }
             } catch (e: Exception) {
+                Log.d("SYNC", "[SyncPlugin] Exception in restoreDevice: ${e.message}")
                 e.printStackTrace()
             }
         }
     }
 
     override fun load(context: Context) {
+        Log.d("SYNC", "[SyncPlugin] load() called.")
         AcraApplication.setKey("device_id", UtilKt.getDeviceId(context.packageName, context))
         restoreDevice()
         startSyncLoop()
@@ -144,8 +171,8 @@ class SyncPlugin : Plugin() {
         openSettings = { activityContext ->
             val appCompatActivity = activityContext as? AppCompatActivity
             appCompatActivity?.let {
-                // ★ 쓸데없는 파라미터 전달 제거, 원본 그대로 복구
-                SyncSettingsFragment(this).show(it.supportFragmentManager, "Sync")
+                Log.d("SYNC", "[SyncPlugin] Opening SyncSettingsFragment.")
+                SyncSettingsFragment(this, context).show(it.supportFragmentManager, "Sync")
             }
         }
     }
