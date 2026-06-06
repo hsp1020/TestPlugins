@@ -1,22 +1,38 @@
-// 파일명: hsp1020/testplugins/TestPlugins-d1a26fae88cb55c8f1d621560cf4e45bd7fd78f6/AnilifeProvider/src/main/kotlin/com/Anilife/Extractor.kt
 package com.anilife
 
+import android.annotation.SuppressLint
 import android.util.Base64
+import android.webkit.JavascriptInterface
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceError
+import android.webkit.WebResourceResponse
+import android.net.http.SslError
+import android.webkit.SslErrorHandler
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.CloudStreamApp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.delay
+import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.io.ByteArrayInputStream
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URI
+import android.os.Handler
+import android.os.Looper
+import java.util.concurrent.CancellationException
 
 class AnilifeProxyExtractor : ExtractorApi() {
     override val name = "Anilife"
@@ -48,6 +64,123 @@ class AnilifeProxyExtractor : ExtractorApi() {
         return null
     }
 
+    /**
+     * [재생 링크 추출 전용 초경량 쌩웹뷰]
+     * 하드웨어 가속 강제 해제, 리소스 다운로드 차단, 사후 소멸 처리가 완벽히 이식되었습니다.
+     */
+    @SuppressLint("SetJavaScriptEnabled")
+    private suspend fun getDoc(url: String): Document {
+        val ctx = CloudStreamApp.context ?: throw Exception("Context가 Null입니다.")
+
+        return withContext(Dispatchers.Main) {
+            suspendCancellableCoroutine { continuation ->
+                val webView = WebView(ctx)
+                var isResumed = false
+
+                fun cleanup() {
+                    Handler(Looper.getMainLooper()).post {
+                        try {
+                            webView.stopLoading()
+                            webView.clearHistory()
+                            webView.loadUrl("about:blank")
+                            webView.destroy()
+                        } catch (e: Exception) { }
+                    }
+                }
+
+                class HtmlExtractor {
+                    @JavascriptInterface
+                    fun processHTML(html: String) {
+                        if (!isResumed) {
+                            isResumed = true
+                            cleanup()
+                            continuation.resume(Jsoup.parse(html, url))
+                        }
+                    }
+                }
+
+                webView.setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
+
+                webView.settings.apply {
+                    javaScriptEnabled = true
+                    domStorageEnabled = true
+                    databaseEnabled = true
+                    userAgentString = DESKTOP_UA
+                    loadsImagesAutomatically = false // 미디어 로드 전 단계이므로 불필요한 이미지 차단 [1.1, 1.3]
+                    mediaPlaybackRequiresUserGesture = true
+                }
+
+                webView.addJavascriptInterface(HtmlExtractor(), "HTMLOUT")
+
+                webView.webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView?, url: String?) {
+                        if (isResumed) return
+                        view?.loadUrl("javascript:window.HTMLOUT.processHTML(document.documentElement.outerHTML);")
+                    }
+
+                    // 필요없는 포스터 이미지, 광고, 스타일시트 차단 패치 [1.1, 1.2, 1.3]
+                    override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                        val resourceUrl = request?.url?.toString()?.lowercase() ?: return null
+                        val isHeavy = resourceUrl.endsWith(".png") || resourceUrl.endsWith(".jpg") ||
+                                      resourceUrl.endsWith(".jpeg") || resourceUrl.endsWith(".webp") ||
+                                      resourceUrl.endsWith(".gif") || resourceUrl.endsWith(".svg") ||
+                                      resourceUrl.endsWith(".woff") || resourceUrl.endsWith(".woff2") ||
+                                      resourceUrl.endsWith(".ttf") || resourceUrl.endsWith(".css") ||
+                                      resourceUrl.endsWith(".mp4") || resourceUrl.contains("analytics") ||
+                                      resourceUrl.contains("google")
+
+                        if (isHeavy) {
+                            return WebResourceResponse("text/plain", "UTF-8", ByteArrayInputStream(ByteArray(0)))
+                        }
+                        return super.shouldInterceptRequest(view, request)
+                    }
+
+                    @Deprecated("Deprecated in Java")
+                    override fun onReceivedError(view: WebView?, errorCode: Int, description: String?, failingUrl: String?) {
+                        if (failingUrl == url && !isResumed) {
+                            isResumed = true
+                            cleanup()
+                            continuation.resumeWith(Result.failure(Exception("접속 실패: $description ($errorCode)")))
+                        }
+                    }
+
+                    override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+                        if (request?.isForMainFrame == true && !isResumed) {
+                            val errorCode = error?.errorCode ?: -1
+                            val description = error?.description?.toString() ?: "Unknown"
+                            isResumed = true
+                            cleanup()
+                            continuation.resumeWith(Result.failure(Exception("접속 실패: $description ($errorCode)")))
+                        }
+                    }
+
+                    override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: SslError?) {
+                        handler?.cancel()
+                        if (!isResumed) {
+                            isResumed = true
+                            cleanup()
+                            continuation.resumeWith(Result.failure(Exception("SSL 핸드셰이크 실패: ${error?.toString()}")))
+                        }
+                    }
+                }
+
+                webView.loadUrl(url)
+
+                Handler(Looper.getMainLooper()).postDelayed({
+                    if (!isResumed) {
+                        isResumed = true
+                        cleanup()
+                        continuation.resumeWith(Result.failure(Exception("응답 시간 초과 (30초)")))
+                    }
+                }, 30000)
+
+                continuation.invokeOnCancellation {
+                    cleanup()
+                }
+            }
+        }
+    }
+
     suspend fun extractWithProxy(
         m3u8Url: String,
         playerUrl: String,
@@ -67,7 +200,10 @@ class AnilifeProxyExtractor : ExtractorApi() {
 
         try {
             var finalM3u8 = ""
-            val playerHtml = app.get(playerUrl, headers = cleanHeaders).text
+            // [최적화 우회 적용] 차단 장벽이 존재하는 playerUrl 주소를 쌩웹뷰 모듈로 우회 획득 [1.1]
+            val playerDoc = getDoc(playerUrl)
+            val playerHtml = playerDoc.outerHtml()
+
             val aldataRegex = Regex("""_aldata\s*=\s*['"]([^'"]+)['"]""")
             val match = aldataRegex.find(playerHtml)
             
@@ -174,7 +310,6 @@ class AnilifeProxyExtractor : ExtractorApi() {
                     while (isRunning && serverSocket != null && !serverSocket!!.isClosed) { 
                         try { 
                             val socket = serverSocket!!.accept()
-                            // [수정: 블로킹 I/O 코루틴 스레드 풀 할당]
                             launch(Dispatchers.IO) { handleClient(socket) } 
                         } catch (e: Exception) {
                             delay(100L)
@@ -189,7 +324,6 @@ class AnilifeProxyExtractor : ExtractorApi() {
             try { serverSocket?.close(); serverSocket = null } catch (e: Exception) {} 
         }
 
-        // [수정: 명시적 I/O 분리 컨텍스트 적용]
         private suspend fun handleClient(socket: Socket) = withContext(Dispatchers.IO) {
             try {
                 socket.soTimeout = 5000
