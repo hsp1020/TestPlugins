@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import android.os.Build
 import android.provider.Settings
 import android.util.Base64
+import android.util.Log
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.lagradost.cloudstream3.AcraApplication
@@ -20,7 +21,7 @@ import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 
 // ==========================================
-// Data Models (파싱 에러 방지를 위해 모두 Nullable 처리)
+// Data Models
 // ==========================================
 
 data class APIRes(
@@ -281,7 +282,6 @@ object ApiUtils {
         val numStr = prefs.getString("sync_project_num", null)?.let { mapper.readValue<String>(it) } ?: return emptyList()
         val num = numStr.toIntOrNull() ?: return emptyList()
         
-        // id 필드를 명시적으로 요청하여 파싱 에러 방지
         val query = """query(${'$'}num: Int!) { viewer { projectV2(number: ${'$'}num) { id items(first: 100) { nodes { id content { ... on DraftIssue { id title bodyText } } } } } } }"""
         val res = apiCall(query, mapOf("num" to num))
         
@@ -315,9 +315,39 @@ object ApiUtils {
         val deviceId = prefs.getString("device_id", null)?.let { mapper.readValue<String>(it) } ?: return Pair(false, "Device ID missing")
         val deviceName = prefs.getString("device_name", null)?.let { mapper.readValue<String>(it) } ?: Build.MODEL
         
-        // GZIP 압축 적용
-        val compressedData = UtilKt.compressJsonToString(UtilKt.cleanedSyncData(backupData))
+        val cleanedData = UtilKt.cleanedSyncData(backupData)
+        val compressedData = UtilKt.compressJsonToString(cleanedData)
         
+        // ====================================================================
+        // [디버깅용 로그 출력] Logcat에서 잘리지 않도록 3000자씩 끊어서 출력합니다.
+        // ====================================================================
+        Log.d("SyncCS", "Original JSON Length: ${backupData.length}")
+        Log.d("SyncCS", "Cleaned JSON Length: ${cleanedData.length}")
+        Log.d("SyncCS", "Compressed Base64 Length: ${compressedData.length}")
+
+        val chunkSize = 3000
+        Log.d("SyncCS", "========== RAW JSON START ==========")
+        for (i in 0..backupData.length / chunkSize) {
+            val start = i * chunkSize
+            val end = minOf((i + 1) * chunkSize, backupData.length)
+            if (start < end) Log.d("SyncCS_RAW", backupData.substring(start, end))
+        }
+        Log.d("SyncCS", "========== RAW JSON END ==========")
+
+        Log.d("SyncCS", "========== BASE64 START ==========")
+        for (i in 0..compressedData.length / chunkSize) {
+            val start = i * chunkSize
+            val end = minOf((i + 1) * chunkSize, compressedData.length)
+            if (start < end) Log.d("SyncCS_B64", compressedData.substring(start, end))
+        }
+        Log.d("SyncCS", "========== BASE64 END ==========")
+        // ====================================================================
+
+        // 65,000자를 초과하면 GitHub에서 무조건 튕겨내므로 사전에 차단합니다.
+        if (compressedData.length > 65000) {
+            return Pair(false, "Data too large (${compressedData.length} chars). Check Logcat 'SyncCS_RAW' to see what is bloating the data.")
+        }
+
         val devices = fetchDevices()
         val existingDevice = devices.find { it.deviceId == deviceId }
         
@@ -501,14 +531,12 @@ object UtilKt {
         return result
     }
 
-    // ★★★ 핵심 수정: 실제 GZIP 압축 적용 (64KB 제한 우회) ★★★
     fun compressJsonToString(json: String): String {
         val bos = ByteArrayOutputStream()
         GZIPOutputStream(bos).use { it.write(json.toByteArray(Charsets.UTF_8)) }
         return Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP or Base64.URL_SAFE)
     }
 
-    // ★★★ 핵심 수정: GZIP 압축 해제 (구버전 Base64 호환성 유지) ★★★
     fun decompressJsonFromString(encoded: String): String {
         return try {
             val bytes = Base64.decode(encoded, Base64.NO_WRAP or Base64.URL_SAFE)
@@ -516,7 +544,6 @@ object UtilKt {
                 val bis = ByteArrayInputStream(bytes)
                 GZIPInputStream(bis).bufferedReader(Charsets.UTF_8).use { it.readText() }
             } catch (e: Exception) {
-                // GZIP이 아닌 예전 방식(순수 Base64)으로 업로드된 데이터 호환성 처리
                 String(bytes, Charsets.UTF_8)
             }
         } catch (e: Exception) {
