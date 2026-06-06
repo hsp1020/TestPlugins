@@ -127,38 +127,43 @@ class Editor(private val editor: SharedPreferences.Editor) {
 // ==========================================
 
 object BackupUtils {
-    // 화이트리스트 키값 선언 (동기화할 데이터)
-    private val whitelistKeys = listOf(
-        "result_resume_watching_2/",
-        "video_pos_dur/",
-        "result_watch_state/",
-        "result_watch_state_data/",
-        "result_season/",
-        "result_episode/",
-        "result_dub/",
-        "video_source_priority"
+    private val nonTransferableKeys = listOf(
+        "anilist_unixtime", "anilist_token", "anilist_user", "anilist_cached_list", "anilist_accounts", "anilist_active",
+        "mal_user", "mal_cached_list", "mal_unixtime", "mal_refresh_token", "mal_token", "mal_accounts", "mal_active",
+        "simkl_token", "simkl_user", "simkl_cached_list", "simkl_cached_time", "simkl_accounts", "simkl_active",
+        "SIMKL_API_CACHE", "ANIWAVE_SIMKL_SYNC", "open_subtitles_user", "opensubtitles_accounts", "opensubtitles_active",
+        "subdl_user", "subdl_accounts", "subdl_active", "biometric_key", "nginx_user", "download_path_key",
+        "download_path_key_visual", "backup_path_key", "backup_dir_path_key", "PLUGINS_KEY", "PLUGINS_KEY_LOCAL",
+        "cs3-votes", "last_sync_api", "last_click_action", "last_opened_id", "library_folder", "result_resume_watching_migrated",
+        "jsdelivr_proxy_key", "fshare_setup", "fshare_token", "checkbox_fsharehd", "checkbox_fsharecine", "checkbox_fsharesheet",
+        "checkbox_fsharefavourite", "checkbox_fsharehdvn", "checkbox_timfshare", "bluphim_token", "device_id", "device_name",
+        "sync_token", "sync_project_num", "sync_project_id", "sync_item_id", "sync_device_id", "restore_device", "backup_device",
+        "movie_active", "dns_active", "ULTIMA_CURRENT_META_PROVIDERS", "ULTIMA_EXTENSIONS_LIST", "ULTIMA_CURRENT_MEDIA_PROVIDERS",
+        "ULTIMA_WATCH_SYNC_CREDS", "used_fstream_providers_v3", "fstream_version", "Aniyomi_Plugin_Successful_Install",
+        "enable_support_by_bongngotv", "prerelease_update", "data_store_helper/account_key_index", "VERSION_NAME", 
+        "FILES_TO_DELETE_KEY", "HAS_DONE_SETUP", "video_source_priority", "preferred_audio_language",
+        "episode_parent_index_", "download_header_cache", "BACKUP_download_header_cache",
+        "CONTENT_URI_", "download_status", "search_history", "download_info", "download_resume",
+        "download_q_resume", "download_episode_cache",
+        "cat_toggle_", "ext_toggle_", "PLUGINS_KEY", "PLUGINS_KEY_LOCAL"
     )
 
-    private fun isAllowed(str: String): Boolean {
-        return whitelistKeys.any { str.contains(it, ignoreCase = true) }
+    private fun isBackup(str: String): Boolean {
+        return nonTransferableKeys.none { str.contains(it, ignoreCase = true) }
     }
 
     @Suppress("UNCHECKED_CAST")
     fun getBackup(context: Context, resumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null): BackupFile {
-        Log.d("SYNC", "[BackupUtils] getBackup() called (Strict Whitelist Mode).")
+        Log.d("SYNC", "[BackupUtils] getBackup() called. Backing up all valid watch history...")
         
         val prefs = with(DataStore) { context.getSharedPrefs() }.all
-        val defaultPrefs = with(DataStore) { context.getDefaultSharedPrefs() }.all
 
-        val filteredPrefs = prefs.filterKeys { isAllowed(it) }
-        val filteredDefaultPrefs = defaultPrefs.filterKeys { isAllowed(it) }
-
-        Log.d("SYNC", "[BackupUtils] Whitelist Filtered -> Datastore: ${filteredPrefs.size} keys, DefaultPrefs: ${filteredDefaultPrefs.size} keys")
+        val filteredPrefs = prefs.filterKeys { isBackup(it) }
 
         fun buildVars(map: Map<String, Any?>): BackupVars {
             return BackupVars(
                 bool = map.filterValues { it is Boolean } as Map<String, Boolean>,
-                int = map.filterValues { it is Int } as Map<String, Int>,
+                int = map.filterValues { it is Int } as Map<String, Integer>,
                 string = map.filterValues { it is String } as Map<String, String>,
                 float = map.filterValues { it is Float } as Map<String, Float>,
                 long = map.filterValues { it is Long } as Map<String, Long>,
@@ -166,7 +171,7 @@ object BackupUtils {
             )
         }
 
-        return BackupFile(buildVars(filteredPrefs), buildVars(filteredDefaultPrefs))
+        return BackupFile(buildVars(filteredPrefs), BackupVars())
     }
 
     private fun <T> restoreMap(context: Context, map: Map<String, T>?, isEditingAppSettings: Boolean) {
@@ -175,16 +180,19 @@ object BackupUtils {
         if (isEditingAppSettings) {
             val defaultEditor = with(DataStore) { context.getDefaultSharedPrefs() }.edit()
             for ((key, value) in map) {
-                if (isAllowed(key)) {
+                if (isBackup(key)) {
                     Editor(defaultEditor).setKeyRaw(key, value)
                 }
             }
             defaultEditor.apply()
         } else {
             for ((key, value) in map) {
-                if (isAllowed(key)) {
+                if (isBackup(key)) {
                     try {
-                        DataStore.setKey(key, value)
+                        // ★ 해결: with(DataStore) 범위를 지정하여 context 객체 위에서 확장 함수인 setKey를 성공적으로 호출합니다.
+                        with(DataStore) {
+                            context.setKey(key, value)
+                        }
                     } catch (e: Exception) {
                         Log.d("SYNC", "Failed to restore key via DataStore: $key")
                     }
@@ -333,19 +341,20 @@ object ApiUtils {
             val deviceId = prefs.getString("device_id", null)?.let { mapper.readValue<String>(it) } ?: return Pair(false, "Device ID missing")
             val deviceName = prefs.getString("device_name", null)?.let { mapper.readValue<String>(it) } ?: Build.MODEL
             
+            val cleanedData = UtilKt.cleanedSyncData(backupData)
+            
             Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA START ==========")
             val chunkSize = 3000
-            for (i in 0..backupData.length / chunkSize) {
+            for (i in 0..cleanedData.length / chunkSize) {
                 val start = i * chunkSize
-                val end = minOf((i + 1) * chunkSize, backupData.length)
+                val end = minOf((i + 1) * chunkSize, cleanedData.length)
                 if (start < end) {
-                    
+                    Log.d("SYNC_JSON", cleanedData.substring(start, end))
                 }
             }
             Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA END ==========")
 
-            // 치환 과정 없이 순수 백업 데이터를 다이렉트로 GZIP 압축 및 인코딩 실행!
-            val compressedData = UtilKt.compressJsonToString(backupData)
+            val compressedData = UtilKt.compressJsonToString(cleanedData)
             
             if (compressedData.length > 65000) {
                 return Pair(false, "Data too large (${compressedData.length} chars).")
@@ -391,7 +400,7 @@ object ApiUtils {
 }
 
 // ==========================================
-// String & Compression Utilities (replacementMap 완전 삭제)
+// String & Compression Utilities
 // ==========================================
 
 object UtilKt {
