@@ -7,8 +7,10 @@ import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.Switch
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
@@ -19,6 +21,7 @@ import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.mapper
 import com.lagradost.cloudstream3.plugins.Plugin
+import com.lagradost.cloudstream3.ui.home.HomeViewModel
 import com.lagradost.cloudstream3.utils.DataStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -59,7 +62,8 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
         val layout = getLayout("settings", inflater, container)
         
         findView<TextView>(layout, "config_text").text = "Config"
-        findView<TextView>(layout, "group_text").text = "Guide"
+        // [요구사항 1] Guide 대신 Devices 로 텍스트 변경
+        findView<TextView>(layout, "group_text").text = "Devices"
 
         val buttonConfig = findView<ImageView>(layout, "button_config")
         buttonConfig.setImageDrawable(getDrawable("edit_icon"))
@@ -69,7 +73,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
             val configLayout = getLayout("config", inflater, container)
             val tokenEdit = findView<EditText>(configLayout, "token")
             val projectNumEdit = findView<EditText>(configLayout, "project_num")
-            val deviceNameEdit = findView<EditText>(configLayout, "device_name") // XML에서 직접 가져옴
+            val deviceNameEdit = findView<EditText>(configLayout, "device_name")
             val backupSwitch = findView<Switch>(configLayout, "backup_device")
             val restoreSwitch = findView<Switch>(configLayout, "restore_device")
 
@@ -79,7 +83,6 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                 tokenEdit.setText(prefs.getString("sync_token", null)?.let { mapper.readValue<String>(it) })
                 projectNumEdit.setText(prefs.getString("sync_project_num", null)?.let { mapper.readValue<String>(it) })
                 
-                // 저장된 기기명이 없으면 기본 모델명 사용
                 val savedDeviceName = prefs.getString("device_name", null)?.let { mapper.readValue<String>(it) } ?: Build.MODEL
                 deviceNameEdit.setText(savedDeviceName)
                 
@@ -111,25 +114,50 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                     
                     loadingDialog.show()
                     
-                    // 값 임시 저장
                     AcraApplication.setKey("sync_token", token)
                     AcraApplication.setKey("sync_project_num", projectNum)
                     AcraApplication.setKey("device_name", deviceName)
                     AcraApplication.setKey("backup_device", backupSwitch.isChecked.toString())
                     AcraApplication.setKey("restore_device", restoreSwitch.isChecked.toString())
 
-                    // 실제 GitHub 서버에 찔러서 검증
                     CoroutineScope(Dispatchers.IO).launch {
                         try {
+                            // 1. 프로젝트 검증
                             val (success, msg) = ApiUtils.syncProjectDetails(context)
+                            if (!success) {
+                                withContext(Dispatchers.Main) {
+                                    loadingDialog.dismiss()
+                                    CommonActivity.showToast(msg, null)
+                                    AcraApplication.setKey("sync_token", "") // 실패 시 토큰 초기화
+                                }
+                                return@launch
+                            }
+
+                            // [요구사항 2] 중복 기기명 검사
+                            val devices = ApiUtils.fetchDevices()
+                            val currentDeviceId = UtilKt.getDeviceId(plugin.javaClass.packageName, requireContext())
+                            val isDuplicate = devices.any { it.name == deviceName && it.deviceId != currentDeviceId }
+                            
+                            if (isDuplicate) {
+                                withContext(Dispatchers.Main) {
+                                    loadingDialog.dismiss()
+                                    CommonActivity.showToast("Error: Device name '$deviceName' already exists!", null)
+                                }
+                                return@launch
+                            }
+
+                            // [요구사항 3] 즉시 동기화 실행 (실제 데이터 업로드)
+                            val backupFile = BackupUtils.getBackup(requireContext(), HomeViewModel.getResumeWatching())
+                            val backupJson = mapper.writeValueAsString(backupFile)
+                            val (syncSuccess, syncMsg) = ApiUtils.syncThisDevice(backupJson, requireContext())
+
                             withContext(Dispatchers.Main) {
                                 loadingDialog.dismiss()
-                                CommonActivity.showToast(msg, null)
-                                if (success) {
-                                    dismiss() // 성공 시에만 창 닫기
+                                if (syncSuccess) {
+                                    CommonActivity.showToast("Successfully synced to GitHub!", null)
+                                    dismiss()
                                 } else {
-                                    // 실패 시 토큰 초기화
-                                    AcraApplication.setKey("sync_token", "")
+                                    CommonActivity.showToast("Sync Failed: $syncMsg", null)
                                 }
                             }
                         } catch (e: Exception) {
@@ -153,14 +181,67 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
         buttonGroup.setImageDrawable(getDrawable("view_icon"))
         makeTvCompatible(buttonGroup)
         
+        // [요구사항 1] 기기 목록 조회 및 삭제 UI
         buttonGroup.setOnClickListener {
-            val guideLayout = getLayout("guide", inflater, container)
-            AlertDialog.Builder(requireContext())
-                .setTitle("Guide")
-                .setView(guideLayout)
-                .show()
+            val loadingDialog = AlertDialog.Builder(requireContext())
+                .setView(getLayout("loading", inflater, container))
+                .setCancelable(false)
+                .create()
+            loadingDialog.show()
+
+            CoroutineScope(Dispatchers.IO).launch {
+                val devices = ApiUtils.fetchDevices()
+                withContext(Dispatchers.Main) {
+                    loadingDialog.dismiss()
+                    showDeviceListDialog(devices, inflater, container)
+                }
+            }
         }
 
         return layout
+    }
+
+    // 기기 목록 다이얼로그 표시 함수
+    private fun showDeviceListDialog(devices: List<SyncDevice>, inflater: LayoutInflater, container: ViewGroup?) {
+        val listLayout = getLayout("device_list", inflater, container)
+        val containerLayout = findView<LinearLayout>(listLayout, "device_list_container")
+
+        if (devices.isEmpty()) {
+            val emptyText = TextView(requireContext()).apply {
+                text = "No devices synced yet."
+                setPadding(16, 16, 16, 16)
+            }
+            containerLayout.addView(emptyText)
+        } else {
+            for (device in devices) {
+                val itemLayout = getLayout("device_item", inflater, containerLayout)
+                val nameText = findView<TextView>(itemLayout, "device_name_text")
+                val deleteBtn = findView<Button>(itemLayout, "btn_delete_device")
+
+                nameText.text = "${device.name}\n(${device.deviceId})"
+                
+                deleteBtn.setOnClickListener {
+                    CoroutineScope(Dispatchers.IO).launch {
+                        val projectId = AcraApplication.getKey<String>("sync_project_id") ?: return@launch
+                        val success = ApiUtils.deleteDevice(projectId, device.itemId)
+                        withContext(Dispatchers.Main) {
+                            if (success) {
+                                containerLayout.removeView(itemLayout)
+                                CommonActivity.showToast("Device deleted", null)
+                            } else {
+                                CommonActivity.showToast("Failed to delete", null)
+                            }
+                        }
+                    }
+                }
+                containerLayout.addView(itemLayout)
+            }
+        }
+
+        AlertDialog.Builder(requireContext())
+            .setTitle("Synced Devices")
+            .setView(listLayout)
+            .setPositiveButton("Close", null)
+            .show()
     }
 }
