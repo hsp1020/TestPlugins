@@ -147,13 +147,30 @@ object BackupUtils {
         return nonTransferableKeys.none { str.contains(it, ignoreCase = true) }
     }
 
+    // ★ 복원: 매개변수 기본값(= null)을 제공하여 settings프래그먼트 호출 시 컴파일 에러가 발생하지 않도록 교정했습니다.
     @Suppress("UNCHECKED_CAST")
-    fun getBackup(context: Context): BackupFile {
+    fun getBackup(context: Context, resumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null): BackupFile {
+        Log.d("SYNC", "[BackupUtils] getBackup() called. Backing up all valid watch history...")
+        
         val prefs = with(DataStore) { context.getSharedPrefs() }.all
         val defaultPrefs = with(DataStore) { context.getDefaultSharedPrefs() }.all
 
         val filteredPrefs = prefs.filterKeys { isBackup(it) }
         val filteredDefaultPrefs = defaultPrefs.filterKeys { isBackup(it) }
+
+        Log.d("SYNC", "[BackupUtils] Filtered Prefs size: ${filteredPrefs.size}, DefaultPrefs size: ${filteredDefaultPrefs.size}")
+
+        // ★ 해결: 지난 답변에서 완전히 누락시켰던 buildVars 헬퍼 함수를 안전하게 다시 복구했습니다.
+        fun buildVars(map: Map<String, Any?>): BackupVars {
+            return BackupVars(
+                bool = map.filterValues { it is Boolean } as Map<String, Boolean>,
+                int = map.filterValues { it is Int } as Map<String, Int>,
+                string = map.filterValues { it is String } as Map<String, String>,
+                float = map.filterValues { it is Float } as Map<String, Float>,
+                long = map.filterValues { it is Long } as Map<String, Long>,
+                stringSet = map.filterValues { it is Set<*> } as Map<String, Set<String>>
+            )
+        }
 
         return BackupFile(buildVars(filteredPrefs), buildVars(filteredDefaultPrefs))
     }
@@ -170,15 +187,19 @@ object BackupUtils {
     private fun <T> restoreMap(context: Context, map: Map<String, T>?, isEditingAppSettings: Boolean = false) {
         if (map == null) return
         val editor = editor(context, isEditingAppSettings)
+        var restoredCount = 0
         for ((key, value) in map) {
             if (isBackup(key)) {
                 editor.setKeyRaw(key, value)
+                restoredCount++
             }
         }
         editor.apply()
+        Log.d("SYNC", "[BackupUtils] restoreMap applied $restoredCount keys (isEditingAppSettings=$isEditingAppSettings)")
     }
 
     fun restore(context: Context, backupFile: BackupFile, restoreSettings: Boolean, restoreDataStore: Boolean) {
+        Log.d("SYNC", "[BackupUtils] restore() started. restoreSettings=$restoreSettings, restoreDataStore=$restoreDataStore")
         if (restoreSettings) {
             restoreMap(context, backupFile.settings.bool, true)
             restoreMap(context, backupFile.settings.int, true)
@@ -195,6 +216,7 @@ object BackupUtils {
             restoreMap(context, backupFile.datastore.long, false)
             restoreMap(context, backupFile.datastore.stringSet, false)
         }
+        Log.d("SYNC", "[BackupUtils] restore() finished.")
     }
 }
 
@@ -226,6 +248,7 @@ object ApiUtils {
         }
         
         return try {
+            Log.d("SYNC", "[ApiUtils] Sending GraphQL request...")
             val response = app.post(
                 "https://api.github.com/graphql",
                 headers = mapOf("Authorization" to "Bearer $token"),
@@ -296,8 +319,10 @@ object ApiUtils {
     }
 
     suspend fun updateDevice(draftIssueId: String, title: String, body: String): Boolean {
-        val updateQuery = """mutation(${'$'}draftIssueId: ID!, ${'$'}title: String!, ${'$'}body: String!) { updateProjectV2DraftIssue(input: {draftIssueId: ${'$'}draftIssueId, title: ${'$'}title, body: ${'$'}body}) { draftIssue { id } } }"""
-        val res = apiCall(updateQuery, mapOf("draftIssueId" to draftIssueId, "title" to title, "body" to body))
+        val res = apiCall(
+            """mutation(${'$'}draftIssueId: ID!, ${'$'}title: String!, ${'$'}body: String!) { updateProjectV2DraftIssue(input: {draftIssueId: ${'$'}draftIssueId, title: ${'$'}title, body: ${'$'}body}) { draftIssue { id } } }""",
+            mapOf("draftIssueId" to draftIssueId, "title" to title, "body" to body)
+        )
         return res != null && res.errors.isNullOrEmpty()
     }
 
@@ -316,10 +341,21 @@ object ApiUtils {
             val deviceName = prefs.getString("device_name", null)?.let { mapper.readValue<String>(it) } ?: Build.MODEL
             
             val cleanedData = UtilKt.cleanedSyncData(backupData)
+            
+            Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA START ==========")
+            val chunkSize = 3000
+            for (i in 0..cleanedData.length / chunkSize) {
+                val start = i * chunkSize
+                val end = minOf((i + 1) * chunkSize, cleanedData.length)
+                if (start < end) {
+                    Log.d("SYNC_JSON", cleanedData.substring(start, end))
+                }
+            }
+            Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA END ==========")
+
             val compressedData = UtilKt.compressJsonToString(cleanedData)
             
             if (compressedData.length > 65000) {
-                Log.d("SYNC", "[ApiUtils] ERROR: Data too large (${compressedData.length} chars)")
                 return Pair(false, "Data too large (${compressedData.length} chars).")
             }
 
@@ -329,7 +365,7 @@ object ApiUtils {
 
             if (existingDevices.isNotEmpty()) {
                 val target = existingDevices.first()
-                Log.d("SYNC", "[Sync] Existing card found. Updating card in place: ${target.name}")
+                Log.d("SYNC", "[ApiUtils] Existing card found. Updating card in place: ${target.name}")
                 val updateSuccess = updateDevice(target.draftIssueId ?: "", title, compressedData)
                 if (!updateSuccess) {
                     return Pair(false, "Failed to update existing card.")
@@ -340,10 +376,8 @@ object ApiUtils {
                         deleteDevice(projectId, duplicate.itemId)
                     }
                 }
-                Log.d("SYNC", "[Sync] Successfully uploaded local data to GitHub Project card: ${target.name}")
                 return Pair(true, "Data updated successfully in place!")
             } else {
-                Log.d("SYNC", "[Sync] No existing card. Creating new draft issue.")
                 val addQuery = """mutation(${'$'}projectId: ID!, ${'$'}title: String!, ${'$'}body: String!) { addProjectV2DraftIssue(input: {projectId: ${'$'}projectId, title: ${'$'}title, body: ${'$'}body}) { projectItem { id } } }"""
                 val addRes = apiCall(addQuery, mapOf("projectId" to projectId, "title" to title, "body" to compressedData))
                 
@@ -354,7 +388,6 @@ object ApiUtils {
                 val newItemId = addRes?.data?.issue?.projectItem?.id
                 if (newItemId != null) {
                     AcraApplication.setKey("sync_item_id", newItemId)
-                    Log.d("SYNC", "[Sync] Successfully created new GitHub Project card: $deviceName")
                     return Pair(true, "Data synced successfully to GitHub!")
                 }
                 return Pair(false, "Failed to upload data to GitHub.")
