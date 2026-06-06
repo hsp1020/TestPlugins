@@ -12,6 +12,8 @@ import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mapper
 import com.lagradost.cloudstream3.utils.DataStore
+import com.lagradost.cloudstream3.utils.DataStoreHelper
+import kotlinx.coroutines.sync.Mutex
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
@@ -140,17 +142,35 @@ object BackupUtils {
         "download_q_resume", "download_episode_cache"
     )
 
-    private fun isBackup(str: String): Boolean {
+    private fun isResume(str: String): Boolean {
         return nonTransferableKeys.none { str.contains(it, ignoreCase = true) }
     }
 
+    private fun isBackup(str: String, resumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null): Boolean {
+        if (!isResume(str)) return false
+        if (str.startsWith("result_resume_watching_2/") || 
+            str.startsWith("result_watch_state/") || 
+            str.startsWith("video_pos_dur/")) {
+            if (resumeWatching == null) return false
+            val id = str.substringAfter("/")
+            return resumeWatching.any { it.url == id || it.url.contains(id) }
+        }
+        return true
+    }
+
+    // ★ 해결: resumeWatching 매개변수에 기본값 null (= null)을 추가하여 프래그먼트 컴파일 문제를 완전히 해결했습니다.
     @Suppress("UNCHECKED_CAST")
-    fun getBackup(context: Context): BackupFile {
+    fun getBackup(context: Context, resumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null): BackupFile {
+        Log.d("SYNC", "[BackupUtils] getBackup() called. Filtering Top 50 resumeWatching...")
+        val listTake = resumeWatching?.take(50)
+        
         val prefs = with(DataStore) { context.getSharedPrefs() }.all
         val defaultPrefs = with(DataStore) { context.getDefaultSharedPrefs() }.all
 
-        val filteredPrefs = prefs.filterKeys { isBackup(it) }
-        val filteredDefaultPrefs = defaultPrefs.filterKeys { isBackup(it) }
+        val filteredPrefs = prefs.filterKeys { isBackup(it, listTake) }
+        val filteredDefaultPrefs = defaultPrefs.filterKeys { isBackup(it, listTake) }
+
+        Log.d("SYNC", "[BackupUtils] Filtered Prefs size: ${filteredPrefs.size}, DefaultPrefs size: ${filteredDefaultPrefs.size}")
 
         fun buildVars(map: Map<String, Any?>): BackupVars {
             return BackupVars(
@@ -178,15 +198,19 @@ object BackupUtils {
     private fun <T> restoreMap(context: Context, map: Map<String, T>?, isEditingAppSettings: Boolean = false) {
         if (map == null) return
         val editor = editor(context, isEditingAppSettings)
+        var restoredCount = 0
         for ((key, value) in map) {
-            if (isBackup(key)) {
+            if (isResume(key)) {
                 editor.setKeyRaw(key, value)
+                restoredCount++
             }
         }
         editor.apply()
+        Log.d("SYNC", "[BackupUtils] restoreMap applied $restoredCount keys (isEditingAppSettings=$isEditingAppSettings)")
     }
 
     fun restore(context: Context, backupFile: BackupFile, restoreSettings: Boolean, restoreDataStore: Boolean) {
+        Log.d("SYNC", "[BackupUtils] restore() started. restoreSettings=$restoreSettings, restoreDataStore=$restoreDataStore")
         if (restoreSettings) {
             restoreMap(context, backupFile.settings.bool, true)
             restoreMap(context, backupFile.settings.int, true)
@@ -203,6 +227,7 @@ object BackupUtils {
             restoreMap(context, backupFile.datastore.long, false)
             restoreMap(context, backupFile.datastore.stringSet, false)
         }
+        Log.d("SYNC", "[BackupUtils] restore() finished.")
     }
 }
 
@@ -211,7 +236,6 @@ object BackupUtils {
 // ==========================================
 
 object ApiUtils {
-    // ★ 0.04초 동시 실행 버그를 완벽하게 차단하는 AtomicBoolean 락
     private val isSyncing = AtomicBoolean(false)
 
     private fun isLoggedIn(): Boolean {
@@ -235,18 +259,25 @@ object ApiUtils {
         }
         
         return try {
+            Log.d("SYNC", "[ApiUtils] Sending GraphQL request...")
             val response = app.post(
                 "https://api.github.com/graphql",
                 headers = mapOf("Authorization" to "Bearer $token"),
                 json = payload
             )
-            response.parsedSafe<APIRes>()
+            val res = response.parsedSafe<APIRes>()
+            if (res?.errors?.isNotEmpty() == true) {
+                Log.d("SYNC", "[ApiUtils] GraphQL Error: ${res.errors!!.first().message}")
+            }
+            res
         } catch (e: Exception) {
+            Log.d("SYNC", "[ApiUtils] Exception in apiCall: ${e.message}")
             null
         }
     }
 
     suspend fun syncProjectDetails(context: Context?): Pair<Boolean, String> {
+        Log.d("SYNC", "[ApiUtils] syncProjectDetails() called")
         if (!isLoggedIn()) return Pair(false, "Please enter Token and Project Number.")
         
         val prefs = with(DataStore) { context?.getSharedPrefs() } ?: return Pair(false, "Context error")
@@ -263,6 +294,7 @@ object ApiUtils {
         val projectId = res?.data?.viewer?.projectV2?.id
         if (projectId != null) {
             AcraApplication.setKey("sync_project_id", projectId)
+            Log.d("SYNC", "[ApiUtils] Project ID fetched successfully: $projectId")
             return Pair(true, "Successfully connected to GitHub Project!")
         }
         
@@ -270,6 +302,7 @@ object ApiUtils {
     }
 
     suspend fun fetchDevices(): List<SyncDevice> {
+        Log.d("SYNC", "[ApiUtils] fetchDevices() called")
         if (!isLoggedIn()) return emptyList()
         
         val context = AcraApplication.context ?: return emptyList()
@@ -282,7 +315,7 @@ object ApiUtils {
         
         val nodes = res?.data?.viewer?.projectV2?.items?.nodes ?: return emptyList()
         
-        return nodes.mapNotNull { node ->
+        val devices = nodes.mapNotNull { node ->
             val title = node.content?.title ?: "Unknown"
             val body = node.content?.bodyText ?: ""
             val itemId = node.id ?: return@mapNotNull null
@@ -295,19 +328,24 @@ object ApiUtils {
                 SyncDevice(name = title, deviceId = "", itemId = itemId, syncedData = body, updatedAt = updatedAt)
             }
         }.sortedBy { it.updatedAt }
+        
+        Log.d("SYNC", "[ApiUtils] Fetched ${devices.size} devices from GitHub.")
+        return devices
     }
 
     suspend fun deleteDevice(projectId: String, itemId: String): Boolean {
         Log.d("SYNC", "[ApiUtils] deleteDevice() called for itemId: $itemId")
         val delQuery = """mutation(${'$'}projectId: ID!, ${'$'}itemId: ID!) { deleteProjectV2Item(input: {projectId: ${'$'}projectId, itemId: ${'$'}itemId}) { deletedItemId } }"""
         val res = apiCall(delQuery, mapOf("projectId" to projectId, "itemId" to itemId))
-        return res?.errors.isNullOrEmpty()
+        val success = res?.errors.isNullOrEmpty()
+        Log.d("SYNC", "[ApiUtils] deleteDevice success: $success")
+        return success
     }
 
     suspend fun syncThisDevice(backupData: String, context: Context? = AcraApplication.context): Pair<Boolean, String> {
+        Log.d("SYNC", "[ApiUtils] syncThisDevice() called")
         if (!isLoggedIn()) return Pair(false, "Not logged in")
         
-        // ★ 0.04초 동시 실행 방지 락
         if (!isSyncing.compareAndSet(false, true)) {
             Log.d("SYNC", "[ApiUtils] Sync already in progress, skipping duplicate request.")
             return Pair(false, "Sync already in progress")
@@ -321,9 +359,6 @@ object ApiUtils {
             
             val cleanedData = UtilKt.cleanedSyncData(backupData)
             
-            // ====================================================================
-            // ★ 업로드 트리거된 원본 JSON 데이터를 Logcat에 출력 (잘리지 않게 3000자씩 분할)
-            // ====================================================================
             Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA START ==========")
             val chunkSize = 3000
             for (i in 0..cleanedData.length / chunkSize) {
@@ -334,10 +369,10 @@ object ApiUtils {
                 }
             }
             Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA END ==========")
-            // ====================================================================
 
             val compressedData = UtilKt.compressJsonToString(cleanedData)
             
+            Log.d("SYNC", "[ApiUtils] Compressed data length: ${compressedData.length}")
             if (compressedData.length > 65000) {
                 Log.d("SYNC", "[ApiUtils] ERROR: Data too large (${compressedData.length} chars)")
                 return Pair(false, "Data too large (${compressedData.length} chars).")
