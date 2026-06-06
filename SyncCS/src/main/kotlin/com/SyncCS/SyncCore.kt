@@ -133,7 +133,7 @@ object BackupUtils {
         "simkl_token", "simkl_user", "simkl_cached_list", "simkl_cached_time", "simkl_accounts", "simkl_active",
         "SIMKL_API_CACHE", "ANIWAVE_SIMKL_SYNC", "open_subtitles_user", "opensubtitles_accounts", "opensubtitles_active",
         "subdl_user", "subdl_accounts", "subdl_active", "biometric_key", "nginx_user", "download_path_key",
-        "download_path_key_visual", "backup_path_key", "backup_dir_path_key", 
+        "download_path_key_visual", "backup_path_key", "backup_dir_path_key", "PLUGINS_KEY", "PLUGINS_KEY_LOCAL",
         "cs3-votes", "last_sync_api", "last_click_action", "last_opened_id", "library_folder", "result_resume_watching_migrated",
         "jsdelivr_proxy_key", "fshare_setup", "fshare_token", "checkbox_fsharehd", "checkbox_fsharecine", "checkbox_fsharesheet",
         "checkbox_fsharefavourite", "checkbox_fsharehdvn", "checkbox_timfshare", "bluphim_token", "device_id", "device_name",
@@ -144,12 +144,7 @@ object BackupUtils {
         "FILES_TO_DELETE_KEY", "HAS_DONE_SETUP", "video_source_priority", "preferred_audio_language",
         "episode_parent_index_", "download_header_cache", "BACKUP_download_header_cache",
         "CONTENT_URI_", "download_status", "search_history", "download_info", "download_resume",
-        "download_q_resume", "download_episode_cache",
-        
-        // 플러그인 자체는 백업하되, 방대한 플러그인 개별 설정값들은 백업에서 완전히 제외합니다.
-        "cat_toggle_",
-        "ext_toggle_",
-        "show_ext_"
+        "download_q_resume", "download_episode_cache"
     )
 
     private fun isBackup(str: String): Boolean {
@@ -159,6 +154,7 @@ object BackupUtils {
     @Suppress("UNCHECKED_CAST")
     fun getBackup(context: Context, resumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null): BackupFile {
         Log.d("SYNC", "[BackupUtils] getBackup() called. Backing up all valid watch history...")
+        val listTake = resumeWatching?.take(50)
         
         val prefs = with(DataStore) { context.getSharedPrefs() }.all
         val defaultPrefs = with(DataStore) { context.getDefaultSharedPrefs() }.all
@@ -193,44 +189,11 @@ object BackupUtils {
 
     private fun <T> restoreMap(context: Context, map: Map<String, T>?, isEditingAppSettings: Boolean = false) {
         if (map == null) return
-        val prefs = if (isEditingAppSettings) {
-            with(DataStore) { context.getDefaultSharedPrefs() }
-        } else {
-            with(DataStore) { context.getSharedPrefs() }
-        }
-        val editor = Editor(prefs.edit())
+        val editor = editor(context, isEditingAppSettings)
         var restoredCount = 0
-        
         for ((key, value) in map) {
             if (isBackup(key)) {
-                if (key == "PLUGINS_KEY" || key == "PLUGINS_KEY_LOCAL") {
-                    // ★ 하이브리드 병합 알고리즘 탑재: 로컬 목록과 수신된 목록을 안전하게 합집합 처리
-                    val localJson = prefs.getString(key, null)
-                    val incomingJson = value as? String
-                    
-                    if (localJson != null && incomingJson != null) {
-                        try {
-                            val localList = mapper.readValue<List<Map<String, Any>>>(localJson)
-                            val incomingList = mapper.readValue<List<Map<String, Any>>>(incomingJson)
-                            
-                            // 중복 항목 제거 (filePath, url, internalName 등을 기준으로 고유값 판별)
-                            val mergedList = (localList + incomingList).distinctBy { item ->
-                                item["filePath"] ?: item["url"] ?: item["internalName"] ?: item.toString()
-                            }
-                            
-                            val mergedJson = mapper.writeValueAsString(mergedList)
-                            editor.setKeyRaw(key, mergedJson)
-                            Log.d("SYNC", "[BackupUtils] Merged plugin list for $key. Total plugins: ${mergedList.size}")
-                        } catch (e: Exception) {
-                            Log.d("SYNC", "[BackupUtils] Failed to merge plugin list, falling back to overwrite: ${e.message}")
-                            editor.setKeyRaw(key, value)
-                        }
-                    } else {
-                        editor.setKeyRaw(key, value)
-                    }
-                } else {
-                    editor.setKeyRaw(key, value)
-                }
+                editor.setKeyRaw(key, value)
                 restoredCount++
             }
         }
@@ -593,22 +556,30 @@ object UtilKt {
         return result
     }
 
+    // ★ 해결: 표준 Base64(NO_WRAP) 규격을 사용하도록 완전 고정하여 디코딩 충돌 및 GZIP 파싱 크래시 해결
     fun compressJsonToString(json: String): String {
         val bos = ByteArrayOutputStream()
         GZIPOutputStream(bos).use { it.write(json.toByteArray(Charsets.UTF_8)) }
-        return Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP or Base64.URL_SAFE)
+        return Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
     }
 
+    // ★ 해결: DEFAULT 디코딩 우선 시도 후 URL_SAFE 예외 대응 적용, GZIP 매직 넘버 검증으로 자폭 방지 완비
     fun decompressJsonFromString(encoded: String): String {
         return try {
-            val bytes = Base64.decode(encoded, Base64.NO_WRAP or Base64.URL_SAFE)
-            try {
-                val bis = ByteArrayInputStream(bytes)
-                GZIPInputStream(bis).bufferedReader(Charsets.UTF_8).use { it.readText() }
+            val decodedBytes = try {
+                Base64.decode(encoded, Base64.DEFAULT)
             } catch (e: Exception) {
-                String(bytes, Charsets.UTF_8)
+                Base64.decode(encoded, Base64.URL_SAFE)
+            }
+
+            if (decodedBytes.size >= 2 && decodedBytes[0] == 0x1F.toByte() && decodedBytes[1] == 0x8B.toByte()) {
+                val bis = ByteArrayInputStream(decodedBytes)
+                GZIPInputStream(bis).bufferedReader(Charsets.UTF_8).use { it.readText() }
+            } else {
+                String(decodedBytes, Charsets.UTF_8)
             }
         } catch (e: Exception) {
+            Log.d("SYNC", "[UtilKt] Failed to decompress: ${e.message}")
             ""
         }
     }
