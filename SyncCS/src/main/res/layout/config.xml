@@ -20,6 +20,15 @@
         android:inputType="number"
         android:layout_marginTop="8dp" />
 
+    <!-- 새로 추가된 기기명 입력칸 -->
+    <EditText
+        android:id="@+id/device_name"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="Device Name (e.g. My Phone)"
+        android:inputType="text"
+        android:layout_marginTop="8dp" />
+
     <Switch
         android:id="@+id/backup_device"
         android:layout_width="match_parent"
