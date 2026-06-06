@@ -1,10 +1,10 @@
 [
     {
         "iconUrl": "https://anilife.live/assets/img/animestream.png",
-        "fileHash": "sha256-a0d5c74cd73474c994e16a849b98d5edef94c9bf471546de3334adb3474ee49e",
+        "fileHash": "sha256-c9d9eea3c57ac34705c08d2dea8443b057941e4bb58a06182e4648415cbb5fcb",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 31881,
+        "fileSize": 34375,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -169,10 +169,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/SyncCS/cloud-sync.png",
-        "fileHash": "sha256-883b4b969123d9acdecf0c695fc4908d723ff06dd0b234762dab3d914f057f2b",
+        "fileHash": "sha256-6c0a1b58c7cc0f5b231969fe762cb71ace3c97b8606ee3c7305ddc3e5c64a0ef",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 44079,
+        "fileSize": 44070,
         "status": 1,
         "language": "ko",
         "authors": [
