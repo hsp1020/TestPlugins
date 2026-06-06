@@ -168,6 +168,26 @@
         "name": "StremioX"
     },
     {
+        "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/SyncCS/cloud-sync.png",
+        "fileHash": "sha256-f34a856877a58b1cc76cd9350a5a35f428fdef8e2c90631b659cad0c3312283a",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
+        "fileSize": 34956,
+        "status": 1,
+        "language": "ko",
+        "authors": [
+            "hsp1020"
+        ],
+        "tvTypes": [
+            "Other"
+        ],
+        "version": 1,
+        "internalName": "SyncCS",
+        "description": "Sync CloudStream",
+        "url": "https://raw.githubusercontent.com/hsp1020/TestPlugins/builds/SyncCS.cs3",
+        "name": "SyncCS"
+    },
+    {
         "iconUrl": "https://tvchak200.com/template/xiaozhuti/img/logo.png",
         "fileHash": "sha256-6c184c52df89eed723ceb209c6c9db012dbcc1d07b198f6541425b8e5fc70777",
         "apiVersion": 1,
