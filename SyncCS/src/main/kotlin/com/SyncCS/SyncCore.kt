@@ -8,6 +8,7 @@ import android.util.Base64
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.lagradost.cloudstream3.AcraApplication
+import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mapper
 import com.lagradost.cloudstream3.utils.DataStore
 import com.lagradost.cloudstream3.utils.DataStoreHelper
@@ -15,7 +16,7 @@ import java.security.MessageDigest
 import java.util.UUID
 
 // ==========================================
-// Data Models (Array 대신 Kotlin List 사용)
+// Data Models
 // ==========================================
 
 data class APIRes(
@@ -27,7 +28,7 @@ data class APIRes(
         @JsonProperty("addProjectV2DraftIssue") var issue: Issue? = null,
         @JsonProperty("deleteProjectV2Item") var delItem: DelItem? = null
     ) {
-        data class Viewer(@JsonProperty("projectV2") var projectV2: ProjectV2) {
+        data class Viewer(@JsonProperty("projectV2") var projectV2: ProjectV2?) {
             data class ProjectV2(
                 @JsonProperty("id") var id: String,
                 @JsonProperty("items") var items: Items? = null
@@ -38,23 +39,23 @@ data class APIRes(
                         @JsonProperty("content") var content: Content
                     ) {
                         data class Content(
-                            @JsonProperty("id") var id: String,
-                            @JsonProperty("title") var title: String,
-                            @JsonProperty("bodyText") var bodyText: String
+                            @JsonProperty("id") var id: String?,
+                            @JsonProperty("title") var title: String?,
+                            @JsonProperty("bodyText") var bodyText: String?
                         )
                     }
                 }
             }
         }
-        data class Issue(@JsonProperty("projectItem") var projectItem: ProjectItem) {
+        data class Issue(@JsonProperty("projectItem") var projectItem: ProjectItem?) {
             data class ProjectItem(
                 @JsonProperty("id") var id: String,
-                @JsonProperty("content") var content: Content
+                @JsonProperty("content") var content: Content?
             ) {
-                data class Content(@JsonProperty("id") var id: String)
+                data class Content(@JsonProperty("id") var id: String?)
             }
         }
-        data class DelItem(@JsonProperty("deletedItemId") var deletedItemId: String)
+        data class DelItem(@JsonProperty("deletedItemId") var deletedItemId: String?)
     }
     data class Error(@JsonProperty("message") var message: String? = null)
 }
@@ -104,12 +105,11 @@ class Editor(private val editor: SharedPreferences.Editor) {
 
     fun apply() {
         editor.apply()
-        // System.gc() 제거: Kotlin/Android 환경에서 강제 GC 호출은 안티 패턴입니다.
     }
 }
 
 // ==========================================
-// Backup Utilities
+// Backup Utilities (유실되었던 isBackup 로직 복원)
 // ==========================================
 
 object BackupUtils {
@@ -210,7 +210,7 @@ object BackupUtils {
 }
 
 // ==========================================
-// API Utilities
+// API Utilities (유실되었던 GitHub GraphQL 완벽 복원)
 // ==========================================
 
 object ApiUtils {
@@ -218,32 +218,124 @@ object ApiUtils {
         val context = AcraApplication.context ?: return false
         val prefs = with(DataStore) { context.getSharedPrefs() }
         
-        // Java의 String::class.java 대신 Kotlin의 Reified Type Parameter 사용
         val token = prefs.getString("sync_token", null)?.let { mapper.readValue<String>(it) }
         val projectNum = prefs.getString("sync_project_num", null)?.let { mapper.readValue<String>(it) }
-        val projectId = prefs.getString("sync_project_id", null)?.let { mapper.readValue<String>(it) }
         
-        return !token.isNullOrEmpty() && !projectNum.isNullOrEmpty() && !projectId.isNullOrEmpty()
+        return !token.isNullOrEmpty() && !projectNum.isNullOrEmpty()
     }
 
-    suspend fun syncProjectDetails(context: Context?, failureToken: Boolean = false): Pair<Boolean, String> {
-        if (!isLoggedIn()) return Pair(false, "Not logged in")
-        return Pair(true, "Project details synced successfully")
-    }
-
-    suspend fun syncThisDevice(backupData: String, context: Context? = AcraApplication.context): Pair<Boolean, String> {
-        if (!isLoggedIn()) return Pair(false, "Not logged in")
+    // GraphQL API 공통 호출 함수
+    private suspend fun apiCall(query: String, variables: Map<String, Any>? = null): APIRes? {
+        val context = AcraApplication.context ?: return null
+        val prefs = with(DataStore) { context.getSharedPrefs() }
+        val token = prefs.getString("sync_token", null)?.let { mapper.readValue<String>(it) } ?: return null
+        
+        val payload = mutableMapOf<String, Any>("query" to query)
+        if (variables != null) {
+            payload["variables"] = variables
+        }
+        
         return try {
-            val compressedData = UtilKt.compressJsonToString(UtilKt.cleanedSyncData(backupData))
-            Pair(true, "Synced successfully")
+            val response = app.post(
+                "https://api.github.com/graphql",
+                headers = mapOf("Authorization" to "Bearer $token"),
+                json = payload
+            )
+            response.parsedSafe<APIRes>()
         } catch (e: Exception) {
-            Pair(false, e.message ?: "Unknown error")
+            null
         }
     }
 
+    // 1. 프로젝트 ID 검증 및 가져오기 (실제 검증 로직)
+    suspend fun syncProjectDetails(context: Context?): Pair<Boolean, String> {
+        if (!isLoggedIn()) return Pair(false, "Please enter Token and Project Number.")
+        
+        val prefs = with(DataStore) { context?.getSharedPrefs() } ?: return Pair(false, "Context error")
+        val numStr = prefs.getString("sync_project_num", null)?.let { mapper.readValue<String>(it) } ?: return Pair(false, "Project Number missing")
+        val num = numStr.toIntOrNull() ?: return Pair(false, "Invalid Project Number")
+        
+        val query = """query(${'$'}num: Int!) { viewer { projectV2(number: ${'$'}num) { id } } }"""
+        val res = apiCall(query, mapOf("num" to num))
+        
+        if (res?.errors?.isNotEmpty() == true) {
+            return Pair(false, "GitHub Error: ${res.errors!!.first().message}")
+        }
+        
+        val projectId = res?.data?.viewer?.projectV2?.id
+        if (projectId != null) {
+            AcraApplication.setKey("sync_project_id", projectId)
+            return Pair(true, "Successfully connected to GitHub Project!")
+        }
+        
+        return Pair(false, "Failed to find project. Check your Token and Project Number.")
+    }
+
+    // 2. 프로젝트에 저장된 모든 기기 데이터 불러오기
     suspend fun fetchDevices(): List<SyncDevice> {
         if (!isLoggedIn()) return emptyList()
-        return emptyList()
+        
+        val context = AcraApplication.context ?: return emptyList()
+        val prefs = with(DataStore) { context.getSharedPrefs() }
+        val numStr = prefs.getString("sync_project_num", null)?.let { mapper.readValue<String>(it) } ?: return emptyList()
+        val num = numStr.toIntOrNull() ?: return emptyList()
+        
+        val query = """query(${'$'}num: Int!) { viewer { projectV2(number: ${'$'}num) { items(first: 100) { nodes { id content { ... on DraftIssue { id title bodyText } } } } } } }"""
+        val res = apiCall(query, mapOf("num" to num))
+        
+        val nodes = res?.data?.viewer?.projectV2?.items?.nodes ?: return emptyList()
+        
+        return nodes.mapNotNull { node ->
+            val title = node.content.title ?: "Unknown"
+            val body = node.content.bodyText ?: ""
+            val itemId = node.id
+            
+            val parts = title.split("|")
+            if (parts.size >= 2) {
+                SyncDevice(name = parts[0], deviceId = parts[1], itemId = itemId, syncedData = body)
+            } else {
+                SyncDevice(name = title, deviceId = "", itemId = itemId, syncedData = body)
+            }
+        }
+    }
+
+    // 3. 현재 기기 데이터 업로드 (기존 데이터 삭제 후 재생성)
+    suspend fun syncThisDevice(backupData: String, context: Context? = AcraApplication.context): Pair<Boolean, String> {
+        if (!isLoggedIn()) return Pair(false, "Not logged in")
+        
+        val prefs = with(DataStore) { context?.getSharedPrefs() } ?: return Pair(false, "Context error")
+        val projectId = prefs.getString("sync_project_id", null)?.let { mapper.readValue<String>(it) } ?: return Pair(false, "Project ID missing. Please save config again.")
+        val deviceId = prefs.getString("device_id", null)?.let { mapper.readValue<String>(it) } ?: return Pair(false, "Device ID missing")
+        val deviceName = prefs.getString("device_name", null)?.let { mapper.readValue<String>(it) } ?: Build.MODEL
+        
+        val compressedData = UtilKt.compressJsonToString(UtilKt.cleanedSyncData(backupData))
+        
+        // 기존 데이터 찾기
+        val devices = fetchDevices()
+        val existingDevice = devices.find { it.deviceId == deviceId }
+        
+        // 기존 데이터가 있으면 삭제
+        if (existingDevice != null && existingDevice.itemId.isNotBlank()) {
+            val delQuery = """mutation(${'$'}projectId: ID!, ${'$'}itemId: ID!) { deleteProjectV2Item(input: {projectId: ${'$'}projectId, itemId: ${'$'}itemId}) { deletedItemId } }"""
+            apiCall(delQuery, mapOf("projectId" to projectId, "itemId" to existingDevice.itemId))
+        }
+        
+        // 새 데이터 업로드
+        val title = "$deviceName|$deviceId"
+        val addQuery = """mutation(${'$'}projectId: ID!, ${'$'}title: String!, ${'$'}body: String!) { addProjectV2DraftIssue(input: {projectId: ${'$'}projectId, title: ${'$'}title, body: ${'$'}body}) { projectItem { id } } }"""
+        val addRes = apiCall(addQuery, mapOf("projectId" to projectId, "title" to title, "body" to compressedData))
+        
+        if (addRes?.errors?.isNotEmpty() == true) {
+            return Pair(false, "Upload Error: ${addRes.errors!!.first().message}")
+        }
+        
+        val newItemId = addRes?.data?.issue?.projectItem?.id
+        if (newItemId != null) {
+            AcraApplication.setKey("sync_item_id", newItemId)
+            return Pair(true, "Data synced successfully to GitHub!")
+        }
+        
+        return Pair(false, "Failed to upload data to GitHub.")
     }
 }
 
