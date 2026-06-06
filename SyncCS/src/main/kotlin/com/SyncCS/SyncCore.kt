@@ -123,11 +123,10 @@ class Editor(private val editor: SharedPreferences.Editor) {
 }
 
 // ==========================================
-// Backup Utilities (화이트리스트 방식 장착 완료)
+// Backup Utilities (지능형 지향 필터링 장착 완료)
 // ==========================================
 
 object BackupUtils {
-    // ★ 화이트리스트 8개 키값 지정 완료
     private val whitelistKeys = listOf(
         "result_resume_watching_2/",
         "video_pos_dur/",
@@ -137,7 +136,7 @@ object BackupUtils {
         "result_episode/",
         "result_dub/",
         "video_source_priority",
-        "download_header_cache/" // 이 라인을 추가하여 포스터, 제목, API 정보를 함께 동기화합니다.
+        "download_header_cache/"
     )
 
     private fun isAllowed(str: String): Boolean {
@@ -151,7 +150,21 @@ object BackupUtils {
         val prefs = with(DataStore) { context.getSharedPrefs() }.all
         val defaultPrefs = with(DataStore) { context.getDefaultSharedPrefs() }.all
 
-        val filteredPrefs = prefs.filterKeys { isAllowed(it) }
+        // ★ 용량 폭발 방지: 현재 '이어보기'에 활성화되어 있는 작품의 ID 목록만 추출합니다.
+        val resumeKeys = prefs.keys.filter { it.contains("result_resume_watching_2/", ignoreCase = true) }
+        val activeParentIds = resumeKeys.mapNotNull { key ->
+            key.substringAfter("result_resume_watching_2/", "").trim().ifEmpty { null }
+        }.toSet()
+
+        // download_header_cache는 현재 이어보기(activeParentIds)에 활성화되어 있는 작품만 골라서 통과시킵니다.
+        val filteredPrefs = prefs.filter { (key, _) ->
+            if (key.contains("download_header_cache/", ignoreCase = true)) {
+                val id = key.substringAfter("download_header_cache/", "").trim()
+                activeParentIds.contains(id)
+            } else {
+                isAllowed(key)
+            }
+        }
         val filteredDefaultPrefs = defaultPrefs.filterKeys { isAllowed(it) }
 
         Log.d("SYNC", "[BackupUtils] Whitelist Filtered -> Datastore: ${filteredPrefs.size} keys, DefaultPrefs: ${filteredDefaultPrefs.size} keys")
@@ -395,9 +408,155 @@ object ApiUtils {
 // ==========================================
 
 object UtilKt {
+    private val replacementMap = listOf(
+        "\"result_resume_watching_2/" to "\"k1/",
+        "\"video_pos_dur/" to "\"k2/",
+        "\"download_header_cache/" to "\"k3/",
+        "\"result_watch_state/" to "\"k4/",
+        "\"result_watch_state_data/" to "\"k5/",
+        "\"result_season/" to "\"k6/",
+        "\"result_episode/" to "\"k7/",
+        "\"result_dub/" to "\"k8/",
+        "\"search_history/" to "\"k9/",
+        "\"video_quality_priority/" to "\"k10/",
+        "\"video_profile_name/" to "\"k11/",
+        "\"home_bookmarked_last_list" to "\"k12",
+        "\"user_custom_sites" to "\"k13",
+        "\"search_pref_tags" to "\"k14",
+        "\"search_pref_providers" to "\"k15",
+        "\"resize_mode" to "\"k16",
+        "\"duration_mode" to "\"k17",
+        "\"REPOSITORIES_KEY" to "\"k18",
+        "\"subtitle_settings" to "\"k19",
+        "\"results_sorting_mode" to "\"k20",
+        "\"home_pref_homepage" to "\"k21",
+        "\"playback_speed" to "\"k22",
+        "\"fshare_username" to "\"k23",
+        "\"fshare_password" to "\"k24",
+        "\"monplayer_links" to "\"k25",
+        "\"xtream_iptv_links" to "\"k26",
+        "\"iptv_links" to "\"k27",
+        "\"library_sorting_mode" to "\"k28",
+        "\"subs_auto_select" to "\"k29",
+        "\"bookmarkedTime\"" to "\"v1\"",
+        "\"latestUpdatedTime\"" to "\"v2\"",
+        "\"name\"" to "\"v3\"",
+        "\"url\"" to "\"v4\"",
+        "\"type\"" to "\"v5\"",
+        "\"apiName\"" to "\"v6\"",
+        "\"posterUrl\"" to "\"v7\"",
+        "\"year\"" to "\"v8\"",
+        "\"syncData\"" to "\"v9\"",
+        "\"quality\"" to "\"v10\"",
+        "\"posterHeaders\"" to "\"v11\"",
+        "\"plot\"" to "\"v12\"",
+        "\"rating\"" to "\"v13\"",
+        "\"tags\"" to "\"v14\"",
+        "\"searchedAt\"" to "\"v15\"",
+        "\"searchText\"" to "\"v16\"",
+        "\"parentId\"" to "\"v17\"",
+        "\"episodeId\"" to "\"v18\"",
+        "\"episode\"" to "\"v19\"",
+        "\"season\"" to "\"v20\"",
+        "\"updateTime\"" to "\"v21\"",
+        "\"isFromDownload\"" to "\"v22\"",
+        "\"position\"" to "\"v23\"",
+        "\"duration\"" to "\"v24\"",
+        "\"mainUrl\"" to "\"v25\"",
+        "\"searchUrl\"" to "\"v26\"",
+        "\"cacheTime\"" to "\"v27\"",
+        "\"title\"" to "\"v28\"",
+        "\"poster\"" to "\"v29\"",
+        "\"TvSeries\"" to "\"v30\"",
+        "\"Movie\"" to "\"v31\"",
+        "\"NSFW\"" to "\"v32\"",
+        "\"Anime\"" to "\"v33\"",
+        "\"Live\"" to "\"v34\"",
+        "\"AnimeMovie\"" to "\"v35\"",
+        "\"AsianDrama\"" to "\"v36\"",
+        "\"Cartoon\"" to "\"v37\"",
+        "\"Torrent\"" to "\"v38\"",
+        "\"slug\"" to "\"v39\"",
+        "\"https://" to "\"h//",
+        "\":null," to "\":n,",
+        "\":false}" to "\":f}",
+        "\":true}" to "\":t}",
+        "\"_Bool\"" to "\"s1\"",
+        "\"_Int\"" to "\"s2\"",
+        "\"_String\"" to "\"s3\"",
+        "\"_Float\"" to "\"s4\"",
+        "\"_Long\"" to "\"s5\"",
+        "\"_StringSet\"" to "\"s6\"",
+        "\"swipe_enabled_key\"" to "\"s7\"",
+        "\"skip_startup_account_select_key\"" to "\"s8\"",
+        "\"auto_update\"" to "\"s9\"",
+        "\"rotate_video_key\"" to "\"s10\"",
+        "\"auto_download_plugins_key\"" to "\"s11\"",
+        "\"auto_update_plugins\"" to "\"s12\"",
+        "\"player_resize_enabled_key\"" to "\"s13\"",
+        "\"bg_startup_tracing\"" to "\"s14\"",
+        "\"playback_speed_enabled_key\"" to "\"s15\"",
+        "\"acra.disable\"" to "\"s16\"",
+        "\"enable_nsfw_on_providers_key\"" to "\"s17\"",
+        "\"preview_seekbar_key\"" to "\"s18\"",
+        "\"show_trailers_key\"" to "\"s19\"",
+        "\"show_fillers_key\"" to "\"s20\"",
+        "\"random_button_key\"" to "\"s21\"",
+        "\"swipe_vertical_enabled_key\"" to "\"s22\"",
+        "\"bottom_title_key\"" to "\"s23\"",
+        "\"auto_rotate_video_key\"" to "\"s24\"",
+        "\"advanced_search\"" to "\"s25\"",
+        "\"speedup_key\"" to "\"s26\"",
+        "\"episode_sync_enabled_key\"" to "\"s27\"",
+        "\"hide_player_control_names_key\"" to "\"s28\"",
+        "\"show_kitsu_posters_key\"" to "\"s29\"",
+        "\"double_tap_enabled_key\"" to "\"s30\"",
+        "\"pip_enabled_key\"" to "\"s31\"",
+        "\"double_tap_pause_enabled_key\"" to "\"s32\"",
+        "\"enable_skip_op_from_database\"" to "\"s33\"",
+        "\"autoplay_next_key\"" to "\"s34\"",
+        "\"android_tv_interface_off_seek_key\"" to "\"s35\"",
+        "\"DNS over HTTPS\"" to "\"s36\"",
+        "\"double_tap_seek_time_key2\"" to "\"s37\"",
+        "\"auto_download_plugins_key2\"" to "\"s38\"",
+        "\"automatic_backup_key\"" to "\"s39\"",
+        "\"download_concurrent_key\"" to "\"s40\"",
+        "\"com.facebook.appevents.SessionInfo.interruptionCount\"" to "\"s41\"",
+        "\"download_parallel_key\"" to "\"s42\"",
+        "\"android_tv_interface_on_seek_key\"" to "\"s43\"",
+        "\"app_layout_key\"" to "\"s44\"",
+        "\"backup_dir_key\"" to "\"s45\"",
+        "\"com.applovin.sdk.impl.isFirstRun\"" to "\"s46\"",
+        "\"com.facebook.appevents.SessionInfo.sessionId\"" to "\"s47\"",
+        "\"primary_color_key\"" to "\"s48\"",
+        "\"app_theme_key\"" to "\"s49\"",
+        "\"app_locale\"" to "\"s50\"",
+        "\"com.facebook.appevents.SessionInfo.sessionEndTime\"" to "\"s51\"",
+        "\"com.facebook.appevents.SessionInfo.sessionStartTime\"" to "\"s52\"",
+        "\"prefer_media_type_key_2\"" to "\"s53\"",
+        "\"datastore\"" to "\"s54\""
+    )
+
+    private fun replaceKeys(json: String): String {
+        var result = json
+        for ((original, replacement) in replacementMap) {
+            result = result.replace(original, replacement)
+        }
+        return result
+    }
+
+    private fun restoreKeys(json: String): String {
+        var result = json
+        for ((original, replacement) in replacementMap) {
+            result = result.replace(replacement, original)
+        }
+        return result
+    }
+
     fun compressJsonToString(json: String): String {
+        val shrunkenJson = replaceKeys(json)
         val bos = ByteArrayOutputStream()
-        GZIPOutputStream(bos).use { it.write(json.toByteArray(Charsets.UTF_8)) }
+        GZIPOutputStream(bos).use { it.write(shrunkenJson.toByteArray(Charsets.UTF_8)) }
         return Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
     }
 
@@ -409,12 +568,14 @@ object UtilKt {
                 Base64.decode(encoded, Base64.DEFAULT)
             }
 
-            if (decodedBytes.size >= 2 && decodedBytes[0] == 0x1F.toByte() && decodedBytes[1] == 0x8B.toByte()) {
+            val rawJson = if (decodedBytes.size >= 2 && decodedBytes[0] == 0x1F.toByte() && decodedBytes[1] == 0x8B.toByte()) {
                 val bis = ByteArrayInputStream(decodedBytes)
                 GZIPInputStream(bis).bufferedReader(Charsets.UTF_8).use { it.readText() }
             } else {
                 String(decodedBytes, Charsets.UTF_8)
             }
+            
+            restoreKeys(rawJson)
         } catch (e: Exception) {
             Log.d("SYNC", "[UtilKt] Failed to decompress: ${e.message}")
             ""
