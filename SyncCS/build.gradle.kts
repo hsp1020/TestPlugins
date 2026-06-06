@@ -11,9 +11,11 @@ cloudstream {
     )
     
     iconUrl = "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/SyncCS/cloud-sync.png"
+    
+    // ★★★ 이 옵션이 있어야 Cloudstream이 XML 리소스를 읽어옵니다! ★★★
+    requiresResources = true 
 }
 
-// ★★★ 이 부분이 추가되어야 XML 리소스가 정상적으로 연결됩니다 ★★★
 android {
     namespace = "com.SyncCS"
 }
