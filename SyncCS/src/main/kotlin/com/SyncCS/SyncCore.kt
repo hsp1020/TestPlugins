@@ -56,11 +56,16 @@ data class APIRes(
             }
         }
         data class Issue(@JsonProperty("projectItem") var projectItem: ProjectItem?) {
-            @JsonProperty("draftIssue") var draftIssue: Content? = null
+            data class ProjectItem(
+                @JsonProperty("id") var id: String? = null,
+                @JsonProperty("content") var content: Content? = null
+            ) {
+                @JsonProperty("draftIssue") var draftIssue: Content? = null
 
-            data class Content(
-                @JsonProperty("id") var id: String? = null
-            )
+                data class Content(
+                    @JsonProperty("id") var id: String? = null
+                )
+            }
         }
         data class DelItem(@JsonProperty("deletedItemId") var deletedItemId: String? = null)
     }
