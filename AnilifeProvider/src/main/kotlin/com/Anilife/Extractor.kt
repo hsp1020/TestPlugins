@@ -9,7 +9,6 @@ import android.webkit.WebViewClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceError
 import android.webkit.WebResourceResponse
-import android.webkit.CookieManager
 import android.net.http.SslError
 import android.webkit.SslErrorHandler
 import com.lagradost.cloudstream3.SubtitleFile
@@ -68,39 +67,11 @@ class AnilifeProxyExtractor : ExtractorApi() {
     }
 
     /**
-     * [추출기 하이브리드 통신 브릿지]
-     * 쿠키가 있을 때는 OkHttp 수립을 선제 적용해 비디오 주소 추출 속도 극대화
-     */
-    private suspend fun getDocumentWithFallback(url: String, headers: Map<String, String>): Document {
-        val cookieHeader = try {
-            CookieManager.getInstance().getCookie("https://anilife.live")
-        } catch (e: Exception) {
-            null
-        }
-
-        if (!cookieHeader.isNullOrEmpty()) {
-            try {
-                val mergedHeaders = headers.toMutableMap()
-                mergedHeaders["Cookie"] = cookieHeader
-                
-                val response = app.get(url, headers = mergedHeaders)
-                if (response.code == 200) {
-                    return response.document
-                }
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-            }
-        }
-
-        return getDoc(url, headers)
-    }
-
-    /**
      * [재생 링크 추출 전용 극효율 쌩웹뷰]
      * resumeWith 및 자바스크립트 리다이렉트 최종 경로 추적 패키지 수립 완료
      */
     @SuppressLint("SetJavaScriptEnabled")
-    private suspend fun getDoc(url: String, headers: Map<String, String>): Document {
+    private suspend fun getDoc(url: String): Document {
         Log.d(TAG, "[RawWebView] 추출용 쌩웹뷰 기동 -> $url")
         val ctx = CloudStreamApp.context ?: throw Exception("Context가 Null입니다.")
 
@@ -114,8 +85,8 @@ class AnilifeProxyExtractor : ExtractorApi() {
                         try {
                             webView.stopLoading()
                             webView.clearHistory()
-                            webView.loadUrl("about:blank") // 백그라운드 악성 자바스크립트 루프 처형
-                            webView.destroy() // 메모리 자원 완전 소멸 반환 [1.1, 1.3]
+                            webView.loadUrl("about:blank")
+                            webView.destroy()
                         } catch (e: Exception) { }
                     }
                 }
@@ -139,7 +110,7 @@ class AnilifeProxyExtractor : ExtractorApi() {
                     domStorageEnabled = true
                     databaseEnabled = true
                     userAgentString = DESKTOP_UA
-                    loadsImagesAutomatically = false // 이미지 다운로드 전면 차단 [1.1, 1.3]
+                    loadsImagesAutomatically = false
                     mediaPlaybackRequiresUserGesture = true
                 }
 
@@ -208,8 +179,7 @@ class AnilifeProxyExtractor : ExtractorApi() {
                     }
                 }
 
-                // 동적 레퍼러 헤더 주입 실행 [1.1]
-                webView.loadUrl(url, headers)
+                webView.loadUrl(url)
 
                 Handler(Looper.getMainLooper()).postDelayed({
                     if (!isResumed) {
@@ -250,9 +220,10 @@ class AnilifeProxyExtractor : ExtractorApi() {
 
         try {
             var finalM3u8 = ""
-            // [최적화 하이브리드 폴백 적용] playerUrl 쌩웹뷰 전송 [1.1]
-            println("[DEBUG-Extractor] 하이브리드 브릿지로 playerUrl 수집 호출 시작...")
-            val playerDoc = getDocumentWithFallback(playerUrl, cleanHeaders)
+            // [우회 적용]: 차단 장막이 있는 플레이어 수집 경로를 쌩웹뷰로 호출 우회 [1.1]
+            println("[DEBUG-Extractor] 쌩웹뷰로 playerUrl 수집 호출 시작...")
+            val playerDoc = getDoc(playerUrl)
+            // Jsoup의 완전한 HTML 코드를 수취하기 위해 .outerHtml() 호출 적용 [1.1]
             val playerHtml = playerDoc.outerHtml()
             println("[DEBUG-Extractor] 수집 완료된 playerHtml 전체 길이: ${playerHtml.length} 자")
 
