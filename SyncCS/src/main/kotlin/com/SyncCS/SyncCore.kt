@@ -133,7 +133,8 @@ object BackupUtils {
         "simkl_token", "simkl_user", "simkl_cached_list", "simkl_cached_time", "simkl_accounts", "simkl_active",
         "SIMKL_API_CACHE", "ANIWAVE_SIMKL_SYNC", "open_subtitles_user", "opensubtitles_accounts", "opensubtitles_active",
         "subdl_user", "subdl_accounts", "subdl_active", "biometric_key", "nginx_user", "download_path_key",
-        "download_path_key_visual", "backup_path_key", "backup_dir_path_key", "PLUGINS_KEY", "PLUGINS_KEY_LOCAL",
+        "download_path_key_visual", "backup_path_key", "backup_dir_path_key", 
+        // ★ PLUGINS_KEY 및 PLUGINS_KEY_LOCAL을 블랙리스트에서 제거하여 설치된 플러그인 목록은 정상 동기화되도록 조치했습니다.
         "cs3-votes", "last_sync_api", "last_click_action", "last_opened_id", "library_folder", "result_resume_watching_migrated",
         "jsdelivr_proxy_key", "fshare_setup", "fshare_token", "checkbox_fsharehd", "checkbox_fsharecine", "checkbox_fsharesheet",
         "checkbox_fsharefavourite", "checkbox_fsharehdvn", "checkbox_timfshare", "bluphim_token", "device_id", "device_name",
@@ -144,7 +145,12 @@ object BackupUtils {
         "FILES_TO_DELETE_KEY", "HAS_DONE_SETUP", "video_source_priority", "preferred_audio_language",
         "episode_parent_index_", "download_header_cache", "BACKUP_download_header_cache",
         "CONTENT_URI_", "download_status", "search_history", "download_info", "download_resume",
-        "download_q_resume", "download_episode_cache"
+        "download_q_resume", "download_episode_cache",
+        
+        // ★ 추가됨: 설치된 플러그인 자체는 백업하되, 방대한 플러그인 개별 설정값들은 백업에서 완전히 제외합니다.
+        "cat_toggle_",
+        "ext_toggle_",
+        "show_ext_"
     )
 
     private fun isBackup(str: String): Boolean {
@@ -342,14 +348,16 @@ object ApiUtils {
             
             val cleanedData = UtilKt.cleanedSyncData(backupData)
             
+            Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA START ==========")
             val chunkSize = 3000
             for (i in 0..cleanedData.length / chunkSize) {
                 val start = i * chunkSize
                 val end = minOf((i + 1) * chunkSize, cleanedData.length)
                 if (start < end) {
-                    
+                    Log.d("SYNC_JSON", cleanedData.substring(start, end))
                 }
             }
+            Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA END ==========")
 
             val compressedData = UtilKt.compressJsonToString(cleanedData)
             
@@ -553,30 +561,22 @@ object UtilKt {
         return result
     }
 
-    // ★ 해결: 표준 Base64(NO_WRAP) 규격을 사용하도록 완전 고정하여 디코딩 충돌 및 GZIP 파싱 크래시 해결
     fun compressJsonToString(json: String): String {
         val bos = ByteArrayOutputStream()
         GZIPOutputStream(bos).use { it.write(json.toByteArray(Charsets.UTF_8)) }
-        return Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
+        return Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP or Base64.URL_SAFE)
     }
 
-    // ★ 해결: DEFAULT 디코딩 우선 시도 후 URL_SAFE 예외 대응 적용, GZIP 매직 넘버 검증으로 자폭 방지 완비
     fun decompressJsonFromString(encoded: String): String {
         return try {
-            val decodedBytes = try {
-                Base64.decode(encoded, Base64.DEFAULT)
-            } catch (e: Exception) {
-                Base64.decode(encoded, Base64.URL_SAFE)
-            }
-
-            if (decodedBytes.size >= 2 && decodedBytes[0] == 0x1F.toByte() && decodedBytes[1] == 0x8B.toByte()) {
-                val bis = ByteArrayInputStream(decodedBytes)
+            val bytes = Base64.decode(encoded, Base64.NO_WRAP or Base64.URL_SAFE)
+            try {
+                val bis = ByteArrayInputStream(bytes)
                 GZIPInputStream(bis).bufferedReader(Charsets.UTF_8).use { it.readText() }
-            } else {
-                String(decodedBytes, Charsets.UTF_8)
+            } catch (e: Exception) {
+                String(bytes, Charsets.UTF_8)
             }
         } catch (e: Exception) {
-            Log.d("SYNC", "[UtilKt] Failed to decompress: ${e.message}")
             ""
         }
     }
