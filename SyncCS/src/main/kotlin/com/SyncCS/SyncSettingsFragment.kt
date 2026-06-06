@@ -1,7 +1,6 @@
 package com.SyncCS
 
 import android.annotation.SuppressLint
-import android.content.Context
 import android.graphics.drawable.Drawable
 import android.os.Build
 import android.os.Bundle
@@ -15,7 +14,6 @@ import android.widget.LinearLayout
 import android.widget.Switch
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
-import androidx.core.content.res.ResourcesCompat
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.lagradost.cloudstream3.AcraApplication
@@ -28,12 +26,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-class SyncSettingsFragment(
-    private val plugin: Plugin,
-    private val pluginContext: Context
-) : BottomSheetDialogFragment() {
+class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragment() {
 
-    private val res = pluginContext.resources
+    // ★ StremioX와 완벽하게 동일한 방식: plugin.resources 직접 사용
+    private val res = plugin.resources ?: error("Resources not found")
     private val resPackageName = "com.SyncCS"
 
     private fun <T : View> findView(view: View, name: String): T {
@@ -45,19 +41,23 @@ class SyncSettingsFragment(
     private fun getLayout(name: String, inflater: LayoutInflater, container: ViewGroup?): View {
         val id = res.getIdentifier(name, "layout", resPackageName)
         if (id == 0) error("Layout XML not found: $name")
-        val pluginInflater = inflater.cloneInContext(pluginContext)
-        return pluginInflater.inflate(id, container, false)
+        // ★ StremioX와 완벽하게 동일한 방식: res.getLayout(id) 사용
+        val layout = res.getLayout(id)
+        return inflater.inflate(layout, container, false)
     }
 
+    @SuppressLint("UseCompatLoadingForDrawables")
     private fun getDrawable(name: String): Drawable? {
         val id = res.getIdentifier(name, "drawable", resPackageName)
-        return if (id != 0) ResourcesCompat.getDrawable(res, id, null) else null
+        // ★ StremioX와 완벽하게 동일한 방식: res.getDrawable 사용
+        return if (id != 0) res.getDrawable(id, null) else null
     }
 
+    @SuppressLint("UseCompatLoadingForDrawables")
     private fun makeTvCompatible(view: View) {
         val id = res.getIdentifier("outline", "drawable", resPackageName)
         if (id != 0) {
-            view.background = ResourcesCompat.getDrawable(res, id, null)
+            view.background = res.getDrawable(id, null)
         }
     }
 
@@ -125,7 +125,7 @@ class SyncSettingsFragment(
 
                     CoroutineScope(Dispatchers.IO).launch {
                         try {
-                            val (success, msg) = ApiUtils.syncProjectDetails(context)
+                            val (success, msg) = ApiUtils.syncProjectDetails(requireContext())
                             if (!success) {
                                 withContext(Dispatchers.Main) {
                                     loadingDialog.dismiss()
@@ -136,7 +136,7 @@ class SyncSettingsFragment(
                             }
 
                             val devices = ApiUtils.fetchDevices()
-                            val currentDeviceId = UtilKt.getDeviceId(pluginContext.packageName, requireContext())
+                            val currentDeviceId = UtilKt.getDeviceId(resPackageName, requireContext())
                             val isDuplicate = devices.any { it.name == deviceName && it.deviceId != currentDeviceId }
                             
                             if (isDuplicate) {
