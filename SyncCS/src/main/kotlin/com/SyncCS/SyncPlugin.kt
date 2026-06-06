@@ -26,9 +26,9 @@ class SyncPlugin : Plugin() {
         override fun run() {
             try {
                 CoroutineScope(Dispatchers.IO).launch {
-                    // 수정됨: 프로퍼티가 아닌 suspend 함수 호출
                     val resumeWatching = HomeViewModel.getResumeWatching()
-                    val listTake = resumeWatching.take(10)
+                    // 수정됨: Nullable 반환이므로 ?. 안전 호출 연산자 사용
+                    val listTake = resumeWatching?.take(10)
                     if (listTake != lastResumeWatching) {
                         backupDevice(true)
                         lastResumeWatching = listTake
@@ -56,7 +56,6 @@ class SyncPlugin : Plugin() {
                 }
                 
                 if (isBackupEnabled == "true") {
-                    // 수정됨: 프로퍼티가 아닌 suspend 함수 호출
                     val resumeWatching = HomeViewModel.getResumeWatching()
                     val backupFile = BackupUtils.getBackup(context, resumeWatching)
                     val backupJson = backupFile?.let { mapper.writeValueAsString(it) } ?: ""
