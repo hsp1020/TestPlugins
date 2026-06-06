@@ -1,10 +1,10 @@
 [
     {
         "iconUrl": "https://anilife.live/assets/img/animestream.png",
-        "fileHash": "sha256-3faa2730dc6a401d306df908a66c339dcd1e9a16a2159ae12918ccf4eb29784e",
+        "fileHash": "sha256-d38c19e603afd52a224bb2f329675e027bbcd1387007f01afd6bf85704ead69b",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 33981,
+        "fileSize": 36253,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -166,26 +166,6 @@
         "description": "StremioC allows you to use catalog addons",
         "url": "https://raw.githubusercontent.com/hsp1020/TestPlugins/builds/StremioX.cs3",
         "name": "StremioX"
-    },
-    {
-        "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/SyncCS/cloud-sync.png",
-        "fileHash": "sha256-93b674ddd7c523c799ada25b2e1862045ad94eade0ab90c78fb2d4d4406a99c1",
-        "apiVersion": 1,
-        "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 44818,
-        "status": 1,
-        "language": "ko",
-        "authors": [
-            "hsp1020"
-        ],
-        "tvTypes": [
-            "Other"
-        ],
-        "version": 1,
-        "internalName": "SyncCS",
-        "description": "Sync CloudStream",
-        "url": "https://raw.githubusercontent.com/hsp1020/TestPlugins/builds/SyncCS.cs3",
-        "name": "SyncCS"
     },
     {
         "iconUrl": "https://tvchak200.com/template/xiaozhuti/img/logo.png",
