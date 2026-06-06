@@ -12,7 +12,6 @@ import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mapper
 import com.lagradost.cloudstream3.utils.DataStore
-import com.lagradost.cloudstream3.utils.DataStoreHelper
 import kotlinx.coroutines.sync.Mutex
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -22,7 +21,7 @@ import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 
 // ==========================================
-// Data Models (원본 APIRes.java와 100% 동일하게 복원)
+// Data Models
 // ==========================================
 
 data class APIRes(
@@ -42,6 +41,7 @@ data class APIRes(
                 data class Items(@JsonProperty("nodes") var nodes: List<Node>? = null) {
                     data class Node(
                         @JsonProperty("id") var id: String? = null,
+                        @JsonProperty("updatedAt") var updatedAt: String? = null,
                         @JsonProperty("content") var content: Content? = null
                     ) {
                         data class Content(
@@ -84,7 +84,8 @@ data class SyncDevice(
     @JsonProperty("name") var name: String,
     @JsonProperty("deviceId") var deviceId: String,
     @JsonProperty("itemId") var itemId: String,
-    @JsonProperty("syncedData") var syncedData: String? = null
+    @JsonProperty("syncedData") var syncedData: String? = null,
+    @JsonProperty("updatedAt") var updatedAt: String? = null
 )
 
 // ==========================================
@@ -134,35 +135,27 @@ object BackupUtils {
         "ULTIMA_WATCH_SYNC_CREDS", "used_fstream_providers_v3", "fstream_version", "Aniyomi_Plugin_Successful_Install",
         "enable_support_by_bongngotv", "prerelease_update", "data_store_helper/account_key_index", "VERSION_NAME", 
         "FILES_TO_DELETE_KEY", "HAS_DONE_SETUP", "video_source_priority", "preferred_audio_language",
+        
+        // ★ 핵심 수정: 동기화에 필수적인 video_watch_state, result_episode 등은 블랙리스트에서 제거했습니다.
+        // 오직 용량만 차지하는 진짜 쓰레기 캐시 데이터만 차단합니다.
         "episode_parent_index_", "download_header_cache", "BACKUP_download_header_cache",
-        "result_season", "result_episode", "result_dub", "CONTENT_URI_", "download_status",
-        "video_watch_state", "search_history", "download_info", "download_resume",
+        "CONTENT_URI_", "download_status", "search_history", "download_info", "download_resume",
         "download_q_resume", "download_episode_cache"
     )
 
-    private fun isResume(str: String): Boolean {
+    private fun isBackup(str: String): Boolean {
         return nonTransferableKeys.none { str.contains(it, ignoreCase = true) }
     }
 
-    private fun isBackup(str: String, resumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null): Boolean {
-        if (!isResume(str)) return false
-        if (str.startsWith("result_resume_watching_2/")) {
-            if (resumeWatching == null) return false
-            val id = str.removePrefix("result_resume_watching_2/")
-            return resumeWatching.any { it.url == id || it.url.contains(id) }
-        }
-        return true
-    }
-
     @Suppress("UNCHECKED_CAST")
-    fun getBackup(context: Context, resumeWatching: List<DataStoreHelper.ResumeWatchingResult>?): BackupFile {
-        val listTake = resumeWatching?.take(50)
-        
+    fun getBackup(context: Context): BackupFile {
         val prefs = with(DataStore) { context.getSharedPrefs() }.all
         val defaultPrefs = with(DataStore) { context.getDefaultSharedPrefs() }.all
 
-        val filteredPrefs = prefs.filterKeys { isBackup(it, listTake) }
-        val filteredDefaultPrefs = defaultPrefs.filterKeys { isBackup(it, listTake) }
+        // ★ 핵심 수정: HomeViewModel의 불확실한 타이밍에 의존하지 않고, 
+        // 저장소에 있는 모든 시청 기록을 다이렉트로 긁어와서 100% 안전하게 백업합니다.
+        val filteredPrefs = prefs.filterKeys { isBackup(it) }
+        val filteredDefaultPrefs = defaultPrefs.filterKeys { isBackup(it) }
 
         fun buildVars(map: Map<String, Any?>): BackupVars {
             return BackupVars(
@@ -191,7 +184,7 @@ object BackupUtils {
         if (map == null) return
         val editor = editor(context, isEditingAppSettings)
         for ((key, value) in map) {
-            if (isResume(key)) {
+            if (isBackup(key)) {
                 editor.setKeyRaw(key, value)
             }
         }
@@ -223,7 +216,6 @@ object BackupUtils {
 // ==========================================
 
 object ApiUtils {
-    // ★ 동시 실행으로 인한 중복 기기 생성을 막는 유일한 해결책 (Mutex)
     private val syncMutex = Mutex()
 
     private fun isLoggedIn(): Boolean {
@@ -289,7 +281,7 @@ object ApiUtils {
         val numStr = prefs.getString("sync_project_num", null)?.let { mapper.readValue<String>(it) } ?: return emptyList()
         val num = numStr.toIntOrNull() ?: return emptyList()
         
-        val query = """query(${'$'}num: Int!) { viewer { projectV2(number: ${'$'}num) { id items(first: 100) { nodes { id content { ... on DraftIssue { id title bodyText } } } } } } }"""
+        val query = """query(${'$'}num: Int!) { viewer { projectV2(number: ${'$'}num) { id items(first: 100) { nodes { id updatedAt content { ... on DraftIssue { id title bodyText } } } } } } }"""
         val res = apiCall(query, mapOf("num" to num))
         
         val nodes = res?.data?.viewer?.projectV2?.items?.nodes ?: return emptyList()
@@ -298,14 +290,15 @@ object ApiUtils {
             val title = node.content?.title ?: "Unknown"
             val body = node.content?.bodyText ?: ""
             val itemId = node.id ?: return@mapNotNull null
+            val updatedAt = node.updatedAt ?: ""
             
             val parts = title.split("|")
             if (parts.size >= 2) {
-                SyncDevice(name = parts[0], deviceId = parts[1], itemId = itemId, syncedData = body)
+                SyncDevice(name = parts[0], deviceId = parts[1], itemId = itemId, syncedData = body, updatedAt = updatedAt)
             } else {
-                SyncDevice(name = title, deviceId = "", itemId = itemId, syncedData = body)
+                SyncDevice(name = title, deviceId = "", itemId = itemId, syncedData = body, updatedAt = updatedAt)
             }
-        }
+        }.sortedBy { it.updatedAt }
     }
 
     suspend fun deleteDevice(projectId: String, itemId: String): Boolean {
