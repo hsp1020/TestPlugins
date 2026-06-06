@@ -18,7 +18,7 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
 // ==========================================
-// Data Models (순정 APIRes.java와 100% 동일하게 복원)
+// Data Models
 // ==========================================
 
 data class APIRes(
@@ -549,9 +549,8 @@ object UtilKt {
 
     // ★ 해결 1: 표준 Base64(NO_WRAP) 규격을 사용하여 기기간 디코딩 충돌 및 GZIP 압축 크래시를 원천 해결했습니다.
     fun compressJsonToString(json: String): String {
-        val bos = ByteArrayOutputStream()
-        GZIPOutputStream(bos).use { it.write(json.toByteArray(Charsets.UTF_8)) }
-        return Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
+        val bytes = json.toByteArray(Charsets.UTF_8)
+        return Base64.encodeToString(bytes, Base64.NO_WRAP)
     }
 
     // ★ 해결 1: GZIP 매직 넘버 검증 및 유연한 DEFAULT/URL_SAFE 하이브리드 디코딩 적용
@@ -562,13 +561,7 @@ object UtilKt {
             } catch (e: Exception) {
                 Base64.decode(encoded, Base64.URL_SAFE)
             }
-
-            if (decodedBytes.size >= 2 && decodedBytes[0] == 0x1F.toByte() && decodedBytes[1] == 0x8B.toByte()) {
-                val bis = ByteArrayInputStream(decodedBytes)
-                GZIPInputStream(bis).bufferedReader(Charsets.UTF_8).use { it.readText() }
-            } else {
-                String(decodedBytes, Charsets.UTF_8)
-            }
+            String(decodedBytes, Charsets.UTF_8)
         } catch (e: Exception) {
             Log.d("SYNC", "[UtilKt] Failed to decompress: ${e.message}")
             ""
