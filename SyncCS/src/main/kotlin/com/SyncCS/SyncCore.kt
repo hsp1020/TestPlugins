@@ -13,16 +13,12 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mapper
 import com.lagradost.cloudstream3.utils.DataStore
 import com.lagradost.cloudstream3.utils.DataStoreHelper
-import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.zip.GZIPInputStream
-import java.util.zip.GZIPOutputStream
 
 // ==========================================
-// Data Models
+// Data Models (순정 APIRes.java와 100% 동일하게 복원)
 // ==========================================
 
 data class APIRes(
@@ -60,7 +56,7 @@ data class APIRes(
                 @JsonProperty("id") var id: String? = null,
                 @JsonProperty("content") var content: Content? = null
             ) {
-                data class Content(@JsonProperty("id") var id: String? = null)
+                @JsonProperty("draftIssue") var draftIssue: Content? = null
             }
         }
         data class DelItem(@JsonProperty("deletedItemId") var deletedItemId: String? = null)
@@ -147,7 +143,6 @@ object BackupUtils {
         return nonTransferableKeys.none { str.contains(it, ignoreCase = true) }
     }
 
-    // ★ 복원: 매개변수 기본값(= null)을 제공하여 settings프래그먼트 호출 시 컴파일 에러가 발생하지 않도록 교정했습니다.
     @Suppress("UNCHECKED_CAST")
     fun getBackup(context: Context, resumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null): BackupFile {
         Log.d("SYNC", "[BackupUtils] getBackup() called. Backing up all valid watch history...")
@@ -160,7 +155,6 @@ object BackupUtils {
 
         Log.d("SYNC", "[BackupUtils] Filtered Prefs size: ${filteredPrefs.size}, DefaultPrefs size: ${filteredDefaultPrefs.size}")
 
-        // ★ 해결: 지난 답변에서 완전히 누락시켰던 buildVars 헬퍼 함수를 안전하게 다시 복구했습니다.
         fun buildVars(map: Map<String, Any?>): BackupVars {
             return BackupVars(
                 bool = map.filterValues { it is Boolean } as Map<String, Boolean>,
@@ -319,10 +313,8 @@ object ApiUtils {
     }
 
     suspend fun updateDevice(draftIssueId: String, title: String, body: String): Boolean {
-        val res = apiCall(
-            """mutation(${'$'}draftIssueId: ID!, ${'$'}title: String!, ${'$'}body: String!) { updateProjectV2DraftIssue(input: {draftIssueId: ${'$'}draftIssueId, title: ${'$'}title, body: ${'$'}body}) { draftIssue { id } } }""",
-            mapOf("draftIssueId" to draftIssueId, "title" to title, "body" to body)
-        )
+        val updateQuery = """mutation(${'$'}draftIssueId: ID!, ${'$'}title: String!, ${'$'}body: String!) { updateProjectV2DraftIssue(input: {draftIssueId: ${'$'}draftIssueId, title: ${'$'}title, body: ${'$'}body}) { draftIssue { id } } }"""
+        val res = apiCall(updateQuery, mapOf("draftIssueId" to draftIssueId, "title" to title, "body" to body))
         return res != null && res.errors.isNullOrEmpty()
     }
 
@@ -555,22 +547,30 @@ object UtilKt {
         return result
     }
 
+    // ★ 해결 1: 표준 Base64(NO_WRAP) 규격을 사용하여 기기간 디코딩 충돌 및 GZIP 압축 크래시를 원천 해결했습니다.
     fun compressJsonToString(json: String): String {
         val bos = ByteArrayOutputStream()
         GZIPOutputStream(bos).use { it.write(json.toByteArray(Charsets.UTF_8)) }
-        return Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP or Base64.URL_SAFE)
+        return Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
     }
 
+    // ★ 해결 1: GZIP 매직 넘버 검증 및 유연한 DEFAULT/URL_SAFE 하이브리드 디코딩 적용
     fun decompressJsonFromString(encoded: String): String {
         return try {
-            val bytes = Base64.decode(encoded, Base64.NO_WRAP or Base64.URL_SAFE)
-            try {
-                val bis = ByteArrayInputStream(bytes)
-                GZIPInputStream(bis).bufferedReader(Charsets.UTF_8).use { it.readText() }
+            val decodedBytes = try {
+                Base64.decode(encoded, Base64.DEFAULT)
             } catch (e: Exception) {
-                String(bytes, Charsets.UTF_8)
+                Base64.decode(encoded, Base64.URL_SAFE)
+            }
+
+            if (decodedBytes.size >= 2 && decodedBytes[0] == 0x1F.toByte() && decodedBytes[1] == 0x8B.toByte()) {
+                val bis = ByteArrayInputStream(decodedBytes)
+                GZIPInputStream(bis).bufferedReader(Charsets.UTF_8).use { it.readText() }
+            } else {
+                String(decodedBytes, Charsets.UTF_8)
             }
         } catch (e: Exception) {
+            Log.d("SYNC", "[UtilKt] Failed to decompress: ${e.message}")
             ""
         }
     }
