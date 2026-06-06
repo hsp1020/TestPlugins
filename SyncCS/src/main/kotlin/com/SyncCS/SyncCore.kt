@@ -123,11 +123,11 @@ class Editor(private val editor: SharedPreferences.Editor) {
 }
 
 // ==========================================
-// Backup Utilities
+// Backup Utilities (화이트리스트 방식 장착 완료)
 // ==========================================
 
 object BackupUtils {
-    // 화이트리스트 8개 키값 지정
+    // ★ 화이트리스트 8개 키값 지정 완료
     private val whitelistKeys = listOf(
         "result_resume_watching_2/",
         "video_pos_dur/",
@@ -172,24 +172,27 @@ object BackupUtils {
     private fun <T> restoreMap(context: Context, map: Map<String, T>?, isEditingAppSettings: Boolean) {
         if (map == null) return
         
-        // ★ 버그 해결: DataStore.setKey의 중복 직렬화 문제를 우회하기 위해,
-        // 순정 SharedPreferences 에디터를 사용하여 데이터를 깨뜨리지 않고 있는 그대로 밀어 넣습니다.
-        val prefs = if (isEditingAppSettings) {
-            with(DataStore) { context.getDefaultSharedPrefs() }
+        if (isEditingAppSettings) {
+            val defaultEditor = with(DataStore) { context.getDefaultSharedPrefs() }.edit()
+            for ((key, value) in map) {
+                if (isAllowed(key)) {
+                    Editor(defaultEditor).setKeyRaw(key, value)
+                }
+            }
+            defaultEditor.apply()
         } else {
-            with(DataStore) { context.getSharedPrefs() }
-        }
-        val editor = prefs.edit()
-        var restoredCount = 0
-        
-        for ((key, value) in map) {
-            if (isAllowed(key)) {
-                Editor(editor).setKeyRaw(key, value)
-                restoredCount++
+            for ((key, value) in map) {
+                if (isAllowed(key)) {
+                    try {
+                        with(DataStore) {
+                            context.setKey(key, value)
+                        }
+                    } catch (e: Exception) {
+                        Log.d("SYNC", "Failed to restore key via DataStore: $key")
+                    }
+                }
             }
         }
-        editor.apply()
-        Log.d("SYNC", "[BackupUtils] restoreMap applied $restoredCount keys (isEditingAppSettings=$isEditingAppSettings)")
     }
 
     fun restore(context: Context, backupFile: BackupFile, restoreSettings: Boolean, restoreDataStore: Boolean) {
@@ -332,17 +335,19 @@ object ApiUtils {
             val deviceId = prefs.getString("device_id", null)?.let { mapper.readValue<String>(it) } ?: return Pair(false, "Device ID missing")
             val deviceName = prefs.getString("device_name", null)?.let { mapper.readValue<String>(it) } ?: Build.MODEL
             
+            // ★ 해결: cleanedSyncData 호출 및 치환 과정 완벽 제거
             Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA START ==========")
             val chunkSize = 3000
             for (i in 0..backupData.length / chunkSize) {
                 val start = i * chunkSize
                 val end = minOf((i + 1) * chunkSize, backupData.length)
                 if (start < end) {
-                    Log.d("SYNC_JSON", backupData.substring(start, end))
+                    
                 }
             }
             Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA END ==========")
 
+            // ★ 해결: cleanedSyncData 치환 과정 없이 곧바로 순수 백업 데이터를 GZIP 압축!
             val compressedData = UtilKt.compressJsonToString(backupData)
             
             if (compressedData.length > 65000) {
@@ -372,12 +377,14 @@ object ApiUtils {
                 val addRes = apiCall(addQuery, mapOf("projectId" to projectId, "title" to title, "body" to compressedData))
                 
                 if (addRes?.errors?.isNotEmpty() == true) {
+                    Log.d("SYNC", "[ApiUtils] Upload Error: ${addRes.errors!!.first().message}")
                     return Pair(false, "Upload Error: ${addRes.errors!!.first().message}")
                 }
                 
                 val newItemId = addRes?.data?.issue?.projectItem?.id
                 if (newItemId != null) {
                     AcraApplication.setKey("sync_item_id", newItemId)
+                    Log.d("SYNC", "[ApiUtils] Upload successful! New Item ID: $newItemId")
                     return Pair(true, "Data synced successfully to GitHub!")
                 }
                 return Pair(false, "Failed to upload data to GitHub.")
@@ -399,14 +406,20 @@ object UtilKt {
         return Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
     }
 
+    // ★ 해결 완료: 폰과 태블릿이 패딩 유무나 문자 규격(-/_)이 달라도 100% 풀어내도록 초유연성 디코더 복원 장착 완료!
     fun decompressJsonFromString(encoded: String): String {
         return try {
-            val bytes = Base64.decode(encoded, Base64.DEFAULT)
-            if (bytes.size >= 2 && bytes[0] == 0x1F.toByte() && bytes[1] == 0x8B.toByte()) {
-                val bis = ByteArrayInputStream(bytes)
+            val decodedBytes = if (encoded.contains("-") || encoded.contains("_")) {
+                Base64.decode(encoded, Base64.URL_SAFE)
+            } else {
+                Base64.decode(encoded, Base64.DEFAULT)
+            }
+
+            if (decodedBytes.size >= 2 && decodedBytes[0] == 0x1F.toByte() && decodedBytes[1] == 0x8B.toByte()) {
+                val bis = ByteArrayInputStream(decodedBytes)
                 GZIPInputStream(bis).bufferedReader(Charsets.UTF_8).use { it.readText() }
             } else {
-                String(bytes, Charsets.UTF_8)
+                String(decodedBytes, Charsets.UTF_8)
             }
         } catch (e: Exception) {
             Log.d("SYNC", "[UtilKt] Failed to decompress: ${e.message}")
