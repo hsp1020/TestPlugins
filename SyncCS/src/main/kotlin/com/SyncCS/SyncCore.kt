@@ -149,6 +149,7 @@ object BackupUtils {
         // ★ 추가 해결 3: 방대한 양의 플러그인 토글 및 플러그인 목록 동기화 차단
         "cat_toggle_",
         "ext_toggle_",
+        "show_ext_",
         "PLUGINS_KEY",
         "PLUGINS_KEY_LOCAL"
     )
