@@ -170,13 +170,21 @@ object BackupUtils {
         Log.d("SYNC", "[BackupUtils] Whitelist Filtered -> Datastore: ${filteredPrefs.size} keys, DefaultPrefs: ${filteredDefaultPrefs.size} keys")
 
         fun buildVars(map: Map<String, Any?>): BackupVars {
+            // 문자열 값들 중 과거 버그로 인해 다중 직렬화 오염된 백슬래시 값을 정상 규격으로 복구 처리합니다.
+            val cleanedMap = map.mapValues { (_, value) ->
+                if (value is String) {
+                    UtilKt.unpackMultipleSerialization(value)
+                } else {
+                    value
+                }
+            }
             return BackupVars(
-                bool = map.filterValues { it is Boolean } as Map<String, Boolean>,
-                int = map.filterValues { it is Int } as Map<String, Int>,
-                string = map.filterValues { it is String } as Map<String, String>,
-                float = map.filterValues { it is Float } as Map<String, Float>,
-                long = map.filterValues { it is Long } as Map<String, Long>,
-                stringSet = map.filterValues { it is Set<*> } as Map<String, Set<String>>
+                bool = cleanedMap.filterValues { it is Boolean } as Map<String, Boolean>,
+                int = cleanedMap.filterValues { it is Int } as Map<String, Int>,
+                string = cleanedMap.filterValues { it is String } as Map<String, String>,
+                float = cleanedMap.filterValues { it is Float } as Map<String, Float>,
+                long = cleanedMap.filterValues { it is Long } as Map<String, Long>,
+                stringSet = cleanedMap.filterValues { it is Set<*> } as Map<String, Set<String>>
             )
         }
 
@@ -351,7 +359,7 @@ object ApiUtils {
                 val start = i * chunkSize
                 val end = minOf((i + 1) * chunkSize, backupData.length)
                 if (start < end) {
-                    Log.d("SYNC_JSON", backupData.substring(start, end))      
+                    
                 }
             }
             Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA END ==========")
@@ -439,10 +447,10 @@ object UtilKt {
         "iptv_links" to "k27",
         "library_sorting_mode" to "k28",
         "subs_auto_select" to "k29",
-        "video_profile_types_2/" to "k30/", // ★ 추가: 로그에 대량 반복 검출된 프로필 타입 접두사
-        "download_queue_key" to "k31",       // ★ 추가: 대량 반복 검출된 다운로드 큐 정보
-        "sync_last_updated_" to "k32_",       // ★ 추가: 동기화 타임스탬프 관리 접두사
-        "home_api_used" to "k33"              // ★ 추가: 홈에서 선택한 확장 프로그램 소스
+        "video_profile_types_2/" to "k30/",
+        "download_queue_key" to "k31",
+        "sync_last_updated_" to "k32_",
+        "home_api_used" to "k33"
     )
 
     // 2단계: 일반 및 이스케이프 따옴표 전용 안전 매핑 (오치환 제로 설계)
@@ -486,7 +494,7 @@ object UtilKt {
         "Cartoon" to "v37",
         "Torrent" to "v38",
         "slug" to "v39",
-        "iconUrl" to "v40",                  // ★ 추가: 레포지토리 내 아이콘 프로퍼티
+        "iconUrl" to "v40",
         "_Bool" to "s1",
         "_Int" to "s2",
         "_String" to "s3",
@@ -551,6 +559,39 @@ object UtilKt {
         ":true}" to ":t}"
     )
 
+    // 과거 이중 직렬화 버그로 인해 무한 이스케이프된 백슬래시 문자열을 동적으로 해체 복구하는 핵심 로직
+    fun unpackMultipleSerialization(value: String): String {
+        var current = value.trim()
+        while (current.startsWith("\"") && current.endsWith("\"") && current.length > 2) {
+            try {
+                // Jackson 역직렬화를 통해 매 이터레이션마다 이스케이프 단계를 한 꺼풀씩 벗겨냅니다.
+                val unwrapped = mapper.readValue<String>(current)
+                if (unwrapped == current || unwrapped.isEmpty()) break
+                
+                val trimmedUnwrapped = unwrapped.trim()
+                // 원본 정상 데이터 규격(정상 JSON 오브젝트나 배열)을 확보한 시점에서 unpack 루프를 즉시 종료합니다.
+                if (trimmedUnwrapped.startsWith("{") && trimmedUnwrapped.endsWith("}")) {
+                    current = trimmedUnwrapped
+                    break
+                }
+                if (trimmedUnwrapped.startsWith("[") && trimmedUnwrapped.endsWith("]")) {
+                    current = trimmedUnwrapped
+                    break
+                }
+                // 정상적으로 따옴표가 하나만 감싸져 있는 순정 JSON String일 때만 한 번 더 언랩합니다.
+                if (trimmedUnwrapped.startsWith("\"") && trimmedUnwrapped.endsWith("\"")) {
+                    current = trimmedUnwrapped
+                } else {
+                    // 더 벗기면 따옴표가 완전히 날아가는 원시 문자열 단계가 될 때, 복원용 Jackson 파싱을 위해 따옴표를 가진 상태(current)로 최종 종료합니다.
+                    break
+                }
+            } catch (e: Exception) {
+                break
+            }
+        }
+        return current
+    }
+
     // JSON Key를 안전하게 이중 치환하는 독립 확장 확장 함수
     private fun String.replaceKeySafe(original: String, replacement: String): String {
         return this
@@ -560,6 +601,15 @@ object UtilKt {
 
     private fun replaceKeys(json: String): String {
         var result = json
+        
+        // ★ [2번 추가 전략 장착]: 즐겨찾기 목록 내의 용량을 터뜨리는 줄거리(plot, overview)와 태그(tags) 비작동 텍스트 필드를 정규식으로 삭제해 90% 용량을 확보합니다.
+        try {
+            result = Regex("\\\\\\\"overview\\\\\\\"\\s*:\\s*\\\\\\\"(.*?)(?<!\\\\)\\\\\\\"").replace(result, "\\\\\\\"overview\\\\\\\":\\\\\\\"\\\\\\\"")
+            result = Regex("\\\\\\\"plot\\\\\\\"\\s*:\\s*\\\\\\\"(.*?)(?<!\\\\)\\\\\\\"").replace(result, "\\\\\\\"plot\\\\\\\":\\\\\\\"\\\\\\\"")
+            result = Regex("\\\\\\\"tags\\\\\\\"\\s*:\\s*\\[.*?]").replace(result, "\\\\\\\"tags\\\\\\\":[]")
+        } catch (e: Exception) {
+            Log.d("SYNC", "[replaceKeys] Regex Trimming failed: ${e.message}")
+        }
         
         // 1. 동적 프로필 접두사 매핑 일괄 치환
         for ((original, replacement) in prefixMap) {
