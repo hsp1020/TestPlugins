@@ -38,7 +38,6 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
 
     @Suppress("UNCHECKED_CAST")
     private fun <T : View> findView(view: View, str: String): T {
-        // Dynamically locate layout elements relative to compiled plugin package namespace
         return view.findViewById(this.res.getIdentifier(str, "id", plugin.javaClass.packageName)) as T
     }
 
