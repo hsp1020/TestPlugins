@@ -61,6 +61,10 @@ data class APIRes(
                 @JsonProperty("content") var content: Content? = null
             ) {
                 @JsonProperty("draftIssue") var draftIssue: Content? = null
+
+                data class Content(
+                    @JsonProperty("id") var id: String? = null
+                )
             }
         }
         data class DelItem(@JsonProperty("deletedItemId") var deletedItemId: String? = null)
@@ -150,6 +154,7 @@ object BackupUtils {
     @Suppress("UNCHECKED_CAST")
     fun getBackup(context: Context, resumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null): BackupFile {
         Log.d("SYNC", "[BackupUtils] getBackup() called. Backing up all valid watch history...")
+        val listTake = resumeWatching?.take(50)
         
         val prefs = with(DataStore) { context.getSharedPrefs() }.all
         val defaultPrefs = with(DataStore) { context.getDefaultSharedPrefs() }.all
@@ -551,14 +556,14 @@ object UtilKt {
         return result
     }
 
-    // ★ 해결: 표준 Base64(NO_WRAP) 규격을 사용하여 기기간 디코딩 충돌 및 GZIP 압축 크래시를 원천 해결했습니다.
+    // ★ 해결: 표준 Base64(NO_WRAP) 규격을 사용하도록 완전 고정하여 디코딩 충돌 및 GZIP 파싱 크래시 해결
     fun compressJsonToString(json: String): String {
         val bos = ByteArrayOutputStream()
         GZIPOutputStream(bos).use { it.write(json.toByteArray(Charsets.UTF_8)) }
         return Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
     }
 
-    // ★ 해결: DEFAULT 디코딩 우선 시도 후 URL_SAFE 예외 대응 적용
+    // ★ 해결: DEFAULT 디코딩 우선 시도 후 URL_SAFE 예외 대응 적용, GZIP 매직 넘버 검증으로 자폭 방지 완비
     fun decompressJsonFromString(encoded: String): String {
         return try {
             val decodedBytes = try {
@@ -567,7 +572,6 @@ object UtilKt {
                 Base64.decode(encoded, Base64.URL_SAFE)
             }
 
-            // GZIP 매직 넘버 검증 (깨진 바이너리를 강제로 반환하여 잭슨 크래시를 유발하던 자폭 로직 제거)
             if (decodedBytes.size >= 2 && decodedBytes[0] == 0x1F.toByte() && decodedBytes[1] == 0x8B.toByte()) {
                 val bis = ByteArrayInputStream(decodedBytes)
                 GZIPInputStream(bis).bufferedReader(Charsets.UTF_8).use { it.readText() }
