@@ -27,7 +27,6 @@ class SyncPlugin : Plugin() {
             try {
                 CoroutineScope(Dispatchers.IO).launch {
                     val resumeWatching = HomeViewModel.getResumeWatching()
-                    // 수정됨: Nullable 반환이므로 ?. 안전 호출 연산자 사용
                     val listTake = resumeWatching?.take(10)
                     if (listTake != lastResumeWatching) {
                         backupDevice(true)
@@ -96,6 +95,7 @@ class SyncPlugin : Plugin() {
     }
 
     override fun load(context: Context) {
+        // 여기서 넘어오는 'context'가 바로 플러그인의 리소스를 담고 있는 핵심 Context입니다.
         AcraApplication.setKey("device_id", UtilKt.getDeviceId(context.packageName, context))
         restoreDevice(true)
         handler.post(runnable)
@@ -106,9 +106,12 @@ class SyncPlugin : Plugin() {
         MainActivity.reloadHomeEvent += { backupDevice(true) }
         MainActivity.reloadAccountEvent += { backupDevice(true) }
 
-        val appCompatActivity = context as AppCompatActivity
-        openSettings = { _ ->
-            SyncSettingsFragment(this).show(appCompatActivity.supportFragmentManager, "Sync")
+        openSettings = { activityContext ->
+            val appCompatActivity = activityContext as? AppCompatActivity
+            appCompatActivity?.let {
+                // 프래그먼트 생성 시 플러그인 컨텍스트(context)를 함께 넘겨줍니다.
+                SyncSettingsFragment(this, context).show(it.supportFragmentManager, "Sync")
+            }
         }
     }
 }
