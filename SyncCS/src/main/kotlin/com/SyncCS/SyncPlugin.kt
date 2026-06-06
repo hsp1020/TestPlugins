@@ -3,6 +3,7 @@ package com.SyncCS
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import androidx.appcompat.app.AppCompatActivity
 import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.MainActivity
