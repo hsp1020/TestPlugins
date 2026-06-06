@@ -342,16 +342,14 @@ object ApiUtils {
             
             val cleanedData = UtilKt.cleanedSyncData(backupData)
             
-            Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA START ==========")
             val chunkSize = 3000
             for (i in 0..cleanedData.length / chunkSize) {
                 val start = i * chunkSize
                 val end = minOf((i + 1) * chunkSize, cleanedData.length)
                 if (start < end) {
-                    Log.d("SYNC_JSON", cleanedData.substring(start, end))
+                    
                 }
             }
-            Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA END ==========")
 
             val compressedData = UtilKt.compressJsonToString(cleanedData)
             
