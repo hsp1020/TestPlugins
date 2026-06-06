@@ -348,7 +348,7 @@ object ApiUtils {
                 val start = i * chunkSize
                 val end = minOf((i + 1) * chunkSize, cleanedData.length)
                 if (start < end) {
-                    Log.d("SYNC_JSON", cleanedData.substring(start, end))
+                    
                 }
             }
             Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA END ==========")
