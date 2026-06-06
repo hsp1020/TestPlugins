@@ -26,6 +26,8 @@ class SyncPlugin : Plugin() {
     
     private var syncJob: Job? = null
     private var backupJob: Job? = null
+    
+    private val restoredDeviceTimestamps = mutableMapOf<String, String>()
 
     private fun startSyncLoop() {
         Log.d("SYNC", "[SyncPlugin] startSyncLoop() initiated.")
@@ -56,6 +58,7 @@ class SyncPlugin : Plugin() {
         }
     }
 
+    @Synchronized
     private fun backupDevice() {
         Log.d("SYNC", "[SyncPlugin] backupDevice() called. Debouncing for 3 seconds...")
         backupJob?.cancel()
@@ -168,7 +171,8 @@ class SyncPlugin : Plugin() {
             val appCompatActivity = activityContext as? AppCompatActivity
             appCompatActivity?.let {
                 Log.d("SYNC", "[SyncPlugin] Opening SyncSettingsFragment.")
-                SyncSettingsFragment(this, context).show(it.supportFragmentManager, "Sync")
+                // ★ 해결: 다시 context 인자를 빼고 오직 plugin(this)만 안전하게 넘기도록 복구했습니다.
+                SyncSettingsFragment(this).show(it.supportFragmentManager, "Sync")
             }
         }
     }
