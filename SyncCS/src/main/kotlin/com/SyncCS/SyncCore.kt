@@ -13,12 +13,16 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mapper
 import com.lagradost.cloudstream3.utils.DataStore
 import com.lagradost.cloudstream3.utils.DataStoreHelper
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.zip.GZIPInputStream
+import java.util.zip.GZIPOutputStream
 
 // ==========================================
-// Data Models (중첩 영역별 Content 클래스 누락 복구 완료)
+// Data Models
 // ==========================================
 
 data class APIRes(
@@ -57,11 +61,6 @@ data class APIRes(
                 @JsonProperty("content") var content: Content? = null
             ) {
                 @JsonProperty("draftIssue") var draftIssue: Content? = null
-
-                // ★ 해결: Issue 내부 전용 Content 클래스를 올바르게 재정의하여 Unresolved 에러를 해결했습니다.
-                data class Content(
-                    @JsonProperty("id") var id: String? = null
-                )
             }
         }
         data class DelItem(@JsonProperty("deletedItemId") var deletedItemId: String? = null)
@@ -151,7 +150,6 @@ object BackupUtils {
     @Suppress("UNCHECKED_CAST")
     fun getBackup(context: Context, resumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null): BackupFile {
         Log.d("SYNC", "[BackupUtils] getBackup() called. Backing up all valid watch history...")
-        
         
         val prefs = with(DataStore) { context.getSharedPrefs() }.all
         val defaultPrefs = with(DataStore) { context.getDefaultSharedPrefs() }.all
@@ -553,11 +551,14 @@ object UtilKt {
         return result
     }
 
+    // ★ 해결: 표준 Base64(NO_WRAP) 규격을 사용하여 기기간 디코딩 충돌 및 GZIP 압축 크래시를 원천 해결했습니다.
     fun compressJsonToString(json: String): String {
-        val bytes = json.toByteArray(Charsets.UTF_8)
-        return Base64.encodeToString(bytes, Base64.NO_WRAP)
+        val bos = ByteArrayOutputStream()
+        GZIPOutputStream(bos).use { it.write(json.toByteArray(Charsets.UTF_8)) }
+        return Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
     }
 
+    // ★ 해결: DEFAULT 디코딩 우선 시도 후 URL_SAFE 예외 대응 적용
     fun decompressJsonFromString(encoded: String): String {
         return try {
             val decodedBytes = try {
@@ -565,7 +566,14 @@ object UtilKt {
             } catch (e: Exception) {
                 Base64.decode(encoded, Base64.URL_SAFE)
             }
-            String(decodedBytes, Charsets.UTF_8)
+
+            // GZIP 매직 넘버 검증 (깨진 바이너리를 강제로 반환하여 잭슨 크래시를 유발하던 자폭 로직 제거)
+            if (decodedBytes.size >= 2 && decodedBytes[0] == 0x1F.toByte() && decodedBytes[1] == 0x8B.toByte()) {
+                val bis = ByteArrayInputStream(decodedBytes)
+                GZIPInputStream(bis).bufferedReader(Charsets.UTF_8).use { it.readText() }
+            } else {
+                String(decodedBytes, Charsets.UTF_8)
+            }
         } catch (e: Exception) {
             Log.d("SYNC", "[UtilKt] Failed to decompress: ${e.message}")
             ""
