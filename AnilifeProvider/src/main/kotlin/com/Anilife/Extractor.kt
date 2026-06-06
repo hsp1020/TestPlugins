@@ -356,4 +356,16 @@ class AnilifeProxyExtractor : ExtractorApi() {
 
                 if (path.contains("playlist.m3u8")) {
                     val payload = playlistData.toByteArray(charset("UTF-8"))
-                    out.writ
+                    out.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nConnection: close\r\nContent-Length: ${payload.size}\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
+                    out.write(payload)
+                } else {
+                    out.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
+                }
+                out.flush()
+            } catch (e: Exception) {
+            } finally {
+                try { socket.close() } catch (e: Exception) {}
+            }
+        }
+    }
+}
