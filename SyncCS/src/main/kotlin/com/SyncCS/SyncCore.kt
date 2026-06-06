@@ -22,7 +22,7 @@ import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 
 // ==========================================
-// Data Models
+// Data Models (원본 APIRes.java와 100% 동일하게 복원)
 // ==========================================
 
 data class APIRes(
@@ -223,7 +223,7 @@ object BackupUtils {
 // ==========================================
 
 object ApiUtils {
-    // ★ 핵심: 동시 실행 방지를 위한 Mutex 락
+    // ★ 동시 실행으로 인한 중복 기기 생성을 막는 유일한 해결책 (Mutex)
     private val syncMutex = Mutex()
 
     private fun isLoggedIn(): Boolean {
@@ -317,9 +317,7 @@ object ApiUtils {
     suspend fun syncThisDevice(backupData: String, context: Context? = AcraApplication.context): Pair<Boolean, String> {
         if (!isLoggedIn()) return Pair(false, "Not logged in")
         
-        // ★ Mutex 적용: 이미 동기화가 진행 중이면 중복 요청을 즉시 무시합니다.
         if (!syncMutex.tryLock()) {
-            Log.d("SyncCS", "Sync already in progress, skipping duplicate request.")
             return Pair(false, "Sync already in progress")
         }
         
@@ -338,7 +336,6 @@ object ApiUtils {
 
             val devices = fetchDevices()
             
-            // 중복 기기 싹쓸이 삭제
             val existingDevices = devices.filter { it.deviceId == deviceId }
             existingDevices.forEach { device ->
                 if (device.itemId.isNotBlank()) {
@@ -362,7 +359,6 @@ object ApiUtils {
             
             return Pair(false, "Failed to upload data to GitHub.")
         } finally {
-            // 작업이 끝나면 반드시 락을 해제합니다.
             syncMutex.unlock()
         }
     }
