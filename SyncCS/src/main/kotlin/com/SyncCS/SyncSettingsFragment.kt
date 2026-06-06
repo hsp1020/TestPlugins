@@ -34,8 +34,6 @@ class SyncSettingsFragment(
 ) : BottomSheetDialogFragment() {
 
     private val res = pluginContext.resources
-    
-    // ★★★ 제가 실수로 바꿨던 부분 원상복구: 무조건 "com.SyncCS"를 바라보도록 고정 ★★★
     private val resPackageName = "com.SyncCS"
 
     private fun <T : View> findView(view: View, name: String): T {
@@ -138,7 +136,7 @@ class SyncSettingsFragment(
                             }
 
                             val devices = ApiUtils.fetchDevices()
-                            val currentDeviceId = UtilKt.getDeviceId(resPackageName, requireContext())
+                            val currentDeviceId = UtilKt.getDeviceId(pluginContext.packageName, requireContext())
                             val isDuplicate = devices.any { it.name == deviceName && it.deviceId != currentDeviceId }
                             
                             if (isDuplicate) {
