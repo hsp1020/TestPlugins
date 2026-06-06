@@ -53,7 +53,7 @@ class SyncPlugin : Plugin() {
     private fun backupDevice() {
         backupJob?.cancel()
         backupJob = CoroutineScope(Dispatchers.IO).launch {
-            delay(3000L) // 3초 디바운스 (동시 실행 방지)
+            delay(3000L) // 3초 디바운스
             
             try {
                 counterBackup = 0
@@ -89,8 +89,7 @@ class SyncPlugin : Plugin() {
                 if (isRestoreEnabled == "true") {
                     val devices = ApiUtils.fetchDevices()
                     
-                    // ★ 핵심 수정: 내 기기 하나만 찾는 로직 삭제. 
-                    // 모든 기기의 데이터를 시간순(오래된 것 -> 최신 것)으로 가져와서 전부 병합(Merge)합니다.
+                    // ★ 핵심: 모든 기기의 데이터를 순회하며 내 기기에 병합(Merge)합니다.
                     devices.forEach { device ->
                         device.syncedData?.let { encoded ->
                             val decoded = UtilKt.restoreText(UtilKt.decompressJsonFromString(encoded))
