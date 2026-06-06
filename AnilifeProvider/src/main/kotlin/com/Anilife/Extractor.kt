@@ -2,6 +2,7 @@ package com.anilife
 
 import android.annotation.SuppressLint
 import android.util.Base64
+import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -40,6 +41,7 @@ class AnilifeProxyExtractor : ExtractorApi() {
     override val requiresReferer = false
 
     private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
+    private val TAG = "[AnilifeExtractor]"
 
     companion object {
         @Volatile private var currentProxyServer: ProxyWebServer? = null
@@ -65,11 +67,12 @@ class AnilifeProxyExtractor : ExtractorApi() {
     }
 
     /**
-     * [재생 링크 추출 전용 초경량 쌩웹뷰]
-     * 하드웨어 가속 강제 해제, 리소스 다운로드 차단, 사후 소멸 처리가 완벽히 이식되었습니다.
+     * [재생 링크 추출 전용 극효율 쌩웹뷰]
+     * 하드웨어 가속 강제 해제, 이미지/광고 도메인 차단, 팝업 리다이렉트 원천 봉쇄가 적용된 최적화 엔진
      */
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun getDoc(url: String): Document {
+        Log.d(TAG, "[RawWebView] 추출용 쌩웹뷰 기동 -> $url")
         val ctx = CloudStreamApp.context ?: throw Exception("Context가 Null입니다.")
 
         return withContext(Dispatchers.Main) {
@@ -82,8 +85,9 @@ class AnilifeProxyExtractor : ExtractorApi() {
                         try {
                             webView.stopLoading()
                             webView.clearHistory()
-                            webView.loadUrl("about:blank")
-                            webView.destroy()
+                            webView.loadUrl("about:blank") // 백그라운드 악성 자바스크립트 루프 처형
+                            webView.destroy() // 메모리 자원 완전 소멸 반환 [1.1, 1.3]
+                            Log.d(TAG, "[RawWebView] 사용 완료된 추출기 웹뷰 소멸 완료")
                         } catch (e: Exception) { }
                     }
                 }
@@ -99,6 +103,7 @@ class AnilifeProxyExtractor : ExtractorApi() {
                     }
                 }
 
+                // [하드웨어 최적화] 하드웨어 가속 해제하여 GPU/CPU 점유 최소화 [1.1, 1.3]
                 webView.setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
 
                 webView.settings.apply {
@@ -106,7 +111,7 @@ class AnilifeProxyExtractor : ExtractorApi() {
                     domStorageEnabled = true
                     databaseEnabled = true
                     userAgentString = DESKTOP_UA
-                    loadsImagesAutomatically = false // 미디어 로드 전 단계이므로 불필요한 이미지 차단 [1.1, 1.3]
+                    loadsImagesAutomatically = false // 미디어 로드 전 단계이므로 불필요한 이미지 원천 거절 [1.1, 1.3]
                     mediaPlaybackRequiresUserGesture = true
                 }
 
@@ -118,18 +123,32 @@ class AnilifeProxyExtractor : ExtractorApi() {
                         view?.loadUrl("javascript:window.HTMLOUT.processHTML(document.documentElement.outerHTML);")
                     }
 
-                    // 필요없는 포스터 이미지, 광고, 스타일시트 차단 패치 [1.1, 1.2, 1.3]
+                    // [리다이렉트 원천 차단 최적화] 광고 서버로의 화면 강제 이동 및 팝업 생성을 철저하게 막아 렉 예방
+                    override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                        val requestUrl = request?.url?.toString() ?: return false
+                        if (request.isForMainFrame && !requestUrl.contains("anilife.live") && !requestUrl.contains("about:blank")) {
+                            Log.d(TAG, "[RawWebView] [광고 팝업 우회 방어] 강제 리다이렉트 차단: $requestUrl")
+                            return true // 차단 적용
+                        }
+                        return false
+                    }
+
+                    // [데이터/트래픽 다이어트 핵심 최적화] 불필요한 미디어 이진 파일 및 광고 네트워크 패킷 드롭 [1.1, 1.2, 1.3]
                     override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                         val resourceUrl = request?.url?.toString()?.lowercase() ?: return null
-                        val isHeavy = resourceUrl.endsWith(".png") || resourceUrl.endsWith(".jpg") ||
-                                      resourceUrl.endsWith(".jpeg") || resourceUrl.endsWith(".webp") ||
-                                      resourceUrl.endsWith(".gif") || resourceUrl.endsWith(".svg") ||
-                                      resourceUrl.endsWith(".woff") || resourceUrl.endsWith(".woff2") ||
-                                      resourceUrl.endsWith(".ttf") || resourceUrl.endsWith(".css") ||
-                                      resourceUrl.endsWith(".mp4") || resourceUrl.contains("analytics") ||
-                                      resourceUrl.contains("google")
+                        val isHeavyOrMalicious = resourceUrl.endsWith(".png") || resourceUrl.endsWith(".jpg") ||
+                                                 resourceUrl.endsWith(".jpeg") || resourceUrl.endsWith(".webp") ||
+                                                 resourceUrl.endsWith(".gif") || resourceUrl.endsWith(".svg") ||
+                                                 resourceUrl.endsWith(".woff") || resourceUrl.endsWith(".woff2") ||
+                                                 resourceUrl.endsWith(".ttf") || resourceUrl.endsWith(".css") ||
+                                                 resourceUrl.endsWith(".mp4") || resourceUrl.endsWith(".m4a") ||
+                                                 resourceUrl.contains("analytics") || resourceUrl.contains("google") ||
+                                                 resourceUrl.contains("adsense") || resourceUrl.contains("ads") ||
+                                                 resourceUrl.contains("popunder") || resourceUrl.contains("popads") ||
+                                                 resourceUrl.contains("exoclick") || resourceUrl.contains("juicyads")
 
-                        if (isHeavy) {
+                        if (isHeavyOrMalicious) {
+                            // 빈 응답 객체를 반환하여 실제 통신 전송 및 다운로드를 전면 취소 [1.1]
                             return WebResourceResponse("text/plain", "UTF-8", ByteArrayInputStream(ByteArray(0)))
                         }
                         return super.shouldInterceptRequest(view, request)
@@ -166,6 +185,7 @@ class AnilifeProxyExtractor : ExtractorApi() {
 
                 webView.loadUrl(url)
 
+                // 30초 대기 안전 강제 탈출 장치
                 Handler(Looper.getMainLooper()).postDelayed({
                     if (!isResumed) {
                         isResumed = true
@@ -200,7 +220,7 @@ class AnilifeProxyExtractor : ExtractorApi() {
 
         try {
             var finalM3u8 = ""
-            // [최적화 우회 적용] 차단 장벽이 존재하는 playerUrl 주소를 쌩웹뷰 모듈로 우회 획득 [1.1]
+            // [최적화 우회 적용] 차단 및 우회 챌린지가 존재하는 playerUrl 페이지를 극효율 쌩웹뷰 모듈로 우회 획득 [1.1]
             val playerDoc = getDoc(playerUrl)
             val playerHtml = playerDoc.outerHtml()
 
