@@ -146,10 +146,11 @@ object BackupUtils {
         "CONTENT_URI_", "download_status", "search_history", "download_info", "download_resume",
         "download_q_resume", "download_episode_cache",
         
-        // 플러그인 자체는 백업하되, 방대한 플러그인 개별 설정값들은 백업에서 완전히 제외합니다.
+        // ★ 추가 해결 3: 방대한 양의 플러그인 토글 및 플러그인 목록 동기화 차단
         "cat_toggle_",
         "ext_toggle_",
-        "show_ext_"
+        "PLUGINS_KEY",
+        "PLUGINS_KEY_LOCAL"
     )
 
     private fun isBackup(str: String): Boolean {
@@ -159,15 +160,10 @@ object BackupUtils {
     @Suppress("UNCHECKED_CAST")
     fun getBackup(context: Context, resumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null): BackupFile {
         Log.d("SYNC", "[BackupUtils] getBackup() called. Backing up all valid watch history...")
-        val listTake = resumeWatching?.take(50)
         
         val prefs = with(DataStore) { context.getSharedPrefs() }.all
-        val defaultPrefs = with(DataStore) { context.getDefaultSharedPrefs() }.all
 
         val filteredPrefs = prefs.filterKeys { isBackup(it) }
-        val filteredDefaultPrefs = defaultPrefs.filterKeys { isBackup(it) }
-
-        Log.d("SYNC", "[BackupUtils] Filtered Prefs size: ${filteredPrefs.size}, DefaultPrefs size: ${filteredDefaultPrefs.size}")
 
         fun buildVars(map: Map<String, Any?>): BackupVars {
             return BackupVars(
@@ -180,49 +176,36 @@ object BackupUtils {
             )
         }
 
-        return BackupFile(buildVars(filteredPrefs), buildVars(filteredDefaultPrefs))
+        // ★ 추가 해결 1: 앱 자체 설정이 공유되는 것을 막기 위해 settings 백업 강제 차단 (빈 값 전송)
+        return BackupFile(buildVars(filteredPrefs), BackupVars())
     }
 
-    private fun editor(context: Context, isEditingAppSettings: Boolean = false): Editor {
-        val prefs = if (isEditingAppSettings) {
-            with(DataStore) { context.getDefaultSharedPrefs() }
-        } else {
-            with(DataStore) { context.getSharedPrefs() }
-        }
-        return Editor(prefs.edit())
-    }
-
-    private fun <T> restoreMap(context: Context, map: Map<String, T>?, isEditingAppSettings: Boolean = false) {
+    private fun <T> restoreMap(context: Context, map: Map<String, T>?) {
         if (map == null) return
-        val editor = editor(context, isEditingAppSettings)
-        var restoredCount = 0
+        
+        // ★ 추가 해결 4: SharedPreferences 에디터를 우회하여 DataStore.setKey API 직접 호출 (UI 즉시 갱신 보장)
         for ((key, value) in map) {
             if (isBackup(key)) {
-                editor.setKeyRaw(key, value)
-                restoredCount++
+                try {
+                    DataStore.setKey(key, value)
+                } catch (e: Exception) {
+                    Log.d("SYNC", "Failed to restore key via DataStore: $key")
+                }
             }
         }
-        editor.apply()
-        Log.d("SYNC", "[BackupUtils] restoreMap applied $restoredCount keys (isEditingAppSettings=$isEditingAppSettings)")
     }
 
     fun restore(context: Context, backupFile: BackupFile, restoreSettings: Boolean, restoreDataStore: Boolean) {
         Log.d("SYNC", "[BackupUtils] restore() started. restoreSettings=$restoreSettings, restoreDataStore=$restoreDataStore")
-        if (restoreSettings) {
-            restoreMap(context, backupFile.settings.bool, true)
-            restoreMap(context, backupFile.settings.int, true)
-            restoreMap(context, backupFile.settings.string, true)
-            restoreMap(context, backupFile.settings.float, true)
-            restoreMap(context, backupFile.settings.long, true)
-            restoreMap(context, backupFile.settings.stringSet, true)
-        }
+        
+        // ★ 추가 해결 1: 앱 자체 설정 복원 강제 차단 (restoreSettings 플래그가 넘어오더라도 무시함)
         if (restoreDataStore) {
-            restoreMap(context, backupFile.datastore.bool, false)
-            restoreMap(context, backupFile.datastore.int, false)
-            restoreMap(context, backupFile.datastore.string, false)
-            restoreMap(context, backupFile.datastore.float, false)
-            restoreMap(context, backupFile.datastore.long, false)
-            restoreMap(context, backupFile.datastore.stringSet, false)
+            restoreMap(context, backupFile.datastore.bool)
+            restoreMap(context, backupFile.datastore.int)
+            restoreMap(context, backupFile.datastore.string)
+            restoreMap(context, backupFile.datastore.float)
+            restoreMap(context, backupFile.datastore.long)
+            restoreMap(context, backupFile.datastore.stringSet)
         }
         Log.d("SYNC", "[BackupUtils] restore() finished.")
     }
@@ -354,6 +337,7 @@ object ApiUtils {
                 val start = i * chunkSize
                 val end = minOf((i + 1) * chunkSize, cleanedData.length)
                 if (start < end) {
+                    Log.d("SYNC_JSON", cleanedData.substring(start, end))
                 }
             }
             Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA END ==========")
@@ -560,30 +544,22 @@ object UtilKt {
         return result
     }
 
-    // ★ 해결: 표준 Base64(NO_WRAP) 규격을 사용하도록 완전 고정하여 디코딩 충돌 및 GZIP 파싱 크래시 해결
     fun compressJsonToString(json: String): String {
         val bos = ByteArrayOutputStream()
         GZIPOutputStream(bos).use { it.write(json.toByteArray(Charsets.UTF_8)) }
-        return Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
+        return Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP or Base64.URL_SAFE)
     }
 
-    // ★ 해결: DEFAULT 디코딩 우선 시도 후 URL_SAFE 예외 대응 적용, GZIP 매직 넘버 검증으로 자폭 방지 완비
     fun decompressJsonFromString(encoded: String): String {
         return try {
-            val decodedBytes = try {
-                Base64.decode(encoded, Base64.DEFAULT)
-            } catch (e: Exception) {
-                Base64.decode(encoded, Base64.URL_SAFE)
-            }
-
-            if (decodedBytes.size >= 2 && decodedBytes[0] == 0x1F.toByte() && decodedBytes[1] == 0x8B.toByte()) {
-                val bis = ByteArrayInputStream(decodedBytes)
+            val bytes = Base64.decode(encoded, Base64.NO_WRAP or Base64.URL_SAFE)
+            try {
+                val bis = ByteArrayInputStream(bytes)
                 GZIPInputStream(bis).bufferedReader(Charsets.UTF_8).use { it.readText() }
-            } else {
-                String(decodedBytes, Charsets.UTF_8)
+            } catch (e: Exception) {
+                String(bytes, Charsets.UTF_8)
             }
         } catch (e: Exception) {
-            Log.d("SYNC", "[UtilKt] Failed to decompress: ${e.message}")
             ""
         }
     }
