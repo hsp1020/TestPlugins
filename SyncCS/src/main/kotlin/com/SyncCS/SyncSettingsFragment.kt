@@ -1,7 +1,6 @@
 package com.SyncCS
 
 import android.annotation.SuppressLint
-import android.content.Context
 import android.graphics.drawable.Drawable
 import android.os.Build
 import android.os.Bundle
@@ -23,19 +22,14 @@ import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.mapper
 import com.lagradost.cloudstream3.plugins.Plugin
+import com.lagradost.cloudstream3.ui.home.HomeViewModel
 import com.lagradost.cloudstream3.utils.DataStore
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
-class SyncSettingsFragment(
-    private val plugin: Plugin,
-    private val pluginContext: Context
-) : BottomSheetDialogFragment() {
+class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragment() {
 
-    private val res = pluginContext.resources
-    private val resPackageName = pluginContext.packageName
+    // ★ 복원: StremioX와 동일하게 plugin.resources를 사용하여 안전하게 리소스를 획득합니다.
+    private val res = plugin.resources ?: error("Resources not found")
+    private val resPackageName = "com.SyncCS"
 
     private fun <T : View> findView(view: View, name: String): T {
         val id = res.getIdentifier(name, "id", resPackageName)
@@ -46,8 +40,8 @@ class SyncSettingsFragment(
     private fun getLayout(name: String, inflater: LayoutInflater, container: ViewGroup?): View {
         val id = res.getIdentifier(name, "layout", resPackageName)
         if (id == 0) error("Layout XML not found: $name")
-        val pluginInflater = inflater.cloneInContext(pluginContext)
-        return pluginInflater.inflate(id, container, false)
+        val layout = res.getLayout(id)
+        return inflater.inflate(layout, container, false)
     }
 
     private fun getDrawable(name: String): Drawable? {
@@ -130,7 +124,7 @@ class SyncSettingsFragment(
                     CoroutineScope(Dispatchers.IO).launch {
                         try {
                             Log.d("SYNC", "[SyncSettingsFragment] Verifying project details...")
-                            val (success, msg) = ApiUtils.syncProjectDetails(context)
+                            val (success, msg) = ApiUtils.syncProjectDetails(requireContext())
                             if (!success) {
                                 Log.d("SYNC", "[SyncSettingsFragment] Project verification failed: $msg")
                                 withContext(Dispatchers.Main) {
@@ -143,7 +137,7 @@ class SyncSettingsFragment(
 
                             Log.d("SYNC", "[SyncSettingsFragment] Checking for duplicate device names...")
                             val devices = ApiUtils.fetchDevices()
-                            val currentDeviceId = UtilKt.getDeviceId(pluginContext.packageName, requireContext())
+                            val currentDeviceId = UtilKt.getDeviceId(resPackageName, requireContext())
                             val isDuplicate = devices.any { it.name == deviceName && it.deviceId != currentDeviceId }
                             
                             if (isDuplicate) {
