@@ -29,28 +29,31 @@ class SyncSettingsFragment(
     private val pluginContext: Context // Plugin에서 넘겨받은 리소스 컨텍스트
 ) : BottomSheetDialogFragment() {
 
-    // plugin.resources 대신 pluginContext.resources를 사용합니다.
     private val res = pluginContext.resources
+    // 핵심 수정: Kotlin 클래스의 패키지명이 아닌, 실제 안드로이드 Context의 패키지명을 사용합니다.
+    private val resPackageName = pluginContext.packageName
 
     private fun <T : View> findView(view: View, name: String): T {
-        val id = res.getIdentifier(name, "id", plugin.javaClass.packageName)
+        val id = res.getIdentifier(name, "id", resPackageName)
+        if (id == 0) throw RuntimeException("View ID not found: $name")
         return view.findViewById(id)
     }
 
     private fun getLayout(name: String, inflater: LayoutInflater, container: ViewGroup?): View {
-        val id = res.getIdentifier(name, "layout", plugin.javaClass.packageName)
-        // 핵심: Inflater에 플러그인 컨텍스트를 입혀서 XML을 파싱하도록 합니다.
+        val id = res.getIdentifier(name, "layout", resPackageName)
+        if (id == 0) throw RuntimeException("Layout XML not found: $name")
+        
         val pluginInflater = inflater.cloneInContext(pluginContext)
         return pluginInflater.inflate(id, container, false)
     }
 
     private fun getDrawable(name: String): Drawable? {
-        val id = res.getIdentifier(name, "drawable", plugin.javaClass.packageName)
+        val id = res.getIdentifier(name, "drawable", resPackageName)
         return if (id != 0) ResourcesCompat.getDrawable(res, id, null) else null
     }
 
     private fun makeTvCompatible(view: View) {
-        val id = res.getIdentifier("outline", "drawable", plugin.javaClass.packageName)
+        val id = res.getIdentifier("outline", "drawable", resPackageName)
         if (id != 0) {
             view.background = ResourcesCompat.getDrawable(res, id, null)
         }
