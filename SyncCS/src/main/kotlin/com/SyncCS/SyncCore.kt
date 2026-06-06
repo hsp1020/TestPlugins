@@ -133,22 +133,10 @@ object BackupUtils {
         "ULTIMA_WATCH_SYNC_CREDS", "used_fstream_providers_v3", "fstream_version", "Aniyomi_Plugin_Successful_Install",
         "enable_support_by_bongngotv", "prerelease_update", "data_store_helper/account_key_index", "VERSION_NAME", 
         "FILES_TO_DELETE_KEY", "HAS_DONE_SETUP", "video_source_priority", "preferred_audio_language",
-        
-        // ★★★ 로그캣 분석을 통해 추가된 쓰레기 데이터 필터링 목록 ★★★
-        "episode_parent_index_",
-        "download_header_cache",
-        "BACKUP_download_header_cache",
-        "result_season",
-        "result_episode",
-        "result_dub",
-        "CONTENT_URI_",
-        "download_status",
-        "video_watch_state",
-        "search_history",
-        "download_info",
-        "download_resume",
-        "download_q_resume",
-        "download_episode_cache"
+        "episode_parent_index_", "download_header_cache", "BACKUP_download_header_cache",
+        "result_season", "result_episode", "result_dub", "CONTENT_URI_", "download_status",
+        "video_watch_state", "search_history", "download_info", "download_resume",
+        "download_q_resume", "download_episode_cache"
     )
 
     private fun isResume(str: String): Boolean {
@@ -333,19 +321,18 @@ object ApiUtils {
         val cleanedData = UtilKt.cleanedSyncData(backupData)
         val compressedData = UtilKt.compressJsonToString(cleanedData)
         
-        Log.d("SyncCS", "Original JSON Length: ${backupData.length}")
-        Log.d("SyncCS", "Cleaned JSON Length: ${cleanedData.length}")
-        Log.d("SyncCS", "Compressed Base64 Length: ${compressedData.length}")
-
         if (compressedData.length > 65000) {
-            return Pair(false, "Data too large (${compressedData.length} chars). Check Logcat 'SyncCS_RAW' to see what is bloating the data.")
+            return Pair(false, "Data too large (${compressedData.length} chars).")
         }
 
         val devices = fetchDevices()
-        val existingDevice = devices.find { it.deviceId == deviceId }
         
-        if (existingDevice != null && existingDevice.itemId.isNotBlank()) {
-            deleteDevice(projectId, existingDevice.itemId)
+        // ★ 핵심 수정: find(1개만 찾음) -> filter(전부 다 찾음) 로 변경하여 중복 기기 싹쓸이 삭제
+        val existingDevices = devices.filter { it.deviceId == deviceId }
+        existingDevices.forEach { device ->
+            if (device.itemId.isNotBlank()) {
+                deleteDevice(projectId, device.itemId)
+            }
         }
         
         val title = "$deviceName|$deviceId"
