@@ -2,20 +2,14 @@ package com.SyncCS
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.content.DialogInterface
-import android.content.res.Resources
-import android.graphics.drawable.Drawable
+import android.graphics.Color
 import android.os.Bundle
+import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.widget.EditText
-import android.widget.ImageView
-import android.widget.Switch
-import android.widget.TextView
-import androidx.annotation.RequiresApi
+import android.widget.*
 import androidx.appcompat.app.AlertDialog
-import androidx.core.content.res.ResourcesCompat
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.CommonActivity
@@ -26,63 +20,110 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.xmlpull.v1.XmlPullParser
 
 class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragment() {
-    private val res: Resources
 
-    init {
-        val resources = plugin.resources ?: throw Exception("Unable to read resources")
-        this.res = resources
-    }
-
-    @Suppress("UNCHECKED_CAST")
-    private fun <T : View> findView(view: View, str: String): T {
-        return view.findViewById(this.res.getIdentifier(str, "id", plugin.javaClass.packageName)) as T
-    }
-
-    private fun getLayout(name: String, inflater: LayoutInflater, container: ViewGroup?): View {
-        val id = this.res.getIdentifier(name, "layout", plugin.javaClass.packageName)
-        val parser = this.res.getLayout(id)
-        return inflater.inflate(parser as XmlPullParser, container, false)
-    }
-
-    private fun getDrawable(name: String): Drawable? {
-        val id = this.res.getIdentifier(name, "drawable", plugin.javaClass.packageName)
-        return ResourcesCompat.getDrawable(this.res, id, null)
-    }
-
-    private fun getString(name: String): String {
-        val id = this.res.getIdentifier(name, "string", plugin.javaClass.packageName)
-        return this.res.getString(id)
-    }
-
-    @Suppress("DEPRECATION")
-    private fun makeTvCompatible(view: View) {
-        val id = this.res.getIdentifier("outline", "drawable", plugin.javaClass.packageName)
-        view.background = this.res.getDrawable(id, null)
-    }
-
-    @RequiresApi(23)
-    @SuppressLint("UseSwitchCompatOrMaterialCode")
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
         savedInstanceState: Bundle?
-    ): View? {
-        val layout = getLayout("settings", inflater, container)
-        findView<TextView>(layout, "config_text").text = "Config"
-        findView<TextView>(layout, "group_text").text = "Guide"
-        val buttonConfig = findView<ImageView>(layout, "button_config")
-        buttonConfig.setImageDrawable(getDrawable("edit_icon"))
-        makeTvCompatible(buttonConfig)
-        
-        buttonConfig.setOnClickListener {
-            val layoutConfig = getLayout("config", inflater, container)
-            val tokenInput = findView<EditText>(layoutConfig, "token")
-            
-            val context = AcraApplication.context
+    ): View {
+        val ctx = requireContext()
+
+        val mainLayout = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(60, 60, 60, 60)
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        // Config Row Layout
+        val configRow = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 20, 0, 20)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+        val configText = TextView(ctx).apply {
+            text = "Config"
+            textSize = 18f
+            setTextColor(Color.WHITE)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val configButton = Button(ctx).apply {
+            text = "Setup"
+            setOnClickListener { showConfigDialog() }
+        }
+        configRow.addView(configText)
+        configRow.addView(configButton)
+        mainLayout.addView(configRow)
+
+        // Guide Row Layout
+        val guideRow = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 20, 0, 20)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+        val guideText = TextView(ctx).apply {
+            text = "Guide"
+            textSize = 18f
+            setTextColor(Color.WHITE)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val guideButton = Button(ctx).apply {
+            text = "View"
+            setOnClickListener { showGuideDialog() }
+        }
+        guideRow.addView(guideText)
+        guideRow.addView(guideButton)
+        mainLayout.addView(guideRow)
+
+        return mainLayout
+    }
+
+    private fun showGuideDialog() {
+        val ctx = context ?: return
+        val textView = TextView(ctx).apply {
+            text = "1. GitHub에서 'project' 권한이 체크된 PAT 토큰을 발급하세요.\n\n" +
+                   "2. GitHub 프로필에서 Project V2를 생성하고 프로젝트 번호를 확인하세요.\n\n" +
+                   "3. Configuration 메뉴에 토큰과 번호를 입력한 뒤 'Save'를 누르세요.\n\n" +
+                   "4. 동기화 후 앱을 완전히 종료(스와이프)하고 다시 켜야 데이터가 화면에 표시됩니다."
+            setPadding(60, 60, 60, 60)
+            textSize = 15f
+            setTextColor(Color.WHITE)
+        }
+        AlertDialog.Builder(ctx)
+            .setTitle("Guide")
+            .setView(textView)
+            .setPositiveButton("Close", null)
+            .show()
+    }
+
+    @SuppressLint("SetTextI18n")
+    private fun showConfigDialog() {
+        val ctx = context ?: return
+
+        val scrollContainer = ScrollView(ctx)
+        val configLayout = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(50, 50, 50, 50)
+        }
+        scrollContainer.addView(configLayout)
+
+        // Token Input
+        val tokenInput = EditText(ctx).apply {
+            hint = "GitHub PAT Token"
             var tokenVal: String? = null
+            val context = AcraApplication.context
             if (context != null) {
                 try {
                     val raw = with(DataStore) { context.getSharedPrefs().getString("sync_token", null) }
@@ -92,9 +133,18 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                 } catch (unused: Exception) {
                 }
             }
-            tokenInput.setText(tokenVal)
-            
-            val projectNumInput = findView<EditText>(layoutConfig, "project_num")
+            setText(tokenVal)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, 10, 0, 20) }
+        }
+        configLayout.addView(tokenInput)
+
+        // Project Num Input
+        val projectNumInput = EditText(ctx).apply {
+            hint = "GitHub Project Number"
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER
             var projectNumVal: String? = null
             val context2 = AcraApplication.context
             if (context2 != null) {
@@ -106,10 +156,17 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                 } catch (unused: Exception) {
                 }
             }
-            projectNumInput.setText(projectNumVal)
-            
-            val backupSwitch = findView<Switch>(layoutConfig, "backup_device")
-            backupSwitch.text = "Backup data to the cloud"
+            setText(projectNumVal)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, 10, 0, 20) }
+        }
+        configLayout.addView(projectNumInput)
+
+        // Backup Switch
+        val backupSwitch = Switch(ctx).apply {
+            text = "Backup data to the cloud"
             var backupVal: String? = null
             val context3 = AcraApplication.context
             if (context3 != null) {
@@ -121,10 +178,14 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                 } catch (unused: Exception) {
                 }
             }
-            backupSwitch.isChecked = (backupVal == "true")
-            
-            val restoreSwitch = findView<Switch>(layoutConfig, "restore_device")
-            restoreSwitch.text = "Recover data from cloud"
+            isChecked = (backupVal == "true")
+            setPadding(0, 20, 0, 20)
+        }
+        configLayout.addView(backupSwitch)
+
+        // Restore Switch
+        val restoreSwitch = Switch(ctx).apply {
+            text = "Recover data from cloud"
             var restoreVal: String? = null
             val context4 = AcraApplication.context
             if (context4 != null) {
@@ -136,65 +197,54 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                 } catch (unused: Exception) {
                 }
             }
-            restoreSwitch.isChecked = (restoreVal == "true")
-            
-            val layoutLoading = getLayout("loading", inflater, container)
-            val ctx = context ?: throw Exception("Unable to build alert dialog")
-            val loadingDialog = AlertDialog.Builder(ctx).setView(layoutLoading).setCancelable(false).create()
-            
-            AlertDialog.Builder(ctx)
-                .setTitle("Config")
-                .setView(layoutConfig)
-                .setPositiveButton("Save") { _, _ ->
-                    val token = tokenInput.text.toString().trim()
-                    val projectNum = projectNumInput.text.toString().trim()
-                    if (token.isEmpty() || projectNum.isEmpty()) {
-                        CommonActivity.showToast("Please fill in all information", null)
-                        return@setPositiveButton
-                    }
-                    loadingDialog.show()
-                    AcraApplication.Companion.setKey("sync_token", token)
-                    AcraApplication.Companion.setKey("sync_project_num", projectNum)
-                    AcraApplication.Companion.setKey("backup_device", backupSwitch.isChecked.toString())
-                    AcraApplication.Companion.setKey("restore_device", restoreSwitch.isChecked.toString())
-                    
-                    CoroutineScope(Dispatchers.IO).launch {
-                        try {
-                            val res = ApiUtils.INSTANCE.syncProjectDetails(ctx)
-                            withContext(Dispatchers.Main) {
-                                loadingDialog.dismiss()
-                                if (res != null && res.first) {
-                                    dismiss()
-                                }
-                                CommonActivity.showToast(res?.second ?: "Sync failed", null)
+            isChecked = (restoreVal == "true")
+            setPadding(0, 20, 0, 20)
+        }
+        configLayout.addView(restoreSwitch)
+
+        val loadingView = ProgressBar(ctx).apply { setPadding(50, 50, 50, 50) }
+        val loadingDialog = AlertDialog.Builder(ctx).setView(loadingView).setCancelable(false).create()
+
+        AlertDialog.Builder(ctx)
+            .setTitle("Config")
+            .setView(scrollContainer)
+            .setPositiveButton("Save") { _, _ ->
+                val token = tokenInput.text.toString().trim()
+                val projectNum = projectNumInput.text.toString().trim()
+                if (token.isEmpty() || projectNum.isEmpty()) {
+                    CommonActivity.showToast("Please fill in all information", null)
+                    return@setPositiveButton
+                }
+                loadingDialog.show()
+                AcraApplication.Companion.setKey("sync_token", token)
+                AcraApplication.Companion.setKey("sync_project_num", projectNum)
+                AcraApplication.Companion.setKey("backup_device", backupSwitch.isChecked.toString())
+                AcraApplication.Companion.setKey("restore_device", restoreSwitch.isChecked.toString())
+
+                CoroutineScope(Dispatchers.IO).launch {
+                    try {
+                        val res = ApiUtils.INSTANCE.syncProjectDetails(ctx)
+                        withContext(Dispatchers.Main) {
+                            loadingDialog.dismiss()
+                            if (res != null && res.first) {
+                                dismiss()
                             }
-                        } catch (e: Exception) {
-                            withContext(Dispatchers.Main) {
-                                loadingDialog.dismiss()
-                                CommonActivity.showToast("Error syncing: $e", null)
-                            }
+                            CommonActivity.showToast(res?.second ?: "Sync failed", null)
+                        }
+                    } catch (e: Exception) {
+                        withContext(Dispatchers.Main) {
+                            loadingDialog.dismiss()
+                            CommonActivity.showToast("Error syncing: $e", null)
                         }
                     }
                 }
-                .setNegativeButton("Reset") { _, _ ->
-                    AcraApplication.Companion.setKey("sync_token", "")
-                    AcraApplication.Companion.setKey("sync_project_num", "")
-                    CommonActivity.showToast("Credentials removed", null)
-                    dismiss()
-                }
-                .show()
-        }
-        
-        val buttonGroup = findView<ImageView>(layout, "button_group")
-        buttonGroup.setImageDrawable(getDrawable("view_icon"))
-        makeTvCompatible(buttonGroup)
-        
-        buttonGroup.setOnClickListener {
-            val layoutGuide = getLayout("guide", inflater, container)
-            val ctx = context ?: throw Exception("Unable to build alert dialog")
-            AlertDialog.Builder(ctx).setTitle("Guide").setView(layoutGuide).show()
-        }
-        
-        return layout
+            }
+            .setNegativeButton("Reset") { _, _ ->
+                AcraApplication.Companion.setKey("sync_token", "")
+                AcraApplication.Companion.setKey("sync_project_num", "")
+                CommonActivity.showToast("Credentials removed", null)
+                dismiss()
+            }
+            .show()
     }
 }
