@@ -68,7 +68,7 @@ class AnilifeProxyExtractor : ExtractorApi() {
 
     /**
      * [재생 링크 추출 전용 극효율 쌩웹뷰]
-     * 하드웨어 가속 강제 해제, 이미지/광고 도메인 차단, 팝업 리다이렉트 원천 봉쇄가 적용된 최적화 엔진
+     * 이중 파싱 전달 규격으로 완벽 보완
      */
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun getDoc(url: String): Document {
@@ -87,24 +87,22 @@ class AnilifeProxyExtractor : ExtractorApi() {
                             webView.clearHistory()
                             webView.loadUrl("about:blank") // 백그라운드 악성 자바스크립트 루프 처형
                             webView.destroy() // 메모리 자원 완전 소멸 반환 [1.1, 1.3]
-                            Log.d(TAG, "[RawWebView] 사용 완료된 추출기 웹뷰 소멸 완료")
                         } catch (e: Exception) { }
                     }
                 }
 
                 class HtmlExtractor {
                     @JavascriptInterface
-                    fun processHTML(html: String) {
+                    fun processHTML(html: String, finalUrl: String) {
                         if (!isResumed) {
                             isResumed = true
                             cleanup()
-                            // resume 대신 표준 resumeWith 규격을 호출하여 onCancellation 컴파일 에러 완전 해결
-                            continuation.resumeWith(Result.success(Jsoup.parse(html, url)))
+                            // resumeWith를 사용하여 컴파일 에러 해결 및 최종 리다이렉트 주소 결합 수립
+                            continuation.resumeWith(Result.success(Jsoup.parse(html, finalUrl)))
                         }
                     }
                 }
 
-                // [렌더링 최적화] GPU 가속을 완전히 해제하여 CPU/GPU 가용 자원 절약 [1.1, 1.3]
                 webView.setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
 
                 webView.settings.apply {
@@ -121,20 +119,18 @@ class AnilifeProxyExtractor : ExtractorApi() {
                 webView.webViewClient = object : WebViewClient() {
                     override fun onPageFinished(view: WebView?, url: String?) {
                         if (isResumed) return
-                        view?.loadUrl("javascript:window.HTMLOUT.processHTML(document.documentElement.outerHTML);")
+                        view?.loadUrl("javascript:window.HTMLOUT.processHTML(document.documentElement.outerHTML, window.location.href);")
                     }
 
-                    // [리다이렉트 원천 차단 최적화] 광고 서버로의 화면 강제 이동 및 팝업 생성을 철저하게 막아 렉 예방
                     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                         val requestUrl = request?.url?.toString() ?: return false
                         if (request.isForMainFrame && !requestUrl.contains("anilife.live") && !requestUrl.contains("about:blank")) {
                             Log.d(TAG, "[RawWebView] [광고 팝업 우회 방어] 강제 리다이렉트 차단: $requestUrl")
-                            return true // 차단 적용
+                            return true
                         }
                         return false
                     }
 
-                    // [데이터/트래픽 다이어트 핵심 최적화] 파싱에 필요없는 미디어 이진 파일 및 광고 네트워크 패킷 드롭 [1.1, 1.2, 1.3]
                     override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                         val resourceUrl = request?.url?.toString()?.lowercase() ?: return null
                         val isHeavyOrMalicious = resourceUrl.endsWith(".png") || resourceUrl.endsWith(".jpg") ||
@@ -149,7 +145,6 @@ class AnilifeProxyExtractor : ExtractorApi() {
                                                  resourceUrl.contains("exoclick") || resourceUrl.contains("juicyads")
 
                         if (isHeavyOrMalicious) {
-                            // 빈 응답 객체를 반환하여 실제 통신 전송 및 다운로드를 전면 취소 [1.1]
                             return WebResourceResponse("text/plain", "UTF-8", ByteArrayInputStream(ByteArray(0)))
                         }
                         return super.shouldInterceptRequest(view, request)
@@ -186,7 +181,6 @@ class AnilifeProxyExtractor : ExtractorApi() {
 
                 webView.loadUrl(url)
 
-                // 30초 대기 안전 강제 탈출 장치
                 Handler(Looper.getMainLooper()).postDelayed({
                     if (!isResumed) {
                         isResumed = true
@@ -223,6 +217,7 @@ class AnilifeProxyExtractor : ExtractorApi() {
             var finalM3u8 = ""
             // [최적화 우회 적용] 차단 및 우회 챌린지가 존재하는 playerUrl 페이지를 극효율 쌩웹뷰 모듈로 우회 획득 [1.1]
             val playerDoc = getDoc(playerUrl)
+            // Jsoup의 완전한 HTML 코드를 수취하기 위해 .outerHtml() 호출 적용 [1.1]
             val playerHtml = playerDoc.outerHtml()
 
             val aldataRegex = Regex("""_aldata\s*=\s*['"]([^'"]+)['"]""")
@@ -361,16 +356,4 @@ class AnilifeProxyExtractor : ExtractorApi() {
 
                 if (path.contains("playlist.m3u8")) {
                     val payload = playlistData.toByteArray(charset("UTF-8"))
-                    out.write("HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nConnection: close\r\nContent-Length: ${payload.size}\r\nAccess-Control-Allow-Origin: *\r\n\r\n".toByteArray())
-                    out.write(payload)
-                } else {
-                    out.write("HTTP/1.1 404 Not Found\r\n\r\n".toByteArray())
-                }
-                out.flush()
-            } catch (e: Exception) {
-            } finally {
-                try { socket.close() } catch (e: Exception) {}
-            }
-        }
-    }
-}
+                    out.writ
