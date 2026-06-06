@@ -18,7 +18,7 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
 // ==========================================
-// Data Models
+// Data Models (중첩 영역별 Content 클래스 누락 복구 완료)
 // ==========================================
 
 data class APIRes(
@@ -57,6 +57,11 @@ data class APIRes(
                 @JsonProperty("content") var content: Content? = null
             ) {
                 @JsonProperty("draftIssue") var draftIssue: Content? = null
+
+                // ★ 해결: Issue 내부 전용 Content 클래스를 올바르게 재정의하여 Unresolved 에러를 해결했습니다.
+                data class Content(
+                    @JsonProperty("id") var id: String? = null
+                )
             }
         }
         data class DelItem(@JsonProperty("deletedItemId") var deletedItemId: String? = null)
@@ -146,6 +151,7 @@ object BackupUtils {
     @Suppress("UNCHECKED_CAST")
     fun getBackup(context: Context, resumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null): BackupFile {
         Log.d("SYNC", "[BackupUtils] getBackup() called. Backing up all valid watch history...")
+        val listTake = resumeWatching?.take(50)
         
         val prefs = with(DataStore) { context.getSharedPrefs() }.all
         val defaultPrefs = with(DataStore) { context.getDefaultSharedPrefs() }.all
@@ -547,13 +553,11 @@ object UtilKt {
         return result
     }
 
-    // ★ 해결 1: 표준 Base64(NO_WRAP) 규격을 사용하여 기기간 디코딩 충돌 및 GZIP 압축 크래시를 원천 해결했습니다.
     fun compressJsonToString(json: String): String {
         val bytes = json.toByteArray(Charsets.UTF_8)
         return Base64.encodeToString(bytes, Base64.NO_WRAP)
     }
 
-    // ★ 해결 1: GZIP 매직 넘버 검증 및 유연한 DEFAULT/URL_SAFE 하이브리드 디코딩 적용
     fun decompressJsonFromString(encoded: String): String {
         return try {
             val decodedBytes = try {
