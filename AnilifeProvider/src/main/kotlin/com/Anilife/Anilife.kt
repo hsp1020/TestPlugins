@@ -9,7 +9,7 @@ import android.webkit.WebViewClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceError
 import android.webkit.WebResourceResponse
-import android.webkit.CookieManager
+import android.webkit.CookieManager // 쿠키 제어용 패키지 수입
 import android.net.http.SslError
 import android.webkit.SslErrorHandler
 import com.lagradost.cloudstream3.*
@@ -43,6 +43,7 @@ class Anilife : MainAPI() {
     )
 
     companion object {
+        // [병렬 렉 차단] 웹뷰가 동시에 가동되어 메인 스레드를 정지시키는 현상 방지용 세마포어
         private val webViewSemaphore = Semaphore(2)
     }
 
@@ -56,7 +57,49 @@ class Anilife : MainAPI() {
     )
 
     /**
-     * 레퍼러 검증 우회를 위해 호출 시점에 추가 HTTP 헤더맵을 동적으로 WebView에 주입하는 리졸버
+     * [하이브리드 폴백 엔진]
+     * 쿠키 브릿지를 타는 1차 OkHttp 시도를 우선 수행하고, 실패 시 2차 최적화 쌩웹뷰로 전환하는 우회 코어
+     */
+    private suspend fun getDocumentWithFallback(url: String, headers: Map<String, String> = commonHeaders): Document {
+        Log.d(TAG, "[HybridEngine] 통신 요청 개시 -> $url")
+
+        // 1. 웹뷰가 수집해서 안드로이드 OS 영역에 캐싱해 둔 쿠키가 존재하는지 탐색
+        val cookieHeader = try {
+            CookieManager.getInstance().getCookie("https://anilife.live")
+        } catch (e: Exception) {
+            Log.w(TAG, "[HybridEngine] 쿠키 매니저 조회 실패: ${e.message}")
+            null
+        }
+
+        // 2. 쿠키가 존재한다면 우선적으로 가벼운 OkHttp 직접 통신 시도 (DoH/VPN 환경에서 동작 보장)
+        if (!cookieHeader.isNullOrEmpty()) {
+            try {
+                Log.d(TAG, "[HybridEngine] [1차 시도] 기수확된 쿠키 브릿지 활용 OkHttp 직접 요청 개시")
+                val mergedHeaders = headers.toMutableMap()
+                mergedHeaders["Cookie"] = cookieHeader
+                
+                val response = app.get(url, headers = mergedHeaders)
+                if (response.code == 200) {
+                    Log.d(TAG, "[HybridEngine] [1차 시도 성공] OkHttp 쿠키 통신으로 즉시 완료!")
+                    return response.document
+                }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                Log.w(TAG, "[HybridEngine] [1차 시도 실패] 연결 거부됨 (${e.message}). 즉시 2차 쌩웹뷰로 자동 폴백(우회)합니다.")
+            }
+        }
+
+        // 3. 쿠키가 없거나 OkHttp 연결이 거부당한 경우, 세마포어 정렬을 거쳐 안전하게 최적화 쌩웹뷰 기동 [1.1, 1.3]
+        Log.d(TAG, "[HybridEngine] [2차 시도] 세마포어 대기열 등록 (슬롯 잔여: ${webViewSemaphore.availablePermits})")
+        return webViewSemaphore.withPermit {
+            Log.d(TAG, "[HybridEngine] [2차 시도] 슬롯 확보 -> 초경량 쌩웹뷰 기동")
+            getDoc(url, headers)
+        }
+    }
+
+    /**
+     * [최적화 쌩웹뷰 단일 로더]
+     * 하드웨어 가속 강제 해제, 리소스 다운로드 차단, 사후 소멸 처리가 적용된 핵심 엔진
      */
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun getDoc(url: String, headers: Map<String, String> = commonHeaders): Document {
@@ -85,11 +128,13 @@ class Anilife : MainAPI() {
                         if (!isResumed) {
                             isResumed = true
                             cleanup()
+                            // Jsoup.parse에 리다이렉트 완료 주소인 finalUrl을 바인딩하여 resumeWith 리턴 처리
                             continuation.resumeWith(Result.success(Jsoup.parse(html, finalUrl)))
                         }
                     }
                 }
 
+                // [렌더링 최적화] GPU 가속을 완전히 해제하여 CPU/GPU 가용 자원 절약 [1.1, 1.3]
                 webView.setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
 
                 webView.settings.apply {
@@ -97,7 +142,7 @@ class Anilife : MainAPI() {
                     domStorageEnabled = true
                     databaseEnabled = true
                     userAgentString = pcUserAgent
-                    loadsImagesAutomatically = false
+                    loadsImagesAutomatically = false // 이미지 다운로드 차단 [1.1, 1.3]
                     mediaPlaybackRequiresUserGesture = true
                 }
 
@@ -154,7 +199,7 @@ class Anilife : MainAPI() {
                     }
                 }
 
-                // [최적화 우회 핵심] 망 우회를 위해 loadUrl 시점에 동적 HTTP Headers를 탑재하여 요청 [1.1]
+                // 동적 레퍼러 헤더와 유저에이전트를 탑재해 웹뷰 요청 실행 [1.1]
                 webView.loadUrl(url, headers)
 
                 Handler(Looper.getMainLooper()).postDelayed({
@@ -181,7 +226,7 @@ class Anilife : MainAPI() {
                   else "$mainUrl${request.data.substringBeforeLast("/")}/$page"
         
         return try {
-            val doc = webViewSemaphore.withPermit { getDoc(url) }
+            val doc = getDocumentWithFallback(url) // 가시성 및 렉 제어가 수립된 하이브리드 엔진 호출
             val items = parseCommonList(doc)
             val hasNextPage = if (request.name.contains("TOP 20")) false else items.isNotEmpty()
             
@@ -213,7 +258,7 @@ class Anilife : MainAPI() {
                 
                 newAnimeSearchResponse(title, finalHref, TvType.Anime) {
                     this.posterUrl = poster
-                    this.posterHeaders = commonHeaders
+                    this.posterHeaders = commonHeaders // 포스터 403을 전면 회피하기 위해 정밀 레퍼러 헤더 탑재 [1.3]
                 }
             } catch (e: Exception) { null }
         }
@@ -221,7 +266,7 @@ class Anilife : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         return try {
-            val doc = webViewSemaphore.withPermit { getDoc("$mainUrl/search?keyword=$query") }
+            val doc = getDocumentWithFallback("$mainUrl/search?keyword=$query")
             parseCommonList(doc)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
@@ -238,7 +283,7 @@ class Anilife : MainAPI() {
         } else url
 
         try {
-            val doc = webViewSemaphore.withPermit { getDoc(cleanUrl) }
+            val doc = getDocumentWithFallback(cleanUrl)
             val finalUrl = doc.location()
             val encodedRef = Base64.encodeToString(finalUrl.toByteArray(), Base64.NO_WRAP)
 
@@ -317,14 +362,13 @@ class Anilife : MainAPI() {
 
         try {
             val linkHeaders = commonHeaders.toMutableMap()
-            linkHeaders["Referer"] = detailReferer // 동적 레퍼러 헤더 설정
+            linkHeaders["Referer"] = detailReferer
 
-            println("[DEBUG-loadLinks] 쌩웹뷰로 비디오 프록시 HTML 수집 개시 -> $cleanData")
-            // [최적화 우회 연동]: 웹뷰 loadUrl 전송 시점에 정적 레퍼러를 탑재하여 서버 보안 검증 해제 [1.1]
-            val doc = webViewSemaphore.withPermit { getDoc(cleanData, linkHeaders) }
+            println("[DEBUG-loadLinks] 하이브리드 엔진 가동 -> $cleanData")
+            val doc = getDocumentWithFallback(cleanData, linkHeaders)
             val docLocation = doc.location()
             val docHtmlLen = doc.outerHtml().length
-            println("[DEBUG-loadLinks] 웹뷰 호출 완수. 리다이렉트 도달 주소: $docLocation, 원본 HTML 크기: $docHtmlLen 자")
+            println("[DEBUG-loadLinks] 호출 완수. 리다이렉트 도달 주소: $docLocation, 원본 HTML 크기: $docHtmlLen 자")
 
             // [이중 매칭 연동]: 웹뷰가 알아서 리다이렉트를 끝냈는지 수집하여 낚아챔
             val playerUrl = if (docLocation.contains("h/live") && docLocation.contains("p=")) {
