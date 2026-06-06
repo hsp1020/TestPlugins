@@ -13,7 +13,6 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mapper
 import com.lagradost.cloudstream3.utils.DataStore
 import com.lagradost.cloudstream3.utils.DataStoreHelper
-import kotlinx.coroutines.sync.Mutex
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
@@ -23,7 +22,7 @@ import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 
 // ==========================================
-// Data Models
+// Data Models (updatedAt 필드 완벽 복원)
 // ==========================================
 
 data class APIRes(
@@ -33,6 +32,7 @@ data class APIRes(
     data class Data(
         @JsonProperty("viewer") var viewer: Viewer? = null,
         @JsonProperty("addProjectV2DraftIssue") var issue: Issue? = null,
+        @JsonProperty("updateProjectV2DraftIssue") var updateIssue: Issue? = null,
         @JsonProperty("deleteProjectV2Item") var delItem: DelItem? = null
     ) {
         data class Viewer(@JsonProperty("projectV2") var projectV2: ProjectV2?) {
@@ -43,7 +43,7 @@ data class APIRes(
                 data class Items(@JsonProperty("nodes") var nodes: List<Node>? = null) {
                     data class Node(
                         @JsonProperty("id") var id: String? = null,
-                        @JsonProperty("updatedAt") var updatedAt: String? = null,
+                        @JsonProperty("updatedAt") var updatedAt: String? = null, // ★ 복원 완료
                         @JsonProperty("content") var content: Content? = null
                     ) {
                         data class Content(
@@ -87,7 +87,8 @@ data class SyncDevice(
     @JsonProperty("deviceId") var deviceId: String,
     @JsonProperty("itemId") var itemId: String,
     @JsonProperty("syncedData") var syncedData: String? = null,
-    @JsonProperty("updatedAt") var updatedAt: String? = null
+    @JsonProperty("updatedAt") var updatedAt: String? = null,
+    @JsonProperty("draftIssueId") var draftIssueId: String? = null
 )
 
 // ==========================================
@@ -142,33 +143,19 @@ object BackupUtils {
         "download_q_resume", "download_episode_cache"
     )
 
-    private fun isResume(str: String): Boolean {
+    private fun isBackup(str: String): Boolean {
         return nonTransferableKeys.none { str.contains(it, ignoreCase = true) }
     }
 
-    private fun isBackup(str: String, resumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null): Boolean {
-        if (!isResume(str)) return false
-        if (str.startsWith("result_resume_watching_2/") || 
-            str.startsWith("result_watch_state/") || 
-            str.startsWith("video_pos_dur/")) {
-            if (resumeWatching == null) return false
-            val id = str.substringAfter("/")
-            return resumeWatching.any { it.url == id || it.url.contains(id) }
-        }
-        return true
-    }
-
-    // ★ 해결: resumeWatching 매개변수에 기본값 null (= null)을 추가하여 프래그먼트 컴파일 문제를 완전히 해결했습니다.
     @Suppress("UNCHECKED_CAST")
     fun getBackup(context: Context, resumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null): BackupFile {
-        Log.d("SYNC", "[BackupUtils] getBackup() called. Filtering Top 50 resumeWatching...")
-        val listTake = resumeWatching?.take(50)
+        Log.d("SYNC", "[BackupUtils] getBackup() called. Backing up all valid watch history...")
         
         val prefs = with(DataStore) { context.getSharedPrefs() }.all
         val defaultPrefs = with(DataStore) { context.getDefaultSharedPrefs() }.all
 
-        val filteredPrefs = prefs.filterKeys { isBackup(it, listTake) }
-        val filteredDefaultPrefs = defaultPrefs.filterKeys { isBackup(it, listTake) }
+        val filteredPrefs = prefs.filterKeys { isBackup(it) }
+        val filteredDefaultPrefs = defaultPrefs.filterKeys { isBackup(it) }
 
         Log.d("SYNC", "[BackupUtils] Filtered Prefs size: ${filteredPrefs.size}, DefaultPrefs size: ${filteredDefaultPrefs.size}")
 
@@ -200,7 +187,7 @@ object BackupUtils {
         val editor = editor(context, isEditingAppSettings)
         var restoredCount = 0
         for ((key, value) in map) {
-            if (isResume(key)) {
+            if (isBackup(key)) {
                 editor.setKeyRaw(key, value)
                 restoredCount++
             }
@@ -265,19 +252,13 @@ object ApiUtils {
                 headers = mapOf("Authorization" to "Bearer $token"),
                 json = payload
             )
-            val res = response.parsedSafe<APIRes>()
-            if (res?.errors?.isNotEmpty() == true) {
-                Log.d("SYNC", "[ApiUtils] GraphQL Error: ${res.errors!!.first().message}")
-            }
-            res
+            response.parsedSafe<APIRes>()
         } catch (e: Exception) {
-            Log.d("SYNC", "[ApiUtils] Exception in apiCall: ${e.message}")
             null
         }
     }
 
     suspend fun syncProjectDetails(context: Context?): Pair<Boolean, String> {
-        Log.d("SYNC", "[ApiUtils] syncProjectDetails() called")
         if (!isLoggedIn()) return Pair(false, "Please enter Token and Project Number.")
         
         val prefs = with(DataStore) { context?.getSharedPrefs() } ?: return Pair(false, "Context error")
@@ -294,7 +275,6 @@ object ApiUtils {
         val projectId = res?.data?.viewer?.projectV2?.id
         if (projectId != null) {
             AcraApplication.setKey("sync_project_id", projectId)
-            Log.d("SYNC", "[ApiUtils] Project ID fetched successfully: $projectId")
             return Pair(true, "Successfully connected to GitHub Project!")
         }
         
@@ -302,7 +282,6 @@ object ApiUtils {
     }
 
     suspend fun fetchDevices(): List<SyncDevice> {
-        Log.d("SYNC", "[ApiUtils] fetchDevices() called")
         if (!isLoggedIn()) return emptyList()
         
         val context = AcraApplication.context ?: return emptyList()
@@ -310,40 +289,41 @@ object ApiUtils {
         val numStr = prefs.getString("sync_project_num", null)?.let { mapper.readValue<String>(it) } ?: return emptyList()
         val num = numStr.toIntOrNull() ?: return emptyList()
         
+        // ★ 복원 완료: updatedAt 추가로 태블릿이 새로운 업로드를 정상 감지합니다.
         val query = """query(${'$'}num: Int!) { viewer { projectV2(number: ${'$'}num) { id items(first: 100) { nodes { id updatedAt content { ... on DraftIssue { id title bodyText } } } } } } }"""
         val res = apiCall(query, mapOf("num" to num))
         
         val nodes = res?.data?.viewer?.projectV2?.items?.nodes ?: return emptyList()
         
-        val devices = nodes.mapNotNull { node ->
+        return nodes.mapNotNull { node ->
             val title = node.content?.title ?: "Unknown"
             val body = node.content?.bodyText ?: ""
             val itemId = node.id ?: return@mapNotNull null
             val updatedAt = node.updatedAt ?: ""
+            val draftIssueId = node.content?.id ?: ""
             
             val parts = title.split("|")
             if (parts.size >= 2) {
-                SyncDevice(name = parts[0], deviceId = parts[1], itemId = itemId, syncedData = body, updatedAt = updatedAt)
+                SyncDevice(name = parts[0], deviceId = parts[1], itemId = itemId, syncedData = body, updatedAt = updatedAt, draftIssueId = draftIssueId)
             } else {
-                SyncDevice(name = title, deviceId = "", itemId = itemId, syncedData = body, updatedAt = updatedAt)
+                SyncDevice(name = title, deviceId = "", itemId = itemId, syncedData = body, updatedAt = updatedAt, draftIssueId = draftIssueId)
             }
         }.sortedBy { it.updatedAt }
-        
-        Log.d("SYNC", "[ApiUtils] Fetched ${devices.size} devices from GitHub.")
-        return devices
     }
 
     suspend fun deleteDevice(projectId: String, itemId: String): Boolean {
-        Log.d("SYNC", "[ApiUtils] deleteDevice() called for itemId: $itemId")
         val delQuery = """mutation(${'$'}projectId: ID!, ${'$'}itemId: ID!) { deleteProjectV2Item(input: {projectId: ${'$'}projectId, itemId: ${'$'}itemId}) { deletedItemId } }"""
         val res = apiCall(delQuery, mapOf("projectId" to projectId, "itemId" to itemId))
-        val success = res?.errors.isNullOrEmpty()
-        Log.d("SYNC", "[ApiUtils] deleteDevice success: $success")
-        return success
+        return res?.errors.isNullOrEmpty()
+    }
+
+    suspend fun updateDevice(draftIssueId: String, title: String, body: String): Boolean {
+        val updateQuery = """mutation(${'$'}draftIssueId: ID!, ${'$'}title: String!, ${'$'}body: String!) { updateProjectV2DraftIssue(input: {draftIssueId: ${'$'}draftIssueId, title: ${'$'}title, body: ${'$'}body}) { draftIssue { id } } }"""
+        val res = apiCall(updateQuery, mapOf("draftIssueId" to draftIssueId, "title" to title, "body" to body))
+        return res != null && res.errors.isNullOrEmpty()
     }
 
     suspend fun syncThisDevice(backupData: String, context: Context? = AcraApplication.context): Pair<Boolean, String> {
-        Log.d("SYNC", "[ApiUtils] syncThisDevice() called")
         if (!isLoggedIn()) return Pair(false, "Not logged in")
         
         if (!isSyncing.compareAndSet(false, true)) {
@@ -372,44 +352,45 @@ object ApiUtils {
 
             val compressedData = UtilKt.compressJsonToString(cleanedData)
             
-            Log.d("SYNC", "[ApiUtils] Compressed data length: ${compressedData.length}")
             if (compressedData.length > 65000) {
-                Log.d("SYNC", "[ApiUtils] ERROR: Data too large (${compressedData.length} chars)")
                 return Pair(false, "Data too large (${compressedData.length} chars).")
             }
 
             val devices = fetchDevices()
-            
             val existingDevices = devices.filter { it.deviceId == deviceId }
-            Log.d("SYNC", "[ApiUtils] Found ${existingDevices.size} existing cards for this device. Deleting...")
-            existingDevices.forEach { device ->
-                if (device.itemId.isNotBlank()) {
-                    deleteDevice(projectId, device.itemId)
-                }
-            }
-            
             val title = "$deviceName|$deviceId"
-            val addQuery = """mutation(${'$'}projectId: ID!, ${'$'}title: String!, ${'$'}body: String!) { addProjectV2DraftIssue(input: {projectId: ${'$'}projectId, title: ${'$'}title, body: ${'$'}body}) { projectItem { id } } }"""
-            Log.d("SYNC", "[ApiUtils] Uploading new draft issue for device: $deviceName")
-            val addRes = apiCall(addQuery, mapOf("projectId" to projectId, "title" to title, "body" to compressedData))
-            
-            if (addRes?.errors?.isNotEmpty() == true) {
-                Log.d("SYNC", "[ApiUtils] Upload Error: ${addRes.errors!!.first().message}")
-                return Pair(false, "Upload Error: ${addRes.errors!!.first().message}")
+
+            if (existingDevices.isNotEmpty()) {
+                val target = existingDevices.first()
+                Log.d("SYNC", "[ApiUtils] Existing card found. Updating card in place: ${target.name}")
+                val updateSuccess = updateDevice(target.draftIssueId ?: "", title, compressedData)
+                if (!updateSuccess) {
+                    return Pair(false, "Failed to update existing card.")
+                }
+
+                if (existingDevices.size > 1) {
+                    existingDevices.drop(1).forEach { duplicate ->
+                        deleteDevice(projectId, duplicate.itemId)
+                    }
+                }
+                return Pair(true, "Data updated successfully in place!")
+            } else {
+                val addQuery = """mutation(${'$'}projectId: ID!, ${'$'}title: String!, ${'$'}body: String!) { addProjectV2DraftIssue(input: {projectId: ${'$'}projectId, title: ${'$'}title, body: ${'$'}body}) { projectItem { id } } }"""
+                val addRes = apiCall(addQuery, mapOf("projectId" to projectId, "title" to title, "body" to compressedData))
+                
+                if (addRes?.errors?.isNotEmpty() == true) {
+                    return Pair(false, "Upload Error: ${addRes.errors!!.first().message}")
+                }
+                
+                val newItemId = addRes?.data?.issue?.projectItem?.id
+                if (newItemId != null) {
+                    AcraApplication.setKey("sync_item_id", newItemId)
+                    return Pair(true, "Data synced successfully to GitHub!")
+                }
+                return Pair(false, "Failed to upload data to GitHub.")
             }
-            
-            val newItemId = addRes?.data?.issue?.projectItem?.id
-            if (newItemId != null) {
-                AcraApplication.setKey("sync_item_id", newItemId)
-                Log.d("SYNC", "[ApiUtils] Upload successful! New Item ID: $newItemId")
-                return Pair(true, "Data synced successfully to GitHub!")
-            }
-            
-            Log.d("SYNC", "[ApiUtils] Upload failed: No Item ID returned.")
-            return Pair(false, "Failed to upload data to GitHub.")
         } finally {
             isSyncing.set(false)
-            Log.d("SYNC", "[ApiUtils] isSyncing lock released.")
         }
     }
 }
