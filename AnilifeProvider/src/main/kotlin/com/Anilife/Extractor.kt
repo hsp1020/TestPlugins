@@ -98,12 +98,13 @@ class AnilifeProxyExtractor : ExtractorApi() {
                         if (!isResumed) {
                             isResumed = true
                             cleanup()
-                            continuation.resume(Jsoup.parse(html, url))
+                            // resume 대신 표준 resumeWith 규격을 호출하여 onCancellation 컴파일 에러 완전 해결
+                            continuation.resumeWith(Result.success(Jsoup.parse(html, url)))
                         }
                     }
                 }
 
-                // [하드웨어 최적화] 하드웨어 가속 해제하여 GPU/CPU 점유 최소화 [1.1, 1.3]
+                // [렌더링 최적화] GPU 가속을 완전히 해제하여 CPU/GPU 가용 자원 절약 [1.1, 1.3]
                 webView.setLayerType(android.view.View.LAYER_TYPE_SOFTWARE, null)
 
                 webView.settings.apply {
@@ -111,7 +112,7 @@ class AnilifeProxyExtractor : ExtractorApi() {
                     domStorageEnabled = true
                     databaseEnabled = true
                     userAgentString = DESKTOP_UA
-                    loadsImagesAutomatically = false // 미디어 로드 전 단계이므로 불필요한 이미지 원천 거절 [1.1, 1.3]
+                    loadsImagesAutomatically = false // 이미지 다운로드 전면 차단 [1.1, 1.3]
                     mediaPlaybackRequiresUserGesture = true
                 }
 
@@ -133,7 +134,7 @@ class AnilifeProxyExtractor : ExtractorApi() {
                         return false
                     }
 
-                    // [데이터/트래픽 다이어트 핵심 최적화] 불필요한 미디어 이진 파일 및 광고 네트워크 패킷 드롭 [1.1, 1.2, 1.3]
+                    // [데이터/트래픽 다이어트 핵심 최적화] 파싱에 필요없는 미디어 이진 파일 및 광고 네트워크 패킷 드롭 [1.1, 1.2, 1.3]
                     override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                         val resourceUrl = request?.url?.toString()?.lowercase() ?: return null
                         val isHeavyOrMalicious = resourceUrl.endsWith(".png") || resourceUrl.endsWith(".jpg") ||
