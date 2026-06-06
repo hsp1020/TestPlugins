@@ -9,6 +9,7 @@ import android.webkit.WebViewClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceError
 import android.webkit.WebResourceResponse
+import android.webkit.CookieManager
 import android.net.http.SslError
 import android.webkit.SslErrorHandler
 import com.lagradost.cloudstream3.SubtitleFile
@@ -67,8 +68,36 @@ class AnilifeProxyExtractor : ExtractorApi() {
     }
 
     /**
+     * [추출기 하이브리드 통신 브릿지]
+     * 쿠키가 있을 때는 OkHttp 수립을 선제 적용해 비디오 주소 추출 속도 극대화
+     */
+    private suspend fun getDocumentWithFallback(url: String, headers: Map<String, String>): Document {
+        val cookieHeader = try {
+            CookieManager.getInstance().getCookie("https://anilife.live")
+        } catch (e: Exception) {
+            null
+        }
+
+        if (!cookieHeader.isNullOrEmpty()) {
+            try {
+                val mergedHeaders = headers.toMutableMap()
+                mergedHeaders["Cookie"] = cookieHeader
+                
+                val response = app.get(url, headers = mergedHeaders)
+                if (response.code == 200) {
+                    return response.document
+                }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+            }
+        }
+
+        return getDoc(url, headers)
+    }
+
+    /**
      * [재생 링크 추출 전용 극효율 쌩웹뷰]
-     * 레퍼러 검증 우회용 HTTP Header 주입 기능 보강 완료
+     * resumeWith 및 자바스크립트 리다이렉트 최종 경로 추적 패키지 수립 완료
      */
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun getDoc(url: String, headers: Map<String, String>): Document {
@@ -85,8 +114,8 @@ class AnilifeProxyExtractor : ExtractorApi() {
                         try {
                             webView.stopLoading()
                             webView.clearHistory()
-                            webView.loadUrl("about:blank")
-                            webView.destroy()
+                            webView.loadUrl("about:blank") // 백그라운드 악성 자바스크립트 루프 처형
+                            webView.destroy() // 메모리 자원 완전 소멸 반환 [1.1, 1.3]
                         } catch (e: Exception) { }
                     }
                 }
@@ -97,6 +126,7 @@ class AnilifeProxyExtractor : ExtractorApi() {
                         if (!isResumed) {
                             isResumed = true
                             cleanup()
+                            // Jsoup.parse에 리다이렉트 완료 주소인 finalUrl을 바인딩하여 resumeWith 리턴 처리
                             continuation.resumeWith(Result.success(Jsoup.parse(html, finalUrl)))
                         }
                     }
@@ -109,7 +139,7 @@ class AnilifeProxyExtractor : ExtractorApi() {
                     domStorageEnabled = true
                     databaseEnabled = true
                     userAgentString = DESKTOP_UA
-                    loadsImagesAutomatically = false
+                    loadsImagesAutomatically = false // 이미지 다운로드 전면 차단 [1.1, 1.3]
                     mediaPlaybackRequiresUserGesture = true
                 }
 
@@ -178,7 +208,7 @@ class AnilifeProxyExtractor : ExtractorApi() {
                     }
                 }
 
-                // [최적화 우회 핵심] 동적 레퍼러 헤더 주입 실행 [1.1]
+                // 동적 레퍼러 헤더 주입 실행 [1.1]
                 webView.loadUrl(url, headers)
 
                 Handler(Looper.getMainLooper()).postDelayed({
@@ -220,9 +250,9 @@ class AnilifeProxyExtractor : ExtractorApi() {
 
         try {
             var finalM3u8 = ""
-            // [최적화 우회 적용] playerUrl 호출 시에도 안전한 헤더(Referer)를 전달하도록 패치 [1.1]
-            println("[DEBUG-Extractor] 쌩웹뷰로 playerUrl 수집 호출 시작...")
-            val playerDoc = getDoc(playerUrl, cleanHeaders)
+            // [최적화 하이브리드 폴백 적용] playerUrl 쌩웹뷰 전송 [1.1]
+            println("[DEBUG-Extractor] 하이브리드 브릿지로 playerUrl 수집 호출 시작...")
+            val playerDoc = getDocumentWithFallback(playerUrl, cleanHeaders)
             val playerHtml = playerDoc.outerHtml()
             println("[DEBUG-Extractor] 수집 완료된 playerHtml 전체 길이: ${playerHtml.length} 자")
 
