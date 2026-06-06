@@ -351,7 +351,7 @@ object ApiUtils {
                 val start = i * chunkSize
                 val end = minOf((i + 1) * chunkSize, backupData.length)
                 if (start < end) {
-                    
+                    Log.d("SYNC_JSON", backupData.substring(start, end))      
                 }
             }
             Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA END ==========")
