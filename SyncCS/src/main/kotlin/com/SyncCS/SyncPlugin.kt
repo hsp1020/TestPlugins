@@ -22,7 +22,9 @@ import kotlinx.coroutines.launch
 class SyncPlugin : Plugin() {
     private var counterBackup = 0
     private var lastResumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null
+    
     private var syncJob: Job? = null
+    private var backupJob: Job? = null
 
     private fun startSyncLoop() {
         syncJob?.cancel()
@@ -31,17 +33,13 @@ class SyncPlugin : Plugin() {
                 try {
                     val resumeWatching = HomeViewModel.getResumeWatching()
                     val listTake = resumeWatching?.take(10)
-                    
-                    // ★ 원본 로직: 시청 기록에 변화가 생겼을 때만 백업 실행
                     if (listTake != lastResumeWatching) {
                         backupDevice()
                         lastResumeWatching = listTake
                     }
-                    
-                    // ★ 원본 로직: 15번(75초)마다 다른 기기의 데이터를 가져옴
                     if (counterBackup >= 15) {
                         restoreDevice()
-                        counterBackup = 0 // 카운터 초기화
+                        counterBackup = 0
                     }
                     counterBackup++
                 } catch (e: Exception) {
@@ -53,7 +51,10 @@ class SyncPlugin : Plugin() {
     }
 
     private fun backupDevice() {
-        CoroutineScope(Dispatchers.IO).launch {
+        backupJob?.cancel()
+        backupJob = CoroutineScope(Dispatchers.IO).launch {
+            delay(3000L) // 3초 디바운스 (동시 실행 방지)
+            
             try {
                 counterBackup = 0
                 val context = AcraApplication.context ?: return@launch
@@ -87,14 +88,16 @@ class SyncPlugin : Plugin() {
                 
                 if (isRestoreEnabled == "true") {
                     val devices = ApiUtils.fetchDevices()
-                    val currentDeviceId = UtilKt.getDeviceId(context.packageName, context)
-                    val targetDevice = devices.firstOrNull { it.deviceId == currentDeviceId } ?: devices.firstOrNull()
                     
-                    targetDevice?.syncedData?.let { encoded ->
-                        val decoded = UtilKt.restoreText(UtilKt.decompressJsonFromString(encoded))
-                        if (decoded.isNotBlank()) {
-                            val backupFile = mapper.readValue<BackupFile>(decoded)
-                            BackupUtils.restore(context, backupFile, restoreSettings = true, restoreDataStore = true)
+                    // ★ 핵심 수정: 내 기기 하나만 찾는 로직 삭제. 
+                    // 모든 기기의 데이터를 시간순(오래된 것 -> 최신 것)으로 가져와서 전부 병합(Merge)합니다.
+                    devices.forEach { device ->
+                        device.syncedData?.let { encoded ->
+                            val decoded = UtilKt.restoreText(UtilKt.decompressJsonFromString(encoded))
+                            if (decoded.isNotBlank()) {
+                                val backupFile = mapper.readValue<BackupFile>(decoded)
+                                BackupUtils.restore(context, backupFile, restoreSettings = true, restoreDataStore = true)
+                            }
                         }
                     }
                 }
