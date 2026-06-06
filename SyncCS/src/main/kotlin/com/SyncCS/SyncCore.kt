@@ -56,16 +56,11 @@ data class APIRes(
             }
         }
         data class Issue(@JsonProperty("projectItem") var projectItem: ProjectItem?) {
-            data class ProjectItem(
-                @JsonProperty("id") var id: String? = null,
-                @JsonProperty("content") var content: Content? = null
-            ) {
-                @JsonProperty("draftIssue") var draftIssue: Content? = null
+            @JsonProperty("draftIssue") var draftIssue: Content? = null
 
-                data class Content(
-                    @JsonProperty("id") var id: String? = null
-                )
-            }
+            data class Content(
+                @JsonProperty("id") var id: String? = null
+            )
         }
         data class DelItem(@JsonProperty("deletedItemId") var deletedItemId: String? = null)
     }
@@ -181,17 +176,13 @@ object BackupUtils {
             }
             defaultEditor.apply()
         } else {
+            val datastoreEditor = with(DataStore) { context.getSharedPrefs() }.edit()
             for ((key, value) in map) {
                 if (isAllowed(key)) {
-                    try {
-                        with(DataStore) {
-                            context.setKey(key, value)
-                        }
-                    } catch (e: Exception) {
-                        Log.d("SYNC", "Failed to restore key via DataStore: $key")
-                    }
+                    Editor(datastoreEditor).setKeyRaw(key, value)
                 }
             }
+            datastoreEditor.apply()
         }
     }
 
@@ -335,7 +326,6 @@ object ApiUtils {
             val deviceId = prefs.getString("device_id", null)?.let { mapper.readValue<String>(it) } ?: return Pair(false, "Device ID missing")
             val deviceName = prefs.getString("device_name", null)?.let { mapper.readValue<String>(it) } ?: Build.MODEL
             
-            // ★ 해결: cleanedSyncData 호출 및 치환 과정 완벽 제거
             Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA START ==========")
             val chunkSize = 3000
             for (i in 0..backupData.length / chunkSize) {
@@ -347,7 +337,6 @@ object ApiUtils {
             }
             Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA END ==========")
 
-            // ★ 해결: cleanedSyncData 치환 과정 없이 곧바로 순수 백업 데이터를 GZIP 압축!
             val compressedData = UtilKt.compressJsonToString(backupData)
             
             if (compressedData.length > 65000) {
@@ -406,7 +395,6 @@ object UtilKt {
         return Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
     }
 
-    // ★ 해결 완료: 폰과 태블릿이 패딩 유무나 문자 규격(-/_)이 달라도 100% 풀어내도록 초유연성 디코더 복원 장착 완료!
     fun decompressJsonFromString(encoded: String): String {
         return try {
             val decodedBytes = if (encoded.contains("-") || encoded.contains("_")) {
