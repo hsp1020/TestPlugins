@@ -1,6 +1,7 @@
 package com.SyncCS
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.graphics.drawable.Drawable
 import android.os.Build
 import android.os.Bundle
@@ -21,17 +22,19 @@ import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.mapper
 import com.lagradost.cloudstream3.plugins.Plugin
-import com.lagradost.cloudstream3.ui.home.HomeViewModel
 import com.lagradost.cloudstream3.utils.DataStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragment() {
+class SyncSettingsFragment(
+    private val plugin: Plugin,
+    private val pluginContext: Context
+) : BottomSheetDialogFragment() {
 
-    private val res = plugin.resources ?: error("Resources not found")
-    private val resPackageName = "com.SyncCS"
+    private val res = pluginContext.resources
+    private val resPackageName = pluginContext.packageName
 
     private fun <T : View> findView(view: View, name: String): T {
         val id = res.getIdentifier(name, "id", resPackageName)
@@ -42,7 +45,8 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
     private fun getLayout(name: String, inflater: LayoutInflater, container: ViewGroup?): View {
         val id = res.getIdentifier(name, "layout", resPackageName)
         if (id == 0) error("Layout XML not found: $name")
-        return inflater.inflate(res.getLayout(id), container, false)
+        val pluginInflater = inflater.cloneInContext(pluginContext)
+        return pluginInflater.inflate(id, container, false)
     }
 
     private fun getDrawable(name: String): Drawable? {
@@ -62,7 +66,6 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
         val layout = getLayout("settings", inflater, container)
         
         findView<TextView>(layout, "config_text").text = "Config"
-        // [요구사항 1] Guide 대신 Devices 로 텍스트 변경
         findView<TextView>(layout, "group_text").text = "Devices"
 
         val buttonConfig = findView<ImageView>(layout, "button_config")
@@ -70,7 +73,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
         makeTvCompatible(buttonConfig)
         
         buttonConfig.setOnClickListener {
-            val configLayout = getLayout("config", inflater, container)
+            val configLayout = getLayout("config", inflater, container) as ViewGroup
             val tokenEdit = findView<EditText>(configLayout, "token")
             val projectNumEdit = findView<EditText>(configLayout, "project_num")
             val deviceNameEdit = findView<EditText>(configLayout, "device_name")
@@ -122,20 +125,18 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
 
                     CoroutineScope(Dispatchers.IO).launch {
                         try {
-                            // 1. 프로젝트 검증
                             val (success, msg) = ApiUtils.syncProjectDetails(context)
                             if (!success) {
                                 withContext(Dispatchers.Main) {
                                     loadingDialog.dismiss()
                                     CommonActivity.showToast(msg, null)
-                                    AcraApplication.setKey("sync_token", "") // 실패 시 토큰 초기화
+                                    AcraApplication.setKey("sync_token", "")
                                 }
                                 return@launch
                             }
 
-                            // [요구사항 2] 중복 기기명 검사
                             val devices = ApiUtils.fetchDevices()
-                            val currentDeviceId = UtilKt.getDeviceId(plugin.javaClass.packageName, requireContext())
+                            val currentDeviceId = UtilKt.getDeviceId(pluginContext.packageName, requireContext())
                             val isDuplicate = devices.any { it.name == deviceName && it.deviceId != currentDeviceId }
                             
                             if (isDuplicate) {
@@ -146,8 +147,8 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                                 return@launch
                             }
 
-                            // [요구사항 3] 즉시 동기화 실행 (실제 데이터 업로드)
-                            val backupFile = BackupUtils.getBackup(requireContext(), HomeViewModel.getResumeWatching())
+                            // ★★★ 에러 발생 원인 수정: getBackup() 인자를 1개로 변경하여 컴파일 에러 해결 ★★★
+                            val backupFile = BackupUtils.getBackup(requireContext())
                             val backupJson = mapper.writeValueAsString(backupFile)
                             val (syncSuccess, syncMsg) = ApiUtils.syncThisDevice(backupJson, requireContext())
 
@@ -181,7 +182,6 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
         buttonGroup.setImageDrawable(getDrawable("view_icon"))
         makeTvCompatible(buttonGroup)
         
-        // [요구사항 1] 기기 목록 조회 및 삭제 UI
         buttonGroup.setOnClickListener {
             val loadingDialog = AlertDialog.Builder(requireContext())
                 .setView(getLayout("loading", inflater, container))
@@ -201,7 +201,6 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
         return layout
     }
 
-    // 기기 목록 다이얼로그 표시 함수
     private fun showDeviceListDialog(devices: List<SyncDevice>, inflater: LayoutInflater, container: ViewGroup?) {
         val listLayout = getLayout("device_list", inflater, container)
         val containerLayout = findView<LinearLayout>(listLayout, "device_list_container")
