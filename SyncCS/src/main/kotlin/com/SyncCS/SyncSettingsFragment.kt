@@ -1,9 +1,11 @@
 package com.SyncCS
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.graphics.drawable.Drawable
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -14,23 +16,27 @@ import android.widget.LinearLayout
 import android.widget.Switch
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
+import androidx.core.content.res.ResourcesCompat
 import com.fasterxml.jackson.module.kotlin.readValue
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.mapper
 import com.lagradost.cloudstream3.plugins.Plugin
+import com.lagradost.cloudstream3.ui.home.HomeViewModel
 import com.lagradost.cloudstream3.utils.DataStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragment() {
+class SyncSettingsFragment(
+    private val plugin: Plugin,
+    private val pluginContext: Context
+) : BottomSheetDialogFragment() {
 
-    // ★ StremioX와 완벽하게 동일한 방식: plugin.resources 직접 사용
-    private val res = plugin.resources ?: error("Resources not found")
-    private val resPackageName = "com.SyncCS"
+    private val res = pluginContext.resources
+    private val resPackageName = pluginContext.packageName
 
     private fun <T : View> findView(view: View, name: String): T {
         val id = res.getIdentifier(name, "id", resPackageName)
@@ -41,28 +47,25 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
     private fun getLayout(name: String, inflater: LayoutInflater, container: ViewGroup?): View {
         val id = res.getIdentifier(name, "layout", resPackageName)
         if (id == 0) error("Layout XML not found: $name")
-        // ★ StremioX와 완벽하게 동일한 방식: res.getLayout(id) 사용
-        val layout = res.getLayout(id)
-        return inflater.inflate(layout, container, false)
+        val pluginInflater = inflater.cloneInContext(pluginContext)
+        return pluginInflater.inflate(id, container, false)
     }
 
-    @SuppressLint("UseCompatLoadingForDrawables")
     private fun getDrawable(name: String): Drawable? {
         val id = res.getIdentifier(name, "drawable", resPackageName)
-        // ★ StremioX와 완벽하게 동일한 방식: res.getDrawable 사용
-        return if (id != 0) res.getDrawable(id, null) else null
+        return if (id != 0) ResourcesCompat.getDrawable(res, id, null) else null
     }
 
-    @SuppressLint("UseCompatLoadingForDrawables")
     private fun makeTvCompatible(view: View) {
         val id = res.getIdentifier("outline", "drawable", resPackageName)
         if (id != 0) {
-            view.background = res.getDrawable(id, null)
+            view.background = ResourcesCompat.getDrawable(res, id, null)
         }
     }
 
     @SuppressLint("UseSwitchCompatOrMaterialCode")
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
+        Log.d("SYNC", "[SyncSettingsFragment] onCreateView() called.")
         val layout = getLayout("settings", inflater, container)
         
         findView<TextView>(layout, "config_text").text = "Config"
@@ -73,6 +76,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
         makeTvCompatible(buttonConfig)
         
         buttonConfig.setOnClickListener {
+            Log.d("SYNC", "[SyncSettingsFragment] Config button clicked.")
             val configLayout = getLayout("config", inflater, container) as ViewGroup
             val tokenEdit = findView<EditText>(configLayout, "token")
             val projectNumEdit = findView<EditText>(configLayout, "project_num")
@@ -115,6 +119,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                         return@setPositiveButton
                     }
                     
+                    Log.d("SYNC", "[SyncSettingsFragment] Save clicked. Token/ProjectNum provided.")
                     loadingDialog.show()
                     
                     AcraApplication.setKey("sync_token", token)
@@ -125,8 +130,10 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
 
                     CoroutineScope(Dispatchers.IO).launch {
                         try {
-                            val (success, msg) = ApiUtils.syncProjectDetails(requireContext())
+                            Log.d("SYNC", "[SyncSettingsFragment] Verifying project details...")
+                            val (success, msg) = ApiUtils.syncProjectDetails(context)
                             if (!success) {
+                                Log.d("SYNC", "[SyncSettingsFragment] Project verification failed: $msg")
                                 withContext(Dispatchers.Main) {
                                     loadingDialog.dismiss()
                                     CommonActivity.showToast(msg, null)
@@ -135,11 +142,13 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                                 return@launch
                             }
 
+                            Log.d("SYNC", "[SyncSettingsFragment] Checking for duplicate device names...")
                             val devices = ApiUtils.fetchDevices()
-                            val currentDeviceId = UtilKt.getDeviceId(resPackageName, requireContext())
+                            val currentDeviceId = UtilKt.getDeviceId(pluginContext.packageName, requireContext())
                             val isDuplicate = devices.any { it.name == deviceName && it.deviceId != currentDeviceId }
                             
                             if (isDuplicate) {
+                                Log.d("SYNC", "[SyncSettingsFragment] Duplicate device name found: $deviceName")
                                 withContext(Dispatchers.Main) {
                                     loadingDialog.dismiss()
                                     CommonActivity.showToast("Error: Device name '$deviceName' already exists!", null)
@@ -147,20 +156,25 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                                 return@launch
                             }
 
-                            val backupFile = BackupUtils.getBackup(requireContext())
+                            Log.d("SYNC", "[SyncSettingsFragment] Initiating immediate sync...")
+                            val resumeWatching = HomeViewModel.getResumeWatching()
+                            val backupFile = BackupUtils.getBackup(requireContext(), resumeWatching)
                             val backupJson = mapper.writeValueAsString(backupFile)
                             val (syncSuccess, syncMsg) = ApiUtils.syncThisDevice(backupJson, requireContext())
 
                             withContext(Dispatchers.Main) {
                                 loadingDialog.dismiss()
                                 if (syncSuccess) {
+                                    Log.d("SYNC", "[SyncSettingsFragment] Immediate sync successful.")
                                     CommonActivity.showToast("Successfully synced to GitHub!", null)
                                     dismiss()
                                 } else {
+                                    Log.d("SYNC", "[SyncSettingsFragment] Immediate sync failed: $syncMsg")
                                     CommonActivity.showToast("Sync Failed: $syncMsg", null)
                                 }
                             }
                         } catch (e: Exception) {
+                            Log.d("SYNC", "[SyncSettingsFragment] Exception during save: ${e.message}")
                             withContext(Dispatchers.Main) {
                                 loadingDialog.dismiss()
                                 CommonActivity.showToast("Error syncing: ${e.message}", null)
@@ -169,6 +183,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                     }
                 }
                 .setNegativeButton("Reset") { _, _ ->
+                    Log.d("SYNC", "[SyncSettingsFragment] Reset clicked. Clearing credentials.")
                     AcraApplication.setKey("sync_token", "")
                     AcraApplication.setKey("sync_project_num", "")
                     CommonActivity.showToast("Credentials removed", null)
@@ -182,6 +197,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
         makeTvCompatible(buttonGroup)
         
         buttonGroup.setOnClickListener {
+            Log.d("SYNC", "[SyncSettingsFragment] Devices button clicked.")
             val loadingDialog = AlertDialog.Builder(requireContext())
                 .setView(getLayout("loading", inflater, container))
                 .setCancelable(false)
@@ -189,6 +205,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
             loadingDialog.show()
 
             CoroutineScope(Dispatchers.IO).launch {
+                Log.d("SYNC", "[SyncSettingsFragment] Fetching devices for list dialog...")
                 val devices = ApiUtils.fetchDevices()
                 withContext(Dispatchers.Main) {
                     loadingDialog.dismiss()
@@ -201,6 +218,7 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
     }
 
     private fun showDeviceListDialog(devices: List<SyncDevice>, inflater: LayoutInflater, container: ViewGroup?) {
+        Log.d("SYNC", "[SyncSettingsFragment] Showing device list dialog. Count: ${devices.size}")
         val listLayout = getLayout("device_list", inflater, container)
         val containerLayout = findView<LinearLayout>(listLayout, "device_list_container")
 
@@ -219,14 +237,17 @@ class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragme
                 nameText.text = "${device.name}\n(${device.deviceId})"
                 
                 deleteBtn.setOnClickListener {
+                    Log.d("SYNC", "[SyncSettingsFragment] Delete clicked for device: ${device.name} (${device.deviceId})")
                     CoroutineScope(Dispatchers.IO).launch {
                         val projectId = AcraApplication.getKey<String>("sync_project_id") ?: return@launch
                         val success = ApiUtils.deleteDevice(projectId, device.itemId)
                         withContext(Dispatchers.Main) {
                             if (success) {
+                                Log.d("SYNC", "[SyncSettingsFragment] Device deleted successfully.")
                                 containerLayout.removeView(itemLayout)
                                 CommonActivity.showToast("Device deleted", null)
                             } else {
+                                Log.d("SYNC", "[SyncSettingsFragment] Failed to delete device.")
                                 CommonActivity.showToast("Failed to delete", null)
                             }
                         }
