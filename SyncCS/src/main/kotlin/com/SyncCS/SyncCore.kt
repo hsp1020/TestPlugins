@@ -21,7 +21,7 @@ import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 
 // ==========================================
-// Data Models
+// Data Models (파싱 에러 방지를 위해 모두 Nullable 처리)
 // ==========================================
 
 data class APIRes(
@@ -136,8 +136,7 @@ object BackupUtils {
         "enable_support_by_bongngotv", "prerelease_update", "data_store_helper/account_key_index", "VERSION_NAME", 
         "FILES_TO_DELETE_KEY", "HAS_DONE_SETUP", "video_source_priority", "preferred_audio_language",
         
-        // ★ 핵심 수정: 동기화에 필수적인 video_watch_state, result_episode 등은 블랙리스트에서 제거했습니다.
-        // 오직 용량만 차지하는 진짜 쓰레기 캐시 데이터만 차단합니다.
+        // 용량 초과를 막기 위한 쓰레기 데이터 필터링 (핵심 시청 기록은 제외됨)
         "episode_parent_index_", "download_header_cache", "BACKUP_download_header_cache",
         "CONTENT_URI_", "download_status", "search_history", "download_info", "download_resume",
         "download_q_resume", "download_episode_cache"
@@ -152,8 +151,6 @@ object BackupUtils {
         val prefs = with(DataStore) { context.getSharedPrefs() }.all
         val defaultPrefs = with(DataStore) { context.getDefaultSharedPrefs() }.all
 
-        // ★ 핵심 수정: HomeViewModel의 불확실한 타이밍에 의존하지 않고, 
-        // 저장소에 있는 모든 시청 기록을 다이렉트로 긁어와서 100% 안전하게 백업합니다.
         val filteredPrefs = prefs.filterKeys { isBackup(it) }
         val filteredDefaultPrefs = defaultPrefs.filterKeys { isBackup(it) }
 
