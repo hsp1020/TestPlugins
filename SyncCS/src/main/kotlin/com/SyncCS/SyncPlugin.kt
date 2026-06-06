@@ -55,7 +55,7 @@ class SyncPlugin : Plugin() {
     private fun backupDevice() {
         backupJob?.cancel()
         backupJob = CoroutineScope(Dispatchers.IO).launch {
-            delay(3000L) // 3초 디바운스
+            delay(3000L)
             
             try {
                 counterBackup = 0
@@ -144,7 +144,8 @@ class SyncPlugin : Plugin() {
         openSettings = { activityContext ->
             val appCompatActivity = activityContext as? AppCompatActivity
             appCompatActivity?.let {
-                SyncSettingsFragment(this, context).show(it.supportFragmentManager, "Sync")
+                // ★ 쓸데없는 파라미터 전달 제거, 원본 그대로 복구
+                SyncSettingsFragment(this).show(it.supportFragmentManager, "Sync")
             }
         }
     }
