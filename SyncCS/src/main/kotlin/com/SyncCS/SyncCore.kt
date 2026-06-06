@@ -13,6 +13,7 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mapper
 import com.lagradost.cloudstream3.utils.DataStore
 import com.lagradost.cloudstream3.utils.DataStoreHelper
+import kotlinx.coroutines.sync.Mutex
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
@@ -222,6 +223,9 @@ object BackupUtils {
 // ==========================================
 
 object ApiUtils {
+    // ★ 핵심: 동시 실행 방지를 위한 Mutex 락
+    private val syncMutex = Mutex()
+
     private fun isLoggedIn(): Boolean {
         val context = AcraApplication.context ?: return false
         val prefs = with(DataStore) { context.getSharedPrefs() }
@@ -313,43 +317,54 @@ object ApiUtils {
     suspend fun syncThisDevice(backupData: String, context: Context? = AcraApplication.context): Pair<Boolean, String> {
         if (!isLoggedIn()) return Pair(false, "Not logged in")
         
-        val prefs = with(DataStore) { context?.getSharedPrefs() } ?: return Pair(false, "Context error")
-        val projectId = prefs.getString("sync_project_id", null)?.let { mapper.readValue<String>(it) } ?: return Pair(false, "Project ID missing. Please save config again.")
-        val deviceId = prefs.getString("device_id", null)?.let { mapper.readValue<String>(it) } ?: return Pair(false, "Device ID missing")
-        val deviceName = prefs.getString("device_name", null)?.let { mapper.readValue<String>(it) } ?: Build.MODEL
-        
-        val cleanedData = UtilKt.cleanedSyncData(backupData)
-        val compressedData = UtilKt.compressJsonToString(cleanedData)
-        
-        if (compressedData.length > 65000) {
-            return Pair(false, "Data too large (${compressedData.length} chars).")
+        // ★ Mutex 적용: 이미 동기화가 진행 중이면 중복 요청을 즉시 무시합니다.
+        if (!syncMutex.tryLock()) {
+            Log.d("SyncCS", "Sync already in progress, skipping duplicate request.")
+            return Pair(false, "Sync already in progress")
         }
-
-        val devices = fetchDevices()
         
-        // ★ 핵심 수정: find(1개만 찾음) -> filter(전부 다 찾음) 로 변경하여 중복 기기 싹쓸이 삭제
-        val existingDevices = devices.filter { it.deviceId == deviceId }
-        existingDevices.forEach { device ->
-            if (device.itemId.isNotBlank()) {
-                deleteDevice(projectId, device.itemId)
+        try {
+            val prefs = with(DataStore) { context?.getSharedPrefs() } ?: return Pair(false, "Context error")
+            val projectId = prefs.getString("sync_project_id", null)?.let { mapper.readValue<String>(it) } ?: return Pair(false, "Project ID missing. Please save config again.")
+            val deviceId = prefs.getString("device_id", null)?.let { mapper.readValue<String>(it) } ?: return Pair(false, "Device ID missing")
+            val deviceName = prefs.getString("device_name", null)?.let { mapper.readValue<String>(it) } ?: Build.MODEL
+            
+            val cleanedData = UtilKt.cleanedSyncData(backupData)
+            val compressedData = UtilKt.compressJsonToString(cleanedData)
+            
+            if (compressedData.length > 65000) {
+                return Pair(false, "Data too large (${compressedData.length} chars).")
             }
+
+            val devices = fetchDevices()
+            
+            // 중복 기기 싹쓸이 삭제
+            val existingDevices = devices.filter { it.deviceId == deviceId }
+            existingDevices.forEach { device ->
+                if (device.itemId.isNotBlank()) {
+                    deleteDevice(projectId, device.itemId)
+                }
+            }
+            
+            val title = "$deviceName|$deviceId"
+            val addQuery = """mutation(${'$'}projectId: ID!, ${'$'}title: String!, ${'$'}body: String!) { addProjectV2DraftIssue(input: {projectId: ${'$'}projectId, title: ${'$'}title, body: ${'$'}body}) { projectItem { id } } }"""
+            val addRes = apiCall(addQuery, mapOf("projectId" to projectId, "title" to title, "body" to compressedData))
+            
+            if (addRes?.errors?.isNotEmpty() == true) {
+                return Pair(false, "Upload Error: ${addRes.errors!!.first().message}")
+            }
+            
+            val newItemId = addRes?.data?.issue?.projectItem?.id
+            if (newItemId != null) {
+                AcraApplication.setKey("sync_item_id", newItemId)
+                return Pair(true, "Data synced successfully to GitHub!")
+            }
+            
+            return Pair(false, "Failed to upload data to GitHub.")
+        } finally {
+            // 작업이 끝나면 반드시 락을 해제합니다.
+            syncMutex.unlock()
         }
-        
-        val title = "$deviceName|$deviceId"
-        val addQuery = """mutation(${'$'}projectId: ID!, ${'$'}title: String!, ${'$'}body: String!) { addProjectV2DraftIssue(input: {projectId: ${'$'}projectId, title: ${'$'}title, body: ${'$'}body}) { projectItem { id } } }"""
-        val addRes = apiCall(addQuery, mapOf("projectId" to projectId, "title" to title, "body" to compressedData))
-        
-        if (addRes?.errors?.isNotEmpty() == true) {
-            return Pair(false, "Upload Error: ${addRes.errors!!.first().message}")
-        }
-        
-        val newItemId = addRes?.data?.issue?.projectItem?.id
-        if (newItemId != null) {
-            AcraApplication.setKey("sync_item_id", newItemId)
-            return Pair(true, "Data synced successfully to GitHub!")
-        }
-        
-        return Pair(false, "Failed to upload data to GitHub.")
     }
 }
 
