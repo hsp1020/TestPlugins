@@ -23,7 +23,6 @@ import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.CommonActivity
 import com.lagradost.cloudstream3.mapper
 import com.lagradost.cloudstream3.plugins.Plugin
-import com.lagradost.cloudstream3.ui.home.HomeViewModel
 import com.lagradost.cloudstream3.utils.DataStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -157,8 +156,7 @@ class SyncSettingsFragment(
                             }
 
                             Log.d("SYNC", "[SyncSettingsFragment] Initiating immediate sync...")
-                            val resumeWatching = HomeViewModel.getResumeWatching()
-                            val backupFile = BackupUtils.getBackup(requireContext(), resumeWatching)
+                            val backupFile = BackupUtils.getBackup(requireContext())
                             val backupJson = mapper.writeValueAsString(backupFile)
                             val (syncSuccess, syncMsg) = ApiUtils.syncThisDevice(backupJson, requireContext())
 
