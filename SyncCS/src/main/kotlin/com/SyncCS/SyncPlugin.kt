@@ -65,7 +65,12 @@ class SyncPlugin : Plugin() {
                     val json = if (backupFile != null) {
                         mapper.writeValueAsString(backupFile) ?: ""
                     } else ""
-                    ApiUtils.INSTANCE.syncThisDevice(json)
+                    
+                    if (json.isNotEmpty()) {
+                        val cleaned = UtilKt.cleanedSyncData(json)
+                        val compressed = UtilKt.compressJsonToString(cleaned)
+                        ApiUtils.INSTANCE.syncThisDevice(compressed)
+                    }
                 }
             }
         } catch (unused: Exception) {
@@ -97,11 +102,20 @@ class SyncPlugin : Plugin() {
                             if (device.deviceId != thisDeviceId) {
                                 val syncedData = device.syncedData
                                 if (!syncedData.isNullOrEmpty()) {
-                                    val json = UtilKt.restoreText(UtilKt.decompressJsonFromString(syncedData))
-                                    val backupFile = mapper.readValue(json, BackupFile::class.java)
-                                    if (backupFile != null && context2 != null) {
-                                        withContext(Dispatchers.Main) {
-                                            BackupUtils.restore(context2, backupFile, true, true)
+                                    val decompressed = UtilKt.decompressJsonFromString(syncedData)
+                                    if (decompressed.isNotEmpty()) {
+                                        val json = UtilKt.restoreText(decompressed)
+                                        if (json.isNotEmpty()) {
+                                            try {
+                                                val backupFile = mapper.readValue(json, BackupFile::class.java)
+                                                if (backupFile != null && context2 != null) {
+                                                    withContext(Dispatchers.Main) {
+                                                        BackupUtils.restore(context2, backupFile, true, true)
+                                                    }
+                                                }
+                                            } catch (e: Exception) {
+                                                Log.e("SyncCS", "Error mapping device JSON: ${e.message}")
+                                            }
                                         }
                                     }
                                 }
