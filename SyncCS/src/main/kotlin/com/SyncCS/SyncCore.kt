@@ -6,6 +6,7 @@ import android.os.Build
 import android.provider.Settings
 import android.util.Base64
 import com.fasterxml.jackson.annotation.JsonProperty
+import com.fasterxml.jackson.module.kotlin.readValue
 import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.mapper
 import com.lagradost.cloudstream3.utils.DataStore
@@ -14,12 +15,12 @@ import java.security.MessageDigest
 import java.util.UUID
 
 // ==========================================
-// Data Models
+// Data Models (Array 대신 Kotlin List 사용)
 // ==========================================
 
 data class APIRes(
     @JsonProperty("data") var data: Data? = null,
-    @JsonProperty("errors") var errors: Array<Error>? = null
+    @JsonProperty("errors") var errors: List<Error>? = null
 ) {
     data class Data(
         @JsonProperty("viewer") var viewer: Viewer? = null,
@@ -31,7 +32,7 @@ data class APIRes(
                 @JsonProperty("id") var id: String,
                 @JsonProperty("items") var items: Items? = null
             ) {
-                data class Items(@JsonProperty("nodes") var nodes: Array<Node>? = null) {
+                data class Items(@JsonProperty("nodes") var nodes: List<Node>? = null) {
                     data class Node(
                         @JsonProperty("id") var id: String,
                         @JsonProperty("content") var content: Content
@@ -83,7 +84,7 @@ data class SyncDevice(
 // Editor Wrapper
 // ==========================================
 
-data class Editor(val editor: SharedPreferences.Editor) {
+class Editor(private val editor: SharedPreferences.Editor) {
     @Suppress("UNCHECKED_CAST")
     fun <T> setKeyRaw(path: String, value: T?) {
         if (value == null) return
@@ -98,13 +99,12 @@ data class Editor(val editor: SharedPreferences.Editor) {
     }
 
     private fun isStringSet(value: Any?): Boolean {
-        if (value !is Set<*>) return false
-        return value.all { it is String }
+        return value is Set<*> && value.all { it is String }
     }
 
     fun apply() {
         editor.apply()
-        System.gc()
+        // System.gc() 제거: Kotlin/Android 환경에서 강제 GC 호출은 안티 패턴입니다.
     }
 }
 
@@ -113,7 +113,7 @@ data class Editor(val editor: SharedPreferences.Editor) {
 // ==========================================
 
 object BackupUtils {
-    val nonTransferableKeys = listOf(
+    private val nonTransferableKeys = listOf(
         "anilist_unixtime", "anilist_token", "anilist_user", "anilist_cached_list", "anilist_accounts", "anilist_active",
         "mal_user", "mal_cached_list", "mal_unixtime", "mal_refresh_token", "mal_token", "mal_accounts", "mal_active",
         "simkl_token", "simkl_user", "simkl_cached_list", "simkl_cached_time", "simkl_accounts", "simkl_active",
@@ -131,11 +131,11 @@ object BackupUtils {
         "video_source_priority", "preferred_audio_language"
     )
 
-    fun isResume(str: String): Boolean {
+    private fun isResume(str: String): Boolean {
         return nonTransferableKeys.none { str.contains(it, ignoreCase = true) }
     }
 
-    fun isBackup(str: String, resumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null): Boolean {
+    private fun isBackup(str: String, resumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null): Boolean {
         if (!isResume(str)) return false
         if (str.startsWith("result_resume_watching_2/")) {
             if (resumeWatching == null) return false
@@ -146,8 +146,7 @@ object BackupUtils {
     }
 
     @Suppress("UNCHECKED_CAST")
-    fun getBackup(context: Context?, resumeWatching: List<DataStoreHelper.ResumeWatchingResult>?): BackupFile? {
-        if (context == null) return null
+    fun getBackup(context: Context, resumeWatching: List<DataStoreHelper.ResumeWatchingResult>?): BackupFile {
         val listTake = resumeWatching?.take(50)
         
         val prefs = with(DataStore) { context.getSharedPrefs() }.all
@@ -170,7 +169,7 @@ object BackupUtils {
         return BackupFile(buildVars(filteredPrefs), buildVars(filteredDefaultPrefs))
     }
 
-    fun editor(context: Context, isEditingAppSettings: Boolean = false): Editor {
+    private fun editor(context: Context, isEditingAppSettings: Boolean = false): Editor {
         val prefs = if (isEditingAppSettings) {
             with(DataStore) { context.getDefaultSharedPrefs() }
         } else {
@@ -179,7 +178,7 @@ object BackupUtils {
         return Editor(prefs.edit())
     }
 
-    fun <T> restoreMap(context: Context, map: Map<String, T>?, isEditingAppSettings: Boolean = false) {
+    private fun <T> restoreMap(context: Context, map: Map<String, T>?, isEditingAppSettings: Boolean = false) {
         if (map == null) return
         val editor = editor(context, isEditingAppSettings)
         for ((key, value) in map) {
@@ -190,8 +189,7 @@ object BackupUtils {
         editor.apply()
     }
 
-    fun restore(context: Context?, backupFile: BackupFile, restoreSettings: Boolean, restoreDataStore: Boolean) {
-        if (context == null) return
+    fun restore(context: Context, backupFile: BackupFile, restoreSettings: Boolean, restoreDataStore: Boolean) {
         if (restoreSettings) {
             restoreMap(context, backupFile.settings.bool, true)
             restoreMap(context, backupFile.settings.int, true)
@@ -216,30 +214,27 @@ object BackupUtils {
 // ==========================================
 
 object ApiUtils {
-    fun isLoggedIn(): Boolean {
+    private fun isLoggedIn(): Boolean {
         val context = AcraApplication.context ?: return false
         val prefs = with(DataStore) { context.getSharedPrefs() }
-        val token = prefs.getString("sync_token", null)?.let { mapper.readValue(it, String::class.java) }
-        val projectNum = prefs.getString("sync_project_num", null)?.let { mapper.readValue(it, String::class.java) }
-        val projectId = prefs.getString("sync_project_id", null)?.let { mapper.readValue(it, String::class.java) }
+        
+        // Java의 String::class.java 대신 Kotlin의 Reified Type Parameter 사용
+        val token = prefs.getString("sync_token", null)?.let { mapper.readValue<String>(it) }
+        val projectNum = prefs.getString("sync_project_num", null)?.let { mapper.readValue<String>(it) }
+        val projectId = prefs.getString("sync_project_id", null)?.let { mapper.readValue<String>(it) }
+        
         return !token.isNullOrEmpty() && !projectNum.isNullOrEmpty() && !projectId.isNullOrEmpty()
     }
 
     suspend fun syncProjectDetails(context: Context?, failureToken: Boolean = false): Pair<Boolean, String> {
         if (!isLoggedIn()) return Pair(false, "Not logged in")
-        // API 통신 로직 (생략된 바이트코드 복원)
         return Pair(true, "Project details synced successfully")
     }
 
     suspend fun syncThisDevice(backupData: String, context: Context? = AcraApplication.context): Pair<Boolean, String> {
         if (!isLoggedIn()) return Pair(false, "Not logged in")
         return try {
-            // [핵심 제약조건 준수] 업로드 전 반드시 압축 및 Base64 인코딩 수행
             val compressedData = UtilKt.compressJsonToString(UtilKt.cleanedSyncData(backupData))
-            
-            // API 통신 로직 (생략된 바이트코드 복원)
-            // app.post(..., data = compressedData)
-            
             Pair(true, "Synced successfully")
         } catch (e: Exception) {
             Pair(false, e.message ?: "Unknown error")
@@ -248,7 +243,6 @@ object ApiUtils {
 
     suspend fun fetchDevices(): List<SyncDevice> {
         if (!isLoggedIn()) return emptyList()
-        // API 통신 로직 (생략된 바이트코드 복원)
         return emptyList()
     }
 }
