@@ -109,7 +109,7 @@ class Editor(private val editor: SharedPreferences.Editor) {
 }
 
 // ==========================================
-// Backup Utilities (유실되었던 isBackup 로직 복원)
+// Backup Utilities
 // ==========================================
 
 object BackupUtils {
@@ -210,7 +210,7 @@ object BackupUtils {
 }
 
 // ==========================================
-// API Utilities (유실되었던 GitHub GraphQL 완벽 복원)
+// API Utilities
 // ==========================================
 
 object ApiUtils {
@@ -224,7 +224,6 @@ object ApiUtils {
         return !token.isNullOrEmpty() && !projectNum.isNullOrEmpty()
     }
 
-    // GraphQL API 공통 호출 함수
     private suspend fun apiCall(query: String, variables: Map<String, Any>? = null): APIRes? {
         val context = AcraApplication.context ?: return null
         val prefs = with(DataStore) { context.getSharedPrefs() }
@@ -247,7 +246,6 @@ object ApiUtils {
         }
     }
 
-    // 1. 프로젝트 ID 검증 및 가져오기 (실제 검증 로직)
     suspend fun syncProjectDetails(context: Context?): Pair<Boolean, String> {
         if (!isLoggedIn()) return Pair(false, "Please enter Token and Project Number.")
         
@@ -271,7 +269,6 @@ object ApiUtils {
         return Pair(false, "Failed to find project. Check your Token and Project Number.")
     }
 
-    // 2. 프로젝트에 저장된 모든 기기 데이터 불러오기
     suspend fun fetchDevices(): List<SyncDevice> {
         if (!isLoggedIn()) return emptyList()
         
@@ -299,7 +296,13 @@ object ApiUtils {
         }
     }
 
-    // 3. 현재 기기 데이터 업로드 (기존 데이터 삭제 후 재생성)
+    // [추가됨] 기기 삭제 API
+    suspend fun deleteDevice(projectId: String, itemId: String): Boolean {
+        val delQuery = """mutation(${'$'}projectId: ID!, ${'$'}itemId: ID!) { deleteProjectV2Item(input: {projectId: ${'$'}projectId, itemId: ${'$'}itemId}) { deletedItemId } }"""
+        val res = apiCall(delQuery, mapOf("projectId" to projectId, "itemId" to itemId))
+        return res?.errors.isNullOrEmpty()
+    }
+
     suspend fun syncThisDevice(backupData: String, context: Context? = AcraApplication.context): Pair<Boolean, String> {
         if (!isLoggedIn()) return Pair(false, "Not logged in")
         
@@ -310,17 +313,13 @@ object ApiUtils {
         
         val compressedData = UtilKt.compressJsonToString(UtilKt.cleanedSyncData(backupData))
         
-        // 기존 데이터 찾기
         val devices = fetchDevices()
         val existingDevice = devices.find { it.deviceId == deviceId }
         
-        // 기존 데이터가 있으면 삭제
         if (existingDevice != null && existingDevice.itemId.isNotBlank()) {
-            val delQuery = """mutation(${'$'}projectId: ID!, ${'$'}itemId: ID!) { deleteProjectV2Item(input: {projectId: ${'$'}projectId, itemId: ${'$'}itemId}) { deletedItemId } }"""
-            apiCall(delQuery, mapOf("projectId" to projectId, "itemId" to existingDevice.itemId))
+            deleteDevice(projectId, existingDevice.itemId)
         }
         
-        // 새 데이터 업로드
         val title = "$deviceName|$deviceId"
         val addQuery = """mutation(${'$'}projectId: ID!, ${'$'}title: String!, ${'$'}body: String!) { addProjectV2DraftIssue(input: {projectId: ${'$'}projectId, title: ${'$'}title, body: ${'$'}body}) { projectItem { id } } }"""
         val addRes = apiCall(addQuery, mapOf("projectId" to projectId, "title" to title, "body" to compressedData))
