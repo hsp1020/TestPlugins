@@ -26,8 +26,6 @@ class SyncPlugin : Plugin() {
     
     private var syncJob: Job? = null
     private var backupJob: Job? = null
-    
-    private val restoredDeviceTimestamps = mutableMapOf<String, String>()
 
     private fun startSyncLoop() {
         Log.d("SYNC", "[SyncPlugin] startSyncLoop() initiated.")
@@ -65,7 +63,6 @@ class SyncPlugin : Plugin() {
             delay(3000L)
             
             try {
-                // ★ 해결 2: counterBackup = 0 삭제 (타이머 초기화 버그 해결)
                 Log.d("SYNC", "[SyncPlugin] Executing backupDevice() logic...")
                 val context = AcraApplication.context ?: return@launch
                 val prefs = with(DataStore) { context.getSharedPrefs() }
@@ -75,8 +72,7 @@ class SyncPlugin : Plugin() {
                 }
                 
                 if (isBackupEnabled == "true") {
-                    val resumeWatching = HomeViewModel.getResumeWatching()
-                    val backupFile = BackupUtils.getBackup(context, resumeWatching)
+                    val backupFile = BackupUtils.getBackup(context)
                     val backupJson = mapper.writeValueAsString(backupFile)
                     Log.d("SYNC", "[SyncPlugin] Backup JSON created. Calling ApiUtils.syncThisDevice().")
                     ApiUtils.syncThisDevice(backupJson, context)
