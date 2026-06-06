@@ -34,7 +34,9 @@ class SyncSettingsFragment(
 ) : BottomSheetDialogFragment() {
 
     private val res = pluginContext.resources
-    private val resPackageName = pluginContext.packageName
+    
+    // ★★★ 제가 실수로 바꿨던 부분 원상복구: 무조건 "com.SyncCS"를 바라보도록 고정 ★★★
+    private val resPackageName = "com.SyncCS"
 
     private fun <T : View> findView(view: View, name: String): T {
         val id = res.getIdentifier(name, "id", resPackageName)
@@ -136,7 +138,7 @@ class SyncSettingsFragment(
                             }
 
                             val devices = ApiUtils.fetchDevices()
-                            val currentDeviceId = UtilKt.getDeviceId(pluginContext.packageName, requireContext())
+                            val currentDeviceId = UtilKt.getDeviceId(resPackageName, requireContext())
                             val isDuplicate = devices.any { it.name == deviceName && it.deviceId != currentDeviceId }
                             
                             if (isDuplicate) {
@@ -147,7 +149,6 @@ class SyncSettingsFragment(
                                 return@launch
                             }
 
-                            // ★★★ 에러 발생 원인 수정: getBackup() 인자를 1개로 변경하여 컴파일 에러 해결 ★★★
                             val backupFile = BackupUtils.getBackup(requireContext())
                             val backupJson = mapper.writeValueAsString(backupFile)
                             val (syncSuccess, syncMsg) = ApiUtils.syncThisDevice(backupJson, requireContext())
