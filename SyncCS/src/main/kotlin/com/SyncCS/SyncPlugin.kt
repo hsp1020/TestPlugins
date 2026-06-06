@@ -93,7 +93,6 @@ class SyncPlugin : Plugin() {
                     var dataRestored = false
                     
                     devices.forEach { device ->
-                        // ★ 핵심 수정: 내 기기의 옛날 데이터는 절대 다운로드하지 않고 무시합니다! (자폭 방지)
                         if (device.deviceId == currentDeviceId) return@forEach
                         
                         val lastUpdatedKey = "sync_last_updated_${device.deviceId}"
@@ -122,7 +121,6 @@ class SyncPlugin : Plugin() {
                                 e.printStackTrace()
                             }
                         }
-                        // ★ 핵심 수정: 다른 기기의 데이터를 병합 완료했으면, 즉시 내 카드를 GitHub에 업데이트합니다.
                         backupDevice()
                     }
                 }
@@ -146,7 +144,8 @@ class SyncPlugin : Plugin() {
         openSettings = { activityContext ->
             val appCompatActivity = activityContext as? AppCompatActivity
             appCompatActivity?.let {
-                SyncSettingsFragment(this).show(it.supportFragmentManager, "Sync")
+                // ★★★ 에러 원인 수정: context 파라미터를 정상적으로 넘겨줍니다. ★★★
+                SyncSettingsFragment(this, context).show(it.supportFragmentManager, "Sync")
             }
         }
     }
