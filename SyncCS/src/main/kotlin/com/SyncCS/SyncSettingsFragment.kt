@@ -1,7 +1,6 @@
 package com.SyncCS
 
 import android.annotation.SuppressLint
-import android.content.Context
 import android.graphics.drawable.Drawable
 import android.os.Bundle
 import android.view.LayoutInflater
@@ -25,17 +24,17 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-class SyncSettingsFragment(
-    private val plugin: Plugin,
-    private val pluginContext: Context
-) : BottomSheetDialogFragment() {
+class SyncSettingsFragment(private val plugin: Plugin) : BottomSheetDialogFragment() {
 
-    private val res = pluginContext.resources
-    private val resPackageName = pluginContext.packageName
+    private val res = plugin.resources ?: error("Resources not found")
+    
+    // ★★★ 매우 중요 ★★★
+    // 플러그인의 build.gradle.kts 에 적힌 namespace 값과 정확히 일치해야 합니다.
+    // 만약 아래 패키지명으로도 에러가 난다면 원본 패키지명인 "com.anhdaden" 으로 변경해 주세요.
+    private val resPackageName = "com.SyncCS"
 
     private fun <T : View> findView(view: View, name: String): T {
         val id = res.getIdentifier(name, "id", resPackageName)
-        // Java의 RuntimeException 대신 Kotlin의 error() 함수 사용
         if (id == 0) error("View ID not found: $name")
         return view.findViewById(id)
     }
@@ -43,9 +42,8 @@ class SyncSettingsFragment(
     private fun getLayout(name: String, inflater: LayoutInflater, container: ViewGroup?): View {
         val id = res.getIdentifier(name, "layout", resPackageName)
         if (id == 0) error("Layout XML not found: $name")
-        
-        val pluginInflater = inflater.cloneInContext(pluginContext)
-        return pluginInflater.inflate(id, container, false)
+        // 원본 Java 코드와 100% 동일한 방식: res.getLayout()을 직접 파싱
+        return inflater.inflate(res.getLayout(id), container, false)
     }
 
     private fun getDrawable(name: String): Drawable? {
@@ -81,7 +79,6 @@ class SyncSettingsFragment(
             val ctx = AcraApplication.context
             if (ctx != null) {
                 val prefs = with(DataStore) { ctx.getSharedPrefs() }
-                // Java의 String::class.java 대신 Kotlin Reified Type 사용
                 tokenEdit.setText(prefs.getString("sync_token", null)?.let { mapper.readValue<String>(it) })
                 projectNumEdit.setText(prefs.getString("sync_project_num", null)?.let { mapper.readValue<String>(it) })
                 backupSwitch.isChecked = prefs.getString("backup_device", null)?.let { mapper.readValue<String>(it) } == "true"
