@@ -169,10 +169,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/SyncCS/cloud-sync.png",
-        "fileHash": "sha256-bc59d183f2cad4c32c32e30ea17295da8def96da081680522f54f3b1687f4b32",
+        "fileHash": "sha256-372eefe528f98bd5acbf6ec8a855e4b7d7699d84e6ad7713d41b87f0f081f574",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 60998,
+        "fileSize": 64534,
         "status": 1,
         "language": "ko",
         "authors": [
