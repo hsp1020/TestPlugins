@@ -27,6 +27,9 @@ class SyncPlugin : Plugin() {
     private var backupJob: Job? = null
     
     private val restoredDeviceTimestamps = mutableMapOf<String, String>()
+    
+    // ★★★ 핵심 수정: Fragment와 동일하게 패키지명을 고정하여 기기 ID 불일치(자폭 버그)를 원천 차단합니다.
+    private val pluginPackageName = "com.SyncCS"
 
     private fun startSyncLoop() {
         syncJob?.cancel()
@@ -89,10 +92,12 @@ class SyncPlugin : Plugin() {
                 
                 if (isRestoreEnabled == "true") {
                     val devices = ApiUtils.fetchDevices()
-                    val currentDeviceId = UtilKt.getDeviceId(context.packageName, context)
+                    // ★ 수정됨: context.packageName 대신 pluginPackageName("com.SyncCS") 사용
+                    val currentDeviceId = UtilKt.getDeviceId(pluginPackageName, context)
                     var dataRestored = false
                     
                     devices.forEach { device ->
+                        // 내 기기의 옛날 데이터는 절대 다운로드하지 않고 무시합니다.
                         if (device.deviceId == currentDeviceId) return@forEach
                         
                         val lastUpdatedKey = "sync_last_updated_${device.deviceId}"
@@ -131,7 +136,8 @@ class SyncPlugin : Plugin() {
     }
 
     override fun load(context: Context) {
-        AcraApplication.setKey("device_id", UtilKt.getDeviceId(context.packageName, context))
+        // ★ 수정됨: context.packageName 대신 pluginPackageName("com.SyncCS") 사용
+        AcraApplication.setKey("device_id", UtilKt.getDeviceId(pluginPackageName, context))
         restoreDevice()
         startSyncLoop()
 
@@ -144,7 +150,6 @@ class SyncPlugin : Plugin() {
         openSettings = { activityContext ->
             val appCompatActivity = activityContext as? AppCompatActivity
             appCompatActivity?.let {
-                // ★★★ 에러 원인 수정: context 파라미터를 정상적으로 넘겨줍니다. ★★★
                 SyncSettingsFragment(this, context).show(it.supportFragmentManager, "Sync")
             }
         }
