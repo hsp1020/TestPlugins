@@ -408,148 +408,192 @@ object ApiUtils {
 // ==========================================
 
 object UtilKt {
-    private val replacementMap = listOf(
-        "\"result_resume_watching_2/" to "\"k1/",
-        "\"video_pos_dur/" to "\"k2/",
-        "\"download_header_cache/" to "\"k3/",
-        "\"result_watch_state/" to "\"k4/",
-        "\"result_watch_state_data/" to "\"k5/",
-        "\"result_season/" to "\"k6/",
-        "\"result_episode/" to "\"k7/",
-        "\"result_dub/" to "\"k8/",
-        "\"search_history/" to "\"k9/",
-        "\"video_quality_priority/" to "\"k10/",
-        "\"video_profile_name/" to "\"k11/",
-        "\"home_bookmarked_last_list" to "\"k12",
-        "\"user_custom_sites" to "\"k13",
-        "\"search_pref_tags" to "\"k14",
-        "\"search_pref_providers" to "\"k15",
-        "\"resize_mode" to "\"k16",
-        "\"duration_mode" to "\"k17",
-        "\"REPOSITORIES_KEY" to "\"k18",
-        "\"subtitle_settings" to "\"k19",
-        "\"results_sorting_mode" to "\"k20",
-        "\"home_pref_homepage" to "\"k21",
-        "\"playback_speed" to "\"k22",
-        "\"fshare_username" to "\"k23",
-        "\"fshare_password" to "\"k24",
-        "\"monplayer_links" to "\"k25",
-        "\"xtream_iptv_links" to "\"k26",
-        "\"iptv_links" to "\"k27",
-        "\"library_sorting_mode" to "\"k28",
-        "\"subs_auto_select" to "\"k29",
-        "\"bookmarkedTime\"" to "\"v1\"",
-        "\"latestUpdatedTime\"" to "\"v2\"",
-        "\"name\"" to "\"v3\"",
-        "\"url\"" to "\"v4\"",
-        "\"type\"" to "\"v5\"",
-        "\"apiName\"" to "\"v6\"",
-        "\"posterUrl\"" to "\"v7\"",
-        "\"year\"" to "\"v8\"",
-        "\"syncData\"" to "\"v9\"",
-        "\"quality\"" to "\"v10\"",
-        "\"posterHeaders\"" to "\"v11\"",
-        "\"plot\"" to "\"v12\"",
-        "\"rating\"" to "\"v13\"",
-        "\"tags\"" to "\"v14\"",
-        "\"searchedAt\"" to "\"v15\"",
-        "\"searchText\"" to "\"v16\"",
-        "\"parentId\"" to "\"v17\"",
-        "\"episodeId\"" to "\"v18\"",
-        "\"episode\"" to "\"v19\"",
-        "\"season\"" to "\"v20\"",
-        "\"updateTime\"" to "\"v21\"",
-        "\"isFromDownload\"" to "\"v22\"",
-        "\"position\"" to "\"v23\"",
-        "\"duration\"" to "\"v24\"",
-        "\"mainUrl\"" to "\"v25\"",
-        "\"searchUrl\"" to "\"v26\"",
-        "\"cacheTime\"" to "\"v27\"",
-        "\"title\"" to "\"v28\"",
-        "\"poster\"" to "\"v29\"",
-        "\"TvSeries\"" to "\"v30\"",
-        "\"Movie\"" to "\"v31\"",
-        "\"NSFW\"" to "\"v32\"",
-        "\"Anime\"" to "\"v33\"",
-        "\"Live\"" to "\"v34\"",
-        "\"AnimeMovie\"" to "\"v35\"",
-        "\"AsianDrama\"" to "\"v36\"",
-        "\"Cartoon\"" to "\"v37\"",
-        "\"Torrent\"" to "\"v38\"",
-        "\"slug\"" to "\"v39\"",
-        "\"https://" to "\"h//",
-        "\":null," to "\":n,",
-        "\":false}" to "\":f}",
-        "\":true}" to "\":t}",
-        "\"_Bool\"" to "\"s1\"",
-        "\"_Int\"" to "\"s2\"",
-        "\"_String\"" to "\"s3\"",
-        "\"_Float\"" to "\"s4\"",
-        "\"_Long\"" to "\"s5\"",
-        "\"_StringSet\"" to "\"s6\"",
-        "\"swipe_enabled_key\"" to "\"s7\"",
-        "\"skip_startup_account_select_key\"" to "\"s8\"",
-        "\"auto_update\"" to "\"s9\"",
-        "\"rotate_video_key\"" to "\"s10\"",
-        "\"auto_download_plugins_key\"" to "\"s11\"",
-        "\"auto_update_plugins\"" to "\"s12\"",
-        "\"player_resize_enabled_key\"" to "\"s13\"",
-        "\"bg_startup_tracing\"" to "\"s14\"",
-        "\"playback_speed_enabled_key\"" to "\"s15\"",
-        "\"acra.disable\"" to "\"s16\"",
-        "\"enable_nsfw_on_providers_key\"" to "\"s17\"",
-        "\"preview_seekbar_key\"" to "\"s18\"",
-        "\"show_trailers_key\"" to "\"s19\"",
-        "\"show_fillers_key\"" to "\"s20\"",
-        "\"random_button_key\"" to "\"s21\"",
-        "\"swipe_vertical_enabled_key\"" to "\"s22\"",
-        "\"bottom_title_key\"" to "\"s23\"",
-        "\"auto_rotate_video_key\"" to "\"s24\"",
-        "\"advanced_search\"" to "\"s25\"",
-        "\"speedup_key\"" to "\"s26\"",
-        "\"episode_sync_enabled_key\"" to "\"s27\"",
-        "\"hide_player_control_names_key\"" to "\"s28\"",
-        "\"show_kitsu_posters_key\"" to "\"s29\"",
-        "\"double_tap_enabled_key\"" to "\"s30\"",
-        "\"pip_enabled_key\"" to "\"s31\"",
-        "\"double_tap_pause_enabled_key\"" to "\"s32\"",
-        "\"enable_skip_op_from_database\"" to "\"s33\"",
-        "\"autoplay_next_key\"" to "\"s34\"",
-        "\"android_tv_interface_off_seek_key\"" to "\"s35\"",
-        "\"DNS over HTTPS\"" to "\"s36\"",
-        "\"double_tap_seek_time_key2\"" to "\"s37\"",
-        "\"auto_download_plugins_key2\"" to "\"s38\"",
-        "\"automatic_backup_key\"" to "\"s39\"",
-        "\"download_concurrent_key\"" to "\"s40\"",
-        "\"com.facebook.appevents.SessionInfo.interruptionCount\"" to "\"s41\"",
-        "\"download_parallel_key\"" to "\"s42\"",
-        "\"android_tv_interface_on_seek_key\"" to "\"s43\"",
-        "\"app_layout_key\"" to "\"s44\"",
-        "\"backup_dir_key\"" to "\"s45\"",
-        "\"com.applovin.sdk.impl.isFirstRun\"" to "\"s46\"",
-        "\"com.facebook.appevents.SessionInfo.sessionId\"" to "\"s47\"",
-        "\"primary_color_key\"" to "\"s48\"",
-        "\"app_theme_key\"" to "\"s49\"",
-        "\"app_locale\"" to "\"s50\"",
-        "\"com.facebook.appevents.SessionInfo.sessionEndTime\"" to "\"s51\"",
-        "\"com.facebook.appevents.SessionInfo.sessionStartTime\"" to "\"s52\"",
-        "\"prefer_media_type_key_2\"" to "\"s53\"",
-        "\"datastore\"" to "\"s54\""
+    // 1단계: 프로필 접두사 매핑 규칙 (0/result_... ➔ 0/k1/... 동적 완벽 치환)
+    private val prefixMap = listOf(
+        "result_resume_watching_2/" to "k1/",
+        "video_pos_dur/" to "k2/",
+        "download_header_cache/" to "k3/",
+        "result_watch_state/" to "k4/",
+        "result_watch_state_data/" to "k5/",
+        "result_season/" to "k6/",
+        "result_episode/" to "k7/",
+        "result_dub/" to "k8/",
+        "search_history/" to "k9/",
+        "video_quality_priority/" to "k10/",
+        "video_profile_name/" to "k11/",
+        "home_bookmarked_last_list" to "k12",
+        "user_custom_sites" to "k13",
+        "search_pref_tags" to "k14",
+        "search_pref_providers" to "k15",
+        "resize_mode" to "k16",
+        "duration_mode" to "k17",
+        "REPOSITORIES_KEY" to "k18",
+        "subtitle_settings" to "k19",
+        "results_sorting_mode" to "k20",
+        "home_pref_homepage" to "k21",
+        "playback_speed" to "k22",
+        "fshare_username" to "k23",
+        "fshare_password" to "k24",
+        "monplayer_links" to "k25",
+        "xtream_iptv_links" to "k26",
+        "iptv_links" to "k27",
+        "library_sorting_mode" to "k28",
+        "subs_auto_select" to "k29",
+        "video_profile_types_2/" to "k30/", // ★ 추가: 로그에 대량 반복 검출된 프로필 타입 접두사
+        "download_queue_key" to "k31",       // ★ 추가: 대량 반복 검출된 다운로드 큐 정보
+        "sync_last_updated_" to "k32_",       // ★ 추가: 동기화 타임스탬프 관리 접두사
+        "home_api_used" to "k33"              // ★ 추가: 홈에서 선택한 확장 프로그램 소스
     )
+
+    // 2단계: 일반 및 이스케이프 따옴표 전용 안전 매핑 (오치환 제로 설계)
+    private val propertyMap = listOf(
+        "bookmarkedTime" to "v1",
+        "latestUpdatedTime" to "v2",
+        "name" to "v3",
+        "url" to "v4",
+        "type" to "v5",
+        "apiName" to "v6",
+        "posterUrl" to "v7",
+        "year" to "v8",
+        "syncData" to "v9",
+        "quality" to "v10",
+        "posterHeaders" to "v11",
+        "plot" to "v12",
+        "rating" to "v13",
+        "tags" to "v14",
+        "searchedAt" to "v15",
+        "searchText" to "v16",
+        "parentId" to "v17",
+        "episodeId" to "v18",
+        "episode" to "v19",
+        "season" to "v20",
+        "updateTime" to "v21",
+        "isFromDownload" to "v22",
+        "position" to "v23",
+        "duration" to "v24",
+        "mainUrl" to "v25",
+        "searchUrl" to "v26",
+        "cacheTime" to "v27",
+        "title" to "v28",
+        "poster" to "v29",
+        "TvSeries" to "v30",
+        "Movie" to "v31",
+        "NSFW" to "v32",
+        "Anime" to "v33",
+        "Live" to "v34",
+        "AnimeMovie" to "v35",
+        "AsianDrama" to "v36",
+        "Cartoon" to "v37",
+        "Torrent" to "v38",
+        "slug" to "v39",
+        "iconUrl" to "v40",                  // ★ 추가: 레포지토리 내 아이콘 프로퍼티
+        "_Bool" to "s1",
+        "_Int" to "s2",
+        "_String" to "s3",
+        "_Float" to "s4",
+        "_Long" to "s5",
+        "_StringSet" to "s6",
+        "swipe_enabled_key" to "s7",
+        "skip_startup_account_select_key" to "s8",
+        "auto_update" to "s9",
+        "rotate_video_key" to "s10",
+        "auto_download_plugins_key" to "s11",
+        "auto_update_plugins" to "s12",
+        "player_resize_enabled_key" to "s13",
+        "bg_startup_tracing" to "s14",
+        "playback_speed_enabled_key" to "s15",
+        "acra.disable" to "s16",
+        "enable_nsfw_on_providers_key" to "s17",
+        "preview_seekbar_key" to "s18",
+        "show_trailers_key" to "s19",
+        "show_fillers_key" to "s20",
+        "random_button_key" to "s21",
+        "swipe_vertical_enabled_key" to "s22",
+        "bottom_title_key" to "s23",
+        "auto_rotate_video_key" to "s24",
+        "advanced_search" to "s25",
+        "speedup_key" to "s26",
+        "episode_sync_enabled_key" to "s27",
+        "hide_player_control_names_key" to "s28",
+        "show_kitsu_posters_key" to "s29",
+        "double_tap_enabled_key" to "s30",
+        "pip_enabled_key" to "s31",
+        "double_tap_pause_enabled_key" to "s32",
+        "enable_skip_op_from_database" to "s33",
+        "autoplay_next_key" to "s34",
+        "android_tv_interface_off_seek_key" to "s35",
+        "DNS over HTTPS" to "s36",
+        "double_tap_seek_time_key2" to "s37",
+        "auto_download_plugins_key2" to "s38",
+        "automatic_backup_key" to "s39",
+        "download_concurrent_key" to "s40",
+        "com.facebook.appevents.SessionInfo.interruptionCount" to "s41",
+        "download_parallel_key" to "s42",
+        "android_tv_interface_on_seek_key" to "s43",
+        "app_layout_key" to "s44",
+        "backup_dir_key" to "s45",
+        "com.applovin.sdk.impl.isFirstRun" to "s46",
+        "com.facebook.appevents.SessionInfo.sessionId" to "s47",
+        "primary_color_key" to "s48",
+        "app_theme_key" to "s49",
+        "app_locale" to "s50",
+        "com.facebook.appevents.SessionInfo.sessionEndTime" to "s51",
+        "com.facebook.appevents.SessionInfo.sessionStartTime" to "s52",
+        "prefer_media_type_key_2" to "s53",
+        "datastore" to "s54"
+    )
+
+    // 3단계: 특수 규격 문자 매핑 규칙
+    private val valueMap = listOf(
+        "https://" to "h//",
+        ":null," to ":n,",
+        ":false}" to ":f}",
+        ":true}" to ":t}"
+    )
+
+    // JSON Key를 안전하게 이중 치환하는 독립 확장 확장 함수
+    private fun String.replaceKeySafe(original: String, replacement: String): String {
+        return this
+            .replace("\"$original\"", "\"$replacement\"")
+            .replace("\\\"$original\\\"", "\\\"$replacement\\\"")
+    }
 
     private fun replaceKeys(json: String): String {
         var result = json
-        for ((original, replacement) in replacementMap) {
+        
+        // 1. 동적 프로필 접두사 매핑 일괄 치환
+        for ((original, replacement) in prefixMap) {
             result = result.replace(original, replacement)
         }
+        
+        // 2. 내부 직렬화 따옴표 이중 치환
+        for ((original, replacement) in propertyMap) {
+            result = result.replaceKeySafe(original, replacement)
+        }
+        
+        // 3. 특수 규격 문자 일괄 치환
+        for ((original, replacement) in valueMap) {
+            result = result.replace(original, replacement)
+        }
+        
         return result
     }
 
     private fun restoreKeys(json: String): String {
         var result = json
-        for ((original, replacement) in replacementMap) {
+        
+        for ((original, replacement) in valueMap) {
             result = result.replace(replacement, original)
         }
+        
+        for ((original, replacement) in propertyMap) {
+            result = result.replaceKeySafe(replacement, original)
+        }
+        
+        for ((original, replacement) in prefixMap) {
+            result = result.replace(replacement, original)
+        }
+        
         return result
     }
 
