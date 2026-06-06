@@ -131,9 +131,24 @@ object BackupUtils {
         "sync_token", "sync_project_num", "sync_project_id", "sync_item_id", "sync_device_id", "restore_device", "backup_device",
         "movie_active", "dns_active", "ULTIMA_CURRENT_META_PROVIDERS", "ULTIMA_EXTENSIONS_LIST", "ULTIMA_CURRENT_MEDIA_PROVIDERS",
         "ULTIMA_WATCH_SYNC_CREDS", "used_fstream_providers_v3", "fstream_version", "Aniyomi_Plugin_Successful_Install",
-        "enable_support_by_bongngotv", "download_info", "download_resume", "download_q_resume", "download_episode_cache",
-        "prerelease_update", "data_store_helper/account_key_index", "VERSION_NAME", "FILES_TO_DELETE_KEY", "HAS_DONE_SETUP",
-        "video_source_priority", "preferred_audio_language"
+        "enable_support_by_bongngotv", "prerelease_update", "data_store_helper/account_key_index", "VERSION_NAME", 
+        "FILES_TO_DELETE_KEY", "HAS_DONE_SETUP", "video_source_priority", "preferred_audio_language",
+        
+        // ★★★ 로그캣 분석을 통해 추가된 쓰레기 데이터 필터링 목록 ★★★
+        "episode_parent_index_",
+        "download_header_cache",
+        "BACKUP_download_header_cache",
+        "result_season",
+        "result_episode",
+        "result_dub",
+        "CONTENT_URI_",
+        "download_status",
+        "video_watch_state",
+        "search_history",
+        "download_info",
+        "download_resume",
+        "download_q_resume",
+        "download_episode_cache"
     )
 
     private fun isResume(str: String): Boolean {
@@ -318,32 +333,10 @@ object ApiUtils {
         val cleanedData = UtilKt.cleanedSyncData(backupData)
         val compressedData = UtilKt.compressJsonToString(cleanedData)
         
-        // ====================================================================
-        // [디버깅용 로그 출력] Logcat에서 잘리지 않도록 3000자씩 끊어서 출력합니다.
-        // ====================================================================
         Log.d("SyncCS", "Original JSON Length: ${backupData.length}")
         Log.d("SyncCS", "Cleaned JSON Length: ${cleanedData.length}")
         Log.d("SyncCS", "Compressed Base64 Length: ${compressedData.length}")
 
-        val chunkSize = 3000
-        Log.d("SyncCS", "========== RAW JSON START ==========")
-        for (i in 0..backupData.length / chunkSize) {
-            val start = i * chunkSize
-            val end = minOf((i + 1) * chunkSize, backupData.length)
-            if (start < end) Log.d("SyncCS_RAW", backupData.substring(start, end))
-        }
-        Log.d("SyncCS", "========== RAW JSON END ==========")
-
-        Log.d("SyncCS", "========== BASE64 START ==========")
-        for (i in 0..compressedData.length / chunkSize) {
-            val start = i * chunkSize
-            val end = minOf((i + 1) * chunkSize, compressedData.length)
-            if (start < end) Log.d("SyncCS_B64", compressedData.substring(start, end))
-        }
-        Log.d("SyncCS", "========== BASE64 END ==========")
-        // ====================================================================
-
-        // 65,000자를 초과하면 GitHub에서 무조건 튕겨내므로 사전에 차단합니다.
         if (compressedData.length > 65000) {
             return Pair(false, "Data too large (${compressedData.length} chars). Check Logcat 'SyncCS_RAW' to see what is bloating the data.")
         }
