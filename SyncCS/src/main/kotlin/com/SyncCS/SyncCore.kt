@@ -550,7 +550,9 @@ object UtilKt {
 
     fun decompressJsonFromString(str: String): String {
         return try {
-            String(Base64.decode(str, 10), UTF_8)
+            // Safe clean any HTML wrapping that could prevent Base64 decoding
+            val cleanStr = str.replace(Regex("<[^>]*>"), "").trim()
+            String(Base64.decode(cleanStr, 10), UTF_8)
         } catch (e: Exception) {
             ""
         }
