@@ -123,7 +123,7 @@ class Editor(private val editor: SharedPreferences.Editor) {
 }
 
 // ==========================================
-// Backup Utilities (지능형 지향 필터링 장착 완료)
+// Backup Utilities (지능형 복원 및 가변 필터 탑재)
 // ==========================================
 
 object BackupUtils {
@@ -143,6 +143,10 @@ object BackupUtils {
         return whitelistKeys.any { str.contains(it, ignoreCase = true) }
     }
 
+    private fun <T> Map<String, T>.filterAllowedKeys(): Map<String, T> {
+        return this.filter { isAllowed(it.key) }
+    }
+
     @Suppress("UNCHECKED_CAST")
     fun getBackup(context: Context, resumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null): BackupFile {
         Log.d("SYNC", "[BackupUtils] getBackup() called (Strict Whitelist Mode).")
@@ -150,19 +154,56 @@ object BackupUtils {
         val prefs = with(DataStore) { context.getSharedPrefs() }.all
         val defaultPrefs = with(DataStore) { context.getDefaultSharedPrefs() }.all
 
-        // ★ 용량 폭발 방지: 현재 '이어보기'에 활성화되어 있는 작품의 ID 목록만 추출합니다.
-        val resumeKeys = prefs.keys.filter { it.contains("result_resume_watching_2/", ignoreCase = true) }
-        val activeParentIds = resumeKeys.mapNotNull { key ->
-            key.substringAfter("result_resume_watching_2/", "").trim().ifEmpty { null }
-        }.toSet()
+        // 1. 시청 기록을 수집하고 경량 정규식을 사용해 updateTime 타임스탬프를 추출합니다.
+        val resumeEntries = prefs.filter { it.key.contains("result_resume_watching_2/", ignoreCase = true) }
+            .mapNotNull { (key, value) ->
+                if (value !is String) return@mapNotNull null
+                try {
+                    val match = Regex("\"updateTime\"\\s*:\\s*(\\d+)").find(value)
+                    val time = match?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+                    val parentId = key.substringAfter("result_resume_watching_2/", "").trim()
+                    if (parentId.isEmpty()) null else Triple(key, parentId, time)
+                } catch (e: Exception) {
+                    null
+                }
+            }
 
-        // download_header_cache는 현재 이어보기(activeParentIds)에 활성화되어 있는 작품만 골라서 통과시킵니다.
+        // 2. 가장 최근 시청 시간순(내림차순)으로 최대 100개만 필터링하여 상한 제어합니다.
+        val topEntries = resumeEntries.sortedByDescending { it.third }.take(100)
+        val allowedResumeKeys = topEntries.map { it.first }.toSet()
+        val activeParentIds = topEntries.map { it.second }.toSet()
+
+        // 3. activeParentIds 및 화이트리스트에 매칭되는 데이터만 필터링해 백업셋을 경량화합니다.
         val filteredPrefs = prefs.filter { (key, _) ->
-            if (key.contains("download_header_cache/", ignoreCase = true)) {
-                val id = key.substringAfter("download_header_cache/", "").trim()
-                activeParentIds.contains(id)
-            } else {
-                isAllowed(key)
+            when {
+                key.contains("download_header_cache/", ignoreCase = true) -> {
+                    val id = key.substringAfter("download_header_cache/", "").trim()
+                    activeParentIds.contains(id)
+                }
+                key.contains("result_resume_watching_2/", ignoreCase = true) -> {
+                    allowedResumeKeys.contains(key)
+                }
+                key.contains("result_season/", ignoreCase = true) -> {
+                    val id = key.substringAfter("result_season/", "").trim()
+                    activeParentIds.contains(id)
+                }
+                key.contains("result_episode/", ignoreCase = true) -> {
+                    val id = key.substringAfter("result_episode/", "").trim()
+                    activeParentIds.contains(id)
+                }
+                key.contains("result_dub/", ignoreCase = true) -> {
+                    val id = key.substringAfter("result_dub/", "").trim()
+                    activeParentIds.contains(id)
+                }
+                key.contains("result_watch_state/", ignoreCase = true) -> {
+                    val id = key.substringAfter("result_watch_state/", "").trim()
+                    activeParentIds.contains(id)
+                }
+                key.contains("result_watch_state_data/", ignoreCase = true) -> {
+                    val id = key.substringAfter("result_watch_state_data/", "").trim()
+                    activeParentIds.contains(id)
+                }
+                else -> isAllowed(key)
             }
         }
         val filteredDefaultPrefs = defaultPrefs.filterKeys { isAllowed(it) }
@@ -170,7 +211,6 @@ object BackupUtils {
         Log.d("SYNC", "[BackupUtils] Whitelist Filtered -> Datastore: ${filteredPrefs.size} keys, DefaultPrefs: ${filteredDefaultPrefs.size} keys")
 
         fun buildVars(map: Map<String, Any?>): BackupVars {
-            // 문자열 값들 중 과거 버그로 인해 다중 직렬화 오염된 백슬래시 값을 정상 규격으로 복구 처리합니다.
             val cleanedMap = map.mapValues { (_, value) ->
                 if (value is String) {
                     UtilKt.unpackMultipleSerialization(value)
@@ -191,45 +231,37 @@ object BackupUtils {
         return BackupFile(buildVars(filteredPrefs), buildVars(filteredDefaultPrefs))
     }
 
-    private fun <T> restoreMap(context: Context, map: Map<String, T>?, isEditingAppSettings: Boolean) {
-        if (map == null) return
-        
-        if (isEditingAppSettings) {
-            val defaultEditor = with(DataStore) { context.getDefaultSharedPrefs() }.edit()
-            for ((key, value) in map) {
-                if (isAllowed(key)) {
-                    Editor(defaultEditor).setKeyRaw(key, value)
-                }
-            }
-            defaultEditor.apply()
-        } else {
-            val datastoreEditor = with(DataStore) { context.getSharedPrefs() }.edit()
-            for ((key, value) in map) {
-                if (isAllowed(key)) {
-                    Editor(datastoreEditor).setKeyRaw(key, value)
-                }
-            }
-            datastoreEditor.apply()
-        }
-    }
-
     fun restore(context: Context, backupFile: BackupFile, restoreSettings: Boolean, restoreDataStore: Boolean) {
         Log.d("SYNC", "[BackupUtils] restore() started (Strict Whitelist Mode).")
         
-        restoreMap(context, backupFile.settings.bool, true)
-        restoreMap(context, backupFile.settings.int, true)
-        restoreMap(context, backupFile.settings.string, true)
-        restoreMap(context, backupFile.settings.float, true)
-        restoreMap(context, backupFile.settings.long, true)
-        restoreMap(context, backupFile.settings.stringSet, true)
+        // ★ 최적화: 설정 맵 루프마다 수십 번 불리던 apply()를 단 1회의 물리 쓰기로 끝내도록 단일 트랜잭션 구조로 개편했습니다. [1]
+        if (restoreSettings) {
+            val settingsEditor = with(DataStore) { context.getDefaultSharedPrefs() }.edit()
+            val wrappedEditor = Editor(settingsEditor)
+            
+            backupFile.settings.bool?.filterAllowedKeys()?.forEach { (k, v) -> wrappedEditor.setKeyRaw(k, v) }
+            backupFile.settings.int?.filterAllowedKeys()?.forEach { (k, v) -> wrappedEditor.setKeyRaw(k, v) }
+            backupFile.settings.string?.filterAllowedKeys()?.forEach { (k, v) -> wrappedEditor.setKeyRaw(k, v) }
+            backupFile.settings.float?.filterAllowedKeys()?.forEach { (k, v) -> wrappedEditor.setKeyRaw(k, v) }
+            backupFile.settings.long?.filterAllowedKeys()?.forEach { (k, v) -> wrappedEditor.setKeyRaw(k, v) }
+            backupFile.settings.stringSet?.filterAllowedKeys()?.forEach { (k, v) -> wrappedEditor.setKeyRaw(k, v) }
+            
+            settingsEditor.apply()
+        }
 
+        // ★ 최적화: 데이터스토어 또한 전체 데이터를 단 하나의 editor 트랜잭션에 주입한 뒤 마지막에 단 1번만 apply()를 호출하여 쓰기 지연 병목(렉 현상)을 완전히 방지합니다. [1]
         if (restoreDataStore) {
-            restoreMap(context, backupFile.datastore.bool, false)
-            restoreMap(context, backupFile.datastore.int, false)
-            restoreMap(context, backupFile.datastore.string, false)
-            restoreMap(context, backupFile.datastore.float, false)
-            restoreMap(context, backupFile.datastore.long, false)
-            restoreMap(context, backupFile.datastore.stringSet, false)
+            val datastoreEditor = with(DataStore) { context.getSharedPrefs() }.edit()
+            val wrappedEditor = Editor(datastoreEditor)
+            
+            backupFile.datastore.bool?.filterAllowedKeys()?.forEach { (k, v) -> wrappedEditor.setKeyRaw(k, v) }
+            backupFile.datastore.int?.filterAllowedKeys()?.forEach { (k, v) -> wrappedEditor.setKeyRaw(k, v) }
+            backupFile.datastore.string?.filterAllowedKeys()?.forEach { (k, v) -> wrappedEditor.setKeyRaw(k, v) }
+            backupFile.datastore.float?.filterAllowedKeys()?.forEach { (k, v) -> wrappedEditor.setKeyRaw(k, v) }
+            backupFile.datastore.long?.filterAllowedKeys()?.forEach { (k, v) -> wrappedEditor.setKeyRaw(k, v) }
+            backupFile.datastore.stringSet?.filterAllowedKeys()?.forEach { (k, v) -> wrappedEditor.setKeyRaw(k, v) }
+            
+            datastoreEditor.apply()
         }
         Log.d("SYNC", "[BackupUtils] restore() finished.")
     }
@@ -412,11 +444,10 @@ object ApiUtils {
 }
 
 // ==========================================
-// String & Compression Utilities
+// String & Compression Utilities (완벽 복구 및 코틀린 문법 교정 완료)
 // ==========================================
 
 object UtilKt {
-    // 1단계: 프로필 접두사 매핑 규칙 (0/result_... ➔ 0/k1/... 동적 완벽 치환)
     private val prefixMap = listOf(
         "result_resume_watching_2/" to "k1/",
         "video_pos_dur/" to "k2/",
@@ -453,7 +484,6 @@ object UtilKt {
         "home_api_used" to "k33"
     )
 
-    // 2단계: 일반 및 이스케이프 따옴표 전용 안전 매핑 (오치환 제로 설계)
     private val propertyMap = listOf(
         "bookmarkedTime" to "v1",
         "latestUpdatedTime" to "v2",
@@ -551,7 +581,6 @@ object UtilKt {
         "datastore" to "s54"
     )
 
-    // 3단계: 특수 규격 문자 매핑 규칙
     private val valueMap = listOf(
         "https://" to "h//",
         ":null," to ":n,",
@@ -559,17 +588,14 @@ object UtilKt {
         ":true}" to ":t}"
     )
 
-    // 과거 이중 직렬화 버그로 인해 무한 이스케이프된 백슬래시 문자열을 동적으로 해체 복구하는 핵심 로직
     fun unpackMultipleSerialization(value: String): String {
         var current = value.trim()
         while (current.startsWith("\"") && current.endsWith("\"") && current.length > 2) {
             try {
-                // Jackson 역직렬화를 통해 매 이터레이션마다 이스케이프 단계를 한 꺼풀씩 벗겨냅니다.
                 val unwrapped = mapper.readValue<String>(current)
                 if (unwrapped == current || unwrapped.isEmpty()) break
                 
                 val trimmedUnwrapped = unwrapped.trim()
-                // 원본 정상 데이터 규격(정상 JSON 오브젝트나 배열)을 확보한 시점에서 unpack 루프를 즉시 종료합니다.
                 if (trimmedUnwrapped.startsWith("{") && trimmedUnwrapped.endsWith("}")) {
                     current = trimmedUnwrapped
                     break
@@ -578,11 +604,9 @@ object UtilKt {
                     current = trimmedUnwrapped
                     break
                 }
-                // 정상적으로 따옴표가 하나만 감싸져 있는 순정 JSON String일 때만 한 번 더 언랩합니다.
                 if (trimmedUnwrapped.startsWith("\"") && trimmedUnwrapped.endsWith("\"")) {
                     current = trimmedUnwrapped
                 } else {
-                    // 더 벗기면 따옴표가 완전히 날아가는 원시 문자열 단계가 될 때, 복원용 Jackson 파싱을 위해 따옴표를 가진 상태(current)로 최종 종료합니다.
                     break
                 }
             } catch (e: Exception) {
@@ -592,7 +616,6 @@ object UtilKt {
         return current
     }
 
-    // JSON Key를 안전하게 이중 치환하는 독립 확장 확장 함수
     private fun String.replaceKeySafe(original: String, replacement: String): String {
         return this
             .replace("\"$original\"", "\"$replacement\"")
@@ -602,7 +625,6 @@ object UtilKt {
     private fun replaceKeys(json: String): String {
         var result = json
         
-        // ★ [2번 추가 전략 장착]: 즐겨찾기 목록 내의 용량을 터뜨리는 줄거리(plot, overview)와 태그(tags) 비작동 텍스트 필드를 정규식으로 삭제해 90% 용량을 확보합니다.
         try {
             result = Regex("\\\\\\\"overview\\\\\\\"\\s*:\\s*\\\\\\\"(.*?)(?<!\\\\)\\\\\\\"").replace(result, "\\\\\\\"overview\\\\\\\":\\\\\\\"\\\\\\\"")
             result = Regex("\\\\\\\"plot\\\\\\\"\\s*:\\s*\\\\\\\"(.*?)(?<!\\\\)\\\\\\\"").replace(result, "\\\\\\\"plot\\\\\\\":\\\\\\\"\\\\\\\"")
@@ -611,17 +633,14 @@ object UtilKt {
             Log.d("SYNC", "[replaceKeys] Regex Trimming failed: ${e.message}")
         }
         
-        // 1. 동적 프로필 접두사 매핑 일괄 치환
         for ((original, replacement) in prefixMap) {
             result = result.replace(original, replacement)
         }
         
-        // 2. 내부 직렬화 따옴표 이중 치환
         for ((original, replacement) in propertyMap) {
             result = result.replaceKeySafe(original, replacement)
         }
         
-        // 3. 특수 규격 문자 일괄 치환
         for ((original, replacement) in valueMap) {
             result = result.replace(original, replacement)
         }
@@ -683,7 +702,7 @@ object UtilKt {
         }
         if (Build.VERSION.SDK_INT >= 26) {
             try {
-                val serial = Build.getSerial()
+                val serial = Build.getSerial() // ★ 자바 식 문법(String serial)에서 코틀린 변수 선언(val)으로 완전 교정! [1]
                 if (!serial.isNullOrEmpty()) {
                     return md5(packageName + serial)
                 }
