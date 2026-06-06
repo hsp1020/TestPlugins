@@ -22,7 +22,7 @@ import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 
 // ==========================================
-// Data Models (updatedAt 필드 완벽 복원)
+// Data Models
 // ==========================================
 
 data class APIRes(
@@ -43,7 +43,7 @@ data class APIRes(
                 data class Items(@JsonProperty("nodes") var nodes: List<Node>? = null) {
                     data class Node(
                         @JsonProperty("id") var id: String? = null,
-                        @JsonProperty("updatedAt") var updatedAt: String? = null, // ★ 복원 완료
+                        @JsonProperty("updatedAt") var updatedAt: String? = null,
                         @JsonProperty("content") var content: Content? = null
                     ) {
                         data class Content(
@@ -148,27 +148,12 @@ object BackupUtils {
     }
 
     @Suppress("UNCHECKED_CAST")
-    fun getBackup(context: Context, resumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null): BackupFile {
-        Log.d("SYNC", "[BackupUtils] getBackup() called. Backing up all valid watch history...")
-        
+    fun getBackup(context: Context): BackupFile {
         val prefs = with(DataStore) { context.getSharedPrefs() }.all
         val defaultPrefs = with(DataStore) { context.getDefaultSharedPrefs() }.all
 
         val filteredPrefs = prefs.filterKeys { isBackup(it) }
         val filteredDefaultPrefs = defaultPrefs.filterKeys { isBackup(it) }
-
-        Log.d("SYNC", "[BackupUtils] Filtered Prefs size: ${filteredPrefs.size}, DefaultPrefs size: ${filteredDefaultPrefs.size}")
-
-        fun buildVars(map: Map<String, Any?>): BackupVars {
-            return BackupVars(
-                bool = map.filterValues { it is Boolean } as Map<String, Boolean>,
-                int = map.filterValues { it is Int } as Map<String, Int>,
-                string = map.filterValues { it is String } as Map<String, String>,
-                float = map.filterValues { it is Float } as Map<String, Float>,
-                long = map.filterValues { it is Long } as Map<String, Long>,
-                stringSet = map.filterValues { it is Set<*> } as Map<String, Set<String>>
-            )
-        }
 
         return BackupFile(buildVars(filteredPrefs), buildVars(filteredDefaultPrefs))
     }
@@ -185,19 +170,15 @@ object BackupUtils {
     private fun <T> restoreMap(context: Context, map: Map<String, T>?, isEditingAppSettings: Boolean = false) {
         if (map == null) return
         val editor = editor(context, isEditingAppSettings)
-        var restoredCount = 0
         for ((key, value) in map) {
             if (isBackup(key)) {
                 editor.setKeyRaw(key, value)
-                restoredCount++
             }
         }
         editor.apply()
-        Log.d("SYNC", "[BackupUtils] restoreMap applied $restoredCount keys (isEditingAppSettings=$isEditingAppSettings)")
     }
 
     fun restore(context: Context, backupFile: BackupFile, restoreSettings: Boolean, restoreDataStore: Boolean) {
-        Log.d("SYNC", "[BackupUtils] restore() started. restoreSettings=$restoreSettings, restoreDataStore=$restoreDataStore")
         if (restoreSettings) {
             restoreMap(context, backupFile.settings.bool, true)
             restoreMap(context, backupFile.settings.int, true)
@@ -214,7 +195,6 @@ object BackupUtils {
             restoreMap(context, backupFile.datastore.long, false)
             restoreMap(context, backupFile.datastore.stringSet, false)
         }
-        Log.d("SYNC", "[BackupUtils] restore() finished.")
     }
 }
 
@@ -246,7 +226,6 @@ object ApiUtils {
         }
         
         return try {
-            Log.d("SYNC", "[ApiUtils] Sending GraphQL request...")
             val response = app.post(
                 "https://api.github.com/graphql",
                 headers = mapOf("Authorization" to "Bearer $token"),
@@ -289,7 +268,6 @@ object ApiUtils {
         val numStr = prefs.getString("sync_project_num", null)?.let { mapper.readValue<String>(it) } ?: return emptyList()
         val num = numStr.toIntOrNull() ?: return emptyList()
         
-        // ★ 복원 완료: updatedAt 추가로 태블릿이 새로운 업로드를 정상 감지합니다.
         val query = """query(${'$'}num: Int!) { viewer { projectV2(number: ${'$'}num) { id items(first: 100) { nodes { id updatedAt content { ... on DraftIssue { id title bodyText } } } } } } }"""
         val res = apiCall(query, mapOf("num" to num))
         
@@ -338,21 +316,10 @@ object ApiUtils {
             val deviceName = prefs.getString("device_name", null)?.let { mapper.readValue<String>(it) } ?: Build.MODEL
             
             val cleanedData = UtilKt.cleanedSyncData(backupData)
-            
-            Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA START ==========")
-            val chunkSize = 3000
-            for (i in 0..cleanedData.length / chunkSize) {
-                val start = i * chunkSize
-                val end = minOf((i + 1) * chunkSize, cleanedData.length)
-                if (start < end) {
-                    Log.d("SYNC_JSON", cleanedData.substring(start, end))
-                }
-            }
-            Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA END ==========")
-
             val compressedData = UtilKt.compressJsonToString(cleanedData)
             
             if (compressedData.length > 65000) {
+                Log.d("SYNC", "[ApiUtils] ERROR: Data too large (${compressedData.length} chars)")
                 return Pair(false, "Data too large (${compressedData.length} chars).")
             }
 
@@ -362,7 +329,7 @@ object ApiUtils {
 
             if (existingDevices.isNotEmpty()) {
                 val target = existingDevices.first()
-                Log.d("SYNC", "[ApiUtils] Existing card found. Updating card in place: ${target.name}")
+                Log.d("SYNC", "[Sync] Existing card found. Updating card in place: ${target.name}")
                 val updateSuccess = updateDevice(target.draftIssueId ?: "", title, compressedData)
                 if (!updateSuccess) {
                     return Pair(false, "Failed to update existing card.")
@@ -373,8 +340,10 @@ object ApiUtils {
                         deleteDevice(projectId, duplicate.itemId)
                     }
                 }
+                Log.d("SYNC", "[Sync] Successfully uploaded local data to GitHub Project card: ${target.name}")
                 return Pair(true, "Data updated successfully in place!")
             } else {
+                Log.d("SYNC", "[Sync] No existing card. Creating new draft issue.")
                 val addQuery = """mutation(${'$'}projectId: ID!, ${'$'}title: String!, ${'$'}body: String!) { addProjectV2DraftIssue(input: {projectId: ${'$'}projectId, title: ${'$'}title, body: ${'$'}body}) { projectItem { id } } }"""
                 val addRes = apiCall(addQuery, mapOf("projectId" to projectId, "title" to title, "body" to compressedData))
                 
@@ -385,6 +354,7 @@ object ApiUtils {
                 val newItemId = addRes?.data?.issue?.projectItem?.id
                 if (newItemId != null) {
                     AcraApplication.setKey("sync_item_id", newItemId)
+                    Log.d("SYNC", "[Sync] Successfully created new GitHub Project card: $deviceName")
                     return Pair(true, "Data synced successfully to GitHub!")
                 }
                 return Pair(false, "Failed to upload data to GitHub.")
