@@ -163,7 +163,7 @@ object BackupUtils {
         fun buildVars(map: Map<String, Any?>): BackupVars {
             return BackupVars(
                 bool = map.filterValues { it is Boolean } as Map<String, Boolean>,
-                int = map.filterValues { it is Int } as Map<String, Integer>,
+                int = map.filterValues { it is Int } as Map<String, Int>,
                 string = map.filterValues { it is String } as Map<String, String>,
                 float = map.filterValues { it is Float } as Map<String, Float>,
                 long = map.filterValues { it is Long } as Map<String, Long>,
@@ -189,7 +189,6 @@ object BackupUtils {
             for ((key, value) in map) {
                 if (isBackup(key)) {
                     try {
-                        // ★ 해결: with(DataStore) 범위를 지정하여 context 객체 위에서 확장 함수인 setKey를 성공적으로 호출합니다.
                         with(DataStore) {
                             context.setKey(key, value)
                         }
@@ -341,20 +340,20 @@ object ApiUtils {
             val deviceId = prefs.getString("device_id", null)?.let { mapper.readValue<String>(it) } ?: return Pair(false, "Device ID missing")
             val deviceName = prefs.getString("device_name", null)?.let { mapper.readValue<String>(it) } ?: Build.MODEL
             
-            val cleanedData = UtilKt.cleanedSyncData(backupData)
-            
+            // ★ 해결: cleanedSyncData 호출 및 치환 과정 완전 제거! 순수 backupData를 그대로 3000자씩 분할 출력
             Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA START ==========")
             val chunkSize = 3000
-            for (i in 0..cleanedData.length / chunkSize) {
+            for (i in 0..backupData.length / chunkSize) {
                 val start = i * chunkSize
-                val end = minOf((i + 1) * chunkSize, cleanedData.length)
+                val end = minOf((i + 1) * chunkSize, backupData.length)
                 if (start < end) {
-                    
+                    Log.d("SYNC_JSON", backupData.substring(start, end))
                 }
             }
             Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA END ==========")
 
-            val compressedData = UtilKt.compressJsonToString(cleanedData)
+            // ★ 해결: cleanedSyncData 치환 과정 없이 다이렉트로 GZIP 압축 실행!
+            val compressedData = UtilKt.compressJsonToString(backupData)
             
             if (compressedData.length > 65000) {
                 return Pair(false, "Data too large (${compressedData.length} chars).")
@@ -383,12 +382,14 @@ object ApiUtils {
                 val addRes = apiCall(addQuery, mapOf("projectId" to projectId, "title" to title, "body" to compressedData))
                 
                 if (addRes?.errors?.isNotEmpty() == true) {
+                    Log.d("SYNC", "[ApiUtils] Upload Error: ${addRes.errors!!.first().message}")
                     return Pair(false, "Upload Error: ${addRes.errors!!.first().message}")
                 }
                 
                 val newItemId = addRes?.data?.issue?.projectItem?.id
                 if (newItemId != null) {
                     AcraApplication.setKey("sync_item_id", newItemId)
+                    Log.d("SYNC", "[ApiUtils] Upload successful! New Item ID: $newItemId")
                     return Pair(true, "Data synced successfully to GitHub!")
                 }
                 return Pair(false, "Failed to upload data to GitHub.")
