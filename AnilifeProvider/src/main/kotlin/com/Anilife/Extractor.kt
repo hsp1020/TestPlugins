@@ -68,10 +68,10 @@ class AnilifeProxyExtractor : ExtractorApi() {
 
     /**
      * [재생 링크 추출 전용 극효율 쌩웹뷰]
-     * resumeWith 및 자바스크립트 리다이렉트 최종 경로 추적 패키지 수립 완료
+     * 레퍼러 검증 우회용 HTTP Header 주입 기능 보강 완료
      */
     @SuppressLint("SetJavaScriptEnabled")
-    private suspend fun getDoc(url: String): Document {
+    private suspend fun getDoc(url: String, headers: Map<String, String>): Document {
         Log.d(TAG, "[RawWebView] 추출용 쌩웹뷰 기동 -> $url")
         val ctx = CloudStreamApp.context ?: throw Exception("Context가 Null입니다.")
 
@@ -97,7 +97,6 @@ class AnilifeProxyExtractor : ExtractorApi() {
                         if (!isResumed) {
                             isResumed = true
                             cleanup()
-                            // Jsoup.parse에 리다이렉트 완료 주소인 finalUrl을 바인딩하여 resumeWith 리턴 처리
                             continuation.resumeWith(Result.success(Jsoup.parse(html, finalUrl)))
                         }
                     }
@@ -179,7 +178,8 @@ class AnilifeProxyExtractor : ExtractorApi() {
                     }
                 }
 
-                webView.loadUrl(url)
+                // [최적화 우회 핵심] 동적 레퍼러 헤더 주입 실행 [1.1]
+                webView.loadUrl(url, headers)
 
                 Handler(Looper.getMainLooper()).postDelayed({
                     if (!isResumed) {
@@ -220,10 +220,9 @@ class AnilifeProxyExtractor : ExtractorApi() {
 
         try {
             var finalM3u8 = ""
-            // [우회 적용]: 차단 장막이 있는 플레이어 수집 경로를 쌩웹뷰로 호출 우회 [1.1]
+            // [최적화 우회 적용] playerUrl 호출 시에도 안전한 헤더(Referer)를 전달하도록 패치 [1.1]
             println("[DEBUG-Extractor] 쌩웹뷰로 playerUrl 수집 호출 시작...")
-            val playerDoc = getDoc(playerUrl)
-            // Jsoup의 완전한 HTML 코드를 수취하기 위해 .outerHtml() 호출 적용 [1.1]
+            val playerDoc = getDoc(playerUrl, cleanHeaders)
             val playerHtml = playerDoc.outerHtml()
             println("[DEBUG-Extractor] 수집 완료된 playerHtml 전체 길이: ${playerHtml.length} 자")
 
