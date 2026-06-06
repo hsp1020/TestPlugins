@@ -34,7 +34,7 @@ class SyncSettingsFragment(
 ) : BottomSheetDialogFragment() {
 
     private val res = pluginContext.resources
-    private val resPackageName = "com.SyncCS"
+    private val resPackageName = pluginContext.packageName
 
     private fun <T : View> findView(view: View, name: String): T {
         val id = res.getIdentifier(name, "id", resPackageName)
