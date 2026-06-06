@@ -27,7 +27,7 @@ import javax.net.ssl.TrustManager
 import javax.net.ssl.X509TrustManager
 
 // =========================================================================
-// [1] Jackson Models Area
+// [1] Jackson Models Area (1:1 Restored)
 // =========================================================================
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class APIRes(
@@ -99,7 +99,7 @@ data class SyncDevice(
 )
 
 // =========================================================================
-// [2] Shared SharedPreferences Editor Class
+// [2] Shared SharedPreferences Editor Class (1:1 Restored)
 // =========================================================================
 class Editor(val editor: SharedPreferences.Editor) {
     fun <T> setKeyRaw(path: String, value: T) {
@@ -132,7 +132,7 @@ class Editor(val editor: SharedPreferences.Editor) {
 }
 
 // =========================================================================
-// [3] BackupUtils Area (Synchronized with exact key filters)
+// [3] BackupUtils Area (1:1 Restored)
 // =========================================================================
 object BackupUtils {
     val nonTransferableKeys = listOf(
@@ -246,7 +246,7 @@ object BackupUtils {
 }
 
 // =========================================================================
-// [4] ApiUtils Area
+// [4] ApiUtils Area (1:1 Restored & mapper deprecation bypassed)
 // =========================================================================
 class ApiUtils private constructor() {
     companion object {
@@ -277,7 +277,6 @@ class ApiUtils private constructor() {
         return mapper.writeValueAsString(obj)
     }
 
-    /* JADX INFO: Access modifiers changed from: private */
     suspend fun apiCall(query: String): APIRes? = withContext(Dispatchers.IO) {
         try {
             val formattedQuery = query.replace("\n", " ").replace(Regex("\\s+"), " ")
@@ -425,7 +424,7 @@ class ApiUtils private constructor() {
 }
 
 // =========================================================================
-// [5] Native Bytecode Utilities Area
+// [5] Native Bytecode Utilities Area (1:1 Restored)
 // =========================================================================
 object UtilKt {
     fun cleanedSyncData(str: String): String {
