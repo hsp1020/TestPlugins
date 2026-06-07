@@ -24,7 +24,7 @@ class MovieKing : MainAPI() {
             currentMainUrl = newDomain
             AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 ?.edit()?.putString(PREF_KEY, newDomain)?.apply()
-            println("[MovieKing DBG] 영구 도메인 저장 완료: $newDomain")
+            println("[MovieKing DBG] 💾 영구 도메인 저장 완료: $newDomain")
         }
     }
 
@@ -57,6 +57,7 @@ class MovieKing : MainAPI() {
             if (cachedDomain != null) {
                 currentMainUrl = cachedDomain
                 mainUrl = currentMainUrl
+                println("[MovieKing DBG] 📂 캐시된 도메인 로드: $currentMainUrl")
             }
             
             try {
@@ -64,17 +65,20 @@ class MovieKing : MainAPI() {
                 val finalUrl = res.url.trimEnd('/')
                 if (res.isSuccessful && res.text.contains("video-card")) {
                     if (currentMainUrl != finalUrl) {
+                        println("[MovieKing DBG] 🔄 리다이렉트 감지됨: $currentMainUrl -> $finalUrl")
                         saveDomain(finalUrl)
                         mainUrl = currentMainUrl
                     }
                     isDomainChecked = true; return@withLock
                 }
-            } catch (e: Exception) {}
+            } catch (e: Exception) { println("[MovieKing DBG] ❌ 현재 도메인 접속 실패") }
 
             try {
+                println("[MovieKing DBG] 🌐 베이스 도메인(movieking.net) 폴백 시도")
                 val baseRes = app.get("https://movieking.net", headers = commonHeaders, timeout = 5L)
                 val baseFinalUrl = baseRes.url.trimEnd('/')
                 if (baseRes.isSuccessful && baseRes.text.contains("video-card")) {
+                    println("[MovieKing DBG] ✨ 베이스 도메인 폴백 성공: $baseFinalUrl")
                     saveDomain(baseFinalUrl)
                     mainUrl = currentMainUrl
                     isDomainChecked = true; return@withLock
@@ -82,6 +86,7 @@ class MovieKing : MainAPI() {
             } catch (e: Exception) {}
 
             try {
+                println("[MovieKing DBG] 🕵️ 대피소 포털 스크래핑 시도")
                 val portalDoc = app.get(PORTAL_URL, timeout = 10L).document
                 val latestUrl = portalDoc.select("a").firstOrNull { 
                     it.text().contains("무비킹") || it.attr("href").contains("mvking") || it.attr("href").contains("movieking")
@@ -89,11 +94,12 @@ class MovieKing : MainAPI() {
 
                 if (!latestUrl.isNullOrBlank()) {
                     val newTarget = if (latestUrl.startsWith("http")) latestUrl else "https://$latestUrl"
+                    println("[MovieKing DBG] ✨ 대피소 파싱 성공: $newTarget")
                     saveDomain(newTarget)
                     mainUrl = currentMainUrl
                     isDomainChecked = true; return@withLock
                 }
-            } catch (e: Exception) {}
+            } catch (e: Exception) { println("[MovieKing DBG] ❌ 대피소 파싱 실패") }
             
             isDomainChecked = true 
         }
@@ -104,6 +110,7 @@ class MovieKing : MainAPI() {
         if (qLower.startsWith("!movieking ")) {
             val userDomain = query.substring(11).trim().trimEnd('/')
             if (userDomain.startsWith("http")) {
+                println("[MovieKing DBG] 🔧 백도어 도메인 수동 갱신: $userDomain")
                 saveDomain(userDomain)
                 mainUrl = currentMainUrl
                 isDomainChecked = true 
@@ -112,6 +119,7 @@ class MovieKing : MainAPI() {
         } else if (query.startsWith("!")) { return emptyList() }
 
         checkAndUpdateDomain()
+        println("[MovieKing DBG] 🔍 검색 요청: $query")
         
         return try {
             var searchUrl = "$mainUrl/search?k=$query"
@@ -121,6 +129,7 @@ class MovieKing : MainAPI() {
 
             if (redirectedDomain != mainUrl || !finalUrl.contains("search")) {
                 if (redirectedDomain != mainUrl) {
+                    println("[MovieKing DBG] 🔄 검색 중 리다이렉트 감지: $redirectedDomain")
                     saveDomain(redirectedDomain)
                     mainUrl = currentMainUrl
                 }
@@ -130,7 +139,9 @@ class MovieKing : MainAPI() {
 
             if (!res.url.contains("search")) return emptyList()
 
-            res.document.select(".video-card").mapNotNull { it.toSearchResponse() }
+            val items = res.document.select(".video-card").mapNotNull { it.toSearchResponse() }
+            println("[MovieKing DBG] 🔍 검색 결과 수: ${items.size}")
+            items
         } catch (e: Exception) { if (e is CancellationException) throw e; emptyList() }
     }
 
@@ -138,6 +149,7 @@ class MovieKing : MainAPI() {
         checkAndUpdateDomain()
         val separator = if (request.data.contains("?")) "&" else "?"
         var url = "$mainUrl${request.data}${separator}page=$page"
+        println("[MovieKing DBG] 📄 메인페이지 로드: 카테고리=${request.name}, URL=$url")
         
         return try {
             var res = app.get(url, headers = commonHeaders)
@@ -149,6 +161,7 @@ class MovieKing : MainAPI() {
 
             if (redirectedDomain != mainUrl || !decodedFinalUrl.contains(decodedRequestData)) {
                 if (redirectedDomain != mainUrl) {
+                    println("[MovieKing DBG] 🔄 메인페이지 로드 중 리다이렉트 감지: $redirectedDomain")
                     saveDomain(redirectedDomain)
                     mainUrl = currentMainUrl
                 }
@@ -158,6 +171,7 @@ class MovieKing : MainAPI() {
 
             val doc = res.document
             val list = doc.select(".video-card").mapNotNull { it.toSearchResponse(request.name) }
+            println("[MovieKing DBG] 📄 메인페이지 아이템 수: ${list.size}")
             newHomePageResponse(request.name, list, hasNext = list.isNotEmpty())
         } catch (e: Exception) {
             if (e is CancellationException) throw e 
@@ -187,6 +201,7 @@ class MovieKing : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse {
         checkAndUpdateDomain()
+        println("[MovieKing DBG] 🎬 상세페이지 로드: $url")
         
         var passedPoster: String? = null
         var cleanUrl = url
@@ -216,6 +231,8 @@ class MovieKing : MainAPI() {
             newEpisode(fixUrl(it.attr("href"))) { this.name = it.text().trim() } 
         }.reversed()
 
+        println("[MovieKing DBG] 🎬 파싱 완료: 에피소드 수=${episodeList.size}")
+
         return if (episodeList.size <= 1) {
             newMovieLoadResponse(title, finalUrl, TvType.Movie, finalUrl) { this.posterUrl = fixUrl(poster); this.plot = intro }
         } else {
@@ -225,6 +242,7 @@ class MovieKing : MainAPI() {
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         checkAndUpdateDomain()
+        println("[MovieKing DBG] 🔗 영상 링크 추출 시작: $data")
         var targetData = data
         if (!targetData.startsWith(mainUrl) && (targetData.contains("mvking") || targetData.contains("movieking"))) {
             targetData = mainUrl + targetData.replace(Regex("https?://[^/]+"), "")
