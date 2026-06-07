@@ -9,7 +9,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.UUID
 import java.util.concurrent.TimeUnit
-import com.hsp1020.BuildConfig // 생성될 패키지 주소를 안전하게 참조
 
 /**
  * Firebase Remote Config Fetcher for SKTech Live App
