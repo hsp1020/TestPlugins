@@ -1,4 +1,3 @@
-// 파일명: hsp1020/testplugins/TestPlugins-d1a26fae88cb55c8f1d621560cf4e45bd7fd78f6/TVMONProvider/src/main/kotlin/com/tvmon/TVMon.kt
 package com.tvmon
 
 import android.content.Context
@@ -16,7 +15,6 @@ import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.RequestBody.Companion.toRequestBody
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CancellationException
-
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.async
@@ -30,6 +28,13 @@ class TVMon : MainAPI() {
         private val domainMutex = Mutex()
         private const val PREFS_NAME = "TVMon_Domain_Cache"
         private const val PREF_KEY = "current_domain"
+
+        fun saveDomain(newDomain: String) {
+            currentMainUrl = newDomain
+            AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                ?.edit()?.putString(PREF_KEY, newDomain)?.apply()
+            println("[TVMon DBG] 영구 도메인 저장 완료: $newDomain")
+        }
     }
 
     override var mainUrl = currentMainUrl
@@ -63,10 +68,9 @@ class TVMon : MainAPI() {
             if (isDomainChecked) return@withLock
 
             val prefs = AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            val rawCachedDomain = prefs?.getString(PREF_KEY, null)
-            val cachedDomain = rawCachedDomain?.replace("http://", "https://")
+            val cachedDomain = prefs?.getString(PREF_KEY, null)?.replace("http://", "https://")
             
-            if (cachedDomain != null && currentMainUrl == "https://tvmon1.com") {
+            if (cachedDomain != null) {
                 currentMainUrl = cachedDomain
                 mainUrl = currentMainUrl
             }
@@ -80,21 +84,16 @@ class TVMon : MainAPI() {
                 
                 if (res.isSuccessful && (res.text.contains("mov_list") || res.text.contains("item"))) {
                     if (currentMainUrl != finalUrl) {
-                        currentMainUrl = finalUrl
+                        saveDomain(finalUrl)
                         mainUrl = currentMainUrl
-                        prefs?.edit()?.putString(PREF_KEY, currentMainUrl)?.apply()
                     }
                     isDomainChecked = true
                     return@withLock
                 }
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-            }
+            } catch (e: Exception) {}
 
             val match = Regex("tvmon(\\d+)").find(currentMainUrl)
             val startNum = match?.groupValues?.get(1)?.toIntOrNull() ?: 1
-            
-            var foundDomain: String? = null
             
             coroutineScope {
                 val candidates = (startNum..startNum + 100).map { "https://tvmon$it.com" }
@@ -112,29 +111,44 @@ class TVMon : MainAPI() {
                                 if (res.isSuccessful && (res.text.contains("mov_list") || res.text.contains("item"))) {
                                     return@async testFinalUrl
                                 }
-                            } catch (e: Exception) {
-                                if (e is CancellationException) throw e
-                            }
+                            } catch (e: Exception) {}
                             null
                         }
                     }
-                    
-                    val results = deferreds.awaitAll()
-                    foundDomain = results.firstOrNull { it != null }
-                    
-                    if (foundDomain != null) break
+                    val foundDomain = deferreds.awaitAll().firstOrNull { it != null }
+                    if (foundDomain != null) {
+                        saveDomain(foundDomain)
+                        mainUrl = currentMainUrl
+                        isDomainChecked = true
+                        return@coroutineScope
+                    }
                 }
             }
-            
-            if (foundDomain != null) {
-                currentMainUrl = foundDomain!!
+            isDomainChecked = true 
+        }
+    }
+
+    override suspend fun search(query: String): List<SearchResponse> {
+        val qLower = query.lowercase()
+        if (qLower.startsWith("!tvmon ")) {
+            val userDomain = query.substring(7).trim().trimEnd('/')
+            if (userDomain.startsWith("http")) {
+                saveDomain(userDomain)
                 mainUrl = currentMainUrl
                 isDomainChecked = true
-                prefs?.edit()?.putString(PREF_KEY, currentMainUrl)?.apply()
-                return@withLock
+                return listOf(newMovieSearchResponse("✅ TVMON 갱신 성공: $userDomain", userDomain, TvType.Movie) { this.posterUrl = "" })
             }
-            
-            isDomainChecked = true 
+        } else if (query.startsWith("!")) { return emptyList() }
+
+        checkAndUpdateDomain()
+        val searchUrl = "$mainUrl/search?stx=$query"
+        return try {
+            val doc = app.get(searchUrl, headers = commonHeaders).document
+            var items = doc.select("ul#mov_con_list li").mapNotNull { it.toSearchResponse() }
+            if (items.isEmpty()) items = doc.select(".mov_list ul li, .item").mapNotNull { it.toSearchResponse() }
+            items
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e; emptyList()
         }
     }
 
@@ -172,19 +186,6 @@ class TVMon : MainAPI() {
         val isMovie = link.contains("/movie") || link.contains("/kor_movie") || link.contains("/ani_movie")
         return if (isMovie) newMovieSearchResponse(title, link, TvType.Movie) { this.posterUrl = fixedPoster }
                else newTvSeriesSearchResponse(title, link, TvType.TvSeries) { this.posterUrl = fixedPoster }
-    }
-
-    override suspend fun search(query: String): List<SearchResponse> {
-        checkAndUpdateDomain()
-        val searchUrl = "$mainUrl/search?stx=$query"
-        return try {
-            val doc = app.get(searchUrl, headers = commonHeaders).document
-            var items = doc.select("ul#mov_con_list li").mapNotNull { it.toSearchResponse() }
-            if (items.isEmpty()) items = doc.select(".mov_list ul li, .item").mapNotNull { it.toSearchResponse() }
-            items
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e; emptyList()
-        }
     }
 
     override suspend fun load(url: String): LoadResponse {
