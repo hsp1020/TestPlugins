@@ -23,7 +23,7 @@ class Kotbc : MainAPI() {
             currentMainUrl = newDomain
             AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 ?.edit()?.putString(PREF_KEY, newDomain)?.apply()
-            println("[Kotbc DBG] 영구 도메인 저장 완료: $newDomain")
+            println("[Kotbc DBG] 💾 영구 도메인 저장 완료: $newDomain")
         }
     }
 
@@ -45,6 +45,7 @@ class Kotbc : MainAPI() {
 
             if (cachedDomain != null) {
                 currentMainUrl = cachedDomain; mainUrl = currentMainUrl
+                println("[Kotbc DBG] 📂 캐시된 도메인 로드: $currentMainUrl")
             }
             
             try {
@@ -52,14 +53,16 @@ class Kotbc : MainAPI() {
                 val finalUrl = res.url.trimEnd('/')
                 if (res.isSuccessful && res.text.contains("list-box")) {
                     if (currentMainUrl != finalUrl) {
+                        println("[Kotbc DBG] 🔄 리다이렉트 감지됨: $currentMainUrl -> $finalUrl")
                         saveDomain(finalUrl)
                         mainUrl = currentMainUrl
                     }
                     isDomainChecked = true; return@withLock
                 }
-            } catch (e: Exception) {}
+            } catch (e: Exception) { println("[Kotbc DBG] ❌ 현재 도메인 접속 실패: ${e.message}") }
 
             try {
+                println("[Kotbc DBG] 🌐 베이스 도메인(kotbc2.com) 폴백 시도")
                 val redirectRes = app.get("https://kotbc2.com", timeout = 3L)
                 val baseFinalUrl = redirectRes.url.trimEnd('/')
                 if (redirectRes.isSuccessful && baseFinalUrl.contains("kotbc2.com") && redirectRes.text.contains("list-box")) {
@@ -71,6 +74,7 @@ class Kotbc : MainAPI() {
 
             val match = Regex("m(\\d+)").find(currentMainUrl)
             val startNum = match?.groupValues?.get(1)?.toIntOrNull() ?: 142
+            println("[Kotbc DBG] 🚀 브루트포스 탐색 시작 (시작번호: $startNum)")
             
             coroutineScope {
                 val candidates = (startNum..startNum + 100).map { "https://m$it.kotbc2.com" }
@@ -88,6 +92,7 @@ class Kotbc : MainAPI() {
                     }
                     val found = deferreds.awaitAll().firstOrNull { it != null }
                     if (found != null) {
+                        println("[Kotbc DBG] ✨ 브루트포스 성공: $found")
                         saveDomain(found)
                         mainUrl = currentMainUrl
                         isDomainChecked = true; return@coroutineScope
@@ -103,6 +108,7 @@ class Kotbc : MainAPI() {
         if (qLower.startsWith("!kotbc ")) {
             val userDomain = query.substring(7).trim().trimEnd('/')
             if (userDomain.startsWith("http")) {
+                println("[Kotbc DBG] 🔧 백도어 도메인 수동 갱신: $userDomain")
                 saveDomain(userDomain)
                 mainUrl = currentMainUrl
                 isDomainChecked = true
@@ -111,9 +117,12 @@ class Kotbc : MainAPI() {
         } else if (query.startsWith("!")) { return emptyList() }
 
         checkAndUpdateDomain()
+        println("[Kotbc DBG] 🔍 검색 요청: $query")
         return try {
-            app.get("$mainUrl/bbs/search.php?sfl=wr_subject&stx=$query").document
+            val items = app.get("$mainUrl/bbs/search.php?sfl=wr_subject&stx=$query").document
                 .select(".list-body .list-row .list-box").mapNotNull { it.toSearchResponse() }
+            println("[Kotbc DBG] 🔍 검색 결과 수: ${items.size}")
+            items
         } catch (e: Exception) {
             if (e is CancellationException) throw e; emptyList()
         }
@@ -121,9 +130,11 @@ class Kotbc : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         checkAndUpdateDomain()
+        println("[Kotbc DBG] 📄 메인페이지 로드: 카테고리=${request.name}, 페이지=$page")
         return try {
             val doc = app.get("$mainUrl/bbs/board.php?bo_table=${request.data}&page=$page").document
             val list = doc.select(".list-body .list-row .list-box").mapNotNull { it.toSearchResponse() }
+            println("[Kotbc DBG] 📄 메인페이지 아이템 수: ${list.size}")
             newHomePageResponse(request.name, list, hasNext = list.isNotEmpty())
         } catch (e: Exception) {
             if (e is CancellationException) throw e
@@ -146,6 +157,7 @@ class Kotbc : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse {
         checkAndUpdateDomain()
+        println("[Kotbc DBG] 🎬 상세페이지 로드: $url")
         var targetUrl = url
         if (!targetUrl.startsWith(mainUrl)) targetUrl = mainUrl + targetUrl.replace(Regex("https?://[^/]+"), "")
         
@@ -176,6 +188,7 @@ class Kotbc : MainAPI() {
                 }
             } else episodes.add(newEpisode(targetUrl) { this.name = title; this.posterUrl = poster })
 
+            println("[Kotbc DBG] 🎬 파싱 완료: 에피소드 수=${episodes.size}")
             val type = if (targetUrl.contains("bo_table=movie")) TvType.Movie else TvType.TvSeries
             return if (type == TvType.Movie) newMovieLoadResponse(title, targetUrl, TvType.Movie, episodes.firstOrNull()?.data ?: targetUrl) {
                 this.posterUrl = poster; this.plot = description; this.tags = tags
@@ -188,6 +201,7 @@ class Kotbc : MainAPI() {
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
+        println("[Kotbc DBG] 🔗 영상 링크 추출 시작: $data")
         try {
             val doc = app.get(data).document
             val form = doc.selectFirst("form.tt2") ?: doc.selectFirst("form.tt")
