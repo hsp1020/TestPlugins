@@ -392,14 +392,30 @@ class YoutubeProvider(
                 requestBuilder.addHeader("Cookie", cookies)
                 requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
 
+                // [YTSYNC] 시청 기록 통계(stats) 서버로 가는 요청 가로채기 확인
+                if (urlStr.contains("api/stats/")) {
+                    println("[YTSYNC] ---------------- INTERCEPTOR DETECTED ----------------")
+                    println("[YTSYNC] Target Tracking URL: $urlStr")
+                    println("[YTSYNC] Logged-in Cookies attached: $cookies")
+                    println("[YTSYNC] Extracted SAPISID: $sapisidVal")
+                }
+
                 if (!sapisidVal.isNullOrBlank()) {
                     try {
                         val authHeader = YoutubeUtils.getSapisidHash(sapisidVal)
                         requestBuilder.addHeader("Authorization", authHeader)
                         requestBuilder.addHeader("X-Origin", "https://www.youtube.com")
                         requestBuilder.addHeader("X-Goog-AuthUser", "0")
+                        
+                        if (urlStr.contains("api/stats/")) {
+                            println("[YTSYNC] SAPISIDHASH Authorization Header: $authHeader")
+                        }
                     } catch (e: Exception) {
                         logError(e)
+                    }
+                } else {
+                    if (urlStr.contains("api/stats/")) {
+                        println("[YTSYNC] ⚠️ SAPISID is null or empty. Tracking might be treated as Guest.")
                     }
                 }
             } else {
@@ -411,7 +427,7 @@ class YoutubeProvider(
             return chain.proceed(requestBuilder.build())
         }
     }
-    
+
     private val ytInterceptor = YouTubeInterceptor(this)
 
     private var savedContinuationToken: String? = null
@@ -455,17 +471,28 @@ class YoutubeProvider(
     }
 
     private suspend fun triggerPlaybackTracking(playbackTracking: PlaybackTracking?, videoId: String, isShort: Boolean = false) {
+        println("[YTSYNC] ---------------- TRIGGER PLAYBACK TRACKING ----------------")
+        println("[YTSYNC] input videoId: $videoId, isShort: $isShort")
+
         val playbackBaseUrl = playbackTracking?.videostatsPlaybackUrl?.baseUrl
         val watchtimeBaseUrl = playbackTracking?.videostatsWatchtimeUrl?.baseUrl
 
-        if (playbackBaseUrl.isNullOrBlank() || watchtimeBaseUrl.isNullOrBlank()) return
+        println("[YTSYNC] parsed videostatsPlaybackUrl: $playbackBaseUrl")
+        println("[YTSYNC] parsed videostatsWatchtimeUrl: $watchtimeBaseUrl")
+
+        if (playbackBaseUrl.isNullOrBlank() || watchtimeBaseUrl.isNullOrBlank()) {
+            println("[YTSYNC] ⚠️ Tracking base URLs are null or blank. Aborting ping.")
+            return
+        }
 
         val cpn = generateCpn()
+        println("[YTSYNC] Generated CPN: $cpn")
         try {
             var playbackUrl = buildTrackingUrl(playbackBaseUrl, cpn, cmt = "0.000", state = null, realTime = "0")
             var watchtimeUrl = buildTrackingUrl(watchtimeBaseUrl, cpn, cmt = "5.000", state = "playing", realTime = "5")
             
             if (isShort) {
+                println("[YTSYNC] Modifying query parameters for YouTube Shorts page...")
                 playbackUrl = playbackUrl.replace("el=detailpage", "el=shortspage").replace("el=embedded", "el=shortspage")
                 if (!playbackUrl.contains("el=shortspage")) {
                     playbackUrl = "$playbackUrl&el=shortspage"
@@ -476,13 +503,23 @@ class YoutubeProvider(
                 }
             }
 
-            app.get(playbackUrl, interceptor = ytInterceptor)
+            println("[YTSYNC] Final Playback Url: $playbackUrl")
+            println("[YTSYNC] Final Watchtime Url: $watchtimeUrl")
 
-            app.get(watchtimeUrl, interceptor = ytInterceptor)
+            println("[YTSYNC] Sending Playback (0.0s) tracking request...")
+            val playbackRes = app.get(playbackUrl, interceptor = ytInterceptor)
+            println("[YTSYNC] Playback Response Code: ${playbackRes.code}")
+
+            println("[YTSYNC] Sending Watchtime (5.0s, playing) tracking request...")
+            val watchtimeRes = app.get(watchtimeUrl, interceptor = ytInterceptor)
+            println("[YTSYNC] Watchtime Response Code: ${watchtimeRes.code}")
+            
+            println("[YTSYNC] ---------------- TRACKING PINGS COMPLETED ----------------")
         } catch (e: Exception) {
+            println("[YTSYNC] ❌ Error executing tracking requests: ${e.message}")
             logError(e)
         }
-    }
+    }    
 
     private fun getSavedContinuationToken(key: String): String? {
         val hashedKey = YoutubeUtils.sha1(key)
@@ -2449,9 +2486,32 @@ class YoutubeProvider(
         val fullUrl = "https://www.youtube.com/watch?v=$videoId"
         val isShort = data.contains("/shorts/")
 
+        // [YTSYNC] 진입 로그
+        println("[YTSYNC] ==================== LOAD LINKS START ====================")
+        println("[YTSYNC] Requested videoId: $videoId, isShort: $isShort, Raw Data: $data")
+
         var playerResponseText = ""
         try {
-            val apiUrl = if (isShort) "$mainUrl/youtubei/v1/reel/reel_item_watch?%24fields=playerResponse" else "$mainUrl/youtubei/v1/player"
+            // [YTSYNC] 저장된 API Key 로드 시도 및 검증
+            val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
+            println("[YTSYNC] Retrieved Innertube API Key: $apiKey")
+
+            // [YTSYNC] API Key 주입하여 apiUrl 재생성 (원인 ① 해결)
+            val apiUrl = if (isShort) {
+                if (!apiKey.isNullOrBlank()) {
+                    "$mainUrl/youtubei/v1/reel/reel_item_watch?key=$apiKey&%24fields=playerResponse"
+                } else {
+                    "$mainUrl/youtubei/v1/reel/reel_item_watch?%24fields=playerResponse"
+                }
+            } else {
+                if (!apiKey.isNullOrBlank()) {
+                    "$mainUrl/youtubei/v1/player?key=$apiKey"
+                } else {
+                    "$mainUrl/youtubei/v1/player"
+                }
+            }
+            println("[YTSYNC] Requesting playerResponse from endpoint: $apiUrl")
+
             val payload = if (isShort) {
                 mapOf(
                     "context" to mapOf(
@@ -2480,8 +2540,14 @@ class YoutubeProvider(
                 )
             }
             val headers = mapOf("Referer" to "$mainUrl/watch?v=$videoId")
-            playerResponseText = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).text
+            
+            val responseResult = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor)
+            playerResponseText = responseResult.text
+            
+            println("[YTSYNC] playerResponse Server Response Status: ${responseResult.code}")
+            println("[YTSYNC] playerResponse Server Response Length: ${playerResponseText.length} bytes")
         } catch (e: Exception) {
+            println("[YTSYNC] ❌ Error requesting playerResponse API: ${e.message}")
             logError(e)
         }
 
@@ -2493,12 +2559,17 @@ class YoutubeProvider(
                 } else {
                     playerResponseText
                 }
+                println("[YTSYNC] Successfully parsed JSON root. Parsing Jackson PlayerResponse schema...")
                 val playerResponse = mapper.readValue<PlayerResponse>(targetJson)
                 
+                println("[YTSYNC] PlayerResponse mapped successfully. playbackTracking null check: ${playerResponse.playbackTracking == null}")
                 triggerPlaybackTracking(playerResponse.playbackTracking, videoId, isShort)
             } catch (e: Exception) {
+                println("[YTSYNC] ❌ Error during playerResponse parsing/mapping: ${e.message}")
                 logError(e)
             }
+        } else {
+            println("[YTSYNC] ⚠️ playerResponseText is blank! Skipping tracking execution.")
         }
 
         com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback, callback)
