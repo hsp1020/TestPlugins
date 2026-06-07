@@ -123,7 +123,7 @@ class Editor(private val editor: SharedPreferences.Editor) {
 }
 
 // ==========================================
-// Backup Utilities (북마크 보존 정밀 튜닝 버전)
+// Backup Utilities (맵 레벨 완전 격리 압축형)
 // ==========================================
 
 object BackupUtils {
@@ -172,7 +172,7 @@ object BackupUtils {
         val allowedResumeKeys = topEntries.map { it.first }.toSet()
         val activeParentIds = topEntries.map { it.second }.toSet()
 
-        // 2. 필터 설계 개정: download_header_cache와 resume_watching은 상한 제어를 적용하되, 즐겨찾기(result_watch_state 등)는 시청 여부와 무관하게 무조건 보존합니다.
+        // 2. 필터 제어: download_header_cache와 resume_watching은 상한 제어하되 즐겨찾기는 전체 보존
         val filteredPrefs = prefs.filter { (key, _) ->
             when {
                 key.contains("download_header_cache/", ignoreCase = true) -> {
@@ -182,7 +182,7 @@ object BackupUtils {
                 key.contains("result_resume_watching_2/", ignoreCase = true) -> {
                     allowedResumeKeys.contains(key)
                 }
-                else -> isAllowed(key) // 북마크 관련 데이터들은 이 블록을 타고 제약 없이 100% 온전하게 백업됩니다.
+                else -> isAllowed(key) 
             }
         }
         val filteredDefaultPrefs = defaultPrefs.filterKeys { isAllowed(it) }
@@ -191,19 +191,21 @@ object BackupUtils {
 
         fun buildVars(map: Map<String, Any?>): BackupVars {
             val cleanedMap = map.mapValues { (_, value) ->
-                if (value is String) {
-                    UtilKt.unpackMultipleSerialization(value)
-                } else {
-                    value
-                }
+                val unpacked = if (value is String) UtilKt.unpackMultipleSerialization(value) else value
+                // ★ 핵심 최적화: 밸류(Value) 내부의 JSON 데이터만 골라서 안전 따옴표 치환을 적용합니다.
+                if (unpacked is String) UtilKt.compressValueProperties(unpacked) else unpacked
             }
+            
+            // ★ 핵심 아키텍처: SharedPreferences "Key"값들만 맵 레벨에서 격리 압축을 태워 URL(밸류)이 깨지는 현상을 완벽히 방어합니다.
+            val compressedMap = cleanedMap.mapKeys { (key, _) -> UtilKt.compressKey(key) }
+
             return BackupVars(
-                bool = cleanedMap.filterValues { it is Boolean } as Map<String, Boolean>,
-                int = cleanedMap.filterValues { it is Int } as Map<String, Int>,
-                string = cleanedMap.filterValues { it is String } as Map<String, String>,
-                float = cleanedMap.filterValues { it is Float } as Map<String, Float>,
-                long = cleanedMap.filterValues { it is Long } as Map<String, Long>,
-                stringSet = cleanedMap.filterValues { it is Set<*> } as Map<String, Set<String>>
+                bool = compressedMap.filterValues { it is Boolean } as Map<String, Boolean>,
+                int = compressedMap.filterValues { it is Int } as Map<String, Int>,
+                string = compressedMap.filterValues { it is String } as Map<String, String>,
+                float = compressedMap.filterValues { it is Float } as Map<String, Float>,
+                long = compressedMap.filterValues { it is Long } as Map<String, Long>,
+                stringSet = compressedMap.filterValues { it is Set<*> } as Map<String, Set<String>>
             )
         }
 
@@ -215,15 +217,36 @@ object BackupUtils {
         
         if (restoreSettings) {
             val settingsEditor = with(DataStore) { context.getDefaultSharedPrefs() }.edit()
-            val wrappedEditor = Editor(settingsEditor)
-            
-            backupFile.settings.bool?.filterAllowedKeys()?.forEach { (k, v) -> wrappedEditor.setKeyRaw(k, v) }
-            backupFile.settings.int?.filterAllowedKeys()?.forEach { (k, v) -> wrappedEditor.setKeyRaw(k, v) }
-            backupFile.settings.string?.filterAllowedKeys()?.forEach { (k, v) -> wrappedEditor.setKeyRaw(k, v) }
-            backupFile.settings.float?.filterAllowedKeys()?.forEach { (k, v) -> wrappedEditor.setKeyRaw(k, v) }
-            backupFile.settings.long?.filterAllowedKeys()?.forEach { (k, v) -> wrappedEditor.setKeyRaw(k, v) }
-            backupFile.settings.stringSet?.filterAllowedKeys()?.forEach { (k, v) -> wrappedEditor.setKeyRaw(k, v) }
-            
+            for ((key, value) in backupFile.settings.stringSet ?: emptyMap()) {
+                val decompressedKey = UtilKt.decompressKey(key)
+                if (isAllowed(decompressedKey)) {
+                    settingsEditor.putStringSet(decompressedKey, value)
+                }
+            }
+            // 세팅 설정 복원
+            backupFile.settings.bool?.forEach { (k, v) ->
+                val dk = UtilKt.decompressKey(k)
+                if (isAllowed(dk)) settingsEditor.putBoolean(dk, v)
+            }
+            backupFile.settings.int?.forEach { (k, v) ->
+                val dk = UtilKt.decompressKey(k)
+                if (isAllowed(dk)) settingsEditor.putInt(dk, v)
+            }
+            backupFile.settings.string?.forEach { (k, v) ->
+                val dk = UtilKt.decompressKey(k)
+                if (isAllowed(dk)) {
+                    val rv = UtilKt.decompressValueProperties(v)
+                    settingsEditor.putString(dk, rv)
+                }
+            }
+            backupFile.settings.float?.forEach { (k, v) ->
+                val dk = UtilKt.decompressKey(k)
+                if (isAllowed(dk)) settingsEditor.putFloat(dk, v)
+            }
+            backupFile.settings.long?.forEach { (k, v) ->
+                val dk = UtilKt.decompressKey(k)
+                if (isAllowed(dk)) settingsEditor.putLong(dk, v)
+            }
             settingsEditor.apply()
         }
 
@@ -231,12 +254,34 @@ object BackupUtils {
             val datastoreEditor = with(DataStore) { context.getSharedPrefs() }.edit()
             val wrappedEditor = Editor(datastoreEditor)
             
-            backupFile.datastore.bool?.filterAllowedKeys()?.forEach { (k, v) -> wrappedEditor.setKeyRaw(k, v) }
-            backupFile.datastore.int?.filterAllowedKeys()?.forEach { (k, v) -> wrappedEditor.setKeyRaw(k, v) }
-            backupFile.datastore.string?.filterAllowedKeys()?.forEach { (k, v) -> wrappedEditor.setKeyRaw(k, v) }
-            backupFile.datastore.float?.filterAllowedKeys()?.forEach { (k, v) -> wrappedEditor.setKeyRaw(k, v) }
-            backupFile.datastore.long?.filterAllowedKeys()?.forEach { (k, v) -> wrappedEditor.setKeyRaw(k, v) }
-            backupFile.datastore.stringSet?.filterAllowedKeys()?.forEach { (k, v) -> wrappedEditor.setKeyRaw(k, v) }
+            // ★ 복원 복구 시에도 맵 레벨에서 안전하게 키와 벨류의 속성만 각각 디컴프레스하여 디스크 렉과 텍스트 오염을 전면 방지합니다.
+            backupFile.datastore.bool?.forEach { (k, v) ->
+                val dk = UtilKt.decompressKey(k)
+                if (isAllowed(dk)) wrappedEditor.setKeyRaw(dk, v)
+            }
+            backupFile.datastore.int?.forEach { (k, v) ->
+                val dk = UtilKt.decompressKey(k)
+                if (isAllowed(dk)) wrappedEditor.setKeyRaw(dk, v)
+            }
+            backupFile.datastore.string?.forEach { (k, v) ->
+                val dk = UtilKt.decompressKey(k)
+                if (isAllowed(dk)) {
+                    val rv = UtilKt.decompressValueProperties(v)
+                    wrappedEditor.setKeyRaw(dk, rv)
+                }
+            }
+            backupFile.datastore.float?.forEach { (k, v) ->
+                val dk = UtilKt.decompressKey(k)
+                if (isAllowed(dk)) wrappedEditor.setKeyRaw(dk, v)
+            }
+            backupFile.datastore.long?.forEach { (k, v) ->
+                val dk = UtilKt.decompressKey(k)
+                if (isAllowed(dk)) wrappedEditor.setKeyRaw(dk, v)
+            }
+            backupFile.datastore.stringSet?.forEach { (k, v) ->
+                val dk = UtilKt.decompressKey(k)
+                if (isAllowed(dk)) wrappedEditor.setKeyRaw(dk, v)
+            }
             
             datastoreEditor.apply()
         }
@@ -421,11 +466,10 @@ object ApiUtils {
 }
 
 // ==========================================
-// String & Compression Utilities (완벽 복구 및 코틀린 문법 교정 완료)
+// String & Compression Utilities (완벽 복구 완료)
 // ==========================================
 
 object UtilKt {
-    // 1단계: 프로필 접두사 매핑 규칙 (0/result_... ➔ 0/k1/... 동적 완벽 치환)
     private val prefixMap = listOf(
         "result_resume_watching_2/" to "k1/",
         "video_pos_dur/" to "k2/",
@@ -459,10 +503,10 @@ object UtilKt {
         "video_profile_types_2/" to "k30/",
         "download_queue_key" to "k31",
         "sync_last_updated_" to "k32_",
-        "home_api_used" to "k33"
+        "home_api_used" to "k33",
+        "video_source_priority/" to "k34/"
     )
 
-    // 2단계: 일반 및 이스케이프 따옴표 전용 안전 매핑 (오치환 제로 설계)
     private val propertyMap = listOf(
         "bookmarkedTime" to "v1",
         "latestUpdatedTime" to "v2",
@@ -560,7 +604,6 @@ object UtilKt {
         "datastore" to "s54"
     )
 
-    // 3단계: 특수 규격 문자 매핑 규칙
     private val valueMap = listOf(
         "https://" to "h//",
         ":null," to ":n,",
@@ -602,54 +645,54 @@ object UtilKt {
             .replace("\\\"$original\\\"", "\\\"$replacement\\\"")
     }
 
-    private fun replaceKeys(json: String): String {
-        var result = json
-        
-        try {
-            result = Regex("\\\\\\\"overview\\\\\\\"\\s*:\\s*\\\\\\\"(.*?)(?<!\\\\)\\\\\\\"").replace(result, "\\\\\\\"overview\\\\\\\":\\\\\\\"\\\\\\\"")
-            result = Regex("\\\\\\\"plot\\\\\\\"\\s*:\\s*\\\\\\\"(.*?)(?<!\\\\)\\\\\\\"").replace(result, "\\\\\\\"plot\\\\\\\":\\\\\\\"\\\\\\\"")
-            result = Regex("\\\\\\\"tags\\\\\\\"\\s*:\\s*\\[.*?]").replace(result, "\\\\\\\"tags\\\\\\\":[]")
-        } catch (e: Exception) {
-            Log.d("SYNC", "[replaceKeys] Regex Trimming failed: ${e.message}")
-        }
-        
+    // 맵 레벨 키 압축을 위해 유틸리티 구조를 대폭 개선합니다.
+    fun compressKey(key: String): String {
+        var result = key
         for ((original, replacement) in prefixMap) {
-            result = result.replace(original, replacement)
+            if (result.contains(original)) {
+                result = result.replace(original, replacement)
+                break
+            }
         }
-        
-        for ((original, replacement) in propertyMap) {
-            result = result.replaceKeySafe(original, replacement)
-        }
-        
-        for ((original, replacement) in valueMap) {
-            result = result.replace(original, replacement)
-        }
-        
         return result
     }
 
-    private fun restoreKeys(json: String): String {
-        var result = json
-        
+    fun decompressKey(key: String): String {
+        var result = key
+        for ((original, replacement) in prefixMap) {
+            if (result.contains(replacement)) {
+                result = result.replace(replacement, original)
+                break
+            }
+        }
+        return result
+    }
+
+    fun compressValueProperties(value: String): String {
+        var result = value
+        for ((original, replacement) in propertyMap) {
+            result = result.replaceKeySafe(original, replacement)
+        }
+        for ((original, replacement) in valueMap) {
+            result = result.replace(original, replacement)
+        }
+        return result
+    }
+
+    fun decompressValueProperties(value: String): String {
+        var result = value
         for ((original, replacement) in valueMap) {
             result = result.replace(replacement, original)
         }
-        
         for ((original, replacement) in propertyMap) {
             result = result.replaceKeySafe(replacement, original)
         }
-        
-        for ((original, replacement) in prefixMap) {
-            result = result.replace(replacement, original)
-        }
-        
         return result
     }
 
     fun compressJsonToString(json: String): String {
-        val shrunkenJson = replaceKeys(json)
         val bos = ByteArrayOutputStream()
-        GZIPOutputStream(bos).use { it.write(shrunkenJson.toByteArray(Charsets.UTF_8)) }
+        GZIPOutputStream(bos).use { it.write(json.toByteArray(Charsets.UTF_8)) }
         return Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
     }
 
@@ -661,14 +704,12 @@ object UtilKt {
                 Base64.decode(encoded, Base64.DEFAULT)
             }
 
-            val rawJson = if (decodedBytes.size >= 2 && decodedBytes[0] == 0x1F.toByte() && decodedBytes[1] == 0x8B.toByte()) {
+            if (decodedBytes.size >= 2 && decodedBytes[0] == 0x1F.toByte() && decodedBytes[1] == 0x8B.toByte()) {
                 val bis = ByteArrayInputStream(decodedBytes)
                 GZIPInputStream(bis).bufferedReader(Charsets.UTF_8).use { it.readText() }
             } else {
                 String(decodedBytes, Charsets.UTF_8)
             }
-            
-            restoreKeys(rawJson)
         } catch (e: Exception) {
             Log.d("SYNC", "[UtilKt] Failed to decompress: ${e.message}")
             ""
@@ -682,7 +723,7 @@ object UtilKt {
         }
         if (Build.VERSION.SDK_INT >= 26) {
             try {
-                val serial = Build.getSerial() // ★ 자바 식 문법(String serial)에서 코틀린 변수 선언(val)으로 완전 교정! [1]
+                val serial = Build.getSerial() 
                 if (!serial.isNullOrEmpty()) {
                     return md5(packageName + serial)
                 }
