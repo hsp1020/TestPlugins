@@ -7,8 +7,7 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.mvvm.logError
 import com.lagradost.cloudstream3.utils.*
-import com.fasterxml.jackson.module.kotlin.readValue
-import com.lagradost.cloudstream3.mapper
+import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import okhttp3.Interceptor
 import okhttp3.Response
 import java.net.URLEncoder
@@ -20,10 +19,6 @@ import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
 import com.lagradost.cloudstream3.AcraApplication
 import androidx.preference.PreferenceManager
-import androidx.annotation.Keep
-
-
-
 
 object YoutubeUtils {
     const val CHROME_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
@@ -91,26 +86,6 @@ object YoutubeUtils {
 
     // 일반영상 검색 결과 및 계속 시청 전용 하단 크롭 정렬 추가 프록시 필터 (a=bottom)
     fun getProxiedPoster(poster: String?): String? {
-        if (poster.isNullOrBlank()) return null
-        return try {
-            "https://wsrv.nl/?url=${URLEncoder.encode(poster, "UTF-8")}&w=800&h=1200&fit=contain&cbg=black"
-        } catch (e: Exception) {
-            poster
-        }
-    }
-
-    // 검색 결과 화면 전용 하단 크롭 정렬 추가 프록시 필터 (a=bottom)
-    fun getProxiedPosterBottom(poster: String?): String? {
-        if (poster.isNullOrBlank()) return null
-        return try {
-            "https://wsrv.nl/?url=${URLEncoder.encode(poster, "UTF-8")}&w=800&h=1200&fit=contain&cbg=black"
-        } catch (e: Exception) {
-            poster
-        }
-    }
-
-    // 홈 화면 및 추천목록 전용 일반 가로형 프록시 필터 (a=bottom 없음)
-    fun getProxiedPosterNormal(poster: String?): String? {
         if (poster.isNullOrBlank()) return null
         return try {
             "https://wsrv.nl/?url=${URLEncoder.encode(poster, "UTF-8")}&w=800&h=1200&fit=contain&cbg=black"
@@ -279,14 +254,12 @@ class YoutubeProvider(
     val appPrefs: SharedPreferences?
         get() = sharedPref ?: AcraApplication.context?.let { PreferenceManager.getDefaultSharedPreferences(it) }
 
-    @Keep
     data class CustomSection(
         @JsonProperty("name") var name: String = "",
         @JsonProperty("url") var url: String = "",
         @JsonProperty("isEnabled") var isEnabled: Boolean = true
     )
     
-    @Keep
     data class CachedChip(
         @JsonProperty("name") val name: String,
         @JsonProperty("token") val token: String
@@ -417,7 +390,24 @@ class YoutubeProvider(
     
     private val ytInterceptor = YouTubeInterceptor(this)
 
-    private var savedContinuationToken: String? = null    
+    private var savedContinuationToken: String? = null
+
+    @Suppress("PropertyName")
+    private data class PlayerResponse(
+        @JsonProperty("streamingData") val streamingData: StreamingData?,
+        @JsonProperty("playbackTracking") val playbackTracking: PlaybackTracking? 
+    )
+    private data class StreamingData(
+        @JsonProperty("hlsManifestUrl") val hlsManifestUrl: String?
+    )
+
+    private data class PlaybackTracking(
+        @JsonProperty("videostatsPlaybackUrl") val videostatsPlaybackUrl: TrackingUrl?,
+        @JsonProperty("videostatsWatchtimeUrl") val videostatsWatchtimeUrl: TrackingUrl?
+    )
+    private data class TrackingUrl(
+        @JsonProperty("baseUrl") val baseUrl: String?
+    )
 
     private fun generateCpn(): String {
         val alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
@@ -440,12 +430,10 @@ class YoutubeProvider(
         return uri.build().toString()
     }
 
-    private suspend fun triggerPlaybackTracking(
-        playbackBaseUrl: String?,
-        watchtimeBaseUrl: String?,
-        videoId: String,
-        isShort: Boolean = false
-    ) {
+    private suspend fun triggerPlaybackTracking(playbackTracking: PlaybackTracking?, videoId: String, isShort: Boolean = false) {
+        val playbackBaseUrl = playbackTracking?.videostatsPlaybackUrl?.baseUrl
+        val watchtimeBaseUrl = playbackTracking?.videostatsWatchtimeUrl?.baseUrl
+
         if (playbackBaseUrl.isNullOrBlank() || watchtimeBaseUrl.isNullOrBlank()) return
 
         val cpn = generateCpn()
@@ -453,6 +441,7 @@ class YoutubeProvider(
             var playbackUrl = buildTrackingUrl(playbackBaseUrl, cpn, cmt = "0.000", state = null, realTime = "0")
             var watchtimeUrl = buildTrackingUrl(watchtimeBaseUrl, cpn, cmt = "5.000", state = "playing", realTime = "5")
             
+            // 쇼츠 영상일 경우, 유튜브 로그 수집 서버에 일반 VOD가 아닌 쇼츠 전용 시청기록(el=shortspage)으로 기입되도록 트래킹 파라미터 변환
             if (isShort) {
                 playbackUrl = playbackUrl.replace("el=detailpage", "el=shortspage").replace("el=embedded", "el=shortspage")
                 if (!playbackUrl.contains("el=shortspage")) {
@@ -471,6 +460,7 @@ class YoutubeProvider(
             logError(e)
         }
     }
+
     
     private fun getSavedContinuationToken(key: String): String? {
         val hashedKey = YoutubeUtils.sha1(key)
@@ -740,8 +730,7 @@ class YoutubeProvider(
 
     private fun collectFromRenderer(
         renderer: Map<*, *>?,
-        seenIds: MutableSet<String>,
-        playlistId: String? = null
+        seenIds: MutableSet<String>
     ): SearchResponse? {
         if (renderer == null) return null
 
@@ -761,35 +750,17 @@ class YoutubeProvider(
                 val title = getText(videoData.getMapKey("title")) ?: "Video"
                 val viewText = getText(videoData.getMapKey("viewCountText"))
                     ?: getText(videoData.getMapKey("shortViewCountText"))
-                
-                // .ifBlank 체인을 통해 엘비스 연산자 우회 및 수동 플레이리스트의 shortBylineText 채널명 정상 룩업 보장
                 val channel = getText(videoData.getMapKey("ownerText"))
-                    .ifBlank { getText(videoData.getMapKey("shortBylineText")) }
-                    .ifBlank { getText(videoData.getMapKey("longBylineText")) }
-
+                    ?: getText(videoData.getMapKey("shortBylineText")) ?: ""
                 val views = formatViews(viewText)
-                
-                // N/A 노출 분기를 전면 제거하여 가독성 강화
-                val finalTitle = when {
-                    channel.isNotBlank() && views != "N/A" -> "{$channel | $views} $title"
-                    channel.isNotBlank() -> "{$channel} $title"
-                    views != "N/A" -> "{$views} $title"
-                    else -> title
-                }
-
+                val finalTitle =
+                    if (channel.isNotBlank()) "{$channel | $views} $title" else "{$views} $title"
                 var poster = YoutubeUtils.getBestThumbnail(videoData.getMapKey("thumbnail"))
                 if (poster.isNullOrBlank()) poster = YoutubeUtils.buildThumbnailFromId(videoId)
                 
-                // 수동 플레이리스트 행일 경우 재생 주소 끝에 &list= 고유 아이디 결속 수행
-                val watchUrl = if (!playlistId.isNullOrBlank()) {
-                    "$mainUrl/watch?v=$videoId&list=$playlistId"
-                } else {
-                    "$mainUrl/watch?v=$videoId"
-                }
-
                 return newMovieSearchResponse(
                     finalTitle,
-                    watchUrl,
+                    "$mainUrl/watch?v=$videoId",
                     TvType.Movie
                 ) {
                     // 검색 결과 화면(isSearchContext = true)인 경우에만 wsrv.nl 프록시(&a=bottom 포함)를 적용하고, 홈 화면은 원본 이미지 적용
@@ -904,12 +875,8 @@ class YoutubeProvider(
                         "$mainUrl/$targetPath",
                         TvType.TvSeries
                     ) {
-                        // 검색 결과 화면(isSearchContext = true)인 경우에만 &a=bottom 프록시 적용, 홈 화면 및 추천목록은 일반 가로형 프록시(a=bottom 없음) 적용
-                        this.posterUrl = if (isSearchContext) {
-                            YoutubeUtils.getProxiedPosterBottom(poster)
-                        } else {
-                            YoutubeUtils.getProxiedPosterNormal(poster)
-                        }
+                        // 검색 결과 화면(isSearchContext = true)인 경우에만 wsrv.nl 프록시(&a=bottom 포함)를 적용하고, 홈 화면은 원본 이미지 적용
+                        this.posterUrl = if (isSearchContext) YoutubeUtils.getProxiedPoster(poster) else poster
                     }
                 }
             }
@@ -984,12 +951,8 @@ class YoutubeProvider(
                         "$mainUrl/watch?v=$videoId",
                         TvType.Movie
                     ) {
-                        // 검색 결과 화면(isSearchContext = true)인 경우에만 &a=bottom 프록시 적용, 홈 화면 및 추천목록은 일반 가로형 프록시(a=bottom 없음) 적용
-                        this.posterUrl = if (isSearchContext) {
-                            YoutubeUtils.getProxiedPosterBottom(poster)
-                        } else {
-                            YoutubeUtils.getProxiedPosterNormal(poster)
-                        }
+                        // 검색 결과 화면(isSearchContext = true)인 경우에만 wsrv.nl 프록시(&a=bottom 포함)를 적용하고, 홈 화면은 원본 이미지 적용
+                        this.posterUrl = if (isSearchContext) YoutubeUtils.getProxiedPoster(poster) else poster
                     }
                 }
             }
@@ -1008,12 +971,8 @@ class YoutubeProvider(
                     "$mainUrl/channel/$id",
                     TvType.Live
                 ) {
-                    // 검색 결과 화면(isSearchContext = true)인 경우에만 &a=bottom 프록시 적용, 홈 화면 및 추천목록은 일반 가로형 프록시(a=bottom 없음) 적용
-                    this.posterUrl = if (isSearchContext) {
-                        YoutubeUtils.getProxiedPosterBottom(poster)
-                    } else {
-                        YoutubeUtils.getProxiedPosterNormal(poster)
-                    }
+                    // 검색 결과 화면(isSearchContext = true)인 경우에만 wsrv.nl 프록시(&a=bottom 포함)를 적용하고, 홈 화면은 원본 이미지 적용
+                    this.posterUrl = if (isSearchContext) YoutubeUtils.getProxiedPoster(poster) else poster
                 }
             }
         }
@@ -1025,12 +984,11 @@ class YoutubeProvider(
         outList: MutableList<SearchResponse>,
         seenIds: MutableSet<String>,
         playlistMode: Boolean,
-        depth: Int = 0,
-        playlistId: String? = null
+        depth: Int = 0
     ) {
         if (data == null || depth > 32) return 
         if (data is Map<*, *>) {
-            val extracted = collectFromRenderer(data, seenIds, playlistId)
+            val extracted = collectFromRenderer(data, seenIds)
             if (extracted != null) {
                 if (!playlistMode || extracted.type == TvType.TvSeries) {
                     outList.add(extracted)
@@ -1043,20 +1001,20 @@ class YoutubeProvider(
             for (i in 0 until keysSize) {
                 val key = KEYS_TO_CHECK[i]
                 if (data.containsKey(key)) {
-                    processRecursive(data[key], outList, seenIds, playlistMode, depth + 1, playlistId)
+                    processRecursive(data[key], outList, seenIds, playlistMode, depth + 1)
                     foundContainer = true
                 }
             }
             if (!foundContainer) {
                 for (value in data.values) {
                     if (value is Map<*, *> || value is List<*>) {
-                        processRecursive(value, outList, seenIds, playlistMode, depth + 1, playlistId)
+                        processRecursive(value, outList, seenIds, playlistMode, depth + 1)
                     }
                 }
             }
         } else if (data is List<*>) {
             for (item in data) {
-                processRecursive(item, outList, seenIds, playlistMode, depth + 1, playlistId)
+                processRecursive(item, outList, seenIds, playlistMode, depth + 1)
             }
         }
     }
@@ -1124,8 +1082,7 @@ class YoutubeProvider(
                     val jsonString = extractBalancedJson(possibleJson)
                     if (jsonString != null) {
                         try {
-                            return mapper.readValue<Map<String, Any>>(jsonString)
-                            
+                            return parseJson<Map<String, Any>>(jsonString)
                         } catch (e: Exception) {
                         }
                     }
@@ -1183,97 +1140,45 @@ class YoutubeProvider(
     
     override val mainPage: List<MainPageData>
         get() {
-            val customSections = getCustomHomepages()
             val list = mutableListOf<MainPageData>()
-
-            // 개별 칩들의 이름 기반 동적 매핑 테이블 구축
-            val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
-            val cachedChipsMap = try {
-                mapper.readValue<List<CachedChip>>(cachedChipsJson).associateBy { it.name }
-            } catch (e: Exception) {
-                emptyMap()
-            }
-
-            customSections.filter { it.isEnabled }.forEach { section ->
-                val url = section.url
-                when {
-                    url == "Home" -> {
-                        val homeTitle = when(lang) {
-                            "ko" -> "홈"
-                            "ar" -> "الرئيسية"
-                            else -> "Home"
-                        }
-                        list.add(MainPageData(homeTitle, "Home", horizontalImages = true))
-                    }
-                    url.startsWith("chip_name_") -> {
-                        val chipName = url.removePrefix("chip_name_")
-                        val activeChip = cachedChipsMap[chipName]
-                        if (activeChip != null) {
-                            // 안정적인 고유 칩 이름을 매개로 하여 유튜브로부터 발급받은 최신 active token을 실시간 기입
-                            list.add(MainPageData(activeChip.name, "chip_${activeChip.token}", horizontalImages = true))
-                        }
-                    }
-                    else -> {
-                        var title = section.name
-                        if (title.isBlank()) title = extractNameFromUrl(url)
-                        list.add(MainPageData(title, url, horizontalImages = true))
-                    }
-                }
-            }
-
-            return list
-        }
-
-
-    private fun getCustomHomepages(): List<CustomSection> {
-        val json = appPrefs?.getString("custom_homepages_v3", "[]") ?: "[]"
-        val currentList = try {
-            mapper.readValue<List<CustomSection>>(json).toMutableList()
-        } catch (e: Exception) {
-            mutableListOf()
-        }
-
-        var modified = false
-
-        // 1. 설정 관리 레이아웃에 기본 '홈(Home)' 팩터 영구 보장
-        if (currentList.none { it.url == "Home" }) {
             val homeTitle = when(lang) {
                 "ko" -> "홈"
                 "ar" -> "الرئيسية"
                 else -> "Home"
             }
-            currentList.add(0, CustomSection(name = homeTitle, url = "Home", isEnabled = true))
-            modified = true
-        }
 
-        // 2. 홈화면 기동 시 캐싱되었던 "개별" 칩 필터 항목들(요리, 농구 등)을 독립된 채널 레이아웃 구성 요소로 등록 및 동기화
-        val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
-        try {
-            val cachedChips = mapper.readValue<List<CachedChip>>(cachedChipsJson)
-            cachedChips.forEach { chip ->
-                val stableUrl = "chip_name_${chip.name}"
-                if (currentList.none { it.url == stableUrl }) {
-                    currentList.add(CustomSection(name = chip.name, url = stableUrl, isEnabled = true))
-                    modified = true
+            if (appPrefs?.getBoolean("show_trending_home", true) == true) {
+                list.add(MainPageData(homeTitle, "Home", horizontalImages = true))
+                
+                val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
+                try {
+                    val chips: List<CachedChip> = AppUtils.parseJson(cachedChipsJson)
+                    chips.forEach { chip ->
+                        list.add(MainPageData(chip.name, "chip_${chip.token}", horizontalImages = true))
+                    }
+                } catch (e: Exception) {
+                    logError(e)
                 }
             }
-        } catch (e: Exception) {
-            logError(e)
-        }
 
-        if (modified) {
-            try {
-                val updatedJson = mapper.writeValueAsString(currentList) // 리플렉션 비용 제거
-                appPrefs?.edit()?.putString("custom_homepages_v3", updatedJson)?.apply()
-            } catch (e: Exception) {
-                logError(e)
+            val customSections = getCustomHomepages()
+            customSections.filter { it.isEnabled && it.url != "Home" }.forEach { section ->
+                var title = section.name
+                if (title.isBlank()) title = extractNameFromUrl(section.url)
+                list.add(MainPageData(title, section.url, horizontalImages = true))
             }
+
+            return list
         }
-        
 
-        return currentList
+    private fun getCustomHomepages(): List<CustomSection> {
+        val json = appPrefs?.getString("custom_homepages_v3", "[]") ?: "[]"
+        return try {
+            AppUtils.parseJson<List<CustomSection>>(json)
+        } catch (e: Exception) {
+            emptyList()
+        }
     }
-
 
     private fun extractNameFromUrl(url: String): String {
         return when {
@@ -1375,13 +1280,7 @@ class YoutubeProvider(
                                 }
                             }
                         }
-
-                        // 수동 추가 플레이리스트 행인 경우, URL 내부에서 playlistId 정밀 추출 수행
-                        val playlistId = if (requestData.contains("list=")) {
-                            requestData.substringAfter("list=", "").substringBefore("&")
-                        } else null
-
-                        processRecursive(initialData, results, seenIds, playlistMode = false, playlistId = playlistId)
+                        processRecursive(initialData, results, seenIds, playlistMode = false)
                         nextContinuation = findTokenRecursive(initialData)
                     }
                 }
@@ -1432,12 +1331,7 @@ class YoutubeProvider(
                                         ?: innerResponse["onResponseReceivedCommands"] 
                                         ?: innerResponse["continuationContents"] 
                                         ?: innerResponse
-                                    
-                                    val playlistId = if (requestData.contains("list=")) {
-                                        requestData.substringAfter("list=", "").substringBefore("&")
-                                    } else null
-
-                                    processRecursive(actions, results, seenIds, playlistMode = false, playlistId = playlistId)
+                                    processRecursive(actions, results, seenIds, playlistMode = false)
                                     nextContinuation = findTokenRecursive(innerResponse)
                                 }
                             }
@@ -1468,12 +1362,7 @@ class YoutubeProvider(
                             ?: response["onResponseReceivedCommands"] 
                             ?: response["continuationContents"] 
                             ?: response
-
-                        val playlistId = if (requestData.contains("list=")) {
-                            requestData.substringAfter("list=", "").substringBefore("&")
-                        } else null
-
-                        processRecursive(actions, results, seenIds, playlistMode = false, playlistId = playlistId)
+                        processRecursive(actions, results, seenIds, playlistMode = false)
                         nextContinuation = findTokenRecursive(response)
                     }
                 }
@@ -1493,6 +1382,8 @@ class YoutubeProvider(
             for (item in results) {
                 val isShort = item.url.contains("/shorts/")
                 if (isShort) {
+                    // 일반 영상을 보다가 다시 쇼츠가 등장했다는 것은 '새로운 날짜 섹션(새로운 날)'으로 진입했음을 의미함.
+                    // 따라서 이전 날짜 그룹의 정렬을 완료(일반 ➡️ 쇼츠 순)하여 sorted에 비우고 새로 수집 시작.
                     if (tempVods.isNotEmpty()) {
                         sorted.addAll(tempVods)
                         tempVods.clear()
@@ -1504,6 +1395,7 @@ class YoutubeProvider(
                     tempVods.add(item)
                 }
             }
+            // 미처 비워지지 않고 남아있는 마지막 날짜 섹션의 데이터를 순서대로 적재
             if (tempVods.isNotEmpty() || tempShorts.isNotEmpty()) {
                 sorted.addAll(tempVods)
                 sorted.addAll(tempShorts)
@@ -1513,6 +1405,7 @@ class YoutubeProvider(
         }
 
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
+
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -2426,6 +2319,7 @@ class YoutubeProvider(
         }
     }
 
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -2438,6 +2332,7 @@ class YoutubeProvider(
 
         var playerResponseText = ""
         try {
+            // 쇼츠일 경우 시청기록 수급 필드를 포함한 단독 엔드포인트(?%24fields=playerResponse) 지정
             val apiUrl = if (isShort) "$mainUrl/youtubei/v1/reel/reel_item_watch?%24fields=playerResponse" else "$mainUrl/youtubei/v1/player"
             val payload = if (isShort) {
                 mapOf(
@@ -2475,28 +2370,23 @@ class YoutubeProvider(
         if (playerResponseText.isNotBlank()) {
             try {
                 val root = org.json.JSONObject(playerResponseText)
-                val targetObj = if (root.has("playerResponse")) {
-                    root.getJSONObject("playerResponse")
+                // 쇼츠 전용 중첩 구조(playerResponse) 감지 시 한 단계를 벗겨내어 일반 VOD 구조와 일치화 처리
+                val targetJson = if (root.has("playerResponse")) {
+                    root.getJSONObject("playerResponse").toString()
                 } else {
-                    root
+                    playerResponseText
                 }
+                val playerResponse = parseJson<PlayerResponse>(targetJson)
                 
-                val playbackTrackingObj = targetObj.optJSONObject("playbackTracking")
-                if (playbackTrackingObj != null) {
-                    val playbackUrlObj = playbackTrackingObj.optJSONObject("videostatsPlaybackUrl")
-                    val watchtimeUrlObj = playbackTrackingObj.optJSONObject("videostatsWatchtimeUrl")
-                    
-                    val playbackBaseUrl = playbackUrlObj?.optString("baseUrl")
-                    val watchtimeBaseUrl = watchtimeUrlObj?.optString("baseUrl")
-                    
-                    triggerPlaybackTracking(playbackBaseUrl, watchtimeBaseUrl, videoId, isShort)
-                }
+                // 쇼츠 전용 플래그 파라미터(isShort)를 이행하여 시청 기록을 쇼츠 전용 데이터로 적재
+                triggerPlaybackTracking(playerResponse.playbackTracking, videoId, isShort)
             } catch (e: Exception) {
                 logError(e)
             }
         }
 
         com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback, callback)
+
         return true
     }
 }
