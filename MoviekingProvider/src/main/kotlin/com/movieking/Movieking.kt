@@ -14,7 +14,7 @@ import kotlinx.coroutines.sync.withLock
 
 class MovieKing : MainAPI() {
     companion object {
-        var currentMainUrl = "https://mvking.net" 
+        var currentMainUrl = "https://mvking.mov" 
         var isDomainChecked = false 
         private val domainMutex = Mutex()
         private const val PREFS_NAME = "MovieKing_Domain_Cache"
@@ -47,7 +47,7 @@ class MovieKing : MainAPI() {
             val prefs = AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             val cachedDomain = prefs?.getString(PREF_KEY, null)
             
-            if (cachedDomain != null && currentMainUrl == "https://mvking.top") {
+            if (cachedDomain != null && currentMainUrl == "https://mvking.mov") {
                 currentMainUrl = cachedDomain
                 mainUrl = currentMainUrl
             }
