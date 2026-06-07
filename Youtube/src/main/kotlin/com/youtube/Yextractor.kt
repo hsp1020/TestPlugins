@@ -1,5 +1,6 @@
 package com.youtube
 
+import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mvvm.logError
@@ -92,6 +93,158 @@ open class YoutubeExtractor : ExtractorApi() {
         init {
             println("[YT_DEBUG_INIT] 유튜브 DASH 추출기 최적화 가상서버 초기화 완료")
         }
+
+        // 가상 서버 내부에서 메인 UI 스레드를 통해 외부 웹 브라우저를 즉시 실행시키는 메소드
+        private fun openUrlInBrowser(url: String) {
+            val context = AcraApplication.context ?: return
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                try {
+                    val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url)).apply {
+                        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    context.startActivity(intent)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+
+        private fun handleClient(client: Socket) {
+            try {
+                // client.use 영역 진입을 통하여 소켓 및 IO 자원의 안전 소멸 주기 확립
+                client.use { socket ->
+                    val inputStream = socket.getInputStream()
+                    val reader = BufferedReader(InputStreamReader(inputStream, java.nio.charset.StandardCharsets.UTF_8))
+                    val output = socket.getOutputStream()
+                    val outWriter = PrintWriter(output, true)
+
+                    val requestLine = reader.readLine() ?: return
+                    val parts = requestLine.split(" ")
+                    if (parts.size < 2) return
+
+                    val fullPath = parts[1]
+                    
+                    val clientHeaders = LinkedHashMap<String, String>()
+                    var headerLines = 0
+                    while (headerLines++ < 100) {
+                        val line = reader.readLine()
+                        if (line.isNullOrBlank()) break
+                        val colonIndex = line.indexOf(':')
+                        if (colonIndex != -1) {
+                            clientHeaders[line.substring(0, colonIndex).trim().lowercase()] = line.substring(colonIndex + 1).trim()
+                        }
+                    }
+
+                    val cleanPath = fullPath.substringBefore("?")
+                    val queryParams = fullPath.substringAfter("?", "")
+
+                    // 웹 브라우저 바로 가기 인터셉터 신규 동작 처리 영역
+                    if (cleanPath.startsWith("/open_browser")) {
+                        val targetUrlEncoded = queryParams.substringAfter("url=", "")
+                        if (targetUrlEncoded.isNotEmpty()) {
+                            try {
+                                val targetUrl = java.net.URLDecoder.decode(targetUrlEncoded, "UTF-8")
+                                openUrlInBrowser(targetUrl)
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                            }
+                        }
+                        // 비디오 플레이어 연결이 무한 대기 상태에 빠지지 않도록 빈 콘텐츠 상태 코드 전달 반환
+                        outWriter.print("HTTP/1.1 204 No Content\r\n")
+                        outWriter.print("Connection: close\r\n")
+                        outWriter.print("Access-Control-Allow-Origin: *\r\n")
+                        outWriter.print("\r\n")
+                        outWriter.flush()
+                    }
+                    else if (cleanPath.startsWith("/chunk")) {
+                        val idMatch = CHUNK_ID_REGEX.find(queryParams)
+                        val chunkId = idMatch?.groupValues?.get(1)
+                        val targetYoutubeUrl = if (chunkId != null) streamUrlCache[chunkId] else null
+
+                        if (targetYoutubeUrl != null) {
+                            proxyChunkToYouTube(client, targetYoutubeUrl, clientHeaders)
+                        } else {
+                            outWriter.print("HTTP/1.1 404 Not Found\r\n\r\n")
+                            outWriter.flush()
+                        }
+                    } 
+                    else if (cleanPath.endsWith(".mpd", ignoreCase = true)) {
+                        val path = cleanPath.substringBeforeLast(".mpd").removePrefix("/")
+                        val content = manifestMap[path]
+                        if (content != null) {
+                            outWriter.print("HTTP/1.1 200 OK\r\n")
+                            outWriter.print("Content-Type: application/dash+xml\r\n")
+                            outWriter.print("Connection: close\r\n")
+                            outWriter.print("Access-Control-Allow-Origin: *\r\n")
+                            outWriter.print("\r\n")
+                            outWriter.print(content)
+                            outWriter.flush()
+                        } else {
+                            outWriter.print("HTTP/1.1 404 Not Found\r\n\r\n")
+                            outWriter.flush()
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                println("[YT_PROXY_DEBUG] handleClient 예외: ${e.message}")
+            }
+        }
+
+        private fun proxyChunkToYouTube(socket: Socket, targetUrl: String, clientHeaders: Map<String, String>) {
+            try {
+                val requestBuilder = okhttp3.Request.Builder()
+                    .url(targetUrl)
+                    .header("User-Agent", YoutubeUtils.ANDROID_VR_USER_AGENT)
+                    .header("Accept", "*/*")
+                    .header("Connection", "keep-alive")
+
+                clientHeaders.forEach { (key, value) ->
+                    val lowerKey = key.lowercase()
+                    if (lowerKey != "host" && lowerKey != "user-agent" && lowerKey != "origin" && lowerKey != "referer" && lowerKey != "accept-encoding") {
+                        requestBuilder.header(key, value)
+                    }
+                }
+
+                val request = requestBuilder.build()
+                val response = proxyHttpClient.newCall(request).execute()
+                
+                try {
+                    if (response.code == 403 || response.code == 400) {
+                        println("[YT_PROXY_DEBUG] 🚨 유튜브 CDN 에러 발생: ${response.code}")
+                        val output = socket.getOutputStream()
+                        val rawOutWriter = java.io.PrintWriter(output, false)
+                        rawOutWriter.print("HTTP/1.1 ${response.code} ${response.message}\r\n\r\n")
+                        rawOutWriter.flush()
+                        return
+                    }
+
+                    val output = socket.getOutputStream()
+                    val rawOutWriter = java.io.PrintWriter(output, false)
+
+                    rawOutWriter.print("HTTP/1.1 ${response.code} ${response.message}\r\n")
+                    response.header("Content-Type")?.let { rawOutWriter.print("Content-Type: $it\r\n") }
+                    response.header("Content-Length")?.let { rawOutWriter.print("Content-Length: $it\r\n") }
+                    response.header("Content-Range")?.let { rawOutWriter.print("Content-Range: $it\r\n") }
+                    response.header("Accept-Ranges")?.let { rawOutWriter.print("Accept-Ranges: $it\r\n") }
+                    rawOutWriter.print("Connection: close\r\n")
+                    rawOutWriter.print("\r\n")
+                    rawOutWriter.flush()
+
+                    val body = response.body
+                    if (body != null) {
+                        body.byteStream().use { input ->
+                            // 64KB 고속 버퍼 릴레이 데이터 전송 지원
+                            input.copyTo(output, bufferSize = 65536)
+                        }
+                    }
+                    output.flush()
+                } finally {
+                    response.close()
+                }
+            } catch (e: Exception) {
+                println("[YT_PROXY_DEBUG] 프록시 릴레이 중 예외 발생: ${e.message}")
+            }
+        }
     }
 
     override fun getExtractorUrl(id: String): String {
@@ -116,6 +269,21 @@ open class YoutubeExtractor : ExtractorApi() {
         val initRange: String?,
         val indexRange: String?
     )
+
+    // 로컬 가상 리다이렉트 URL 생성을 담당하는 도우미 인스턴스 메소드
+    private fun getBrowserRedirectUrl(targetUrl: String): String? {
+        startServerIfNeeded()
+        return if (serverPort != 0) {
+            try {
+                val encoded = java.net.URLEncoder.encode(targetUrl, "UTF-8")
+                "http://127.0.0.1:$serverPort/open_browser?url=$encoded"
+            } catch (e: Exception) {
+                null
+            }
+        } else {
+            null
+        }
+    }
 
     private suspend fun fetchPlayerResponse(videoId: String): Pair<JSONObject?, Long> {
         val watchUrl = "https://www.youtube.com/watch?v=$videoId"
@@ -182,7 +350,7 @@ open class YoutubeExtractor : ExtractorApi() {
                             "client" to mapOf(
                                 "clientName" to "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
                                 "clientVersion" to "2.0",
-                                "hl" to "en", // 컴파일 에러 해결을 위해 원래의 하드코딩 형식 "en"으로 정상 환원
+                                "hl" to "en",
                                 "gl" to "US",
                                 "visitorData" to visitorData
                             ),
@@ -223,10 +391,20 @@ open class YoutubeExtractor : ExtractorApi() {
             try {
                 val (playerResponse, durationSeconds) = fetchPlayerResponse(videoId)
 
+                // 우회 수단이 전부 막혔을 때 등록되는 Fallback 브라우저 다이렉트 이원화 주소 처리 영역
                 if (playerResponse == null) {
                     println("[YT_DEBUG_EXTRACTOR] 🚨 모든 우회 실패! playerResponse 없음.")
-                    callback(newExtractorLink(source = "YouTube Original", name = "YouTube Original", url = "https://www.youtube.com/watch?v=$videoId", type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
-                    callback(newExtractorLink(source = "YouTube Downloader", name = "Cobalt Web Download(4K)", url = "https://qwkuns.me/#https://www.youtube.com/watch?v=$videoId", type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+                    
+                    val originalUrl = "https://www.youtube.com/watch?v=$videoId"
+                    val originalRedirect = getBrowserRedirectUrl(originalUrl) ?: originalUrl
+                    callback(newExtractorLink(source = "YouTube Original", name = "YouTube Original (즉시 열기)", url = originalRedirect, type = if (originalRedirect.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+                    callback(newExtractorLink(source = "YouTube Original", name = "YouTube Original (링크 복사/외부 열기)", url = originalUrl, type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+
+                    val downloaderUrl = "https://qwkuns.me/#https://www.youtube.com/watch?v=$videoId"
+                    val downloaderRedirect = getBrowserRedirectUrl(downloaderUrl) ?: downloaderUrl
+                    callback(newExtractorLink(source = "YouTube Downloader", name = "Cobalt Web Download (즉시 열기)", url = downloaderRedirect, type = if (downloaderRedirect.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+                    callback(newExtractorLink(source = "YouTube Downloader", name = "Cobalt Web Download (링크 복사/외부 열기)", url = downloaderUrl, type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+                    
                     return@withContext
                 }
 
@@ -392,8 +570,16 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
 
-                callback(newExtractorLink(source = "YouTube Original", name = "YouTube Original", url = "https://www.youtube.com/watch?v=$videoId", type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
-                callback(newExtractorLink(source = "YouTube Downloader", name = "Cobalt Web Download(4K)", url = "https://qwkuns.me/#https://www.youtube.com/watch?v=$videoId", type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+                // 정상 동작 상황 하에서 노출되는 다운로드 및 오리지널 다이렉트 브라우저 이원화 주소 처리 영역
+                val originalUrl = "https://www.youtube.com/watch?v=$videoId"
+                val originalRedirect = getBrowserRedirectUrl(originalUrl) ?: originalUrl
+                callback(newExtractorLink(source = "YouTube Original", name = "YouTube Original (즉시 열기)", url = originalRedirect, type = if (originalRedirect.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+                callback(newExtractorLink(source = "YouTube Original", name = "YouTube Original (링크 복사/외부 열기)", url = originalUrl, type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+
+                val downloaderUrl = "https://qwkuns.me/#https://www.youtube.com/watch?v=$videoId"
+                val downloaderRedirect = getBrowserRedirectUrl(downloaderUrl) ?: downloaderUrl
+                callback(newExtractorLink(source = "YouTube Downloader", name = "Cobalt Web Download (즉시 열기)", url = downloaderRedirect, type = if (downloaderRedirect.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+                callback(newExtractorLink(source = "YouTube Downloader", name = "Cobalt Web Download (링크 복사/외부 열기)", url = downloaderUrl, type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
                 
             } catch (e: Exception) { 
                 println("[YT_DEBUG_EXTRACTOR] 🚨 Exception 발생: ${e.message}")
@@ -435,125 +621,6 @@ open class YoutubeExtractor : ExtractorApi() {
         val id = "m_${streamCounter.getAndIncrement()}"
         manifestMap[id] = xmlContent
         return "http://127.0.0.1:$serverPort/$id.mpd"
-    }
-
-    private fun handleClient(client: Socket) {
-        try {
-            // client.use 영역 진입을 통하여 소켓 및 IO 자원의 안전 소멸 주기 확립
-            client.use { socket ->
-                val inputStream = socket.getInputStream()
-                val reader = BufferedReader(InputStreamReader(inputStream, java.nio.charset.StandardCharsets.UTF_8))
-                val output = socket.getOutputStream()
-                val outWriter = PrintWriter(output, true)
-
-                val requestLine = reader.readLine() ?: return
-                val parts = requestLine.split(" ")
-                if (parts.size < 2) return
-
-                val fullPath = parts[1]
-                
-                val clientHeaders = LinkedHashMap<String, String>()
-                var headerLines = 0
-                while (headerLines++ < 100) {
-                    val line = reader.readLine()
-                    if (line.isNullOrBlank()) break
-                    val colonIndex = line.indexOf(':')
-                    if (colonIndex != -1) {
-                        clientHeaders[line.substring(0, colonIndex).trim().lowercase()] = line.substring(colonIndex + 1).trim()
-                    }
-                }
-
-                val cleanPath = fullPath.substringBefore("?")
-                val queryParams = fullPath.substringAfter("?", "")
-
-                if (cleanPath.startsWith("/chunk")) {
-                    val idMatch = CHUNK_ID_REGEX.find(queryParams)
-                    val chunkId = idMatch?.groupValues?.get(1)
-                    val targetYoutubeUrl = if (chunkId != null) streamUrlCache[chunkId] else null
-
-                    if (targetYoutubeUrl != null) {
-                        proxyChunkToYouTube(client, targetYoutubeUrl, clientHeaders)
-                    } else {
-                        outWriter.print("HTTP/1.1 404 Not Found\r\n\r\n")
-                        outWriter.flush()
-                    }
-                } 
-                else if (cleanPath.endsWith(".mpd", ignoreCase = true)) {
-                    val path = cleanPath.substringBeforeLast(".mpd").removePrefix("/")
-                    val content = manifestMap[path]
-                    if (content != null) {
-                        outWriter.print("HTTP/1.1 200 OK\r\n")
-                        outWriter.print("Content-Type: application/dash+xml\r\n")
-                        outWriter.print("Connection: close\r\n")
-                        outWriter.print("Access-Control-Allow-Origin: *\r\n")
-                        outWriter.print("\r\n")
-                        outWriter.print(content)
-                        outWriter.flush()
-                    } else {
-                        outWriter.print("HTTP/1.1 404 Not Found\r\n\r\n")
-                        outWriter.flush()
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            println("[YT_PROXY_DEBUG] handleClient 예외: ${e.message}")
-        }
-    }
-
-    private fun proxyChunkToYouTube(socket: Socket, targetUrl: String, clientHeaders: Map<String, String>) {
-        try {
-            val requestBuilder = okhttp3.Request.Builder()
-                .url(targetUrl)
-                .header("User-Agent", YoutubeUtils.ANDROID_VR_USER_AGENT)
-                .header("Accept", "*/*")
-                .header("Connection", "keep-alive")
-
-            clientHeaders.forEach { (key, value) ->
-                val lowerKey = key.lowercase()
-                if (lowerKey != "host" && lowerKey != "user-agent" && lowerKey != "origin" && lowerKey != "referer" && lowerKey != "accept-encoding") {
-                    requestBuilder.header(key, value)
-                }
-            }
-
-            val request = requestBuilder.build()
-            val response = proxyHttpClient.newCall(request).execute()
-            
-            try {
-                if (response.code == 403 || response.code == 400) {
-                    println("[YT_PROXY_DEBUG] 🚨 유튜브 CDN 에러 발생: ${response.code}")
-                    val output = socket.getOutputStream()
-                    val rawOutWriter = java.io.PrintWriter(output, false)
-                    rawOutWriter.print("HTTP/1.1 ${response.code} ${response.message}\r\n\r\n")
-                    rawOutWriter.flush()
-                    return
-                }
-
-                val output = socket.getOutputStream()
-                val rawOutWriter = java.io.PrintWriter(output, false)
-
-                rawOutWriter.print("HTTP/1.1 ${response.code} ${response.message}\r\n")
-                response.header("Content-Type")?.let { rawOutWriter.print("Content-Type: $it\r\n") }
-                response.header("Content-Length")?.let { rawOutWriter.print("Content-Length: $it\r\n") }
-                response.header("Content-Range")?.let { rawOutWriter.print("Content-Range: $it\r\n") }
-                response.header("Accept-Ranges")?.let { rawOutWriter.print("Accept-Ranges: $it\r\n") }
-                rawOutWriter.print("Connection: close\r\n")
-                rawOutWriter.print("\r\n")
-                rawOutWriter.flush()
-
-                val body = response.body
-                if (body != null) {
-                    body.byteStream().use { input ->
-                        // 64KB 고속 버퍼 릴레이 데이터 전송 지원
-                        input.copyTo(output, bufferSize = 65536)
-                    }
-                }
-                output.flush()
-            } finally {
-                response.close()
-            }
-        } catch (e: Exception) {
-            println("[YT_PROXY_DEBUG] 프록시 릴레이 중 예외 발생: ${e.message}")
-        }
     }
 
     private fun buildDashManifestXml(
