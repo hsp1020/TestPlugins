@@ -18,6 +18,13 @@ class Kotbc : MainAPI() {
         private val domainMutex = Mutex()
         private const val PREFS_NAME = "Kotbc_Domain_Cache"
         private const val PREF_KEY = "current_domain"
+
+        fun saveDomain(newDomain: String) {
+            currentMainUrl = newDomain
+            AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                ?.edit()?.putString(PREF_KEY, newDomain)?.apply()
+            println("[Kotbc DBG] 영구 도메인 저장 완료: $newDomain")
+        }
     }
 
     override var mainUrl = currentMainUrl
@@ -32,10 +39,11 @@ class Kotbc : MainAPI() {
         if (isDomainChecked) return
         domainMutex.withLock {
             if (isDomainChecked) return@withLock
+            
             val prefs = AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             val cachedDomain = prefs?.getString(PREF_KEY, null)
 
-            if (cachedDomain != null && currentMainUrl == "https://m142.kotbc2.com") {
+            if (cachedDomain != null) {
                 currentMainUrl = cachedDomain; mainUrl = currentMainUrl
             }
             
@@ -44,26 +52,26 @@ class Kotbc : MainAPI() {
                 val finalUrl = res.url.trimEnd('/')
                 if (res.isSuccessful && res.text.contains("list-box")) {
                     if (currentMainUrl != finalUrl) {
-                        currentMainUrl = finalUrl; mainUrl = currentMainUrl
-                        prefs?.edit()?.putString(PREF_KEY, currentMainUrl)?.apply()
+                        saveDomain(finalUrl)
+                        mainUrl = currentMainUrl
                     }
                     isDomainChecked = true; return@withLock
                 }
-            } catch (e: Exception) { if (e is CancellationException) throw e }
+            } catch (e: Exception) {}
 
             try {
                 val redirectRes = app.get("https://kotbc2.com", timeout = 3L)
                 val baseFinalUrl = redirectRes.url.trimEnd('/')
                 if (redirectRes.isSuccessful && baseFinalUrl.contains("kotbc2.com") && redirectRes.text.contains("list-box")) {
-                    currentMainUrl = baseFinalUrl; mainUrl = currentMainUrl; isDomainChecked = true
-                    prefs?.edit()?.putString(PREF_KEY, currentMainUrl)?.apply(); return@withLock
+                    saveDomain(baseFinalUrl)
+                    mainUrl = currentMainUrl
+                    isDomainChecked = true; return@withLock
                 }
-            } catch (e: Exception) { if (e is CancellationException) throw e }
+            } catch (e: Exception) {}
 
             val match = Regex("m(\\d+)").find(currentMainUrl)
             val startNum = match?.groupValues?.get(1)?.toIntOrNull() ?: 142
             
-            // [공통 개선] 5개씩 병렬로 빠르게 스캔 (최대 150초 로딩 방지)
             coroutineScope {
                 val candidates = (startNum..startNum + 100).map { "https://m$it.kotbc2.com" }
                 val chunks = candidates.chunked(10)
@@ -80,12 +88,34 @@ class Kotbc : MainAPI() {
                     }
                     val found = deferreds.awaitAll().firstOrNull { it != null }
                     if (found != null) {
-                        currentMainUrl = found; mainUrl = currentMainUrl; isDomainChecked = true
-                        prefs?.edit()?.putString(PREF_KEY, currentMainUrl)?.apply(); return@coroutineScope
+                        saveDomain(found)
+                        mainUrl = currentMainUrl
+                        isDomainChecked = true; return@coroutineScope
                     }
                 }
             }
             isDomainChecked = true 
+        }
+    }
+
+    override suspend fun search(query: String): List<SearchResponse> {
+        val qLower = query.lowercase()
+        if (qLower.startsWith("!kotbc ")) {
+            val userDomain = query.substring(7).trim().trimEnd('/')
+            if (userDomain.startsWith("http")) {
+                saveDomain(userDomain)
+                mainUrl = currentMainUrl
+                isDomainChecked = true
+                return listOf(newMovieSearchResponse("✅ Kotbc 갱신 성공: $userDomain", userDomain, TvType.Movie) { this.posterUrl = "" })
+            }
+        } else if (query.startsWith("!")) { return emptyList() }
+
+        checkAndUpdateDomain()
+        return try {
+            app.get("$mainUrl/bbs/search.php?sfl=wr_subject&stx=$query").document
+                .select(".list-body .list-row .list-box").mapNotNull { it.toSearchResponse() }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e; emptyList()
         }
     }
 
@@ -98,16 +128,6 @@ class Kotbc : MainAPI() {
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             newHomePageResponse(request.name, emptyList(), hasNext = false)
-        }
-    }
-
-    override suspend fun search(query: String): List<SearchResponse> {
-        checkAndUpdateDomain()
-        return try {
-            app.get("$mainUrl/bbs/search.php?sfl=wr_subject&stx=$query").document
-                .select(".list-body .list-row .list-box").mapNotNull { it.toSearchResponse() }
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e; emptyList()
         }
     }
 
@@ -179,7 +199,6 @@ class Kotbc : MainAPI() {
                     return true
                 }
             }
-            // [고유 개선] Iframe 범용성 확보 (nnmo0oi1, glamov 하드코딩 탈피)
             doc.select("iframe").forEach { iframe ->
                 val src = iframe.attr("src")
                 if (src.contains(Regex("""player|embed|view|video|nnmo|glamov"""))) {
