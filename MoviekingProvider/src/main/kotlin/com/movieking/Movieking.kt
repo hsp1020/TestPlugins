@@ -1,4 +1,3 @@
-// 버전 정보: v2.0 (검색창 수동 도메인 갱신 + 영구 저장소 + 리다이렉트 폴백 추가)
 package com.movieking
 
 import android.content.Context
@@ -14,19 +13,18 @@ import kotlinx.coroutines.sync.withLock
 
 class MovieKing : MainAPI() {
     companion object {
-        var currentMainUrl = "https://movieking.net" // 최상단 기준 최초 도메인
+        var currentMainUrl = "https://movieking.net"
         var isDomainChecked = false 
         private val domainMutex = Mutex()
         private const val PREFS_NAME = "MovieKing_Domain_Cache"
         private const val PREF_KEY = "current_domain"
         private const val PORTAL_URL = "https://xn--2z1bw8g20f.com" 
 
-        // 성공한 도메인 영구 저장 헬퍼 함수
         fun saveDomain(newDomain: String) {
             currentMainUrl = newDomain
             AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 ?.edit()?.putString(PREF_KEY, newDomain)?.apply()
-            println("[MovieKing v2.0 DBG] 영구 도메인 저장 완료: $newDomain")
+            println("[MovieKing DBG] 영구 도메인 저장 완료: $newDomain")
         }
     }
 
@@ -53,7 +51,6 @@ class MovieKing : MainAPI() {
         domainMutex.withLock {
             if (isDomainChecked) return@withLock
             
-            // 1. 기기에 캐시된 도메인이 있다면 최초 도메인을 덮어씌우고 시작
             val prefs = AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             val cachedDomain = prefs?.getString(PREF_KEY, null)
             
@@ -62,20 +59,18 @@ class MovieKing : MainAPI() {
                 mainUrl = currentMainUrl
             }
             
-            // 2. 현재 도메인이 정상 작동(리다이렉트 포함)하는지 확인
             try {
                 val res = app.get(currentMainUrl, headers = commonHeaders, timeout = 5L)
                 val finalUrl = res.url.trimEnd('/')
                 if (res.isSuccessful && res.text.contains("video-card")) {
                     if (currentMainUrl != finalUrl) {
-                        saveDomain(finalUrl) // 리다이렉트 발생 시 즉시 저장
+                        saveDomain(finalUrl)
                         mainUrl = currentMainUrl
                     }
                     isDomainChecked = true; return@withLock
                 }
             } catch (e: Exception) {}
 
-            // 3. [신규 폴백] 하드코딩된 베이스 도메인(movieking.net) 리다이렉트 추적
             try {
                 val baseRes = app.get("https://movieking.net", headers = commonHeaders, timeout = 5L)
                 val baseFinalUrl = baseRes.url.trimEnd('/')
@@ -86,7 +81,6 @@ class MovieKing : MainAPI() {
                 }
             } catch (e: Exception) {}
 
-            // 4. 최후의 수단: 대피소(포털) 파싱 스크래핑
             try {
                 val portalDoc = app.get(PORTAL_URL, timeout = 10L).document
                 val latestUrl = portalDoc.select("a").firstOrNull { 
@@ -107,30 +101,15 @@ class MovieKing : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val qLower = query.lowercase()
-
-        // =========================================================
-        // [백도어 트릭] 검색창을 통한 수동 도메인 관리 로직
-        // =========================================================
         if (qLower.startsWith("!movieking ")) {
             val userDomain = query.substring(11).trim().trimEnd('/')
             if (userDomain.startsWith("http")) {
-                saveDomain(userDomain) // 사용자가 입력한 값으로 덮어쓰기 및 영구저장
+                saveDomain(userDomain)
                 mainUrl = currentMainUrl
-                isDomainChecked = true // 변경 즉시 검증 우회
-                
-                return listOf(
-                    newMovieSearchResponse("✅ 무비킹 도메인 강제 갱신 성공: $userDomain", userDomain, TvType.Movie) {
-                        this.posterUrl = ""
-                    }
-                )
+                isDomainChecked = true 
+                return listOf(newMovieSearchResponse("✅ 무비킹 갱신 성공: $userDomain", userDomain, TvType.Movie) { this.posterUrl = "" })
             }
-        }
-        
-        // 사용자가 다른 플러그인 명령어를 쳤을 경우 불필요한 요청 방지 및 충돌 차단
-        if (qLower.startsWith("!")) {
-            return emptyList()
-        }
-        // =========================================================
+        } else if (query.startsWith("!")) { return emptyList() }
 
         checkAndUpdateDomain()
         
@@ -140,7 +119,6 @@ class MovieKing : MainAPI() {
             val finalUrl = res.url
             val redirectedDomain = Regex("^https?://[^/]+").find(finalUrl)?.value ?: mainUrl
 
-            // 검색 중 예기치 못한 리다이렉트 도메인 변경 감지 시 영구 저장
             if (redirectedDomain != mainUrl || !finalUrl.contains("search")) {
                 if (redirectedDomain != mainUrl) {
                     saveDomain(redirectedDomain)
@@ -169,7 +147,6 @@ class MovieKing : MainAPI() {
             val decodedRequestData = URLDecoder.decode(request.data, "UTF-8").substringBefore("?")
             val decodedFinalUrl = URLDecoder.decode(finalUrl, "UTF-8")
 
-            // 메인 페이지 로드 중 리다이렉트 발생 시 도메인 영구 저장
             if (redirectedDomain != mainUrl || !decodedFinalUrl.contains(decodedRequestData)) {
                 if (redirectedDomain != mainUrl) {
                     saveDomain(redirectedDomain)
