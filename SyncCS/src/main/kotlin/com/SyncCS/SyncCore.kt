@@ -153,7 +153,8 @@ object BackupUtils {
         return this.filter { isAllowed(it.key) }
     }
 
-    @Suppress("UNCHECKED_CAST")
+
+@Suppress("UNCHECKED_CAST")
     fun getBackup(context: Context, resumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null): BackupFile {
         Log.d("SYNC", "[BackupUtils] getBackup() called (Strict Whitelist Mode).")
         
@@ -176,7 +177,6 @@ object BackupUtils {
                 }
             }
 
-        // 1. 최근 시청 100개 ID 선별 코드 블록 아래 영역입니다. (약 130~140라인 부근)
         val topEntries = resumeEntries.sortedByDescending { it.third }.take(100)
         val allowedResumeKeys = topEntries.map { it.first }.toSet()
         val activeParentIds = topEntries.map { it.second }.toSet()
@@ -188,7 +188,7 @@ object BackupUtils {
 
         val currentActiveIds = (activeParentIds + bookmarkParentIds)
 
-        // 2. 툼스톤(삭제 이력) 제어 및 2주 만료 청소 (3번 부작용 해결)
+        // 2. 툼스톤(삭제 이력) 제어 및 2주 만료 청소
         val currentKeys = prefs.keys.filter { isCoreSyncKey(it) }.toSet()
         val lastKnownKeys = sharedPrefs.getString("sync_last_known_keys", null)?.let {
             try { mapper.readValue<Set<String>>(it) } catch(e: Exception) { emptySet<String>() }
@@ -201,21 +201,15 @@ object BackupUtils {
             emptySet()
         }
 
-        // 로컬에 누적 저장되어 있던 삭제 히스토리 맵 로드 (Key -> 삭제 타임스탬프)
+        // 로컬에 누적 저장되어 있던 삭제 히스토리 맵 로드
         val deletedMap = sharedPrefs.getString("sync_deleted_keys_map", null)?.let {
             try { mapper.readValue<MutableMap<String, Long>>(it) } catch(e: Exception) { mutableMapOf<String, Long>() }
         } ?: mutableMapOf()
 
-
-        // ==========================================
-        // ★ 이 위치에 들여쓰기를 맞춰 아래 코드를 정확히 삽입합니다.
-        // ==========================================
-        // ★ 버그 해결책: 지웠던 키를 다시 사용하기 시작했다면, 삭제 히스토리 맵에서 흔적을 완벽하게 지워 백업 오염을 방지합니다.
+        // 지웠던 키를 다시 사용하기 시작했다면, 삭제 히스토리 맵에서 즉시 소멸시킵니다.
         currentKeys.forEach { activeKey ->
             deletedMap.remove(activeKey)
         }
-        // ==========================================
-
 
         // 신규 삭제 발생 건 등록
         val now = System.currentTimeMillis()
@@ -262,9 +256,10 @@ object BackupUtils {
         Log.d("SYNC", "[BackupUtils] Whitelist Filtered -> Datastore: ${mutableFilteredPrefs.size} keys, DefaultPrefs: ${filteredDefaultPrefs.size} keys")
 
         fun buildVars(map: Map<String, Any?>): BackupVars {
-            val cleanedMap = map.mapValues { (_, value) ->
+            val cleanedMap = map.mapValues { (key, value) ->
                 val unpacked = if (value is String) UtilKt.unpackMultipleSerialization(value) else value
-                val isTombstone = unpacked is String && unpacked.toLongOrNull()?.let { it < 0L } == true
+                // ★ 핵심 수정: 오직 핵심 시청 기록 관련 키(isCoreSyncKey)일 때만 음수 툼스톤 체크를 실행합니다.
+                val isTombstone = unpacked is String && isCoreSyncKey(key) && unpacked.toLongOrNull()?.let { it < 0L } == true
                 if (unpacked is String && !isTombstone) UtilKt.compressValueProperties(unpacked) else unpacked
             }
             
@@ -331,7 +326,8 @@ object BackupUtils {
                 val dk = UtilKt.decompressKey(k)
                 if (isAllowed(dk)) {
                     val valueLong = v.toLongOrNull()
-                    if (valueLong != null && valueLong < 0L) {
+                    // ★ 핵심 해결책: 오직 핵심 시청 기록 키(isCoreSyncKey)일 때만 음수 값을 툼스톤 삭제 신호로 인지합니다.
+                    if (isCoreSyncKey(dk) && valueLong != null && valueLong < 0L) {
                         val deletionTime = -valueLong
                         
                         val localValue = localPrefs[dk] as? String
@@ -353,7 +349,6 @@ object BackupUtils {
                 }
             }
             
-            // 기타 타입 데이터 정상 복원
             backupFile.datastore.bool?.forEach { (k, v) ->
                 val dk = UtilKt.decompressKey(k)
                 if (isAllowed(dk)) wrappedEditor.setKeyRaw(dk, v)
