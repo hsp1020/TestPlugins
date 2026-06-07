@@ -37,22 +37,24 @@ open class EmbedStreams(context: Context) : ExtractorApi() {
         referer: String?,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
-    ) = coroutineScope {
-        Log.d("kraptor_$name", "================== Extractor Start ==================")
-        Log.d("kraptor_$name", "Target URL: $url")
-        Log.d("kraptor_$name", "Referer: $referer")
-        try {
-            val videoUrl = withContext(Dispatchers.Main) {
-                getVideoUrlWithWebView(appContext, url)
+    ) { // 등호(=) 대신 명시적 중괄호 블록 바디를 사용하여 반환형을 Unit으로 보장합니다.
+        coroutineScope {
+            Log.d("kraptor_$name", "================== Extractor Start ==================")
+            Log.d("kraptor_$name", "Target URL: $url")
+            Log.d("kraptor_$name", "Referer: $referer")
+            try {
+                val videoUrl = withContext(Dispatchers.Main) {
+                    getVideoUrlWithWebView(appContext, url)
+                }
+                Log.d("kraptor_$name", "WebView returned videoUrl: $videoUrl")
+                if (videoUrl != null) {
+                    processVideoUrl(videoUrl, callback)
+                } else {
+                    Log.e("kraptor_$name", "❌ videoUrl is null. Extraction failed.")
+                }
+            } catch (e: Exception) { 
+                Log.e("kraptor_$name", "❌ Error in getUrl: ${e.message}", e)
             }
-            Log.d("kraptor_$name", "WebView returned videoUrl: $videoUrl")
-            if (videoUrl != null) {
-                processVideoUrl(videoUrl, callback)
-            } else {
-                Log.e("kraptor_$name", "❌ videoUrl is null. Extraction failed.")
-            }
-        } catch (e: Exception) { 
-            Log.e("kraptor_$name", "❌ Error in getUrl: ${e.message}", e)
         }
     }
 
