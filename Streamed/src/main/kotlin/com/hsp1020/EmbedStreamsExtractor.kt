@@ -16,7 +16,6 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 
-
 open class EmbedSporty(context: Context) : EmbedStreams(context) {
     override val name = "EmbedSporty"
     override val mainUrl = "https://embedsporty.top"
@@ -72,8 +71,17 @@ open class EmbedStreams(context: Context) : ExtractorApi() {
                         settings.allowContentAccess = true
                         settings.mediaPlaybackRequiresUserGesture = false
                         
-                        // Cloudflare 우회를 위해 데스크톱 User-Agent 명시적 지정
-                        settings.userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.7103.48 Safari/537.36"
+                        // 실제 기기 UA를 얻은 후, 웹뷰 흔적만 지워 순정 모바일 크롬 브라우저로 속입니다.
+                        val defaultUa = settings.userAgentString
+                        val cleanMobileChromeUa = defaultUa
+                            .replace("Version/4.0 ", "")
+                            .replace("; wv", "")
+                            .trim()
+                        
+                        settings.userAgentString = cleanMobileChromeUa
+                        
+                        Log.d("kraptor_webview", "Original UA: $defaultUa")
+                        Log.d("kraptor_webview", "Spoofed Pure Mobile Chrome UA: $cleanMobileChromeUa")
 
                         webViewClient = object : WebViewClient() {
                             override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
@@ -122,7 +130,7 @@ open class EmbedStreams(context: Context) : ExtractorApi() {
                                     """.trimIndent()) { result ->
                                         Log.d("kraptor_webview", "Play JS result: $result")
                                     }
-                                }, 2000) // 페이지가 안정적으로 그리기 완료될 때까지 2초 대기
+                                }, 2000) // 페이지 그리기 작업 보장을 위해 2초 대기
                             }
 
                             override fun shouldInterceptRequest(
