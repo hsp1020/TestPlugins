@@ -123,7 +123,7 @@ class Editor(private val editor: SharedPreferences.Editor) {
 }
 
 // ==========================================
-// Backup Utilities (맵 레벨 완전 격리 압축형)
+// Backup Utilities (수동 음수 타임스탬프 & 2주 만료 청소 탑재)
 // ==========================================
 
 object BackupUtils {
@@ -143,6 +143,12 @@ object BackupUtils {
         return whitelistKeys.any { str.contains(it, ignoreCase = true) }
     }
 
+    private fun isCoreSyncKey(key: String): Boolean {
+        return key.contains("result_resume_watching_2/", ignoreCase = true) ||
+               key.contains("result_watch_state/", ignoreCase = true) ||
+               key.contains("result_watch_state_data/", ignoreCase = true)
+    }
+
     private fun <T> Map<String, T>.filterAllowedKeys(): Map<String, T> {
         return this.filter { isAllowed(it.key) }
     }
@@ -151,12 +157,14 @@ object BackupUtils {
     fun getBackup(context: Context, resumeWatching: List<DataStoreHelper.ResumeWatchingResult>? = null): BackupFile {
         Log.d("SYNC", "[BackupUtils] getBackup() called (Strict Whitelist Mode).")
         
-        val prefs = with(DataStore) { context.getSharedPrefs() }.all
+        val sharedPrefs = with(DataStore) { context.getSharedPrefs() }
+        val prefs = sharedPrefs.all
         val defaultPrefs = with(DataStore) { context.getDefaultSharedPrefs() }.all
 
-        // 1. result_resume_watching_2 키들을 수집하여 경량 정규식으로 최근 100개의 시청 기기 키만 선별합니다.
-        val resumeEntries = prefs.filter { it.key.contains("result_resume_watching_2/", ignoreCase = true) }
-            .mapNotNull { (key, value) ->
+        // 1. 최근 시청 100개 ID 선별
+        val resumeKeys = prefs.keys.filter { it.contains("result_resume_watching_2/", ignoreCase = true) }
+        val resumeEntries = resumeKeys.mapNotNull { key ->
+                val value = prefs[key]
                 if (value !is String) return@mapNotNull null
                 try {
                     val match = Regex("\"updateTime\"\\s*:\\s*(\\d+)").find(value)
@@ -172,7 +180,52 @@ object BackupUtils {
         val allowedResumeKeys = topEntries.map { it.first }.toSet()
         val activeParentIds = topEntries.map { it.second }.toSet()
 
-        // 2. 필터 제어: download_header_cache와 resume_watching은 상한 제어하되 즐겨찾기는 전체 보존
+        val bookmarkKeys = prefs.keys.filter { it.contains("result_watch_state_data/", ignoreCase = true) }
+        val bookmarkParentIds = bookmarkKeys.map { key ->
+            key.substringAfter("result_watch_state_data/", "").trim()
+        }.filter { it.isNotEmpty() }.toSet()
+
+        val currentActiveIds = (activeParentIds + bookmarkParentIds)
+
+        // 2. 툼스톤(삭제 이력) 제어 및 2주 만료 청소 (3번 부작용 해결)
+        val currentKeys = prefs.keys.filter { isCoreSyncKey(it) }.toSet()
+        val lastKnownKeys = sharedPrefs.getString("sync_last_known_keys", null)?.let {
+            try { mapper.readValue<Set<String>>(it) } catch(e: Exception) { emptySet<String>() }
+        } ?: emptySet()
+
+        // 새로 삭제가 일어난 키 수집
+        val newlyDeletedKeys = if (lastKnownKeys.isNotEmpty()) {
+            lastKnownKeys - currentKeys
+        } else {
+            emptySet()
+        }
+
+        // 로컬에 누적 저장되어 있던 삭제 히스토리 맵 로드 (Key -> 삭제 타임스탬프)
+        val deletedMap = sharedPrefs.getString("sync_deleted_keys_map", null)?.let {
+            try { mapper.readValue<MutableMap<String, Long>>(it) } catch(e: Exception) { mutableMapOf<String, Long>() }
+        } ?: mutableMapOf()
+
+        // 신규 삭제 발생 건 등록
+        val now = System.currentTimeMillis()
+        newlyDeletedKeys.forEach { key ->
+            deletedMap[key] = now
+        }
+
+        // ★ 해결책: 삭제된 지 14일(2주일)이 지난 툼스톤 데이터는 리스트에서 영구 소멸시켜 용량 폭발을 완전히 방어합니다.
+        val iterator = deletedMap.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            if (now - entry.value > 14 * 24 * 3600 * 1000L) {
+                iterator.remove()
+                Log.d("SYNC", "[BackupUtils] Tombstone expired and purged: ${entry.key}")
+            }
+        }
+
+        // 다음 동기화를 위해 상태 갱신 보존
+        sharedPrefs.edit().putString("sync_last_known_keys", mapper.writeValueAsString(currentKeys)).apply()
+        sharedPrefs.edit().putString("sync_deleted_keys_map", mapper.writeValueAsString(deletedMap)).apply()
+
+        // 3. download_header_cache 필터링
         val filteredPrefs = prefs.filter { (key, _) ->
             when {
                 key.contains("download_header_cache/", ignoreCase = true) -> {
@@ -182,21 +235,28 @@ object BackupUtils {
                 key.contains("result_resume_watching_2/", ignoreCase = true) -> {
                     allowedResumeKeys.contains(key)
                 }
-                else -> isAllowed(key) 
+                else -> isAllowed(key)
             }
         }
+
+        // 4. 삭제 데이터 전파를 위해 14일 이내 유효한 삭제 키들을 "음수 타임스탬프"로 세팅하여 주입합니다. [1]
+        val mutableFilteredPrefs = filteredPrefs.toMutableMap()
+        deletedMap.forEach { (deletedKey, deleteTime) ->
+            mutableFilteredPrefs[deletedKey] = (-deleteTime).toString()
+        }
+
         val filteredDefaultPrefs = defaultPrefs.filterKeys { isAllowed(it) }
 
-        Log.d("SYNC", "[BackupUtils] Whitelist Filtered -> Datastore: ${filteredPrefs.size} keys, DefaultPrefs: ${filteredDefaultPrefs.size} keys")
+        Log.d("SYNC", "[BackupUtils] Whitelist Filtered -> Datastore: ${mutableFilteredPrefs.size} keys, DefaultPrefs: ${filteredDefaultPrefs.size} keys")
 
         fun buildVars(map: Map<String, Any?>): BackupVars {
             val cleanedMap = map.mapValues { (_, value) ->
                 val unpacked = if (value is String) UtilKt.unpackMultipleSerialization(value) else value
-                // ★ 핵심 최적화: 밸류(Value) 내부의 JSON 데이터만 골라서 안전 따옴표 치환을 적용합니다.
-                if (unpacked is String) UtilKt.compressValueProperties(unpacked) else unpacked
+                // 음수 마커가 아닐 때만 내부 치환 수행
+                val isTombstone = unpacked is String && unpacked.toLongOrNull()?.let { it < 0L } == true
+                if (unpacked is String && !isTombstone) UtilKt.compressValueProperties(unpacked) else unpacked
             }
             
-            // ★ 핵심 아키텍처: SharedPreferences "Key"값들만 맵 레벨에서 격리 압축을 태워 URL(밸류)이 깨지는 현상을 완벽히 방어합니다.
             val compressedMap = cleanedMap.mapKeys { (key, _) -> UtilKt.compressKey(key) }
 
             return BackupVars(
@@ -209,7 +269,7 @@ object BackupUtils {
             )
         }
 
-        return BackupFile(buildVars(filteredPrefs), buildVars(filteredDefaultPrefs))
+        return BackupFile(buildVars(mutableFilteredPrefs), buildVars(filteredDefaultPrefs))
     }
 
     fun restore(context: Context, backupFile: BackupFile, restoreSettings: Boolean, restoreDataStore: Boolean) {
@@ -223,7 +283,6 @@ object BackupUtils {
                     settingsEditor.putStringSet(decompressedKey, value)
                 }
             }
-            // 세팅 설정 복원
             backupFile.settings.bool?.forEach { (k, v) ->
                 val dk = UtilKt.decompressKey(k)
                 if (isAllowed(dk)) settingsEditor.putBoolean(dk, v)
@@ -254,7 +313,39 @@ object BackupUtils {
             val datastoreEditor = with(DataStore) { context.getSharedPrefs() }.edit()
             val wrappedEditor = Editor(datastoreEditor)
             
-            // ★ 복원 복구 시에도 맵 레벨에서 안전하게 키와 벨류의 속성만 각각 디컴프레스하여 디스크 렉과 텍스트 오염을 전면 방지합니다.
+            val datastoreMap = backupFile.datastore.string ?: emptyMap()
+            val localPrefs = with(DataStore) { context.getSharedPrefs() }.all
+            
+            datastoreMap.forEach { (k, v) ->
+                val dk = UtilKt.decompressKey(k)
+                if (isAllowed(dk)) {
+                    val valueLong = v.toLongOrNull()
+                    // 수신받은 값이 음수 타임스탬프(툼스톤 삭제 신호)일 때 작동
+                    if (valueLong != null && valueLong < 0L) {
+                        val deletionTime = -valueLong
+                        
+                        // ★ 해결책: 내 로컬 단말기가 소유한 실제 최신 시청 시간(updateTime)과 대조합니다. (2번 경합 부작용 해결) [1]
+                        val localValue = localPrefs[dk] as? String
+                        val localTime = if (localValue != null) {
+                            val match = Regex("\"updateTime\"\\s*:\\s*(\\d+)").find(localValue)
+                            match?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+                        } else 0L
+                        
+                        // 로컬 데이터가 삭제 명령 시각보다 옛날 것일 때만 안전하게 핀포인트로 조준 삭제를 전파합니다.
+                        if (localTime <= deletionTime) {
+                            datastoreEditor.remove(dk)
+                            Log.d("SYNC", "[BackupUtils] Pinpoint delete triggered for key: $dk (Deletion: $deletionTime, Local: $localTime)")
+                        } else {
+                            Log.d("SYNC", "[BackupUtils] Skip delete for key: $dk because local data is newer. (Local: $localTime, Deletion: $deletionTime)")
+                        }
+                    } else {
+                        val rv = UtilKt.decompressValueProperties(v)
+                        wrappedEditor.setKeyRaw(dk, rv)
+                    }
+                }
+            }
+            
+            // 기타 타입 데이터 정상 복원
             backupFile.datastore.bool?.forEach { (k, v) ->
                 val dk = UtilKt.decompressKey(k)
                 if (isAllowed(dk)) wrappedEditor.setKeyRaw(dk, v)
@@ -262,13 +353,6 @@ object BackupUtils {
             backupFile.datastore.int?.forEach { (k, v) ->
                 val dk = UtilKt.decompressKey(k)
                 if (isAllowed(dk)) wrappedEditor.setKeyRaw(dk, v)
-            }
-            backupFile.datastore.string?.forEach { (k, v) ->
-                val dk = UtilKt.decompressKey(k)
-                if (isAllowed(dk)) {
-                    val rv = UtilKt.decompressValueProperties(v)
-                    wrappedEditor.setKeyRaw(dk, rv)
-                }
             }
             backupFile.datastore.float?.forEach { (k, v) ->
                 val dk = UtilKt.decompressKey(k)
@@ -286,182 +370,6 @@ object BackupUtils {
             datastoreEditor.apply()
         }
         Log.d("SYNC", "[BackupUtils] restore() finished.")
-    }
-}
-
-// ==========================================
-// API Utilities
-// ==========================================
-
-object ApiUtils {
-    private val isSyncing = AtomicBoolean(false)
-
-    private fun isLoggedIn(): Boolean {
-        val context = AcraApplication.context ?: return false
-        val prefs = with(DataStore) { context.getSharedPrefs() }
-        
-        val token = prefs.getString("sync_token", null)?.let { mapper.readValue<String>(it) }
-        val projectNum = prefs.getString("sync_project_num", null)?.let { mapper.readValue<String>(it) }
-        
-        return !token.isNullOrEmpty() && !projectNum.isNullOrEmpty()
-    }
-
-    private suspend fun apiCall(query: String, variables: Map<String, Any>? = null): APIRes? {
-        val context = AcraApplication.context ?: return null
-        val prefs = with(DataStore) { context.getSharedPrefs() }
-        val token = prefs.getString("sync_token", null)?.let { mapper.readValue<String>(it) } ?: return null
-        
-        val payload = mutableMapOf<String, Any>("query" to query)
-        if (variables != null) {
-            payload["variables"] = variables
-        }
-        
-        return try {
-            Log.d("SYNC", "[ApiUtils] Sending GraphQL request...")
-            val response = app.post(
-                "https://api.github.com/graphql",
-                headers = mapOf("Authorization" to "Bearer $token"),
-                json = payload
-            )
-            response.parsedSafe<APIRes>()
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    suspend fun syncProjectDetails(context: Context?): Pair<Boolean, String> {
-        if (!isLoggedIn()) return Pair(false, "Please enter Token and Project Number.")
-        
-        val prefs = with(DataStore) { context?.getSharedPrefs() } ?: return Pair(false, "Context error")
-        val numStr = prefs.getString("sync_project_num", null)?.let { mapper.readValue<String>(it) } ?: return Pair(false, "Project Number missing")
-        val num = numStr.toIntOrNull() ?: return Pair(false, "Invalid Project Number")
-        
-        val query = """query(${'$'}num: Int!) { viewer { projectV2(number: ${'$'}num) { id } } }"""
-        val res = apiCall(query, mapOf("num" to num))
-        
-        if (res?.errors?.isNotEmpty() == true) {
-            return Pair(false, "GitHub Error: ${res.errors!!.first().message}")
-        }
-        
-        val projectId = res?.data?.viewer?.projectV2?.id
-        if (projectId != null) {
-            AcraApplication.setKey("sync_project_id", projectId)
-            return Pair(true, "Successfully connected to GitHub Project!")
-        }
-        
-        return Pair(false, "Failed to find project. Check your Token and Project Number.")
-    }
-
-    suspend fun fetchDevices(): List<SyncDevice> {
-        if (!isLoggedIn()) return emptyList()
-        
-        val context = AcraApplication.context ?: return emptyList()
-        val prefs = with(DataStore) { context.getSharedPrefs() }
-        val numStr = prefs.getString("sync_project_num", null)?.let { mapper.readValue<String>(it) } ?: return emptyList()
-        val num = numStr.toIntOrNull() ?: return emptyList()
-        
-        val query = """query(${'$'}num: Int!) { viewer { projectV2(number: ${'$'}num) { id items(first: 100) { nodes { id updatedAt content { ... on DraftIssue { id title bodyText } } } } } } }"""
-        val res = apiCall(query, mapOf("num" to num))
-        
-        val nodes = res?.data?.viewer?.projectV2?.items?.nodes ?: return emptyList()
-        
-        return nodes.mapNotNull { node ->
-            val title = node.content?.title ?: "Unknown"
-            val body = node.content?.bodyText ?: ""
-            val itemId = node.id ?: return@mapNotNull null
-            val updatedAt = node.updatedAt ?: ""
-            val draftIssueId = node.content?.id ?: ""
-            
-            val parts = title.split("|")
-            if (parts.size >= 2) {
-                SyncDevice(name = parts[0], deviceId = parts[1], itemId = itemId, syncedData = body, updatedAt = updatedAt, draftIssueId = draftIssueId)
-            } else {
-                SyncDevice(name = title, deviceId = "", itemId = itemId, syncedData = body, updatedAt = updatedAt, draftIssueId = draftIssueId)
-            }
-        }.sortedBy { it.updatedAt }
-    }
-
-    suspend fun deleteDevice(projectId: String, itemId: String): Boolean {
-        val delQuery = """mutation(${'$'}projectId: ID!, ${'$'}itemId: ID!) { deleteProjectV2Item(input: {projectId: ${'$'}projectId, itemId: ${'$'}itemId}) { deletedItemId } }"""
-        val res = apiCall(delQuery, mapOf("projectId" to projectId, "itemId" to itemId))
-        return res?.errors.isNullOrEmpty()
-    }
-
-    suspend fun updateDevice(draftIssueId: String, title: String, body: String): Boolean {
-        val updateQuery = """mutation(${'$'}draftIssueId: ID!, ${'$'}title: String!, ${'$'}body: String!) { updateProjectV2DraftIssue(input: {draftIssueId: ${'$'}draftIssueId, title: ${'$'}title, body: ${'$'}body}) { draftIssue { id } } }"""
-        val res = apiCall(updateQuery, mapOf("draftIssueId" to draftIssueId, "title" to title, "body" to body))
-        return res != null && res.errors.isNullOrEmpty()
-    }
-
-    suspend fun syncThisDevice(backupData: String, context: Context? = AcraApplication.context): Pair<Boolean, String> {
-        if (!isLoggedIn()) return Pair(false, "Not logged in")
-        
-        if (!isSyncing.compareAndSet(false, true)) {
-            Log.d("SYNC", "[ApiUtils] Sync already in progress, skipping duplicate request.")
-            return Pair(false, "Sync already in progress")
-        }
-        
-        try {
-            val prefs = with(DataStore) { context?.getSharedPrefs() } ?: return Pair(false, "Context error")
-            val projectId = prefs.getString("sync_project_id", null)?.let { mapper.readValue<String>(it) } ?: return Pair(false, "Project ID missing. Please save config again.")
-            val deviceId = prefs.getString("device_id", null)?.let { mapper.readValue<String>(it) } ?: return Pair(false, "Device ID missing")
-            val deviceName = prefs.getString("device_name", null)?.let { mapper.readValue<String>(it) } ?: Build.MODEL
-            
-            Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA START ==========")
-            val chunkSize = 3000
-            for (i in 0..backupData.length / chunkSize) {
-                val start = i * chunkSize
-                val end = minOf((i + 1) * chunkSize, backupData.length)
-                if (start < end) {
-                    
-                }
-            }
-            Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA END ==========")
-
-            val compressedData = UtilKt.compressJsonToString(backupData)
-            
-            if (compressedData.length > 65000) {
-                return Pair(false, "Data too large (${compressedData.length} chars).")
-            }
-
-            val devices = fetchDevices()
-            val existingDevices = devices.filter { it.deviceId == deviceId }
-            val title = "$deviceName|$deviceId"
-
-            if (existingDevices.isNotEmpty()) {
-                val target = existingDevices.first()
-                Log.d("SYNC", "[ApiUtils] Existing card found. Updating card in place: ${target.name}")
-                val updateSuccess = updateDevice(target.draftIssueId ?: "", title, compressedData)
-                if (!updateSuccess) {
-                    return Pair(false, "Failed to update existing card.")
-                }
-
-                if (existingDevices.size > 1) {
-                    existingDevices.drop(1).forEach { duplicate ->
-                        deleteDevice(projectId, duplicate.itemId)
-                    }
-                }
-                return Pair(true, "Data updated successfully in place!")
-            } else {
-                val addQuery = """mutation(${'$'}projectId: ID!, ${'$'}title: String!, ${'$'}body: String!) { addProjectV2DraftIssue(input: {projectId: ${'$'}projectId, title: ${'$'}title, body: ${'$'}body}) { projectItem { id } } }"""
-                val addRes = apiCall(addQuery, mapOf("projectId" to projectId, "title" to title, "body" to compressedData))
-                
-                if (addRes?.errors?.isNotEmpty() == true) {
-                    Log.d("SYNC", "[ApiUtils] Upload Error: ${addRes.errors!!.first().message}")
-                    return Pair(false, "Upload Error: ${addRes.errors!!.first().message}")
-                }
-                
-                val newItemId = addRes?.data?.issue?.projectItem?.id
-                if (newItemId != null) {
-                    AcraApplication.setKey("sync_item_id", newItemId)
-                    Log.d("SYNC", "[ApiUtils] Upload successful! New Item ID: $newItemId")
-                    return Pair(true, "Data synced successfully to GitHub!")
-                }
-                return Pair(false, "Failed to upload data to GitHub.")
-            }
-        } finally {
-            isSyncing.set(false)
-        }
     }
 }
 
@@ -645,7 +553,6 @@ object UtilKt {
             .replace("\\\"$original\\\"", "\\\"$replacement\\\"")
     }
 
-    // 맵 레벨 키 압축을 위해 유틸리티 구조를 대폭 개선합니다.
     fun compressKey(key: String): String {
         var result = key
         for ((original, replacement) in prefixMap) {
