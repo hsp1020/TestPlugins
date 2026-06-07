@@ -94,7 +94,7 @@ open class YoutubeExtractor : ExtractorApi() {
             println("[YT_DEBUG_INIT] 유튜브 DASH 추출기 최적화 가상서버 초기화 완료")
         }
 
-        // 가상 서버 내부에서 메인 UI 스레드를 통해 외부 웹 브라우저를 즉시 실행시키는 메소드
+        // 브라우저로 직접 리다이렉트 연결 처리 메소드
         private fun openUrlInBrowser(url: String) {
             val context = AcraApplication.context ?: return
             android.os.Handler(android.os.Looper.getMainLooper()).post {
@@ -105,6 +105,31 @@ open class YoutubeExtractor : ExtractorApi() {
                     context.startActivity(intent)
                 } catch (e: Exception) {
                     e.printStackTrace()
+                }
+            }
+        }
+
+        // 인텐트를 구성해 타겟 다운로더 앱(Seal, YTDLnis 등)에 유튜브 주소를 즉시 넘겨 실행시키는 메소드
+        private fun openInExternalApp(packageName: String, targetUrl: String) {
+            val context = AcraApplication.context ?: return
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                try {
+                    val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(android.content.Intent.EXTRA_TEXT, targetUrl)
+                        setPackage(packageName)
+                        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    context.startActivity(intent)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    // 대상 앱이 비설치 상태일 경우 브라우저 열기로 깔끔하게 대체 처리
+                    try {
+                        val browserIntent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(targetUrl)).apply {
+                            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        context.startActivity(browserIntent)
+                    } catch (_: Exception) {}
                 }
             }
         }
@@ -138,18 +163,34 @@ open class YoutubeExtractor : ExtractorApi() {
                     val cleanPath = fullPath.substringBefore("?")
                     val queryParams = fullPath.substringAfter("?", "")
 
-                    // 웹 브라우저 바로 가기 인터셉터 신규 동작 처리 영역
-                    if (cleanPath.startsWith("/open_browser")) {
-                        val targetUrlEncoded = queryParams.substringAfter("url=", "")
-                        if (targetUrlEncoded.isNotEmpty()) {
-                            try {
-                                val targetUrl = java.net.URLDecoder.decode(targetUrlEncoded, "UTF-8")
-                                openUrlInBrowser(targetUrl)
-                            } catch (e: Exception) {
-                                e.printStackTrace()
+                    // 웹 브라우저 및 타겟 외부 앱 바로가기 인터셉터 신규 동작 통합 처리 영역
+                    if (cleanPath.startsWith("/open_app") || cleanPath.startsWith("/open_browser")) {
+                        var pkg: String? = null
+                        var targetUrl: String? = null
+                        
+                        val pairs = queryParams.split("&")
+                        for (pair in pairs) {
+                            val idx = pair.indexOf("=")
+                            if (idx != -1) {
+                                val key = pair.substring(0, idx)
+                                val value = pair.substring(idx + 1)
+                                if (key == "package") {
+                                    pkg = java.net.URLDecoder.decode(value, "UTF-8")
+                                } else if (key == "url") {
+                                    targetUrl = java.net.URLDecoder.decode(value, "UTF-8")
+                                }
                             }
                         }
-                        // 비디오 플레이어 연결이 무한 대기 상태에 빠지지 않도록 빈 콘텐츠 상태 코드 전달 반환
+                        
+                        if (targetUrl != null) {
+                            if (cleanPath.startsWith("/open_app") && pkg != null) {
+                                openInExternalApp(pkg, targetUrl)
+                            } else {
+                                openUrlInBrowser(targetUrl)
+                            }
+                        }
+                        
+                        // 비디오 플레이어가 에러 메시지 없이 조용히 중단되도록 204 반환
                         outWriter.print("HTTP/1.1 204 No Content\r\n")
                         outWriter.print("Connection: close\r\n")
                         outWriter.print("Access-Control-Allow-Origin: *\r\n")
@@ -270,13 +311,29 @@ open class YoutubeExtractor : ExtractorApi() {
         val indexRange: String?
     )
 
-    // 로컬 가상 리다이렉트 URL 생성을 담당하는 도우미 인스턴스 메소드
+    // 로컬 가상 리다이렉트 웹 브라우저 URL 생성기
     private fun getBrowserRedirectUrl(targetUrl: String): String? {
         startServerIfNeeded()
         return if (serverPort != 0) {
             try {
                 val encoded = java.net.URLEncoder.encode(targetUrl, "UTF-8")
                 "http://127.0.0.1:$serverPort/open_browser?url=$encoded"
+            } catch (e: Exception) {
+                null
+            }
+        } else {
+            null
+        }
+    }
+
+    // 로컬 가상 외부 다운로더 앱 인텐트 공유 리다이렉트 URL 생성기
+    private fun getAppRedirectUrl(packageName: String, targetUrl: String): String? {
+        startServerIfNeeded()
+        return if (serverPort != 0) {
+            try {
+                val encodedPkg = java.net.URLEncoder.encode(packageName, "UTF-8")
+                val encodedUrl = java.net.URLEncoder.encode(targetUrl, "UTF-8")
+                "http://127.0.0.1:$serverPort/open_app?package=$encodedPkg&url=$encodedUrl"
             } catch (e: Exception) {
                 null
             }
@@ -405,6 +462,19 @@ open class YoutubeExtractor : ExtractorApi() {
                     callback(newExtractorLink(source = "YouTube Downloader", name = "Cobalt Web Download (즉시 열기)", url = downloaderRedirect, type = if (downloaderRedirect.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
                     callback(newExtractorLink(source = "YouTube Downloader", name = "Cobalt Web Download (링크 복사/외부 열기)", url = downloaderUrl, type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
                     
+                    // Seal, SealPlus, YTDLnis 즉시 다운로드용 가상 리링크 추가
+                    val sealPkg = "com.junkfood.seal"
+                    val sealRedirect = getAppRedirectUrl(sealPkg, originalUrl) ?: originalUrl
+                    callback(newExtractorLink(source = "YouTube Downloader", name = "Seal Download (즉시 다운로드)", url = sealRedirect, type = if (sealRedirect.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+
+                    val sealPlusPkg = "com.maheshtechnicals.sealplus"
+                    val sealPlusRedirect = getAppRedirectUrl(sealPlusPkg, originalUrl) ?: originalUrl
+                    callback(newExtractorLink(source = "YouTube Downloader", name = "SealPlus Download (즉시 다운로드)", url = sealPlusRedirect, type = if (sealPlusRedirect.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+
+                    val ytdlPkg = "com.deniscerri.ytdl"
+                    val ytdlRedirect = getAppRedirectUrl(ytdlPkg, originalUrl) ?: originalUrl
+                    callback(newExtractorLink(source = "YouTube Downloader", name = "YTDLnis Download (즉시 다운로드)", url = ytdlRedirect, type = if (ytdlRedirect.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+
                     return@withContext
                 }
 
@@ -581,6 +651,19 @@ open class YoutubeExtractor : ExtractorApi() {
                 callback(newExtractorLink(source = "YouTube Downloader", name = "Cobalt Web Download (즉시 열기)", url = downloaderRedirect, type = if (downloaderRedirect.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
                 callback(newExtractorLink(source = "YouTube Downloader", name = "Cobalt Web Download (링크 복사/외부 열기)", url = downloaderUrl, type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
                 
+                // Seal, SealPlus, YTDLnis 즉시 다운로드용 가상 리링크 추가
+                val sealPkg = "com.junkfood.seal"
+                val sealRedirect = getAppRedirectUrl(sealPkg, originalUrl) ?: originalUrl
+                callback(newExtractorLink(source = "YouTube Downloader", name = "Seal Download (즉시 다운로드)", url = sealRedirect, type = if (sealRedirect.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+
+                val sealPlusPkg = "com.maheshtechnicals.sealplus"
+                val sealPlusRedirect = getAppRedirectUrl(sealPlusPkg, originalUrl) ?: originalUrl
+                callback(newExtractorLink(source = "YouTube Downloader", name = "SealPlus Download (즉시 다운로드)", url = sealPlusRedirect, type = if (sealPlusRedirect.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+
+                val ytdlPkg = "com.deniscerri.ytdl"
+                val ytdlRedirect = getAppRedirectUrl(ytdlPkg, originalUrl) ?: originalUrl
+                callback(newExtractorLink(source = "YouTube Downloader", name = "YTDLnis Download (즉시 다운로드)", url = ytdlRedirect, type = if (ytdlRedirect.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+
             } catch (e: Exception) { 
                 println("[YT_DEBUG_EXTRACTOR] 🚨 Exception 발생: ${e.message}")
                 logError(e) 
