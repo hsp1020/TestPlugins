@@ -37,29 +37,20 @@ open class EmbedStreams(context: Context) : ExtractorApi() {
         referer: String?,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
-    ) { // 등호(=) 대신 명시적 중괄호 블록 바디를 사용하여 반환형을 Unit으로 보장합니다.
+    ) {
         coroutineScope {
-            Log.d("kraptor_$name", "================== Extractor Start ==================")
-            Log.d("kraptor_$name", "Target URL: $url")
-            Log.d("kraptor_$name", "Referer: $referer")
             try {
                 val videoUrl = withContext(Dispatchers.Main) {
                     getVideoUrlWithWebView(appContext, url)
                 }
-                Log.d("kraptor_$name", "WebView returned videoUrl: $videoUrl")
                 if (videoUrl != null) {
                     processVideoUrl(videoUrl, callback)
-                } else {
-                    Log.e("kraptor_$name", "❌ videoUrl is null. Extraction failed.")
                 }
-            } catch (e: Exception) { 
-                Log.e("kraptor_$name", "❌ Error in getUrl: ${e.message}", e)
-            }
+            } catch (e: Exception) { }
         }
     }
 
     private suspend fun getVideoUrlWithWebView(context: Context, url: String): String? {
-        Log.d("kraptor_webview", "Initializing WebView on Main Thread for URL: $url")
         return withContext(Dispatchers.Main) {
             suspendCancellableCoroutine<String?> { cont ->
                 val captured = AtomicBoolean(false)
@@ -72,67 +63,55 @@ open class EmbedStreams(context: Context) : ExtractorApi() {
                         settings.allowFileAccess = true
                         settings.allowContentAccess = true
                         settings.mediaPlaybackRequiresUserGesture = false
-                        
-                        // 실제 기기 UA를 얻은 후, 웹뷰 흔적만 지워 순정 모바일 크롬 브라우저로 속입니다.
+
                         val defaultUa = settings.userAgentString
                         val cleanMobileChromeUa = defaultUa
                             .replace("Version/4.0 ", "")
                             .replace("; wv", "")
                             .trim()
-                        
+
                         settings.userAgentString = cleanMobileChromeUa
-                        
-                        Log.d("kraptor_webview", "Original UA: $defaultUa")
-                        Log.d("kraptor_webview", "Spoofed Pure Mobile Chrome UA: $cleanMobileChromeUa")
 
                         webViewClient = object : WebViewClient() {
                             override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                                 super.onPageStarted(view, url, favicon)
-                                Log.d("kraptor_webview", "Page load started: $url")
+                                // Log.d("hsp1020_webview", "Page is loading: $url")
                             }
 
                             override fun onPageFinished(view: WebView?, url: String?) {
                                 super.onPageFinished(view, url)
-                                Log.d("kraptor_webview", "Page load finished: $url")
+                                // Log.d("hsp1020_webview", "Page loaded: $url")
 
-                                // 1. 웹뷰에 로드된 전체 HTML 소스코드를 읽어와 청크 단위로 로그에 출력
-                                view?.evaluateJavascript("(function() { return document.documentElement.outerHTML; })();") { rawHtml ->
-                                    if (rawHtml != null) {
-                                        Log.d("kraptor_webview_html", "┌==================== [HTML SOURCE CODE START] ====================┐")
-                                        val cleanedHtml = unescapeJsonString(rawHtml)
-                                        logInChunks("kraptor_webview_html", cleanedHtml)
-                                        Log.d("kraptor_webview_html", "└==================== [HTML SOURCE CODE END] ====================┘")
-                                    } else {
-                                        Log.e("kraptor_webview_html", "⚠️ evaluateJavascript returned null HTML source.")
-                                    }
-                                }
-
-                                // 2. 재생 버튼(JWPlayer 등) 자동 클릭 유도
+                                // Click the play button
                                 Handler(Looper.getMainLooper()).postDelayed({
-                                    Log.d("kraptor_webview", "Evaluating Play button click script...")
                                     view?.evaluateJavascript("""
                                         (function() {
                                             try {
+                                                // Find and click the JWPlayer play button
                                                 var playButton = document.querySelector('.jw-icon-display');
                                                 if (playButton) {
+                                                    console.log('Clicking play button...');
                                                     playButton.click();
-                                                    return 'Success: Clicked play button (.jw-icon-display)';
+                                                    return 'Play button clicked';
                                                 }
                                                 
+                                                // Alternatively, use the JWPlayer API directly
                                                 if (typeof jwplayer !== 'undefined') {
                                                     jwplayer().play();
-                                                    return 'Success: Played using JWPlayer API';
+                                                    return 'Played with JWPlayer API';
                                                 }
                                                 
-                                                return 'Warning: No play button found in current DOM';
+                                                return 'Play button not found';
                                             } catch(e) {
-                                                return 'Error in JS: ' + e.message;
+                                                return 'Error: ' + e.message;
                                             }
                                         })();
                                     """.trimIndent()) { result ->
-                                        Log.d("kraptor_webview", "Play JS result: $result")
+                                        // Log.d("hsp1020_webview", "Play button result: $result")
                                     }
-                                }, 2000) // 페이지 그리기 작업 보장을 위해 2초 대기
+                                }, 2000) // Wait 2 seconds for the page to fully load
+
+                                // Log.d("hsp1020_webview", "Waiting for shouldInterceptRequest...")
                             }
 
                             override fun shouldInterceptRequest(
@@ -140,21 +119,14 @@ open class EmbedStreams(context: Context) : ExtractorApi() {
                                 request: WebResourceRequest?
                             ): android.webkit.WebResourceResponse? {
                                 val reqUrl = request?.url?.toString() ?: return null
-                                
-                                // 스트림(m3u8, mp4, ts 등)이나 플레이리스트 관련 핵심 요청을 감지하면 즉시 로그 출력
-                                if (reqUrl.contains(".m3u8") || reqUrl.contains("playlist") || reqUrl.contains("stream")) {
-                                    Log.d("kraptor_webview_intercept", "📺 Detected stream request: $reqUrl")
-                                }
+                                // Log.d("hsp1020_webview", "Request: $reqUrl")
 
-                                // m3u8 주소 추출 조건 검사
+                                // Capture only URLs ending with .m3u8
                                 if (reqUrl.endsWith(".m3u8") && !captured.get()) {
-                                    Log.i("kraptor_webview", "✅ Successfully captured target M3U8 URL: $reqUrl")
+                                    // Log.d("hsp1020_webview", "✅ Video URL captured: $reqUrl")
                                     if (captured.compareAndSet(false, true)) {
                                         cont.resume(reqUrl)
-                                        Handler(Looper.getMainLooper()).postDelayed({ 
-                                            Log.d("kraptor_webview", "Destroying WebView after capture.")
-                                            destroy() 
-                                        }, 500)
+                                        Handler(Looper.getMainLooper()).postDelayed({ destroy() }, 500)
                                     }
                                 }
 
@@ -163,20 +135,19 @@ open class EmbedStreams(context: Context) : ExtractorApi() {
                         }
                     }
 
-                    Log.d("kraptor_webview", "Loading URL in WebView...")
                     webView.loadUrl(url)
 
-                    // 타임아웃 타이머 작동 (15초)
+                    // Add timeout
                     Handler(Looper.getMainLooper()).postDelayed({
                         if (captured.compareAndSet(false, true)) {
-                            Log.e("kraptor_webview", "⏱️ Timeout reached (15s). No stream URL found.")
+                            // Log.d("hsp1020_webview", "Timeout: URL not found")
                             cont.resume(null)
                             webView?.destroy()
                         }
-                    }, 15000)
+                    }, 15000) // 15 seconds timeout
 
                 } catch (e: Exception) {
-                    Log.e("kraptor_webview", "❌ Exception while creating WebView: ${e.message}", e)
+                    // Log.e("hsp1020_webview", "WebView creation error: ${e.message}")
                     if (captured.compareAndSet(false, true)) {
                         cont.resume(null)
                         webView?.destroy()
@@ -185,7 +156,6 @@ open class EmbedStreams(context: Context) : ExtractorApi() {
 
                 cont.invokeOnCancellation {
                     if (captured.compareAndSet(false, true)) {
-                        Log.d("kraptor_webview", "WebView extraction job cancelled.")
                         Handler(Looper.getMainLooper()).post { webView?.destroy() }
                     }
                 }
@@ -194,7 +164,7 @@ open class EmbedStreams(context: Context) : ExtractorApi() {
     }
 
     private suspend fun processVideoUrl(videoUrl: String, callback: (ExtractorLink) -> Unit) {
-        Log.d("kraptor_$name", "Starting processVideoUrl with: $videoUrl")
+        // Log.d("hsp1020_$name", "Video URL: $videoUrl")
         val sourceName = if (videoUrl.contains("alpha")) {
             "Alpha-Most Reliable 720p 30fps"
         } else if (videoUrl.contains("bravo")) {
@@ -219,8 +189,6 @@ open class EmbedStreams(context: Context) : ExtractorApi() {
             "Streamed"
         }
 
-        Log.d("kraptor_$name", "Matched Source Name: $sourceName")
-
         callback.invoke(newExtractorLink(
             source = sourceName,
             name = sourceName,
@@ -235,35 +203,5 @@ open class EmbedStreams(context: Context) : ExtractorApi() {
                 "Connection" to "keep-alive"
             )
         })
-        Log.d("kraptor_$name", "================== Extractor End ==================")
-    }
-
-    // 디버깅 헬퍼: 로그캣 글자수 제한 우회를 위해 긴 문자열을 나누어 출력하는 함수
-    private fun logInChunks(tag: String, message: String) {
-        val maxLogSize = 2500
-        var i = 0
-        while (i < message.length) {
-            val end = Math.min(message.length, i + maxLogSize)
-            Log.d(tag, message.substring(i, end))
-            i += maxLogSize
-        }
-    }
-
-    // 디버깅 헬퍼: JS 결과 문자열(JSON-escaped)을 가독성 좋은 HTML 문자열로 디코딩
-    private fun unescapeJsonString(jsonStr: String): String {
-        var str = jsonStr
-        if (str.startsWith("\"") && str.endsWith("\"")) {
-            str = str.substring(1, str.length - 1)
-        }
-        return str
-            .replace("\\u003C", "<")
-            .replace("\\u003E", ">")
-            .replace("\\u0026", "&")
-            .replace("\\\"", "\"")
-            .replace("\\'", "'")
-            .replace("\\\\", "\\")
-            .replace("\\n", "\n")
-            .replace("\\t", "\t")
-            .replace("\\r", "\r")
     }
 }
