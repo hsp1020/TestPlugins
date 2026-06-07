@@ -2486,17 +2486,14 @@ class YoutubeProvider(
         val fullUrl = "https://www.youtube.com/watch?v=$videoId"
         val isShort = data.contains("/shorts/")
 
-        // [YTSYNC] 진입 로그
         println("[YTSYNC] ==================== LOAD LINKS START ====================")
         println("[YTSYNC] Requested videoId: $videoId, isShort: $isShort, Raw Data: $data")
 
         var playerResponseText = ""
         try {
-            // [YTSYNC] 저장된 API Key 로드 시도 및 검증
             val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
             println("[YTSYNC] Retrieved Innertube API Key: $apiKey")
 
-            // [YTSYNC] API Key 주입하여 apiUrl 재생성 (원인 ① 해결)
             val apiUrl = if (isShort) {
                 if (!apiKey.isNullOrBlank()) {
                     "$mainUrl/youtubei/v1/reel/reel_item_watch?key=$apiKey&%24fields=playerResponse"
@@ -2554,12 +2551,34 @@ class YoutubeProvider(
         if (playerResponseText.isNotBlank()) {
             try {
                 val root = org.json.JSONObject(playerResponseText)
+                
+                // 1. 응답 JSON 객체의 탑레벨 Key 목록을 모두 출력하여 실체 파악
+                val keys = mutableListOf<String>()
+                val keysIt = root.keys()
+                while(keysIt.hasNext()) {
+                    keys.add(keysIt.next())
+                }
+                println("[YTSYNC] Response JSON Top-level Keys: $keys")
+
+                // 2. playabilityStatus 객체가 존재한다면 내부 통째로 출력 (차단 사유 확인용)
+                if (root.has("playabilityStatus")) {
+                    val playabilityStatus = root.getJSONObject("playabilityStatus")
+                    println("[YTSYNC] playabilityStatus Object: $playabilityStatus")
+                } else {
+                    println("[YTSYNC] playabilityStatus key is MISSING in response!")
+                }
+
+                // 3. 실제 17KB 텍스트의 앞부분 1500글자를 그대로 출력하여 눈으로 확인
+                val previewLength = if (playerResponseText.length > 1500) 1500 else playerResponseText.length
+                val preview = playerResponseText.substring(0, previewLength)
+                println("[YTSYNC] Raw Response Preview: $preview")
+
                 val targetJson = if (root.has("playerResponse")) {
                     root.getJSONObject("playerResponse").toString()
                 } else {
                     playerResponseText
                 }
-                println("[YTSYNC] Successfully parsed JSON root. Parsing Jackson PlayerResponse schema...")
+                println("[YTSYNC] Parsing targetJson for playerResponse mapping...")
                 val playerResponse = mapper.readValue<PlayerResponse>(targetJson)
                 
                 println("[YTSYNC] PlayerResponse mapped successfully. playbackTracking null check: ${playerResponse.playbackTracking == null}")
