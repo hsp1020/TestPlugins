@@ -17,7 +17,6 @@ class Streamed() : MainAPI() {
     override var lang = "en"
     override val hasQuickSearch = true
     override val supportedTypes = setOf(TvType.Live)
-    override val vpnStatus = VPNStatus.MightBeNeeded
 
 
     override val mainPage = mainPageOf(
@@ -222,7 +221,7 @@ class Streamed() : MainAPI() {
 
         val sourcesCount = match.sources?.size ?: 0
         val finalDescription = if (sourcesCount > 1) {
-            "$description\n\nAvailable sources: $sourcesCount"
+            "$description / Available sources: $sourcesCount"
         } else {
             description
         }
