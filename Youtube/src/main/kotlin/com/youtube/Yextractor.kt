@@ -73,6 +73,10 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         )
 
+        // 재추출 시 발생하는 무거운 유튜브 네트워크 연산(5~10초)을 생략하기 위한 메모리 캐시 해시맵
+        // Triple 구조: first = playerResponse(JSONObject), second = videoLength(Long), third = 캐시 생성 시각(Long)
+        private val playerCache = ConcurrentHashMap<String, Triple<JSONObject, Long, Long>>()
+
         private val serverExecutor = ThreadPoolExecutor(
             4, 
             16, 
@@ -322,6 +326,16 @@ open class YoutubeExtractor : ExtractorApi() {
     }
 
     private suspend fun fetchPlayerResponse(videoId: String): Pair<JSONObject?, Long> {
+        // [재추출 속도 최적화] 동일 비디오 ID에 대해 5분 이내의 유효 캐시가 존재할 시 즉시 호출 생략 반환
+        val cached = playerCache[videoId]
+        if (cached != null) {
+            val (json, duration, timestamp) = cached
+            if (System.currentTimeMillis() - timestamp < 300000L) { // 5분 캐시 유효
+                println("[YT_DEBUG_EXTRACTOR] 🚀 캐시 히트! 비디오 ID ($videoId)의 유튜브 API 연산 과정을 모두 생략합니다.")
+                return Pair(json, duration)
+            }
+        }
+
         val watchUrl = "https://www.youtube.com/watch?v=$videoId"
         
         val html = app.get(watchUrl, headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)).text
@@ -373,6 +387,8 @@ open class YoutubeExtractor : ExtractorApi() {
             
             if (status == "OK" || vrJson.has("streamingData")) {
                 println("[YT_DEBUG_EXTRACTOR] ✅ ANDROID_VR에서 playerResponse 확보 성공!")
+                // [캐시 등록] YouTube API 호출 결과를 즉시 캐싱에 기입
+                playerCache[videoId] = Triple(vrJson, lengthSeconds, System.currentTimeMillis())
                 return Pair(vrJson, lengthSeconds)
             } else if (status == "UNPLAYABLE" || status == "LOGIN_REQUIRED") {
                 println("[YT_DEBUG_EXTRACTOR] VR 차단됨. TV_EMBEDDED로 연령 제한 우회 시도...")
@@ -402,6 +418,8 @@ open class YoutubeExtractor : ExtractorApi() {
                     val tvJson = JSONObject(tvRes)
                     val tvLengthSeconds = tvJson.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
                     println("[YT_DEBUG_EXTRACTOR] TV API 응답 상태: ${tvJson.optJSONObject("playabilityStatus")?.optString("status")}")
+                    // [캐시 등록] TV API 우회 호출 결과를 즉시 캐싱에 기입
+                    playerCache[videoId] = Triple(tvJson, tvLengthSeconds, System.currentTimeMillis())
                     return Pair(tvJson, tvLengthSeconds)
                 }
             }
@@ -705,7 +723,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
             val audioId = "audio_$index"
             val aSegmentBase = if (audio.initRange != null && audio.indexRange != null) {
-                """<SegmentBase indexRange="${audio.indexRange}"><Initialization range="${audio.initRange}" /></SegmentBase>"""
+                """<SegmentBase indexRange="${audio.initRange}"><Initialization range="${audio.initRange}" /></SegmentBase>"""
             } else ""
 
             sb.append("""
