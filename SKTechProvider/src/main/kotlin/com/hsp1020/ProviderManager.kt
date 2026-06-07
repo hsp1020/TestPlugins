@@ -1,4 +1,4 @@
-package com.hsp1020
+package com.hsp1020 // 패키지명 교정 완료
 
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import okhttp3.OkHttpClient
