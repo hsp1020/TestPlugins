@@ -60,43 +60,43 @@ open class EmbedStreams(context: Context) : ExtractorApi() {
                         webViewClient = object : WebViewClient() {
                             override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                                 super.onPageStarted(view, url, favicon)
-//                                Log.d("kraptor_webview", "Sayfa yükleniyor: $url")
+//                                Log.d("kraptor_webview", "Page is loading: $url")
                             }
 
                             override fun onPageFinished(view: WebView?, url: String?) {
                                 super.onPageFinished(view, url)
-//                                Log.d("kraptor_webview", "Sayfa yüklendi: $url")
+//                                Log.d("kraptor_webview", "Page loaded: $url")
 
-                                // Play butonuna tıkla
+                                // Click the play button
                                 Handler(Looper.getMainLooper()).postDelayed({
                                     view?.evaluateJavascript("""
                                         (function() {
                                             try {
-                                                // JWPlayer play butonunu bul ve tıkla
+                                                // Find and click the JWPlayer play button
                                                 var playButton = document.querySelector('.jw-icon-display');
                                                 if (playButton) {
-                                                    console.log('Play butonuna tıklanıyor...');
+                                                    console.log('Clicking play button...');
                                                     playButton.click();
-                                                    return 'Play butonuna tıklandı';
+                                                    return 'Play button clicked';
                                                 }
                                                 
-                                                // Alternatif olarak direkt JWPlayer API'sini kullan
+                                                // Alternatively, use the JWPlayer API directly
                                                 if (typeof jwplayer !== 'undefined') {
                                                     jwplayer().play();
-                                                    return 'JWPlayer API ile oynatıldı';
+                                                    return 'Played with JWPlayer API';
                                                 }
                                                 
-                                                return 'Play butonu bulunamadı';
+                                                return 'Play button not found';
                                             } catch(e) {
-                                                return 'Hata: ' + e.message;
+                                                return 'Error: ' + e.message;
                                             }
                                         })();
                                     """.trimIndent()) { result ->
-//                                        Log.d("kraptor_webview", "Play butonu sonucu: $result")
+//                                        Log.d("kraptor_webview", "Play button result: $result")
                                     }
-                                }, 2000) // 2 saniye bekle, sayfa tam yüklensin
+                                }, 2000) // Wait 2 seconds for the page to fully load
 
-//                                Log.d("kraptor_webview", "shouldInterceptRequest bekleniyor...")
+//                                Log.d("kraptor_webview", "Waiting for shouldInterceptRequest...")
                             }
 
                             override fun shouldInterceptRequest(
@@ -104,11 +104,11 @@ open class EmbedStreams(context: Context) : ExtractorApi() {
                                 request: WebResourceRequest?
                             ): android.webkit.WebResourceResponse? {
                                 val reqUrl = request?.url?.toString() ?: return null
-//                                Log.d("kraptor_webview", "İstek: $reqUrl")
+//                                Log.d("kraptor_webview", "Request: $reqUrl")
 
-                                // Sadece .m3u8 ile biten URL'leri yakala
+                                // Capture only URLs ending with .m3u8
                                 if (reqUrl.endsWith(".m3u8") && !captured.get()) {
-//                                    Log.d("kraptor_webview", "✅ Video URL'si yakalandı: $reqUrl")
+//                                    Log.d("kraptor_webview", "✅ Video URL captured: $reqUrl")
                                     if (captured.compareAndSet(false, true)) {
                                         cont.resume(reqUrl)
                                         Handler(Looper.getMainLooper()).postDelayed({ destroy() }, 500)
@@ -122,17 +122,17 @@ open class EmbedStreams(context: Context) : ExtractorApi() {
 
                     webView.loadUrl(url)
 
-                    // Zaman aşımı ekle
+                    // Add timeout
                     Handler(Looper.getMainLooper()).postDelayed({
                         if (captured.compareAndSet(false, true)) {
-//                            Log.d("kraptor_webview", "Zaman aşımı: URL bulunamadı")
+//                            Log.d("kraptor_webview", "Timeout: URL not found")
                             cont.resume(null)
                             webView?.destroy()
                         }
-                    }, 15000) // 15 saniye timeout
+                    }, 15000) // 15 seconds timeout
 
                 } catch (e: Exception) {
-//                    Log.e("kraptor_webview", "WebView oluşturma hatası: ${e.message}")
+//                    Log.e("kraptor_webview", "WebView creation error: ${e.message}")
                     if (captured.compareAndSet(false, true)) {
                         cont.resume(null)
                         webView?.destroy()
@@ -150,33 +150,33 @@ open class EmbedStreams(context: Context) : ExtractorApi() {
 
     private suspend fun processVideoUrl(videoUrl: String, callback: (ExtractorLink) -> Unit) {
 //       Log.d("kraptor_$name", "Video URL: $videoUrl")
-        val kaynakAdı = if (videoUrl.contains("alpha")) {
-            "Alpha-En Güvenilir 720p 30fps"
+        val sourceName = if (videoUrl.contains("alpha")) {
+            "Alpha-Most Reliable 720p 30fps"
         } else if (videoUrl.contains("bravo")) {
-            "Bravo-Yüksek Fps ama Düşük Bitrate"
+            "Bravo-High FPS but Low Bitrate"
         } else if (videoUrl.contains("charlie")) {
-            "Charlie-Bazen kötü kaliteli yayın verebilir"
+            "Charlie-May sometimes provide poor quality stream"
         } else if (videoUrl.contains("delta")) {
-            "Delta-Yedek, fena değil (gecikme olabilir/yüklenmeyebilir)"
+            "Delta-Backup, not bad (may lag/not load)"
         } else if (videoUrl.contains("echo")) {
-            "Echo-İyi sayılabilecek kalite"
+            "Echo-Decent quality"
         } else if (videoUrl.contains("foxtrot")) {
             "Foxtrot"
         } else if (videoUrl.contains("golf")) {
-            "Golf-Yüksek kalite, doğrudan kaynaktan"
+            "Golf-High quality, direct from source"
         } else if (videoUrl.contains("intel")) {
-            "Intel-Geniş etkinlik kapsamı, şüpheli kalite"
+            "Intel-Wide event coverage, questionable quality"
         } else if (videoUrl.contains("admin") || videoUrl.contains("poocloud")) {
-            "Admin-Admin tarafından eklenen"
+            "Admin-Added by admin"
         } else if (videoUrl.contains("hotel")) {
-            "Hotel-Çok yüksek kalite"
+            "Hotel-Very high quality"
         } else {
             "Streamed"
         }
 
         callback.invoke(newExtractorLink(
-            source = kaynakAdı,
-            name = kaynakAdı,
+            source = sourceName,
+            name = sourceName,
             url = videoUrl,
             type = ExtractorLinkType.M3U8
         ) {
