@@ -326,6 +326,11 @@ object BackupUtils {
             
             val datastoreMap = backupFile.datastore.string ?: emptyMap()
             val localPrefs = with(DataStore) { context.getSharedPrefs() }.all
+
+            // ★ 추가: 상대 기기가 보낸 최신 데이터와 대조하기 위해, 내 단말기 로컬의 삭제 히스토리 맵을 미리 로드해 둡니다.
+            val localDeletedMap = with(DataStore) { context.getSharedPrefs() }.getString("sync_deleted_keys_map", null)?.let {
+                try { mapper.readValue<MutableMap<String, Long>>(it) } catch(e: Exception) { mutableMapOf<String, Long>() }
+            } ?: mutableMapOf()
             
             datastoreMap.forEach { (k, v) ->
                 val dk = UtilKt.decompressKey(k)
@@ -347,12 +352,27 @@ object BackupUtils {
                             Log.d("SYNC", "[BackupUtils] Skip delete for key: $dk because local data is newer. (Local: $localTime, Deletion: $deletionTime)")
                         }
                     } else {
+                        // ★ [부활 차단 핵심 로직 적용 영역]
+                        // 상대 기기가 정상 데이터를 나에게 밀어 넣으려 할 때, 내가 최근에 이 데이터를 지운 이력이 있는지 먼저 대조합니다.
+                        val localDeletionTime = localDeletedMap[dk]
+                        if (localDeletionTime != null) {
+                            val incomingTime = run {
+                                val match = Regex("\"updateTime\"\\s*:\\s*(\\d+)").find(v)
+                                match?.groupValues?.get(1)?.toLongOrNull() ?: 0L
+                            }
+                            // 상대방 데이터의 시청 완료 시각이 내 기기에서 지운 시점보다 과거의 구형 데이터라면 복원을 완강하게 거부(Skip)합니다.
+                            if (incomingTime <= localDeletionTime) {
+                                Log.d("SYNC", "[BackupUtils] Blocked resurrection of key: $dk (Local Deletion: $localDeletionTime, Incoming: $incomingTime)")
+                                return@forEach // 복원을 건너뛰고 다음 키로 즉시 루프 이동
+                            }
+                        }
+
                         val rv = UtilKt.decompressValueProperties(v)
                         wrappedEditor.setKeyRaw(dk, rv)
                     }
                 }
             }
-            
+                     
             // 기타 타입 데이터 정상 복원
             backupFile.datastore.bool?.forEach { (k, v) ->
                 val dk = UtilKt.decompressKey(k)
