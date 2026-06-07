@@ -1,3 +1,4 @@
+// 파일명: hsp1020/testplugins/TestPlugins-d1a26fae88cb55c8f1d621560cf4e45bd7fd78f6/TVWikiProvider/src/main/kotlin/com/tvwiki/TVWiki.kt
 package com.tvwiki
 
 import android.content.Context
@@ -23,13 +24,11 @@ import kotlinx.coroutines.coroutineScope
 
 class TVWiki : MainAPI() {
     companion object {
-        const val HARDCODED_DEFAULT = "https://tvwiki7.net"
-        var currentMainUrl = HARDCODED_DEFAULT
+        var currentMainUrl = "https://tvwiki7.net" 
         var isDomainChecked = false 
         private val domainMutex = Mutex()
         private const val PREFS_NAME = "TVWiki_Domain_Cache"
-        private const val PREF_KEY_USER = "user_domain"
-        private const val PREF_KEY_CURRENT = "current_domain"
+        private const val PREF_KEY = "current_domain"
     }
 
     override var mainUrl = currentMainUrl
@@ -88,12 +87,13 @@ class TVWiki : MainAPI() {
             if (isDomainChecked) return@withLock
 
             val prefs = AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            val userDomain = prefs?.getString(PREF_KEY_USER, null)?.replace("http://", "https://")
-            val cachedDomain = prefs?.getString(PREF_KEY_CURRENT, null)?.replace("http://", "https://")
+            val rawCachedDomain = prefs?.getString(PREF_KEY, null)
+            val cachedDomain = rawCachedDomain?.replace("http://", "https://")
             
-            val baseDomain = userDomain ?: cachedDomain ?: HARDCODED_DEFAULT
-            currentMainUrl = baseDomain
-            mainUrl = currentMainUrl
+            if (cachedDomain != null && currentMainUrl == "https://tvwiki7.net") {
+                currentMainUrl = cachedDomain
+                mainUrl = currentMainUrl
+            }
 
             val testPath = "/popular"
             
@@ -103,18 +103,16 @@ class TVWiki : MainAPI() {
                 val finalUrl = extractedUrl.replace("http://", "https://")
                 
                 if (res.isSuccessful && res.text.contains("list_type")) {
-                    currentMainUrl = finalUrl
-                    mainUrl = currentMainUrl
-                    prefs?.edit()?.putString(PREF_KEY_CURRENT, currentMainUrl)?.apply()
+                    if (currentMainUrl != finalUrl) {
+                        currentMainUrl = finalUrl
+                        mainUrl = currentMainUrl
+                        prefs?.edit()?.putString(PREF_KEY, currentMainUrl)?.apply()
+                    }
                     isDomainChecked = true
                     return@withLock
                 }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
-            }
-
-            if (userDomain != null) {
-                prefs?.edit()?.remove(PREF_KEY_USER)?.apply()
             }
 
             val match = Regex("tvwiki(\\d+)").find(currentMainUrl)
@@ -156,7 +154,7 @@ class TVWiki : MainAPI() {
                 currentMainUrl = foundDomain!!
                 mainUrl = currentMainUrl
                 isDomainChecked = true
-                prefs?.edit()?.putString(PREF_KEY_CURRENT, currentMainUrl)?.apply()
+                prefs?.edit()?.putString(PREF_KEY, currentMainUrl)?.apply()
                 return@withLock
             }
             
@@ -507,11 +505,5 @@ class TVWiki : MainAPI() {
             if (priorityRegex.containsMatchIn(fixed)) return fixed
         }
         return null
-    }
-
-    private fun fixUrl(url: String): String {
-        if (url.startsWith("http")) return url
-        if (url.startsWith("//")) return "https:$url"
-        return mainUrl + if (url.startsWith("/")) url else "/$url"
     }
 }
