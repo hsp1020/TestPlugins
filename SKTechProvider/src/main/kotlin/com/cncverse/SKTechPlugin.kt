@@ -1,4 +1,4 @@
-package com.cncverse
+package hsp1020
 
 import android.content.Context
 import com.lagradost.cloudstream3.plugins.Plugin
