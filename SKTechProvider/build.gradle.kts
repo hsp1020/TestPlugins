@@ -15,7 +15,7 @@ dependencies {
 cloudstream {
     language = "ta"
     description = "Watch Live sports via SK Tech"
-    authors = listOf("HSP1020")
+    authors = listOf("hsp1020")
     status = 1 
     tvTypes = listOf(
         "Live",
