@@ -33,7 +33,7 @@ class TVMon : MainAPI() {
             currentMainUrl = newDomain
             AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 ?.edit()?.putString(PREF_KEY, newDomain)?.apply()
-            println("[TVMon DBG] 영구 도메인 저장 완료: $newDomain")
+            println("[TVMON DBG] 💾 영구 도메인 저장 완료: $newDomain")
         }
     }
 
@@ -73,6 +73,7 @@ class TVMon : MainAPI() {
             if (cachedDomain != null) {
                 currentMainUrl = cachedDomain
                 mainUrl = currentMainUrl
+                println("[TVMON DBG] 📂 캐시된 도메인 로드: $currentMainUrl")
             }
 
             val testPath = "/drama"
@@ -84,16 +85,18 @@ class TVMon : MainAPI() {
                 
                 if (res.isSuccessful && (res.text.contains("mov_list") || res.text.contains("item"))) {
                     if (currentMainUrl != finalUrl) {
+                        println("[TVMON DBG] 🔄 리다이렉트 감지됨: $currentMainUrl -> $finalUrl")
                         saveDomain(finalUrl)
                         mainUrl = currentMainUrl
                     }
                     isDomainChecked = true
                     return@withLock
                 }
-            } catch (e: Exception) {}
+            } catch (e: Exception) { println("[TVMON DBG] ❌ 현재 도메인 접속 실패") }
 
             val match = Regex("tvmon(\\d+)").find(currentMainUrl)
             val startNum = match?.groupValues?.get(1)?.toIntOrNull() ?: 1
+            println("[TVMON DBG] 🚀 브루트포스 탐색 시작 (시작번호: $startNum)")
             
             coroutineScope {
                 val candidates = (startNum..startNum + 100).map { "https://tvmon$it.com" }
@@ -117,6 +120,7 @@ class TVMon : MainAPI() {
                     }
                     val foundDomain = deferreds.awaitAll().firstOrNull { it != null }
                     if (foundDomain != null) {
+                        println("[TVMON DBG] ✨ 브루트포스 성공: $foundDomain")
                         saveDomain(foundDomain)
                         mainUrl = currentMainUrl
                         isDomainChecked = true
@@ -133,6 +137,7 @@ class TVMon : MainAPI() {
         if (qLower.startsWith("!tvmon ")) {
             val userDomain = query.substring(7).trim().trimEnd('/')
             if (userDomain.startsWith("http")) {
+                println("[TVMON DBG] 🔧 백도어 도메인 수동 갱신: $userDomain")
                 saveDomain(userDomain)
                 mainUrl = currentMainUrl
                 isDomainChecked = true
@@ -142,10 +147,12 @@ class TVMon : MainAPI() {
 
         checkAndUpdateDomain()
         val searchUrl = "$mainUrl/search?stx=$query"
+        println("[TVMON DBG] 🔍 검색 요청: $query")
         return try {
             val doc = app.get(searchUrl, headers = commonHeaders).document
             var items = doc.select("ul#mov_con_list li").mapNotNull { it.toSearchResponse() }
             if (items.isEmpty()) items = doc.select(".mov_list ul li, .item").mapNotNull { it.toSearchResponse() }
+            println("[TVMON DBG] 🔍 검색 결과 수: ${items.size}")
             items
         } catch (e: Exception) {
             if (e is CancellationException) throw e; emptyList()
@@ -155,6 +162,7 @@ class TVMon : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         checkAndUpdateDomain()
         val url = "$mainUrl${request.data}?page=$page"
+        println("[TVMON DBG] 📄 메인페이지 로드: 카테고리=${request.name}, 페이지=$page")
         return try {
             delay((200..800).random().toLong()) 
             val doc = requestMutex.withLock {
@@ -164,6 +172,7 @@ class TVMon : MainAPI() {
             if (elements.isEmpty()) elements = doc.select(".item")
             if (elements.isEmpty()) elements = doc.select("li, div.item")
             val list = elements.mapNotNull { it.toSearchResponse() }
+            println("[TVMON DBG] 📄 메인페이지 아이템 수: ${list.size}")
             newHomePageResponse(request.name, list, hasNext = list.isNotEmpty())
         } catch (e: Exception) {
             if (e is CancellationException) throw e; newHomePageResponse(request.name, emptyList(), hasNext = false)
@@ -190,6 +199,7 @@ class TVMon : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse {
         checkAndUpdateDomain()
+        println("[TVMON DBG] 🎬 상세페이지 로드: $url")
         
         var targetUrl = url
         if (!targetUrl.startsWith(mainUrl) && targetUrl.contains("tvmon")) {
@@ -229,6 +239,8 @@ class TVMon : MainAPI() {
             newEpisode(href) { this.name = epName; this.posterUrl = fixUrl(epThumb ?: "") }
         }.reversed()
 
+        println("[TVMON DBG] 🎬 파싱 완료: 에피소드 수=${episodes.size}")
+
         val isMovie = realUrl.contains("/movie") || realUrl.contains("/kor_movie") || realUrl.contains("/ani_movie")
         return if (isMovie) newMovieLoadResponse(title, realUrl, TvType.Movie, episodes.firstOrNull()?.data ?: realUrl) { this.posterUrl = fixUrl(poster); this.plot = story; this.tags = tagsList.filter{ it.isNotEmpty()} }
                else newTvSeriesLoadResponse(title, realUrl, TvType.TvSeries, episodes) { this.posterUrl = fixUrl(poster); this.plot = story; this.tags = tagsList.filter{it.isNotEmpty()} }
@@ -236,6 +248,7 @@ class TVMon : MainAPI() {
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         checkAndUpdateDomain()
+        println("[TVMON DBG] 🔗 영상 링크 추출 시작: $data")
         
         var targetData = data
         if (!targetData.startsWith(mainUrl) && targetData.contains("tvmon")) {
