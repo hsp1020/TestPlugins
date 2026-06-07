@@ -148,10 +148,10 @@
     },
     {
         "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://streamed.pk/&size=128",
-        "fileHash": "sha256-7bb7d26240d7b4a22e0bba6f78e0849c8004521d5ea2559c3d045649fe53b8ee",
+        "fileHash": "sha256-5220bcf58eaa408def11fcb7e27f03b00189757cc4a46dea45e175b310ddd405",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 34514,
+        "fileSize": 32384,
         "status": 1,
         "language": "en",
         "authors": [
