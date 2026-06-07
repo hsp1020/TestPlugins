@@ -2520,7 +2520,7 @@ class YoutubeProvider(
                     "context" to mapOf(
                         "client" to mapOf(
                             "clientName" to "ANDROID",
-                            "clientVersion" to "19.09.37",
+                            "clientVersion" to "20.05.46",
                             "hl" to lang,
                             "gl" to if (lang == "ko") "KR" else "US"
                         )
