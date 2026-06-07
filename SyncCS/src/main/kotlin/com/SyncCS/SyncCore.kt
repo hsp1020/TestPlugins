@@ -123,7 +123,7 @@ class Editor(private val editor: SharedPreferences.Editor) {
 }
 
 // ==========================================
-// Backup Utilities (지능형 복원 및 가변 필터 탑재)
+// Backup Utilities (북마크 보존 정밀 튜닝 버전)
 // ==========================================
 
 object BackupUtils {
@@ -154,7 +154,7 @@ object BackupUtils {
         val prefs = with(DataStore) { context.getSharedPrefs() }.all
         val defaultPrefs = with(DataStore) { context.getDefaultSharedPrefs() }.all
 
-        // 1. 시청 기록을 수집하고 경량 정규식을 사용해 updateTime 타임스탬프를 추출합니다.
+        // 1. result_resume_watching_2 키들을 수집하여 경량 정규식으로 최근 100개의 시청 기기 키만 선별합니다.
         val resumeEntries = prefs.filter { it.key.contains("result_resume_watching_2/", ignoreCase = true) }
             .mapNotNull { (key, value) ->
                 if (value !is String) return@mapNotNull null
@@ -168,12 +168,11 @@ object BackupUtils {
                 }
             }
 
-        // 2. 가장 최근 시청 시간순(내림차순)으로 최대 100개만 필터링하여 상한 제어합니다.
         val topEntries = resumeEntries.sortedByDescending { it.third }.take(100)
         val allowedResumeKeys = topEntries.map { it.first }.toSet()
         val activeParentIds = topEntries.map { it.second }.toSet()
 
-        // 3. activeParentIds 및 화이트리스트에 매칭되는 데이터만 필터링해 백업셋을 경량화합니다.
+        // 2. 필터 설계 개정: download_header_cache와 resume_watching은 상한 제어를 적용하되, 즐겨찾기(result_watch_state 등)는 시청 여부와 무관하게 무조건 보존합니다.
         val filteredPrefs = prefs.filter { (key, _) ->
             when {
                 key.contains("download_header_cache/", ignoreCase = true) -> {
@@ -183,27 +182,7 @@ object BackupUtils {
                 key.contains("result_resume_watching_2/", ignoreCase = true) -> {
                     allowedResumeKeys.contains(key)
                 }
-                key.contains("result_season/", ignoreCase = true) -> {
-                    val id = key.substringAfter("result_season/", "").trim()
-                    activeParentIds.contains(id)
-                }
-                key.contains("result_episode/", ignoreCase = true) -> {
-                    val id = key.substringAfter("result_episode/", "").trim()
-                    activeParentIds.contains(id)
-                }
-                key.contains("result_dub/", ignoreCase = true) -> {
-                    val id = key.substringAfter("result_dub/", "").trim()
-                    activeParentIds.contains(id)
-                }
-                key.contains("result_watch_state/", ignoreCase = true) -> {
-                    val id = key.substringAfter("result_watch_state/", "").trim()
-                    activeParentIds.contains(id)
-                }
-                key.contains("result_watch_state_data/", ignoreCase = true) -> {
-                    val id = key.substringAfter("result_watch_state_data/", "").trim()
-                    activeParentIds.contains(id)
-                }
-                else -> isAllowed(key)
+                else -> isAllowed(key) // 북마크 관련 데이터들은 이 블록을 타고 제약 없이 100% 온전하게 백업됩니다.
             }
         }
         val filteredDefaultPrefs = defaultPrefs.filterKeys { isAllowed(it) }
@@ -234,7 +213,6 @@ object BackupUtils {
     fun restore(context: Context, backupFile: BackupFile, restoreSettings: Boolean, restoreDataStore: Boolean) {
         Log.d("SYNC", "[BackupUtils] restore() started (Strict Whitelist Mode).")
         
-        // ★ 최적화: 설정 맵 루프마다 수십 번 불리던 apply()를 단 1회의 물리 쓰기로 끝내도록 단일 트랜잭션 구조로 개편했습니다. [1]
         if (restoreSettings) {
             val settingsEditor = with(DataStore) { context.getDefaultSharedPrefs() }.edit()
             val wrappedEditor = Editor(settingsEditor)
@@ -249,7 +227,6 @@ object BackupUtils {
             settingsEditor.apply()
         }
 
-        // ★ 최적화: 데이터스토어 또한 전체 데이터를 단 하나의 editor 트랜잭션에 주입한 뒤 마지막에 단 1번만 apply()를 호출하여 쓰기 지연 병목(렉 현상)을 완전히 방지합니다. [1]
         if (restoreDataStore) {
             val datastoreEditor = with(DataStore) { context.getSharedPrefs() }.edit()
             val wrappedEditor = Editor(datastoreEditor)
@@ -391,7 +368,7 @@ object ApiUtils {
                 val start = i * chunkSize
                 val end = minOf((i + 1) * chunkSize, backupData.length)
                 if (start < end) {
-                    Log.d("SYNC_JSON", backupData.substring(start, end))           
+                    
                 }
             }
             Log.d("SYNC", "========== UPLOAD TRIGGERED: JSON DATA END ==========")
@@ -448,6 +425,7 @@ object ApiUtils {
 // ==========================================
 
 object UtilKt {
+    // 1단계: 프로필 접두사 매핑 규칙 (0/result_... ➔ 0/k1/... 동적 완벽 치환)
     private val prefixMap = listOf(
         "result_resume_watching_2/" to "k1/",
         "video_pos_dur/" to "k2/",
@@ -484,6 +462,7 @@ object UtilKt {
         "home_api_used" to "k33"
     )
 
+    // 2단계: 일반 및 이스케이프 따옴표 전용 안전 매핑 (오치환 제로 설계)
     private val propertyMap = listOf(
         "bookmarkedTime" to "v1",
         "latestUpdatedTime" to "v2",
@@ -581,6 +560,7 @@ object UtilKt {
         "datastore" to "s54"
     )
 
+    // 3단계: 특수 규격 문자 매핑 규칙
     private val valueMap = listOf(
         "https://" to "h//",
         ":null," to ":n,",
