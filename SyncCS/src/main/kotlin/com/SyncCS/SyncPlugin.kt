@@ -20,7 +20,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 @CloudstreamPlugin
 class SyncPlugin : Plugin() {
@@ -54,15 +53,15 @@ class SyncPlugin : Plugin() {
                         isAppInForeground = true
                         currentDelay = 5000L 
                         
-                        // ★ 즉각성 극대화: 사용자가 앱을 켜거나 포그라운드로 진입하는 찰나에 즉각적으로 다른 기기의 MD5 해시를 당겨와 머지합니다.
+                        // 앱 화면 활성화 즉시 다른 기기의 변경 사항을 조회해 머지합니다.
                         restoreDevice() 
                     }
                     override fun onActivityResumed(activity: Activity) {}
                     override fun onActivityPaused(activity: Activity) {}
                     override fun onActivityStopped(activity: Activity) {
-                        activeActivities = maxOf(0, activeActivities - 1) // 마이너스 오염 보호
+                        activeActivities = maxOf(0, activeActivities - 1)
                         if (activeActivities <= 0) {
-                            // 저사양 기기 랙 방지 및 최종 백업 안전 보장용 10초 유예
+                            // 액티비티 일시 전환 시의 백그라운드 오판 예방을 위해 10초의 넉넉한 디바운스 유예 보장
                             backgroundDelayJob?.cancel()
                             backgroundDelayJob = CoroutineScope(Dispatchers.Main).launch {
                                 delay(10000L)
@@ -97,7 +96,6 @@ class SyncPlugin : Plugin() {
                         val now = System.currentTimeMillis()
                         Log.d("SYNC", "[SyncPlugin] Sync loop tick. Delay: $currentDelay ms, Elapsed since last restore: ${(now - lastRestoreTime) / 1000}s")
                         
-                        // 가변 대기 상태와 무관하게 시스템 타임스탬프 기준으로 최대 1분(60초)마다 클라우드 데이터 해시 대조
                         if (now - lastRestoreTime >= 60000L) {
                             Log.d("SYNC", "[SyncPlugin] 60 seconds elapsed. Triggering restoreDevice().")
                             restoreDevice()
@@ -166,7 +164,6 @@ class SyncPlugin : Plugin() {
                             return@forEach
                         }
                         
-                        // ★ 핵심 해결책: 무용지물인 updatedAt 시간 비교 대신, 실제 데이터의 MD5 해시값 변화를 직접 비교하여 100% 감지합니다.
                         val lastHashKey = "sync_last_hash_${device.deviceId}"
                         val lastHash = prefs.getString(lastHashKey, "")
                         val currentHash = UtilKt.md5(device.syncedData ?: "")
@@ -179,7 +176,7 @@ class SyncPlugin : Plugin() {
                                     val backupFile = mapper.readValue<BackupFile>(decoded)
                                     BackupUtils.restore(context, backupFile, restoreSettings = true, restoreDataStore = true)
                                     
-                                    // 복원 성공 시 새로운 해시값을 로컬 저장소에 적용
+                                    // 해시 정상 보존 주입
                                     prefs.edit().putString(lastHashKey, currentHash).apply()
                                     dataRestored = true
                                     Log.d("SYNC", "[SyncPlugin] Merge successful for device: ${device.name}")
@@ -191,15 +188,7 @@ class SyncPlugin : Plugin() {
                     }
 
                     if (dataRestored) {
-                        Log.d("SYNC", "[SyncPlugin] Data restored. Triggering UI reload and backupDevice().")
-                        withContext(Dispatchers.Main) {
-                            try {
-                                MainActivity.reloadHomeEvent.invoke(true)
-                                MainActivity.bookmarksUpdatedEvent.invoke(true)
-                            } catch (e: Exception) {
-                                e.printStackTrace()
-                            }
-                        }
+                        Log.d("SYNC", "[SyncPlugin] Data restored successfully. Relying on native UI binding. Skipping manual reload.")
                         backupDevice()
                     }
                 } else {
