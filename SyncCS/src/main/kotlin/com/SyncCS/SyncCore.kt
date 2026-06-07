@@ -176,6 +176,7 @@ object BackupUtils {
                 }
             }
 
+        // 1. 최근 시청 100개 ID 선별 코드 블록 아래 영역입니다. (약 130~140라인 부근)
         val topEntries = resumeEntries.sortedByDescending { it.third }.take(100)
         val allowedResumeKeys = topEntries.map { it.first }.toSet()
         val activeParentIds = topEntries.map { it.second }.toSet()
