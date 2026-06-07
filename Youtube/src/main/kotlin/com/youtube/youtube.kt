@@ -1,3 +1,4 @@
+
 package com.lagradost.cloudstream3.ar.youtube
 
 import org.json.JSONObject
@@ -20,6 +21,7 @@ import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
 import com.lagradost.cloudstream3.AcraApplication
 import androidx.preference.PreferenceManager
+import androidx.annotation.Keep
 
 
 
@@ -278,12 +280,14 @@ class YoutubeProvider(
     val appPrefs: SharedPreferences?
         get() = sharedPref ?: AcraApplication.context?.let { PreferenceManager.getDefaultSharedPreferences(it) }
 
+    @Keep
     data class CustomSection(
         @JsonProperty("name") var name: String = "",
         @JsonProperty("url") var url: String = "",
         @JsonProperty("isEnabled") var isEnabled: Boolean = true
     )
     
+    @Keep
     data class CachedChip(
         @JsonProperty("name") val name: String,
         @JsonProperty("token") val token: String
@@ -414,24 +418,7 @@ class YoutubeProvider(
     
     private val ytInterceptor = YouTubeInterceptor(this)
 
-    private var savedContinuationToken: String? = null
-
-    @Suppress("PropertyName")
-    private data class PlayerResponse(
-        @JsonProperty("streamingData") val streamingData: StreamingData?,
-        @JsonProperty("playbackTracking") val playbackTracking: PlaybackTracking? 
-    )
-    private data class StreamingData(
-        @JsonProperty("hlsManifestUrl") val hlsManifestUrl: String?
-    )
-
-    private data class PlaybackTracking(
-        @JsonProperty("videostatsPlaybackUrl") val videostatsPlaybackUrl: TrackingUrl?,
-        @JsonProperty("videostatsWatchtimeUrl") val videostatsWatchtimeUrl: TrackingUrl?
-    )
-    private data class TrackingUrl(
-        @JsonProperty("baseUrl") val baseUrl: String?
-    )
+    private var savedContinuationToken: String? = null    
 
     private fun generateCpn(): String {
         val alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
@@ -454,10 +441,12 @@ class YoutubeProvider(
         return uri.build().toString()
     }
 
-    private suspend fun triggerPlaybackTracking(playbackTracking: PlaybackTracking?, videoId: String, isShort: Boolean = false) {
-        val playbackBaseUrl = playbackTracking?.videostatsPlaybackUrl?.baseUrl
-        val watchtimeBaseUrl = playbackTracking?.videostatsWatchtimeUrl?.baseUrl
-
+    private suspend fun triggerPlaybackTracking(
+        playbackBaseUrl: String?,
+        watchtimeBaseUrl: String?,
+        videoId: String,
+        isShort: Boolean = false
+    ) {
         if (playbackBaseUrl.isNullOrBlank() || watchtimeBaseUrl.isNullOrBlank()) return
 
         val cpn = generateCpn()
@@ -483,7 +472,7 @@ class YoutubeProvider(
             logError(e)
         }
     }
-
+    
     private fun getSavedContinuationToken(key: String): String? {
         val hashedKey = YoutubeUtils.sha1(key)
         val cached = continuationTokenCache[hashedKey]
@@ -2438,7 +2427,6 @@ class YoutubeProvider(
         }
     }
 
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -2488,21 +2476,28 @@ class YoutubeProvider(
         if (playerResponseText.isNotBlank()) {
             try {
                 val root = org.json.JSONObject(playerResponseText)
-                val targetJson = if (root.has("playerResponse")) {
-                    root.getJSONObject("playerResponse").toString()
+                val targetObj = if (root.has("playerResponse")) {
+                    root.getJSONObject("playerResponse")
                 } else {
-                    playerResponseText
+                    root
                 }
-                val playerResponse = mapper.readValue<PlayerResponse>(targetJson)
                 
-                triggerPlaybackTracking(playerResponse.playbackTracking, videoId, isShort)
+                val playbackTrackingObj = targetObj.optJSONObject("playbackTracking")
+                if (playbackTrackingObj != null) {
+                    val playbackUrlObj = playbackTrackingObj.optJSONObject("videostatsPlaybackUrl")
+                    val watchtimeUrlObj = playbackTrackingObj.optJSONObject("videostatsWatchtimeUrl")
+                    
+                    val playbackBaseUrl = playbackUrlObj?.optString("baseUrl")
+                    val watchtimeBaseUrl = watchtimeUrlObj?.optString("baseUrl")
+                    
+                    triggerPlaybackTracking(playbackBaseUrl, watchtimeBaseUrl, videoId, isShort)
+                }
             } catch (e: Exception) {
                 logError(e)
             }
         }
 
         com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback, callback)
-
         return true
     }
 }
