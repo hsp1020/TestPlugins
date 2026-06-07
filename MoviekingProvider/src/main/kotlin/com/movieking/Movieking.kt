@@ -120,7 +120,7 @@ class MovieKing : MainAPI() {
                 
                 return listOf(
                     newMovieSearchResponse("✅ 무비킹 도메인 강제 갱신 성공: $userDomain", userDomain, TvType.Movie) {
-                        this.posterUrl = "https://via.placeholder.com/300x450/008000/FFFFFF/?text=MovieKing+OK"
+                        this.posterUrl = ""
                     }
                 )
             }
