@@ -9,6 +9,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import com.hsp1020.BuildConfig // 패키지명 교정 완료
 
 /**
  * Firebase Remote Config Fetcher for SKTech Live App
@@ -18,24 +19,24 @@ object FirebaseRemoteConfigFetcher {
     
     private const val PACKAGE_NAME = "com.live.sktechtv"
     
-    // Get credentials from BuildConfig (injected from local.properties)
+    // Get credentials from BuildConfig
     private val API_KEY: String
         get() = try {
-            com.cncverse.BuildConfig.SKTECH_FIREBASE_API_KEY
+            BuildConfig.SKTECH_FIREBASE_API_KEY
         } catch (e: Exception) {
             ""
         }
     
     private val APP_ID: String
         get() = try {
-            com.cncverse.BuildConfig.SKTECH_FIREBASE_APP_ID
+            BuildConfig.SKTECH_FIREBASE_APP_ID
         } catch (e: Exception) {
             ""
         }
     
     private val PROJECT_NUMBER: String
         get() = try {
-            com.cncverse.BuildConfig.SKTECH_FIREBASE_PROJECT_NUMBER
+            BuildConfig.SKTECH_FIREBASE_PROJECT_NUMBER
         } catch (e: Exception) {
             ""
         }
