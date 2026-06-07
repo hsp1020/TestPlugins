@@ -1,4 +1,4 @@
-package hsp1020
+package com.hsp1020 // 패키지명 교정 완료
 
 import android.content.Context
 import com.lagradost.cloudstream3.plugins.Plugin
@@ -9,7 +9,7 @@ class SKTechPlugin: Plugin() {
     override fun load(context: Context) {
         LiveEventsProvider.context = context
         
-        // 스포츠 중계용 라이브 이벤트 프로바이더만 안전하게 단독 등록합니다.
+        // Register Live Events provider
         registerMainAPI(LiveEventsProvider())
     }
 }
