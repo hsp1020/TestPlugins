@@ -167,7 +167,7 @@ class Streamed() : MainAPI() {
             match.sources?.any { it.id == sourceId } == true || match.id == sourceId
         } ?: return null
 
-        val title = match.title ?: "Bilinmeyen Başlık"
+        val title = match.title ?: "Unknown Title"
 
         val poster = match.poster ?: ""
         val posterUrl = if (poster.contains("api")) {
@@ -195,34 +195,34 @@ class Streamed() : MainAPI() {
                         hours > 24 -> {
                             val days = hours / 24
                             val remainingHours = hours % 24
-                            "Maça kalan süre: $days gün $remainingHours saat"
+                            "Time remaining to match: $days days $remainingHours hours"
                         }
 
                         hours > 0 -> {
-                            "Maça kalan süre: $hours saat $minutes dakika"
+                            "Time remaining to match: $hours hours $minutes minutes"
                         }
 
                         minutes > 0 -> {
-                            "Maça kalan süre: $minutes dakika"
+                            "Time remaining to match: $minutes minutes"
                         }
 
                         else -> {
-                            "Maç yakında başlayacak"
+                            "Match starting soon"
                         }
                     }
                 }
 
                 else -> {
-                    "Maç şu anda canlı veya tamamlandı - Bağlantı bulunamazsa basılıp tutup bağlantıları yenilemeyi deneyebilirsiniz."
+                    "The match is currently live or completed - If links are not found, you can try pressing and holding to refresh the links."
                 }
             }
-        } ?: "Maç zamanı bilgisi bulunamadı"
+        } ?: "Match time information not found"
 
         val tags = match.category?.let { listOf(it) } ?: emptyList()
 
         val sourcesCount = match.sources?.size ?: 0
         val finalDescription = if (sourcesCount > 1) {
-            "$description\n\nMevcut kaynak sayısı: $sourcesCount"
+            "$description\n\nAvailable sources: $sourcesCount"
         } else {
             description
         }
