@@ -30,13 +30,12 @@ class SyncPlugin : Plugin() {
     private var backupJob: Job? = null
     private var backgroundDelayJob: Job? = null
     
-    // 가변 백오프 및 배터리 세이브 제어 플래그
     private var isAppInForeground = true
     private var currentDelay = 5000L
-    private var lastRestoreTime = 0L // 시간 기반 복원 체크용 스탬프
+    private var lastRestoreTime = 0L
 
     companion object {
-        private var isLifecycleRegistered = false // 중복 리스너 등록 누수 방지용 정적 플래그
+        private var isLifecycleRegistered = false 
     }
 
     private fun startSyncLoop(context: Context) {
@@ -50,22 +49,22 @@ class SyncPlugin : Plugin() {
                     private var activeActivities = 0
                     override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
                     override fun onActivityStarted(activity: Activity) {
-                        backgroundDelayJob?.cancel() // 전환 gap 사이에 예약된 백그라운드 동면 처리를 취소
+                        backgroundDelayJob?.cancel() 
                         activeActivities++
                         isAppInForeground = true
-                        currentDelay = 5000L // 화면 복귀 시 즉시 5초 가속 상태로 복원
+                        currentDelay = 5000L 
                     }
                     override fun onActivityResumed(activity: Activity) {}
                     override fun onActivityPaused(activity: Activity) {}
                     override fun onActivityStopped(activity: Activity) {
-                        activeActivities--
+                        activeActivities = maxOf(0, activeActivities - 1) // 마이너스 오염 보호
                         if (activeActivities <= 0) {
-                            // 액티비티 일시적 전환 찰나(메인 화면 ➔ 플레이어)의 오판을 방지하기 위해 1.5초간 대기 후 백그라운드로 판정
+                            // ★ 사용자 피드백 적극 반영: 저사양 기기 및 외부 플레이어 딜레이를 완벽히 정복하기 위해 10초(10000ms)의 디바운스 유예 시간을 넉넉하게 제공합니다.
                             backgroundDelayJob?.cancel()
                             backgroundDelayJob = CoroutineScope(Dispatchers.Main).launch {
-                                delay(1500L)
+                                delay(10000L)
                                 isAppInForeground = false
-                                currentDelay = 60000L // 백그라운드 동면 시 대기 주기를 1분으로 설정해 배터리 보존
+                                currentDelay = 60000L 
                                 Log.d("SYNC", "[SyncPlugin] App entered background. Suspending active sync loop to save battery.")
                             }
                         }
@@ -87,16 +86,14 @@ class SyncPlugin : Plugin() {
                             Log.d("SYNC", "[SyncPlugin] Watch history changed. Triggering backupDevice().")
                             backupDevice()
                             lastResumeWatching = currentResumeState
-                            currentDelay = 5000L // 데이터 변경 시 주기를 즉시 가속
+                            currentDelay = 5000L 
                         } else {
-                            // 적응형 주기의 최대 한계를 5분에서 1분(60초)으로 현실화하여 장시간 시청 시의 레이턴시 보장
                             currentDelay = minOf(currentDelay + 5000L, 60000L)
                         }
                         
                         val now = System.currentTimeMillis()
                         Log.d("SYNC", "[SyncPlugin] Sync loop tick. Delay: $currentDelay ms, Elapsed since last restore: ${(now - lastRestoreTime) / 1000}s")
                         
-                        // 불안정한 틱 카운터 대신, 가변 주기 상태와 무관하게 "마지막 복원 후 1분(60,000ms)" 이상 지났을 때 즉시 다른 기기 데이터 머지
                         if (now - lastRestoreTime >= 60000L) {
                             Log.d("SYNC", "[SyncPlugin] 60 seconds elapsed. Triggering restoreDevice().")
                             restoreDevice()
