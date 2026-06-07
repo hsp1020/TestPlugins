@@ -10,6 +10,6 @@ class StreamedPlugin: Plugin() {
         registerMainAPI(Streamed())
         registerExtractorAPI(EmbedStreams(context))
         registerExtractorAPI(EmbedSporty(context))
-        registerExtractorAPI(EmbedST(context)) // embed.st 처리용 익스트랙터 추가 등록
+        registerExtractorAPI(EmbedST(context)) // 가독성에 맞춰 깔끔하게 정렬하여 등록
     }
 }
