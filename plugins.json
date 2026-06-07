@@ -60,10 +60,10 @@
     },
     {
         "iconUrl": "https://m135.kotbc2.com/img/ktblogo.gif",
-        "fileHash": "sha256-d26c55a95828ef68e079c67e3bb5938a303c849fdd6ad813924ad190e22822c0",
+        "fileHash": "sha256-824d6083eb29affd1d4724b002d5e70d5b4fc90a8f8b5fb7cf3b3af94e38d49d",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 29302,
+        "fileSize": 29703,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -103,10 +103,10 @@
     },
     {
         "iconUrl": "https://mvking6.org/resource/favicon.ico",
-        "fileHash": "sha256-287a25e8a6b88b5d598c44b2da9b41a053802fe9e9ae07632c704747d074f41b",
+        "fileHash": "sha256-4fdd6d603835118a30ce63ec2f374c851e9c85b5143c89badea23284d1f9733e",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 34265,
+        "fileSize": 34235,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -189,10 +189,10 @@
     },
     {
         "iconUrl": "https://tvchak200.com/template/xiaozhuti/img/logo.png",
-        "fileHash": "sha256-6c184c52df89eed723ceb209c6c9db012dbcc1d07b198f6541425b8e5fc70777",
+        "fileHash": "sha256-c3cbe0ac94da3c8c46da33c6e62b7d65de2c64f55d915b650aad8ca437a1f09d",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 20148,
+        "fileSize": 20349,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -212,10 +212,10 @@
     },
     {
         "iconUrl": "https://tvmon.site/img/111.png",
-        "fileHash": "sha256-87405b9ed4b1e2e299e76842b5e37501f120dc99f66f16aa736da2bf432cffd1",
+        "fileHash": "sha256-a5c3bf6b226f97e9c20ebdaea0ff21defb3c701506c2606cc3732108a3c05060",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 49633,
+        "fileSize": 49842,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -235,10 +235,10 @@
     },
     {
         "iconUrl": "https://tvwiki5.net/img/logo.png",
-        "fileHash": "sha256-e2b340ff56a78dc0bb9a0d010b065275dbd938c1511f8f3b0315a254f82f1898",
+        "fileHash": "sha256-7681609e7817da9b8fbd2f5b34f765e8a2a1b3b07df9e9e5b6e6015b762e5945",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 51626,
+        "fileSize": 51613,
         "status": 1,
         "language": "ko",
         "authors": [
