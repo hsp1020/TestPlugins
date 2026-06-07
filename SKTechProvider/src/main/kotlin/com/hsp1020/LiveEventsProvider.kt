@@ -1,4 +1,4 @@
-package hsp1020
+package com.hsp1020 // 패키지명 교정 완료
 
 import android.os.Handler
 import android.os.Looper
@@ -388,7 +388,6 @@ class LiveEventsProvider : MainAPI() {
             subtitleCallback: (SubtitleFile) -> Unit,
             callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // [광고 호출 로직 완전 소거 완료]
         val loadData = parseJson<LiveEventLoadData>(data)
 
         // Fetch stream URLs from /channels/{slug}.txt
