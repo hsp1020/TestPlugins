@@ -206,6 +206,17 @@ object BackupUtils {
             try { mapper.readValue<MutableMap<String, Long>>(it) } catch(e: Exception) { mutableMapOf<String, Long>() }
         } ?: mutableMapOf()
 
+
+        // ==========================================
+        // ★ 이 위치에 들여쓰기를 맞춰 아래 코드를 정확히 삽입합니다.
+        // ==========================================
+        // ★ 버그 해결책: 지웠던 키를 다시 사용하기 시작했다면, 삭제 히스토리 맵에서 흔적을 완벽하게 지워 백업 오염을 방지합니다.
+        currentKeys.forEach { activeKey ->
+            deletedMap.remove(activeKey)
+        }
+        // ==========================================
+
+
         // 신규 삭제 발생 건 등록
         val now = System.currentTimeMillis()
         newlyDeletedKeys.forEach { key ->
