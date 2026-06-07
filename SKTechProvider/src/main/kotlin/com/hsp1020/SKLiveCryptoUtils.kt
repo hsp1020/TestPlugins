@@ -4,7 +4,7 @@ import android.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
-
+import com.hsp1020.BuildConfig // 패키지명 교정 완료
 
 object SKLiveCryptoUtils {
     private val V23_KEY = BuildConfig.SKLIVE_V23_KEY.toByteArray(Charsets.UTF_8)
