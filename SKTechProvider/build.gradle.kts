@@ -2,6 +2,8 @@
 version = 21
 
 android {
+    namespace = "com.hsp1020" // 빌드 엔진이 BuildConfig를 com.hsp1020 패키지 하위에 강제 생성하도록 지정
+    
     buildFeatures {
         buildConfig = true
         viewBinding = false // 불필요해진 설정 화면 뷰바인딩을 비활성화하여 빌드 경량화
