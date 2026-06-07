@@ -2475,7 +2475,6 @@ class YoutubeProvider(
         }
     }
 
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -2487,34 +2486,27 @@ class YoutubeProvider(
         val isShort = data.contains("/shorts/")
 
         println("[YTSYNC] ==================== LOAD LINKS START ====================")
-        println("[YTSYNC] Requested videoId: $videoId, isShort: $isShort, Raw Data: $data")
+        println("[YTSYNC] Requested videoId: $videoId, isShort: $isShort")
 
         var playerResponseText = ""
         try {
-            val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
-            println("[YTSYNC] Retrieved Innertube API Key: $apiKey")
+            // WEB의 엄격한 보안 챌린지를 우회하기 위한 안드로이드 앱 전용 표준 공용 API Key 적용
+            val androidApiKey = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
 
             val apiUrl = if (isShort) {
-                if (!apiKey.isNullOrBlank()) {
-                    "$mainUrl/youtubei/v1/reel/reel_item_watch?key=$apiKey&%24fields=playerResponse"
-                } else {
-                    "$mainUrl/youtubei/v1/reel/reel_item_watch?%24fields=playerResponse"
-                }
+                "$mainUrl/youtubei/v1/reel/reel_item_watch?key=$androidApiKey&%24fields=playerResponse"
             } else {
-                if (!apiKey.isNullOrBlank()) {
-                    "$mainUrl/youtubei/v1/player?key=$apiKey"
-                } else {
-                    "$mainUrl/youtubei/v1/player"
-                }
+                "$mainUrl/youtubei/v1/player?key=$androidApiKey"
             }
             println("[YTSYNC] Requesting playerResponse from endpoint: $apiUrl")
 
+            // 안드로이드 앱 환경으로 페이로드 및 컨텍스트 변경 (WEB 클라이언트 차단 우회 목적)
             val payload = if (isShort) {
                 mapOf(
                     "context" to mapOf(
                         "client" to mapOf(
-                            "clientName" to "WEB",
-                            "clientVersion" to YoutubeUtils.DEFAULT_CLIENT_VERSION,
+                            "clientName" to "ANDROID",
+                            "clientVersion" to "19.09.37",
                             "hl" to lang,
                             "gl" to if (lang == "ko") "KR" else "US"
                         )
@@ -2527,16 +2519,25 @@ class YoutubeProvider(
                 mapOf(
                     "context" to mapOf(
                         "client" to mapOf(
-                            "clientName" to "WEB",
-                            "clientVersion" to YoutubeUtils.DEFAULT_CLIENT_VERSION,
+                            "clientName" to "ANDROID",
+                            "clientVersion" to "19.09.37",
                             "hl" to lang,
                             "gl" to if (lang == "ko") "KR" else "US"
                         )
                     ),
-                    "videoId" to videoId
+                    "videoId" to videoId,
+                    "playbackContext" to mapOf(
+                        "contentPlaybackContext" to mapOf(
+                            "html5Preference" to "HTML5_PREF_WANTS"
+                        )
+                    )
                 )
             }
-            val headers = mapOf("Referer" to "$mainUrl/watch?v=$videoId")
+            
+            val headers = mapOf(
+                "Referer" to "$mainUrl/watch?v=$videoId",
+                "User-Agent" to "com.google.android.youtube/19.09.37 (Linux; U; Android 11)"
+            )
             
             val responseResult = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor)
             playerResponseText = responseResult.text
@@ -2552,36 +2553,23 @@ class YoutubeProvider(
             try {
                 val root = org.json.JSONObject(playerResponseText)
                 
-                // 1. 응답 JSON 객체의 탑레벨 Key 목록을 모두 출력하여 실체 파악
-                val keys = mutableListOf<String>()
-                val keysIt = root.keys()
-                while(keysIt.hasNext()) {
-                    keys.add(keysIt.next())
-                }
-                println("[YTSYNC] Response JSON Top-level Keys: $keys")
-
-                // 2. playabilityStatus 객체가 존재한다면 내부 통째로 출력 (차단 사유 확인용)
+                // playabilityStatus 상태를 로그캣에 지속 모니터링하기 위한 필터링 노출
                 if (root.has("playabilityStatus")) {
                     val playabilityStatus = root.getJSONObject("playabilityStatus")
-                    println("[YTSYNC] playabilityStatus Object: $playabilityStatus")
-                } else {
-                    println("[YTSYNC] playabilityStatus key is MISSING in response!")
+                    val statusValue = playabilityStatus.optString("status") ?: "UNKNOWN"
+                    val reasonValue = playabilityStatus.optString("reason") ?: "No Reason"
+                    println("[YTSYNC] playabilityStatus - Status: $statusValue, Reason: $reasonValue")
                 }
-
-                // 3. 실제 17KB 텍스트의 앞부분 1500글자를 그대로 출력하여 눈으로 확인
-                val previewLength = if (playerResponseText.length > 1500) 1500 else playerResponseText.length
-                val preview = playerResponseText.substring(0, previewLength)
-                println("[YTSYNC] Raw Response Preview: $preview")
 
                 val targetJson = if (root.has("playerResponse")) {
                     root.getJSONObject("playerResponse").toString()
                 } else {
                     playerResponseText
                 }
-                println("[YTSYNC] Parsing targetJson for playerResponse mapping...")
-                val playerResponse = mapper.readValue<PlayerResponse>(targetJson)
                 
+                val playerResponse = mapper.readValue<PlayerResponse>(targetJson)
                 println("[YTSYNC] PlayerResponse mapped successfully. playbackTracking null check: ${playerResponse.playbackTracking == null}")
+                
                 triggerPlaybackTracking(playerResponse.playbackTracking, videoId, isShort)
             } catch (e: Exception) {
                 println("[YTSYNC] ❌ Error during playerResponse parsing/mapping: ${e.message}")
