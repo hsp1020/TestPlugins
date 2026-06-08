@@ -316,8 +316,12 @@ open class YoutubeExtractor : ExtractorApi() {
         val codec: String,
         val bitrate: Int,
         val initRange: String?,
-        val indexRange: String?
+        val indexRange: String?,
+        val language: String  // [추가됨] 다국어 오디오 트랙 식별자
     )
+
+    
+    
 
     // 로컬 가상 외부 다운로더 앱 인텐트 공유 리다이렉트 URL 생성기
     private fun getAppRedirectUrl(packageName: String, targetUrl: String): String? {
@@ -487,6 +491,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     return@withContext
                 }
 
+                // ================= 여기서부터 교체 =================
                 val adaptiveFormats = streamingData.optJSONArray("adaptiveFormats") ?: JSONArray()
                 
                 val videoOnlyList = ArrayList<StreamInfo>(adaptiveFormats.length())
@@ -544,7 +549,13 @@ open class YoutubeExtractor : ExtractorApi() {
                         val bitrate = format.optInt("bitrate", 128000)
                         if (codec.isEmpty()) codec = if (cleanMimeType.contains("webm")) "opus" else "mp4a.40.2"
                         
-                        audioInfoList.add(AudioInfo(streamUrl, cleanMimeType, codec, bitrate, initR, indexR))
+                        // [핵심 패치] 유튜브 JSON 내부에 있는 audioTrack 객체 파싱 (PipePipe 알고리즘 이식)
+                        val audioTrack = format.optJSONObject("audioTrack")
+                        val displayName = audioTrack?.optString("displayName")
+                        // displayName이 없으면 기본 오디오 트랙(원본)으로 취급
+                        val language = if (!displayName.isNullOrBlank()) displayName else "Original"
+                        
+                        audioInfoList.add(AudioInfo(streamUrl, cleanMimeType, codec, bitrate, initR, indexR, language))
                     }
                 }
 
@@ -557,7 +568,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         var subUrl = track.optString("baseUrl")
                         val lang = track.optString("languageCode")
                         
-                        // [자막 최적화] 자동 생성(Auto-generated / ASR) 자막 식별 및 필터링 제거
                         val kind = track.optString("kind", "")
                         val vssId = track.optString("vssId", "")
                         if (kind == "asr" || vssId.startsWith("a.")) {
@@ -576,7 +586,6 @@ open class YoutubeExtractor : ExtractorApi() {
                             displayName = lang.uppercase()
                         }
 
-                        // [자막 최적화] 이름 기반의 2차 자동 생성 자막 안전 장치 필터링
                         if (displayName.contains("auto-generated", ignoreCase = true) || 
                             displayName.contains("자동 생성", ignoreCase = true)) {
                             continue
@@ -597,34 +606,47 @@ open class YoutubeExtractor : ExtractorApi() {
                 if (videoOnlyList.isNotEmpty() && audioInfoList.isNotEmpty()) {
                     startServerIfNeeded()
 
+                    // [핵심 패치] 다른 개발자 코드처럼 오디오를 "언어별"로 그룹핑
+                    val audiosByLanguage = audioInfoList.groupBy { it.language }
+
+                    // 비디오 화질별로 루프
                     for (video in videoOnlyList.distinctBy { it.height }) {
-                        val bestAudio = if (video.mimeType.contains("webm")) {
-                            audioInfoList.maxByOrNull { if (it.mimeType.contains("webm")) it.bitrate + 1000000 else it.bitrate }
-                        } else {
-                            audioInfoList.maxByOrNull { if (it.mimeType.contains("mp4")) it.bitrate + 1000000 else it.bitrate }
-                        }
+                        // 언어 그룹별로 루프
+                        for ((lang, audios) in audiosByLanguage) {
+                            
+                            // 해당 언어 내에서 비트레이트가 가장 높은 최고 음질 오디오 선택
+                            val bestAudio = if (video.mimeType.contains("webm")) {
+                                audios.maxByOrNull { if (it.mimeType.contains("webm")) it.bitrate + 1000000 else it.bitrate }
+                            } else {
+                                audios.maxByOrNull { if (it.mimeType.contains("mp4")) it.bitrate + 1000000 else it.bitrate }
+                            }
 
-                        if (bestAudio != null) {
-                            val dashXml = buildDashManifestXml(video, listOf(bestAudio), durationSeconds)
-                            val localLink = registerManifestAndGetUrl(dashXml)
+                            if (bestAudio != null) {
+                                val dashXml = buildDashManifestXml(video, listOf(bestAudio), durationSeconds)
+                                val localLink = registerManifestAndGetUrl(dashXml)
 
-                            if (localLink != null) {
-                                val finalName = "YouTube ${video.label}"
-                                val sourceName = "YouTube"
-                                
-                                callback(
-                                    newExtractorLink(
-                                        sourceName, finalName, localLink, type = ExtractorLinkType.DASH
-                                    ) {
-                                        this.referer = mainUrl
-                                        this.quality = video.height
-                                        this.headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
-                                    }
-                                )
+                                if (localLink != null) {
+                                    // 링크 이름에 언어를 명시하여 다국어 지원 표시
+                                    val finalName = if (lang == "Original") "YouTube ${video.label}" else "YouTube ${video.label} ($lang)"
+                                    val sourceName = "YouTube"
+                                    
+                                    callback(
+                                        newExtractorLink(
+                                            sourceName, finalName, localLink, type = ExtractorLinkType.DASH
+                                        ) {
+                                            this.referer = mainUrl
+                                            this.quality = video.height
+                                            this.headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
+                                        }
+                                    )
+                                }
                             }
                         }
                     }
                 }
+                // ================= 여기까지 교체 =================
+                
+
 
                 // 정상 동작 상황 하에서의 외부 앱 리링크 추가 영역
                 val originalUrl = "https://www.youtube.com/watch?v=$videoId"
