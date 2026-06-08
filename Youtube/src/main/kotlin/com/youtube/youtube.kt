@@ -2486,7 +2486,7 @@ class YoutubeProvider(
         }
     }
 
-    override suspend fun loadLinks(
+override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
@@ -2510,12 +2510,13 @@ class YoutubeProvider(
             }
             println("[YTSYNC] Requesting playerResponse from endpoint: $apiUrl")
 
+            // [오타 수정] ANDROID_VR 및 버전 1.65.10으로 정정
             val payload = if (isShort) {
                 mapOf(
                     "context" to mapOf(
                         "client" to mapOf(
-                            "clientName" to "ANDROID",
-                            "clientVersion" to "19.09.37",
+                            "clientName" to "ANDROID_VR",
+                            "clientVersion" to "1.65.10",
                             "hl" to lang,
                             "gl" to if (lang == "ko") "KR" else "US"
                         )
@@ -2528,8 +2529,8 @@ class YoutubeProvider(
                 mapOf(
                     "context" to mapOf(
                         "client" to mapOf(
-                            "clientName" to "ANDROID",
-                            "clientVersion" to "19.09.37",
+                            "clientName" to "ANDROID_VR",
+                            "clientVersion" to "1.65.10",
                             "hl" to lang,
                             "gl" to if (lang == "ko") "KR" else "US"
                         )
@@ -2543,16 +2544,17 @@ class YoutubeProvider(
                 )
             }
 
-            // 글로벌 인터셉터를 거치지 않으므로 수동으로 세션 쿠키를 획득하여 주입
+            // 글로벌 인터셉터를 경유하지 않도록 수동 헤더 빌드 및 쿠키 주입 진행
             val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(appPrefs, lang, "_Mk3UVhY40g", isSearch = false)
             
+            // ANDROID_VR 클라이언트 이름에 대응하는 모바일 User-Agent 헤더 지정
             val headers = mapOf(
                 "Cookie" to cookies,
-                "User-Agent" to "com.google.android.youtube/19.09.37 (Linux; U; Android 11)",
+                "User-Agent" to YoutubeUtils.ANDROID_VR_USER_AGENT,
                 "Content-Type" to "application/json"
             )
             
-            // [중요] interceptor 인자를 제외하여 전역 인터셉터의 간섭(크롬 덮어쓰기 및 Authorization 강제 삽입)을 완전히 회피
+            // 글로벌 인터셉터의 간섭(크롬 덮어쓰기 및 Authorization 강제 삽입)을 완전히 회피
             val responseResult = app.post(apiUrl, json = payload, headers = headers) 
             playerResponseText = responseResult.text
             
