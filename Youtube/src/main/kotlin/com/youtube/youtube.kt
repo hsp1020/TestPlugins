@@ -463,22 +463,41 @@ class YoutubeProvider(
         val cpn = generateCpn()
         try {
             var playbackUrl = buildTrackingUrl(playbackBaseUrl, cpn, cmt = "0.000", state = null, realTime = "0")
-            var watchtimeUrl = buildTrackingUrl(watchtimeBaseUrl, cpn, cmt = "5.000", state = "playing", realTime = "5")
+            // 유튜브 백엔드에 확실히 시청으로 인정받기 위해 Watchtime cmt를 10초(10.000) 단위로 설정
+            var watchtimeUrl = buildTrackingUrl(watchtimeBaseUrl, cpn, cmt = "10.000", state = "playing", realTime = "10")
             
+            // [핵심 패치: Client Spoofing] 
+            // ANDROID_VR에서 발급된 URL의 클라이언트를 WEB으로 변조합니다.
+            // 이를 통해 ytInterceptor가 주입하는 "SAPISIDHASH" 웹 세션과 정합성이 맞아떨어져 실제 시청 기록에 연동됩니다.
+            playbackUrl = playbackUrl.replace(Regex("([&?])c=[^&]+"), "$1c=WEB")
+                .replace(Regex("([&?])cver=[^&]+"), "$1cver=2.20240101.00")
+            
+            watchtimeUrl = watchtimeUrl.replace(Regex("([&?])c=[^&]+"), "$1c=WEB")
+                .replace(Regex("([&?])cver=[^&]+"), "$1cver=2.20240101.00")
+
             if (isShort) {
                 playbackUrl = playbackUrl.replace("el=detailpage", "el=shortspage").replace("el=embedded", "el=shortspage")
-                if (!playbackUrl.contains("el=shortspage")) {
-                    playbackUrl = "$playbackUrl&el=shortspage"
-                }
+                if (!playbackUrl.contains("el=shortspage")) playbackUrl = "$playbackUrl&el=shortspage"
+                
                 watchtimeUrl = watchtimeUrl.replace("el=detailpage", "el=shortspage").replace("el=embedded", "el=shortspage")
-                if (!watchtimeUrl.contains("el=shortspage")) {
-                    watchtimeUrl = "$watchtimeUrl&el=shortspage"
-                }
+                if (!watchtimeUrl.contains("el=shortspage")) watchtimeUrl = "$watchtimeUrl&el=shortspage"
             }
 
-            app.get(playbackUrl, interceptor = ytInterceptor)
-
-            app.get(watchtimeUrl, interceptor = ytInterceptor)
+            // UI 멈춤 방지를 위해 코루틴 백그라운드 환경에서 비동기로 트래킹 핑 전송 처리
+            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    // 1차 핑 전송: 재생 시작(Playback)
+                    app.get(playbackUrl, interceptor = ytInterceptor)
+                    
+                    // 2차 핑 전송 전 대기: 백엔드에서 Playback 핑을 DB에 안착시킬 논리적 간격 보장
+                    kotlinx.coroutines.delay(2000L)
+                    
+                    // 2차 핑 전송: 시청 인정(Watchtime)
+                    app.get(watchtimeUrl, interceptor = ytInterceptor)
+                } catch (e: Exception) {
+                    logError(e)
+                }
+            }
         } catch (e: Exception) {
             logError(e)
         }
@@ -2451,36 +2470,60 @@ class YoutubeProvider(
 
         var playerResponseText = ""
         try {
-            val apiUrl = if (isShort) "$mainUrl/youtubei/v1/reel/reel_item_watch?%24fields=playerResponse" else "$mainUrl/youtubei/v1/player"
-            val payload = if (isShort) {
-                mapOf(
-                    "context" to mapOf(
-                        "client" to mapOf(
-                            "clientName" to "WEB",
-                            "clientVersion" to YoutubeUtils.DEFAULT_CLIENT_VERSION,
-                            "hl" to lang,
-                            "gl" to if (lang == "ko") "KR" else "US"
-                        )
-                    ),
-                    "playerRequest" to mapOf(
-                        "videoId" to videoId
+            // 1. 영상 웹페이지 1회 경유를 통해 최신 sts 및 visitorData 파싱 확보
+            val htmlHeaders = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
+            val htmlUrl = if (isShort) "$mainUrl/shorts/$videoId" else fullUrl
+            val htmlResponse = app.get(htmlUrl, headers = htmlHeaders, interceptor = ytInterceptor).text
+            
+            val stsMatch = Regex(""""signatureTimestamp":\s*(\d+)""").find(htmlResponse)
+            val sts = stsMatch?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            val visitorDataMatch = Regex(""""VISITOR_DATA":"([^"]+)"""").find(htmlResponse)
+            val visitorData = visitorDataMatch?.groupValues?.get(1) ?: ""
+
+            // 2. ANDROID_VR 클라이언트를 사용해 차단 우회 및 playerResponse 직접 확보
+            val androidApiKey = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
+            val apiUrl = "https://www.youtube.com/youtubei/v1/player?key=$androidApiKey"
+            
+            val payload = mapOf(
+                "videoId" to videoId,
+                "context" to mapOf(
+                    "client" to mapOf(
+                        "clientName" to "ANDROID_VR",
+                        "clientVersion" to "1.65.10",
+                        "androidSdkVersion" to 32,
+                        "osName" to "Android",
+                        "osVersion" to "12L",
+                        "deviceMake" to "Oculus",
+                        "deviceModel" to "Quest 3",
+                        "hl" to lang,
+                        "gl" to if (lang == "ko") "KR" else "US",
+                        "visitorData" to visitorData
+                    )
+                ),
+                "playbackContext" to mapOf(
+                    "contentPlaybackContext" to mapOf(
+                        "signatureTimestamp" to sts
                     )
                 )
-            } else {
-                mapOf(
-                    "context" to mapOf(
-                        "client" to mapOf(
-                            "clientName" to "WEB",
-                            "clientVersion" to YoutubeUtils.DEFAULT_CLIENT_VERSION,
-                            "hl" to lang,
-                            "gl" to if (lang == "ko") "KR" else "US"
-                        )
-                    ),
-                    "videoId" to videoId
-                )
+            )
+
+            // 3. 전역 인터셉터 바인딩 해제에 따른 400 에러 우회 방어 로직
+            // SAPISIDHASH가 API 요청에 섞여 들어가는 걸 막고, VR 앱 순수 헤더 및 쿠키 세션만 수동 조합하여 전송
+            val vrHeaders = mutableMapOf(
+                "User-Agent" to YoutubeUtils.ANDROID_VR_USER_AGENT,
+                "X-YouTube-Client-Name" to "28",
+                "X-YouTube-Client-Version" to "1.65.10",
+                "Content-Type" to "application/json",
+                "Origin" to "https://www.youtube.com"
+            )
+            
+            val (cookies, _) = YoutubeUtils.buildCookiesAndExtractSapisid(appPrefs, lang, visitorData.ifBlank { "_Mk3UVhY40g" }, isSearch = false)
+            if (cookies.isNotBlank()) {
+                vrHeaders["Cookie"] = cookies
             }
-            val headers = mapOf("Referer" to "$mainUrl/watch?v=$videoId")
-            playerResponseText = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).text
+
+            // 인터셉터 우회 전송으로 73KB 급의 온전한 응답 확보
+            playerResponseText = app.post(apiUrl, json = payload, headers = vrHeaders).text
         } catch (e: Exception) {
             logError(e)
         }
@@ -2495,12 +2538,14 @@ class YoutubeProvider(
                 }
                 val playerResponse = mapper.readValue<PlayerResponse>(targetJson)
                 
+                // 시청 기록 연동 코루틴 트리거 시작
                 triggerPlaybackTracking(playerResponse.playbackTracking, videoId, isShort)
             } catch (e: Exception) {
                 logError(e)
             }
         }
 
+        // 기존 비디오 해상도 추출기는 독립적으로 안전하게 구동되도록 위임 (사이드 이펙트 분리)
         com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback, callback)
 
         return true
