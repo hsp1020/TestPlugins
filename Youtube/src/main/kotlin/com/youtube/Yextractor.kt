@@ -122,7 +122,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     try {
                         val appName = when (packageName) {
                             "com.junkfood.seal" -> "Seal"
-                            "com.maheshtechnicals.sealplus" -> "SealPlus"
+                            "com.maheshtechnicals.sealplus" -> "Seal Plus"
                             "com.deniscerri.ytdl" -> "YTDLnis"
                             else -> "The downloader"
                         }
@@ -461,18 +461,18 @@ open class YoutubeExtractor : ExtractorApi() {
                     
                     val originalUrl = "https://www.youtube.com/watch?v=$videoId"
                     
-                    // Seal, SealPlus, YTDLnis 즉시 다운로드용 가상 리링크 추가
+                    // YTDLnis, Seal, Seal Plus 즉시 다운로드용 가상 리링크 추가
+                    val ytdlPkg = "com.deniscerri.ytdl"
+                    val ytdlRedirect = getAppRedirectUrl(ytdlPkg, originalUrl) ?: originalUrl
+                    callback(newExtractorLink(source = "YouTube Downloader", name = "YTDLnis Download", url = ytdlRedirect, type = if (ytdlRedirect.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+
                     val sealPkg = "com.junkfood.seal"
                     val sealRedirect = getAppRedirectUrl(sealPkg, originalUrl) ?: originalUrl
                     callback(newExtractorLink(source = "YouTube Downloader", name = "Seal Download", url = sealRedirect, type = if (sealRedirect.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
 
                     val sealPlusPkg = "com.maheshtechnicals.sealplus"
                     val sealPlusRedirect = getAppRedirectUrl(sealPlusPkg, originalUrl) ?: originalUrl
-                    callback(newExtractorLink(source = "YouTube Downloader", name = "SealPlus Download", url = sealPlusRedirect, type = if (sealPlusRedirect.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
-
-                    val ytdlPkg = "com.deniscerri.ytdl"
-                    val ytdlRedirect = getAppRedirectUrl(ytdlPkg, originalUrl) ?: originalUrl
-                    callback(newExtractorLink(source = "YouTube Downloader", name = "YTDLnis Download", url = ytdlRedirect, type = if (ytdlRedirect.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+                    callback(newExtractorLink(source = "YouTube Downloader", name = "Seal Plus Download", url = sealPlusRedirect, type = if (sealPlusRedirect.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
 
                     return@withContext
                 }
@@ -642,18 +642,18 @@ open class YoutubeExtractor : ExtractorApi() {
                 // 정상 동작 상황 하에서의 외부 앱 리링크 추가 영역
                 val originalUrl = "https://www.youtube.com/watch?v=$videoId"
                 
-                // Seal, SealPlus, YTDLnis 즉시 다운로드용 가상 리링크 추가
+                // YTDLnis, Seal, Seal Plus 즉시 다운로드용 가상 리링크 추가
+                val ytdlPkg = "com.deniscerri.ytdl"
+                val ytdlRedirect = getAppRedirectUrl(ytdlPkg, originalUrl) ?: originalUrl
+                callback(newExtractorLink(source = "YouTube Downloader", name = "YTDLnis Download", url = ytdlRedirect, type = if (ytdlRedirect.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+
                 val sealPkg = "com.junkfood.seal"
                 val sealRedirect = getAppRedirectUrl(sealPkg, originalUrl) ?: originalUrl
                 callback(newExtractorLink(source = "YouTube Downloader", name = "Seal Download", url = sealRedirect, type = if (sealRedirect.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
 
                 val sealPlusPkg = "com.maheshtechnicals.sealplus"
                 val sealPlusRedirect = getAppRedirectUrl(sealPlusPkg, originalUrl) ?: originalUrl
-                callback(newExtractorLink(source = "YouTube Downloader", name = "SealPlus Download", url = sealPlusRedirect, type = if (sealPlusRedirect.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
-
-                val ytdlPkg = "com.deniscerri.ytdl"
-                val ytdlRedirect = getAppRedirectUrl(ytdlPkg, originalUrl) ?: originalUrl
-                callback(newExtractorLink(source = "YouTube Downloader", name = "YTDLnis Download", url = ytdlRedirect, type = if (ytdlRedirect.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+                callback(newExtractorLink(source = "YouTube Downloader", name = "Seal Plus Download", url = sealPlusRedirect, type = if (sealPlusRedirect.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
 
             } catch (e: Exception) { 
                 println("[YT_DEBUG_EXTRACTOR] 🚨 Exception 발생: ${e.message}")
