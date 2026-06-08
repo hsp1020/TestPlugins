@@ -271,32 +271,12 @@ object YoutubeUtils {
     }
 }
 
-
 class YoutubeProvider(
     private val sharedPref: SharedPreferences? = null
 ) : MainAPI() {
 
     val appPrefs: SharedPreferences?
-        get() {
-            val privatePrefs = sharedPref
-            val defaultPrefs = AcraApplication.context?.let { PreferenceManager.getDefaultSharedPreferences(it) }
-            
-            val hasPrivateSid = privatePrefs?.getString("SID", null) != null
-            val hasDefaultSid = defaultPrefs?.getString("SID", null) != null
-            
-            // [YTSYNC] 어느 저장소에 로그인 정보가 저장되었는지 실시간 모니터링 및 복구
-            println("[YTSYNC] Prefs lookup - Private SID exists: $hasPrivateSid, Default SID exists: $hasDefaultSid")
-            
-            return if (hasPrivateSid) {
-                privatePrefs
-            } else if (hasDefaultSid) {
-                defaultPrefs
-            } else {
-                privatePrefs ?: defaultPrefs
-            }
-        }
-
-        
+        get() = sharedPref ?: AcraApplication.context?.let { PreferenceManager.getDefaultSharedPreferences(it) }
 
     data class CustomSection(
         @JsonProperty("name") var name: String = "",
@@ -412,30 +392,14 @@ class YoutubeProvider(
                 requestBuilder.addHeader("Cookie", cookies)
                 requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
 
-                // [YTSYNC] 시청 기록 통계(stats) 서버로 가는 요청 가로채기 확인
-                if (urlStr.contains("api/stats/")) {
-                    println("[YTSYNC] ---------------- INTERCEPTOR DETECTED ----------------")
-                    println("[YTSYNC] Target Tracking URL: $urlStr")
-                    println("[YTSYNC] Logged-in Cookies attached: $cookies")
-                    println("[YTSYNC] Extracted SAPISID: $sapisidVal")
-                }
-
                 if (!sapisidVal.isNullOrBlank()) {
                     try {
                         val authHeader = YoutubeUtils.getSapisidHash(sapisidVal)
                         requestBuilder.addHeader("Authorization", authHeader)
                         requestBuilder.addHeader("X-Origin", "https://www.youtube.com")
                         requestBuilder.addHeader("X-Goog-AuthUser", "0")
-                        
-                        if (urlStr.contains("api/stats/")) {
-                            println("[YTSYNC] SAPISIDHASH Authorization Header: $authHeader")
-                        }
                     } catch (e: Exception) {
                         logError(e)
-                    }
-                } else {
-                    if (urlStr.contains("api/stats/")) {
-                        println("[YTSYNC] ⚠️ SAPISID is null or empty. Tracking might be treated as Guest.")
                     }
                 }
             } else {
@@ -447,7 +411,7 @@ class YoutubeProvider(
             return chain.proceed(requestBuilder.build())
         }
     }
-
+    
     private val ytInterceptor = YouTubeInterceptor(this)
 
     private var savedContinuationToken: String? = null
@@ -490,22 +454,12 @@ class YoutubeProvider(
         return uri.build().toString()
     }
 
-    private suspend fun triggerPlaybackTracking(
-        playbackTracking: PlaybackTracking?, 
-        videoId: String, 
-        cookies: String,
-        sapisidVal: String?,
-        isShort: Boolean = false
-    ) {
+    private suspend fun triggerPlaybackTracking(playbackTracking: PlaybackTracking?, videoId: String, isShort: Boolean = false) {
         val playbackBaseUrl = playbackTracking?.videostatsPlaybackUrl?.baseUrl
         val watchtimeBaseUrl = playbackTracking?.videostatsWatchtimeUrl?.baseUrl
 
-        if (playbackBaseUrl.isNullOrBlank() || watchtimeBaseUrl.isNullOrBlank()) {
-            println("[YTSYNC] ⚠️ Tracking base URLs are null or blank. Aborting ping.")
-            return
-        }
+        if (playbackBaseUrl.isNullOrBlank() || watchtimeBaseUrl.isNullOrBlank()) return
 
-        // [정정 핵심] 단 하나의 CPN만 생성하여 playback과 watchtime에 공통으로 바인딩
         val cpn = generateCpn()
         try {
             var playbackUrl = buildTrackingUrl(playbackBaseUrl, cpn, cmt = "0.000", state = null, realTime = "0")
@@ -522,35 +476,13 @@ class YoutubeProvider(
                 }
             }
 
-            val headers = mutableMapOf<String, String>()
-            headers["Cookie"] = cookies
-            headers["User-Agent"] = YoutubeUtils.CHROME_USER_AGENT
-            if (!sapisidVal.isNullOrBlank()) {
-                try {
-                    headers["Authorization"] = YoutubeUtils.getSapisidHash(sapisidVal)
-                    headers["X-Origin"] = "https://www.youtube.com"
-                    headers["X-Goog-AuthUser"] = "0"
-                } catch (e: Exception) {
-                    logError(e)
-                }
-            }
+            app.get(playbackUrl, interceptor = ytInterceptor)
 
-            // 인위적인 delay 없이 정합성이 맞춰진 단일 CPN 세션 핑 순차 송신
-            println("[YTSYNC] Sending Playback (0.0s) tracking request...")
-            val playbackRes = app.get(playbackUrl, headers = headers) 
-            println("[YTSYNC] Playback Response Code: ${playbackRes.code}")
-
-            println("[YTSYNC] Sending Watchtime (5.0s, playing) tracking request...")
-            val watchtimeRes = app.get(watchtimeUrl, headers = headers) 
-            println("[YTSYNC] Watchtime Response Code: ${watchtimeRes.code}")
-            
-            println("[YTSYNC] ---------------- TRACKING PINGS COMPLETED ----------------")
+            app.get(watchtimeUrl, interceptor = ytInterceptor)
         } catch (e: Exception) {
-            println("[YTSYNC] ❌ Error executing tracking requests: ${e.message}")
             logError(e)
         }
     }
-    
 
     private fun getSavedContinuationToken(key: String): String? {
         val hashedKey = YoutubeUtils.sha1(key)
@@ -2506,6 +2438,7 @@ class YoutubeProvider(
         }
     }
 
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -2516,103 +2449,56 @@ class YoutubeProvider(
         val fullUrl = "https://www.youtube.com/watch?v=$videoId"
         val isShort = data.contains("/shorts/")
 
-        println("[YTSYNC] ==================== LOAD LINKS START ====================")
-        println("[YTSYNC] Requested videoId: $videoId, isShort: $isShort")
-
         var playerResponseText = ""
         try {
-            // [검증 완료] 로그인 세션 쿠키 정상 동기화 체크
-            val hasSidInTarget = appPrefs?.getString("SID", null) != null
-            println("[YTSYNC] Targeted Prefs SID session verification: $hasSidInTarget")
-
-            // 실시간 봇 탐지 우회 토큰 파싱 진행 (Yextractor와 완벽 일치)
-            val watchUrl = "https://www.youtube.com/watch?v=$videoId"
-            val html = app.get(watchUrl, headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)).text
-            
-            val visitorData = Regex(""""VISITOR_DATA":"([^"]+)"""").find(html)?.groupValues?.get(1) ?: ""
-            val sts = Regex(""""signatureTimestamp":\s*(\d+)"""").find(html)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-            
-            println("[YTSYNC] Extracted Security Tokens - sts: $sts, visitorData: $visitorData")
-
-            val androidApiKey = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
-            val apiUrl = if (isShort) {
-                "$mainUrl/youtubei/v1/reel/reel_item_watch?key=$androidApiKey&%24fields=playerResponse"
-            } else {
-                "$mainUrl/youtubei/v1/player?key=$androidApiKey"
-            }
-
-            // ANDROID_VR 전용 세부 디바이스 정보 탑재 페이로드
-            val payload = mapOf(
-                "videoId" to videoId,
-                "context" to mapOf(
-                    "client" to mapOf(
-                        "clientName" to "ANDROID_VR",
-                        "clientVersion" to "1.65.10",
-                        "androidSdkVersion" to 32,
-                        "osName" to "Android",
-                        "osVersion" to "12L",
-                        "deviceMake" to "Oculus",
-                        "deviceModel" to "Quest 3",
-                        "hl" to lang,
-                        "gl" to if (lang == "ko") "KR" else "US",
-                        "visitorData" to visitorData
-                    )
-                ),
-                "playbackContext" to mapOf(
-                    "contentPlaybackContext" to mapOf(
-                        "signatureTimestamp" to sts
+            val apiUrl = if (isShort) "$mainUrl/youtubei/v1/reel/reel_item_watch?%24fields=playerResponse" else "$mainUrl/youtubei/v1/player"
+            val payload = if (isShort) {
+                mapOf(
+                    "context" to mapOf(
+                        "client" to mapOf(
+                            "clientName" to "WEB",
+                            "clientVersion" to YoutubeUtils.DEFAULT_CLIENT_VERSION,
+                            "hl" to lang,
+                            "gl" to if (lang == "ko") "KR" else "US"
+                        )
+                    ),
+                    "playerRequest" to mapOf(
+                        "videoId" to videoId
                     )
                 )
-            )
-
-            // 수동 쿠키 빌드 및 글로벌 인터셉터 완전 이탈
-            val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(appPrefs, lang, "_Mk3UVhY40g", isSearch = false)
-            println("[YTSYNC] Raw Cookies to be sent: $cookies")
-
-            val headers = mapOf(
-                "Cookie" to cookies,
-                "User-Agent" to YoutubeUtils.ANDROID_VR_USER_AGENT,
-                "Content-Type" to "application/json"
-            )
-            
-            val responseResult = app.post(apiUrl, json = payload, headers = headers) 
-            playerResponseText = responseResult.text
-            
-            println("[YTSYNC] playerResponse Server Response Status: ${responseResult.code}")
-            println("[YTSYNC] playerResponse Server Response Length: ${playerResponseText.length} bytes")
+            } else {
+                mapOf(
+                    "context" to mapOf(
+                        "client" to mapOf(
+                            "clientName" to "WEB",
+                            "clientVersion" to YoutubeUtils.DEFAULT_CLIENT_VERSION,
+                            "hl" to lang,
+                            "gl" to if (lang == "ko") "KR" else "US"
+                        )
+                    ),
+                    "videoId" to videoId
+                )
+            }
+            val headers = mapOf("Referer" to "$mainUrl/watch?v=$videoId")
+            playerResponseText = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).text
         } catch (e: Exception) {
-            println("[YTSYNC] ❌ Error requesting playerResponse API: ${e.message}")
             logError(e)
         }
 
         if (playerResponseText.isNotBlank()) {
             try {
                 val root = org.json.JSONObject(playerResponseText)
-                
-                if (root.has("playabilityStatus")) {
-                    val playabilityStatus = root.getJSONObject("playabilityStatus")
-                    val statusValue = playabilityStatus.optString("status") ?: "UNKNOWN"
-                    val reasonValue = playabilityStatus.optString("reason") ?: "No Reason"
-                    println("[YTSYNC] playabilityStatus - Status: $statusValue, Reason: $reasonValue")
-                }
-
                 val targetJson = if (root.has("playerResponse")) {
                     root.getJSONObject("playerResponse").toString()
                 } else {
                     playerResponseText
                 }
-                
                 val playerResponse = mapper.readValue<PlayerResponse>(targetJson)
-                println("[YTSYNC] PlayerResponse mapped successfully. playbackTracking null check: ${playerResponse.playbackTracking == null}")
                 
-                val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(appPrefs, lang, "_Mk3UVhY40g", isSearch = false)
-                triggerPlaybackTracking(playerResponse.playbackTracking, videoId, cookies, sapisidVal, isShort)
+                triggerPlaybackTracking(playerResponse.playbackTracking, videoId, isShort)
             } catch (e: Exception) {
-                println("[YTSYNC] ❌ Error during playerResponse parsing/mapping: ${e.message}")
                 logError(e)
             }
-        } else {
-            println("[YTSYNC] ⚠️ playerResponseText is blank! Skipping tracking execution.")
         }
 
         com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback, callback)
