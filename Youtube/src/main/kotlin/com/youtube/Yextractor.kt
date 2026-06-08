@@ -316,12 +316,8 @@ open class YoutubeExtractor : ExtractorApi() {
         val codec: String,
         val bitrate: Int,
         val initRange: String?,
-        val indexRange: String?,
-        val language: String  // [추가됨] 다국어 오디오 트랙 식별자
+        val indexRange: String?
     )
-
-    
-    
 
     // 로컬 가상 외부 다운로더 앱 인텐트 공유 리다이렉트 URL 생성기
     private fun getAppRedirectUrl(packageName: String, targetUrl: String): String? {
@@ -491,14 +487,10 @@ open class YoutubeExtractor : ExtractorApi() {
                     return@withContext
                 }
 
-                // ================= 여기서부터 교체 =================
-                // ================= 여기서부터 교체 =================
                 val adaptiveFormats = streamingData.optJSONArray("adaptiveFormats") ?: JSONArray()
                 
                 val videoOnlyList = ArrayList<StreamInfo>(adaptiveFormats.length())
                 val audioInfoList = ArrayList<AudioInfo>(adaptiveFormats.length())
-
-                println("[YTTRACK_DEBUG] === 다국어 오디오 파싱 시작 (총 포맷 개수: ${adaptiveFormats.length()}) ===")
 
                 for (i in 0 until adaptiveFormats.length()) {
                     val format = adaptiveFormats.getJSONObject(i)
@@ -552,24 +544,11 @@ open class YoutubeExtractor : ExtractorApi() {
                         val bitrate = format.optInt("bitrate", 128000)
                         if (codec.isEmpty()) codec = if (cleanMimeType.contains("webm")) "opus" else "mp4a.40.2"
                         
-                        // [YTTRACK_DEBUG] 유튜브 오디오 트랙 메타데이터 정밀 파싱
-                        val audioTrack = format.optJSONObject("audioTrack")
-                        val displayName = audioTrack?.optString("displayName") ?: ""
-                        val trackId = audioTrack?.optString("id") ?: ""
-                        val isDefault = audioTrack?.optBoolean("audioIsDefault", false) ?: false
-
-                        // displayName 우선, 없으면 id, 둘다 없으면 Original로 처리
-                        val language = if (displayName.isNotBlank()) displayName 
-                                       else if (trackId.isNotBlank()) trackId 
-                                       else "Original"
-                        
-                        println("[YTTRACK_DEBUG] 🎵 발견된 오디오 -> Mime: $cleanMimeType | Bitrate: $bitrate | trackId: $trackId | displayName: $displayName | Default: $isDefault | 최종 언어명: $language")
-                        
-                        audioInfoList.add(AudioInfo(streamUrl, cleanMimeType, codec, bitrate, initR, indexR, language))
+                        audioInfoList.add(AudioInfo(streamUrl, cleanMimeType, codec, bitrate, initR, indexR))
                     }
                 }
 
-                println("[YTTRACK_DEBUG] 파싱 완료 -> 비디오: ${videoOnlyList.size}개, 오디오: ${audioInfoList.size}개")
+                println("[YT_DEBUG_EXTRACTOR] 파싱 완료 -> 비디오: ${videoOnlyList.size}개, 오디오: ${audioInfoList.size}개")
 
                 val captions = playerResponse.optJSONObject("captions")?.optJSONObject("playerCaptionsTracklistRenderer")?.optJSONArray("captionTracks")
                 if (captions != null) {
@@ -578,6 +557,7 @@ open class YoutubeExtractor : ExtractorApi() {
                         var subUrl = track.optString("baseUrl")
                         val lang = track.optString("languageCode")
                         
+                        // [자막 최적화] 자동 생성(Auto-generated / ASR) 자막 식별 및 필터링 제거
                         val kind = track.optString("kind", "")
                         val vssId = track.optString("vssId", "")
                         if (kind == "asr" || vssId.startsWith("a.")) {
@@ -596,6 +576,7 @@ open class YoutubeExtractor : ExtractorApi() {
                             displayName = lang.uppercase()
                         }
 
+                        // [자막 최적화] 이름 기반의 2차 자동 생성 자막 안전 장치 필터링
                         if (displayName.contains("auto-generated", ignoreCase = true) || 
                             displayName.contains("자동 생성", ignoreCase = true)) {
                             continue
@@ -616,54 +597,34 @@ open class YoutubeExtractor : ExtractorApi() {
                 if (videoOnlyList.isNotEmpty() && audioInfoList.isNotEmpty()) {
                     startServerIfNeeded()
 
-                    // 언어명(language) 기준으로 오디오 그룹화
-                    val audiosByLanguage = audioInfoList.groupBy { it.language }
-                    
-                    println("[YTTRACK_DEBUG] 🌐 언어별 오디오 그룹화 결과: 총 ${audiosByLanguage.size}개의 언어 트랙 발견됨")
-                    audiosByLanguage.forEach { (lang, audios) ->
-                        println("[YTTRACK_DEBUG]   -> 언어: [$lang] / 해당 언어의 오디오 포맷 개수: ${audios.size}개")
-                    }
-
-                    // 비디오 화질별로 루프
                     for (video in videoOnlyList.distinctBy { it.height }) {
-                        // 언어 그룹별로 루프를 돌아 각각의 ExtractorLink를 생성
-                        for ((lang, audios) in audiosByLanguage) {
-                            
-                            val bestAudio = if (video.mimeType.contains("webm")) {
-                                audios.maxByOrNull { if (it.mimeType.contains("webm")) it.bitrate + 1000000 else it.bitrate }
-                            } else {
-                                audios.maxByOrNull { if (it.mimeType.contains("mp4")) it.bitrate + 1000000 else it.bitrate }
-                            }
+                        val bestAudio = if (video.mimeType.contains("webm")) {
+                            audioInfoList.maxByOrNull { if (it.mimeType.contains("webm")) it.bitrate + 1000000 else it.bitrate }
+                        } else {
+                            audioInfoList.maxByOrNull { if (it.mimeType.contains("mp4")) it.bitrate + 1000000 else it.bitrate }
+                        }
 
-                            if (bestAudio != null) {
-                                val dashXml = buildDashManifestXml(video, listOf(bestAudio), durationSeconds)
-                                val localLink = registerManifestAndGetUrl(dashXml)
+                        if (bestAudio != null) {
+                            val dashXml = buildDashManifestXml(video, listOf(bestAudio), durationSeconds)
+                            val localLink = registerManifestAndGetUrl(dashXml)
 
-                                if (localLink != null) {
-                                    // 클라우드스트림 소스 목록에 표시될 이름 (예: YouTube 1080p (Spanish))
-                                    val finalName = if (lang == "Original") "YouTube ${video.label}" else "YouTube ${video.label} ($lang)"
-                                    val sourceName = "YouTube"
-                                    
-                                    println("[YTTRACK_DEBUG] ✅ 링크 생성됨: $finalName | 화질: ${video.height}p")
-                                    
-                                    callback(
-                                        newExtractorLink(
-                                            sourceName, finalName, localLink, type = ExtractorLinkType.DASH
-                                        ) {
-                                            this.referer = mainUrl
-                                            this.quality = video.height
-                                            this.headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
-                                        }
-                                    )
-                                }
+                            if (localLink != null) {
+                                val finalName = "YouTube ${video.label}"
+                                val sourceName = "YouTube"
+                                
+                                callback(
+                                    newExtractorLink(
+                                        sourceName, finalName, localLink, type = ExtractorLinkType.DASH
+                                    ) {
+                                        this.referer = mainUrl
+                                        this.quality = video.height
+                                        this.headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
+                                    }
+                                )
                             }
                         }
                     }
                 }
-                // ================= 여기까지 교체 =================
-                // ================= 여기까지 교체 =================
-                
-
 
                 // 정상 동작 상황 하에서의 외부 앱 리링크 추가 영역
                 val originalUrl = "https://www.youtube.com/watch?v=$videoId"
