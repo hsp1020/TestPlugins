@@ -185,11 +185,15 @@ open class YoutubeExtractor : ExtractorApi() {
                         }
                         
                         if (targetUrl != null && pkg != null) {
-                            // ExoPlayer의 실제 재생 요청(X-Play-Action 고유 헤더 포함)인 경우에만 앱을 실행시킵니다.
-                            // Cloudstream의 사전 링크 검증(Ping/Pre-check) 및 썸네일 스레드 요청은 무시하여 미설치 토스트 오작동을 원천 차단합니다.
-                            val isActualPlayback = clientHeaders.containsKey("x-play-action")
+                            val userAgent = clientHeaders["user-agent"] ?: ""
                             
-                            if (isActualPlayback) {
+                            // 백그라운드 수집기(stagefright, okhttp, dalvik)의 핑 요청인 경우 앱 실행을 원천 차단합니다.
+                            // 실제 미디어 재생기(ExoPlayer/Cronet)인 경우에만 인텐트 공유 실행을 가동합니다.
+                            val isBackgroundProbe = userAgent.contains("stagefright", ignoreCase = true) || 
+                                                    userAgent.contains("okhttp", ignoreCase = true) || 
+                                                    userAgent.contains("dalvik", ignoreCase = true)
+                            
+                            if (!isBackgroundProbe) {
                                 val triggerKey = "$pkg|$targetUrl"
                                 val now = System.currentTimeMillis()
                                 val lastTrigger = recentTriggers[triggerKey] ?: 0L
@@ -202,13 +206,17 @@ open class YoutubeExtractor : ExtractorApi() {
                                     println("[YT_PROXY_DEBUG] 중복된 앱 실행 요청 감지되어 인텐트 발송 차단: $triggerKey")
                                 }
                             } else {
-                                println("[YT_PROXY_DEBUG] 링크 사전 체크(Ping) 요청 감지되어 앱 실행 생략함: $pkg")
+                                println("[YT_PROXY_DEBUG] 백그라운드 선행수집기 요청 감지되어 앱 실행 생략함: pkg=$pkg, ua=$userAgent")
                             }
                         }
                         
-                        // 실제 재생 요청에는 204 No Content를, 단순 체크(Ping)에는 정상 응답으로 인식되게끔 빈 200 OK를 전송합니다.
-                        val isActualPlayback = clientHeaders.containsKey("x-play-action")
-                        if (isActualPlayback) {
+                        // 백그라운드 수집기에는 주소가 살아있다고 인지되게끔 정상 응답(200 OK)을, 실제 재생 중단에는 204 No Content를 전송합니다.
+                        val userAgent = clientHeaders["user-agent"] ?: ""
+                        val isBackgroundProbe = userAgent.contains("stagefright", ignoreCase = true) || 
+                                                userAgent.contains("okhttp", ignoreCase = true) || 
+                                                userAgent.contains("dalvik", ignoreCase = true)
+                        
+                        if (!isBackgroundProbe) {
                             outWriter.print("HTTP/1.1 204 No Content\r\n")
                         } else {
                             outWriter.print("HTTP/1.1 200 OK\r\n")
