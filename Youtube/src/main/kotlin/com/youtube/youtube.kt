@@ -490,7 +490,6 @@ class YoutubeProvider(
         return uri.build().toString()
     }
 
-
     private suspend fun triggerPlaybackTracking(
         playbackTracking: PlaybackTracking?, 
         videoId: String, 
@@ -522,7 +521,11 @@ class YoutubeProvider(
                 }
             }
 
-            // 시청 기록 트래킹 전송에 사용되는 웹 브라우저 기반의 정합성 헤더 직접 주입
+            // [YTSYNC 핵심 교정 1] s.youtube.com 도메인을 www.youtube.com으로 치환하여 전송 (쿠키 및 Authorization 완벽 연동 보장)
+            playbackUrl = playbackUrl.replace("s.youtube.com", "www.youtube.com")
+            watchtimeUrl = watchtimeUrl.replace("s.youtube.com", "www.youtube.com")
+
+            // 수동 웹 브라우저 헤더 구성
             val headers = mutableMapOf<String, String>()
             headers["Cookie"] = cookies
             headers["User-Agent"] = YoutubeUtils.CHROME_USER_AGENT
@@ -536,12 +539,18 @@ class YoutubeProvider(
                 }
             }
 
-            println("[YTSYNC] Sending Playback (0.0s) tracking request...")
-            val playbackRes = app.get(playbackUrl, headers = headers) // 글로벌 인터셉터 타지 않음
+            // 1단계: 플레이백 전송 (CMT=0.0)
+            println("[YTSYNC] Sending Playback (0.0s) tracking request to: $playbackUrl")
+            val playbackRes = app.get(playbackUrl, headers = headers) 
             println("[YTSYNC] Playback Response Code: ${playbackRes.code}")
 
-            println("[YTSYNC] Sending Watchtime (5.0s, playing) tracking request...")
-            val watchtimeRes = app.get(watchtimeUrl, headers = headers) // 글로벌 인터셉터 타지 않음
+            // [YTSYNC 핵심 교정 2] 시스템 안티 스팸 락을 우회하기 위한 1초 대기 딜레이 시뮬레이션
+            println("[YTSYNC] Simulating real watchtime progress... waiting 1000ms...")
+            kotlinx.coroutines.delay(1000)
+
+            // 2단계: 워치타임 전송 (CMT=5.0)
+            println("[YTSYNC] Sending Watchtime (5.0s, playing) tracking request to: $watchtimeUrl")
+            val watchtimeRes = app.get(watchtimeUrl, headers = headers) 
             println("[YTSYNC] Watchtime Response Code: ${watchtimeRes.code}")
             
             println("[YTSYNC] ---------------- TRACKING PINGS COMPLETED ----------------")
@@ -550,7 +559,6 @@ class YoutubeProvider(
             logError(e)
         }
     }
-    
 
     private fun getSavedContinuationToken(key: String): String? {
         val hashedKey = YoutubeUtils.sha1(key)
@@ -2521,35 +2529,60 @@ class YoutubeProvider(
 
         var playerResponseText = ""
         try {
-            // 안드로이드 공용 API Key (TVHTML5 클라이언트와 호환성 100%)
-            val androidApiKey = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
-            val apiUrl = "https://www.youtube.com/youtubei/v1/player?key=$androidApiKey"
-            println("[YTSYNC] Requesting playerResponse from endpoint: $apiUrl")
+            // [검증 완료] 로그인 세션 쿠키 정상 동기화 체크
+            val hasSidInTarget = appPrefs?.getString("SID", null) != null
+            println("[YTSYNC] Targeted Prefs SID session verification: $hasSidInTarget")
 
-            // 포토큰 필터 및 보안 챌린지가 없는 경량 TVHTML5 페이로드 구성
+            // 실시간 봇 탐지 우회 토큰 파싱 진행 (Yextractor와 완벽 일치)
+            val watchUrl = "https://www.youtube.com/watch?v=$videoId"
+            val html = app.get(watchUrl, headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)).text
+            
+            val visitorData = Regex(""""VISITOR_DATA":"([^"]+)"""").find(html)?.groupValues?.get(1) ?: ""
+            val sts = Regex(""""signatureTimestamp":\s*(\d+)"""").find(html)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            
+            println("[YTSYNC] Extracted Security Tokens - sts: $sts, visitorData: $visitorData")
+
+            val androidApiKey = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
+            val apiUrl = if (isShort) {
+                "$mainUrl/youtubei/v1/reel/reel_item_watch?key=$androidApiKey&%24fields=playerResponse"
+            } else {
+                "$mainUrl/youtubei/v1/player?key=$androidApiKey"
+            }
+
+            // ANDROID_VR 전용 세부 디바이스 정보 탑재 페이로드
             val payload = mapOf(
                 "videoId" to videoId,
                 "context" to mapOf(
                     "client" to mapOf(
-                        "clientName" to "TVHTML5",
-                        "clientVersion" to "7.20240701.16.00",
+                        "clientName" to "ANDROID_VR",
+                        "clientVersion" to "1.65.10",
+                        "androidSdkVersion" to 32,
+                        "osName" to "Android",
+                        "osVersion" to "12L",
+                        "deviceMake" to "Oculus",
+                        "deviceModel" to "Quest 3",
                         "hl" to lang,
-                        "gl" to if (lang == "ko") "KR" else "US"
+                        "gl" to if (lang == "ko") "KR" else "US",
+                        "visitorData" to visitorData
+                    )
+                ),
+                "playbackContext" to mapOf(
+                    "contentPlaybackContext" to mapOf(
+                        "signatureTimestamp" to sts
                     )
                 )
             )
 
-            // 웹 쿠키 획득 (글로벌 인터셉터 우회용)
+            // 수동 쿠키 빌드 및 글로벌 인터셉터 완전 이탈
             val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(appPrefs, lang, "_Mk3UVhY40g", isSearch = false)
             println("[YTSYNC] Raw Cookies to be sent: $cookies")
 
             val headers = mapOf(
                 "Cookie" to cookies,
-                "User-Agent" to YoutubeUtils.CHROME_USER_AGENT,
+                "User-Agent" to YoutubeUtils.ANDROID_VR_USER_AGENT,
                 "Content-Type" to "application/json"
             )
             
-            // 글로벌 인터셉터의 간섭(크롬 덮어쓰기 및 Authorization 삽입)을 차단하여 송신
             val responseResult = app.post(apiUrl, json = payload, headers = headers) 
             playerResponseText = responseResult.text
             
