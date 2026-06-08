@@ -492,10 +492,13 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
 
                 // ================= 여기서부터 교체 =================
+                // ================= 여기서부터 교체 =================
                 val adaptiveFormats = streamingData.optJSONArray("adaptiveFormats") ?: JSONArray()
                 
                 val videoOnlyList = ArrayList<StreamInfo>(adaptiveFormats.length())
                 val audioInfoList = ArrayList<AudioInfo>(adaptiveFormats.length())
+
+                println("[YTTRACK_DEBUG] === 다국어 오디오 파싱 시작 (총 포맷 개수: ${adaptiveFormats.length()}) ===")
 
                 for (i in 0 until adaptiveFormats.length()) {
                     val format = adaptiveFormats.getJSONObject(i)
@@ -549,17 +552,24 @@ open class YoutubeExtractor : ExtractorApi() {
                         val bitrate = format.optInt("bitrate", 128000)
                         if (codec.isEmpty()) codec = if (cleanMimeType.contains("webm")) "opus" else "mp4a.40.2"
                         
-                        // [핵심 패치] 유튜브 JSON 내부에 있는 audioTrack 객체 파싱 (PipePipe 알고리즘 이식)
+                        // [YTTRACK_DEBUG] 유튜브 오디오 트랙 메타데이터 정밀 파싱
                         val audioTrack = format.optJSONObject("audioTrack")
-                        val displayName = audioTrack?.optString("displayName")
-                        // displayName이 없으면 기본 오디오 트랙(원본)으로 취급
-                        val language = if (!displayName.isNullOrBlank()) displayName else "Original"
+                        val displayName = audioTrack?.optString("displayName") ?: ""
+                        val trackId = audioTrack?.optString("id") ?: ""
+                        val isDefault = audioTrack?.optBoolean("audioIsDefault", false) ?: false
+
+                        // displayName 우선, 없으면 id, 둘다 없으면 Original로 처리
+                        val language = if (displayName.isNotBlank()) displayName 
+                                       else if (trackId.isNotBlank()) trackId 
+                                       else "Original"
+                        
+                        println("[YTTRACK_DEBUG] 🎵 발견된 오디오 -> Mime: $cleanMimeType | Bitrate: $bitrate | trackId: $trackId | displayName: $displayName | Default: $isDefault | 최종 언어명: $language")
                         
                         audioInfoList.add(AudioInfo(streamUrl, cleanMimeType, codec, bitrate, initR, indexR, language))
                     }
                 }
 
-                println("[YT_DEBUG_EXTRACTOR] 파싱 완료 -> 비디오: ${videoOnlyList.size}개, 오디오: ${audioInfoList.size}개")
+                println("[YTTRACK_DEBUG] 파싱 완료 -> 비디오: ${videoOnlyList.size}개, 오디오: ${audioInfoList.size}개")
 
                 val captions = playerResponse.optJSONObject("captions")?.optJSONObject("playerCaptionsTracklistRenderer")?.optJSONArray("captionTracks")
                 if (captions != null) {
@@ -606,15 +616,19 @@ open class YoutubeExtractor : ExtractorApi() {
                 if (videoOnlyList.isNotEmpty() && audioInfoList.isNotEmpty()) {
                     startServerIfNeeded()
 
-                    // [핵심 패치] 다른 개발자 코드처럼 오디오를 "언어별"로 그룹핑
+                    // 언어명(language) 기준으로 오디오 그룹화
                     val audiosByLanguage = audioInfoList.groupBy { it.language }
+                    
+                    println("[YTTRACK_DEBUG] 🌐 언어별 오디오 그룹화 결과: 총 ${audiosByLanguage.size}개의 언어 트랙 발견됨")
+                    audiosByLanguage.forEach { (lang, audios) ->
+                        println("[YTTRACK_DEBUG]   -> 언어: [$lang] / 해당 언어의 오디오 포맷 개수: ${audios.size}개")
+                    }
 
                     // 비디오 화질별로 루프
                     for (video in videoOnlyList.distinctBy { it.height }) {
-                        // 언어 그룹별로 루프
+                        // 언어 그룹별로 루프를 돌아 각각의 ExtractorLink를 생성
                         for ((lang, audios) in audiosByLanguage) {
                             
-                            // 해당 언어 내에서 비트레이트가 가장 높은 최고 음질 오디오 선택
                             val bestAudio = if (video.mimeType.contains("webm")) {
                                 audios.maxByOrNull { if (it.mimeType.contains("webm")) it.bitrate + 1000000 else it.bitrate }
                             } else {
@@ -626,9 +640,11 @@ open class YoutubeExtractor : ExtractorApi() {
                                 val localLink = registerManifestAndGetUrl(dashXml)
 
                                 if (localLink != null) {
-                                    // 링크 이름에 언어를 명시하여 다국어 지원 표시
+                                    // 클라우드스트림 소스 목록에 표시될 이름 (예: YouTube 1080p (Spanish))
                                     val finalName = if (lang == "Original") "YouTube ${video.label}" else "YouTube ${video.label} ($lang)"
                                     val sourceName = "YouTube"
+                                    
+                                    println("[YTTRACK_DEBUG] ✅ 링크 생성됨: $finalName | 화질: ${video.height}p")
                                     
                                     callback(
                                         newExtractorLink(
@@ -644,6 +660,7 @@ open class YoutubeExtractor : ExtractorApi() {
                         }
                     }
                 }
+                // ================= 여기까지 교체 =================
                 // ================= 여기까지 교체 =================
                 
 
