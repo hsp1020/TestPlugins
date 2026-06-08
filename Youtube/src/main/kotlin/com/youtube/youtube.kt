@@ -20,7 +20,10 @@ import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
 import com.lagradost.cloudstream3.AcraApplication
 import androidx.preference.PreferenceManager
-
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 
 
 
@@ -483,14 +486,14 @@ class YoutubeProvider(
                 if (!watchtimeUrl.contains("el=shortspage")) watchtimeUrl = "$watchtimeUrl&el=shortspage"
             }
 
-            // UI 멈춤 방지를 위해 코루틴 백그라운드 환경에서 비동기로 트래킹 핑 전송 처리
-            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            // UI 멈춤(재생 지연) 방지를 위해 코루틴 백그라운드 환경에서 비동기로 트래킹 핑 전송 처리
+            CoroutineScope(Dispatchers.IO).launch {
                 try {
                     // 1차 핑 전송: 재생 시작(Playback)
                     app.get(playbackUrl, interceptor = ytInterceptor)
                     
                     // 2차 핑 전송 전 대기: 백엔드에서 Playback 핑을 DB에 안착시킬 논리적 간격 보장
-                    kotlinx.coroutines.delay(2000L)
+                    delay(2000L)
                     
                     // 2차 핑 전송: 시청 인정(Watchtime)
                     app.get(watchtimeUrl, interceptor = ytInterceptor)
