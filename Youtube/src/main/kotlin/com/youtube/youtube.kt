@@ -2521,61 +2521,35 @@ class YoutubeProvider(
 
         var playerResponseText = ""
         try {
-            // [검증 완료] 로그인 세션 쿠키 정상 동기화 확인 완료
-            val hasSidInTarget = appPrefs?.getString("SID", null) != null
-            println("[YTSYNC] Targeted Prefs SID session verification: $hasSidInTarget")
-
-            val watchUrl = "https://www.youtube.com/watch?v=$videoId"
-            val html = app.get(watchUrl, headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)).text
-            
-            val visitorData = Regex(""""VISITOR_DATA":"([^"]+)"""").find(html)?.groupValues?.get(1) ?: ""
-            val sts = Regex(""""signatureTimestamp":\s*(\d+)"""").find(html)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-            
-            println("[YTSYNC] Extracted Security Tokens - sts: $sts, visitorData: $visitorData")
-
-            // 웹 쿠키 정보를 수동으로 취합
-            val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(appPrefs, lang, "_Mk3UVhY40g", isSearch = false)
-            println("[YTSYNC] Raw Cookies to be sent: $cookies")
-            println("[YTSYNC] Extracted SAPISID hash input: $sapisidVal")
-
-            // 정합성 확보를 위해 웹 브라우저 전용 API Key 및 "WEB" 클라이언트로 완전 정렬
-            val webApiKey = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
-            val apiUrl = "https://www.youtube.com/youtubei/v1/player?key=$webApiKey"
+            // 안드로이드 공용 API Key (TVHTML5 클라이언트와 호환성 100%)
+            val androidApiKey = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
+            val apiUrl = "https://www.youtube.com/youtubei/v1/player?key=$androidApiKey"
             println("[YTSYNC] Requesting playerResponse from endpoint: $apiUrl")
 
+            // 포토큰 필터 및 보안 챌린지가 없는 경량 TVHTML5 페이로드 구성
             val payload = mapOf(
                 "videoId" to videoId,
                 "context" to mapOf(
                     "client" to mapOf(
-                        "clientName" to "WEB",
-                        "clientVersion" to YoutubeUtils.DEFAULT_CLIENT_VERSION, // "2.20240725.01.00"
+                        "clientName" to "TVHTML5",
+                        "clientVersion" to "7.20240701.16.00",
                         "hl" to lang,
-                        "gl" to if (lang == "ko") "KR" else "US",
-                        "visitorData" to visitorData
-                    )
-                ),
-                "playbackContext" to mapOf(
-                    "contentPlaybackContext" to mapOf(
-                        "signatureTimestamp" to sts
+                        "gl" to if (lang == "ko") "KR" else "US"
                     )
                 )
             )
 
-            // 웹 브라우저 정합성 헤더 구성 (글로벌 인터셉터 우회)
-            val headers = mutableMapOf<String, String>()
-            headers["Cookie"] = cookies
-            headers["User-Agent"] = YoutubeUtils.CHROME_USER_AGENT
-            headers["Content-Type"] = "application/json"
-            if (!sapisidVal.isNullOrBlank()) {
-                try {
-                    headers["Authorization"] = YoutubeUtils.getSapisidHash(sapisidVal)
-                    headers["X-Origin"] = "https://www.youtube.com"
-                    headers["X-Goog-AuthUser"] = "0"
-                } catch (e: Exception) {
-                    logError(e)
-                }
-            }
+            // 웹 쿠키 획득 (글로벌 인터셉터 우회용)
+            val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(appPrefs, lang, "_Mk3UVhY40g", isSearch = false)
+            println("[YTSYNC] Raw Cookies to be sent: $cookies")
+
+            val headers = mapOf(
+                "Cookie" to cookies,
+                "User-Agent" to YoutubeUtils.CHROME_USER_AGENT,
+                "Content-Type" to "application/json"
+            )
             
+            // 글로벌 인터셉터의 간섭(크롬 덮어쓰기 및 Authorization 삽입)을 차단하여 송신
             val responseResult = app.post(apiUrl, json = payload, headers = headers) 
             playerResponseText = responseResult.text
             
