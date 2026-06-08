@@ -458,23 +458,29 @@ class YoutubeProvider(
     }
 
     private suspend fun triggerPlaybackTracking(playbackTracking: PlaybackTracking?, videoId: String, isShort: Boolean = false) {
+        println("[YTSYNC_DEBUG] === 트래킹 시작: VideoID=$videoId, isShort=$isShort ===")
         val playbackBaseUrl = playbackTracking?.videostatsPlaybackUrl?.baseUrl
         val watchtimeBaseUrl = playbackTracking?.videostatsWatchtimeUrl?.baseUrl
 
-        if (playbackBaseUrl.isNullOrBlank() || watchtimeBaseUrl.isNullOrBlank()) return
+        if (playbackBaseUrl.isNullOrBlank() || watchtimeBaseUrl.isNullOrBlank()) {
+            println("[YTSYNC_DEBUG] 🚨 트래킹 URL 누락됨! (playbackUrl 혹은 watchtimeUrl이 없습니다)")
+            return
+        }
+
+        println("[YTSYNC_DEBUG] 원본 Playback URL: $playbackBaseUrl")
+        println("[YTSYNC_DEBUG] 원본 Watchtime URL: $watchtimeBaseUrl")
 
         val cpn = generateCpn()
+        println("[YTSYNC_DEBUG] 생성된 CPN: $cpn")
+
         try {
             var playbackUrl = buildTrackingUrl(playbackBaseUrl, cpn, cmt = "0.000", state = null, realTime = "0")
             // 유튜브 백엔드에 확실히 시청으로 인정받기 위해 Watchtime cmt를 10초(10.000) 단위로 설정
             var watchtimeUrl = buildTrackingUrl(watchtimeBaseUrl, cpn, cmt = "10.000", state = "playing", realTime = "10")
-            
-            // [핵심 패치: Client Spoofing] 
-            // ANDROID_VR에서 발급된 URL의 클라이언트를 WEB으로 변조합니다.
-            // 이를 통해 ytInterceptor가 주입하는 "SAPISIDHASH" 웹 세션과 정합성이 맞아떨어져 실제 시청 기록에 연동됩니다.
+
+            // BaseURL이 만약 모바일 클라이언트에서 생성되었다면 WEB으로 안전하게 덮어쓰기
             playbackUrl = playbackUrl.replace(Regex("([&?])c=[^&]+"), "$1c=WEB")
                 .replace(Regex("([&?])cver=[^&]+"), "$1cver=2.20240101.00")
-            
             watchtimeUrl = watchtimeUrl.replace(Regex("([&?])c=[^&]+"), "$1c=WEB")
                 .replace(Regex("([&?])cver=[^&]+"), "$1cver=2.20240101.00")
 
@@ -486,25 +492,35 @@ class YoutubeProvider(
                 if (!watchtimeUrl.contains("el=shortspage")) watchtimeUrl = "$watchtimeUrl&el=shortspage"
             }
 
-            // UI 멈춤(재생 지연) 방지를 위해 코루틴 백그라운드 환경에서 비동기로 트래킹 핑 전송 처리
-            CoroutineScope(Dispatchers.IO).launch {
+            println("[YTSYNC_DEBUG] 최종 Playback 전송 URL: $playbackUrl")
+            println("[YTSYNC_DEBUG] 최종 Watchtime 전송 URL: $watchtimeUrl")
+
+            // UI 및 영상 재생 지연 방지를 위해 백그라운드 코루틴 발사
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
                 try {
-                    // 1차 핑 전송: 재생 시작(Playback)
-                    app.get(playbackUrl, interceptor = ytInterceptor)
+                    println("[YTSYNC_DEBUG] [1/2] Playback 핑 전송 시도 중...")
+                    val pRes = app.get(playbackUrl, interceptor = ytInterceptor)
+                    println("[YTSYNC_DEBUG] [1/2] Playback 핑 응답 코드: ${pRes.code} (204가 정상)")
                     
-                    // 2차 핑 전송 전 대기: 백엔드에서 Playback 핑을 DB에 안착시킬 논리적 간격 보장
-                    delay(2000L)
+                    // 첫 핑 전송 후 백엔드 DB 안착을 위해 2.5초 대기
+                    kotlinx.coroutines.delay(2500L)
                     
-                    // 2차 핑 전송: 시청 인정(Watchtime)
-                    app.get(watchtimeUrl, interceptor = ytInterceptor)
+                    println("[YTSYNC_DEBUG] [2/2] Watchtime 핑 전송 시도 중...")
+                    val wRes = app.get(watchtimeUrl, interceptor = ytInterceptor)
+                    println("[YTSYNC_DEBUG] [2/2] Watchtime 핑 응답 코드: ${wRes.code} (204가 정상)")
+                    println("[YTSYNC_DEBUG] === 트래킹 완료 (시청 기록 연동 성공 예상) ===")
                 } catch (e: Exception) {
+                    println("[YTSYNC_DEBUG] 🚨 트래킹 핑 전송 중 예외 발생: ${e.message}")
                     logError(e)
                 }
             }
         } catch (e: Exception) {
+            println("[YTSYNC_DEBUG] 🚨 URL 빌드 중 예외 발생: ${e.message}")
             logError(e)
         }
     }
+
+
 
     private fun getSavedContinuationToken(key: String): String? {
         val hashedKey = YoutubeUtils.sha1(key)
@@ -2460,7 +2476,6 @@ class YoutubeProvider(
         }
     }
 
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -2471,84 +2486,80 @@ class YoutubeProvider(
         val fullUrl = "https://www.youtube.com/watch?v=$videoId"
         val isShort = data.contains("/shorts/")
 
-        var playerResponseText = ""
-        try {
-            // 1. 영상 웹페이지 1회 경유를 통해 최신 sts 및 visitorData 파싱 확보
-            val htmlHeaders = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
-            val htmlUrl = if (isShort) "$mainUrl/shorts/$videoId" else fullUrl
-            val htmlResponse = app.get(htmlUrl, headers = htmlHeaders, interceptor = ytInterceptor).text
-            
-            val stsMatch = Regex(""""signatureTimestamp":\s*(\d+)""").find(htmlResponse)
-            val sts = stsMatch?.groupValues?.get(1)?.toIntOrNull() ?: 0
-            val visitorDataMatch = Regex(""""VISITOR_DATA":"([^"]+)"""").find(htmlResponse)
-            val visitorData = visitorDataMatch?.groupValues?.get(1) ?: ""
+        println("[YTSYNC_DEBUG] >>> loadLinks 진입: $videoId (isShort=$isShort)")
 
-            // 2. ANDROID_VR 클라이언트를 사용해 차단 우회 및 playerResponse 직접 확보
-            val androidApiKey = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
-            val apiUrl = "https://www.youtube.com/youtubei/v1/player?key=$androidApiKey"
+        var playerResponseJson: String? = null
+        try {
+            // 1. 영상 웹페이지(HTML) 요청 (ytInterceptor가 로그인 세션을 자동으로 주입하여 완벽한 로그인 상태로 접근)
+            val htmlUrl = if (isShort) "$mainUrl/shorts/$videoId" else fullUrl
+            println("[YTSYNC_DEBUG] HTML 페이지 요청 중: $htmlUrl")
+            val htmlResponse = app.get(htmlUrl, interceptor = ytInterceptor).text
             
-            val payload = mapOf(
-                "videoId" to videoId,
-                "context" to mapOf(
-                    "client" to mapOf(
-                        "clientName" to "ANDROID_VR",
-                        "clientVersion" to "1.65.10",
-                        "androidSdkVersion" to 32,
-                        "osName" to "Android",
-                        "osVersion" to "12L",
-                        "deviceMake" to "Oculus",
-                        "deviceModel" to "Quest 3",
-                        "hl" to lang,
-                        "gl" to if (lang == "ko") "KR" else "US",
-                        "visitorData" to visitorData
-                    )
-                ),
-                "playbackContext" to mapOf(
-                    "contentPlaybackContext" to mapOf(
-                        "signatureTimestamp" to sts
+            // 2. HTML 내부에 숨겨진 ytInitialPlayerResponse 추출 (완벽한 WEB 로그인 세션 기반 데이터)
+            val marker1 = "ytInitialPlayerResponse = "
+            var startIdx = htmlResponse.indexOf(marker1)
+            if (startIdx != -1) {
+                playerResponseJson = extractBalancedJson(htmlResponse.substring(startIdx + marker1.length))
+            }
+            
+            if (playerResponseJson == null) {
+                val marker2 = "var ytInitialPlayerResponse = "
+                startIdx = htmlResponse.indexOf(marker2)
+                if (startIdx != -1) {
+                    playerResponseJson = extractBalancedJson(htmlResponse.substring(startIdx + marker2.length))
+                }
+            }
+            
+            println("[YTSYNC_DEBUG] HTML에서 ytInitialPlayerResponse 추출 성공 여부: ${playerResponseJson != null}")
+            
+            // 3. 만약 연령제한 등으로 HTML 추출에 실패했다면, ANDROID_VR로 최후의 폴백 시도
+            if (playerResponseJson == null) {
+                println("[YTSYNC_DEBUG] 🚨 HTML 추출 실패. ANDROID_VR 폴백 요청 진행...")
+                val androidApiKey = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
+                val apiUrl = "https://www.youtube.com/youtubei/v1/player?key=$androidApiKey"
+                val payload = mapOf(
+                    "videoId" to videoId,
+                    "context" to mapOf(
+                        "client" to mapOf("clientName" to "ANDROID_VR", "clientVersion" to "1.65.10", "hl" to lang)
                     )
                 )
-            )
-
-            // 3. 전역 인터셉터 바인딩 해제에 따른 400 에러 우회 방어 로직
-            // SAPISIDHASH가 API 요청에 섞여 들어가는 걸 막고, VR 앱 순수 헤더 및 쿠키 세션만 수동 조합하여 전송
-            val vrHeaders = mutableMapOf(
-                "User-Agent" to YoutubeUtils.ANDROID_VR_USER_AGENT,
-                "X-YouTube-Client-Name" to "28",
-                "X-YouTube-Client-Version" to "1.65.10",
-                "Content-Type" to "application/json",
-                "Origin" to "https://www.youtube.com"
-            )
-            
-            val (cookies, _) = YoutubeUtils.buildCookiesAndExtractSapisid(appPrefs, lang, visitorData.ifBlank { "_Mk3UVhY40g" }, isSearch = false)
-            if (cookies.isNotBlank()) {
-                vrHeaders["Cookie"] = cookies
+                val vrHeaders = mapOf(
+                    "User-Agent" to YoutubeUtils.ANDROID_VR_USER_AGENT,
+                    "X-YouTube-Client-Name" to "28",
+                    "X-YouTube-Client-Version" to "1.65.10",
+                    "Origin" to "https://www.youtube.com"
+                )
+                playerResponseJson = app.post(apiUrl, json = payload, headers = vrHeaders).text
+                println("[YTSYNC_DEBUG] ANDROID_VR 폴백 응답 확보 완료 (길이: ${playerResponseJson.length})")
             }
-
-            // 인터셉터 우회 전송으로 73KB 급의 온전한 응답 확보
-            playerResponseText = app.post(apiUrl, json = payload, headers = vrHeaders).text
         } catch (e: Exception) {
+            println("[YTSYNC_DEBUG] 🚨 playerResponse 획득 중 예외 발생: ${e.message}")
             logError(e)
         }
 
-        if (playerResponseText.isNotBlank()) {
+        if (!playerResponseJson.isNullOrBlank()) {
             try {
-                val root = org.json.JSONObject(playerResponseText)
+                val root = org.json.JSONObject(playerResponseJson)
                 val targetJson = if (root.has("playerResponse")) {
                     root.getJSONObject("playerResponse").toString()
                 } else {
-                    playerResponseText
+                    playerResponseJson
                 }
                 val playerResponse = mapper.readValue<PlayerResponse>(targetJson)
+                
+                println("[YTSYNC_DEBUG] JSON 매핑 성공. playbackTracking 존재 여부: ${playerResponse.playbackTracking != null}")
                 
                 // 시청 기록 연동 코루틴 트리거 시작
                 triggerPlaybackTracking(playerResponse.playbackTracking, videoId, isShort)
             } catch (e: Exception) {
+                println("[YTSYNC_DEBUG] 🚨 JSON 파싱 중 예외 발생: ${e.message}")
                 logError(e)
             }
+        } else {
+            println("[YTSYNC_DEBUG] 🚨 playerResponseJson이 비어 있어 트래킹을 생략합니다.")
         }
 
-        // 기존 비디오 해상도 추출기는 독립적으로 안전하게 구동되도록 위임 (사이드 이펙트 분리)
+        // 기존 비디오 해상도 추출기는 독립적으로 구동되도록 위임 (사이드 이펙트 분리)
         com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback, callback)
 
         return true
