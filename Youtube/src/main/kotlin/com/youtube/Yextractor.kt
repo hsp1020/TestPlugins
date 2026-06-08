@@ -185,9 +185,9 @@ open class YoutubeExtractor : ExtractorApi() {
                         }
                         
                         if (targetUrl != null && pkg != null) {
-                            // ExoPlayer의 실제 재생 요청(Range 헤더 포함)인 경우에만 앱을 실행시킵니다.
-                            // Cloudstream의 사전 링크 검증(Ping/Pre-check) 요청은 무시하여 미설치 토스트 오작동을 원천 차단합니다.
-                            val isActualPlayback = clientHeaders.containsKey("range")
+                            // ExoPlayer의 실제 재생 요청(X-Play-Action 고유 헤더 포함)인 경우에만 앱을 실행시킵니다.
+                            // Cloudstream의 사전 링크 검증(Ping/Pre-check) 및 썸네일 스레드 요청은 무시하여 미설치 토스트 오작동을 원천 차단합니다.
+                            val isActualPlayback = clientHeaders.containsKey("x-play-action")
                             
                             if (isActualPlayback) {
                                 val triggerKey = "$pkg|$targetUrl"
@@ -206,8 +206,8 @@ open class YoutubeExtractor : ExtractorApi() {
                             }
                         }
                         
-                        // 링크 체크(Ping)에는 200 OK를, 실제 재생 요청에는 204 No Content를 전송합니다.
-                        val isActualPlayback = clientHeaders.containsKey("range")
+                        // 실제 재생 요청에는 204 No Content를, 단순 체크(Ping)에는 정상 응답으로 인식되게끔 빈 200 OK를 전송합니다.
+                        val isActualPlayback = clientHeaders.containsKey("x-play-action")
                         if (isActualPlayback) {
                             outWriter.print("HTTP/1.1 204 No Content\r\n")
                         } else {
@@ -464,15 +464,27 @@ open class YoutubeExtractor : ExtractorApi() {
                     // YTDLnis, Seal, Seal Plus 즉시 다운로드용 가상 리링크 추가 (type = INFER_TYPE)
                     val ytdlPkg = "com.deniscerri.ytdl"
                     val ytdlRedirect = getAppRedirectUrl(ytdlPkg, originalUrl) ?: originalUrl
-                    callback(newExtractorLink(source = "YouTube Downloader", name = "YTDLnis Download", url = ytdlRedirect, type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+                    callback(newExtractorLink(source = "YouTube Downloader", name = "YTDLnis Download", url = ytdlRedirect, type = INFER_TYPE) {
+                        this.quality = 2160
+                        this.referer = mainUrl
+                        this.headers = mapOf("X-Play-Action" to "YTDLnis")
+                    })
 
                     val sealPkg = "com.junkfood.seal"
                     val sealRedirect = getAppRedirectUrl(sealPkg, originalUrl) ?: originalUrl
-                    callback(newExtractorLink(source = "YouTube Downloader", name = "Seal Download", url = sealRedirect, type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+                    callback(newExtractorLink(source = "YouTube Downloader", name = "Seal Download", url = sealRedirect, type = INFER_TYPE) {
+                        this.quality = 2160
+                        this.referer = mainUrl
+                        this.headers = mapOf("X-Play-Action" to "Seal")
+                    })
 
                     val sealPlusPkg = "com.maheshtechnicals.sealplus"
                     val sealPlusRedirect = getAppRedirectUrl(sealPlusPkg, originalUrl) ?: originalUrl
-                    callback(newExtractorLink(source = "YouTube Downloader", name = "Seal Plus Download", url = sealPlusRedirect, type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+                    callback(newExtractorLink(source = "YouTube Downloader", name = "Seal Plus Download", url = sealPlusRedirect, type = INFER_TYPE) {
+                        this.quality = 2160
+                        this.referer = mainUrl
+                        this.headers = mapOf("X-Play-Action" to "SealPlus")
+                    })
 
                     return@withContext
                 }
@@ -639,21 +651,33 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
 
-                // 정상 동작 상황 하에서의 외부 앱 리링크 추가 영역 (type = INFER_TYPE으로 교정하여 사전 체크 오류 회피)
+                // 정상 동작 상황 하에서의 외부 다운로드 앱 목록 정렬 및 커스텀 헤더 매핑
                 val originalUrl = "https://www.youtube.com/watch?v=$videoId"
                 
-                // YTDLnis, Seal, Seal Plus 즉시 다운로드용 가상 리링크 추가
+                // YTDLnis, Seal, Seal Plus 즉시 다운로드용 가상 리링크 추가 (type = INFER_TYPE)
                 val ytdlPkg = "com.deniscerri.ytdl"
                 val ytdlRedirect = getAppRedirectUrl(ytdlPkg, originalUrl) ?: originalUrl
-                callback(newExtractorLink(source = "YouTube Downloader", name = "YTDLnis Download", url = ytdlRedirect, type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+                callback(newExtractorLink(source = "YouTube Downloader", name = "YTDLnis Download", url = ytdlRedirect, type = INFER_TYPE) {
+                    this.quality = 2160
+                    this.referer = mainUrl
+                    this.headers = mapOf("X-Play-Action" to "YTDLnis")
+                })
 
                 val sealPkg = "com.junkfood.seal"
                 val sealRedirect = getAppRedirectUrl(sealPkg, originalUrl) ?: originalUrl
-                callback(newExtractorLink(source = "YouTube Downloader", name = "Seal Download", url = sealRedirect, type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+                callback(newExtractorLink(source = "YouTube Downloader", name = "Seal Download", url = sealRedirect, type = INFER_TYPE) {
+                    this.quality = 2160
+                    this.referer = mainUrl
+                    this.headers = mapOf("X-Play-Action" to "Seal")
+                })
 
                 val sealPlusPkg = "com.maheshtechnicals.sealplus"
                 val sealPlusRedirect = getAppRedirectUrl(sealPlusPkg, originalUrl) ?: originalUrl
-                callback(newExtractorLink(source = "YouTube Downloader", name = "Seal Plus Download", url = sealPlusRedirect, type = INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+                callback(newExtractorLink(source = "YouTube Downloader", name = "Seal Plus Download", url = sealPlusRedirect, type = INFER_TYPE) {
+                    this.quality = 2160
+                    this.referer = mainUrl
+                    this.headers = mapOf("X-Play-Action" to "SealPlus")
+                })
 
             } catch (e: Exception) { 
                 println("[YT_DEBUG_EXTRACTOR] 🚨 Exception 발생: ${e.message}")
