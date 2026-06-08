@@ -505,6 +505,7 @@ class YoutubeProvider(
             return
         }
 
+        // [정정 핵심] 단 하나의 CPN만 생성하여 playback과 watchtime에 공통으로 바인딩
         val cpn = generateCpn()
         try {
             var playbackUrl = buildTrackingUrl(playbackBaseUrl, cpn, cmt = "0.000", state = null, realTime = "0")
@@ -521,11 +522,6 @@ class YoutubeProvider(
                 }
             }
 
-            // [YTSYNC 핵심 교정 1] s.youtube.com 도메인을 www.youtube.com으로 치환하여 전송 (쿠키 및 Authorization 완벽 연동 보장)
-            playbackUrl = playbackUrl.replace("s.youtube.com", "www.youtube.com")
-            watchtimeUrl = watchtimeUrl.replace("s.youtube.com", "www.youtube.com")
-
-            // 수동 웹 브라우저 헤더 구성
             val headers = mutableMapOf<String, String>()
             headers["Cookie"] = cookies
             headers["User-Agent"] = YoutubeUtils.CHROME_USER_AGENT
@@ -539,17 +535,12 @@ class YoutubeProvider(
                 }
             }
 
-            // 1단계: 플레이백 전송 (CMT=0.0)
-            println("[YTSYNC] Sending Playback (0.0s) tracking request to: $playbackUrl")
+            // 인위적인 delay 없이 정합성이 맞춰진 단일 CPN 세션 핑 순차 송신
+            println("[YTSYNC] Sending Playback (0.0s) tracking request...")
             val playbackRes = app.get(playbackUrl, headers = headers) 
             println("[YTSYNC] Playback Response Code: ${playbackRes.code}")
 
-            // [YTSYNC 핵심 교정 2] 시스템 안티 스팸 락을 우회하기 위한 1초 대기 딜레이 시뮬레이션
-            println("[YTSYNC] Simulating real watchtime progress... waiting 1000ms...")
-            kotlinx.coroutines.delay(1000)
-
-            // 2단계: 워치타임 전송 (CMT=5.0)
-            println("[YTSYNC] Sending Watchtime (5.0s, playing) tracking request to: $watchtimeUrl")
+            println("[YTSYNC] Sending Watchtime (5.0s, playing) tracking request...")
             val watchtimeRes = app.get(watchtimeUrl, headers = headers) 
             println("[YTSYNC] Watchtime Response Code: ${watchtimeRes.code}")
             
@@ -559,6 +550,7 @@ class YoutubeProvider(
             logError(e)
         }
     }
+    
 
     private fun getSavedContinuationToken(key: String): String? {
         val hashedKey = YoutubeUtils.sha1(key)
