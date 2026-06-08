@@ -271,12 +271,32 @@ object YoutubeUtils {
     }
 }
 
+
 class YoutubeProvider(
     private val sharedPref: SharedPreferences? = null
 ) : MainAPI() {
 
     val appPrefs: SharedPreferences?
-        get() = sharedPref ?: AcraApplication.context?.let { PreferenceManager.getDefaultSharedPreferences(it) }
+        get() {
+            val privatePrefs = sharedPref
+            val defaultPrefs = AcraApplication.context?.let { PreferenceManager.getDefaultSharedPreferences(it) }
+            
+            val hasPrivateSid = privatePrefs?.getString("SID", null) != null
+            val hasDefaultSid = defaultPrefs?.getString("SID", null) != null
+            
+            // [YTSYNC] 어느 저장소에 로그인 정보가 저장되었는지 실시간 모니터링 및 복구
+            println("[YTSYNC] Prefs lookup - Private SID exists: $hasPrivateSid, Default SID exists: $hasDefaultSid")
+            
+            return if (hasPrivateSid) {
+                privatePrefs
+            } else if (hasDefaultSid) {
+                defaultPrefs
+            } else {
+                privatePrefs ?: defaultPrefs
+            }
+        }
+
+        
 
     data class CustomSection(
         @JsonProperty("name") var name: String = "",
@@ -2486,7 +2506,7 @@ class YoutubeProvider(
         }
     }
 
-    override suspend fun loadLinks(
+override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
@@ -2501,7 +2521,10 @@ class YoutubeProvider(
 
         var playerResponseText = ""
         try {
-            // [핵심 우회] 동영상 페이지에서 signatureTimestamp 및 visitorData 실시간 파싱 (추출기와 동일 구조)
+            // [YTSYNC 중요 세션 복구 진단]
+            val hasSidInTarget = appPrefs?.getString("SID", null) != null
+            println("[YTSYNC] Targeted Prefs SID session verification: $hasSidInTarget")
+
             val watchUrl = "https://www.youtube.com/watch?v=$videoId"
             val html = app.get(watchUrl, headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)).text
             
@@ -2517,7 +2540,6 @@ class YoutubeProvider(
                 "$mainUrl/youtubei/v1/player?key=$androidApiKey"
             }
 
-            // 추출기에서 쓰는 가장 강력한 ANDROID_VR 디바이스 상세 페이로드 정렬
             val payload = mapOf(
                 "videoId" to videoId,
                 "context" to mapOf(
@@ -2541,16 +2563,18 @@ class YoutubeProvider(
                 )
             )
 
-            // 글로벌 인터셉터를 경유하지 않도록 수동 헤더 빌드 및 쿠키 주입 진행
             val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(appPrefs, lang, "_Mk3UVhY40g", isSearch = false)
             
+            // [YTSYNC] 최종 전송되는 쿠키 문자열 검증
+            println("[YTSYNC] Raw Cookies to be sent: $cookies")
+            println("[YTSYNC] Extracted SAPISID hash input: $sapisidVal")
+
             val headers = mapOf(
                 "Cookie" to cookies,
                 "User-Agent" to YoutubeUtils.ANDROID_VR_USER_AGENT,
                 "Content-Type" to "application/json"
             )
             
-            // 글로벌 인터셉터의 간섭(크롬 덮어쓰기 및 Authorization 강제 삽입)을 완전히 회피하여 400 에러 차단
             val responseResult = app.post(apiUrl, json = payload, headers = headers) 
             playerResponseText = responseResult.text
             
@@ -2581,7 +2605,6 @@ class YoutubeProvider(
                 val playerResponse = mapper.readValue<PlayerResponse>(targetJson)
                 println("[YTSYNC] PlayerResponse mapped successfully. playbackTracking null check: ${playerResponse.playbackTracking == null}")
                 
-                // 트래킹 전송 전용 수동 세션 정보 획득 및 릴레이
                 val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(appPrefs, lang, "_Mk3UVhY40g", isSearch = false)
                 triggerPlaybackTracking(playerResponse.playbackTracking, videoId, cookies, sapisidVal, isShort)
             } catch (e: Exception) {
