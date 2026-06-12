@@ -272,8 +272,7 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
             }
 
             val builder = MaterialAlertDialogBuilder(ctx)
-            builder.setTitle(titleTxt)
-
+            
             val scrollView = ScrollView(ctx).apply {
                 layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             }
@@ -284,6 +283,18 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 setPadding(padding, padding, padding, padding)
             }
             scrollView.addView(container)
+
+            // 타이틀을 커스텀 뷰 내부 최상단에 직접 그려서 서체 통일
+            val customTitleView = TextView(ctx).apply {
+                text = titleTxt
+                setTextColor(Color.WHITE)
+                textSize = 18f
+                setTypeface(null, android.graphics.Typeface.BOLD)
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    bottomMargin = (16 * ctx.resources.displayMetrics.density).toInt()
+                }
+            }
+            container.addView(customTitleView)
 
             val radioGroup = RadioGroup(ctx).apply {
                 orientation = RadioGroup.VERTICAL
@@ -318,7 +329,7 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
 
             val textInputLayout = com.google.android.material.textfield.TextInputLayout(ctx).apply {
                 layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                    topMargin = (16 * ctx.resources.displayMetrics.density).toInt()
+                    topMargin = (12 * ctx.resources.displayMetrics.density).toInt()
                 }
             }
 
@@ -330,7 +341,45 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
 
             container.addView(radioGroup)
             container.addView(textInputLayout)
+
+            // 하단 버튼 바 생성 (가로형 정렬 및 둥근 패키지 단추)
+            val buttonLayout = LinearLayout(ctx).apply {
+                orientation = LinearLayout.HORIZONTAL
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    topMargin = (24 * ctx.resources.displayMetrics.density).toInt()
+                }
+            }
+
+            fun createStyledButton(textStr: String, isAccent: Boolean = false): Button {
+                return Button(ctx).apply {
+                    text = textStr
+                    setTextColor(Color.WHITE)
+                    textSize = 14f
+                    gravity = Gravity.CENTER
+                    isAllCaps = false
+                    background = android.graphics.drawable.GradientDrawable().apply {
+                        setColor(if (isAccent) Color.parseColor("#E53935") else Color.parseColor("#2E2E32"))
+                        cornerRadius = 8f * ctx.resources.displayMetrics.density
+                    }
+                    layoutParams = LinearLayout.LayoutParams(0, (48 * ctx.resources.displayMetrics.density).toInt(), 1f).apply {
+                        marginEnd = (8 * ctx.resources.displayMetrics.density).toInt()
+                    }
+                }
+            }
+
+            val btnReset = createStyledButton(resetTxt)
+            val btnCancel = createStyledButton(cancelTxt)
+            val btnOk = createStyledButton(okTxt, isAccent = true).apply {
+                (layoutParams as LinearLayout.LayoutParams).marginEnd = 0
+            }
+
+            buttonLayout.addView(btnReset)
+            buttonLayout.addView(btnCancel)
+            buttonLayout.addView(btnOk)
+            container.addView(buttonLayout)
+
             builder.setView(scrollView)
+            val dialog = builder.create()
 
             val currentType = sharedPref.getString(KEY_DOWNLOADER_TYPE, "none") ?: "none"
             val currentCustomPkg = sharedPref.getString(KEY_CUSTOM_PKG, "") ?: ""
@@ -389,7 +438,20 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 }
             }
 
-            builder.setPositiveButton(okTxt) { _, _ ->
+            btnReset.setOnClickListener {
+                sharedPref.edit().apply {
+                    putString(KEY_DOWNLOADER_TYPE, "none")
+                    putString(KEY_CUSTOM_PKG, "")
+                }.apply()
+                updateDownloaderSummary()
+                dialog.dismiss()
+            }
+
+            btnCancel.setOnClickListener {
+                dialog.dismiss()
+            }
+
+            btnOk.setOnClickListener {
                 val selectedType = when (radioGroup.checkedRadioButtonId) {
                     rbYtdl.id -> "ytdlnis"
                     rbSealPlus.id -> "seal_plus"
@@ -407,19 +469,16 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 }.apply()
 
                 updateDownloaderSummary()
+                dialog.dismiss()
             }
 
-            builder.setNegativeButton(cancelTxt, null)
+            dialog.show()
 
-            builder.setNeutralButton(resetTxt) { _, _ ->
-                sharedPref.edit().apply {
-                    putString(KEY_DOWNLOADER_TYPE, "none")
-                    putString(KEY_CUSTOM_PKG, "")
-                }.apply()
-                updateDownloaderSummary()
-            }
-
-            builder.show()
+            // 시스템 기본 팝업 테두리를 완전히 투명화하고, 커스텀 하단 레이아웃의 다크 배경 및 라운딩 각도로 1대1 매핑 교정
+            dialog.window?.setBackgroundDrawable(android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.parseColor("#121212")) // Cloudstream 공식 다크 그레이 배경
+                cornerRadius = 28f * ctx.resources.displayMetrics.density
+            })
         }
 
         private fun updateDownloaderSummary() {
