@@ -127,7 +127,13 @@ object Loc {
             "edit_item" to "Edit Item",
             "url_empty" to "URL cannot be empty",
             "browse_youtube" to "Browse so YouTube can know your preferences",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "downloader_section" to "External Downloader Settings",
+            "downloader_title" to "External Downloader App",
+            "downloader_sum" to "Select the external app to use for downloading",
+            "downloader_custom_title" to "Custom Package Name",
+            "downloader_custom_sum" to "Enter the package name of your downloader app",
+            "downloader_none" to "Disable Integration"
         ),
         "tr" to mapOf(
             "lang_title" to "Dil / Language",
@@ -741,7 +747,13 @@ object Loc {
             "edit_item" to "항목 편집",
             "url_empty" to "URL은 비워 둘 수 없습니다",
             "browse_youtube" to "YouTube가 귀하의 선호를 알 수 있도록 탐색하세요",
-            "url_hint" to "URL (https://...)"
+            "url_hint" to "URL (https://...)",
+            "downloader_section" to "외부 다운로더 설정",
+            "downloader_title" to "외부 다운로더 앱",
+            "downloader_sum" to "연동하여 바로 다운로드할 외부 앱을 선택합니다",
+            "downloader_custom_title" to "사용자 정의 패키지명",
+            "downloader_custom_sum" to "기타 선택 시 연동할 앱의 패키지명을 직접 입력하세요",
+            "downloader_none" to "사용 안 함"
         ),
         "zh" to mapOf(
             "lang_title" to "语言 / Language",
