@@ -41,6 +41,7 @@ object SettingsRepository {
     private const val PREF_KEY_LINKS = "stremio_saved_links"
     const val PREF_KEY_CINESTREAM_ENABLED = "cinestream_integration_enabled"
     const val PREF_KEY_STREAMPLAY_ENABLED = "streamplay_integration_enabled"
+    const val PREF_KEY_VIXSRC_ENABLED = "vixsrc_integration_enabled"
 
     fun loadLinks(sharedPref: SharedPreferences): MutableList<LinkItem> {
         val json = sharedPref.getString(PREF_KEY_LINKS, null) ?: return mutableListOf()
@@ -161,6 +162,8 @@ class SettingsBottomFragment(
         // UI Initialization: Toggles
         setupToggle(view, "switchCineStream", SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, isCineStreamInstalled(), "CineStream")
         setupToggle(view, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
+        // VixSrc는 내장 코드로 실행되므로 설치여부(isInstalled)를 true로 고정합니다.
+        setupToggle(view, "switchVixSrc", SettingsRepository.PREF_KEY_VIXSRC_ENABLED, true, "VixSrc")
 
         // Action: Add Link
         addlinks.setOnClickListener {
