@@ -238,7 +238,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 key = KEY_DOWNLOADER_TYPE
                 entryValues = arrayOf("none", "ytdlnis", "seal", "seal_plus", "custom")
                 if (value == null) setValue("none")
-                summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
                 setOnPreferenceChangeListener { _, newValue ->
                     sharedPref.edit().putString(KEY_DOWNLOADER_TYPE, newValue as String).apply()
                     customPackagePref.isVisible = (newValue == "custom")
@@ -250,7 +249,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
             customPackagePref = EditTextPreference(ctx).apply {
                 key = KEY_CUSTOM_PKG
                 setOnBindEditTextListener { it.setText(sharedPref.getString(KEY_CUSTOM_PKG, "")) }
-                summaryProvider = EditTextPreference.SimpleSummaryProvider.getInstance()
                 setOnPreferenceChangeListener { _, newVal ->
                     sharedPref.edit().putString(KEY_CUSTOM_PKG, (newVal as String).trim()).apply()
                     true
