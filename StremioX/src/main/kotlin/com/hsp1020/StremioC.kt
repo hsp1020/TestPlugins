@@ -1237,7 +1237,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
                     val rawMediaType = media.mediaType ?: tmdbMediaType
                     val posterType = if (rawMediaType == "tv") "tv" else "movie"
                     val outType = if (rawMediaType == "tv") "series" else "movie"
-                    val customPosterUrl = "https://extendedratings.com/poster/tmdb:$posterType:$recTmdbId.jpg?config=61283890-4982-401b-8545-9ccb957ed4ca"
+                    val customPosterUrl = "https://extendedratings.com/poster/tmdb:$posterType:$recTmdbId.jpg?config=aed081fd-73b1-460e-879d-377c5658691c"
                     
                     val thinData = LoadData(id = "tmdb:${media.id}", type = outType)
                     val thinDataJson = jsonMapper.writeValueAsString(thinData)
