@@ -31,7 +31,7 @@ object VixSrcExtractor {
     ) {
         var webView: WebView? = null
         try {
-            println("[STREMIOSUB-VIXSRC] >>> invokeVixSrc() START (Ultra-Fast 0.1s Fix) <<<")
+            println("[STREMIOSUB-VIXSRC] >>> invokeVixSrc() START (Ultra-Fast 0.1s Fix V2) <<<")
             
             val tmdbId = loadData.tmdbId?.toString() ?: loadData.imdbId ?: return
             val baseUrl = "https://vixsrc.to"
@@ -53,31 +53,57 @@ object VixSrcExtractor {
             println("[STREMIOSUB-VIXSRC] ⚡ PHASE 1: Attempting Fast-Track API extraction...")
             try {
                 val apiUrl = if (isMovie) "$baseUrl/api/movie/$tmdbId" else "$baseUrl/api/tv/$tmdbId/$globalSeason/$globalEpisode"
+                
                 val apiResponseObj = StremioC.customSession.get(apiUrl, headers = commonHeaders)
-                val apiResponse = apiResponseObj.text.replace("\\/", "/") 
+                // JSON 안의 이스케이프 문자(\/, \u0026)를 파싱 전에 미리 정상 문자로 전처리!
+                val apiResponse = apiResponseObj.text.replace("\\/", "/").replace("\\u0026", "&")
                 
                 var fastUrl: String? = null
                 
-                // API 응답에서 Embed URL과 실제 영상 ID(actualVid)를 추출!
-                val embedMatch = """(/embed/(\d+)[^"'\s\\]*)""".toRegex().find(apiResponse)
+                // 역슬래시 제한 해제: [^"'\s]* 로 변경하여 URL을 끝까지 캡처
+                val embedMatch = """(/embed/(\d+)[^"'\s]*)""".toRegex().find(apiResponse)
                 val embedPath = embedMatch?.groupValues?.get(1)
-                val actualVid = embedMatch?.groupValues?.get(2) // ex: 700516
+                val actualVid = embedMatch?.groupValues?.get(2) // ex: 700515
                 
                 if (embedPath != null && actualVid != null) {
                     val embedUrl = baseUrl + embedPath
                     println("[STREMIOSUB-VIXSRC] ⚡ Fast-Track caught Embed URL: $embedUrl")
                     
-                    val embedHtml = StremioC.customSession.get(embedUrl.replace("\\u0026", "&"), headers = commonHeaders).text
-                    val rawPlaylistUrl = """(https://vixsrc\.to/playlist/[^"'\s\\]+)""".toRegex().find(embedHtml)?.groupValues?.get(1)
+                    // Embed HTML을 가져온 뒤에도 이스케이프 문자 싹 청소!
+                    val embedHtml = StremioC.customSession.get(embedUrl, headers = commonHeaders).text
+                        .replace("\\u0026", "&")
+                        .replace("\\/", "/")
+                        .replace("&amp;", "&")
+                    
+                    val rawPlaylistUrl = """(https://vixsrc\.to/playlist/[^"'\s]+)""".toRegex().find(embedHtml)?.groupValues?.get(1)
                     
                     if (rawPlaylistUrl != null) {
-                        // ✨ 핵심 해결책: 프론트엔드의 'wrapper' 더미 텍스트를 실제 ID로 치환!
-                        fastUrl = rawPlaylistUrl.replace("wrapper", actualVid)
+                        // 1. wrapper 글자 치환
+                        var tempUrl = rawPlaylistUrl.replace("wrapper", actualVid)
+
+                        // 2. 2중 안전장치: 꼬리표(token)가 잘렸거나 없다면 HTML에서 강제로 뽑아서 붙임!
+                        if (!tempUrl.contains("token=")) {
+                            val token = """token=([a-fA-F0-9]{32}|[a-zA-Z0-9\-_]{20,})""".toRegex().find(embedHtml)?.groupValues?.get(1)
+                                ?: """["']?token["']?\s*[:=]\s*["']([^"']+)["']""".toRegex().find(embedHtml)?.groupValues?.get(1)
+                            
+                            val expires = """expires=(\d{10,})""".toRegex().find(embedHtml)?.groupValues?.get(1)
+                                ?: """["']?expires["']?\s*[:=]\s*["']([^"']+)["']""".toRegex().find(embedHtml)?.groupValues?.get(1)
+
+                            if (token != null && expires != null) {
+                                tempUrl = if (tempUrl.contains("?")) {
+                                    "$tempUrl&token=$token&expires=$expires"
+                                } else {
+                                    "$tempUrl?token=$token&expires=$expires"
+                                }
+                                println("[STREMIOSUB-VIXSRC] ⚡ Forced Token Injection Applied.")
+                            }
+                        }
+                        fastUrl = tempUrl
                     }
                 }
 
                 if (fastUrl != null && fastUrl.contains("/playlist/")) {
-                    masterPlaylistUrl = fastUrl.replace("\\u0026", "&").replace("&amp;", "&")
+                    masterPlaylistUrl = fastUrl
                     println("[STREMIOSUB-VIXSRC] ⚡ FAST-TRACK SUCCESS! Playlist URL: $masterPlaylistUrl")
                 } else {
                     println("[STREMIOSUB-VIXSRC] 🐢 FAST-TRACK Failed to parse. Proceeding to Phase 2 (WebView).")
