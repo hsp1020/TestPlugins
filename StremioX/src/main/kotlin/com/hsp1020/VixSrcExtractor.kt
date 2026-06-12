@@ -1,23 +1,12 @@
 package com.hsp1020
 
-import android.view.View
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.M3u8Helper
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.CancellationException
-import java.io.ByteArrayInputStream
 
 object VixSrcExtractor {
 
@@ -29,9 +18,8 @@ object VixSrcExtractor {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        var webView: WebView? = null
         try {
-            println("[STREMIOSUB-VIXSRC] >>> invokeVixSrc() START (Ultra-Fast 0.1s Fix V2) <<<")
+            println("[STREMIOSUB-VIXSRC] >>> invokeVixSrc() START (Pure API Fast-Track) <<<")
             
             val tmdbId = loadData.tmdbId?.toString() ?: loadData.imdbId ?: return
             val baseUrl = "https://vixsrc.to"
@@ -45,133 +33,67 @@ object VixSrcExtractor {
                 "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             )
 
+            // ====================================================================
+            // ⚡ 순수 API 타격 (웹뷰 없음, 0.1초 컷)
+            // ====================================================================
+            val apiUrl = if (isMovie) "$baseUrl/api/movie/$tmdbId" else "$baseUrl/api/tv/$tmdbId/$globalSeason/$globalEpisode"
+            val apiResponseObj = StremioC.customSession.get(apiUrl, headers = commonHeaders)
+            val apiResponse = apiResponseObj.text.replace("\\/", "/") 
+            
+            // 1. API 응답에서 Embed URL과 실제 영상 고유 ID(actualVid) 추출
+            val embedMatch = """(/embed/(\d+)[^"'\s]*)""".toRegex().find(apiResponse)
+            val embedPath = embedMatch?.groupValues?.get(1)
+            val actualVid = embedMatch?.groupValues?.get(2)
+            
+            if (embedPath == null || actualVid == null) {
+                println("[STREMIOSUB-VIXSRC] ❌ Extraction Failed: Embed URL or Video ID not found in API response.")
+                return
+            }
+
+            val embedUrl = baseUrl + embedPath
+            println("[STREMIOSUB-VIXSRC] ⚡ Fetched Embed URL: $embedUrl")
+            
+            // 2. Embed HTML을 가져온 뒤 이스케이프 문자(\u0026 등) 전처리
+            val embedHtml = StremioC.customSession.get(embedUrl.replace("\\u0026", "&"), headers = commonHeaders).text
+                .replace("\\u0026", "&")
+                .replace("\\/", "/")
+                .replace("&amp;", "&")
+            
+            // 3. VixSrc의 자바스크립트가 사용하는 진짜 템플릿(wrapper) URL만 핀셋으로 추출 (가짜 ub=1 함정 회피)
+            val wrapperMatch = """(https://vixsrc\.to/playlist/wrapper\?[^"'\s]+)""".toRegex().find(embedHtml)
             var masterPlaylistUrl: String? = null
 
-            // ====================================================================
-            // ⚡ PHASE 1: FAST-TRACK (API 직접 타격 - 0.1초 소요)
-            // ====================================================================
-            println("[STREMIOSUB-VIXSRC] ⚡ PHASE 1: Attempting Fast-Track API extraction...")
-            try {
-                val apiUrl = if (isMovie) "$baseUrl/api/movie/$tmdbId" else "$baseUrl/api/tv/$tmdbId/$globalSeason/$globalEpisode"
+            if (wrapperMatch != null) {
+                // 자바스크립트가 하던 짓(치환 및 꼬리표 붙이기)을 코틀린으로 구현
+                var finalUrl = wrapperMatch.groupValues[1].replace("wrapper", actualVid)
+                if (!finalUrl.contains("h=1")) finalUrl += "&h=1"
+                if (!finalUrl.contains("lang=en")) finalUrl += "&lang=en"
                 
-                val apiResponseObj = StremioC.customSession.get(apiUrl, headers = commonHeaders)
-                // JSON 안의 이스케이프 문자(\/, \u0026)를 파싱 전에 미리 정상 문자로 전처리!
-                val apiResponse = apiResponseObj.text.replace("\\/", "/").replace("\\u0026", "&")
-                
-                var fastUrl: String? = null
-                
-                // 역슬래시 제한 해제: [^"'\s]* 로 변경하여 URL을 끝까지 캡처
-                val embedMatch = """(/embed/(\d+)[^"'\s]*)""".toRegex().find(apiResponse)
-                val embedPath = embedMatch?.groupValues?.get(1)
-                val actualVid = embedMatch?.groupValues?.get(2) // ex: 700515
-                
-                if (embedPath != null && actualVid != null) {
-                    val embedUrl = baseUrl + embedPath
-                    println("[STREMIOSUB-VIXSRC] ⚡ Fast-Track caught Embed URL: $embedUrl")
-                    
-                    // Embed HTML을 가져온 뒤에도 이스케이프 문자 싹 청소!
-                    val embedHtml = StremioC.customSession.get(embedUrl, headers = commonHeaders).text
-                        .replace("\\u0026", "&")
-                        .replace("\\/", "/")
-                        .replace("&amp;", "&")
-                    
-                    val rawPlaylistUrl = """(https://vixsrc\.to/playlist/[^"'\s]+)""".toRegex().find(embedHtml)?.groupValues?.get(1)
-                    
-                    if (rawPlaylistUrl != null) {
-                        // 1. wrapper 글자 치환
-                        var tempUrl = rawPlaylistUrl.replace("wrapper", actualVid)
-
-                        // 2. 2중 안전장치: 꼬리표(token)가 잘렸거나 없다면 HTML에서 강제로 뽑아서 붙임!
-                        if (!tempUrl.contains("token=")) {
-                            val token = """token=([a-fA-F0-9]{32}|[a-zA-Z0-9\-_]{20,})""".toRegex().find(embedHtml)?.groupValues?.get(1)
-                                ?: """["']?token["']?\s*[:=]\s*["']([^"']+)["']""".toRegex().find(embedHtml)?.groupValues?.get(1)
-                            
-                            val expires = """expires=(\d{10,})""".toRegex().find(embedHtml)?.groupValues?.get(1)
-                                ?: """["']?expires["']?\s*[:=]\s*["']([^"']+)["']""".toRegex().find(embedHtml)?.groupValues?.get(1)
-
-                            if (token != null && expires != null) {
-                                tempUrl = if (tempUrl.contains("?")) {
-                                    "$tempUrl&token=$token&expires=$expires"
-                                } else {
-                                    "$tempUrl?token=$token&expires=$expires"
-                                }
-                                println("[STREMIOSUB-VIXSRC] ⚡ Forced Token Injection Applied.")
-                            }
-                        }
-                        fastUrl = tempUrl
-                    }
-                }
-
-                if (fastUrl != null && fastUrl.contains("/playlist/")) {
-                    masterPlaylistUrl = fastUrl
-                    println("[STREMIOSUB-VIXSRC] ⚡ FAST-TRACK SUCCESS! Playlist URL: $masterPlaylistUrl")
-                } else {
-                    println("[STREMIOSUB-VIXSRC] 🐢 FAST-TRACK Failed to parse. Proceeding to Phase 2 (WebView).")
-                }
-            } catch (e: Exception) {
-                println("[STREMIOSUB-VIXSRC] 🐢 FAST-TRACK Exception: ${e.message}")
-            }
-
-            // ====================================================================
-            // 🐢 PHASE 2: WEBVIEW FALLBACK (API 차단 시 발동 - 2~3초 소요)
-            // ====================================================================
-            if (masterPlaylistUrl == null) {
-                println("[STREMIOSUB-VIXSRC] 🐢 PHASE 2: Running Headless WebView Fallback...")
-                val deferredUrl = CompletableDeferred<String?>()
-
-                withContext(Dispatchers.Main) {
-                    webView = WebView(CloudStreamApp.context!!)
-                    webView?.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
-                    
-                    webView?.settings?.apply {
-                        javaScriptEnabled = true
-                        domStorageEnabled = true
-                        loadsImagesAutomatically = false
-                        blockNetworkImage = true
-                        mediaPlaybackRequiresUserGesture = true 
-                        userAgentString = commonHeaders["User-Agent"]
-                    }
-
-                    webView?.webViewClient = object : WebViewClient() {
-                        override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
-                            val url = request?.url?.toString() ?: ""
-                            
-                            if (url.endsWith(".css") || url.endsWith(".woff2") || url.contains("analytics") || url.contains("ping.gif")) {
-                                return WebResourceResponse("text/plain", "UTF-8", ByteArrayInputStream(ByteArray(0)))
-                            }
-
-                            if (url.contains("vixsrc.to/playlist/") && url.contains("token=") && !url.contains("type=")) {
-                                if (!deferredUrl.isCompleted) {
-                                    println("[STREMIOSUB-VIXSRC] 🎯 WEBVIEW CAUGHT PLAYLIST: $url")
-                                    deferredUrl.complete(url)
-                                    view?.post { view.stopLoading() }
-                                }
-                            }
-                            return super.shouldInterceptRequest(view, request)
-                        }
-                    }
-                    webView?.loadUrl(requestUrl)
-                }
-
-                val foundUrl = withTimeoutOrNull(15000L) { deferredUrl.await() }
-                if (foundUrl != null) {
-                    masterPlaylistUrl = foundUrl
+                masterPlaylistUrl = finalUrl
+                println("[STREMIOSUB-VIXSRC] ⚡ SUCCESS! Constructed Final Playlist: $masterPlaylistUrl")
+            } else {
+                // 만약 wrapper 문자가 바뀌었을 경우를 대비한 최후의 안전장치
+                val token = """token=([a-fA-F0-9]{32})""".toRegex().find(embedHtml)?.groupValues?.get(1)
+                val expires = """expires=(\d+)""".toRegex().find(embedHtml)?.groupValues?.get(1)
+                if (token != null && expires != null) {
+                    masterPlaylistUrl = "$baseUrl/playlist/$actualVid?token=$token&expires=$expires&h=1&lang=en"
+                    println("[STREMIOSUB-VIXSRC] ⚡ SUCCESS (Fallback Constructor): $masterPlaylistUrl")
                 }
             }
 
             // ====================================================================
-            // 🎬 PHASE 3: M3U8 화질 필터링 및 플레이어 전송
+            // 🎬 M3U8 화질 필터링 및 플레이어 전송
             // ====================================================================
             if (masterPlaylistUrl != null) {
-                println("[STREMIOSUB-VIXSRC] 🔥 Final Master M3U8: $masterPlaylistUrl")
-                
                 try {
+                    println("[STREMIOSUB-VIXSRC] 🎬 Parsing M3U8 for 1080p Filtering...")
                     val m3u8Links = M3u8Helper.generateM3u8("VixSrc", masterPlaylistUrl, requestUrl, headers = commonHeaders)
                     
                     if (m3u8Links.isNotEmpty()) {
                         val sortedLinks = m3u8Links.sortedByDescending { it.quality }
                         val highQualityLinks = sortedLinks.filter { it.quality >= Qualities.P1080.value }
                         
+                        // 1080p 이상만, 없으면 최대 해상도 1개만
                         val finalLinks = highQualityLinks.ifEmpty { 
                             val maxQuality = sortedLinks.first().quality
                             sortedLinks.filter { it.quality == maxQuality }
@@ -185,7 +107,7 @@ object VixSrcExtractor {
                         throw Exception("M3u8Helper parsing returned empty list.")
                     }
                 } catch (e: Exception) {
-                    println("[STREMIOSUB-VIXSRC] M3u8Helper parsing failed, using fallback: ${e.message}")
+                    println("[STREMIOSUB-VIXSRC] M3u8Helper failed, safely falling back to Master M3U8: ${e.message}")
                     callback.invoke(
                         newExtractorLink("VixSrc", "VixSrc", masterPlaylistUrl, ExtractorLinkType.M3U8) {
                             this.quality = Qualities.P1080.value
@@ -194,7 +116,7 @@ object VixSrcExtractor {
                     )
                 }
             } else {
-                println("[STREMIOSUB-VIXSRC] Extraction Failed. Both Fast-Track and WebView timed out.")
+                println("[STREMIOSUB-VIXSRC] ❌ Extraction Failed. Could not find token pattern in Embed HTML.")
             }
 
         } catch (c: CancellationException) {
@@ -202,22 +124,6 @@ object VixSrcExtractor {
             throw c
         } catch (e: Exception) {
             println("[STREMIOSUB-VIXSRC] Crash: ${e.message}")
-        } finally {
-            withContext(Dispatchers.Main) {
-                try {
-                    webView?.apply {
-                        stopLoading()
-                        loadUrl("about:blank") 
-                        clearHistory()
-                        clearCache(true)
-                        removeAllViews()
-                        destroy() 
-                    }
-                    webView = null 
-                } catch (e: Exception) {
-                    println("[STREMIOSUB-VIXSRC] Error destroying WebView: ${e.message}")
-                }
-            }
         }
     }
 }
