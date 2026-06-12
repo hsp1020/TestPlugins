@@ -105,8 +105,7 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
         private lateinit var manageChannelsPref: Preference
         
         private lateinit var downloaderCategory: PreferenceCategory
-        private lateinit var downloaderPref: ListPreference
-        private lateinit var customPackagePref: EditTextPreference
+        private lateinit var downloaderPref: Preference
 
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
             val ctx = requireContext()
@@ -234,32 +233,228 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
             downloaderCategory = PreferenceCategory(ctx)
             preferenceScreen.addPreference(downloaderCategory)
 
-            downloaderPref = ListPreference(ctx).apply {
-                key = KEY_DOWNLOADER_TYPE
-                entryValues = arrayOf("none", "ytdlnis", "seal", "seal_plus", "custom")
-                if (value == null) setValue("none")
-                setOnPreferenceChangeListener { _, newValue ->
-                    sharedPref.edit().putString(KEY_DOWNLOADER_TYPE, newValue as String).apply()
-                    customPackagePref.isVisible = (newValue == "custom")
+            downloaderPref = Preference(ctx).apply {
+                key = "downloader_app_preference"
+                setOnPreferenceClickListener {
+                    showDownloaderDialog(ctx)
                     true
                 }
             }
             downloaderCategory.addPreference(downloaderPref)
 
-            customPackagePref = EditTextPreference(ctx).apply {
-                key = KEY_CUSTOM_PKG
-                setOnBindEditTextListener { it.setText(sharedPref.getString(KEY_CUSTOM_PKG, "")) }
-                setOnPreferenceChangeListener { _, newVal ->
-                    sharedPref.edit().putString(KEY_CUSTOM_PKG, (newVal as String).trim()).apply()
-                    true
-                }
-            }
-            downloaderCategory.addPreference(customPackagePref)
-
             updateTexts()
         }
 
+        private fun showDownloaderDialog(ctx: Context) {
+            val langCode = sharedPref.getString(KEY_LANGUAGE, "ko") ?: "ko"
+            val isKorean = langCode == "ko"
+
+            val resetTxt = Loc.getString(sharedPref, "reset").let { 
+                if (it == "reset") (if (isKorean) "초기화" else "Reset") else it 
+            }
+            val titleTxt = Loc.getString(sharedPref, "downloader_title").let { 
+                if (it == "downloader_title") (if (isKorean) "동영상 외부 다운로더 앱 패키지명" else "Downloader App Package") else it 
+            }
+            val hintTxt = Loc.getString(sharedPref, "downloader_custom_sum").let { 
+                if (it == "downloader_custom_sum") (if (isKorean) "패키지명을 입력하세요" else "Enter package name") else it 
+            }
+            val noneTxt = Loc.getString(sharedPref, "downloader_none").let { 
+                if (it == "downloader_none") (if (isKorean) "사용 안 함" else "None") else it 
+            }
+            val otherTxt = Loc.getString(sharedPref, "downloader_other").let { 
+                if (it == "downloader_other") (if (isKorean) "기타" else "Other") else it 
+            }
+            val okTxt = Loc.getString(sharedPref, "ok").let { 
+                if (it == "ok") (if (isKorean) "확인" else "OK") else it 
+            }
+            val cancelTxt = Loc.getString(sharedPref, "cancel").let { 
+                if (it == "cancel") (if (isKorean) "취소" else "Cancel") else it 
+            }
+
+            val builder = MaterialAlertDialogBuilder(ctx)
+            builder.setTitle(titleTxt)
+
+            val scrollView = ScrollView(ctx).apply {
+                layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            }
+
+            val container = LinearLayout(ctx).apply {
+                orientation = LinearLayout.VERTICAL
+                val padding = (20 * ctx.resources.displayMetrics.density).toInt()
+                setPadding(padding, padding, padding, padding)
+            }
+            scrollView.addView(container)
+
+            val radioGroup = RadioGroup(ctx).apply {
+                orientation = RadioGroup.VERTICAL
+            }
+
+            val rbYtdl = RadioButton(ctx).apply {
+                text = "YTDLnis"
+                id = View.generateViewId()
+                setTextColor(Color.WHITE)
+            }
+            val rbSealPlus = RadioButton(ctx).apply {
+                text = "Seal Plus"
+                id = View.generateViewId()
+                setTextColor(Color.WHITE)
+            }
+            val rbSeal = RadioButton(ctx).apply {
+                text = "Seal"
+                id = View.generateViewId()
+                setTextColor(Color.WHITE)
+            }
+            val rbOther = RadioButton(ctx).apply {
+                text = otherTxt
+                id = View.generateViewId()
+                setTextColor(Color.WHITE)
+            }
+            val rbNone = RadioButton(ctx).apply {
+                text = noneTxt
+                id = View.generateViewId()
+                setTextColor(Color.WHITE)
+            }
+
+            radioGroup.addView(rbYtdl)
+            radioGroup.addView(rbSealPlus)
+            radioGroup.addView(rbSeal)
+            radioGroup.addView(rbOther)
+            radioGroup.addView(rbNone)
+
+            val editText = EditText(ctx).apply {
+                setTextColor(Color.WHITE)
+                setHintTextColor(Color.GRAY)
+                hint = hintTxt
+                textSize = 14f
+                maxLines = 1
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                    topMargin = (16 * ctx.resources.displayMetrics.density).toInt()
+                }
+            }
+
+            container.addView(radioGroup)
+            container.addView(editText)
+            builder.setView(scrollView)
+
+            val currentType = sharedPref.getString(KEY_DOWNLOADER_TYPE, "none") ?: "none"
+            val currentCustomPkg = sharedPref.getString(KEY_CUSTOM_PKG, "") ?: ""
+
+            when (currentType) {
+                "none" -> {
+                    rbNone.isChecked = true
+                    editText.setText("")
+                    editText.isEnabled = false
+                }
+                "ytdlnis" -> {
+                    rbYtdl.isChecked = true
+                    editText.setText("com.deniscerri.ytdl")
+                    editText.isEnabled = false
+                }
+                "seal_plus" -> {
+                    rbSealPlus.isChecked = true
+                    editText.setText("com.maheshtechnicals.sealplus")
+                    editText.isEnabled = false
+                }
+                "seal" -> {
+                    rbSeal.isChecked = true
+                    editText.setText("com.junkfood.seal")
+                    editText.isEnabled = false
+                }
+                "custom" -> {
+                    rbOther.isChecked = true
+                    editText.setText(currentCustomPkg)
+                    editText.isEnabled = true
+                }
+            }
+
+            radioGroup.setOnCheckedChangeListener { _, checkedId ->
+                when (checkedId) {
+                    rbNone.id -> {
+                        editText.setText("")
+                        editText.isEnabled = false
+                    }
+                    rbYtdl.id -> {
+                        editText.setText("com.deniscerri.ytdl")
+                        editText.isEnabled = false
+                    }
+                    rbSealPlus.id -> {
+                        editText.setText("com.maheshtechnicals.sealplus")
+                        editText.isEnabled = false
+                    }
+                    rbSeal.id -> {
+                        editText.setText("com.junkfood.seal")
+                        editText.isEnabled = false
+                    }
+                    rbOther.id -> {
+                        editText.setText(sharedPref.getString(KEY_CUSTOM_PKG, ""))
+                        editText.isEnabled = true
+                        editText.requestFocus()
+                    }
+                }
+            }
+
+            builder.setPositiveButton(okTxt) { _, _ ->
+                val selectedType = when (radioGroup.checkedRadioButtonId) {
+                    rbYtdl.id -> "ytdlnis"
+                    rbSealPlus.id -> "seal_plus"
+                    rbSeal.id -> "seal"
+                    rbOther.id -> "custom"
+                    else -> "none"
+                }
+                val enteredText = editText.text.toString().trim()
+
+                sharedPref.edit().apply {
+                    putString(KEY_DOWNLOADER_TYPE, selectedType)
+                    if (selectedType == "custom") {
+                        putString(KEY_CUSTOM_PKG, enteredText)
+                    }
+                }.apply()
+
+                updateDownloaderSummary()
+            }
+
+            builder.setNegativeButton(cancelTxt, null)
+
+            builder.setNeutralButton(resetTxt) { _, _ ->
+                sharedPref.edit().apply {
+                    putString(KEY_DOWNLOADER_TYPE, "none")
+                    putString(KEY_CUSTOM_PKG, "")
+                }.apply()
+                updateDownloaderSummary()
+            }
+
+            builder.show()
+        }
+
+        private fun updateDownloaderSummary() {
+            val currentType = sharedPref.getString(KEY_DOWNLOADER_TYPE, "none") ?: "none"
+            val currentCustomPkg = sharedPref.getString(KEY_CUSTOM_PKG, "") ?: ""
+            val langCode = sharedPref.getString(KEY_LANGUAGE, "ko") ?: "ko"
+            val isKorean = langCode == "ko"
+            
+            val noneTxt = Loc.getString(sharedPref, "downloader_none").let { 
+                if (it == "downloader_none") (if (isKorean) "사용 안 함" else "None") else it 
+            }
+            val otherTxt = Loc.getString(sharedPref, "downloader_other").let { 
+                if (it == "downloader_other") (if (isKorean) "기타" else "Other") else it 
+            }
+
+            val appName = when (currentType) {
+                "none" -> noneTxt
+                "ytdlnis" -> "YTDLnis (com.deniscerri.ytdl)"
+                "seal_plus" -> "Seal Plus (com.maheshtechnicals.sealplus)"
+                "seal" -> "Seal (com.junkfood.seal)"
+                "custom" -> "$otherTxt ($currentCustomPkg)"
+                else -> currentType
+            }
+
+            downloaderPref.summary = appName
+        }
+
         private fun updateTexts() {
+            val langCode = sharedPref.getString(KEY_LANGUAGE, "ko") ?: "ko"
+            val isKorean = langCode == "ko"
+
             homeCategory.title = Loc.getString(sharedPref, "home_section")
             manageChannelsPref.title = Loc.getString(sharedPref, "manage_channels")
             manageChannelsPref.summary = Loc.getString(sharedPref, "manage_channels_sum")
@@ -290,26 +485,14 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
             playlistTagPref.setPositiveButtonText(Loc.getString(sharedPref, "ok"))
             playlistTagPref.setNegativeButtonText(Loc.getString(sharedPref, "cancel"))
 
-            downloaderCategory.title = Loc.getString(sharedPref, "downloader_section")
-            downloaderPref.title = Loc.getString(sharedPref, "downloader_title")
-            downloaderPref.summary = Loc.getString(sharedPref, "downloader_sum")
-
-            downloaderPref.entries = arrayOf(
-                Loc.getString(sharedPref, "downloader_none"),
-                "YTDLnis",
-                "Seal",
-                "Seal Plus",
-                Loc.getString(sharedPref, "edit_manual")
-            )
-
-            customPackagePref.title = Loc.getString(sharedPref, "downloader_custom_title")
-            customPackagePref.summary = Loc.getString(sharedPref, "downloader_custom_sum")
-            customPackagePref.dialogTitle = Loc.getString(sharedPref, "downloader_custom_title")
-            customPackagePref.setPositiveButtonText(Loc.getString(sharedPref, "ok"))
-            customPackagePref.setNegativeButtonText(Loc.getString(sharedPref, "cancel"))
-
-            val currentType = sharedPref.getString(KEY_DOWNLOADER_TYPE, "none") ?: "none"
-            customPackagePref.isVisible = (currentType == "custom")
+            downloaderCategory.title = Loc.getString(sharedPref, "downloader_section").let { 
+                if (it == "downloader_section") (if (isKorean) "외부 다운로더 설정" else "External Downloader Settings") else it 
+            }
+            downloaderPref.title = Loc.getString(sharedPref, "downloader_title").let { 
+                if (it == "downloader_title") (if (isKorean) "동영상 외부 다운로더 앱 패키지명" else "External Downloader App Package") else it 
+            }
+            
+            updateDownloaderSummary()
         }
     }
 
