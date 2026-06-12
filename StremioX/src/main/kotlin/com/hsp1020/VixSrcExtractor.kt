@@ -10,6 +10,20 @@ import kotlinx.coroutines.CancellationException
 
 object VixSrcExtractor {
 
+    // 안드로이드 로그캣 잘림 방지용 청크 분할 출력 함수
+    private fun logLargeString(tag: String, msg: String) {
+        if (msg.isBlank()) {
+            println("$tag [DEBUG] Body is empty.")
+            return
+        }
+        var index = 0
+        while (index < msg.length) {
+            val end = minOf(index + 3000, msg.length)
+            println("$tag [HTML-PART] ${msg.substring(index, end)}")
+            index = end
+        }
+    }
+
     suspend fun invokeVixSrc(
         loadData: StremioC.LoadData,
         targetType: String,
@@ -19,7 +33,7 @@ object VixSrcExtractor {
         callback: (ExtractorLink) -> Unit
     ) {
         try {
-            println("[STREMIOSUB-VIXSRC] >>> invokeVixSrc() START (Bulletproof API Track) <<<")
+            println("[VIXSRC-DEBUG] >>> invokeVixSrc() START <<<")
             
             val tmdbId = loadData.tmdbId?.toString() ?: loadData.imdbId ?: return
             val baseUrl = "https://vixsrc.to"
@@ -34,89 +48,114 @@ object VixSrcExtractor {
             )
 
             // ====================================================================
-            // ⚡ 순수 API 타격 (웹뷰 없음, 0.1초 컷)
+            // ⚡ STEP 1: API Request
             // ====================================================================
             val apiUrl = if (isMovie) "$baseUrl/api/movie/$tmdbId" else "$baseUrl/api/tv/$tmdbId/$globalSeason/$globalEpisode"
+            println("[VIXSRC-DEBUG] Step 1 -> Sending API Request to: $apiUrl")
+
             val apiResponseObj = StremioC.customSession.get(apiUrl, headers = commonHeaders)
-            val apiResponse = apiResponseObj.text.replace("\\/", "/") 
+            println("[VIXSRC-DEBUG] Step 1 -> API Response Code: ${apiResponseObj.code}")
             
-            // 1. API 응답에서 Embed URL과 실제 영상 고유 ID(actualVid) 추출
+            val apiResponse = apiResponseObj.text.replace("\\/", "/") 
+            println("[VIXSRC-DEBUG] Step 1 -> API Response Content:")
+            logLargeString("[VIXSRC-DEBUG-API-BODY]", apiResponse)
+            
             val embedMatch = """(/embed/(\d+)[^"'\s]*)""".toRegex().find(apiResponse)
             val embedPath = embedMatch?.groupValues?.get(1)
             val actualVid = embedMatch?.groupValues?.get(2)
             
+            println("[VIXSRC-DEBUG] Step 1 -> Extracted embedPath: $embedPath")
+            println("[VIXSRC-DEBUG] Step 1 -> Extracted actualVid: $actualVid")
+
             if (embedPath == null || actualVid == null) {
-                println("[STREMIOSUB-VIXSRC] ❌ Extraction Failed: Embed URL or Video ID not found in API response.")
+                println("[VIXSRC-DEBUG] ❌ Step 1 Failure: embedPath or actualVid is null. Aborting.")
                 return
             }
 
+            // ====================================================================
+            // ⚡ STEP 2: Embed Page Request
+            // ====================================================================
             val embedUrl = baseUrl + embedPath
-            println("[STREMIOSUB-VIXSRC] ⚡ Fetched Embed URL: $embedUrl")
+            println("[VIXSRC-DEBUG] Step 2 -> Sending Embed Request to: $embedUrl")
             
-            // 2. Embed HTML을 가져온 뒤 이스케이프 문자(\u0026 등) 전처리
-            val embedHtml = StremioC.customSession.get(embedUrl.replace("\\u0026", "&"), headers = commonHeaders).text
+            val embedResponseObj = StremioC.customSession.get(embedUrl.replace("\\u0026", "&"), headers = commonHeaders)
+            println("[VIXSRC-DEBUG] Step 2 -> Embed Response Code: ${embedResponseObj.code}")
+            println("[VIXSRC-DEBUG] Step 2 -> Embed Response Headers: ${embedResponseObj.headers}")
+
+            val embedHtml = embedResponseObj.text
                 .replace("\\u0026", "&")
                 .replace("\\/", "/")
                 .replace("&amp;", "&")
             
+            println("[VIXSRC-DEBUG] Step 2 -> Embed HTML Source (Full Dump):")
+            logLargeString("[VIXSRC-DEBUG-EMBED-HTML]", embedHtml)
+
+            // ====================================================================
+            // ⚡ STEP 3: Decrypt / Parse Token & Expiry
+            // ====================================================================
+            println("[VIXSRC-DEBUG] Step 3 -> Starting Regex Parsing on Embed HTML...")
             var masterPlaylistUrl: String? = null
 
-            // 3. [그물망 정규식] wrapper 단어 유무, 절대경로, 상대경로 상관없이 무조건 플레이리스트 캡처
-            var rawPlaylist = """(https://vixsrc\.to/playlist/[^"'\s<>]+)""".toRegex().find(embedHtml)?.groupValues?.get(1)
-            if (rawPlaylist == null) {
-                val relativePlaylist = """(/playlist/[^"'\s<>]+)""".toRegex().find(embedHtml)?.groupValues?.get(1)
-                if (relativePlaylist != null) rawPlaylist = baseUrl + relativePlaylist
-            }
+            // 3-1. window.masterPlaylist 패턴 시도
+            val masterPlaylistMatch = """window\.masterPlaylist\s*=\s*(\{.*?\})""".toRegex().find(embedHtml)?.groupValues?.get(1)
+            println("[VIXSRC-DEBUG] Step 3 -> window.masterPlaylist Match Found: ${masterPlaylistMatch != null}")
+            
+            if (masterPlaylistMatch != null) {
+                println("[VIXSRC-DEBUG] Step 3 -> masterPlaylist Content: $masterPlaylistMatch")
+                val token = """["']?token["']?\s*[:=]\s*["']([^"']+)["']""".toRegex().find(masterPlaylistMatch)?.groupValues?.get(1)
+                val expires = """["']?expir(?:es|y)["']?\s*[:=]\s*["']?(\d+)["']?""".toRegex().find(masterPlaylistMatch)?.groupValues?.get(1)
+                
+                println("[VIXSRC-DEBUG] Step 3 -> Extracted Token: $token")
+                println("[VIXSRC-DEBUG] Step 3 -> Extracted Expires: $expires")
 
-            // 만약 URL 구조로 못 찾으면 변수에서 강제 추출 (최후의 보루)
-            if (rawPlaylist == null) {
-                val token = """token["']?\s*[:=]\s*["']([^"']+)["']""".toRegex().find(embedHtml)?.groupValues?.get(1)
-                val expires = """expires["']?\s*[:=]\s*["']([^"']+)["']""".toRegex().find(embedHtml)?.groupValues?.get(1)
                 if (token != null && expires != null) {
-                    rawPlaylist = "$baseUrl/playlist/$actualVid?token=$token&expires=$expires"
+                    masterPlaylistUrl = "$baseUrl/playlist/$actualVid?token=$token&expires=$expires&h=1&lang=en"
+                }
+            } else {
+                println("[VIXSRC-DEBUG] Step 3 -> window.masterPlaylist not found. Attempting Global Fallback Patterns...")
+                
+                val token = """["']?token["']?\s*[:=]\s*["']([a-fA-F0-9]{32})["']""".toRegex().find(embedHtml)?.groupValues?.get(1)
+                val expires = """["']?expir(?:es|y)["']?\s*[:=]\s*["']?(\d{10,})["']?""".toRegex().find(embedHtml)?.groupValues?.get(1)
+                
+                println("[VIXSRC-DEBUG] Step 3 (Fallback) -> Extracted Token: $token")
+                println("[VIXSRC-DEBUG] Step 3 (Fallback) -> Extracted Expires: $expires")
+
+                if (token != null && expires != null) {
+                    masterPlaylistUrl = "$baseUrl/playlist/$actualVid?token=$token&expires=$expires&h=1&lang=en"
                 }
             }
 
-            if (rawPlaylist != null) {
-                // 자바스크립트가 하던 짓(치환 및 필수 꼬리표 붙이기)을 코틀린으로 보정
-                var finalUrl = rawPlaylist.replace("wrapper", actualVid)
-                if (!finalUrl.contains("h=1")) finalUrl += "&h=1"
-                if (!finalUrl.contains("lang=en")) finalUrl += "&lang=en"
-                
-                masterPlaylistUrl = finalUrl
-                println("[STREMIOSUB-VIXSRC] ⚡ SUCCESS! Constructed Final Playlist: $masterPlaylistUrl")
-            } else {
-                println("[STREMIOSUB-VIXSRC] ❌ Extraction Failed. Could not find any playlist patterns.")
-                println("[STREMIOSUB-VIXSRC] 📝 Dump Preview: ${embedHtml.take(300)}")
-            }
-
             // ====================================================================
-            // 🎬 M3U8 화질 필터링 및 플레이어 전송
+            // ⚡ STEP 4: Resolve Playlist & Filter Resolutions
             // ====================================================================
             if (masterPlaylistUrl != null) {
+                println("[VIXSRC-DEBUG] Step 4 -> Final Constructed Master URL: $masterPlaylistUrl")
                 try {
-                    println("[STREMIOSUB-VIXSRC] 🎬 Parsing M3U8 for 1080p Filtering...")
+                    println("[VIXSRC-DEBUG] Step 4 -> Calling M3u8Helper...")
                     val m3u8Links = M3u8Helper.generateM3u8("VixSrc", masterPlaylistUrl, requestUrl, headers = commonHeaders)
+                    println("[VIXSRC-DEBUG] Step 4 -> M3u8Helper parsed ${m3u8Links.size} links.")
                     
                     if (m3u8Links.isNotEmpty()) {
                         val sortedLinks = m3u8Links.sortedByDescending { it.quality }
                         val highQualityLinks = sortedLinks.filter { it.quality >= Qualities.P1080.value }
                         
-                        // 1080p 이상만, 없으면 최대 해상도 1개만
                         val finalLinks = highQualityLinks.ifEmpty { 
                             val maxQuality = sortedLinks.first().quality
                             sortedLinks.filter { it.quality == maxQuality }
                         }
                         
                         finalLinks.forEach { link ->
-                            println("[STREMIOSUB-VIXSRC] 🎬 Added Filtered Track: Quality ${link.quality} -> ${link.url}")
+                            println("[VIXSRC-DEBUG] Step 4 -> Invoking Callback for Link: Quality ${link.quality} -> ${link.url}")
                             callback.invoke(link)
                         }
                     } else {
                         throw Exception("M3u8Helper returned empty list.")
                     }
                 } catch (e: Exception) {
-                    println("[STREMIOSUB-VIXSRC] M3u8Helper failed, safely falling back to Master M3U8: ${e.message}")
+                    println("[VIXSRC-DEBUG] ❌ Step 4 Exception in M3u8Helper: ${e.message}")
+                    e.printStackTrace()
+                    
+                    println("[VIXSRC-DEBUG] Step 4 -> Falling back to raw Master M3U8 directly.")
                     callback.invoke(
                         newExtractorLink("VixSrc", "VixSrc", masterPlaylistUrl, ExtractorLinkType.M3U8) {
                             this.quality = Qualities.P1080.value
@@ -124,13 +163,18 @@ object VixSrcExtractor {
                         }
                     )
                 }
+            } else {
+                println("[VIXSRC-DEBUG] ❌ Step 4 Failure: masterPlaylistUrl is NULL. No stream URL can be generated.")
             }
 
+            println("[VIXSRC-DEBUG] >>> invokeVixSrc() END <<<")
+
         } catch (c: CancellationException) {
-            println("[STREMIOSUB-VIXSRC] Cancelled by User.")
+            println("[VIXSRC-DEBUG] Coroutine Cancelled.")
             throw c
         } catch (e: Exception) {
-            println("[STREMIOSUB-VIXSRC] Crash: ${e.message}")
+            println("[VIXSRC-DEBUG] ❌ Crash Exception: ${e.message}")
+            e.printStackTrace()
         }
     }
 }
