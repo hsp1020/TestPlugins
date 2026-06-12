@@ -39,7 +39,7 @@ class TvchakProvider : MainAPI() {
     override var lang = "ko"
     override val hasDownloadSupport = true
     
-    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime)
+    override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie, TvType.AsianDrama, TvType.Anime, TvType.AnimeMovie)
 
     override val mainPage = mainPageOf(
         "1" to "영화",
