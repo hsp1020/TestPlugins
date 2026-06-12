@@ -277,7 +277,7 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             return null
         }
 
-        private fun isIntegrationEnabled(prefKey: String): Boolean {
+        fun isIntegrationEnabled(prefKey: String): Boolean {
             val now = System.currentTimeMillis()
             val cached = settingsCache[prefKey]
             if (cached != null && (now - cached.second) < SETTINGS_CACHE_TTL) {
@@ -833,6 +833,11 @@ class StremioC(override var mainUrl: String, override var name: String) : MainAP
             { 
                 println("[STREMIOSUB] Initiating invokeStreamPlay")
                 invokeStreamPlay(loadData, targetType, globalId, globalSeason, globalEpisode, isCasting, subtitleInterceptor, wrappedCallback) 
+            },
+            {
+                if (isIntegrationEnabled("vixsrc_integration_enabled")) {
+                    VixSrcExtractor.invokeVixSrc(loadData, targetType, globalSeason, globalEpisode, subtitleInterceptor, wrappedCallback)
+                }
             }
         )
         return true
