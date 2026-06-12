@@ -19,7 +19,7 @@ object VixSrcExtractor {
         callback: (ExtractorLink) -> Unit
     ) {
         try {
-            println("[STREMIOSUB-VIXSRC] >>> invokeVixSrc() START (Pure API Fast-Track) <<<")
+            println("[STREMIOSUB-VIXSRC] >>> invokeVixSrc() START (Bulletproof API Track) <<<")
             
             val tmdbId = loadData.tmdbId?.toString() ?: loadData.imdbId ?: return
             val baseUrl = "https://vixsrc.to"
@@ -59,26 +59,35 @@ object VixSrcExtractor {
                 .replace("\\/", "/")
                 .replace("&amp;", "&")
             
-            // 3. VixSrc의 자바스크립트가 사용하는 진짜 템플릿(wrapper) URL만 핀셋으로 추출 (가짜 ub=1 함정 회피)
-            val wrapperMatch = """(https://vixsrc\.to/playlist/wrapper\?[^"'\s]+)""".toRegex().find(embedHtml)
             var masterPlaylistUrl: String? = null
 
-            if (wrapperMatch != null) {
-                // 자바스크립트가 하던 짓(치환 및 꼬리표 붙이기)을 코틀린으로 구현
-                var finalUrl = wrapperMatch.groupValues[1].replace("wrapper", actualVid)
+            // 3. [그물망 정규식] wrapper 단어 유무, 절대경로, 상대경로 상관없이 무조건 플레이리스트 캡처
+            var rawPlaylist = """(https://vixsrc\.to/playlist/[^"'\s<>]+)""".toRegex().find(embedHtml)?.groupValues?.get(1)
+            if (rawPlaylist == null) {
+                val relativePlaylist = """(/playlist/[^"'\s<>]+)""".toRegex().find(embedHtml)?.groupValues?.get(1)
+                if (relativePlaylist != null) rawPlaylist = baseUrl + relativePlaylist
+            }
+
+            // 만약 URL 구조로 못 찾으면 변수에서 강제 추출 (최후의 보루)
+            if (rawPlaylist == null) {
+                val token = """token["']?\s*[:=]\s*["']([^"']+)["']""".toRegex().find(embedHtml)?.groupValues?.get(1)
+                val expires = """expires["']?\s*[:=]\s*["']([^"']+)["']""".toRegex().find(embedHtml)?.groupValues?.get(1)
+                if (token != null && expires != null) {
+                    rawPlaylist = "$baseUrl/playlist/$actualVid?token=$token&expires=$expires"
+                }
+            }
+
+            if (rawPlaylist != null) {
+                // 자바스크립트가 하던 짓(치환 및 필수 꼬리표 붙이기)을 코틀린으로 보정
+                var finalUrl = rawPlaylist.replace("wrapper", actualVid)
                 if (!finalUrl.contains("h=1")) finalUrl += "&h=1"
                 if (!finalUrl.contains("lang=en")) finalUrl += "&lang=en"
                 
                 masterPlaylistUrl = finalUrl
                 println("[STREMIOSUB-VIXSRC] ⚡ SUCCESS! Constructed Final Playlist: $masterPlaylistUrl")
             } else {
-                // 만약 wrapper 문자가 바뀌었을 경우를 대비한 최후의 안전장치
-                val token = """token=([a-fA-F0-9]{32})""".toRegex().find(embedHtml)?.groupValues?.get(1)
-                val expires = """expires=(\d+)""".toRegex().find(embedHtml)?.groupValues?.get(1)
-                if (token != null && expires != null) {
-                    masterPlaylistUrl = "$baseUrl/playlist/$actualVid?token=$token&expires=$expires&h=1&lang=en"
-                    println("[STREMIOSUB-VIXSRC] ⚡ SUCCESS (Fallback Constructor): $masterPlaylistUrl")
-                }
+                println("[STREMIOSUB-VIXSRC] ❌ Extraction Failed. Could not find any playlist patterns.")
+                println("[STREMIOSUB-VIXSRC] 📝 Dump Preview: ${embedHtml.take(300)}")
             }
 
             // ====================================================================
@@ -104,7 +113,7 @@ object VixSrcExtractor {
                             callback.invoke(link)
                         }
                     } else {
-                        throw Exception("M3u8Helper parsing returned empty list.")
+                        throw Exception("M3u8Helper returned empty list.")
                     }
                 } catch (e: Exception) {
                     println("[STREMIOSUB-VIXSRC] M3u8Helper failed, safely falling back to Master M3U8: ${e.message}")
@@ -115,8 +124,6 @@ object VixSrcExtractor {
                         }
                     )
                 }
-            } else {
-                println("[STREMIOSUB-VIXSRC] ❌ Extraction Failed. Could not find token pattern in Embed HTML.")
             }
 
         } catch (c: CancellationException) {
