@@ -43,10 +43,8 @@ open class YoutubeExtractor : ExtractorApi() {
         private var serverPort: Int = 0
         private val serverLock = Any()
 
-        // SecureRandom 동기식 지연 차단을 배제하기 위한 고성능 원자적 스레드세이프 카운터
         private val streamCounter = AtomicLong(0)
 
-        // 가상 프록시 Manifest 캐시 (최대 1000개 보장 LRU)
         private val manifestMap: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(128, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
@@ -55,7 +53,6 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         )
 
-        // 메모리 누수를 완전히 방어하는 고정 크기 LRU 스트림 URL 캐시 (최대 1000개 보장)
         private val streamUrlCache: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(128, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
@@ -64,7 +61,6 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         )
 
-        // ExoPlayer의 백그라운드 중복 검증 조회 호출(Retry) 차단을 위한 쿨타임 관리 캐시
         private val recentTriggers: MutableMap<String, Long> = Collections.synchronizedMap(
             object : LinkedHashMap<String, Long>(16, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>?): Boolean {
@@ -83,7 +79,6 @@ open class YoutubeExtractor : ExtractorApi() {
             ThreadPoolExecutor.CallerRunsPolicy()
         )
 
-        // 타입 추론 및 의존성 고립을 위한 표준 OkHttpClient 인스턴스 빌드 구성
         private val proxyHttpClient = okhttp3.OkHttpClient.Builder()
             .followRedirects(true)
             .followSslRedirects(true)
@@ -92,7 +87,6 @@ open class YoutubeExtractor : ExtractorApi() {
             .readTimeout(30, TimeUnit.SECONDS)
             .build()
 
-        // 클래스 적재 시 정적 pre-compile 처리되는 정규식 선언부
         private val VISITOR_DATA_REGEX = Regex(""""VISITOR_DATA":"([^"]+)"""")
         private val STS_REGEX = Regex(""""signatureTimestamp":\s*(\d+)"""")
         private val WEB_API_KEY_REGEX = Regex(""""INNERTUBE_API_KEY":"([^"]+)"""")
@@ -103,7 +97,6 @@ open class YoutubeExtractor : ExtractorApi() {
             println("[YT_DEBUG_INIT] 유튜브 DASH 추출기 최적화 가상서버 초기화 완료")
         }
 
-        // 인텐트를 구성해 타겟 다운로더 앱(Seal, YTDLnis 등)에 유튜브 주소를 즉시 넘겨 실행시키는 메소드
         private fun openInExternalApp(packageName: String, targetUrl: String) {
             val context = AcraApplication.context ?: return
             android.os.Handler(android.os.Looper.getMainLooper()).post {
@@ -118,7 +111,6 @@ open class YoutubeExtractor : ExtractorApi() {
                     context.startActivity(intent)
                 } catch (e: Exception) {
                     e.printStackTrace()
-                    // 앱 미설치로 실행에 실패한 경우 타겟 패키지에 매칭되는 영어 토스트 알림 노출
                     try {
                         val appName = when (packageName) {
                             "com.junkfood.seal" -> "Seal"
@@ -138,7 +130,6 @@ open class YoutubeExtractor : ExtractorApi() {
 
         private fun handleClient(client: Socket) {
             try {
-                // client.use 영역 진입을 통하여 소켓 및 IO 자원의 안전 소멸 주기 확립
                 client.use { socket ->
                     val inputStream = socket.getInputStream()
                     val reader = BufferedReader(InputStreamReader(inputStream, java.nio.charset.StandardCharsets.UTF_8))
@@ -165,7 +156,6 @@ open class YoutubeExtractor : ExtractorApi() {
                     val cleanPath = fullPath.substringBefore("?")
                     val queryParams = fullPath.substringAfter("?", "")
 
-                    // 타겟 외부 다운로드 앱 바로가기 인터셉터 동작 처리 영역
                     if (cleanPath.startsWith("/open_app")) {
                         var pkg: String? = null
                         var targetUrl: String? = null
@@ -189,7 +179,6 @@ open class YoutubeExtractor : ExtractorApi() {
                             val now = System.currentTimeMillis()
                             val lastTrigger = recentTriggers[triggerKey] ?: 0L
                             
-                            // 3초 중복 호출 감지 쿨타임을 통해 중복 실행 및 대기열 중지 해결
                             if (now - lastTrigger > 3000L) {
                                 recentTriggers[triggerKey] = now
                                 openInExternalApp(pkg, targetUrl)
@@ -198,7 +187,6 @@ open class YoutubeExtractor : ExtractorApi() {
                             }
                         }
                         
-                        // 비디오 플레이어가 에러 메시지 없이 조용히 중단되도록 204 반환
                         outWriter.print("HTTP/1.1 204 No Content\r\n")
                         outWriter.print("Connection: close\r\n")
                         outWriter.print("Access-Control-Allow-Origin: *\r\n")
@@ -282,7 +270,6 @@ open class YoutubeExtractor : ExtractorApi() {
                     val body = response.body
                     if (body != null) {
                         body.byteStream().use { input ->
-                            // 64KB 고속 버퍼 릴레이 데이터 전송 지원
                             input.copyTo(output, bufferSize = 65536)
                         }
                     }
@@ -319,7 +306,6 @@ open class YoutubeExtractor : ExtractorApi() {
         val indexRange: String?
     )
 
-    // 로컬 가상 외부 다운로더 앱 인텐트 공유 리다이렉트 URL 생성기
     private fun getAppRedirectUrl(packageName: String, targetUrl: String): String? {
         startServerIfNeeded()
         return if (serverPort != 0) {
@@ -437,29 +423,40 @@ open class YoutubeExtractor : ExtractorApi() {
         val videoId = YoutubeUtils.extractYoutubeId(cleanedUrl) ?: cleanedUrl
         println("[YT_DEBUG_EXTRACTOR] 비디오 ID: $videoId")
 
+        val context = com.lagradost.cloudstream3.AcraApplication.context
+        val sharedPref = context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
+        val downloaderType = sharedPref?.getString("downloader_app_type", "none") ?: "none"
+        val customPkg = sharedPref?.getString("downloader_custom_package", "") ?: ""
+
+        val (pkgName, appName) = when (downloaderType) {
+            "ytdlnis" -> Pair("com.deniscerri.ytdl", "YTDLnis")
+            "seal" -> Pair("com.junkfood.seal", "Seal")
+            "seal_plus" -> Pair("com.maheshtechnicals.sealplus", "Seal Plus")
+            "custom" -> Pair(customPkg, "Custom Downloader")
+            else -> Pair("", "")
+        }
+
         withContext(Dispatchers.IO) {
             try {
                 val (playerResponse, durationSeconds) = fetchPlayerResponse(videoId)
 
-                // 우회 수단이 전부 막혔을 때 등록되는 Fallback 영역 (오직 앱 다이렉트 호출만 활성화)
                 if (playerResponse == null) {
                     println("[YT_DEBUG_EXTRACTOR] 🚨 모든 우회 실패! playerResponse 없음.")
                     
                     val originalUrl = "https://www.youtube.com/watch?v=$videoId"
 
-                    val ytdlPkg = "com.deniscerri.ytdl"
-                    val ytdlRedirect = getAppRedirectUrl(ytdlPkg, originalUrl) ?: originalUrl
-                    callback(newExtractorLink(source = "YouTube Downloader", name = "YTDLnis Download", url = ytdlRedirect, type = if (ytdlRedirect.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
-                  
-                    // Seal, SealPlus, YTDLnis 즉시 다운로드용 가상 리링크 추가
-                    val sealPkg = "com.junkfood.seal"
-                    val sealRedirect = getAppRedirectUrl(sealPkg, originalUrl) ?: originalUrl
-                    callback(newExtractorLink(source = "YouTube Downloader", name = "Seal Download", url = sealRedirect, type = if (sealRedirect.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
-
-                    val sealPlusPkg = "com.maheshtechnicals.sealplus"
-                    val sealPlusRedirect = getAppRedirectUrl(sealPlusPkg, originalUrl) ?: originalUrl
-                    callback(newExtractorLink(source = "YouTube Downloader", name = "Seal Plus Download", url = sealPlusRedirect, type = if (sealPlusRedirect.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
-
+                    if (pkgName.isNotEmpty()) {
+                        val redirectUrl = getAppRedirectUrl(pkgName, originalUrl) ?: originalUrl
+                        callback(newExtractorLink(
+                            source = "YouTube Downloader", 
+                            name = "$appName Download", 
+                            url = redirectUrl, 
+                            type = if (redirectUrl.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE
+                        ) { 
+                            this.quality = 2160 
+                            this.referer = mainUrl 
+                        })
+                    }
                     
                     return@withContext
                 }
@@ -557,7 +554,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         var subUrl = track.optString("baseUrl")
                         val lang = track.optString("languageCode")
                         
-                        // [자막 최적화] 자동 생성(Auto-generated / ASR) 자막 식별 및 필터링 제거
                         val kind = track.optString("kind", "")
                         val vssId = track.optString("vssId", "")
                         if (kind == "asr" || vssId.startsWith("a.")) {
@@ -576,7 +572,6 @@ open class YoutubeExtractor : ExtractorApi() {
                             displayName = lang.uppercase()
                         }
 
-                        // [자막 최적화] 이름 기반의 2차 자동 생성 자막 안전 장치 필터링
                         if (displayName.contains("auto-generated", ignoreCase = true) || 
                             displayName.contains("자동 생성", ignoreCase = true)) {
                             continue
@@ -626,21 +621,20 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
 
-                // 정상 동작 상황 하에서의 외부 앱 리링크 추가 영역
                 val originalUrl = "https://www.youtube.com/watch?v=$videoId"
 
-                val ytdlPkg = "com.deniscerri.ytdl"
-                val ytdlRedirect = getAppRedirectUrl(ytdlPkg, originalUrl) ?: originalUrl
-                callback(newExtractorLink(source = "YouTube Downloader", name = "YTDLnis Download", url = ytdlRedirect, type = if (ytdlRedirect.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
-                
-                // Seal, SealPlus, YTDLnis 즉시 다운로드용 가상 리링크 추가
-                val sealPkg = "com.junkfood.seal"
-                val sealRedirect = getAppRedirectUrl(sealPkg, originalUrl) ?: originalUrl
-                callback(newExtractorLink(source = "YouTube Downloader", name = "Seal Download", url = sealRedirect, type = if (sealRedirect.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
-
-                val sealPlusPkg = "com.maheshtechnicals.sealplus"
-                val sealPlusRedirect = getAppRedirectUrl(sealPlusPkg, originalUrl) ?: originalUrl
-                callback(newExtractorLink(source = "YouTube Downloader", name = "Seal Plus Download", url = sealPlusRedirect, type = if (sealPlusRedirect.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE) { this.quality = 2160; this.referer = mainUrl })
+                if (pkgName.isNotEmpty()) {
+                    val redirectUrl = getAppRedirectUrl(pkgName, originalUrl) ?: originalUrl
+                    callback(newExtractorLink(
+                        source = "YouTube Downloader", 
+                        name = "$appName Download", 
+                        url = redirectUrl, 
+                        type = if (redirectUrl.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE
+                    ) { 
+                        this.quality = 2160 
+                        this.referer = mainUrl 
+                    })
+                }
 
                 
             } catch (e: Exception) { 
@@ -655,7 +649,6 @@ open class YoutubeExtractor : ExtractorApi() {
             val server = activeServer
             if (server != null && !server.isClosed) return
             try {
-                // 루프백 호스트(127.0.0.1) 격리 바인딩을 적용하여 보안 한계 유지
                 val newServer = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
                 activeServer = newServer
                 serverPort = newServer.localPort
@@ -690,7 +683,6 @@ open class YoutubeExtractor : ExtractorApi() {
         audioList: List<AudioInfo>,
         durationSec: Long
     ): String {
-        // 난수 고갈 회피형 Atomic ID 체계 매핑
         val videoChunkId = "v_${streamCounter.getAndIncrement()}"
         streamUrlCache[videoChunkId] = video.url
         val proxyVideoUrl = "http://127.0.0.1:$serverPort/chunk?id=$videoChunkId"
