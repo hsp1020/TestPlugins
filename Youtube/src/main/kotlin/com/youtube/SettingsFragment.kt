@@ -280,7 +280,7 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
 
             val container = LinearLayout(ctx).apply {
                 orientation = LinearLayout.VERTICAL
-                val padding = (20 * ctx.resources.displayMetrics.density).toInt()
+                val padding = (24 * ctx.resources.displayMetrics.density).toInt()
                 setPadding(padding, padding, padding, padding)
             }
             scrollView.addView(container)
@@ -289,30 +289,26 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 orientation = RadioGroup.VERTICAL
             }
 
-            val rbYtdl = RadioButton(ctx).apply {
+            // Material 라이브러리 연동 RadioButton 사용
+            val rbYtdl = com.google.android.material.radiobutton.MaterialRadioButton(ctx).apply {
                 text = "YTDLnis"
                 id = View.generateViewId()
-                setTextColor(Color.WHITE)
             }
-            val rbSealPlus = RadioButton(ctx).apply {
+            val rbSealPlus = com.google.android.material.radiobutton.MaterialRadioButton(ctx).apply {
                 text = "Seal Plus"
                 id = View.generateViewId()
-                setTextColor(Color.WHITE)
             }
-            val rbSeal = RadioButton(ctx).apply {
+            val rbSeal = com.google.android.material.radiobutton.MaterialRadioButton(ctx).apply {
                 text = "Seal"
                 id = View.generateViewId()
-                setTextColor(Color.WHITE)
             }
-            val rbOther = RadioButton(ctx).apply {
+            val rbOther = com.google.android.material.radiobutton.MaterialRadioButton(ctx).apply {
                 text = otherTxt
                 id = View.generateViewId()
-                setTextColor(Color.WHITE)
             }
-            val rbNone = RadioButton(ctx).apply {
+            val rbNone = com.google.android.material.radiobutton.MaterialRadioButton(ctx).apply {
                 text = noneTxt
                 id = View.generateViewId()
-                setTextColor(Color.WHITE)
             }
 
             radioGroup.addView(rbYtdl)
@@ -321,19 +317,21 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
             radioGroup.addView(rbOther)
             radioGroup.addView(rbNone)
 
-            val editText = EditText(ctx).apply {
-                setTextColor(Color.WHITE)
-                setHintTextColor(Color.GRAY)
-                hint = hintTxt
-                textSize = 14f
-                maxLines = 1
+            // 머티리얼 전용 TextInputLayout + TextInputEditText 구조 채용
+            val textInputLayout = com.google.android.material.textfield.TextInputLayout(ctx).apply {
                 layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                     topMargin = (16 * ctx.resources.displayMetrics.density).toInt()
                 }
             }
 
+            val editText = com.google.android.material.textfield.TextInputEditText(ctx).apply {
+                hint = hintTxt
+                maxLines = 1
+            }
+            textInputLayout.addView(editText)
+
             container.addView(radioGroup)
-            container.addView(editText)
+            container.addView(textInputLayout)
             builder.setView(scrollView)
 
             val currentType = sharedPref.getString(KEY_DOWNLOADER_TYPE, "none") ?: "none"
@@ -343,27 +341,27 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 "none" -> {
                     rbNone.isChecked = true
                     editText.setText("")
-                    editText.isEnabled = false
+                    textInputLayout.isEnabled = false
                 }
                 "ytdlnis" -> {
                     rbYtdl.isChecked = true
                     editText.setText("com.deniscerri.ytdl")
-                    editText.isEnabled = false
+                    textInputLayout.isEnabled = false
                 }
                 "seal_plus" -> {
                     rbSealPlus.isChecked = true
                     editText.setText("com.maheshtechnicals.sealplus")
-                    editText.isEnabled = false
+                    textInputLayout.isEnabled = false
                 }
                 "seal" -> {
                     rbSeal.isChecked = true
                     editText.setText("com.junkfood.seal")
-                    editText.isEnabled = false
+                    textInputLayout.isEnabled = false
                 }
                 "custom" -> {
                     rbOther.isChecked = true
                     editText.setText(currentCustomPkg)
-                    editText.isEnabled = true
+                    textInputLayout.isEnabled = true
                 }
             }
 
@@ -371,23 +369,23 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 when (checkedId) {
                     rbNone.id -> {
                         editText.setText("")
-                        editText.isEnabled = false
+                        textInputLayout.isEnabled = false
                     }
                     rbYtdl.id -> {
                         editText.setText("com.deniscerri.ytdl")
-                        editText.isEnabled = false
+                        textInputLayout.isEnabled = false
                     }
                     rbSealPlus.id -> {
                         editText.setText("com.maheshtechnicals.sealplus")
-                        editText.isEnabled = false
+                        textInputLayout.isEnabled = false
                     }
                     rbSeal.id -> {
                         editText.setText("com.junkfood.seal")
-                        editText.isEnabled = false
+                        textInputLayout.isEnabled = false
                     }
                     rbOther.id -> {
                         editText.setText(sharedPref.getString(KEY_CUSTOM_PKG, ""))
-                        editText.isEnabled = true
+                        textInputLayout.isEnabled = true
                         editText.requestFocus()
                     }
                 }
@@ -542,7 +540,7 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 text = Loc.getString(sharedPref, "manage_channels")
                 textSize = 18f
                 setTextColor(Color.WHITE)
-                setTypeface(null, Typeface.BOLD)
+                setTypeface(null, Typeface.Bold)
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f)
             }
 
