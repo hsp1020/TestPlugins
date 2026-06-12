@@ -88,6 +88,9 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
         private val KEY_PAGES = "channel_pages_limit"
         private val KEY_PLAYLIST_TAG = "playlist_search_tag"
         private val KEY_LANGUAGE = "youtube_language"
+        
+        private val KEY_DOWNLOADER_TYPE = "downloader_app_type"
+        private val KEY_CUSTOM_PKG = "downloader_custom_package"
 
         private lateinit var languagePref: ListPreference
         private lateinit var authCategory: PreferenceCategory
@@ -100,6 +103,10 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
         private lateinit var playlistTagPref: EditTextPreference
         private lateinit var homeCategory: PreferenceCategory
         private lateinit var manageChannelsPref: Preference
+        
+        private lateinit var downloaderCategory: PreferenceCategory
+        private lateinit var downloaderPref: ListPreference
+        private lateinit var customPackagePref: EditTextPreference
 
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
             val ctx = requireContext()
@@ -224,6 +231,33 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
             playlistTagPref.text = sharedPref.getString(KEY_PLAYLIST_TAG, "{p}")
             customCategory.addPreference(playlistTagPref)
 
+            downloaderCategory = PreferenceCategory(ctx)
+            preferenceScreen.addPreference(downloaderCategory)
+
+            downloaderPref = ListPreference(ctx).apply {
+                key = KEY_DOWNLOADER_TYPE
+                entryValues = arrayOf("none", "ytdlnis", "seal", "seal_plus", "custom")
+                if (value == null) setValue("none")
+                summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
+                setOnPreferenceChangeListener { _, newValue ->
+                    sharedPref.edit().putString(KEY_DOWNLOADER_TYPE, newValue as String).apply()
+                    customPackagePref.isVisible = (newValue == "custom")
+                    true
+                }
+            }
+            downloaderCategory.addPreference(downloaderPref)
+
+            customPackagePref = EditTextPreference(ctx).apply {
+                key = KEY_CUSTOM_PKG
+                setOnBindEditTextListener { it.setText(sharedPref.getString(KEY_CUSTOM_PKG, "")) }
+                summaryProvider = EditTextPreference.SimpleSummaryProvider.getInstance()
+                setOnPreferenceChangeListener { _, newVal ->
+                    sharedPref.edit().putString(KEY_CUSTOM_PKG, (newVal as String).trim()).apply()
+                    true
+                }
+            }
+            downloaderCategory.addPreference(customPackagePref)
+
             updateTexts()
         }
 
@@ -257,6 +291,27 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
             playlistTagPref.dialogTitle = Loc.getString(sharedPref, "tag_hint")
             playlistTagPref.setPositiveButtonText(Loc.getString(sharedPref, "ok"))
             playlistTagPref.setNegativeButtonText(Loc.getString(sharedPref, "cancel"))
+
+            downloaderCategory.title = Loc.getString(sharedPref, "downloader_section")
+            downloaderPref.title = Loc.getString(sharedPref, "downloader_title")
+            downloaderPref.summary = Loc.getString(sharedPref, "downloader_sum")
+
+            downloaderPref.entries = arrayOf(
+                Loc.getString(sharedPref, "downloader_none"),
+                "YTDLnis",
+                "Seal",
+                "Seal Plus",
+                Loc.getString(sharedPref, "edit_manual")
+            )
+
+            customPackagePref.title = Loc.getString(sharedPref, "downloader_custom_title")
+            customPackagePref.summary = Loc.getString(sharedPref, "downloader_custom_sum")
+            customPackagePref.dialogTitle = Loc.getString(sharedPref, "downloader_custom_title")
+            customPackagePref.setPositiveButtonText(Loc.getString(sharedPref, "ok"))
+            customPackagePref.setNegativeButtonText(Loc.getString(sharedPref, "cancel"))
+
+            val currentType = sharedPref.getString(KEY_DOWNLOADER_TYPE, "none") ?: "none"
+            customPackagePref.isVisible = (currentType == "custom")
         }
     }
 
@@ -589,16 +644,15 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                     if (isChecked) holder.nameTxt.setTextColor(Color.WHITE) else holder.nameTxt.setTextColor(Color.GRAY)
                 }
 
-                // --- 시스템 통합 섹션(홈 및 개별 카테고리 칩) 여부 식별 및 예외 안전처리 가미 ---
                 val isSystem = section.url == "Home" || section.url.startsWith("chip_name_")
                 if (isSystem) {
                     holder.editBtn.visibility = View.GONE
                     holder.deleteBtn.visibility = View.GONE
-                    holder.urlTxt.setTextColor(Color.parseColor("#4CAF50")) // 시스템 전용 녹색 식별 라벨 지정
+                    holder.urlTxt.setTextColor(Color.parseColor("#4CAF50"))
                 } else {
                     holder.editBtn.visibility = View.VISIBLE
                     holder.deleteBtn.visibility = View.VISIBLE
-                    holder.urlTxt.setTextColor(Color.parseColor("#90CAF9")) // 커스텀 URL 전용 하늘색 라벨 지정
+                    holder.urlTxt.setTextColor(Color.parseColor("#90CAF9"))
                 }
 
                 holder.editBtn.setOnClickListener {
