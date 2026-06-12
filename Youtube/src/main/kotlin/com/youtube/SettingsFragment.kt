@@ -289,7 +289,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 orientation = RadioGroup.VERTICAL
             }
 
-            // Material 라이브러리 연동 RadioButton 사용
             val rbYtdl = com.google.android.material.radiobutton.MaterialRadioButton(ctx).apply {
                 text = "YTDLnis"
                 id = View.generateViewId()
@@ -317,7 +316,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
             radioGroup.addView(rbOther)
             radioGroup.addView(rbNone)
 
-            // 머티리얼 전용 TextInputLayout + TextInputEditText 구조 채용
             val textInputLayout = com.google.android.material.textfield.TextInputLayout(ctx).apply {
                 layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                     topMargin = (16 * ctx.resources.displayMetrics.density).toInt()
@@ -540,7 +538,7 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 text = Loc.getString(sharedPref, "manage_channels")
                 textSize = 18f
                 setTextColor(Color.WHITE)
-                setTypeface(null, Typeface.Bold)
+                setTypeface(null, android.graphics.Typeface.BOLD)
                 layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f)
             }
 
@@ -754,7 +752,7 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                     tag = "nameTxt"
                     setTextColor(Color.WHITE)
                     textSize = 16f
-                    setTypeface(null, Typeface.BOLD)
+                    setTypeface(null, android.graphics.Typeface.BOLD)
                 }
 
                 val urlTxt = TextView(ctx).apply {
