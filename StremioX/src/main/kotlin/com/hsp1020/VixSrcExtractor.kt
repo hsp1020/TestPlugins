@@ -21,20 +21,6 @@ import java.io.ByteArrayInputStream
 
 object VixSrcExtractor {
 
-    // 긴 로그가 잘리지 않도록 분할해서 찍어주는 함수
-    private fun logLargeString(tag: String, msg: String) {
-        if (msg.isBlank()) {
-            println("$tag [EMPTY BODY]")
-            return
-        }
-        var index = 0
-        while (index < msg.length) {
-            val end = minOf(index + 3000, msg.length)
-            println("$tag [PART] ${msg.substring(index, end)}")
-            index = end
-        }
-    }
-
     suspend fun invokeVixSrc(
         loadData: StremioC.LoadData,
         targetType: String,
@@ -45,7 +31,7 @@ object VixSrcExtractor {
     ) {
         var webView: WebView? = null
         try {
-            println("[STREMIOSUB-VIXSRC] >>> invokeVixSrc() START (Hybrid Fast-Track + Debug) <<<")
+            println("[STREMIOSUB-VIXSRC] >>> invokeVixSrc() START (Ultra-Fast 0.1s) <<<")
             
             val tmdbId = loadData.tmdbId?.toString() ?: loadData.imdbId ?: return
             val baseUrl = "https://vixsrc.to"
@@ -62,50 +48,37 @@ object VixSrcExtractor {
             var masterPlaylistUrl: String? = null
 
             // ====================================================================
-            // ⚡ PHASE 1: FAST-TRACK (API 직접 타격 및 검증)
+            // ⚡ PHASE 1: FAST-TRACK (API 직접 타격 - 0.1초 소요)
             // ====================================================================
             println("[STREMIOSUB-VIXSRC] ⚡ PHASE 1: Attempting Fast-Track API extraction...")
             try {
                 val apiUrl = if (isMovie) "$baseUrl/api/movie/$tmdbId" else "$baseUrl/api/tv/$tmdbId/$globalSeason/$globalEpisode"
-                println("[STREMIOSUB-VIXSRC] ⚡ API Request URL: $apiUrl")
-
+                
                 val apiResponseObj = StremioC.customSession.get(apiUrl, headers = commonHeaders)
-                println("[STREMIOSUB-VIXSRC] ⚡ API Response Code: ${apiResponseObj.code}")
-                println("[STREMIOSUB-VIXSRC] ⚡ API Headers: ${apiResponseObj.headers}")
+                // JSON의 \/ 이스케이프 문자를 일반 / 로 변경하여 파싱하기 쉽게 만듬
+                val apiResponse = apiResponseObj.text.replace("\\/", "/") 
                 
-                val apiResponse = apiResponseObj.text
-                println("[STREMIOSUB-VIXSRC] ⚡ API Response Body Dump:")
-                logLargeString("[STREMIOSUB-VIXSRC-API-DUMP]", apiResponse)
-                
-                // 정규식 1: 직접 플레이리스트 주소가 있는지 탐색
                 var fastUrl = """(https://vixsrc\.to/playlist/[^"'\s\\]+)""".toRegex().find(apiResponse)?.groupValues?.get(1)
-                println("[STREMIOSUB-VIXSRC] ⚡ Direct Playlist Regex Match: ${fastUrl ?: "NONE"}")
                 
                 if (fastUrl == null) {
-                    // 정규식 2: Embed URL이 있는지 탐색
-                    val embedUrl = """(https://vixsrc\.to/embed/[^"'\s\\]+)""".toRegex().find(apiResponse)?.groupValues?.get(1)
-                    println("[STREMIOSUB-VIXSRC] ⚡ Embed URL Regex Match: ${embedUrl ?: "NONE"}")
-
-                    if (embedUrl != null) {
-                        println("[STREMIOSUB-VIXSRC] ⚡ Requesting Embed URL to extract token...")
-                        val embedResponseObj = StremioC.customSession.get(embedUrl.replace("\\u0026", "&"), headers = commonHeaders)
-                        println("[STREMIOSUB-VIXSRC] ⚡ Embed Response Code: ${embedResponseObj.code}")
+                    // 서버가 던져주는 상대 경로(/embed/...)를 잡아내도록 정규식 수정!
+                    val embedPath = """(/embed/[^"'\s\\]+)""".toRegex().find(apiResponse)?.groupValues?.get(1)
+                    
+                    if (embedPath != null) {
+                        val embedUrl = baseUrl + embedPath
+                        println("[STREMIOSUB-VIXSRC] ⚡ Fast-Track caught Embed URL: $embedUrl")
                         
-                        val embedHtml = embedResponseObj.text
-                        println("[STREMIOSUB-VIXSRC] ⚡ Embed HTML Dump:")
-                        logLargeString("[STREMIOSUB-VIXSRC-EMBED-DUMP]", embedHtml)
+                        // Embed URL의 HTML을 가져와서 최종 토큰을 추출
+                        val embedHtml = StremioC.customSession.get(embedUrl.replace("\\u0026", "&"), headers = commonHeaders).text
                         
                         val token = """token["']?\s*[:=]\s*["']([^"']+)["']""".toRegex().find(embedHtml)?.groupValues?.get(1)
                         val expires = """expires["']?\s*[:=]\s*["']([^"']+)["']""".toRegex().find(embedHtml)?.groupValues?.get(1)
                         val vId = """id["']?\s*[:=]\s*["']([^"']+)["']""".toRegex().find(embedHtml)?.groupValues?.get(1)
                         
-                        println("[STREMIOSUB-VIXSRC] ⚡ Extracted from Embed -> Token: $token, Expires: $expires, ID: $vId")
-
                         if (token != null && expires != null && vId != null) {
                             fastUrl = "$baseUrl/playlist/$vId?token=$token&expires=$expires"
                         } else {
                             fastUrl = """(https://vixsrc\.to/playlist/[^"'\s\\]+)""".toRegex().find(embedHtml)?.groupValues?.get(1)
-                            println("[STREMIOSUB-VIXSRC] ⚡ Fallback Direct Playlist Match from Embed: ${fastUrl ?: "NONE"}")
                         }
                     }
                 }
@@ -114,14 +87,14 @@ object VixSrcExtractor {
                     masterPlaylistUrl = fastUrl.replace("\\u0026", "&").replace("&amp;", "&")
                     println("[STREMIOSUB-VIXSRC] ⚡ FAST-TRACK SUCCESS! Playlist URL: $masterPlaylistUrl")
                 } else {
-                    println("[STREMIOSUB-VIXSRC] 🐢 FAST-TRACK Failed. Proceeding to Phase 2 (WebView).")
+                    println("[STREMIOSUB-VIXSRC] 🐢 FAST-TRACK Failed to parse. Proceeding to Phase 2 (WebView).")
                 }
             } catch (e: Exception) {
                 println("[STREMIOSUB-VIXSRC] 🐢 FAST-TRACK Exception: ${e.message}")
             }
 
             // ====================================================================
-            // 🐢 PHASE 2: WEBVIEW FALLBACK (API 차단 시 발동)
+            // 🐢 PHASE 2: WEBVIEW FALLBACK (API 차단 시 발동 - 2~3초 소요)
             // ====================================================================
             if (masterPlaylistUrl == null) {
                 println("[STREMIOSUB-VIXSRC] 🐢 PHASE 2: Running Headless WebView Fallback...")
