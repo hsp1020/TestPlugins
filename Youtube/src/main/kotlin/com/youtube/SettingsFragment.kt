@@ -239,8 +239,11 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 entryValues = arrayOf("none", "ytdlnis", "seal", "seal_plus", "custom")
                 if (value == null) setValue("none")
                 setOnPreferenceChangeListener { _, newValue ->
-                    sharedPref.edit().putString(KEY_DOWNLOADER_TYPE, newValue as String).apply()
-                    customPackagePref.isVisible = (newValue == "custom")
+                    val selectedValue = newValue as String
+                    sharedPref.edit().putString(KEY_DOWNLOADER_TYPE, selectedValue).apply()
+                    customPackagePref.isVisible = (selectedValue == "custom")
+                    
+                    checkAndShowInstallDialog(ctx, selectedValue)
                     true
                 }
             }
@@ -250,13 +253,77 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 key = KEY_CUSTOM_PKG
                 setOnBindEditTextListener { it.setText(sharedPref.getString(KEY_CUSTOM_PKG, "")) }
                 setOnPreferenceChangeListener { _, newVal ->
-                    sharedPref.edit().putString(KEY_CUSTOM_PKG, (newVal as String).trim()).apply()
+                    val pkg = (newVal as String).trim()
+                    sharedPref.edit().putString(KEY_CUSTOM_PKG, pkg).apply()
+                    
+                    if (pkg.isNotEmpty() && !isAppInstalled(ctx, pkg)) {
+                        val langCode = sharedPref.getString("youtube_language", "ar") ?: "ar"
+                        val title = if (langCode == "ko") "패키지 미설치" else "Package Not Installed"
+                        val msg = if (langCode == "ko") {
+                            "입력하신 패키지명($pkg)에 해당하는 앱이 기기에 설치되어 있지 않습니다. 패키지명을 다시 확인해 주세요."
+                        } else {
+                            "The app with package name ($pkg) is not installed on this device. Please check the package name again."
+                        }
+                        MaterialAlertDialogBuilder(ctx)
+                            .setTitle(title)
+                            .setMessage(msg)
+                            .setPositiveButton(if (langCode == "ko") "확인" else "OK", null)
+                            .show()
+                    }
                     true
                 }
             }
             downloaderCategory.addPreference(customPackagePref)
 
             updateTexts()
+        }
+
+        private fun isAppInstalled(context: Context, packageName: String): Boolean {
+            return try {
+                context.packageManager.getPackageInfo(packageName, 0)
+                true
+            } catch (e: android.content.pm.PackageManager.NameNotFoundException) {
+                false
+            } catch (e: Exception) {
+                false
+            }
+        }
+
+        private fun checkAndShowInstallDialog(context: Context, selectedValue: String) {
+            val (packageName, githubUrl, appName) = when (selectedValue) {
+                "ytdlnis" -> Triple("com.deniscerri.ytdl", "https://github.com/deniscerri/ytdlnis", "YTDLnis")
+                "seal" -> Triple("com.junkfood.seal", "https://github.com/JunkFood02/Seal", "Seal")
+                "seal_plus" -> Triple("com.maheshtechnicals.sealplus", "https://github.com/MaheshTechnicals/Sealplus", "Seal Plus")
+                else -> return
+            }
+
+            if (!isAppInstalled(context, packageName)) {
+                val langCode = sharedPref.getString("youtube_language", "ar") ?: "ar"
+                val title = if (langCode == "ko") "다운로더 미설치" else "Downloader Not Installed"
+                val message = if (langCode == "ko") {
+                    "$appName 앱이 기기에 설치되어 있지 않습니다.\nGitHub에서 다운로드하시겠습니까?"
+                } else {
+                    "$appName is not installed on your device.\nWould you like to download it from GitHub?"
+                }
+                val btnDownload = if (langCode == "ko") "다운로드" else "Download"
+                val btnCancel = if (langCode == "ko") "취소" else "Cancel"
+
+                MaterialAlertDialogBuilder(context)
+                    .setTitle(title)
+                    .setMessage(message)
+                    .setPositiveButton(btnDownload) { _, _ ->
+                        try {
+                            val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(githubUrl)).apply {
+                                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            context.startActivity(intent)
+                        } catch (e: Exception) {
+                            Toast.makeText(context, "Error opening browser", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                    .setNegativeButton(btnCancel, null)
+                    .show()
+            }
         }
 
         private fun updateTexts() {
