@@ -240,11 +240,36 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 if (value == null) setValue("none")
                 setOnPreferenceChangeListener { _, newValue ->
                     val selectedValue = newValue as String
-                    sharedPref.edit().putString(KEY_DOWNLOADER_TYPE, selectedValue).apply()
-                    customPackagePref.isVisible = (selectedValue == "custom")
                     
-                    checkAndShowInstallDialog(ctx, selectedValue)
-                    true
+                    if (selectedValue == "custom") {
+                        sharedPref.edit().putString(KEY_DOWNLOADER_TYPE, selectedValue).apply()
+                        customPackagePref.isVisible = true
+                        return@setOnPreferenceChangeListener true
+                    }
+                    
+                    if (selectedValue == "none") {
+                        sharedPref.edit().putString(KEY_DOWNLOADER_TYPE, selectedValue).apply()
+                        customPackagePref.isVisible = false
+                        return@setOnPreferenceChangeListener true
+                    }
+                    
+                    val (packageName, githubUrl, appName) = when (selectedValue) {
+                        "ytdlnis" -> Triple("com.deniscerri.ytdl", "https://github.com/deniscerri/ytdlnis", "YTDLnis")
+                        "seal" -> Triple("com.junkfood.seal", "https://github.com/JunkFood02/Seal", "Seal")
+                        "seal_plus" -> Triple("com.maheshtechnicals.sealplus", "https://github.com/MaheshTechnicals/Sealplus", "Seal Plus")
+                        else -> Triple("", "", "")
+                    }
+
+                    if (isAppInstalled(ctx, packageName)) {
+                        // 패키지가 기기에 실제로 존재하는 것이 확인된 경우에만 최종 저장 및 승인
+                        sharedPref.edit().putString(KEY_DOWNLOADER_TYPE, selectedValue).apply()
+                        customPackagePref.isVisible = false
+                        true
+                    } else {
+                        // 미설치 상태라면 일단 저장을 완전히 차단(false 반환)하고 팝업을 노출시킵니다.
+                        showInstallDialogAndHandle(ctx, selectedValue, appName, githubUrl, this)
+                        false
+                    }
                 }
             }
             downloaderCategory.addPreference(downloaderPref)
@@ -289,41 +314,54 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
             }
         }
 
-        private fun checkAndShowInstallDialog(context: Context, selectedValue: String) {
-            val (packageName, githubUrl, appName) = when (selectedValue) {
-                "ytdlnis" -> Triple("com.deniscerri.ytdl", "https://github.com/deniscerri/ytdlnis", "YTDLnis")
-                "seal" -> Triple("com.junkfood.seal", "https://github.com/JunkFood02/Seal", "Seal")
-                "seal_plus" -> Triple("com.maheshtechnicals.sealplus", "https://github.com/MaheshTechnicals/Sealplus", "Seal Plus")
-                else -> return
+        private fun showInstallDialogAndHandle(
+            context: Context, 
+            selectedValue: String, 
+            appName: String, 
+            githubUrl: String,
+            downloaderPref: ListPreference
+        ) {
+            val langCode = sharedPref.getString("youtube_language", "ar") ?: "ar"
+            val title = if (langCode == "ko") "다운로더 미설치" else "Downloader Not Installed"
+            val message = if (langCode == "ko") {
+                "$appName 앱이 기기에 설치되어 있지 않습니다.\nGitHub에서 다운로드하시겠습니까?"
+            } else {
+                "$appName is not installed on your device.\nWould you like to download it from GitHub?"
             }
+            val btnDownload = if (langCode == "ko") "다운로드" else "Download"
+            val btnCancel = if (langCode == "ko") "취소" else "Cancel"
 
-            if (!isAppInstalled(context, packageName)) {
-                val langCode = sharedPref.getString("youtube_language", "ar") ?: "ar"
-                val title = if (langCode == "ko") "다운로더 미설치" else "Downloader Not Installed"
-                val message = if (langCode == "ko") {
-                    "$appName 앱이 기기에 설치되어 있지 않습니다.\nGitHub에서 다운로드하시겠습니까?"
-                } else {
-                    "$appName is not installed on your device.\nWould you like to download it from GitHub?"
-                }
-                val btnDownload = if (langCode == "ko") "다운로드" else "Download"
-                val btnCancel = if (langCode == "ko") "취소" else "Cancel"
-
-                MaterialAlertDialogBuilder(context)
-                    .setTitle(title)
-                    .setMessage(message)
-                    .setPositiveButton(btnDownload) { _, _ ->
-                        try {
-                            val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(githubUrl)).apply {
-                                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                            }
-                            context.startActivity(intent)
-                        } catch (e: Exception) {
-                            Toast.makeText(context, "Error opening browser", Toast.LENGTH_SHORT).show()
-                        }
+            MaterialAlertDialogBuilder(context)
+                .setTitle(title)
+                .setMessage(message)
+                .setPositiveButton(btnDownload) { _, _ ->
+                    // 실제 설치 완료 전에는 저장을 하지 않고 브라우저 가이드 릴레이만 제공합니다.
+                    val toastMsg = if (langCode == "ko") {
+                        "다운로드 및 설치 완료 후 설정에서 다시 선택해 주세요."
+                    } else {
+                        "Please select again after downloading and installing the app."
                     }
-                    .setNegativeButton(btnCancel, null)
-                    .show()
-            }
+                    Toast.makeText(context, toastMsg, Toast.LENGTH_LONG).show()
+
+                    try {
+                        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(githubUrl)).apply {
+                            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        context.startActivity(intent)
+                    } catch (e: Exception) {
+                        Toast.makeText(context, "Error opening browser", Toast.LENGTH_SHORT).show()
+                    }
+
+                    // 저장이 완전히 취소되었으므로 UI 라디오 선택 항목도 정상 저장되어 있던 이전 상태로 복구시킵니다.
+                    downloaderPref.value = sharedPref.getString(KEY_DOWNLOADER_TYPE, "none")
+                }
+                .setNegativeButton(btnCancel) { _, _ ->
+                    downloaderPref.value = sharedPref.getString(KEY_DOWNLOADER_TYPE, "none")
+                }
+                .setOnCancelListener {
+                    downloaderPref.value = sharedPref.getString(KEY_DOWNLOADER_TYPE, "none")
+                }
+                .show()
         }
 
         private fun updateTexts() {
