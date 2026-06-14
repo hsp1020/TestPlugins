@@ -2,6 +2,7 @@
 package com.hsp1020
 
 import android.annotation.SuppressLint
+import android.content.Context // 🔥 누락되었던 컨텍스트 임포트 복구 완료
 import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.drawable.Drawable
