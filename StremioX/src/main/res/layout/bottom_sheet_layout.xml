@@ -100,7 +100,7 @@
                 android:nextFocusUp="@id/addlinks" />
         </LinearLayout>
 
-        <!-- History &amp; Library Sync Toggle (CineStream 위에 신규 배치) -->
+        <!-- History &amp; Library Sync Toggle -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -153,7 +153,7 @@
                 android:singleLine="true" />
         </LinearLayout>
 
-        <!-- TMDb Language Selection (CineStream 위에 신규 배치) -->
+        <!-- TMDb Language Selection (텍스트 버튼에서 톱니바퀴 모양 이미지뷰로 교체완료) -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -169,18 +169,15 @@
                 android:textSize="18sp"
                 android:textStyle="bold" />
 
-            <Button
+            <ImageView
                 android:id="@+id/btnSelectLanguage"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="ko-KR"
-                android:background="@null"
-                android:textColor="#2196F3"
-                android:focusable="true"
-                android:padding="5dp" />
+                android:padding="5dp"
+                android:focusable="true" />
         </LinearLayout>
 
-        <!-- Custom Poster URL Input (CineStream 위에 신규 배치) -->
+        <!-- Custom Poster URL Input -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
