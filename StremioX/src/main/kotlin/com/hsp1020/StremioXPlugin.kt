@@ -19,7 +19,7 @@ class StremioXPlugin : Plugin() {
     override fun load(context: Context) {
         println("[StremioXPlugin v1.2-TRACKING] load() 함수 호출됨")
         
-        // 🔥 [기록/라이브러리 통합용]: 백그라운드 가상 공유 코어 등록
+        // [v2.2.1] 기록/즐겨찾기 단일 네임스페이스 격리 및 복원을 위해 백그라운드 공유 프로바이더를 조용히 상시 등록 [1]
         try {
             registerMainAPI(StremioC("", "StremioX"))
         } catch (_: Throwable) {}
@@ -36,7 +36,6 @@ class StremioXPlugin : Plugin() {
             activity?.supportFragmentManager?.let { fm -> frag.show(fm, "Frag") }
         }
     }
-
 
     fun reload(context: Context) {
         println("[StremioXPlugin v1.2-TRACKING] reload() 함수 호출됨")
