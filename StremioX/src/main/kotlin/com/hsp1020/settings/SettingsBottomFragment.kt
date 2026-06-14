@@ -1,4 +1,4 @@
-// 파일명: hsp1020/testplugins/TestPlugins-d1a26fae88cb55c8f1d621560cf4e45bd7fd78f6/StremioX/src/main/kotlin/com/hsp1020/settings/SettingsBottomFragment.kt
+// 파일명: hsp1020/settings/SettingsBottomFragment.kt
 package com.hsp1020
 
 import android.annotation.SuppressLint
@@ -105,7 +105,6 @@ class SettingsBottomFragment(
 
     private val res = plugin.resources ?: throw Exception("Unable to access plugin resources")
 
-    // 다이얼로그용 임시 카탈로그 DTO
     private data class ConfigCatalog(val id: String, val type: String, val name: String, val genres: List<String>)
 
     private fun getDrawable(name: String): Drawable {
@@ -269,7 +268,6 @@ class SettingsBottomFragment(
                         }
                     },
                     onEdit = { itemToEdit, position ->
-                        // [v2.0.0] 수정 시 선택 메뉴 다이얼로그 호출 (링크 수정 vs 카탈로그 제어)
                         val choices = arrayOf("Edit Link Info", "Configure Catalogs & Genres")
                         AlertDialog.Builder(requireContext())
                             .setTitle(itemToEdit.name)
@@ -326,7 +324,7 @@ class SettingsBottomFragment(
                 showToast("$displayName Integration $statusText")
             }
         } catch (e: Throwable) {
-            // 레이아웃 파일에 해당 ID가 없더라도 크래시 차단
+            // 방어 코드
         }
     }
 
@@ -393,7 +391,6 @@ class SettingsBottomFragment(
             .create()
         progressDialog.show()
 
-        // 코루틴 비동기 Manifest 파싱
         CoroutineScope(Dispatchers.Main).launch {
             val manifestText = withContext(Dispatchers.IO) {
                 try {
@@ -409,7 +406,6 @@ class SettingsBottomFragment(
                 return@launch
             }
 
-            // Jackson 매퍼를 이용한 카탈로그 수집
             val catalogs = try {
                 val node = StremioC.jsonMapper.readTree(manifestText)
                 val catsNode = node.get("catalogs")
@@ -449,7 +445,6 @@ class SettingsBottomFragment(
         val context = requireContext()
         val prefs = sharedPref
 
-        // 정렬 맵 로드
         val orderKey = "catalog_order_$addonName"
         val orderJson = prefs.getString(orderKey, null)
         val orderedKeys = mutableListOf<String>()
@@ -462,7 +457,6 @@ class SettingsBottomFragment(
             } catch (e: Exception) {}
         }
 
-        // 기존 정렬 키 기준으로 소팅 후 가변 리스트 생성
         val mutableCatalogs = catalogs.sortedBy { cat ->
             val key = "${cat.id}_${cat.type}"
             val idx = orderedKeys.indexOf(key)
@@ -501,7 +495,7 @@ class SettingsBottomFragment(
             mutableCatalogs.forEachIndexed { index, catalog ->
                 val catalogKey = "${catalog.id}_${catalog.type}"
                 val enabledKey = "catalog_enabled_${addonName}_$catalogKey"
-                val isEnabled = prefs.getBoolean(enabledKey, true)
+                val isCatEnabled = prefs.getBoolean(enabledKey, true)
 
                 val itemLayout = android.widget.LinearLayout(context).apply {
                     orientation = android.widget.LinearLayout.HORIZONTAL
@@ -509,12 +503,11 @@ class SettingsBottomFragment(
                     setPadding(0, 10, 0, 10)
                 }
 
-                // 순서 재정렬 업/다운 화살표 버튼 생성
                 val upButton = android.widget.ImageButton(context).apply {
                     setImageResource(android.R.drawable.arrow_up_float)
                     background = null
-                    isEnabled = index > 0
-                    alpha = if (isEnabled) 1.0f else 0.3f
+                    this.isEnabled = index > 0
+                    alpha = if (this.isEnabled) 1.0f else 0.3f
                     setOnClickListener {
                         Collections.swap(mutableCatalogs, index, index - 1)
                         rebuild?.invoke()
@@ -524,8 +517,8 @@ class SettingsBottomFragment(
                 val downButton = android.widget.ImageButton(context).apply {
                     setImageResource(android.R.drawable.arrow_down_float)
                     background = null
-                    isEnabled = index < mutableCatalogs.size - 1
-                    alpha = if (isEnabled) 1.0f else 0.3f
+                    this.isEnabled = index < mutableCatalogs.size - 1
+                    alpha = if (this.isEnabled) 1.0f else 0.3f
                     setOnClickListener {
                         Collections.swap(mutableCatalogs, index, index + 1)
                         rebuild?.invoke()
@@ -535,9 +528,8 @@ class SettingsBottomFragment(
                 itemLayout.addView(upButton)
                 itemLayout.addView(downButton)
 
-                // 사용 여부 제어 체크박스
                 val checkbox = android.widget.CheckBox(context).apply {
-                    isChecked = isEnabled
+                    isChecked = isCatEnabled
                     text = "${catalog.name} (${catalog.type})"
                     textSize = 15f
                     setOnCheckedChangeListener { _, checked ->
@@ -547,7 +539,6 @@ class SettingsBottomFragment(
                 val checkParams = android.widget.LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 itemLayout.addView(checkbox, checkParams)
 
-                // 세부 장르 제어 (장르 목록이 존재하는 카탈로그만 노출)
                 if (catalog.genres.isNotEmpty()) {
                     val genreButton = android.widget.Button(context).apply {
                         text = "Genres"
