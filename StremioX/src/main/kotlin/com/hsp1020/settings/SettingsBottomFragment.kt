@@ -17,6 +17,8 @@ import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
+import android.widget.CheckBox
+import android.widget.Switch
 import androidx.appcompat.app.AlertDialog
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import androidx.core.net.toUri
@@ -52,7 +54,7 @@ object SettingsRepository {
     const val PREF_KEY_HISTORY_SYNC_ENABLED = "history_sync_enabled"
     const val PREF_KEY_HISTORY_SYNC_URL = "history_sync_url"
     
-    // [v2.2.0] TMDb 다국어 및 추천목록 포스터 설정 키 정의
+    // TMDb 다국어 및 추천목록 포스터 설정 키 정의
     const val PREF_KEY_TMDB_LANG_CODE = "tmdb_language_code"
     const val PREF_KEY_CUSTOM_POSTER_URL = "custom_poster_url"
 
@@ -113,6 +115,66 @@ class SettingsBottomFragment(
     private val res = plugin.resources ?: throw Exception("Unable to access plugin resources")
 
     private data class ConfigFlatTab(val key: String, val displayName: String, val isGenre: Boolean, val catalogKey: String)
+
+    private val languages = listOf(
+        "South Africa (Afrikaans)" to "af-ZA",
+        "United Arab Emirates (Arabic)" to "ar-AE",
+        "Saudi Arabia (Arabic)" to "ar-SA",
+        "Azerbaijan (Azerbaijani)" to "az-AZ",
+        "Bulgaria (Bulgarian)" to "bg-BG",
+        "India (Bengali)" to "bn-IN",
+        "Spain (Catalan)" to "ca-ES",
+        "Czech Republic (Czech)" to "cs-CZ",
+        "United Kingdom (Welsh)" to "cy-GB",
+        "Denmark (Danish)" to "da-DK",
+        "Germany (German)" to "de-DE",
+        "Greece (Greek)" to "el-GR",
+        "United States (English)" to "en-US",
+        "United Kingdom (English)" to "en-GB",
+        "Spain (Spanish)" to "es-ES",
+        "Latin America (Spanish)" to "es-419",
+        "Estonia (Estonian)" to "et-EE",
+        "Spain (Basque)" to "eu-ES",
+        "Iran (Persian)" to "fa-IR",
+        "Finland (Finnish)" to "fi-FI",
+        "Philippines (Filipino)" to "fil-PH",
+        "France (French)" to "fr-FR",
+        "Spain (Galician)" to "gl-ES",
+        "India (Gujarati)" to "gu-IN",
+        "Israel (Hebrew)" to "he-IL",
+        "India (Hindi)" to "hi-IN",
+        "Croatia (Croatian)" to "hr-HR",
+        "Hungary (Hungarian)" to "hu-HU",
+        "Indonesia (Indonesian)" to "id-ID",
+        "Iceland (Icelandic)" to "is-IS",
+        "Italy (Italian)" to "it-IT",
+        "Japan (Japanese)" to "ja-JP",
+        "India (Kannada)" to "kn-IN",
+        "South Korea (Korean)" to "ko-KR",
+        "Lithuania (Lithuanian)" to "lt-LT",
+        "Latvia (Latvian)" to "lv-LV",
+        "India (Malayalam)" to "ml-IN",
+        "Malaysia (Malay)" to "ms-MY",
+        "Norway (Norwegian)" to "no-NO",
+        "Netherlands (Dutch)" to "nl-NL",
+        "Poland (Polish)" to "pl-PL",
+        "Brazil (Portuguese)" to "pt-BR",
+        "Portugal (Portuguese)" to "pt-PT",
+        "Romania (Romanian)" to "ro-RO",
+        "Russia (Russian)" to "ru-RU",
+        "Slovakia (Slovak)" to "sk-SK",
+        "Slovenia (Slovenian)" to "sl-SI",
+        "Serbia (Serbian)" to "sr-RS",
+        "Sweden (Swedish)" to "sv-SE",
+        "India (Tamil)" to "ta-IN",
+        "India (Telugu)" to "te-IN",
+        "Thailand (Thai)" to "th-TH",
+        "Turkey (Turkish)" to "tr-TR",
+        "Ukraine (Ukrainian)" to "uk-UA",
+        "Vietnam (Vietnamese)" to "vi-VN",
+        "China (Chinese Simplified)" to "zh-CN",
+        "Taiwan (Chinese Traditional)" to "zh-TW"
+    ).sortedBy { it.first.lowercase() }
 
     private fun getDrawable(name: String): Drawable {
         val id = res.getIdentifier(name, "drawable", BuildConfig.LIBRARY_PACKAGE_NAME)
@@ -205,7 +267,7 @@ class SettingsBottomFragment(
         setupToggle(view, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
         setupToggle(view, "switchVixSrc", SettingsRepository.PREF_KEY_VIXSRC_ENABLED, true, "VixSrc")
 
-        // [v2.2.0] 다국어 선택 및 커스텀 포스터 주소 바인딩 연동 (참고 코드 수치 규격 적용) [3]
+        // [v2.2.0] 다국어 선택 및 커스텀 포스터 주소 바인딩 연동 (참고 코드 수치 규격 적용)
         val btnSelectLanguage: Button = try { view.findView("btnSelectLanguage") } catch (e: Throwable) {
             throw Exception("btnSelectLanguage Button not found in bottom_sheet_layout", e)
         }
@@ -218,7 +280,7 @@ class SettingsBottomFragment(
         etCustomPosterUrl.setText(sharedPref.getString(SettingsRepository.PREF_KEY_CUSTOM_POSTER_URL, ""))
 
         btnSelectLanguage.setOnClickListener {
-            // 참고 전송 양식대로 수선한 LanguageSelectFragment를 다이어로그형태로 팝업
+            // 수선한 LanguageSelectFragment를 다이어로그 형태로 팝업 [3]
             val fragment = LanguageSelectFragment(plugin, sharedPref) {
                 val updatedLangCode = sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, "ko-KR") ?: "ko-KR"
                 btnSelectLanguage.text = updatedLangCode
@@ -371,6 +433,81 @@ class SettingsBottomFragment(
         }
 
         return view
+    }
+
+    private fun setupToggle(view: View, viewId: String, prefKey: String, isInstalled: Boolean, displayName: String) {
+        try {
+            val switchView: CompoundButton = view.findView(viewId)
+            switchView.isEnabled = isInstalled
+            if (!isInstalled) {
+                switchView.isChecked = false
+                switchView.text = "$displayName (Not Installed)"
+                SettingsRepository.setIntegrationEnabled(sharedPref, prefKey, false)
+            } else {
+                switchView.text = "$displayName Integration"
+                switchView.isChecked = SettingsRepository.isIntegrationEnabled(sharedPref, prefKey)
+            }
+
+            switchView.setOnCheckedChangeListener { _, isChecked ->
+                SettingsRepository.setIntegrationEnabled(sharedPref, prefKey, isChecked)
+                val statusText = if (isChecked) "Enabled" else "Disabled"
+                showToast("$displayName Integration $statusText")
+            }
+        } catch (e: Throwable) {
+            // 방어 코드
+        }
+    }
+
+    private fun showEditDialog(itemToEdit: LinkItem, position: Int, rv: RecyclerView) {
+        val dialogView = getLayout("addlinks", LayoutInflater.from(requireContext()), null)
+        val etName: EditText
+        val etLink: EditText
+        
+        try {
+            etName = dialogView.findView("etName")
+            etLink = dialogView.findView("etLink")
+        } catch (t: Throwable) {
+            Toast.makeText(requireContext(), "Dialog fields not found", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        etName.setText(itemToEdit.name)
+        etLink.setText(itemToEdit.link)
+
+        val dlg = AlertDialog.Builder(requireContext())
+            .setTitle("Edit Link")
+            .setView(dialogView)
+            .setPositiveButton("Update", null)
+            .setNegativeButton("Cancel", null)
+            .create()
+
+        dlg.setOnShowListener {
+            val btnUpdate = dlg.getButton(AlertDialog.BUTTON_POSITIVE)
+            btnUpdate.setOnClickListener {
+                val name = etName.text.toString().trim()
+                val link = etLink.text.toString().trim()
+                val type = "StremioC"
+
+                if (link.isEmpty() || !(link.startsWith("http://") || link.startsWith("https://"))) {
+                    showToast("Enter a valid URL (http/https)")
+                    return@setOnClickListener
+                }
+
+                val updatedList = SettingsRepository.loadLinks(sharedPref)
+                val indexInDb = updatedList.indexOfFirst { it.id == itemToEdit.id }
+                
+                if (indexInDb != -1) {
+                    val newItem = itemToEdit.copy(name = name.ifBlank { link }, link = link, type = type)
+                    updatedList[indexInDb] = newItem
+                    SettingsRepository.saveLinks(sharedPref, updatedList)
+
+                    (rv.adapter as? LinksAdapter)?.updateItem(newItem, position)
+                    showToast("Link Updated Successfully")
+                }
+                dlg.dismiss()
+            }
+        }
+        dlg.show()
     }
 
     private fun showCatalogConfigDialog(item: LinkItem) {
