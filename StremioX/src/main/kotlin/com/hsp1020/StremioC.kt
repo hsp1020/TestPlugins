@@ -1375,12 +1375,14 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     
                     val resolvedPosterUrl = if (customPosterEnabled && customPosterBase.isNotBlank()) {
                         val rawUrl = customPosterBase.trim()
-                        if (rawUrl.contains("posterType") || rawUrl.contains("recTmdbId")) {
-                            // 1. 사용자가 변수명이 포함된 전체 템플릿 주소를 입력한 경우 -> 변수 플레이스홀더를 실시간 동적 치환
+                        if (rawUrl.contains("posterType") || rawUrl.contains("recTmdbId") || rawUrl.contains("{type}") || rawUrl.contains("{tmdb_id}")) {
+                            // 1. 사용자가 변수명이 포함된 전체 템플릿 주소를 입력한 경우 -> 달러($) 및 중괄호({}) 규격 모두를 실시간 동적 치환 [3]
                             rawUrl.replace("\$posterType", posterType)
                                   .replace("posterType", posterType)
+                                  .replace("{type}", posterType)
                                   .replace("\$recTmdbId", recTmdbId.toString())
                                   .replace("recTmdbId", recTmdbId.toString())
+                                  .replace("{tmdb_id}", recTmdbId.toString())
                         } else {
                             // 2. 사용자가 베이스 주소(예: https://extendedratings.com/poster)만 입력한 경우
                             val cleanBase = rawUrl.trimEnd('/')
