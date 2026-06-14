@@ -1365,7 +1365,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 val finalCombinedMedia = (collectionParts + tmdbRecs)
                     .distinctBy { it.id }
                     .filter { it.id != null && it.id != tmdbIdStr.toIntOrNull() }
-                    
+
                 fetchedRecommendations = finalCombinedMedia.mapNotNull { media ->
                     val recTitle = media.title ?: media.name ?: media.originalTitle ?: return@mapNotNull null
                     val recTmdbId = media.id ?: return@mapNotNull null
@@ -1374,11 +1374,20 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     val outType = if (rawMediaType == "tv") "series" else "movie"
                     
                     val resolvedPosterUrl = if (customPosterEnabled && customPosterBase.isNotBlank()) {
-                        // 1. 토글이 ON 상태이고, 유효한 커스텀 주소가 입력되어 있는 경우
-                        val cleanBase = customPosterBase.trim().trimEnd('/')
-                        "$cleanBase/tmdb:$posterType:$recTmdbId.jpg?config=aed081fd-73b1-460e-879d-377c5658691c"
+                        val rawUrl = customPosterBase.trim()
+                        if (rawUrl.contains("posterType") || rawUrl.contains("recTmdbId")) {
+                            // 1. 사용자가 변수명이 포함된 전체 템플릿 주소를 입력한 경우 -> 변수 플레이스홀더를 실시간 동적 치환
+                            rawUrl.replace("\$posterType", posterType)
+                                  .replace("posterType", posterType)
+                                  .replace("\$recTmdbId", recTmdbId.toString())
+                                  .replace("recTmdbId", recTmdbId.toString())
+                        } else {
+                            // 2. 사용자가 베이스 주소(예: https://extendedratings.com/poster)만 입력한 경우
+                            val cleanBase = rawUrl.trimEnd('/')
+                            "$cleanBase/tmdb:$posterType:$recTmdbId.jpg?config=aed081fd-73b1-460e-879d-377c5658691c"
+                        }
                     } else {
-                        // 2. 토글이 OFF 상태이거나, ON 상태여도 입력값이 비어있는 무효값인 경우 -> TMDB 기본 포스터로 로드
+                        // 3. 토글이 OFF 상태이거나 무효값인 경우 -> TMDB 기본 포스터로 로드
                         val path = media.poster_path
                         if (!path.isNullOrBlank()) "https://image.tmdb.org/t/p/w500$path" else TRANSPARENT_PIXEL
                     }
@@ -1392,6 +1401,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 }.take(50)
             }
             
+                      
             // 🔥 [연령 등급 동적화]: 선택한 국가 코드를 정교하게 자동 추출하여 대칭 (미등록 시 US로 폴백) [3]
             val countryCode = langCode.substringAfter("-", "KR").uppercase()
 
