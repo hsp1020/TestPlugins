@@ -1311,8 +1311,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val prefs = context?.getSharedPreferences("StremioX", Context.MODE_PRIVATE)
             val langCode = prefs?.getString("tmdb_language_code", "ko-KR") ?: "ko-KR"
             val customPosterEnabled = prefs?.getBoolean("custom_poster_enabled", false) ?: false
-            val customPosterBase = if (customPosterEnabled) prefs?.getString("custom_poster_url", "") ?: "" else ""
-
+            val customPosterBase = prefs?.getString("custom_poster_url", "") ?: ""
             
             coroutineScope {
                 val shouldFocusEpisodes = (!isMovie && targetVideos.isNullOrEmpty()) || (stremioType == "other" && !isMovie)
@@ -1366,7 +1365,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 val finalCombinedMedia = (collectionParts + tmdbRecs)
                     .distinctBy { it.id }
                     .filter { it.id != null && it.id != tmdbIdStr.toIntOrNull() }
-
+                    
                 fetchedRecommendations = finalCombinedMedia.mapNotNull { media ->
                     val recTitle = media.title ?: media.name ?: media.originalTitle ?: return@mapNotNull null
                     val recTmdbId = media.id ?: return@mapNotNull null
@@ -1374,12 +1373,14 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     val posterType = if (rawMediaType == "tv") "tv" else "movie"
                     val outType = if (rawMediaType == "tv") "series" else "movie"
                     
-                    // 커스텀 추천포스터 활성화 시 기입된 경로 사용, 토글 비활성화 또는 비어있을 시 오리지널 TMDB 주소로 자동 폴백 [3]
-                    val resolvedPosterUrl = if (customPosterBase.isNotBlank()) {
+                    val resolvedPosterUrl = if (customPosterEnabled && customPosterBase.isNotBlank()) {
+                        // 1. 토글이 ON 상태이고, 유효한 커스텀 주소가 입력되어 있는 경우
                         val cleanBase = customPosterBase.trim().trimEnd('/')
                         "$cleanBase/tmdb:$posterType:$recTmdbId.jpg?config=aed081fd-73b1-460e-879d-377c5658691c"
                     } else {
-                        if (!media.poster_path.isNullOrBlank()) "https://image.tmdb.org/t/p/w500${media.poster_path}" else TRANSPARENT_PIXEL
+                        // 2. 토글이 OFF 상태이거나, ON 상태여도 입력값이 비어있는 무효값인 경우 -> TMDB 기본 포스터로 로드
+                        val path = media.poster_path
+                        if (!path.isNullOrBlank()) "https://image.tmdb.org/t/p/w500$path" else TRANSPARENT_PIXEL
                     }
                     
                     val thinData = LoadData(id = "tmdb:${media.id}", type = outType)
@@ -1390,7 +1391,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     }
                 }.take(50)
             }
-
+            
             // 🔥 [연령 등급 동적화]: 선택한 국가 코드를 정교하게 자동 추출하여 대칭 (미등록 시 US로 폴백) [3]
             val countryCode = langCode.substringAfter("-", "KR").uppercase()
 
