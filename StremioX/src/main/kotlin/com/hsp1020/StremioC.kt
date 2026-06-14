@@ -174,10 +174,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     
     companion object {
         private const val tmdbAPI = "https://api.themoviedb.org/3"
-        private const val apiKey = "cc9982c4801545a1481d167137ea7b53"
         private const val TRANSPARENT_PIXEL = "https://upload.wikimedia.org/wikipedia/commons/c/ca/1x1.png"
-        private const val TRAKT_CLIENT_ID = "6d8668915ed1953f5023ea090e206facc6261813243f567dea15a9a678783b6d" 
-        private const val SIMKL_CLIENT_ID = "f392628a1235f474859905f5453239c57715d9a197a89bd71cac975ddd9c4d39" 
         
         private val IMDB_ID_REGEX = "tt[0-9]+".toRegex()
         private val JSON_ID_EXTRACT_REGEX = "\"id\":\"([^\"]+)\"".toRegex()
@@ -363,20 +360,23 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
     private fun buildTmdbUrl(endpoint: String, vararg params: Pair<String, String>): String {
         val builder = "$tmdbAPI$endpoint".toHttpUrlOrNull()?.newBuilder() ?: return ""
-        builder.addQueryParameter("api_key", apiKey)
         
-        // 🔥 [TMDb 다국어 동적화]: SharedPreferences에서 tmdb_language_code를 읽어오며 기본값은 한국어(ko-KR)로 지정 [3]
         val context = CloudStreamApp.context
         val prefs = context?.getSharedPreferences("StremioX", Context.MODE_PRIVATE)
+        
+        // 🔥 [TMDb API Key 동적화]: 하드코딩 대신 설정창에서 기입한 필수 API Key를 실시간 바인딩합니다. [1]
+        val tmdbKey = prefs?.getString("tmdb_api_key", "") ?: ""
+        builder.addQueryParameter("api_key", tmdbKey)
+        
+        // 언어 코드 동적화 유지 [3]
         val langCode = prefs?.getString("tmdb_language_code", "ko-KR") ?: "ko-KR"
         builder.addQueryParameter("language", langCode)
-
+        
         params.forEach { (key, value) ->
             builder.addQueryParameter(key, value)
         }
         return builder.build().toString()
     }
-
 
     private fun extractImdbId(url: String?): String? {
         if (url.isNullOrBlank() || !url.contains("tt")) return null
