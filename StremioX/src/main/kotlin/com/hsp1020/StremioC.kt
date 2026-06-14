@@ -1306,6 +1306,14 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
             val episodeTmdbMeta = ConcurrentHashMap<String, TmdbEpisode>()
 
+            // 🔥 [설정 동적화 수선]: 변수 스코프 충돌 방지를 위해 SharedPreferences 값을 coroutineScope 직전에 로드합니다. [3]
+            val context = CloudStreamApp.context
+            val prefs = context?.getSharedPreferences("StremioX", Context.MODE_PRIVATE)
+            val langCode = prefs?.getString("tmdb_language_code", "ko-KR") ?: "ko-KR"
+            val customPosterEnabled = prefs?.getBoolean("custom_poster_enabled", false) ?: false
+            val customPosterBase = if (customPosterEnabled) prefs?.getString("custom_poster_url", "") ?: "" else ""
+
+            
             coroutineScope {
                 val shouldFocusEpisodes = (!isMovie && targetVideos.isNullOrEmpty()) || (stremioType == "other" && !isMovie)
                 
@@ -1359,13 +1367,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     .distinctBy { it.id }
                     .filter { it.id != null && it.id != tmdbIdStr.toIntOrNull() }
 
-                // 🔥 [TMDb 설정 동적화]: SharedPreferences에서 TMDb 선택 언어 및 커스텀 포스터 주소 토글 정보 조회 [3]
-                val context = CloudStreamApp.context
-                val prefs = context?.getSharedPreferences("StremioX", Context.MODE_PRIVATE)
-                val langCode = prefs?.getString("tmdb_language_code", "ko-KR") ?: "ko-KR"
-                val customPosterEnabled = prefs?.getBoolean("custom_poster_enabled", false) ?: false
-                val customPosterBase = if (customPosterEnabled) prefs?.getString("custom_poster_url", "") ?: "" else ""
-
                 fetchedRecommendations = finalCombinedMedia.mapNotNull { media ->
                     val recTitle = media.title ?: media.name ?: media.originalTitle ?: return@mapNotNull null
                     val recTmdbId = media.id ?: return@mapNotNull null
@@ -1373,7 +1374,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     val posterType = if (rawMediaType == "tv") "tv" else "movie"
                     val outType = if (rawMediaType == "tv") "series" else "movie"
                     
-                    // 커스텀 추천포스터 활성화 시 기입된 경로 우선 사용, 토글 비활성화 또는 비어있을 시 오리지널 TMDB 주소로 자동 폴백 [3]
+                    // 커스텀 추천포스터 활성화 시 기입된 경로 사용, 토글 비활성화 또는 비어있을 시 오리지널 TMDB 주소로 자동 폴백 [3]
                     val resolvedPosterUrl = if (customPosterBase.isNotBlank()) {
                         val cleanBase = customPosterBase.trim().trimEnd('/')
                         "$cleanBase/tmdb:$posterType:$recTmdbId.jpg?config=aed081fd-73b1-460e-879d-377c5658691c"
@@ -1390,7 +1391,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 }.take(50)
             }
 
-            // 🔥 [연령 제한 국가 심의 등급 동적화]: 선택한 국가 코드(ko-KR -> KR, en-US -> US)를 정교하게 자동 추출하여 대칭 [3]
+            // 🔥 [연령 등급 동적화]: 선택한 국가 코드를 정교하게 자동 추출하여 대칭 (미등록 시 US로 폴백) [3]
             val countryCode = langCode.substringAfter("-", "KR").uppercase()
 
             val fetchedAgeRating = if (isMovie) {
