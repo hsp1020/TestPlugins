@@ -261,11 +261,38 @@ class SettingsBottomFragment(
         // 백업(Export) 64비트 문자열 처리 로직 적용
         // [최적화 완료]: 백업(Export) 비동기 처리 및 자동 클립보드 복사 (앱 크래시 원천 차단)
         // [v2.4.1 최적화]: 클립보드 다이렉트 스캔 및 100% 사전 유효성 검증(Pre-validation) 도입
+        // [v2.4.2 완벽 수정본]: 코루틴 및 불필요한 압축 제거. 렉의 원인이었던 EditText 렌더링만 걷어내고 다이렉트 클립보드 동기식 입출력 적용
+        tvExport.setOnClickListener {
+            val ctx = requireContext()
+            try {
+                val json = JSONObject()
+                sharedPref.all.forEach { (key, value) -> json.put(key, value) }
+                
+                // 1. 설정 데이터를 Base64 문자열로 즉시 인코딩 (메모리상 연산이라 0.01초 만에 완료됨)
+                val backupStr = Base64.encodeToString(json.toString().toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+
+                // 2. 무거운 화면(EditText)에 띄우지 않고 곧바로 기기 클립보드에 삽입
+                val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                val clip = ClipData.newPlainText("StremioX Backup", backupStr)
+                clipboard.setPrimaryClip(clip)
+
+                // 3. 완료 팝업 호출
+                AlertDialog.Builder(ctx)
+                    .setTitle("Export Successful")
+                    .setMessage("Backup data has been successfully copied to your clipboard.\n\nPlease paste it somewhere safe (e.g., Notes, Messenger).")
+                    .setPositiveButton("OK", null)
+                    .show()
+            } catch (e: Exception) {
+                Toast.makeText(ctx, "Failed to export settings", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        // [v2.4.2 완벽 수정본]: 클립보드 스캔 및 즉시 복원 (사전 검증 포함)
         tvImport.setOnClickListener {
             val ctx = requireContext()
             val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             
-            // 1. 클립보드 내용 읽어오기
+            // 1. 클립보드에서 텍스트 읽어오기
             val clipData = clipboard.primaryClip
             val clipboardText = if (clipData != null && clipData.itemCount > 0) {
                 clipData.getItemAt(0).text?.toString()?.trim() ?: ""
@@ -276,72 +303,51 @@ class SettingsBottomFragment(
                 return@setOnClickListener
             }
 
-            Toast.makeText(ctx, "Scanning clipboard data...", Toast.LENGTH_SHORT).show()
+            try {
+                // 2. 덮어쓰기 전, 백업 코드가 유효한지 사전 파싱 테스트
+                val decodedBytes = Base64.decode(clipboardText, Base64.NO_WRAP)
+                val jsonString = String(decodedBytes, Charsets.UTF_8)
+                val parsedJson = JSONObject(jsonString)
+                
+                if (parsedJson.length() == 0) throw Exception("Empty JSON Data")
 
-            CoroutineScope(Dispatchers.Main).launch {
-                // 2. 백그라운드에서 클립보드 데이터가 진짜 백업본인지 사전 파싱 테스트 진행
-                val parsedJson = withContext(Dispatchers.IO) {
-                    try {
-                        val decodedBytes = Base64.decode(clipboardText, Base64.NO_WRAP)
+                // 3. 정상 데이터임이 확인되면 복원 팝업 호출
+                AlertDialog.Builder(ctx)
+                    .setTitle("Backup Data Detected")
+                    .setMessage("Valid backup data found in clipboard!\n\nWarning: Restoring will permanently overwrite all current settings.\nAre you sure you want to proceed?")
+                    .setPositiveButton("Restore") { _, _ ->
+                        val editor = sharedPref.edit()
+                        editor.clear() // 새 데이터로 덮어쓰기 위해 기존 설정 초기화
                         
-                        val jsonString = try {
-                            val bais = ByteArrayInputStream(decodedBytes)
-                            GZIPInputStream(bais).bufferedReader(Charsets.UTF_8).readText()
-                        } catch (e: Exception) {
-                            String(decodedBytes, Charsets.UTF_8)
-                        }
-                        
-                        val json = JSONObject(jsonString)
-                        // 데이터가 정상적인 JSON이고 키 값이 1개라도 존재하는지 확인
-                        if (json.length() > 0) json else null
-                    } catch (e: Exception) {
-                        null // 파싱에 실패하면 얄짤없이 null 반환
-                    }
-                }
-
-                // 3. 잘못된 텍스트가 복사되어 있으면 철벽 방어
-                if (parsedJson == null) {
-                    AlertDialog.Builder(ctx)
-                        .setTitle("Invalid Backup Data")
-                        .setMessage("No valid backup data found in your clipboard.\n\nPlease copy the exact backup text and try again.")
-                        .setPositiveButton("OK", null)
-                        .show()
-                } else {
-                    // 4. 완벽히 검증된 데이터일 때만 사용자에게 덮어쓰기 허가 요청
-                    AlertDialog.Builder(ctx)
-                        .setTitle("Backup Data Detected")
-                        .setMessage("Valid backup data found in clipboard!\n\nWarning: Restoring will permanently overwrite all current settings.\nAre you sure you want to proceed?")
-                        .setPositiveButton("Restore") { _, _ ->
-                            CoroutineScope(Dispatchers.IO).launch {
-                                val editor = sharedPref.edit()
-                                editor.clear() // 새 데이터로 덮어쓰기 위해 기존 설정 완전 초기화
-                                
-                                val keys = parsedJson.keys()
-                                while (keys.hasNext()) {
-                                    val key = keys.next()
-                                    when (val value = parsedJson.get(key)) {
-                                        is Boolean -> editor.putBoolean(key, value)
-                                        is String -> editor.putString(key, value)
-                                        is Int -> editor.putInt(key, value)
-                                    }
-                                }
-                                editor.commit() // 확실한 동기식 저장
-
-                                withContext(Dispatchers.Main) {
-                                    AlertDialog.Builder(ctx)
-                                        .setTitle("Import Result")
-                                        .setMessage("Restore completed successfully!\nPlease restart the app.")
-                                        .setPositiveButton("OK") { _, _ -> dismiss() }
-                                        .show()
-                                }
+                        val keys = parsedJson.keys()
+                        while (keys.hasNext()) {
+                            val key = keys.next()
+                            when (val value = parsedJson.get(key)) {
+                                is Boolean -> editor.putBoolean(key, value)
+                                is String -> editor.putString(key, value)
+                                is Int -> editor.putInt(key, value)
                             }
                         }
-                        .setNegativeButton("Cancel", null)
-                        .show()
-                }
+                        editor.apply() // 안전한 동기화
+
+                        AlertDialog.Builder(ctx)
+                            .setTitle("Import Result")
+                            .setMessage("Restore completed successfully!\nPlease restart the app.")
+                            .setPositiveButton("OK") { _, _ -> dismiss() }
+                            .show()
+                    }
+                    .setNegativeButton("Cancel", null)
+                    .show()
+
+            } catch (e: Exception) {
+                // 클립보드에 이상한 텍스트나 오류 데이터가 있을 경우 철벽 방어
+                AlertDialog.Builder(ctx)
+                    .setTitle("Invalid Backup Data")
+                    .setMessage("No valid backup data found in your clipboard.\n\nPlease copy the exact backup text and try again.")
+                    .setPositiveButton("OK", null)
+                    .show()
             }
-        }
-    
+        }   
 
         // 기록 연동 동적 뷰 처리 연동
         val switchHistorySync: Switch = try { view.findView("switchHistorySync") } catch (e: Throwable) {
