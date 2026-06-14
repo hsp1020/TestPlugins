@@ -19,6 +19,10 @@ import android.widget.TextView
 import android.widget.Toast
 import android.widget.CheckBox
 import android.widget.Switch
+import android.widget.FrameLayout
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.util.Base64
 import androidx.appcompat.app.AlertDialog
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import androidx.core.net.toUri
@@ -54,12 +58,12 @@ object SettingsRepository {
     const val PREF_KEY_HISTORY_SYNC_ENABLED = "history_sync_enabled"
     const val PREF_KEY_HISTORY_SYNC_URL = "history_sync_url"
     
-    // TMDb 다국어 및 추천목록 포스터 설정 키 정의
+    // TMDB 다국어 및 추천목록 포스터 설정 키 정의
     const val PREF_KEY_TMDB_LANG_CODE = "tmdb_language_code"
     const val PREF_KEY_CUSTOM_POSTER_ENABLED = "custom_poster_enabled"
     const val PREF_KEY_CUSTOM_POSTER_URL = "custom_poster_url"
 
-    // TMDb API 및 MdbList 정밀 연동 제어 키 정의
+    // TMDB API 및 MdbList 정밀 연동 제어 키 정의
     const val PREF_KEY_TMDB_API_KEY = "tmdb_api_key"
     const val PREF_KEY_MDBLIST_ENABLED = "mdblist_enabled"
     const val PREF_KEY_MDBLIST_API_KEY = "mdblist_api_key"
@@ -239,6 +243,127 @@ class SettingsBottomFragment(
         addlinks.makeTvCompatible()
         showlinks.makeTvCompatible()
         saveIcon.makeTvCompatible()
+
+        // [v2.3.1] 백업 및 복원 텍스트 버튼뷰 수령 이식 (우측상단 가로배치로 수선)
+        val tvExport: TextView = try { view.findView("tvExport") } catch (e: Throwable) {
+            throw Exception("tvExport TextView not found in bottom_sheet_layout", e)
+        }
+        val tvImport: TextView = try { view.findView("tvImport") } catch (e: Throwable) {
+            throw Exception("tvImport TextView not found in bottom_sheet_layout", e)
+        }
+
+        tvExport.makeTvCompatible()
+        tvImport.makeTvCompatible()
+
+        // 백업(Export) 64비트 문자열 처리 로직 적용
+        tvExport.setOnClickListener {
+            val ctx = requireContext()
+            try {
+                val json = JSONObject()
+                sharedPref.all.forEach { (key, value) -> json.put(key, value) }
+                val backupStr = Base64.encodeToString(json.toString().toByteArray(), Base64.NO_WRAP)
+
+                val pxHeight = (250 * ctx.resources.displayMetrics.density).toInt()
+                val et = EditText(ctx).apply {
+                    setText(backupStr)
+                    setTextColor(android.graphics.Color.WHITE)
+                    background = android.graphics.drawable.GradientDrawable().apply {
+                        setColor(android.graphics.Color.parseColor("#0C0C0C"))
+                        setStroke(2, android.graphics.Color.parseColor("#1A1A1A"))
+                        cornerRadius = 30f
+                    }
+                    setPadding(30, 30, 30, 30)
+                    setTextIsSelectable(true)
+                    isFocusable = false
+                    isFocusableInTouchMode = false
+                    gravity = android.view.Gravity.TOP or android.view.Gravity.START
+                    inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                    isVerticalScrollBarEnabled = true
+                    layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, pxHeight)
+                }
+                val wrapper = FrameLayout(ctx).apply {
+                    setPadding(40, 20, 40, 20)
+                    addView(et)
+                }
+                
+                AlertDialog.Builder(ctx)
+                    .setTitle("Export Backup Data")
+                    .setView(wrapper)
+                    .setPositiveButton("Copy") { _, _ ->
+                        val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        val clip = ClipData.newPlainText("StremioX Backup", backupStr)
+                        clipboard.setPrimaryClip(clip)
+                        Toast.makeText(ctx, "Copied to clipboard", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNegativeButton("Close", null)
+                    .show()
+            } catch (e: Exception) {
+                Toast.makeText(ctx, "Failed to export settings", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        // 복원(Import) 처리 로직 적용 (clear 후 덮어쓰기 및 앱재시작 알림 탑재)
+        tvImport.setOnClickListener {
+            val ctx = requireContext()
+            val pxHeight = (250 * ctx.resources.displayMetrics.density).toInt()
+            val et = EditText(ctx).apply {
+                hint = "Paste backup string here..."
+                setHintTextColor(android.graphics.Color.GRAY)
+                setTextColor(android.graphics.Color.WHITE)
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(android.graphics.Color.parseColor("#0C0C0C"))
+                    setStroke(2, android.graphics.Color.parseColor("#1A1A1A"))
+                    cornerRadius = 30f
+                }
+                setPadding(30, 30, 30, 30)
+                gravity = android.view.Gravity.TOP or android.view.Gravity.START
+                inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                isVerticalScrollBarEnabled = true
+                setHorizontallyScrolling(false)
+                layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, pxHeight)
+            }
+            val wrapper = FrameLayout(ctx).apply {
+                setPadding(40, 20, 40, 20)
+                addView(et)
+            }
+
+            AlertDialog.Builder(ctx)
+                .setTitle("Import Backup Data")
+                .setMessage("Warning: This will permanently overwrite all current settings.\nThe app must be restarted after import.")
+                .setView(wrapper)
+                .setPositiveButton("Restore") { _, _ ->
+                    try {
+                        val decodedBytes = Base64.decode(et.text.toString().trim(), Base64.NO_WRAP)
+                        val json = JSONObject(String(decodedBytes))
+                        
+                        val editor = sharedPref.edit()
+                        editor.clear() 
+                        
+                        val keys = json.keys()
+                        while (keys.hasNext()) {
+                            val key = keys.next()
+                            when (val value = json.get(key)) {
+                                is Boolean -> editor.putBoolean(key, value)
+                                is String -> editor.putString(key, value)
+                                is Int -> editor.putInt(key, value)
+                            }
+                        }
+                        editor.apply()
+                        
+                        AlertDialog.Builder(ctx)
+                            .setTitle("Import Result")
+                            .setMessage("Import successful. Please restart the app.")
+                            .setPositiveButton("OK") { _, _ -> dismiss() }
+                            .create()
+                            .show()
+
+                    } catch (e: Exception) {
+                        Toast.makeText(ctx, "Invalid backup string format.", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
 
         // 기록 연동 동적 뷰 처리 연동
         val switchHistorySync: Switch = try { view.findView("switchHistorySync") } catch (e: Throwable) {
@@ -465,10 +590,11 @@ class SettingsBottomFragment(
         saveIcon.setOnClickListener {
             val context = this.context ?: return@setOnClickListener
 
-            // 저장 클릭 시 TMDb API Key 필수값 체크 분기 적용
+            // 저장 클릭 시 TMDB API Key 필수값 체크 분기 적용
             val tmdbApiKeyVal = etTmdbApiKey.text.toString().trim()
             if (tmdbApiKeyVal.isEmpty()) {
-                showToast("TMDb API key is a required field")
+                showToast("TMDB API key is a required field")
+                
                 return@setOnClickListener
             }
 
@@ -571,7 +697,7 @@ class SettingsBottomFragment(
         scrollView.addView(container)
 
         langDialog.apply {
-            setTitle("Select TMDb Language")
+            setTitle("Select TMDB Language")
             setView(scrollView)
             setButton(AlertDialog.BUTTON_NEGATIVE, "Cancel") { d, _ -> d.dismiss() }
         }
@@ -643,9 +769,9 @@ class SettingsBottomFragment(
                             found
                         } ?: false
 
-          
-                        flatTabs.add(ConfigFlatTab("${id}_${type}_default", "$name - $displayType", false, "${id}_${type}"))
-                        
+                        if (!requiresGenre) {
+                            flatTabs.add(ConfigFlatTab("${id}_${type}_default", "$name - $displayType", false, "${id}_${type}"))
+                        }
 
                         val genres = mutableListOf<String>()
                         cat.get("genres")?.let { gArr ->
@@ -958,78 +1084,6 @@ class SettingsBottomFragment(
 
     private fun String.toUniqueKeyLocal(): String {
         return this.lowercase().filter { it.isLetter() }
-    }
-
-    private fun setupToggle(view: View, viewId: String, prefKey: String, isInstalled: Boolean, displayName: String) {
-        try {
-            val switchView: CompoundButton = view.findView(viewId)
-            switchView.isEnabled = isInstalled
-            if (!isInstalled) {
-                switchView.isChecked = false
-                switchView.text = "$displayName (Not Installed)"
-                SettingsRepository.setIntegrationEnabled(sharedPref, prefKey, false)
-            } else {
-                switchView.text = "$displayName Integration"
-                switchView.isChecked = SettingsRepository.isIntegrationEnabled(sharedPref, prefKey)
-            }
-
-            switchView.setOnCheckedChangeListener { _, isChecked ->
-                SettingsRepository.setIntegrationEnabled(sharedPref, prefKey, isChecked)
-                val statusText = if (isChecked) "Enabled" else "Disabled"
-                showToast("$displayName Integration $statusText")
-            }
-        } catch (e: Throwable) {
-            // 방어 코드
-        }
-    }
-
-    private fun showEditDialog(itemToEdit: LinkItem, position: Int, rv: RecyclerView) {
-        val dialogView = getLayout("addlinks", LayoutInflater.from(requireContext()), null)
-        val etName = try { dialogView.findView<EditText>("etName") } catch (t: Throwable) { null }
-        val etLink = try { dialogView.findView<EditText>("etLink") } catch (t: Throwable) { null }
-        
-        if (etName == null || etLink == null) {
-            Toast.makeText(requireContext(), "Dialog fields not found", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        etName.setText(itemToEdit.name)
-        etLink.setText(itemToEdit.link)
-
-        val dlg = AlertDialog.Builder(requireContext())
-            .setTitle("Edit Link")
-            .setView(dialogView)
-            .setPositiveButton("Update", null)
-            .setNegativeButton("Cancel", null)
-            .create()
-
-        dlg.setOnShowListener {
-            val btnUpdate = dlg.getButton(AlertDialog.BUTTON_POSITIVE)
-            btnUpdate.setOnClickListener {
-                val name = etName.text.toString().trim()
-                val link = etLink.text.toString().trim()
-                val type = "StremioC"
-
-                if (link.isEmpty() || !(link.startsWith("http://") || link.startsWith("https://"))) {
-                    showToast("Enter a valid URL (http/https)")
-                    return@setOnClickListener
-                }
-
-                val updatedList = SettingsRepository.loadLinks(sharedPref)
-                val indexInDb = updatedList.indexOfFirst { it.id == itemToEdit.id }
-                
-                if (indexInDb != -1) {
-                    val newItem = itemToEdit.copy(name = name.ifBlank { link }, link = link, type = type)
-                    updatedList[indexInDb] = newItem
-                    SettingsRepository.saveLinks(sharedPref, updatedList)
-
-                    (rv.adapter as? LinksAdapter)?.updateItem(newItem, position)
-                    showToast("Link Updated Successfully")
-                }
-                dlg.dismiss()
-            }
-        }
-        dlg.show()
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {}
