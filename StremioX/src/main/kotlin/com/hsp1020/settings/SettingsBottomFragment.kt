@@ -406,6 +406,7 @@ class SettingsBottomFragment(
                 return@launch
             }
 
+            // [v2.0.3] AIOMetadata 표준 extra[genre].options 및 Cinemeta genres 이중 수집 대응 [1]
             val catalogs = try {
                 val node = StremioC.jsonMapper.readTree(manifestText)
                 val catsNode = node.get("catalogs")
@@ -416,11 +417,32 @@ class SettingsBottomFragment(
                         val id = cat.get("id")?.asText() ?: ""
                         val type = cat.get("type")?.asText() ?: "movie"
                         val name = cat.get("name")?.asText() ?: id
+                        
                         val genres = mutableListOf<String>()
+                        // 방식 1: Cinemeta 식 top-level "genres"
                         cat.get("genres")?.let { gArr ->
                             if (gArr.isArray) {
                                 for (j in 0 until gArr.size()) {
                                     genres.add(gArr.get(j).asText())
+                                }
+                            }
+                        }
+                        // 방식 2: AIOMetadata / Stremio 표준 "extra[name=genre].options"
+                        if (genres.isEmpty()) {
+                            cat.get("extra")?.let { extraArr ->
+                                if (extraArr.isArray) {
+                                    for (j in 0 until extraArr.size()) {
+                                        val extraObj = extraArr.get(j)
+                                        if (extraObj.get("name")?.asText() == "genre") {
+                                            extraObj.get("options")?.let { optsArr ->
+                                                if (optsArr.isArray) {
+                                                    for (k in 0 until optsArr.size()) {
+                                                        genres.add(optsArr.get(k).asText())
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -539,14 +561,33 @@ class SettingsBottomFragment(
                 val checkParams = android.widget.LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 itemLayout.addView(checkbox, checkParams)
 
+                // [v2.0.3-UI] 장르 On/Off 토글 배치 및 활성화 시에만 투명색 "Select" 버튼 노출 제어 [1]
                 if (catalog.genres.isNotEmpty()) {
-                    val genreButton = android.widget.Button(context).apply {
-                        text = "Genres"
+                    val genresEnabledKey = "genres_enabled_${addonName}_$catalogKey"
+                    val isGenresEnabled = prefs.getBoolean(genresEnabledKey, true)
+
+                    val selectButton = android.widget.Button(context).apply {
+                        text = "Select"
+                        background = null // 🔥 구식 회색 배경 완전 제거 (투명화)
+                        setTextColor(android.graphics.Color.parseColor("#2196F3")) // 자막 형태의 수려한 파란 텍스트 클릭 링크 연출
+                        visibility = if (isGenresEnabled) android.view.View.VISIBLE else android.view.View.GONE
                         setOnClickListener {
                             showGenreConfigDialog(addonName, catalogKey, catalog.genres)
                         }
                     }
-                    itemLayout.addView(genreButton)
+
+                    val genreToggle = android.widget.Switch(context).apply {
+                        isChecked = isGenresEnabled
+                        text = "Genre"
+                        textSize = 14f
+                        setOnCheckedChangeListener { _, checked ->
+                            prefs.edit().putBoolean(genresEnabledKey, checked).apply()
+                            selectButton.visibility = if (checked) android.view.View.VISIBLE else android.view.View.GONE
+                        }
+                    }
+
+                    itemLayout.addView(genreToggle)
+                    itemLayout.addView(selectButton)
                 }
 
                 container.addView(itemLayout)
