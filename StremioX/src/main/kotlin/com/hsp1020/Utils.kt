@@ -18,7 +18,7 @@ import java.util.Locale
 import java.util.concurrent.TimeUnit
 import kotlin.math.round
 
-const val MDBLIST_API_KEY = "d2tmbmhnrgdz7ft9re7j2gjr3"
+// 🔥 [API Key 동적화 수선]: mdbList 상수가 완전히 지워졌습니다. [2]
 
 private val QUALITY_REGEX = Regex("(\\d{3,4}[pP])")
 private val TT_REGEX = Regex("^tt\\d+$")
@@ -50,11 +50,21 @@ private val RATING_SOURCES = mapOf(
 @Volatile private var lastTrackerFetchTime: Long = 0L
 
 suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false): List<String> {
-    if (id.isNullOrBlank() || MDBLIST_API_KEY.isBlank()) return emptyList()
+    if (id.isNullOrBlank()) return emptyList()
+
+    // 🔥 [MdbList 설정 동적화]: SharedPreferences에서 토글 상태와 API Key 동적 로드 [2]
+    val context = com.lagradost.cloudstream3.CloudStreamApp.context ?: return emptyList()
+    val prefs = context.getSharedPreferences("StremioX", android.content.Context.MODE_PRIVATE)
+    
+    val mdbListEnabled = prefs.getBoolean("mdblist_enabled", false)
+    val mdbListApiKey = prefs.getString("mdblist_api_key", "") ?: ""
+    
+    // 비활성화 상태이거나 Key 기입이 비어있으면 아예 네트워크 통신을 태우지 않고 즉시 리턴 [2]
+    if (!mdbListEnabled || mdbListApiKey.isBlank()) return emptyList()
     
     return try {
         val idParam = if (isTmdb) "tm" else "i"
-        val url = "https://mdblist.com/api/?apikey=$MDBLIST_API_KEY&$idParam=$id"
+        val url = "https://mdblist.com/api/?apikey=$mdbListApiKey&$idParam=$id"
         
         val json = JSONObject(app.get(url, timeout = 15L).text)
         val ratingsArray = json.optJSONArray("ratings") ?: return emptyList()
