@@ -365,17 +365,18 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val builder = "$tmdbAPI$endpoint".toHttpUrlOrNull()?.newBuilder() ?: return ""
         builder.addQueryParameter("api_key", apiKey)
         
-        // 🔥 [언어 코드 동적화]: SharedPreferences에서 언어 코드를 읽어오며 기본값은 한국어(ko-KR)로 동기화 [3]
+        // 🔥 [TMDb 다국어 동적화]: SharedPreferences에서 tmdb_language_code를 읽어오며 기본값은 한국어(ko-KR)로 지정 [3]
         val context = CloudStreamApp.context
         val prefs = context?.getSharedPreferences("StremioX", Context.MODE_PRIVATE)
         val langCode = prefs?.getString("tmdb_language_code", "ko-KR") ?: "ko-KR"
         builder.addQueryParameter("language", langCode)
-        
+
         params.forEach { (key, value) ->
             builder.addQueryParameter(key, value)
         }
         return builder.build().toString()
     }
+
 
     private fun extractImdbId(url: String?): String? {
         if (url.isNullOrBlank() || !url.contains("tt")) return null
@@ -1358,10 +1359,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     .distinctBy { it.id }
                     .filter { it.id != null && it.id != tmdbIdStr.toIntOrNull() }
 
-                // 🔥 [포스터 URL 동적화]: 사용자가 입력한 커스텀 포스터 주소 동적 분기 및 tmdb 기본 이미지 폴백 로직 적용 [3]
+                // 🔥 [TMDb 설정 동적화]: SharedPreferences에서 TMDb 선택 언어 및 커스텀 포스터 주소 토글 정보 조회 [3]
                 val context = CloudStreamApp.context
                 val prefs = context?.getSharedPreferences("StremioX", Context.MODE_PRIVATE)
-                val customPosterBase = prefs?.getString("custom_poster_url", "") ?: ""
+                val langCode = prefs?.getString("tmdb_language_code", "ko-KR") ?: "ko-KR"
+                val customPosterEnabled = prefs?.getBoolean("custom_poster_enabled", false) ?: false
+                val customPosterBase = if (customPosterEnabled) prefs?.getString("custom_poster_url", "") ?: "" else ""
 
                 fetchedRecommendations = finalCombinedMedia.mapNotNull { media ->
                     val recTitle = media.title ?: media.name ?: media.originalTitle ?: return@mapNotNull null
@@ -1370,11 +1373,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     val posterType = if (rawMediaType == "tv") "tv" else "movie"
                     val outType = if (rawMediaType == "tv") "series" else "movie"
                     
+                    // 커스텀 추천포스터 활성화 시 기입된 경로 우선 사용, 토글 비활성화 또는 비어있을 시 오리지널 TMDB 주소로 자동 폴백 [3]
                     val resolvedPosterUrl = if (customPosterBase.isNotBlank()) {
                         val cleanBase = customPosterBase.trim().trimEnd('/')
                         "$cleanBase/tmdb:$posterType:$recTmdbId.jpg?config=aed081fd-73b1-460e-879d-377c5658691c"
                     } else {
-                        // 주소가 비어있으면 TMDB 기본 포스터 이미지 경로를 자동 추적하여 폴백 처리 [3]
                         if (!media.poster_path.isNullOrBlank()) "https://image.tmdb.org/t/p/w500${media.poster_path}" else TRANSPARENT_PIXEL
                     }
                     
@@ -1385,13 +1388,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                         this.posterUrl = resolvedPosterUrl 
                     }
                 }.take(50)
-                                
             }
 
-            // 🔥 [연령 등급 동적화]: 선택한 언어 코드에 맞게 심의 등급 국가 코드를 동적으로 추출하여 매핑합니다. (미등록 시 US로 폴백) [3]
-            val context = CloudStreamApp.context
-            val prefs = context?.getSharedPreferences("StremioX", Context.MODE_PRIVATE)
-            val langCode = prefs?.getString("tmdb_language_code", "ko-KR") ?: "ko-KR"
+            // 🔥 [연령 제한 국가 심의 등급 동적화]: 선택한 국가 코드(ko-KR -> KR, en-US -> US)를 정교하게 자동 추출하여 대칭 [3]
             val countryCode = langCode.substringAfter("-", "KR").uppercase()
 
             val fetchedAgeRating = if (isMovie) {
@@ -1401,7 +1400,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 detailRes.content_ratings?.results?.firstOrNull { it.iso_3166_1 == countryCode }?.rating
                     ?: detailRes.content_ratings?.results?.firstOrNull { it.iso_3166_1 == "US" }?.rating
             }
-            
+
             val crewList = detailRes.credits?.crew?.filter { it.job == "Director" || it.job == "Writer" }?.groupBy { it.name ?: it.originalName }?.mapNotNull { (name, roles) ->
                 if (name == null) return@mapNotNull null
                 val sortedJobs = roles.mapNotNull { it.job }.distinct().sortedBy { if (it == "Director") 1 else 2 }.joinToString(", ")
