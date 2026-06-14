@@ -19,6 +19,21 @@ class StremioXPlugin : Plugin() {
     override fun load(context: Context) {
         println("[StremioXPlugin v1.2-TRACKING] load() 함수 호출됨")
         
+        // [추가] Cinemeta Catalog 통합 제어 연동
+        val prefs = context.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
+        val cinemetaEnabled = prefs.getBoolean("cinemeta_integration_enabled", true)
+        if (cinemetaEnabled) {
+            println("[StremioXPlugin v1.2-TRACKING] Cinemeta 활성화 상태 감지 - Cinemeta 등록 진행")
+            try {
+                registerMainAPI(Cinemeta())
+                println("[StremioXPlugin v1.2-TRACKING] Cinemeta 성공적으로 등록됨")
+            } catch (e: Throwable) {
+                println("[StremioXPlugin v1.2-TRACKING] Cinemeta 등록 오류: ${e.message}")
+            }
+        } else {
+            println("[StremioXPlugin v1.2-TRACKING] Cinemeta 비활성화 상태 - 등록 건너뜀")
+        }
+        
         println("[StremioXPlugin v1.2-TRACKING] 기본 StremioX, StremioC 카탈로그 등록 건너뜀")
 
         println("[StremioXPlugin v1.2-TRACKING] reload(context) 실행 시도")
