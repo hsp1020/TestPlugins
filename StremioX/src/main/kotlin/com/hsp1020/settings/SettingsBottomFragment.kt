@@ -10,14 +10,13 @@ import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.Button
 import android.widget.CompoundButton
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
-import android.widget.CheckBox
-import android.widget.Switch
 import androidx.appcompat.app.AlertDialog
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import androidx.core.net.toUri
@@ -50,10 +49,12 @@ object SettingsRepository {
     const val PREF_KEY_CINESTREAM_ENABLED = "cinestream_integration_enabled"
     const val PREF_KEY_STREAMPLAY_ENABLED = "streamplay_integration_enabled"
     const val PREF_KEY_VIXSRC_ENABLED = "vixsrc_integration_enabled"
-    
-    // [v2.2.0] 기록 및 라이브러리 연동 토글 제어 키
     const val PREF_KEY_HISTORY_SYNC_ENABLED = "history_sync_enabled"
     const val PREF_KEY_HISTORY_SYNC_URL = "history_sync_url"
+    
+    // [v2.2.0] TMDb 다국어 및 추천목록 포스터 설정 키 정의
+    const val PREF_KEY_TMDB_LANG_CODE = "tmdb_language_code"
+    const val PREF_KEY_CUSTOM_POSTER_URL = "custom_poster_url"
 
     fun loadLinks(sharedPref: SharedPreferences): MutableList<LinkItem> {
         val json = sharedPref.getString(PREF_KEY_LINKS, null) ?: return mutableListOf()
@@ -105,7 +106,7 @@ object SettingsRepository {
 // UI Layer
 // ==========================================
 class SettingsBottomFragment(
-    plugin: StremioXPlugin,
+    private val plugin: StremioXPlugin, // 플러그인 전송 인자 바인딩
     private val sharedPref: SharedPreferences
 ) : BottomSheetDialogFragment() {
 
@@ -171,7 +172,7 @@ class SettingsBottomFragment(
         showlinks.makeTvCompatible()
         saveIcon.makeTvCompatible()
 
-        // [v2.2.0] 기록 연동 동적 뷰 처리 연동
+        // 기록 연동 동적 뷰 처리 연동
         val switchHistorySync: Switch = try { view.findView("switchHistorySync") } catch (e: Throwable) {
             throw Exception("switchHistorySync Switch not found in bottom_sheet_layout", e)
         }
@@ -203,6 +204,33 @@ class SettingsBottomFragment(
         setupToggle(view, "switchCineStream", SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, isCineStreamInstalled(), "CineStream")
         setupToggle(view, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
         setupToggle(view, "switchVixSrc", SettingsRepository.PREF_KEY_VIXSRC_ENABLED, true, "VixSrc")
+
+        // [v2.2.0] 다국어 선택 및 커스텀 포스터 주소 바인딩 연동 (참고 코드 수치 규격 적용) [3]
+        val btnSelectLanguage: Button = try { view.findView("btnSelectLanguage") } catch (e: Throwable) {
+            throw Exception("btnSelectLanguage Button not found in bottom_sheet_layout", e)
+        }
+        val etCustomPosterUrl: EditText = try { view.findView("etCustomPosterUrl") } catch (e: Throwable) {
+            throw Exception("etCustomPosterUrl EditText not found in bottom_sheet_layout", e)
+        }
+
+        val savedLangCode = sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, "ko-KR") ?: "ko-KR"
+        btnSelectLanguage.text = savedLangCode
+        etCustomPosterUrl.setText(sharedPref.getString(SettingsRepository.PREF_KEY_CUSTOM_POSTER_URL, ""))
+
+        btnSelectLanguage.setOnClickListener {
+            // 참고 전송 양식대로 수선한 LanguageSelectFragment를 다이어로그형태로 팝업
+            val fragment = LanguageSelectFragment(plugin, sharedPref) {
+                val updatedLangCode = sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, "ko-KR") ?: "ko-KR"
+                btnSelectLanguage.text = updatedLangCode
+            }
+            fragment.show(parentFragmentManager, "LanguageSelect")
+        }
+
+        etCustomPosterUrl.setOnFocusChangeListener { _, hasFocus ->
+            if (!hasFocus) {
+                sharedPref.edit { putString(SettingsRepository.PREF_KEY_CUSTOM_POSTER_URL, etCustomPosterUrl.text.toString().trim()) }
+            }
+        }
 
         // Action: Add Link
         addlinks.setOnClickListener {
@@ -325,9 +353,10 @@ class SettingsBottomFragment(
         saveIcon.setOnClickListener {
             val context = this.context ?: return@setOnClickListener
 
-            // 저장 직전 포커스 유무에 무관하게 텍스트 대입 저장
+            // 가로입력단 저장소 누수 방어 수치 수집 저장
             sharedPref.edit {
                 putString(SettingsRepository.PREF_KEY_HISTORY_SYNC_URL, etHistorySyncUrl.text.toString().trim())
+                putString(SettingsRepository.PREF_KEY_CUSTOM_POSTER_URL, etCustomPosterUrl.text.toString().trim())
             }
 
             AlertDialog.Builder(context)
@@ -342,81 +371,6 @@ class SettingsBottomFragment(
         }
 
         return view
-    }
-
-    private fun setupToggle(view: View, viewId: String, prefKey: String, isInstalled: Boolean, displayName: String) {
-        try {
-            val switchView: CompoundButton = view.findView(viewId)
-            switchView.isEnabled = isInstalled
-            if (!isInstalled) {
-                switchView.isChecked = false
-                switchView.text = "$displayName (Not Installed)"
-                SettingsRepository.setIntegrationEnabled(sharedPref, prefKey, false)
-            } else {
-                switchView.text = "$displayName Integration"
-                switchView.isChecked = SettingsRepository.isIntegrationEnabled(sharedPref, prefKey)
-            }
-
-            switchView.setOnCheckedChangeListener { _, isChecked ->
-                SettingsRepository.setIntegrationEnabled(sharedPref, prefKey, isChecked)
-                val statusText = if (isChecked) "Enabled" else "Disabled"
-                showToast("$displayName Integration $statusText")
-            }
-        } catch (e: Throwable) {
-            // 방어 코드
-        }
-    }
-
-    private fun showEditDialog(itemToEdit: LinkItem, position: Int, rv: RecyclerView) {
-        val dialogView = getLayout("addlinks", LayoutInflater.from(requireContext()), null)
-        val etName: EditText
-        val etLink: EditText
-        
-        try {
-            etName = dialogView.findView("etName")
-            etLink = dialogView.findView("etLink")
-        } catch (t: Throwable) {
-            Toast.makeText(requireContext(), "Dialog fields not found", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        etName.setText(itemToEdit.name)
-        etLink.setText(itemToEdit.link)
-
-        val dlg = AlertDialog.Builder(requireContext())
-            .setTitle("Edit Link")
-            .setView(dialogView)
-            .setPositiveButton("Update", null)
-            .setNegativeButton("Cancel", null)
-            .create()
-
-        dlg.setOnShowListener {
-            val btnUpdate = dlg.getButton(AlertDialog.BUTTON_POSITIVE)
-            btnUpdate.setOnClickListener {
-                val name = etName.text.toString().trim()
-                val link = etLink.text.toString().trim()
-                val type = "StremioC"
-
-                if (link.isEmpty() || !(link.startsWith("http://") || link.startsWith("https://"))) {
-                    showToast("Enter a valid URL (http/https)")
-                    return@setOnClickListener
-                }
-
-                val updatedList = SettingsRepository.loadLinks(sharedPref)
-                val indexInDb = updatedList.indexOfFirst { it.id == itemToEdit.id }
-                
-                if (indexInDb != -1) {
-                    val newItem = itemToEdit.copy(name = name.ifBlank { link }, link = link, type = type)
-                    updatedList[indexInDb] = newItem
-                    SettingsRepository.saveLinks(sharedPref, updatedList)
-
-                    (rv.adapter as? LinksAdapter)?.updateItem(newItem, position)
-                    showToast("Link Updated Successfully")
-                }
-                dlg.dismiss()
-            }
-        }
-        dlg.show()
     }
 
     private fun showCatalogConfigDialog(item: LinkItem) {
@@ -442,6 +396,7 @@ class SettingsBottomFragment(
                 return@launch
             }
 
+            // AIOMetadata 표준 extra[genre].options 및 Cinemeta genres 이중 수집 대응
             val flatTabs = mutableListOf<ConfigFlatTab>()
             try {
                 val node = StremioC.jsonMapper.readTree(manifestText)
