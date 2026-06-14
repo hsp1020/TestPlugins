@@ -244,7 +244,6 @@ class SettingsBottomFragment(
         showlinks.makeTvCompatible()
         saveIcon.makeTvCompatible()
 
-        // [v2.3.1] 백업 및 복원 텍스트 버튼뷰 수령 이식 (우측상단 가로배치로 수선)
         val tvExport: TextView = try { view.findView("tvExport") } catch (e: Throwable) {
             throw Exception("tvExport TextView not found in bottom_sheet_layout", e)
         }
@@ -398,7 +397,7 @@ class SettingsBottomFragment(
         setupToggle(view, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
         setupToggle(view, "switchVixSrc", SettingsRepository.PREF_KEY_VIXSRC_ENABLED, true, "VixSrc")
 
-        // [v2.2.1-UI]: 버튼을 투명한 배경의 이쁜 톱니바퀴 아이콘 버튼(ImageView)으로 수선 완료
+        // 다국어 선택 및 커스텀 포스터 주소 바인딩 연동
         val btnSelectLanguage: ImageView = try { view.findView("btnSelectLanguage") } catch (e: Throwable) {
             throw Exception("btnSelectLanguage ImageView not found in bottom_sheet_layout", e)
         }
@@ -436,7 +435,7 @@ class SettingsBottomFragment(
             }
         }
 
-        // [v2.3.0] TMDB API Key 및 MdbList 수집 제어판 위젯 신규 연동
+        // TMDB API Key 및 MdbList 수집 제어판 위젯 신규 연동
         val etTmdbApiKey: EditText = try { view.findView("etTmdbApiKey") } catch (e: Throwable) {
             throw Exception("etTmdbApiKey EditText not found in bottom_sheet_layout", e)
         }
@@ -476,11 +475,9 @@ class SettingsBottomFragment(
         // Action: Add Link
         addlinks.setOnClickListener {
             val dialogView = getLayout("addlinks", inflater, container)
-            
-            // [지역 변수 미초기화 에러 방어]: Kotlin 안전 생성 패턴으로 선언과 즉시 초기화하여 'must be initialized' 컴파일 에러 완전 해결
             val etName = try { dialogView.findView<EditText>("etName") } catch (t: Throwable) { null }
             val etLink = try { dialogView.findView<EditText>("etLink") } catch (t: Throwable) { null }
-
+            
             if (etName == null || etLink == null) {
                 Toast.makeText(requireContext(), "Dialog fields not found", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
@@ -592,10 +589,10 @@ class SettingsBottomFragment(
         saveIcon.setOnClickListener {
             val context = this.context ?: return@setOnClickListener
 
-            // [v2.3.0] 저장 클릭 시 TMDB API Key 필수값 체크 분기 적용
+            // 저장 클릭 시 TMDB API Key 필수값 체크 분기 적용
             val tmdbApiKeyVal = etTmdbApiKey.text.toString().trim()
             if (tmdbApiKeyVal.isEmpty()) {
-                showToast("TMDB API key is a required field") // 🔥 [안내문구 수선 완료]
+                showToast("TMDB API key is a required field")
                 return@setOnClickListener
             }
 
@@ -621,7 +618,6 @@ class SettingsBottomFragment(
         return view
     }
 
-    // [v2.2.1] 크래시 프리 100% 프로그램식 다국어 선택 및 검색 다이얼로그 빌더 (TMDB 명칭 개편 연동)
     private fun showLanguageSelectDialog() {
         val context = requireContext()
         val prefs = sharedPref
@@ -699,7 +695,7 @@ class SettingsBottomFragment(
         scrollView.addView(container)
 
         langDialog.apply {
-            setTitle("Select TMDB Language") // 🔥 [TMDB 명칭 개편 완료]
+            setTitle("Select TMDB Language")
             setView(scrollView)
             setButton(AlertDialog.BUTTON_NEGATIVE, "Cancel") { d, _ -> d.dismiss() }
         }
@@ -745,7 +741,6 @@ class SettingsBottomFragment(
                 return@launch
             }
 
-            // AIOMetadata 표준 extra[genre].options 및 Cinemeta genres 이중 수집 대응
             val flatTabs = mutableListOf<ConfigFlatTab>()
             try {
                 val node = StremioC.jsonMapper.readTree(manifestText)
@@ -1113,8 +1108,6 @@ class SettingsBottomFragment(
 
     private fun showEditDialog(itemToEdit: LinkItem, position: Int, rv: RecyclerView) {
         val dialogView = getLayout("addlinks", LayoutInflater.from(requireContext()), null)
-        
-        // [변수 미초기화 컴파일 에러 완전 방어]: Kotlin 안전 생성 패턴 적용
         val etName = try { dialogView.findView<EditText>("etName") } catch (t: Throwable) { null }
         val etLink = try { dialogView.findView<EditText>("etLink") } catch (t: Throwable) { null }
         
@@ -1162,9 +1155,20 @@ class SettingsBottomFragment(
         dlg.show()
     }
 
-    override fun onDismiss(dialog: android.content.DialogInterface) {
-        super.onDismiss(dialog)
-        onDismissCallback?.invoke()
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {}
+
+    // 앱 재시작 함수 복원 완료
+    private fun restartApp() {
+        val context = requireContext().applicationContext
+        val packageManager = context.packageManager
+        val intent = packageManager.getLaunchIntentForPackage(context.packageName)
+        val componentName = intent?.component
+
+        if (componentName != null) {
+            val restartIntent = Intent.makeRestartActivityTask(componentName)
+            context.startActivity(restartIntent)
+            Runtime.getRuntime().exit(0)
+        }
     }
 
     // ==========================================
