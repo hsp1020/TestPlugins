@@ -56,6 +56,7 @@ object SettingsRepository {
     
     // TMDb 다국어 및 추천목록 포스터 설정 키 정의
     const val PREF_KEY_TMDB_LANG_CODE = "tmdb_language_code"
+    const val PREF_KEY_CUSTOM_POSTER_ENABLED = "custom_poster_enabled"
     const val PREF_KEY_CUSTOM_POSTER_URL = "custom_poster_url"
 
     fun loadLinks(sharedPref: SharedPreferences): MutableList<LinkItem> {
@@ -267,9 +268,15 @@ class SettingsBottomFragment(
         setupToggle(view, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
         setupToggle(view, "switchVixSrc", SettingsRepository.PREF_KEY_VIXSRC_ENABLED, true, "VixSrc")
 
-        // 다국어 선택 및 커스텀 포스터 주소 바인딩 연동 (참고 코드 수치 규격 적용)
+        // [v2.2.0] 다국어 선택 및 커스텀 포스터 주소 바인딩 연동 (참고 코드 수치 규격 적용)
         val btnSelectLanguage: ImageView = try { view.findView("btnSelectLanguage") } catch (e: Throwable) {
             throw Exception("btnSelectLanguage ImageView not found in bottom_sheet_layout", e)
+        }
+        val switchCustomPoster: Switch = try { view.findView("switchCustomPoster") } catch (e: Throwable) {
+            throw Exception("switchCustomPoster Switch not found in bottom_sheet_layout", e)
+        }
+        val layoutCustomPosterUrl: View = try { view.findView("layoutCustomPosterUrl") } catch (e: Throwable) {
+            throw Exception("layoutCustomPosterUrl View not found in bottom_sheet_layout", e)
         }
         val etCustomPosterUrl: EditText = try { view.findView("etCustomPosterUrl") } catch (e: Throwable) {
             throw Exception("etCustomPosterUrl EditText not found in bottom_sheet_layout", e)
@@ -277,7 +284,17 @@ class SettingsBottomFragment(
 
         btnSelectLanguage.setImageDrawable(getDrawable("settings_icon"))
         btnSelectLanguage.makeTvCompatible()
+
+        // 커스텀 포스터 옵션 초기 상태 설정
+        val isPosterEnabled = sharedPref.getBoolean(SettingsRepository.PREF_KEY_CUSTOM_POSTER_ENABLED, false)
+        switchCustomPoster.isChecked = isPosterEnabled
+        layoutCustomPosterUrl.visibility = if (isPosterEnabled) View.VISIBLE else View.GONE
         etCustomPosterUrl.setText(sharedPref.getString(SettingsRepository.PREF_KEY_CUSTOM_POSTER_URL, ""))
+
+        switchCustomPoster.setOnCheckedChangeListener { _, isChecked ->
+            sharedPref.edit { putBoolean(SettingsRepository.PREF_KEY_CUSTOM_POSTER_ENABLED, isChecked) }
+            layoutCustomPosterUrl.visibility = if (isChecked) View.VISIBLE else View.GONE
+        }
 
         btnSelectLanguage.setOnClickListener {
             showLanguageSelectDialog()
@@ -292,11 +309,9 @@ class SettingsBottomFragment(
         // Action: Add Link
         addlinks.setOnClickListener {
             val dialogView = getLayout("addlinks", inflater, container)
-            
-            // 🔥 [지역 변수 미초기화 에러 방어]: Kotlin 안전 생성 패턴으로 선언과 즉시 초기화하여 'must be initialized' 에러 원천 해결
             val etName = try { dialogView.findView<EditText>("etName") } catch (t: Throwable) { null }
             val etLink = try { dialogView.findView<EditText>("etLink") } catch (t: Throwable) { null }
-
+            
             if (etName == null || etLink == null) {
                 Toast.makeText(requireContext(), "Dialog fields not found", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
@@ -345,7 +360,6 @@ class SettingsBottomFragment(
                     }
                 }
             }
-
             dlg.show()
         }
 
@@ -429,83 +443,6 @@ class SettingsBottomFragment(
         return view
     }
 
-    private fun setupToggle(view: View, viewId: String, prefKey: String, isInstalled: Boolean, displayName: String) {
-        try {
-            val switchView: CompoundButton = view.findView(viewId)
-            switchView.isEnabled = isInstalled
-            if (!isInstalled) {
-                switchView.isChecked = false
-                switchView.text = "$displayName (Not Installed)"
-                SettingsRepository.setIntegrationEnabled(sharedPref, prefKey, false)
-            } else {
-                switchView.text = "$displayName Integration"
-                switchView.isChecked = SettingsRepository.isIntegrationEnabled(sharedPref, prefKey)
-            }
-
-            switchView.setOnCheckedChangeListener { _, isChecked ->
-                SettingsRepository.setIntegrationEnabled(sharedPref, prefKey, isChecked)
-                val statusText = if (isChecked) "Enabled" else "Disabled"
-                showToast("$displayName Integration $statusText")
-            }
-        } catch (e: Throwable) {
-            // 방어 코드
-        }
-    }
-
-    private fun showEditDialog(itemToEdit: LinkItem, position: Int, rv: RecyclerView) {
-        val dialogView = getLayout("addlinks", LayoutInflater.from(requireContext()), null)
-        
-        // 🔥 [지역 변수 미초기화 에러 방어]: Kotlin 안전 생성 패턴 적용
-        val etName = try { dialogView.findView<EditText>("etName") } catch (t: Throwable) { null }
-        val etLink = try { dialogView.findView<EditText>("etLink") } catch (t: Throwable) { null }
-        
-        if (etName == null || etLink == null) {
-            Toast.makeText(requireContext(), "Dialog fields not found", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        etName.setText(itemToEdit.name)
-        etLink.setText(itemToEdit.link)
-
-        val dlg = AlertDialog.Builder(requireContext())
-            .setTitle("Edit Link")
-            .setView(dialogView)
-            .setPositiveButton("Update", null)
-            .setNegativeButton("Cancel", null)
-            .create()
-
-        dlg.setOnShowListener {
-            val btnUpdate = dlg.getButton(AlertDialog.BUTTON_POSITIVE)
-            btnUpdate.setOnClickListener {
-                val name = etName.text.toString().trim()
-                val link = etLink.text.toString().trim()
-                val type = "StremioC"
-
-                if (link.isEmpty() || !(link.startsWith("http://") || link.startsWith("https://"))) {
-                    showToast("Enter a valid URL (http/https)")
-                    return@setOnClickListener
-                }
-
-                val updatedList = SettingsRepository.loadLinks(sharedPref)
-                val indexInDb = updatedList.indexOfFirst { it.id == itemToEdit.id }
-                
-                if (indexInDb != -1) {
-                    val newItem = itemToEdit.copy(name = name.ifBlank { link }, link = link, type = type)
-                    updatedList[indexInDb] = newItem
-                    SettingsRepository.saveLinks(sharedPref, updatedList)
-
-                    (rv.adapter as? LinksAdapter)?.updateItem(newItem, position)
-                    showToast("Link Updated Successfully")
-                }
-                dlg.dismiss()
-            }
-        }
-        dlg.show()
-    }
-
-    // ==========================================
-    // [v2.2.1] 크래시 프리 100% 프로그램식 다국어 선택 및 검색 다이얼로그 빌더
-    // ==========================================
     private fun showLanguageSelectDialog() {
         val context = requireContext()
         val prefs = sharedPref
@@ -970,6 +907,78 @@ class SettingsBottomFragment(
 
     private fun String.toUniqueKeyLocal(): String {
         return this.lowercase().filter { it.isLetter() }
+    }
+
+    private fun setupToggle(view: View, viewId: String, prefKey: String, isInstalled: Boolean, displayName: String) {
+        try {
+            val switchView: CompoundButton = view.findView(viewId)
+            switchView.isEnabled = isInstalled
+            if (!isInstalled) {
+                switchView.isChecked = false
+                switchView.text = "$displayName (Not Installed)"
+                SettingsRepository.setIntegrationEnabled(sharedPref, prefKey, false)
+            } else {
+                switchView.text = "$displayName Integration"
+                switchView.isChecked = SettingsRepository.isIntegrationEnabled(sharedPref, prefKey)
+            }
+
+            switchView.setOnCheckedChangeListener { _, isChecked ->
+                SettingsRepository.setIntegrationEnabled(sharedPref, prefKey, isChecked)
+                val statusText = if (isChecked) "Enabled" else "Disabled"
+                showToast("$displayName Integration $statusText")
+            }
+        } catch (e: Throwable) {
+            // 방어 코드
+        }
+    }
+
+    private fun showEditDialog(itemToEdit: LinkItem, position: Int, rv: RecyclerView) {
+        val dialogView = getLayout("addlinks", LayoutInflater.from(requireContext()), null)
+        val etName = try { dialogView.findView<EditText>("etName") } catch (t: Throwable) { null }
+        val etLink = try { dialogView.findView<EditText>("etLink") } catch (t: Throwable) { null }
+        
+        if (etName == null || etLink == null) {
+            Toast.makeText(requireContext(), "Dialog fields not found", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        etName.setText(itemToEdit.name)
+        etLink.setText(itemToEdit.link)
+
+        val dlg = AlertDialog.Builder(requireContext())
+            .setTitle("Edit Link")
+            .setView(dialogView)
+            .setPositiveButton("Update", null)
+            .setNegativeButton("Cancel", null)
+            .create()
+
+        dlg.setOnShowListener {
+            val btnUpdate = dlg.getButton(AlertDialog.BUTTON_POSITIVE)
+            btnUpdate.setOnClickListener {
+                val name = etName.text.toString().trim()
+                val link = etLink.text.toString().trim()
+                val type = "StremioC"
+
+                if (link.isEmpty() || !(link.startsWith("http://") || link.startsWith("https://"))) {
+                    showToast("Enter a valid URL (http/https)")
+                    return@setOnClickListener
+                }
+
+                val updatedList = SettingsRepository.loadLinks(sharedPref)
+                val indexInDb = updatedList.indexOfFirst { it.id == itemToEdit.id }
+                
+                if (indexInDb != -1) {
+                    val newItem = itemToEdit.copy(name = name.ifBlank { link }, link = link, type = type)
+                    updatedList[indexInDb] = newItem
+                    SettingsRepository.saveLinks(sharedPref, updatedList)
+
+                    (rv.adapter as? LinksAdapter)?.updateItem(newItem, position)
+                    showToast("Link Updated Successfully")
+                }
+                dlg.dismiss()
+            }
+        }
+        dlg.show()
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {}
