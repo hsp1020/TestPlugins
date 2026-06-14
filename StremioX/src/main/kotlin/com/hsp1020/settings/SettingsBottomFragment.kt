@@ -10,12 +10,15 @@ import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.Button
 import android.widget.CompoundButton
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
+import android.widget.CheckBox
+import android.widget.Switch
 import androidx.appcompat.app.AlertDialog
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import androidx.core.net.toUri
@@ -105,7 +108,7 @@ object SettingsRepository {
 // UI Layer
 // ==========================================
 class SettingsBottomFragment(
-    private val plugin: StremioXPlugin, // 플러그인 인자 바인딩
+    private val plugin: StremioXPlugin, // 플러그인 인자 전적 프로퍼티 바인딩
     private val sharedPref: SharedPreferences
 ) : BottomSheetDialogFragment() {
 
@@ -113,7 +116,6 @@ class SettingsBottomFragment(
 
     private data class ConfigFlatTab(val key: String, val displayName: String, val isGenre: Boolean, val catalogKey: String)
 
-    // 다이얼로그 전용 다국어 리스트 정의
     private val languages = listOf(
         "South Africa (Afrikaans)" to "af-ZA",
         "United Arab Emirates (Arabic)" to "ar-AE",
@@ -265,7 +267,7 @@ class SettingsBottomFragment(
         setupToggle(view, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
         setupToggle(view, "switchVixSrc", SettingsRepository.PREF_KEY_VIXSRC_ENABLED, true, "VixSrc")
 
-        // [v2.2.1-UI]: 버튼을 투명한 배경의 이쁜 톱니바퀴 아이콘 버튼(ImageView)으로 수선 완료
+        // 다국어 선택 및 커스텀 포스터 주소 바인딩 연동 (참고 코드 수치 규격 적용)
         val btnSelectLanguage: ImageView = try { view.findView("btnSelectLanguage") } catch (e: Throwable) {
             throw Exception("btnSelectLanguage ImageView not found in bottom_sheet_layout", e)
         }
@@ -290,13 +292,12 @@ class SettingsBottomFragment(
         // Action: Add Link
         addlinks.setOnClickListener {
             val dialogView = getLayout("addlinks", inflater, container)
-            val etName: EditText
-            val etLink: EditText
             
-            try {
-                etName = dialogView.findView("etName")
-                etLink = dialogView.findView("etLink")
-            } catch (t: Throwable) {
+            // 🔥 [지역 변수 미초기화 에러 방어]: Kotlin 안전 생성 패턴으로 선언과 즉시 초기화하여 'must be initialized' 에러 원천 해결
+            val etName = try { dialogView.findView<EditText>("etName") } catch (t: Throwable) { null }
+            val etLink = try { dialogView.findView<EditText>("etLink") } catch (t: Throwable) { null }
+
+            if (etName == null || etLink == null) {
                 Toast.makeText(requireContext(), "Dialog fields not found", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
@@ -426,6 +427,80 @@ class SettingsBottomFragment(
         }
 
         return view
+    }
+
+    private fun setupToggle(view: View, viewId: String, prefKey: String, isInstalled: Boolean, displayName: String) {
+        try {
+            val switchView: CompoundButton = view.findView(viewId)
+            switchView.isEnabled = isInstalled
+            if (!isInstalled) {
+                switchView.isChecked = false
+                switchView.text = "$displayName (Not Installed)"
+                SettingsRepository.setIntegrationEnabled(sharedPref, prefKey, false)
+            } else {
+                switchView.text = "$displayName Integration"
+                switchView.isChecked = SettingsRepository.isIntegrationEnabled(sharedPref, prefKey)
+            }
+
+            switchView.setOnCheckedChangeListener { _, isChecked ->
+                SettingsRepository.setIntegrationEnabled(sharedPref, prefKey, isChecked)
+                val statusText = if (isChecked) "Enabled" else "Disabled"
+                showToast("$displayName Integration $statusText")
+            }
+        } catch (e: Throwable) {
+            // 방어 코드
+        }
+    }
+
+    private fun showEditDialog(itemToEdit: LinkItem, position: Int, rv: RecyclerView) {
+        val dialogView = getLayout("addlinks", LayoutInflater.from(requireContext()), null)
+        
+        // 🔥 [지역 변수 미초기화 에러 방어]: Kotlin 안전 생성 패턴 적용
+        val etName = try { dialogView.findView<EditText>("etName") } catch (t: Throwable) { null }
+        val etLink = try { dialogView.findView<EditText>("etLink") } catch (t: Throwable) { null }
+        
+        if (etName == null || etLink == null) {
+            Toast.makeText(requireContext(), "Dialog fields not found", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        etName.setText(itemToEdit.name)
+        etLink.setText(itemToEdit.link)
+
+        val dlg = AlertDialog.Builder(requireContext())
+            .setTitle("Edit Link")
+            .setView(dialogView)
+            .setPositiveButton("Update", null)
+            .setNegativeButton("Cancel", null)
+            .create()
+
+        dlg.setOnShowListener {
+            val btnUpdate = dlg.getButton(AlertDialog.BUTTON_POSITIVE)
+            btnUpdate.setOnClickListener {
+                val name = etName.text.toString().trim()
+                val link = etLink.text.toString().trim()
+                val type = "StremioC"
+
+                if (link.isEmpty() || !(link.startsWith("http://") || link.startsWith("https://"))) {
+                    showToast("Enter a valid URL (http/https)")
+                    return@setOnClickListener
+                }
+
+                val updatedList = SettingsRepository.loadLinks(sharedPref)
+                val indexInDb = updatedList.indexOfFirst { it.id == itemToEdit.id }
+                
+                if (indexInDb != -1) {
+                    val newItem = itemToEdit.copy(name = name.ifBlank { link }, link = link, type = type)
+                    updatedList[indexInDb] = newItem
+                    SettingsRepository.saveLinks(sharedPref, updatedList)
+
+                    (rv.adapter as? LinksAdapter)?.updateItem(newItem, position)
+                    showToast("Link Updated Successfully")
+                }
+                dlg.dismiss()
+            }
+        }
+        dlg.show()
     }
 
     // ==========================================
