@@ -159,7 +159,7 @@ class SettingsBottomFragment(
         saveIcon.makeTvCompatible()
 
         // UI Initialization: Toggles (Cinemeta 토글을 CineStream 바로 위에 신규 배치)
-        setupToggle(view, "switchCinemeta", SettingsRepository.PREF_KEY_CINEMETA_ENABLED, true, "Cinemeta Catalog")
+        setupToggle(view, "switchCinemeta", SettingsRepository.PREF_KEY_CINEMETA_ENABLED, true, "Cinemeta Catalogs")
         setupToggle(view, "switchCineStream", SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, isCineStreamInstalled(), "CineStream")
         setupToggle(view, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
         setupToggle(view, "switchVixSrc", SettingsRepository.PREF_KEY_VIXSRC_ENABLED, true, "VixSrc")
