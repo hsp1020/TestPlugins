@@ -426,38 +426,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
             val rawCatalogs = manifest.catalogs ?: emptyList()
             
-            // 1. 매니페스트로부터 렌더링될 수 있는 모든 플랫 탭(Flat-Tab) 후보군을 플랫 리스트로 선출
-            val flatTabs = mutableListOf<FlatTab>()
-            rawCatalogs.forEach { catalog ->
-                val catalogId = catalog.id
-                val catalogType = catalog.type ?: "movie"
-                val catalogName = catalog.name ?: catalogId
-                val displayType = catalogType.replaceFirstChar { it.uppercase() }
-                
-                val requiresGenre = catalog.extra?.any { it.name == "genre" && it.isRequired == true } == true
-
-                // 기본 인기 탭 생성 (장르 필수 조건이 아닌 경우)
-                if (!requiresGenre) {
-                    flatTabs.add(FlatTab(
-                        key = "${catalogId}_${catalogType}_default",
-                        displayName = "$catalogName - $displayType",
-                        urlPath = "/catalog/$catalogType/$catalogId/skip=###.json"
-                    ))
-                }
-
-                // 개별 장르 탭들을 독자 탭 후보로 분리하여 생성
-                val genres = catalog.getGenresList()
-                genres.forEach { genre ->
-                    flatTabs.add(FlatTab(
-                        key = "${catalogId}_${catalogType}_genre_$genre",
-                        displayName = "$catalogName : $genre  - $displayType",
-                        urlPath = "/catalog/$catalogType/$catalogId/genre=${genre.urlEncodeLocal()}&skip=###.json"
-                    ))
-                }
-            }
-
-            // 2. 단일 저장 평면 정렬 순서(Flat-Order) 정보 획득
-            val orderKey = "catalog_order_$name"
+            // 🔥 name 대신 mainUrl 고유 키를 기반으로 정렬 정보 로드
+            val uniqueId = mainUrl.toUniqueKey()
+            val orderKey = "catalog_order_$uniqueId"
             val orderJson = prefs.getString(orderKey, null)
             val orderedKeys = mutableListOf<String>()
             if (orderJson != null) {
@@ -469,17 +440,24 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 } catch (e: Exception) {}
             }
 
-            // 3. 플랫 탭들을 저장된 우선순위에 맞추어 정렬 (신규 탭은 맨 뒤로 배치)
             val sortedTabs = flatTabs.sortedBy { tab ->
                 val idx = orderedKeys.indexOf(tab.key)
                 if (idx != -1) idx else Int.MAX_VALUE
             }
 
-            // 4. 활성화 여부를 개별적으로 검사하여 최종 드롭다운 탭 렌더링 리스트 산출
             return mainPageOf(
                 *buildList {
                     sortedTabs.forEach { tab ->
-                        val isEnabled = prefs.getBoolean("tab_enabled_${name}_${tab.key}", true)
+                        // 🔥 name 대신 uniqueId 사용
+                        val isEnabled = if (tab.key.contains("_genre_")) {
+                            val catalogKey = tab.key.substringBefore("_genre_")
+                            val isGenresMasterEnabled = prefs.getBoolean("genres_enabled_${uniqueId}_$catalogKey", true)
+                            val isIndividualGenreEnabled = prefs.getBoolean("tab_enabled_${uniqueId}_${tab.key}", true)
+                            isGenresMasterEnabled && isIndividualGenreEnabled
+                        } else {
+                            prefs.getBoolean("tab_enabled_${uniqueId}_${tab.key}", true)
+                        }
+                        
                         if (isEnabled) {
                             add(tab.urlPath to tab.displayName)
                         }
@@ -487,7 +465,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 }.toTypedArray()
             )
         }
-
+        
+    
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse = coroutineScope {
         var isNewRequest = false
         
@@ -1877,3 +1856,8 @@ private fun String.urlEncodeLocal(): String = try {
 }
 
 private data class FlatTab(val key: String, val displayName: String, val urlPath: String)
+
+// URL에서 안전한 고유 알파벳 식별자만 추출하는 함수
+private fun String.toUniqueKey(): String {
+    return this.lowercase().filter { it.isLetter() }
+}
