@@ -19,6 +19,11 @@ class StremioXPlugin : Plugin() {
     override fun load(context: Context) {
         println("[StremioXPlugin v1.2-TRACKING] load() 함수 호출됨")
         
+        // 🔥 [기록/라이브러리 통합용]: 백그라운드 가상 공유 코어 등록
+        try {
+            registerMainAPI(StremioC("", "StremioX"))
+        } catch (_: Throwable) {}
+
         println("[StremioXPlugin v1.2-TRACKING] 기본 StremioX, StremioC 카탈로그 등록 건너뜀")
 
         println("[StremioXPlugin v1.2-TRACKING] reload(context) 실행 시도")
@@ -31,6 +36,7 @@ class StremioXPlugin : Plugin() {
             activity?.supportFragmentManager?.let { fm -> frag.show(fm, "Frag") }
         }
     }
+
 
     fun reload(context: Context) {
         println("[StremioXPlugin v1.2-TRACKING] reload() 함수 호출됨")
