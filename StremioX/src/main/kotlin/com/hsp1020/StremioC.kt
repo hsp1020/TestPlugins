@@ -453,7 +453,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     val capitalizedGenre = genre.replaceFirstChar { it.uppercase() }
                     flatTabs.add(FlatTab(
                         key = "${catalogId}_${catalogType}_genre_$genre",
-                        displayName = "$catalogName : $capitalizedGenre  - $displayType",
+                        displayName = "$catalogName : $capitalizedGenre - $displayType",
                         urlPath = "/catalog/$catalogType/$catalogId/genre=${genre.urlEncodeLocal()}&skip=###.json"
                     ))
                 }
