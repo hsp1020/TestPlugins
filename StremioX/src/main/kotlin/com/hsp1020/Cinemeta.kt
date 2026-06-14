@@ -8,12 +8,9 @@ import kotlinx.coroutines.sync.withLock
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 
-// 새로운 XRDB Proxy 주소 반영 및 StremioC 상속
 class Cinemeta : StremioC("https://extendedratings.com/proxy/f873acb8-3861-444c-aca2-81a4c6bdd6cb", "Cinemeta") {
     
     override val hasMainPage = true
-    
-    // 앱 필터링 설정에 의해 카탈로그가 숨겨지는 현상을 방지하기 위해 Others 포함
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Others)
 
     // ==========================================
@@ -43,21 +40,27 @@ class Cinemeta : StremioC("https://extendedratings.com/proxy/f873acb8-3861-444c-
         "Reality-TV", "Talk-Show", "Game-Show"
     )
 
-    // 탭 이름 형식 변경: "Popular - Movie" 및 "Action - Movie"
+    // Popular - Series를 Popular - Movie 바로 뒤에 배치
     override val mainPage = mainPageOf(
         *buildList {
             val movieCatalogName = "Popular"
             val movieType = "Movie"
             
+            val seriesCatalogName = "Popular"
+            val seriesType = "Series"
+            
+            // 1. Popular - Movie 우선 배치
             add("$mainUrl/catalog/movie/top/skip=###.json" to "$movieCatalogName - $movieType")
+            
+            // 2. Popular - Series를 바로 뒤에 배치
+            add("$mainUrl/catalog/series/top/skip=###.json" to "$seriesCatalogName - $seriesType")
+
+            // 3. Movie 장르 목록 배치
             movieGenres.forEach { genre ->
                 add("$mainUrl/catalog/movie/top/genre=$genre&skip=###.json" to "$genre - $movieType")
             }
 
-            val seriesCatalogName = "Popular"
-            val seriesType = "Series"
-            
-            add("$mainUrl/catalog/series/top/skip=###.json" to "$seriesCatalogName - $seriesType")
+            // 4. Series 장르 목록 배치
             seriesGenres.forEach { genre ->
                 add("$mainUrl/catalog/series/top/genre=$genre&skip=###.json" to "$genre - $seriesType")
             }
@@ -137,6 +140,51 @@ class Cinemeta : StremioC("https://extendedratings.com/proxy/f873acb8-3861-444c-
         }
 
         return newHomePageResponse(emptyList(), hasNext = false)
+    }
+
+    // ==========================================
+    // [수정] 모든 경우(All cases)에 지정된 AIO Metadata 주소로 직접 연동하여 로드
+    // ==========================================
+    override suspend fun load(url: String): LoadResponse {
+        val parsed = parseIdAndType(url)
+        if (parsed != null) {
+            val (id, type) = parsed
+            // 영화나 시리즈에 상관없이 모든 메타데이터 요청 주소를 AIO Metadata 프록시 경로로 생성하여 로드합니다.
+            val aioUrl = "https://aiometadata.elfhosted.com/stremio/b345b590-872c-4e13-bc4f-852f4e70c9ef/meta/$type/${id.urlEncodeLocal()}.json"
+            return super.load(aioUrl)
+        }
+        // 예외 대응: 파싱이 완벽하게 실패한 경우에만 기존 보존된 URL로 시도
+        return super.load(url)
+    }
+
+    // JSON 본문(LoadData 등) 혹은 일반 URL 형태에서 ID와 Type을 정밀 추출하는 헬퍼 함수
+    private fun parseIdAndType(url: String): Pair<String, String>? {
+        return try {
+            if (url.startsWith("{")) {
+                val root = StremioC.jsonMapper.readTree(url)
+                val id = root.get("id")?.asText() ?: root.get("imdbId")?.asText()
+                val type = root.get("type")?.asText() ?: "movie"
+                if (id != null) Pair(id, type) else null
+            } else {
+                val cleanUrl = url.substringBefore("?")
+                if (cleanUrl.contains("/meta/")) {
+                    val parts = cleanUrl.substringAfter("/meta/").split("/")
+                    if (parts.size >= 2) {
+                        val type = parts[0]
+                        val id = parts[1].removeSuffix(".json")
+                        Pair(id, type)
+                    } else null
+                } else null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun String.urlEncodeLocal(): String = try {
+        java.net.URLEncoder.encode(this, "UTF-8").replace("+", "%20")
+    } catch (e: Exception) {
+        this
     }
 
     private data class CinemetaDirectResponse(@JsonProperty("metas") val metas: List<CinemetaMeta>?)
