@@ -8,12 +8,12 @@ import kotlinx.coroutines.sync.withLock
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 
-// 새로운 XRDB Proxy 주소 반영 및 StremioC 상속
-class Cinemeta : StremioC("https://extendedratings.com/proxy/f873acb8-3861-444c-aca2-81a4c6bdd6cb", "Cinemeta") {
+// 공식 Cinemeta 주소로 원복 및 StremioC 상속
+class Cinemeta : StremioC("https://v3-cinemeta.strem.io", "Cinemeta") {
     
     override val hasMainPage = true
     
-    // [보완] 앱 필터링 설정에 의해 카탈로그가 아예 숨겨지는 현상을 방지하기 위해 Others를 포함시킵니다.
+    // 앱 필터링 설정에 의해 카탈로그가 숨겨지는 현상을 방지하기 위해 Others 포함
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Others)
 
     // ==========================================
@@ -43,7 +43,7 @@ class Cinemeta : StremioC("https://extendedratings.com/proxy/f873acb8-3861-444c-
         "Reality-TV", "Talk-Show", "Game-Show"
     )
 
-    // 새로운 XRDB Proxy 기반 동적 탭 생성
+    // 공식 Cinemeta 기반 동적 탭 생성
     override val mainPage = mainPageOf(
         *buildList {
             val movieCatalogName = "Popular"
