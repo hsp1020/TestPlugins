@@ -1375,7 +1375,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                         "$cleanBase/tmdb:$posterType:$recTmdbId.jpg?config=aed081fd-73b1-460e-879d-377c5658691c"
                     } else {
                         // 주소가 비어있으면 TMDB 기본 포스터 이미지 경로를 자동 추적하여 폴백 처리 [3]
-                        if (!media.poster_path.isNullOrBlank()) "https://image.tmdb.org/t/p/w500${media.posterPath}" else TRANSPARENT_PIXEL
+                        if (!media.poster_path.isNullOrBlank()) "https://image.tmdb.org/t/p/w500${media.poster_path}" else TRANSPARENT_PIXEL
                     }
                     
                     val thinData = LoadData(id = "tmdb:${media.id}", type = outType)
