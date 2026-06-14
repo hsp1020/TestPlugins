@@ -100,7 +100,34 @@
                 android:nextFocusUp="@id/addlinks" />
         </LinearLayout>
 
-        <!-- TMDb Language Selection (싱크 위에 배치 완료) -->
+        <!-- TMDb API Key Input (List Link 아래 배치 완료) -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginTop="10dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="TMDb API Key (Required)"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+
+            <EditText
+                android:id="@+id/etTmdbApiKey"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="Enter TMDb API Key"
+                android:textColor="#FFFFFF"
+                android:textColorHint="#555555"
+                android:textSize="14sp"
+                android:padding="10dp"
+                android:layout_marginTop="5dp"
+                android:singleLine="true" />
+        </LinearLayout>
+
+        <!-- TMDb Language Selection -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -122,6 +149,59 @@
                 android:layout_height="wrap_content"
                 android:padding="5dp"
                 android:focusable="true" />
+        </LinearLayout>
+
+        <!-- MdbList Ratings Toggle (TMDb Language 아래 배치 완료) -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="10dp"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:text="MdbList Ratings Option"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+
+            <Switch
+                android:id="@+id/switchMdbList"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:focusable="true"
+                android:padding="5dp" />
+        </LinearLayout>
+
+        <!-- MdbList API Key Input (스위치 켜짐 상태에서만 노출) -->
+        <LinearLayout
+            android:id="@+id/layoutMdbList"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginTop="5dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="MdbList API Key"
+                android:textColor="#AAAAAA"
+                android:textSize="14sp" />
+
+            <EditText
+                android:id="@+id/etMdbListApiKey"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="Enter MdbList API Key"
+                android:textColor="#FFFFFF"
+                android:textColorHint="#555555"
+                android:textSize="14sp"
+                android:padding="10dp"
+                android:layout_marginTop="5dp"
+                android:singleLine="true" />
         </LinearLayout>
 
         <!-- History & Library Sync Toggle -->
@@ -177,7 +257,7 @@
                 android:singleLine="true" />
         </LinearLayout>
 
-        <!-- Custom Poster Toggle (CineStream 위에 배치 완료) -->
+        <!-- Custom Poster Toggle -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
