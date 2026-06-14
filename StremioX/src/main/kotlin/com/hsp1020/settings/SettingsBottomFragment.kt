@@ -244,7 +244,7 @@ class SettingsBottomFragment(
         showlinks.makeTvCompatible()
         saveIcon.makeTvCompatible()
 
-        // [v2.3.1-Fix]: 백업 및 복원 텍스트 버튼뷰 수령 이식 (우측상단 가로배치로 수선)
+        // [v2.3.1] 백업 및 복원 텍스트 버튼뷰 수령 이식 (우측상단 가로배치로 수선)
         val tvExport: TextView = try { view.findView("tvExport") } catch (e: Throwable) {
             throw Exception("tvExport TextView not found in bottom_sheet_layout", e)
         }
@@ -398,7 +398,7 @@ class SettingsBottomFragment(
         setupToggle(view, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
         setupToggle(view, "switchVixSrc", SettingsRepository.PREF_KEY_VIXSRC_ENABLED, true, "VixSrc")
 
-        // [v2.2.0] 다국어 선택 및 커스텀 포스터 주소 바인딩 연동 (TMDB 명칭 개편 연동)
+        // [v2.2.1-UI]: 버튼을 투명한 배경의 이쁜 톱니바퀴 아이콘 버튼(ImageView)으로 수선 완료
         val btnSelectLanguage: ImageView = try { view.findView("btnSelectLanguage") } catch (e: Throwable) {
             throw Exception("btnSelectLanguage ImageView not found in bottom_sheet_layout", e)
         }
@@ -1088,9 +1088,6 @@ class SettingsBottomFragment(
         return this.lowercase().filter { it.isLetter() }
     }
 
-    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {}
-
-    // [v2.0.0] 중괄호 비 대칭 교정 및 뷰 누락 전면 복구 [2]
     private fun setupToggle(view: View, viewId: String, prefKey: String, isInstalled: Boolean, displayName: String) {
         try {
             val switchView: CompoundButton = view.findView(viewId)
@@ -1114,7 +1111,6 @@ class SettingsBottomFragment(
         }
     }
 
-    // [v2.0.0] 중괄호 비 대칭 교정 및 뷰 누락 전면 복구 [2]
     private fun showEditDialog(itemToEdit: LinkItem, position: Int, rv: RecyclerView) {
         val dialogView = getLayout("addlinks", LayoutInflater.from(requireContext()), null)
         
