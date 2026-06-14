@@ -10,15 +10,12 @@ import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.widget.Button
 import android.widget.CompoundButton
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
-import android.widget.CheckBox
-import android.widget.Switch
 import androidx.appcompat.app.AlertDialog
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import androidx.core.net.toUri
@@ -108,7 +105,7 @@ object SettingsRepository {
 // UI Layer
 // ==========================================
 class SettingsBottomFragment(
-    private val plugin: StremioXPlugin, // 플러그인 전송 인자 바인딩
+    private val plugin: StremioXPlugin, // 플러그인 인자 바인딩
     private val sharedPref: SharedPreferences
 ) : BottomSheetDialogFragment() {
 
@@ -116,6 +113,7 @@ class SettingsBottomFragment(
 
     private data class ConfigFlatTab(val key: String, val displayName: String, val isGenre: Boolean, val catalogKey: String)
 
+    // 다이얼로그 전용 다국어 리스트 정의
     private val languages = listOf(
         "South Africa (Afrikaans)" to "af-ZA",
         "United Arab Emirates (Arabic)" to "ar-AE",
@@ -267,25 +265,20 @@ class SettingsBottomFragment(
         setupToggle(view, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
         setupToggle(view, "switchVixSrc", SettingsRepository.PREF_KEY_VIXSRC_ENABLED, true, "VixSrc")
 
-        // [v2.2.0] 다국어 선택 및 커스텀 포스터 주소 바인딩 연동 (참고 코드 수치 규격 적용)
-        val btnSelectLanguage: Button = try { view.findView("btnSelectLanguage") } catch (e: Throwable) {
-            throw Exception("btnSelectLanguage Button not found in bottom_sheet_layout", e)
+        // [v2.2.1-UI]: 버튼을 투명한 배경의 이쁜 톱니바퀴 아이콘 버튼(ImageView)으로 수선 완료
+        val btnSelectLanguage: ImageView = try { view.findView("btnSelectLanguage") } catch (e: Throwable) {
+            throw Exception("btnSelectLanguage ImageView not found in bottom_sheet_layout", e)
         }
         val etCustomPosterUrl: EditText = try { view.findView("etCustomPosterUrl") } catch (e: Throwable) {
             throw Exception("etCustomPosterUrl EditText not found in bottom_sheet_layout", e)
         }
 
-        val savedLangCode = sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, "ko-KR") ?: "ko-KR"
-        btnSelectLanguage.text = savedLangCode
+        btnSelectLanguage.setImageDrawable(getDrawable("settings_icon"))
+        btnSelectLanguage.makeTvCompatible()
         etCustomPosterUrl.setText(sharedPref.getString(SettingsRepository.PREF_KEY_CUSTOM_POSTER_URL, ""))
 
         btnSelectLanguage.setOnClickListener {
-            // 수선한 LanguageSelectFragment를 다이어로그 형태로 팝업 [3]
-            val fragment = LanguageSelectFragment(plugin, sharedPref) {
-                val updatedLangCode = sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, "ko-KR") ?: "ko-KR"
-                btnSelectLanguage.text = updatedLangCode
-            }
-            fragment.show(parentFragmentManager, "LanguageSelect")
+            showLanguageSelectDialog()
         }
 
         etCustomPosterUrl.setOnFocusChangeListener { _, hasFocus ->
@@ -435,79 +428,107 @@ class SettingsBottomFragment(
         return view
     }
 
-    private fun setupToggle(view: View, viewId: String, prefKey: String, isInstalled: Boolean, displayName: String) {
-        try {
-            val switchView: CompoundButton = view.findView(viewId)
-            switchView.isEnabled = isInstalled
-            if (!isInstalled) {
-                switchView.isChecked = false
-                switchView.text = "$displayName (Not Installed)"
-                SettingsRepository.setIntegrationEnabled(sharedPref, prefKey, false)
-            } else {
-                switchView.text = "$displayName Integration"
-                switchView.isChecked = SettingsRepository.isIntegrationEnabled(sharedPref, prefKey)
-            }
+    // ==========================================
+    // [v2.2.1] 크래시 프리 100% 프로그램식 다국어 선택 및 검색 다이얼로그 빌더
+    // ==========================================
+    private fun showLanguageSelectDialog() {
+        val context = requireContext()
+        val prefs = sharedPref
 
-            switchView.setOnCheckedChangeListener { _, isChecked ->
-                SettingsRepository.setIntegrationEnabled(sharedPref, prefKey, isChecked)
-                val statusText = if (isChecked) "Enabled" else "Disabled"
-                showToast("$displayName Integration $statusText")
-            }
-        } catch (e: Throwable) {
-            // 방어 코드
-        }
-    }
-
-    private fun showEditDialog(itemToEdit: LinkItem, position: Int, rv: RecyclerView) {
-        val dialogView = getLayout("addlinks", LayoutInflater.from(requireContext()), null)
-        val etName: EditText
-        val etLink: EditText
-        
-        try {
-            etName = dialogView.findView("etName")
-            etLink = dialogView.findView("etLink")
-        } catch (t: Throwable) {
-            Toast.makeText(requireContext(), "Dialog fields not found", Toast.LENGTH_SHORT).show()
-            return
+        val scrollView = androidx.core.widget.NestedScrollView(context).apply {
+            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
 
-        etName.setText(itemToEdit.name)
-        etLink.setText(itemToEdit.link)
+        val container = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(40, 30, 40, 30)
+        }
 
-        val dlg = AlertDialog.Builder(requireContext())
-            .setTitle("Edit Link")
-            .setView(dialogView)
-            .setPositiveButton("Update", null)
-            .setNegativeButton("Cancel", null)
-            .create()
+        val searchBar = EditText(context).apply {
+            hint = "Search language..."
+            setHintTextColor(android.graphics.Color.GRAY)
+            setTextColor(android.graphics.Color.WHITE)
+            textSize = 15f
+            setPadding(20, 20, 20, 20)
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(android.graphics.Color.parseColor("#151515"))
+                cornerRadius = 10f
+            }
+            layoutParams = android.widget.LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                setMargins(0, 0, 0, 20)
+            }
+        }
+        container.addView(searchBar)
 
-        dlg.setOnShowListener {
-            val btnUpdate = dlg.getButton(AlertDialog.BUTTON_POSITIVE)
-            btnUpdate.setOnClickListener {
-                val name = etName.text.toString().trim()
-                val link = etLink.text.toString().trim()
-                val type = "StremioC"
+        val currentSavedCode = prefs.getString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, "ko-KR") ?: "ko-KR"
+        val rowViews = mutableListOf<Pair<String, View>>()
 
-                if (link.isEmpty() || !(link.startsWith("http://") || link.startsWith("https://"))) {
-                    showToast("Enter a valid URL (http/https)")
-                    return@setOnClickListener
+        val langDialog = AlertDialog.Builder(context).create()
+
+        languages.forEach { (langName, code) ->
+            val rowLayout = android.widget.LinearLayout(context).apply {
+                orientation = android.widget.LinearLayout.HORIZONTAL
+                gravity = android.view.Gravity.CENTER_VERTICAL
+                setPadding(10, 15, 10, 15)
+                isClickable = true
+                focusable = View.FOCUSABLE
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(android.graphics.Color.TRANSPARENT)
                 }
-
-                val updatedList = SettingsRepository.loadLinks(sharedPref)
-                val indexInDb = updatedList.indexOfFirst { it.id == itemToEdit.id }
-                
-                if (indexInDb != -1) {
-                    val newItem = itemToEdit.copy(name = name.ifBlank { link }, link = link, type = type)
-                    updatedList[indexInDb] = newItem
-                    SettingsRepository.saveLinks(sharedPref, updatedList)
-
-                    (rv.adapter as? LinksAdapter)?.updateItem(newItem, position)
-                    showToast("Link Updated Successfully")
-                }
-                dlg.dismiss()
             }
+
+            val tvName = TextView(context).apply {
+                text = langName
+                textSize = 15f
+                setTextColor(if (code == currentSavedCode) android.graphics.Color.parseColor("#2196F3") else android.graphics.Color.WHITE)
+                layoutParams = android.widget.LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            rowLayout.addView(tvName)
+
+            if (code == currentSavedCode) {
+                val tvCheck = TextView(context).apply {
+                    text = "✓"
+                    textSize = 16f
+                    setTextColor(android.graphics.Color.parseColor("#2196F3"))
+                    setPadding(10, 0, 10, 0)
+                }
+                rowLayout.addView(tvCheck)
+            }
+
+            rowLayout.setOnClickListener {
+                prefs.edit { putString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, code) }
+                Toast.makeText(context, "Language set to $code ($langName)", Toast.LENGTH_SHORT).show()
+                langDialog.dismiss()
+            }
+
+            container.addView(rowLayout)
+            rowViews.add(langName to rowLayout)
         }
-        dlg.show()
+
+        scrollView.addView(container)
+
+        langDialog.apply {
+            setTitle("Select TMDb Language")
+            setView(scrollView)
+            setButton(AlertDialog.BUTTON_NEGATIVE, "Cancel") { d, _ -> d.dismiss() }
+        }
+
+        searchBar.addTextChangedListener(object : android.text.TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                val query = s.toString().trim().lowercase()
+                rowViews.forEach { (name, view) ->
+                    view.visibility = if (query.isEmpty() || name.lowercase().contains(query)) {
+                        View.VISIBLE
+                    } else {
+                        View.GONE
+                    }
+                }
+            }
+            override fun afterTextChanged(s: android.text.Editable?) {}
+        })
+
+        langDialog.show()
     }
 
     private fun showCatalogConfigDialog(item: LinkItem) {
