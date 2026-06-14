@@ -666,8 +666,9 @@ class SettingsBottomFragment(
                 itemLayout.addView(etOrder)
 
                 // 활성화 토글 체크박스
-                val enabledKey = if (tab.isGenre) "genre_enabled_${addonName}_${tab.catalogKey}_${tab.key.substringAfter("_genre_")}" else "tab_enabled_${addonName}_${tab.catalogKey}"
-                val isEnabled = prefs.getBoolean(enabledKey, true)
+                // 🔥 [키 매핑 동기화]: StremioC 코어의 로드 규격인 tab_enabled 키 형식과 1대1 일치시킵니다.
+                val enabledKey = "tab_enabled_${addonName}_${tab.key}"
+                val isCatEnabled = prefs.getBoolean(enabledKey, true)
 
                 val checkbox = android.widget.CheckBox(context).apply {
                     isChecked = isEnabled
