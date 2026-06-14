@@ -1220,7 +1220,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             typeName: String? = null
         ): SearchResponse {
             val targetType = this.type ?: typeName ?: "movie"
-            val metaUrl = "${provider.mainUrl.substringBefore("?")}/meta/$targetType/${this.id}.json"
+            // 🔥 '/manifest.json'을 정제한 cleanBaseUrl() 적용
+            val cleanBase = provider.mainUrl.cleanBaseUrl()
+            val metaUrl = "$cleanBase/meta/$targetType/${this.id}.json"
+            
 
             val baseName = if (!name.isNullOrBlank()) {
                 name
@@ -1606,9 +1609,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val finalSeriesType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.Anime else TvType.TvSeries
 
             if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
+                // 🔥 '/manifest.json'을 정제한 cleanBaseUrl() 적용
+                val cleanBase = provider.mainUrl.cleanBaseUrl()
                 return@coroutineScope provider.newMovieLoadResponse(
-                    finalName, "${provider.mainUrl}/meta/${finalType ?: "movie"}/${this@CatalogEntry.id}.json", finalMovieType, 
+                    finalName, "$cleanBase/meta/${finalType ?: "movie"}/${this@CatalogEntry.id}.json", finalMovieType, 
                     LoadData(
+                        
                         type = finalType, 
                         id = movieId, 
                         imdbId = cleanImdbId, 
@@ -1645,8 +1651,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 }
             } else {
                 val finalEpisodes = processEpisodes(provider, cleanImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, cleanTmdbId?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, finalAniId, finalMalId, this@CatalogEntry.kitsuIdExt)
+                // 🔥 '/manifest.json'을 정제한 cleanBaseUrl() 적용
+                val cleanBase = provider.mainUrl.cleanBaseUrl()
                 return@coroutineScope provider.newTvSeriesLoadResponse(
-                    finalName, "${provider.mainUrl}/meta/${finalType ?: "series"}/${this@CatalogEntry.id}.json", finalSeriesType, finalEpisodes
+                    finalName, "$cleanBase/meta/${finalType ?: "series"}/${this@CatalogEntry.id}.json", finalSeriesType, finalEpisodes
                 ) {
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
                     this.showStatus = tmdbData?.fetchedStatus 
