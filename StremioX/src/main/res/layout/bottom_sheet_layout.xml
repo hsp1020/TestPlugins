@@ -100,6 +100,59 @@
                 android:nextFocusUp="@id/addlinks" />
         </LinearLayout>
 
+        <!-- History & Library Sync Toggle (CineStream 바로 위 연동 토글) -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="10dp"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:text="History &amp; Library Sync"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+
+            <Switch
+                android:id="@+id/switchHistorySync"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:focusable="true"
+                android:padding="5dp" />
+        </LinearLayout>
+
+        <!-- History & Library Sync URL Input (온 상태에서만 노출될 가로정렬 입력단) -->
+        <LinearLayout
+            android:id="@+id/layoutHistorySyncUrl"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginTop="5dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Sync Metadata Base URL"
+                android:textColor="#AAAAAA"
+                android:textSize="14sp" />
+
+            <EditText
+                android:id="@+id/etHistorySyncUrl"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="https://aiometadata.elfhosted.com/stremio/..."
+                android:textColor="#FFFFFF"
+                android:textColorHint="#555555"
+                android:textSize="14sp"
+                android:padding="10dp"
+                android:layout_marginTop="5dp"
+                android:singleLine="true" />
+        </LinearLayout>
+
         <!-- CineStream Toggle -->
         <LinearLayout
             android:layout_width="match_parent"
