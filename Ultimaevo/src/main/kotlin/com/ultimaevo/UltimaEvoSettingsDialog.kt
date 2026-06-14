@@ -1,4 +1,4 @@
-// v1.54
+// v1.55 (Export/Import: 다이렉트 클립보드 스캔 및 100% 동기식 처리로 UI 렌더링 렉/크래시 원천 차단)
 package com.ultimaevo
 
 import android.app.AlertDialog
@@ -152,8 +152,9 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             setPadding(0, 0, 0, 30)
         }
 
-        val pxHeight = (250 * ctx.resources.displayMetrics.density).toInt()
-
+        // ==========================================
+        // [다이렉트 클립보드 Export 최적화 완료]
+        // ==========================================
         val exportBtn = Button(ctx).apply {
             text = "Export Settings"
             setTextColor(Color.WHITE)
@@ -164,52 +165,38 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 if (SystemClock.elapsedRealtime() - lastClickTime < 1000) return@setOnClickListener
                 lastClickTime = SystemClock.elapsedRealtime()
 
-                // 🌟 백업 출력 시 다중 다이얼로그 중복 체크
                 if (activeAlertDialog?.isShowing == true) return@setOnClickListener
 
                 try {
                     val json = JSONObject()
                     prefs.all.forEach { (key, value) -> json.put(key, value) }
-                    val backupStr = Base64.encodeToString(json.toString().toByteArray(), Base64.NO_WRAP)
-
-                    val et = EditText(ctx).apply {
-                        setText(backupStr)
-                        setTextColor(Color.WHITE)
-                        background = getCardBg()
-                        setPadding(30, 30, 30, 30)
-                        setTextIsSelectable(true)
-                        isFocusable = false
-                        isFocusableInTouchMode = false
-                        gravity = Gravity.TOP or Gravity.START
-                        inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
-                        isVerticalScrollBarEnabled = true
-                        layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, pxHeight)
-                    }
-                    val wrapper = FrameLayout(ctx).apply {
-                        setPadding(40, 20, 40, 20)
-                        addView(et)
-                    }
                     
+                    // 1. 메모리상에서 Base64로 즉시 인코딩 (0.01초 소요)
+                    val backupStr = Base64.encodeToString(json.toString().toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+
+                    // 2. 무거운 화면(EditText)에 그리지 않고 즉시 기기 클립보드에 삽입
+                    val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    val clip = ClipData.newPlainText("Ultima Backup", backupStr)
+                    clipboard.setPrimaryClip(clip)
+
+                    // 3. 완료 팝업 호출
                     val dialog = AlertDialog.Builder(ctx)
-                        .setTitle("Export Backup Data")
-                        .setView(wrapper)
-                        .setPositiveButton("Copy") { _, _ ->
-                            val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                            val clip = ClipData.newPlainText("Ultima Backup", backupStr)
-                            clipboard.setPrimaryClip(clip)
-                            Toast.makeText(ctx, "Copied to clipboard", Toast.LENGTH_SHORT).show()
-                        }
-                        .setNegativeButton("Close", null)
+                        .setTitle("Export Successful")
+                        .setMessage("Backup data has been successfully copied to your clipboard.\n\nPlease paste it somewhere safe (e.g., Notes, Messenger).")
+                        .setPositiveButton("OK", null)
                         .create()
                     
                     activeAlertDialog = dialog
                     dialog.show()
                 } catch (e: Exception) {
-                    println("[UltimaEvo-Debug] [Export] 백업 인코딩 중 에러: ${e.message}")
+                    Toast.makeText(ctx, "Failed to export settings", Toast.LENGTH_SHORT).show()
                 }
             }
         }
 
+        // ==========================================
+        // [다이렉트 클립보드 Import 사전 검증 및 최적화 완료]
+        // ==========================================
         val importBtn = Button(ctx).apply {
             text = "Import Settings"
             setTextColor(Color.WHITE)
@@ -220,47 +207,47 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 if (SystemClock.elapsedRealtime() - lastClickTime < 1000) return@setOnClickListener
                 lastClickTime = SystemClock.elapsedRealtime()
 
-                // 🌟 임포트 팝업 시 다중 다이얼로그 중복 체크
                 if (activeAlertDialog?.isShowing == true) return@setOnClickListener
 
-                val et = EditText(ctx).apply {
-                    hint = "Paste backup string here..."
-                    setHintTextColor(Color.GRAY)
-                    setTextColor(Color.WHITE)
-                    background = getCardBg()
-                    setPadding(30, 30, 30, 30)
-                    gravity = Gravity.TOP or Gravity.START
-                    inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
-                    isVerticalScrollBarEnabled = true
-                    setHorizontallyScrolling(false)
-                    layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, pxHeight)
-                }
-                val wrapper = FrameLayout(ctx).apply {
-                    setPadding(40, 20, 40, 20)
-                    addView(et)
+                val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                
+                // 1. 클립보드에서 텍스트 직접 읽어오기
+                val clipData = clipboard.primaryClip
+                val clipboardText = if (clipData != null && clipData.itemCount > 0) {
+                    clipData.getItemAt(0).text?.toString()?.trim() ?: ""
+                } else ""
+
+                if (clipboardText.isEmpty()) {
+                    Toast.makeText(ctx, "Clipboard is empty. Copy the backup data first.", Toast.LENGTH_LONG).show()
+                    return@setOnClickListener
                 }
 
-                val dialog = AlertDialog.Builder(ctx)
-                    .setTitle("Import Backup Data")
-                    .setMessage("Warning: This will permanently overwrite all current settings.\nThe app must be restarted after import.")
-                    .setView(wrapper)
-                    .setPositiveButton("Restore") { _, _ ->
-                        try {
-                            val decodedBytes = Base64.decode(et.text.toString().trim(), Base64.NO_WRAP)
-                            val json = JSONObject(String(decodedBytes))
-                            
+                try {
+                    // 2. 덮어쓰기 전, 백업 코드가 유효한지 사전 파싱 테스트 (철벽 방어)
+                    val decodedBytes = Base64.decode(clipboardText, Base64.NO_WRAP)
+                    val jsonString = String(decodedBytes, Charsets.UTF_8)
+                    val parsedJson = JSONObject(jsonString)
+                    
+                    if (parsedJson.length() == 0) throw Exception("Empty JSON Data")
+
+                    // 3. 정상 데이터임이 확인되면 복원 팝업 호출
+                    val dialog = AlertDialog.Builder(ctx)
+                        .setTitle("Backup Data Detected")
+                        .setMessage("Valid backup data found in clipboard!\n\nWarning: Restoring will permanently overwrite all current settings.\nAre you sure you want to proceed?")
+                        .setPositiveButton("Restore") { _, _ ->
                             val editor = prefs.edit()
                             editor.clear() 
                             
-                            val keys = json.keys()
+                            val keys = parsedJson.keys()
                             val importedProviders = mutableSetOf<String>()
                             
                             while (keys.hasNext()) {
                                 val key = keys.next()
-                                when (val value = json.get(key)) {
+                                when (val value = parsedJson.get(key)) {
                                     is Boolean -> editor.putBoolean(key, value)
                                     is String -> {
                                         editor.putString(key, value)
+                                        // Ultima Evo 특화 기능: 임포트된 프로바이더 목록 수집
                                         if (key.startsWith("evo_active_cats_")) {
                                             val chunkSeparator = if (value.contains("%%%")) "%%%" else "|||"
                                             val fieldSeparator = if (value.contains("%%%")) ";;;" else "|~|"
@@ -275,8 +262,9 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                                     is Int -> editor.putInt(key, value)
                                 }
                             }
-                            editor.apply()
+                            editor.commit() // 확실한 동기식 저장 적용
                             
+                            // 4. 누락된 플러그인 유무 확인 (UltimaEvo 특화 기능)
                             val currentlyInstalled = APIHolder.allProviders.map { it.name }.toSet()
                             val missingProviders = importedProviders.subtract(currentlyInstalled)
                             
@@ -294,17 +282,23 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                             
                             activeAlertDialog = resultDialog
                             resultDialog.show()
-
-                        } catch (e: Exception) {
-                            Toast.makeText(ctx, "Invalid backup string format.", Toast.LENGTH_SHORT).show()
-                            println("[UltimaEvo-Debug] [Import] 백업 복원 중 에러: ${e.message}")
                         }
-                    }
-                    .setNegativeButton("Cancel", null)
-                    .create()
-                
-                activeAlertDialog = dialog
-                dialog.show()
+                        .setNegativeButton("Cancel", null)
+                        .create()
+                    
+                    activeAlertDialog = dialog
+                    dialog.show()
+
+                } catch (e: Exception) {
+                    // 클립보드에 카톡 대화 등 이상한 텍스트가 있을 경우 철벽 에러 팝업
+                    val errDialog = AlertDialog.Builder(ctx)
+                        .setTitle("Invalid Backup Data")
+                        .setMessage("No valid backup data found in your clipboard.\n\nPlease copy the exact backup text and try again.")
+                        .setPositiveButton("OK", null)
+                        .create()
+                    activeAlertDialog = errDialog
+                    errDialog.show()
+                }
             }
         }
         
@@ -411,7 +405,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 val newCount = instanceCountInput.text.toString().toIntOrNull() ?: oldCount
 
                 if (newCount < oldCount) {
-                    // 🌟 중복 팝업 체크
                     if (activeAlertDialog?.isShowing == true) return@setOnFocusChangeListener
 
                     val dialog = AlertDialog.Builder(requireContext())
@@ -559,7 +552,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     if (SystemClock.elapsedRealtime() - lastClickTime < 1000) return@setOnClickListener
                     lastClickTime = SystemClock.elapsedRealtime()
 
-                    // 🌟 인스턴스 개별 삭제 시 다중 다이얼로그 중복 체크
                     if (activeAlertDialog?.isShowing == true) return@setOnClickListener
                     
                     val dialog = AlertDialog.Builder(requireContext())
@@ -604,7 +596,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 val newCount = instanceCountInput.text.toString().toIntOrNull() ?: oldCount
 
                 if (newCount < oldCount) {
-                    // 🌟 저장 시 강제 축소 삭제 경고 팝업 시 다중 다이얼로그 중복 체크
                     if (activeAlertDialog?.isShowing == true) return@setOnClickListener
 
                     val dialog = AlertDialog.Builder(requireContext())
@@ -640,7 +631,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     return@setOnClickListener
                 }
 
-                // 🌟 재시작 필요 경고 팝업 시 다중 다이얼로그 중복 체크
                 if (activeAlertDialog?.isShowing == true) return@setOnClickListener
 
                 val dialog = AlertDialog.Builder(requireContext())
@@ -666,7 +656,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
     }
 
     private fun showEditCatalogsDialog(instanceId: Int, ctx: Context) {
-        // 🌟 프로바이더 카탈로그 개별 설정 진입 시 다중 다이얼로그 중복 체크
         if (activeAlertDialog?.isShowing == true) return
 
         val prefs = ctx.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
@@ -698,7 +687,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
         val allProviders = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
         
-        // 🌟 접고 펼칠 수 있는 프로바이더별 Auto-add 옵션 카드 설정
         val providerSettingsCard = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(25, 25, 25, 25)
@@ -708,7 +696,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             }
         }
 
-        // 헤더 가로 레이아웃 (타이틀 + 화살표 토글)
         val headerRow = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -723,7 +710,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         }
 
         val toggleArrow = TextView(ctx).apply {
-            text = "▼" // 초기 상태: 접힘 (▽)
+            text = "▼"
             setTextColor(Color.WHITE)
             textSize = 14f
             setPadding(15, 10, 15, 10)
@@ -733,7 +720,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         headerRow.addView(toggleArrow)
         providerSettingsCard.addView(headerRow)
 
-        // 🌟 프로바이더 목록 세로 레이아웃 컨테이너 (초기 상태 숨김: View.GONE)
         val providersContainer = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
@@ -741,7 +727,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         }
         providerSettingsCard.addView(providersContainer)
 
-        // 헤더 영역 탭 시 접고 펼치기 전환 리스너
         headerRow.setOnClickListener {
             if (providersContainer.visibility == View.VISIBLE) {
                 providersContainer.visibility = View.GONE
@@ -782,7 +767,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             providerRow.addView(providerLabel)
             providerRow.addView(providerSwitch)
             
-            // 🌟 원래 card에 담았던 프로바이더 행을 접이식 컨테이너인 providersContainer에 위임합니다.
             providersContainer.addView(providerRow)
         }
         listLayout.addView(providerSettingsCard)
@@ -805,7 +789,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
             for (i in activeRows.indices) {
                 val rowView = activeRows[i].view
-                val expectedIndex = i + 1 // 상단 카드가 0번 인덱스이므로 +1 보정 진행
+                val expectedIndex = i + 1
                 if (listLayout.getChildAt(expectedIndex) != rowView) {
                     listLayout.removeView(rowView)
                     listLayout.addView(rowView, expectedIndex)
