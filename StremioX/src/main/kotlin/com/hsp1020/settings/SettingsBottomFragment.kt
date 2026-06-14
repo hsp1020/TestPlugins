@@ -2,6 +2,7 @@
 package com.hsp1020
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.drawable.Drawable
@@ -26,6 +27,11 @@ import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CommonActivity.showToast
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.util.Collections
 
 // ==========================================
 // Data & Repository Layer
@@ -39,7 +45,6 @@ data class LinkItem(
 
 object SettingsRepository {
     private const val PREF_KEY_LINKS = "stremio_saved_links"
-    const val PREF_KEY_CINEMETA_ENABLED = "cinemeta_integration_enabled" // 🔥 추가: Cinemeta 온오프 키
     const val PREF_KEY_CINESTREAM_ENABLED = "cinestream_integration_enabled"
     const val PREF_KEY_STREAMPLAY_ENABLED = "streamplay_integration_enabled"
     const val PREF_KEY_VIXSRC_ENABLED = "vixsrc_integration_enabled"
@@ -100,6 +105,9 @@ class SettingsBottomFragment(
 
     private val res = plugin.resources ?: throw Exception("Unable to access plugin resources")
 
+    // 다이얼로그용 임시 카탈로그 DTO
+    private data class ConfigCatalog(val id: String, val type: String, val name: String, val genres: List<String>)
+
     private fun getDrawable(name: String): Drawable {
         val id = res.getIdentifier(name, "drawable", BuildConfig.LIBRARY_PACKAGE_NAME)
         return res.getDrawable(id, null) ?: throw Exception("Drawable $name not found")
@@ -158,8 +166,7 @@ class SettingsBottomFragment(
         showlinks.makeTvCompatible()
         saveIcon.makeTvCompatible()
 
-        // UI Initialization: Toggles (Cinemeta 토글을 CineStream 바로 위에 신규 배치)
-        setupToggle(view, "switchCinemeta", SettingsRepository.PREF_KEY_CINEMETA_ENABLED, true, "Cinemeta Catalogs")
+        // UI Initialization: Toggles
         setupToggle(view, "switchCineStream", SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, isCineStreamInstalled(), "CineStream")
         setupToggle(view, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
         setupToggle(view, "switchVixSrc", SettingsRepository.PREF_KEY_VIXSRC_ENABLED, true, "VixSrc")
@@ -262,7 +269,18 @@ class SettingsBottomFragment(
                         }
                     },
                     onEdit = { itemToEdit, position ->
-                        showEditDialog(itemToEdit, position, rv)
+                        // [v2.0.0] 수정 시 선택 메뉴 다이얼로그 호출 (링크 수정 vs 카탈로그 제어)
+                        val choices = arrayOf("Edit Link Info", "Configure Catalogs & Genres")
+                        AlertDialog.Builder(requireContext())
+                            .setTitle(itemToEdit.name)
+                            .setItems(choices) { _, which ->
+                                if (which == 0) {
+                                    showEditDialog(itemToEdit, position, rv)
+                                } else {
+                                    showCatalogConfigDialog(itemToEdit)
+                                }
+                            }
+                            .show()
                     }
                 )
 
@@ -308,7 +326,7 @@ class SettingsBottomFragment(
                 showToast("$displayName Integration $statusText")
             }
         } catch (e: Throwable) {
-            // 레이아웃 파일에 토글이 없더라도 크래시 없이 건너뜀 (안정성 확보)
+            // 레이아웃 파일에 해당 ID가 없더라도 크래시 차단
         }
     }
 
@@ -362,6 +380,210 @@ class SettingsBottomFragment(
             }
         }
         dlg.show()
+    }
+
+    // ==========================================
+    // [v2.0.0] 다이내믹 카탈로그 및 장르 제어 UI 빌더
+    // ==========================================
+    private fun showCatalogConfigDialog(item: LinkItem) {
+        val context = requireContext()
+        val progressDialog = AlertDialog.Builder(context)
+            .setMessage("Loading Stremio Addon Manifest...")
+            .setCancelable(false)
+            .create()
+        progressDialog.show()
+
+        // 코루틴 비동기 Manifest 파싱
+        CoroutineScope(Dispatchers.Main).launch {
+            val manifestText = withContext(Dispatchers.IO) {
+                try {
+                    com.lagradost.cloudstream3.app.get(item.link, timeout = 30L).text
+                } catch (e: Exception) {
+                    null
+                }
+            }
+            progressDialog.dismiss()
+
+            if (manifestText.isNullOrBlank()) {
+                Toast.makeText(context, "Failed to load manifest. Check link.", Toast.LENGTH_LONG).show()
+                return@launch
+            }
+
+            // Jackson 매퍼를 이용한 카탈로그 수집
+            val catalogs = try {
+                val node = StremioC.jsonMapper.readTree(manifestText)
+                val catsNode = node.get("catalogs")
+                val list = mutableListOf<ConfigCatalog>()
+                if (catsNode != null && catsNode.isArray) {
+                    for (i in 0 until catsNode.size()) {
+                        val cat = catsNode.get(i)
+                        val id = cat.get("id")?.asText() ?: ""
+                        val type = cat.get("type")?.asText() ?: "movie"
+                        val name = cat.get("name")?.asText() ?: id
+                        val genres = mutableListOf<String>()
+                        cat.get("genres")?.let { gArr ->
+                            if (gArr.isArray) {
+                                for (j in 0 until gArr.size()) {
+                                    genres.add(gArr.get(j).asText())
+                                }
+                            }
+                        }
+                        list.add(ConfigCatalog(id, type, name, genres))
+                    }
+                }
+                list
+            } catch (e: Exception) {
+                null
+            }
+
+            if (catalogs.isNullOrEmpty()) {
+                Toast.makeText(context, "No catalogs found in manifest.", Toast.LENGTH_LONG).show()
+                return@launch
+            }
+
+            displayCatalogListDialog(item.name, catalogs)
+        }
+    }
+
+    private fun displayCatalogListDialog(addonName: String, catalogs: List<ConfigCatalog>) {
+        val context = requireContext()
+        val prefs = sharedPref
+
+        // 정렬 맵 로드
+        val orderKey = "catalog_order_$addonName"
+        val orderJson = prefs.getString(orderKey, null)
+        val orderedKeys = mutableListOf<String>()
+        if (orderJson != null) {
+            try {
+                val arr = JSONArray(orderJson)
+                for (i in 0 until arr.length()) {
+                    orderedKeys.add(arr.getString(i))
+                }
+            } catch (e: Exception) {}
+        }
+
+        // 기존 정렬 키 기준으로 소팅 후 가변 리스트 생성
+        val mutableCatalogs = catalogs.sortedBy { cat ->
+            val key = "${cat.id}_${cat.type}"
+            val idx = orderedKeys.indexOf(key)
+            if (idx != -1) idx else Int.MAX_VALUE
+        }.toMutableList()
+
+        val scrollView = androidx.core.widget.NestedScrollView(context).apply {
+            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        }
+
+        val container = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(40, 30, 40, 30)
+        }
+        scrollView.addView(container)
+
+        var rebuild: (() -> Unit)? = null
+
+        val dialog = AlertDialog.Builder(context)
+            .setTitle("$addonName - Catalog Settings")
+            .setView(scrollView)
+            .setPositiveButton("Save") { _, _ ->
+                val keysToSave = JSONArray()
+                mutableCatalogs.forEach {
+                    keysToSave.put("${it.id}_${it.type}")
+                }
+                prefs.edit().putString(orderKey, keysToSave.toString()).apply()
+                Toast.makeText(context, "Catalog settings saved. Reload to apply.", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .create()
+
+        rebuild = {
+            container.removeAllViews()
+
+            mutableCatalogs.forEachIndexed { index, catalog ->
+                val catalogKey = "${catalog.id}_${catalog.type}"
+                val enabledKey = "catalog_enabled_${addonName}_$catalogKey"
+                val isEnabled = prefs.getBoolean(enabledKey, true)
+
+                val itemLayout = android.widget.LinearLayout(context).apply {
+                    orientation = android.widget.LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    setPadding(0, 10, 0, 10)
+                }
+
+                // 순서 재정렬 업/다운 화살표 버튼 생성
+                val upButton = android.widget.ImageButton(context).apply {
+                    setImageResource(android.R.drawable.arrow_up_float)
+                    background = null
+                    isEnabled = index > 0
+                    alpha = if (isEnabled) 1.0f else 0.3f
+                    setOnClickListener {
+                        Collections.swap(mutableCatalogs, index, index - 1)
+                        rebuild?.invoke()
+                    }
+                }
+
+                val downButton = android.widget.ImageButton(context).apply {
+                    setImageResource(android.R.drawable.arrow_down_float)
+                    background = null
+                    isEnabled = index < mutableCatalogs.size - 1
+                    alpha = if (isEnabled) 1.0f else 0.3f
+                    setOnClickListener {
+                        Collections.swap(mutableCatalogs, index, index + 1)
+                        rebuild?.invoke()
+                    }
+                }
+
+                itemLayout.addView(upButton)
+                itemLayout.addView(downButton)
+
+                // 사용 여부 제어 체크박스
+                val checkbox = android.widget.CheckBox(context).apply {
+                    isChecked = isEnabled
+                    text = "${catalog.name} (${catalog.type})"
+                    textSize = 15f
+                    setOnCheckedChangeListener { _, checked ->
+                        prefs.edit().putBoolean(enabledKey, checked).apply()
+                    }
+                }
+                val checkParams = android.widget.LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                itemLayout.addView(checkbox, checkParams)
+
+                // 세부 장르 제어 (장르 목록이 존재하는 카탈로그만 노출)
+                if (catalog.genres.isNotEmpty()) {
+                    val genreButton = android.widget.Button(context).apply {
+                        text = "Genres"
+                        setOnClickListener {
+                            showGenreConfigDialog(addonName, catalogKey, catalog.genres)
+                        }
+                    }
+                    itemLayout.addView(genreButton)
+                }
+
+                container.addView(itemLayout)
+            }
+        }
+
+        rebuild.invoke()
+        dialog.show()
+    }
+
+    private fun showGenreConfigDialog(addonName: String, catalogKey: String, genres: List<String>) {
+        val context = requireContext()
+        val prefs = sharedPref
+
+        val genreArray = genres.toTypedArray()
+        val checkedItems = BooleanArray(genres.size) { i ->
+            val genre = genres[i]
+            prefs.getBoolean("genre_enabled_${addonName}_${catalogKey}_$genre", true)
+        }
+
+        AlertDialog.Builder(context)
+            .setTitle("Select Genres to Show")
+            .setMultiChoiceItems(genreArray, checkedItems) { _, which, isChecked ->
+                val genre = genres[which]
+                prefs.edit().putBoolean("genre_enabled_${addonName}_${catalogKey}_$genre", isChecked).apply()
+            }
+            .setPositiveButton("Done", null)
+            .show()
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {}
