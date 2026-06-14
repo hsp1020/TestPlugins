@@ -2,7 +2,7 @@
 package com.hsp1020
 
 import android.annotation.SuppressLint
-import android.content.Context // 🔥 누락되었던 컨텍스트 임포트 복구 완료
+import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.drawable.Drawable
@@ -16,8 +16,8 @@ import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
-import android.widget.CheckBox  // 🔥 추가 완료
-import android.widget.Switch    // 🔥 추가 완료
+import android.widget.CheckBox
+import android.widget.Switch
 import androidx.appcompat.app.AlertDialog
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import androidx.core.net.toUri
@@ -107,7 +107,6 @@ class SettingsBottomFragment(
 
     private val res = plugin.resources ?: throw Exception("Unable to access plugin resources")
 
-    // 독자정렬(Flat-Tab) 구성을 위한 DTO 선언
     private data class ConfigFlatTab(val key: String, val displayName: String, val isGenre: Boolean, val catalogKey: String)
 
     private fun getDrawable(name: String): Drawable {
@@ -383,9 +382,6 @@ class SettingsBottomFragment(
         dlg.show()
     }
 
-    // ==========================================
-    // [v2.0.0] 다이내믹 카탈로그 및 장르 제어 UI 빌더
-    // ==========================================
     private fun showCatalogConfigDialog(item: LinkItem) {
         val context = requireContext()
         val progressDialog = AlertDialog.Builder(context)
@@ -409,7 +405,6 @@ class SettingsBottomFragment(
                 return@launch
             }
 
-            // AIOMetadata 표준 extra[genre].options 및 Cinemeta genres 이중 수집 대응
             val flatTabs = mutableListOf<ConfigFlatTab>()
             try {
                 val node = StremioC.jsonMapper.readTree(manifestText)
@@ -440,7 +435,6 @@ class SettingsBottomFragment(
                         }
 
                         val genres = mutableListOf<String>()
-                        // 방식 1: Cinemeta 식 top-level "genres"
                         cat.get("genres")?.let { gArr ->
                             if (gArr.isArray) {
                                 for (j in 0 until gArr.size()) {
@@ -448,7 +442,6 @@ class SettingsBottomFragment(
                                 }
                             }
                         }
-                        // 방식 2: AIOMetadata / Stremio 표준 "extra[name=genre].options"
                         if (genres.isEmpty()) {
                             cat.get("extra")?.let { extraArr ->
                                 if (extraArr.isArray) {
@@ -475,7 +468,7 @@ class SettingsBottomFragment(
                     }
                 }
             } catch (e: Exception) {
-                // 파싱 예외 처리
+                // 파싱 예외
             }
 
             if (flatTabs.isEmpty()) {
@@ -483,17 +476,14 @@ class SettingsBottomFragment(
                 return@launch
             }
 
-            // 🔥 [수정부]: 세 번째 인자에 고유 식별 주소인 'item.link'를 전달하여 키 무결성을 동기화합니다.
             displayCatalogListDialog(item.name, flatTabs, item.link)
         }
     }
 
-
-    private fun displayCatalogListDialog(addonName: String, flatTabs: List<ConfigFlatTab>, linkUrl: String) { // 🔥 인자에 링크 주소 추가
+    private fun displayCatalogListDialog(addonName: String, flatTabs: List<ConfigFlatTab>, linkUrl: String) {
         val context = requireContext()
         val prefs = sharedPref
 
-        // 🔥 addonName 대신 링크 URL 고유식별자(uniqueId) 사용으로 무결성 보장
         val uniqueId = linkUrl.toUniqueKeyLocal()
         val orderKey = "catalog_order_$uniqueId"
         val orderJson = prefs.getString(orderKey, null)
@@ -507,7 +497,7 @@ class SettingsBottomFragment(
             } catch (e: Exception) {}
         }
 
-        val mutableTabs = flatTabs.sortedBy { tab ->
+        val masterTabs = flatTabs.sortedBy { tab ->
             val idx = orderedKeys.indexOf(tab.key)
             if (idx != -1) idx else Int.MAX_VALUE
         }.toMutableList()
@@ -522,30 +512,99 @@ class SettingsBottomFragment(
         }
         scrollView.addView(container)
 
-        var rebuild: (() -> Unit)? = null
+        class TabRow(
+            val tab: ConfigFlatTab,
+            val checkBox: CheckBox,
+            val orderEdit: EditText,
+            val view: View
+        )
 
-        val dialog = AlertDialog.Builder(context)
-            .setTitle("$addonName - Catalog Settings")
-            .setView(scrollView)
-            .setPositiveButton("Save") { _, _ ->
-                val keysToSave = JSONArray()
-                mutableTabs.forEach {
-                    keysToSave.put(it.key)
+        val activeRows = mutableListOf<TabRow>()
+        var rebuildLayout: (() -> Unit)? = null
+
+        fun shiftItem(row: TabRow, newOrder: Int) {
+            val clampedOrder = newOrder.coerceIn(1, activeRows.size)
+            val oldIndex = activeRows.indexOf(row)
+            val newIndex = clampedOrder - 1
+
+            if (oldIndex == -1) return
+
+            if (oldIndex != newIndex) {
+                val targetTab = row.tab
+                val masterOldIndex = masterTabs.indexOf(targetTab)
+                
+                if (masterOldIndex != -1) {
+                    masterTabs.removeAt(masterOldIndex)
+                    val targetNeighborTab = activeRows[newIndex].tab
+                    val masterNewIndex = masterTabs.indexOf(targetNeighborTab)
+                    if (masterNewIndex != -1) {
+                        masterTabs.add(masterNewIndex, targetTab)
+                    } else {
+                        masterTabs.add(targetTab)
+                    }
                 }
-                prefs.edit().putString(orderKey, keysToSave.toString()).apply()
-                Toast.makeText(context, "Catalog settings saved. Reload to apply.", Toast.LENGTH_SHORT).show()
             }
-            .setNegativeButton("Cancel", null)
-            .create()
 
-        rebuild = {
+            val focusedView = container.findFocus() as? EditText
+            val selStart = focusedView?.selectionStart ?: 0
+            val selEnd = focusedView?.selectionEnd ?: 0
+
+            val visibleTabs = masterTabs.filter { tab ->
+                if (tab.isGenre) {
+                    val genresEnabledKey = "genres_enabled_${uniqueId}_${tab.catalogKey}"
+                    prefs.getBoolean(genresEnabledKey, true)
+                } else {
+                    true
+                }
+            }
+
+            val reorderedRows = mutableListOf<TabRow>()
+            visibleTabs.forEach { tab ->
+                activeRows.find { it.tab.key == tab.key }?.let { reorderedRows.add(it) }
+            }
+            activeRows.clear()
+            activeRows.addAll(reorderedRows)
+
+            for (i in activeRows.indices) {
+                val rowView = activeRows[i].view
+                val expectedIndex = i
+                if (container.getChildAt(expectedIndex) != rowView) {
+                    container.removeView(rowView)
+                    container.addView(rowView, expectedIndex)
+                }
+                activeRows[i].orderEdit.setText((i + 1).toString())
+            }
+
+            for (i in activeRows.indices) {
+                val itemLayout = activeRows[i].view as android.widget.LinearLayout
+                val upBtn = itemLayout.getChildAt(0) as android.widget.ImageButton
+                val downBtn = itemLayout.getChildAt(1) as android.widget.ImageButton
+                upBtn.isEnabled = i > 0
+                upBtn.alpha = if (upBtn.isEnabled) 1.0f else 0.3f
+                downBtn.isEnabled = i < activeRows.size - 1
+                downBtn.alpha = if (downBtn.isEnabled) 1.0f else 0.3f
+            }
+
+            focusedView?.requestFocus()
+            if (focusedView != null && selStart in 0..focusedView.text.length && selEnd in 0..focusedView.text.length) {
+                focusedView.setSelection(selStart, selEnd)
+            }
+        }
+
+        rebuildLayout = {
             container.removeAllViews()
+            activeRows.clear()
 
-            mutableTabs.forEachIndexed { index, tab ->
-                // 🔥 uniqueId 연동하여 키 동기화 진행
-                val enabledKey = "tab_enabled_${uniqueId}_${tab.key}"
-                val isCatEnabled = prefs.getBoolean(enabledKey, true)
+            val visibleTabs = masterTabs.filter { tab ->
+                if (tab.isGenre) {
+                    val genresEnabledKey = "genres_enabled_${uniqueId}_${tab.catalogKey}"
+                    prefs.getBoolean(genresEnabledKey, true)
+                } else {
+                    true
+                }
+            }
 
+            visibleTabs.forEachIndexed { index, tab ->
                 val itemLayout = android.widget.LinearLayout(context).apply {
                     orientation = android.widget.LinearLayout.HORIZONTAL
                     gravity = android.view.Gravity.CENTER_VERTICAL
@@ -557,28 +616,43 @@ class SettingsBottomFragment(
                     background = null
                     this.isEnabled = index > 0
                     alpha = if (this.isEnabled) 1.0f else 0.3f
-                    setOnClickListener {
-                        Collections.swap(mutableTabs, index, index - 1)
-                        rebuild?.invoke()
-                    }
                 }
 
                 val downButton = android.widget.ImageButton(context).apply {
                     setImageResource(android.R.drawable.arrow_down_float)
                     background = null
-                    this.isEnabled = index < mutableTabs.size - 1
+                    this.isEnabled = index < visibleTabs.size - 1
                     alpha = if (this.isEnabled) 1.0f else 0.3f
-                    setOnClickListener {
-                        Collections.swap(mutableTabs, index, index + 1)
-                        rebuild?.invoke()
-                    }
                 }
 
                 itemLayout.addView(upButton)
                 itemLayout.addView(downButton)
 
+                val etOrder = EditText(context).apply {
+                    inputType = android.text.InputType.TYPE_CLASS_NUMBER
+                    imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+                    layoutParams = android.widget.LinearLayout.LayoutParams(90, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                        setMargins(0, 0, 10, 0)
+                    }
+                    gravity = android.view.Gravity.CENTER
+                    setTextColor(android.graphics.Color.WHITE)
+                    textSize = 13f
+                    setPadding(10, 10, 10, 10)
+                    setText((index + 1).toString())
+                    
+                    val gd = android.graphics.drawable.GradientDrawable().apply {
+                        setColor(android.graphics.Color.parseColor("#151515"))
+                        cornerRadius = 10f
+                    }
+                    background = gd
+                }
+                itemLayout.addView(etOrder)
+
+                val enabledKey = "tab_enabled_${uniqueId}_${tab.key}"
+                val isEnabled = prefs.getBoolean(enabledKey, true)
+
                 val checkbox = android.widget.CheckBox(context).apply {
-                    isChecked = isCatEnabled
+                    isChecked = isEnabled
                     text = tab.displayName
                     textSize = 15f
                     setOnCheckedChangeListener { _, checked ->
@@ -588,7 +662,6 @@ class SettingsBottomFragment(
                 val checkParams = android.widget.LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 itemLayout.addView(checkbox, checkParams)
 
-                // 🔥 [장르 온오프 토글스위치 마스터 제어]: uniqueId 연동
                 if (!tab.isGenre) {
                     val catalogHasGenres = masterTabs.any { it.isGenre && it.catalogKey == tab.catalogKey }
                     if (catalogHasGenres) {
@@ -608,18 +681,70 @@ class SettingsBottomFragment(
                     }
                 }
 
+                val row = TabRow(tab, checkbox, etOrder, itemLayout)
+                activeRows.add(row)
+
+                upButton.setOnClickListener {
+                    etOrder.clearFocus()
+                    val cur = activeRows.indexOf(row) + 1
+                    if (cur > 1) {
+                        shiftItem(row, cur - 1)
+                    }
+                }
+                downButton.setOnClickListener {
+                    etOrder.clearFocus()
+                    val cur = activeRows.indexOf(row) + 1
+                    if (cur < activeRows.size) {
+                        shiftItem(row, cur + 1)
+                    }
+                }
+
+                etOrder.setOnEditorActionListener { _, actionId, _ ->
+                    if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE || actionId == android.view.inputmethod.EditorInfo.IME_ACTION_NEXT) {
+                        etOrder.clearFocus()
+                        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+                        imm.hideSoftInputFromWindow(etOrder.windowToken, 0)
+                        true
+                    } else false
+                }
+
+                etOrder.setOnFocusChangeListener { _, hasFocus ->
+                    if (!hasFocus) {
+                        val inputVal = etOrder.text.toString().toIntOrNull() ?: (activeRows.indexOf(row) + 1)
+                        shiftItem(row, inputVal)
+                    }
+                }
+
                 container.addView(itemLayout)
             }
         }
 
-        rebuild.invoke()
+        val dialog = AlertDialog.Builder(context)
+            .setTitle("$addonName - Catalog Settings")
+            .setView(scrollView)
+            .setPositiveButton("Save") { _, _ ->
+                val keysToSave = JSONArray()
+                masterTabs.forEach {
+                    keysToSave.put(it.key)
+                }
+                prefs.edit().putString(orderKey, keysToSave.toString()).apply()
+                Toast.makeText(context, "Catalog settings saved. Reload to apply.", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .create()
+
+        rebuildLayout.invoke()
         dialog.show()
     }
-          
+
     private fun String.capitalizeFirstLocal(): String = if (this.isNotEmpty()) {
         this.substring(0, 1).uppercase() + this.substring(1)
     } else {
         this
+    }
+
+    private fun String.toUniqueKeyLocal(): String {
+        return this.lowercase().filter { it.isLetter() }
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {}
@@ -687,8 +812,4 @@ class SettingsBottomFragment(
             }
         }
     }
-}
-
-private fun String.toUniqueKeyLocal(): String {
-    return this.lowercase().filter { it.isLetter() }
 }
