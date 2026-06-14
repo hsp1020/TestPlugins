@@ -1,4 +1,4 @@
-// 버전 정보: v2.0.2 - 공식 extra[genre].options 장르 파싱 규격 이중화 대응 완료 코어
+// 버전 정보: v2.1.0 - 카탈로그 및 장르의 완전한 독자 정렬 체계(Flat-Alignment) 통합 지원 버전
 package com.hsp1020
 
 import android.content.Context
@@ -413,7 +413,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     }
 
     // ==========================================
-    // [v2.0.0] 설정값 동적 탭 구성 (mainPage)
+    // [v2.1.0] 설정값 동적 탭 구성 (mainPage) - 독자 정렬(Flat-Alignment) 시스템 구현
     // ==========================================
     override val mainPage: List<MainPageData>
         get() {
@@ -426,7 +426,37 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
             val rawCatalogs = manifest.catalogs ?: emptyList()
             
-            // 정렬 정보 로드
+            // 1. 매니페스트로부터 렌더링될 수 있는 모든 플랫 탭(Flat-Tab) 후보군을 플랫 리스트로 선출
+            val flatTabs = mutableListOf<FlatTab>()
+            rawCatalogs.forEach { catalog ->
+                val catalogId = catalog.id
+                val catalogType = catalog.type ?: "movie"
+                val catalogName = catalog.name ?: catalogId
+                val displayType = catalogType.replaceFirstChar { it.uppercase() }
+                
+                val requiresGenre = catalog.extra?.any { it.name == "genre" && it.isRequired == true } == true
+
+                // 기본 인기 탭 생성 (장르 필수 조건이 아닌 경우)
+                if (!requiresGenre) {
+                    flatTabs.add(FlatTab(
+                        key = "${catalogId}_${catalogType}_default",
+                        displayName = "$catalogName - $displayType",
+                        urlPath = "/catalog/$catalogType/$catalogId/skip=###.json"
+                    ))
+                }
+
+                // 개별 장르 탭들을 독자 탭 후보로 분리하여 생성
+                val genres = catalog.getGenresList()
+                genres.forEach { genre ->
+                    flatTabs.add(FlatTab(
+                        key = "${catalogId}_${catalogType}_genre_$genre",
+                        displayName = "$catalogName : $genre  - $displayType",
+                        urlPath = "/catalog/$catalogType/$catalogId/genre=${genre.urlEncodeLocal()}&skip=###.json"
+                    ))
+                }
+            }
+
+            // 2. 단일 저장 평면 정렬 순서(Flat-Order) 정보 획득
             val orderKey = "catalog_order_$name"
             val orderJson = prefs.getString(orderKey, null)
             val orderedKeys = mutableListOf<String>()
@@ -439,40 +469,19 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 } catch (e: Exception) {}
             }
 
-            val sortedCatalogs = rawCatalogs.sortedBy { cat ->
-                val key = "${cat.id}_${cat.type}"
-                val idx = orderedKeys.indexOf(key)
+            // 3. 플랫 탭들을 저장된 우선순위에 맞추어 정렬 (신규 탭은 맨 뒤로 배치)
+            val sortedTabs = flatTabs.sortedBy { tab ->
+                val idx = orderedKeys.indexOf(tab.key)
                 if (idx != -1) idx else Int.MAX_VALUE
             }
 
+            // 4. 활성화 여부를 개별적으로 검사하여 최종 드롭다운 탭 렌더링 리스트 산출
             return mainPageOf(
                 *buildList {
-                    sortedCatalogs.forEach { catalog ->
-                        val catalogKey = "${catalog.id}_${catalog.type}"
-                        val isCatalogEnabled = prefs.getBoolean("catalog_enabled_${name}_$catalogKey", true)
-                        if (!isCatalogEnabled) return@forEach
-
-                        val catalogName = catalog.name ?: catalog.id
-                        val displayType = catalog.type?.replaceFirstChar { it.uppercase() } ?: ""
-                        val requiresGenre = catalog.extra?.any { it.name == "genre" && it.isRequired == true } == true
-
-                        if (!requiresGenre) {
-                            add("/catalog/${catalog.type}/${catalog.id}/skip=###.json" to "$catalogName - $displayType")
-                        }
-
-                        // [v2.0.2] 장르 수집 통합 헬퍼 함수(getGenresList)를 사용하여 AIOMetadata와 완벽 동기화
-                        val genres = catalog.getGenresList()
-                        val genresEnabledKey = "genres_enabled_${name}_$catalogKey"
-                        val isGenresEnabled = prefs.getBoolean(genresEnabledKey, true)
-
-                        if (isGenresEnabled) {
-                            genres.forEach { genre ->
-                                val isGenreEnabled = prefs.getBoolean("genre_enabled_${name}_${catalogKey}_$genre", true)
-                                if (isGenreEnabled) {
-                                    // 🔥 [장르 노출 포맷 수정]: "Popular : Action  - Series" 형태로 조합하여 추가
-                                    add("/catalog/${catalog.type}/${catalog.id}/genre=${genre.urlEncodeLocal()}&skip=###.json" to "$catalogName : $genre - $displayType")
-                                }
-                            }
+                    sortedTabs.forEach { tab ->
+                        val isEnabled = prefs.getBoolean("tab_enabled_${name}_${tab.key}", true)
+                        if (isEnabled) {
+                            add(tab.urlPath to tab.displayName)
                         }
                     }
                 }.toTypedArray()
@@ -565,9 +574,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
     }
 
-    // ==========================================
-    // [v2.0.0] 모든 경우(All cases)에 지정된 AIO Metadata 주소로 직접 연동하여 로드 (폴백 구현)
-    // ==========================================
     override suspend fun load(url: String): LoadResponse = coroutineScope {
         val res: CatalogEntry = if (url.startsWith("{")) {
             jsonMapper.readValue(url, CatalogEntry::class.java)
@@ -715,35 +721,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         return@coroutineScope loadRes
     }
 
-    private fun parseIdAndType(url: String): Pair<String, String>? {
-        return try {
-            if (url.startsWith("{")) {
-                val root = jsonMapper.readTree(url)
-                val id = root.get("id")?.asText() ?: root.get("imdbId")?.asText()
-                val type = root.get("type")?.asText() ?: "movie"
-                if (id != null) Pair(id, type) else null
-            } else {
-                val cleanUrl = url.substringBefore("?")
-                if (cleanUrl.contains("/meta/")) {
-                    val parts = cleanUrl.substringAfter("/meta/").split("/")
-                    if (parts.size >= 2) {
-                        val type = parts[0]
-                        val id = parts[1].removeSuffix(".json")
-                        Pair(id, type)
-                    } else null
-                } else null
-            }
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    private fun String.urlEncodeLocal(): String = try {
-        java.net.URLEncoder.encode(this, "UTF-8").replace("+", "%20")
-    } catch (e: Exception) {
-        this
-    }
-
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val loadData = try { jsonMapper.readValue(data, LoadData::class.java) } catch (e: Exception) { null } ?: return false
         
@@ -786,6 +763,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             )
         }
 
+        // --- Stremio 자막 애드온 설정 수집 및 정밀 디버깅 로그 구조 ---
         val customHosts = withContext(Dispatchers.IO) {
             val now = System.currentTimeMillis()
             if (cachedCustomHosts != null && now - cachedCustomHostsTime < SETTINGS_CACHE_TTL) {
@@ -794,6 +772,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             
             val context = CloudStreamApp.context
             
+            // 모든 SharedPreferences 파일을 전 탐색하여 stremio_addons 키가 어디에 있는지 정적 로깅
             try {
                 if (context != null) {
                     val sharedPrefsDir = java.io.File(context.applicationInfo.dataDir, "shared_prefs")
@@ -812,6 +791,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }
 
             val raw = try { 
+                // [원인 분석]: 로컬 SharedPreferences 이름이 구버전명인 "rebuild_key"가 아닌 "rebuild_preference"로 생성되어 있어, 1순위 타겟 이름을 수정합니다.
                 val rebuildPrefs = context?.getSharedPreferences("rebuild_preference", Context.MODE_PRIVATE)
                 var rawValue = rebuildPrefs?.getString("stremio_addons", "") ?: ""
                 
@@ -851,6 +831,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
         val builtInHosts = setOf("opensubtitles.stremio.homes", "subsense.nepiraw.com", "opensubtitles-v3.strem.io")
 
+        // 자막 필터링 및 매칭 과정을 하나도 놓치지 않고 수집하는 디버깅 인터셉터
         val subtitleInterceptor: (SubtitleFile) -> Unit = { sub ->
             println("[STREMIOSUB] Interceptor Triggered -> lang: '${sub.lang}', url: '${sub.url}'")
             try {
@@ -1111,7 +1092,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     private data class Extra(
         @JsonProperty("name") val name: String?, 
         @JsonProperty("isRequired") val isRequired: Boolean? = false,
-        @JsonProperty("options") val options: List<String>? = null // 🔥 공식 표준인 extra[genre].options를 받도록 수용
+        @JsonProperty("options") val options: List<String>? = null
     )
 
     private data class Catalog(
@@ -1125,7 +1106,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     ) {
         init { if (type != null) types.add(type) }
 
-        // [v2.0.2] Cinemeta 구형 단일 genres 속성과 표준 extra[genre].options 파싱 지원 헬퍼
         fun getGenresList(): List<String> {
             val list = mutableListOf<String>()
             genres?.let { list.addAll(it) }
@@ -1220,10 +1200,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             typeName: String? = null
         ): SearchResponse {
             val targetType = this.type ?: typeName ?: "movie"
-            // 🔥 '/manifest.json'을 정제한 cleanBaseUrl() 적용
             val cleanBase = provider.mainUrl.cleanBaseUrl()
             val metaUrl = "$cleanBase/meta/$targetType/${this.id}.json"
-            
 
             val baseName = if (!name.isNullOrBlank()) {
                 name
@@ -1243,7 +1221,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 }
             }
 
-            // [v2.0.2-Score-Hotfix] 홈 화면 검색 결과 렌더링 카드에만 평점(Score) 출력을 누락시켜 깔끔하게 연출
             return provider.newMovieSearchResponse(finalName, metaUrl, TvType.Others) { 
                 posterUrl = poster 
             }
@@ -1609,12 +1586,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val finalSeriesType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.Anime else TvType.TvSeries
 
             if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
-                // 🔥 '/manifest.json'을 정제한 cleanBaseUrl() 적용
                 val cleanBase = provider.mainUrl.cleanBaseUrl()
                 return@coroutineScope provider.newMovieLoadResponse(
                     finalName, "$cleanBase/meta/${finalType ?: "movie"}/${this@CatalogEntry.id}.json", finalMovieType, 
                     LoadData(
-                        
                         type = finalType, 
                         id = movieId, 
                         imdbId = cleanImdbId, 
@@ -1651,7 +1626,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 }
             } else {
                 val finalEpisodes = processEpisodes(provider, cleanImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, cleanTmdbId?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, finalAniId, finalMalId, this@CatalogEntry.kitsuIdExt)
-                // 🔥 '/manifest.json'을 정제한 cleanBaseUrl() 적용
                 val cleanBase = provider.mainUrl.cleanBaseUrl()
                 return@coroutineScope provider.newTvSeriesLoadResponse(
                     finalName, "$cleanBase/meta/${finalType ?: "series"}/${this@CatalogEntry.id}.json", finalSeriesType, finalEpisodes
@@ -1854,7 +1828,7 @@ private data class TmdbDetailResponse(
             title = this.title ?: this.name,
             originalTitle = this.original_title ?: this.original_name,
             mediaType = mediaType,
-            poster_path = this.posterPath,
+            posterPath = this.posterPath,
             overview = this.overview,
             origin_country = this.origin_country,
             original_language = this.original_language,
