@@ -1,4 +1,4 @@
-// 정보: v2.0.1 - Semaphore 참조 에러 보완 및 탭 변환, 순서 재배치, 장르 필터링, AIO 메타데이터 폴백 통합 코어
+// 버전 정보: v2.0.2 - 공식 extra[genre].options 장르 파싱 규격 이중화 대응 완료 코어
 package com.hsp1020
 
 import android.content.Context
@@ -50,7 +50,7 @@ import com.hsp1020.SubsExtractors.invokeWatchsomuch
 import com.lagradost.nicehttp.Requests
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore // 🔥 수입 보완 완료
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 import okhttp3.ConnectionPool
@@ -167,7 +167,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         @Volatile private var cachedCustomHostsTime: Long = 0
         private const val SETTINGS_CACHE_TTL = 60_000L
 
-        val networkSemaphore = Semaphore(35) // 🔥 사용부 무결점 매칭
+        val networkSemaphore = Semaphore(35)
 
         @Volatile private var cachedCineStreamProvider: MainAPI? = null
         @Volatile private var hasSearchedCineStream = false
@@ -460,11 +460,17 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                             add("/catalog/${catalog.type}/${catalog.id}/skip=###.json" to "$catalogName - $displayType")
                         }
 
-                        val genres = catalog.genres ?: emptyList()
-                        genres.forEach { genre ->
-                            val isGenreEnabled = prefs.getBoolean("genre_enabled_${name}_${catalogKey}_$genre", true)
-                            if (isGenreEnabled) {
-                                add("/catalog/${catalog.type}/${catalog.id}/genre=${genre.urlEncodeLocal()}&skip=###.json" to "$genre - $displayType")
+                        // [v2.0.2] 장르 수집 통합 헬퍼 함수(getGenresList)를 사용하여 AIOMetadata와 완벽 동기화
+                        val genres = catalog.getGenresList()
+                        val genresEnabledKey = "genres_enabled_${name}_$catalogKey"
+                        val isGenresEnabled = prefs.getBoolean(genresEnabledKey, true)
+
+                        if (isGenresEnabled) {
+                            genres.forEach { genre ->
+                                val isGenreEnabled = prefs.getBoolean("genre_enabled_${name}_${catalogKey}_$genre", true)
+                                if (isGenreEnabled) {
+                                    add("/catalog/${catalog.type}/${catalog.id}/genre=${genre.urlEncodeLocal()}&skip=###.json" to "$genre - $displayType")
+                                }
                             }
                         }
                     }
@@ -1125,7 +1131,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     
     private data class Manifest(val catalogs: List<Catalog>)
     
-    private data class Extra(@JsonProperty("name") val name: String?, @JsonProperty("isRequired") val isRequired: Boolean? = false)
+    private data class Extra(
+        @JsonProperty("name") val name: String?, 
+        @JsonProperty("isRequired") val isRequired: Boolean? = false,
+        @JsonProperty("options") val options: List<String>? = null // 🔥 공식 표준인 extra[genre].options를 받도록 수용
+    )
 
     private data class Catalog(
         var name: String?, 
@@ -1137,6 +1147,16 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         @JsonProperty("genres") val genres: List<String>? = null
     ) {
         init { if (type != null) types.add(type) }
+
+        // [v2.0.2] Cinemeta 구형 단일 genres 속성과 표준 extra[genre].options 파싱 지원 헬퍼
+        fun getGenresList(): List<String> {
+            val list = mutableListOf<String>()
+            genres?.let { list.addAll(it) }
+            if (list.isEmpty()) {
+                extra?.find { it.name == "genre" }?.options?.let { list.addAll(it) }
+            }
+            return list
+        }
 
         fun isSearchRequired(): Boolean = extra?.any { it.name == "search" && it.isRequired == true } == true
         fun supportsSearch(): Boolean = extra?.any { it.name == "search" } == true || extraSupported?.contains("search") == true
@@ -1243,6 +1263,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 }
             }
 
+            // [v2.0.2-Score-Hotfix] 홈 화면 검색 결과 렌더링 카드에만 평점(Score) 출력을 누락시켜 깔끔하게 연출
             return provider.newMovieSearchResponse(finalName, metaUrl, TvType.Others) { 
                 posterUrl = poster 
             }
@@ -1867,7 +1888,7 @@ private data class TmdbMedia(
     @JsonProperty("title") val title: String? = null,
     @JsonProperty("original_title") val originalTitle: String? = null,
     @JsonProperty("media_type") val mediaType: String? = null,
-    @JsonProperty("poster_path") val posterPath: String? = null,
+    @JsonProperty("poster_path") val poster_path: String? = null,
     @JsonProperty("overview") val overview: String? = null,
     @JsonProperty("origin_country") val origin_country: List<String>? = null,
     @JsonProperty("original_language") val original_language: String? = null,
