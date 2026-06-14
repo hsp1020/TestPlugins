@@ -105,7 +105,7 @@ class SettingsBottomFragment(
 
     private val res = plugin.resources ?: throw Exception("Unable to access plugin resources")
 
-    private data class ConfigCatalog(val id: String, val type: String, val name: String, val genres: List<String>)
+    private data class ConfigFlatTab(val key: String, val displayName: String)
 
     private fun getDrawable(name: String): Drawable {
         val id = res.getIdentifier(name, "drawable", BuildConfig.LIBRARY_PACKAGE_NAME)
@@ -406,18 +406,36 @@ class SettingsBottomFragment(
                 return@launch
             }
 
-            // [v2.0.3] AIOMetadata 표준 extra[genre].options 및 Cinemeta genres 이중 수집 대응 [1]
-            val catalogs = try {
+            // [v2.0.3] AIOMetadata 표준 extra[genre].options 및 Cinemeta genres 이중 수집 대응
+            val flatTabs = mutableListOf<ConfigFlatTab>()
+            try {
                 val node = StremioC.jsonMapper.readTree(manifestText)
                 val catsNode = node.get("catalogs")
-                val list = mutableListOf<ConfigCatalog>()
                 if (catsNode != null && catsNode.isArray) {
                     for (i in 0 until catsNode.size()) {
                         val cat = catsNode.get(i)
                         val id = cat.get("id")?.asText() ?: ""
                         val type = cat.get("type")?.asText() ?: "movie"
                         val name = cat.get("name")?.asText() ?: id
+                        val displayType = type.replaceFirstChar { it.uppercase() }
                         
+                        val requiresGenre = cat.get("extra")?.let { extraArr ->
+                            var found = false
+                            if (extraArr.isArray) {
+                                for (j in 0 until extraArr.size()) {
+                                    val extraObj = extraArr.get(j)
+                                    if (extraObj.get("name")?.asText() == "genre" && extraObj.get("isRequired")?.asBoolean() == true) {
+                                        found = true
+                                    }
+                                }
+                            }
+                            found
+                        } ?: false
+
+                        if (!requiresGenre) {
+                            flatTabs.add(ConfigFlatTab("${id}_${type}_default", "$name - $displayType"))
+                        }
+
                         val genres = mutableListOf<String>()
                         // 방식 1: Cinemeta 식 top-level "genres"
                         cat.get("genres")?.let { gArr ->
@@ -446,24 +464,26 @@ class SettingsBottomFragment(
                                 }
                             }
                         }
-                        list.add(ConfigCatalog(id, type, name, genres))
+
+                        genres.forEach { genre ->
+                            flatTabs.add(ConfigFlatTab("${id}_${type}_genre_$genre", "$name : $genre  - $displayType"))
+                        }
                     }
                 }
-                list
             } catch (e: Exception) {
-                null
+                // 파싱 예외 처리
             }
 
-            if (catalogs.isNullOrEmpty()) {
+            if (flatTabs.isEmpty()) {
                 Toast.makeText(context, "No catalogs found in manifest.", Toast.LENGTH_LONG).show()
                 return@launch
             }
 
-            displayCatalogListDialog(item.name, catalogs)
+            displayCatalogListDialog(item.name, flatTabs)
         }
     }
 
-    private fun displayCatalogListDialog(addonName: String, catalogs: List<ConfigCatalog>) {
+    private fun displayCatalogListDialog(addonName: String, flatTabs: List<ConfigFlatTab>) {
         val context = requireContext()
         val prefs = sharedPref
 
@@ -479,9 +499,8 @@ class SettingsBottomFragment(
             } catch (e: Exception) {}
         }
 
-        val mutableCatalogs = catalogs.sortedBy { cat ->
-            val key = "${cat.id}_${cat.type}"
-            val idx = orderedKeys.indexOf(key)
+        val mutableTabs = flatTabs.sortedBy { tab ->
+            val idx = orderedKeys.indexOf(tab.key)
             if (idx != -1) idx else Int.MAX_VALUE
         }.toMutableList()
 
@@ -502,8 +521,8 @@ class SettingsBottomFragment(
             .setView(scrollView)
             .setPositiveButton("Save") { _, _ ->
                 val keysToSave = JSONArray()
-                mutableCatalogs.forEach {
-                    keysToSave.put("${it.id}_${it.type}")
+                mutableTabs.forEach {
+                    keysToSave.put(it.key)
                 }
                 prefs.edit().putString(orderKey, keysToSave.toString()).apply()
                 Toast.makeText(context, "Catalog settings saved. Reload to apply.", Toast.LENGTH_SHORT).show()
@@ -514,9 +533,8 @@ class SettingsBottomFragment(
         rebuild = {
             container.removeAllViews()
 
-            mutableCatalogs.forEachIndexed { index, catalog ->
-                val catalogKey = "${catalog.id}_${catalog.type}"
-                val enabledKey = "catalog_enabled_${addonName}_$catalogKey"
+            mutableTabs.forEachIndexed { index, tab ->
+                val enabledKey = "tab_enabled_${addonName}_${tab.key}"
                 val isCatEnabled = prefs.getBoolean(enabledKey, true)
 
                 val itemLayout = android.widget.LinearLayout(context).apply {
@@ -531,7 +549,7 @@ class SettingsBottomFragment(
                     this.isEnabled = index > 0
                     alpha = if (this.isEnabled) 1.0f else 0.3f
                     setOnClickListener {
-                        Collections.swap(mutableCatalogs, index, index - 1)
+                        Collections.swap(mutableTabs, index, index - 1)
                         rebuild?.invoke()
                     }
                 }
@@ -539,10 +557,10 @@ class SettingsBottomFragment(
                 val downButton = android.widget.ImageButton(context).apply {
                     setImageResource(android.R.drawable.arrow_down_float)
                     background = null
-                    this.isEnabled = index < mutableCatalogs.size - 1
+                    this.isEnabled = index < mutableTabs.size - 1
                     alpha = if (this.isEnabled) 1.0f else 0.3f
                     setOnClickListener {
-                        Collections.swap(mutableCatalogs, index, index + 1)
+                        Collections.swap(mutableTabs, index, index + 1)
                         rebuild?.invoke()
                     }
                 }
@@ -552,7 +570,7 @@ class SettingsBottomFragment(
 
                 val checkbox = android.widget.CheckBox(context).apply {
                     isChecked = isCatEnabled
-                    text = "${catalog.name} (${catalog.type})"
+                    text = tab.displayName
                     textSize = 15f
                     setOnCheckedChangeListener { _, checked ->
                         prefs.edit().putBoolean(enabledKey, checked).apply()
@@ -561,61 +579,12 @@ class SettingsBottomFragment(
                 val checkParams = android.widget.LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 itemLayout.addView(checkbox, checkParams)
 
-                // [v2.0.3-UI] 장르 On/Off 토글 배치 및 활성화 시에만 투명색 "Select" 버튼 노출 제어 [1]
-                if (catalog.genres.isNotEmpty()) {
-                    val genresEnabledKey = "genres_enabled_${addonName}_$catalogKey"
-                    val isGenresEnabled = prefs.getBoolean(genresEnabledKey, true)
-
-                    val selectButton = android.widget.Button(context).apply {
-                        text = "Select"
-                        background = null // 🔥 구식 회색 배경 완전 제거 (투명화)
-                        setTextColor(android.graphics.Color.parseColor("#2196F3")) // 자막 형태의 수려한 파란 텍스트 클릭 링크 연출
-                        visibility = if (isGenresEnabled) android.view.View.VISIBLE else android.view.View.GONE
-                        setOnClickListener {
-                            showGenreConfigDialog(addonName, catalogKey, catalog.genres)
-                        }
-                    }
-
-                    val genreToggle = android.widget.Switch(context).apply {
-                        isChecked = isGenresEnabled
-                        text = "Genre"
-                        textSize = 14f
-                        setOnCheckedChangeListener { _, checked ->
-                            prefs.edit().putBoolean(genresEnabledKey, checked).apply()
-                            selectButton.visibility = if (checked) android.view.View.VISIBLE else android.view.View.GONE
-                        }
-                    }
-
-                    itemLayout.addView(genreToggle)
-                    itemLayout.addView(selectButton)
-                }
-
                 container.addView(itemLayout)
             }
         }
 
         rebuild.invoke()
         dialog.show()
-    }
-
-    private fun showGenreConfigDialog(addonName: String, catalogKey: String, genres: List<String>) {
-        val context = requireContext()
-        val prefs = sharedPref
-
-        val genreArray = genres.toTypedArray()
-        val checkedItems = BooleanArray(genres.size) { i ->
-            val genre = genres[i]
-            prefs.getBoolean("genre_enabled_${addonName}_${catalogKey}_$genre", true)
-        }
-
-        AlertDialog.Builder(context)
-            .setTitle("Select Genres to Show")
-            .setMultiChoiceItems(genreArray, checkedItems) { _, which, isChecked ->
-                val genre = genres[which]
-                prefs.edit().putBoolean("genre_enabled_${addonName}_${catalogKey}_$genre", isChecked).apply()
-            }
-            .setPositiveButton("Done", null)
-            .show()
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {}
