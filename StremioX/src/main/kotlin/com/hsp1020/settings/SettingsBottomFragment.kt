@@ -50,6 +50,10 @@ object SettingsRepository {
     const val PREF_KEY_CINESTREAM_ENABLED = "cinestream_integration_enabled"
     const val PREF_KEY_STREAMPLAY_ENABLED = "streamplay_integration_enabled"
     const val PREF_KEY_VIXSRC_ENABLED = "vixsrc_integration_enabled"
+    
+    // [v2.2.0] 기록 및 라이브러리 연동 토글 제어 키
+    const val PREF_KEY_HISTORY_SYNC_ENABLED = "history_sync_enabled"
+    const val PREF_KEY_HISTORY_SYNC_URL = "history_sync_url"
 
     fun loadLinks(sharedPref: SharedPreferences): MutableList<LinkItem> {
         val json = sharedPref.getString(PREF_KEY_LINKS, null) ?: return mutableListOf()
@@ -166,6 +170,34 @@ class SettingsBottomFragment(
         addlinks.makeTvCompatible()
         showlinks.makeTvCompatible()
         saveIcon.makeTvCompatible()
+
+        // [v2.2.0] 기록 연동 동적 뷰 처리 연동
+        val switchHistorySync: Switch = try { view.findView("switchHistorySync") } catch (e: Throwable) {
+            throw Exception("switchHistorySync Switch not found in bottom_sheet_layout", e)
+        }
+        val layoutHistorySyncUrl: View = try { view.findView("layoutHistorySyncUrl") } catch (e: Throwable) {
+            throw Exception("layoutHistorySyncUrl View not found in bottom_sheet_layout", e)
+        }
+        val etHistorySyncUrl: EditText = try { view.findView("etHistorySyncUrl") } catch (e: Throwable) {
+            throw Exception("etHistorySyncUrl EditText not found in bottom_sheet_layout", e)
+        }
+
+        // 기록 연동 초기 상태 정의
+        val isSyncEnabled = sharedPref.getBoolean(SettingsRepository.PREF_KEY_HISTORY_SYNC_ENABLED, false)
+        switchHistorySync.isChecked = isSyncEnabled
+        layoutHistorySyncUrl.visibility = if (isSyncEnabled) View.VISIBLE else View.GONE
+        etHistorySyncUrl.setText(sharedPref.getString(SettingsRepository.PREF_KEY_HISTORY_SYNC_URL, ""))
+
+        switchHistorySync.setOnCheckedChangeListener { _, isChecked ->
+            sharedPref.edit { putBoolean(SettingsRepository.PREF_KEY_HISTORY_SYNC_ENABLED, isChecked) }
+            layoutHistorySyncUrl.visibility = if (isChecked) View.VISIBLE else View.GONE
+        }
+
+        etHistorySyncUrl.setOnFocusChangeListener { _, hasFocus ->
+            if (!hasFocus) {
+                sharedPref.edit { putString(SettingsRepository.PREF_KEY_HISTORY_SYNC_URL, etHistorySyncUrl.text.toString().trim()) }
+            }
+        }
 
         // UI Initialization: Toggles
         setupToggle(view, "switchCineStream", SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, isCineStreamInstalled(), "CineStream")
@@ -292,6 +324,11 @@ class SettingsBottomFragment(
         // Action: Save & Restart
         saveIcon.setOnClickListener {
             val context = this.context ?: return@setOnClickListener
+
+            // 저장 직전 포커스 유무에 무관하게 텍스트 대입 저장
+            sharedPref.edit {
+                putString(SettingsRepository.PREF_KEY_HISTORY_SYNC_URL, etHistorySyncUrl.text.toString().trim())
+            }
 
             AlertDialog.Builder(context)
                 .setTitle("Save & Reload")
