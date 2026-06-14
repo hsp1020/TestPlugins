@@ -8,7 +8,7 @@ import kotlinx.coroutines.sync.withLock
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 
-class Cinemeta : StremioC("https://extendedratings.com/proxy/f873acb8-3861-444c-aca2-81a4c6bdd6cb", "Cinemeta") {
+class Cinemeta : StremioC("https://extendedratings.com/proxy/3be73f8c-91ff-449a-bfe1-cf5d95b09c2a", "Cinemeta") {
     
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Others)
