@@ -255,53 +255,38 @@ class SettingsBottomFragment(
         tvImport.makeTvCompatible()
 
         // 백업(Export) 64비트 문자열 처리 로직 적용
+        // [최적화 완료]: 백업(Export) 비동기 처리 및 자동 클립보드 복사 (앱 크래시 원천 차단)
         tvExport.setOnClickListener {
             val ctx = requireContext()
-            try {
-                val json = JSONObject()
-                sharedPref.all.forEach { (key, value) -> json.put(key, value) }
-                val backupStr = Base64.encodeToString(json.toString().toByteArray(), Base64.NO_WRAP)
+            Toast.makeText(ctx, "Generating backup data...", Toast.LENGTH_SHORT).show()
 
-                val pxHeight = (250 * ctx.resources.displayMetrics.density).toInt()
-                val et = EditText(ctx).apply {
-                    setText(backupStr)
-                    setTextColor(android.graphics.Color.WHITE)
-                    background = android.graphics.drawable.GradientDrawable().apply {
-                        setColor(android.graphics.Color.parseColor("#0C0C0C"))
-                        setStroke(2, android.graphics.Color.parseColor("#1A1A1A"))
-                        cornerRadius = 30f
+            CoroutineScope(Dispatchers.Main).launch {
+                try {
+                    // 무거운 JSON 텍스트 생성과 인코딩은 백그라운드(IO) 스레드에서 처리하여 화면 멈춤 방지
+                    val backupStr = withContext(Dispatchers.IO) {
+                        val json = JSONObject()
+                        sharedPref.all.forEach { (key, value) -> json.put(key, value) }
+                        Base64.encodeToString(json.toString().toByteArray(), Base64.NO_WRAP)
                     }
-                    setPadding(30, 30, 30, 30)
-                    setTextIsSelectable(true)
-                    isFocusable = false
-                    isFocusableInTouchMode = false
-                    gravity = android.view.Gravity.TOP or android.view.Gravity.START
-                    inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
-                    isVerticalScrollBarEnabled = true
-                    layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, pxHeight)
+
+                    // EditText에 무거운 텍스트를 그리지 않고 즉시 클립보드에 복사
+                    val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    val clip = ClipData.newPlainText("StremioX Backup", backupStr)
+                    clipboard.setPrimaryClip(clip)
+
+                    AlertDialog.Builder(ctx)
+                        .setTitle("Export Successful")
+                        .setMessage("Backup data has been successfully copied to the clipboard!\n\nPlease paste it in a safe place (e.g., Notepad, Messenger).")
+                        .setPositiveButton("OK", null)
+                        .show()
+                        
+                } catch (e: Exception) {
+                    Toast.makeText(ctx, "Failed to export settings", Toast.LENGTH_SHORT).show()
                 }
-                val wrapper = FrameLayout(ctx).apply {
-                    setPadding(40, 20, 40, 20)
-                    addView(et)
-                }
-                
-                AlertDialog.Builder(ctx)
-                    .setTitle("Export Backup Data")
-                    .setView(wrapper)
-                    .setPositiveButton("Copy") { _, _ ->
-                        val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        val clip = ClipData.newPlainText("StremioX Backup", backupStr)
-                        clipboard.setPrimaryClip(clip)
-                        Toast.makeText(ctx, "Copied to clipboard", Toast.LENGTH_SHORT).show()
-                    }
-                    .setNegativeButton("Close", null)
-                    .show()
-            } catch (e: Exception) {
-                Toast.makeText(ctx, "Failed to export settings", Toast.LENGTH_SHORT).show()
             }
         }
 
-        // 복원(Import) 처리 로직 적용 (clear 후 덮어쓰기 및 앱재시작 알림 탑재)
+        // [최적화 완료]: 복원(Import) 비동기 처리 (앱 크래시 원천 차단)
         tvImport.setOnClickListener {
             val ctx = requireContext()
             val pxHeight = (250 * ctx.resources.displayMetrics.density).toInt()
@@ -331,38 +316,48 @@ class SettingsBottomFragment(
                 .setMessage("Warning: This will permanently overwrite all current settings.\nThe app must be restarted after import.")
                 .setView(wrapper)
                 .setPositiveButton("Restore") { _, _ ->
-                    try {
-                        val decodedBytes = Base64.decode(et.text.toString().trim(), Base64.NO_WRAP)
-                        val json = JSONObject(String(decodedBytes))
-                        
-                        val editor = sharedPref.edit()
-                        editor.clear() 
-                        
-                        val keys = json.keys()
-                        while (keys.hasNext()) {
-                            val key = keys.next()
-                            when (val value = json.get(key)) {
-                                is Boolean -> editor.putBoolean(key, value)
-                                is String -> editor.putString(key, value)
-                                is Int -> editor.putInt(key, value)
-                            }
-                        }
-                        editor.apply()
-                        
-                        AlertDialog.Builder(ctx)
-                            .setTitle("Import Result")
-                            .setMessage("Import successful. Please restart the app.")
-                            .setPositiveButton("OK") { _, _ -> dismiss() }
-                            .create()
-                            .show()
+                    val backupInput = et.text.toString().trim()
+                    if (backupInput.isEmpty()) return@setPositiveButton
+                    
+                    Toast.makeText(ctx, "Restoring data...", Toast.LENGTH_SHORT).show()
 
-                    } catch (e: Exception) {
-                        Toast.makeText(ctx, "Invalid backup string format.", Toast.LENGTH_SHORT).show()
+                    CoroutineScope(Dispatchers.Main).launch {
+                        try {
+                            // 무거운 복원 파싱 및 DB 덮어쓰기를 백그라운드에서 처리
+                            withContext(Dispatchers.IO) {
+                                val decodedBytes = Base64.decode(backupInput, Base64.NO_WRAP)
+                                val json = JSONObject(String(decodedBytes))
+                                
+                                val editor = sharedPref.edit()
+                                editor.clear() 
+                                
+                                val keys = json.keys()
+                                while (keys.hasNext()) {
+                                    val key = keys.next()
+                                    when (val value = json.get(key)) {
+                                        is Boolean -> editor.putBoolean(key, value)
+                                        is String -> editor.putString(key, value)
+                                        is Int -> editor.putInt(key, value)
+                                    }
+                                }
+                                editor.commit() // 비동기 IO이므로 즉시 동기화(commit)
+                            }
+                            
+                            AlertDialog.Builder(ctx)
+                                .setTitle("Import Result")
+                                .setMessage("Import successful. Please restart the app.")
+                                .setPositiveButton("OK") { _, _ -> dismiss() }
+                                .show()
+
+                        } catch (e: Exception) {
+                            Toast.makeText(ctx, "Invalid backup string format.", Toast.LENGTH_SHORT).show()
+                        }
                     }
                 }
                 .setNegativeButton("Cancel", null)
                 .show()
         }
+
 
         // 기록 연동 동적 뷰 처리 연동
         val switchHistorySync: Switch = try { view.findView("switchHistorySync") } catch (e: Throwable) {
