@@ -8,10 +8,13 @@ import kotlinx.coroutines.sync.withLock
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 
-class Cinemeta : StremioC("https://v3-cinemeta.strem.io", "Cinemeta") {
+// 새로운 XRDB Proxy 주소 반영 및 StremioC 상속
+class Cinemeta : StremioC("https://extendedratings.com/proxy/f873acb8-3861-444c-aca2-81a4c6bdd6cb", "Cinemeta") {
     
     override val hasMainPage = true
-    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
+    
+    // [보완] 앱 필터링 설정에 의해 카탈로그가 아예 숨겨지는 현상을 방지하기 위해 Others를 포함시킵니다.
+    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Others)
 
     // ==========================================
     // [StremioC 완벽 동기화] 안정성 방어 상태 변수들
@@ -40,7 +43,7 @@ class Cinemeta : StremioC("https://v3-cinemeta.strem.io", "Cinemeta") {
         "Reality-TV", "Talk-Show", "Game-Show"
     )
 
-    // [빌드 에러 수정] mainPageOf 함수에 buildList 배열을 전개(*)하여 전달합니다.
+    // 새로운 XRDB Proxy 기반 동적 탭 생성
     override val mainPage = mainPageOf(
         *buildList {
             val movieCatalogName = "Popular"
@@ -96,7 +99,6 @@ class Cinemeta : StremioC("https://v3-cinemeta.strem.io", "Cinemeta") {
         val targetUrl = request.data.replace("###", currentSkip.toString())
         val cacheKey = "Cinemeta_${request.name}_$currentSkip"
 
-        // StremioC의 Companion Object 멤버 접근 시 명시적으로 'StremioC.' 를 붙여 컴파일 오류 원천 차단
         val resultPair = StremioC.getOrFetchCachedPage(cacheKey) {
             val jsonText = StremioC.customSession.get(targetUrl).text
             val response = try {
@@ -137,7 +139,6 @@ class Cinemeta : StremioC("https://v3-cinemeta.strem.io", "Cinemeta") {
         return newHomePageResponse(emptyList(), hasNext = false)
     }
 
-    // JSON DTO
     private data class CinemetaDirectResponse(@JsonProperty("metas") val metas: List<CinemetaMeta>?)
     
     private data class CinemetaMeta(
