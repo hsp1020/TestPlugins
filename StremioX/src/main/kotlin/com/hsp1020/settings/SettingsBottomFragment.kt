@@ -468,7 +468,7 @@ class SettingsBottomFragment(
             // 저장 클릭 시 TMDb API Key 필수값 체크 분기 적용
             val tmdbApiKeyVal = etTmdbApiKey.text.toString().trim()
             if (tmdbApiKeyVal.isEmpty()) {
-                showToast("TMDb API key is a required field")
+                showToast("TMDb API Key는 필수 입력 항목입니다.")
                 return@setOnClickListener
             }
 
@@ -643,9 +643,8 @@ class SettingsBottomFragment(
                             found
                         } ?: false
 
-                        if (!requiresGenre) {
-                            flatTabs.add(ConfigFlatTab("${id}_${type}_default", "$name - $displayType", false, "${id}_${type}"))
-                        }
+                        // 🔥 [v2.2.2-Fix]: requiresGenre(장르 필수 여부)에 상관없이 설정 UI에는 항상 기본 카탈로그 행을 추가하여 Year 마스터 토글 스위치 노출 보완
+                        flatTabs.add(ConfigFlatTab("${id}_${type}_default", "$name - $displayType", false, "${id}_${type}"))
 
                         val genres = mutableListOf<String>()
                         cat.get("genres")?.let { gArr ->
@@ -958,78 +957,6 @@ class SettingsBottomFragment(
 
     private fun String.toUniqueKeyLocal(): String {
         return this.lowercase().filter { it.isLetter() }
-    }
-
-    private fun setupToggle(view: View, viewId: String, prefKey: String, isInstalled: Boolean, displayName: String) {
-        try {
-            val switchView: CompoundButton = view.findView(viewId)
-            switchView.isEnabled = isInstalled
-            if (!isInstalled) {
-                switchView.isChecked = false
-                switchView.text = "$displayName (Not Installed)"
-                SettingsRepository.setIntegrationEnabled(sharedPref, prefKey, false)
-            } else {
-                switchView.text = "$displayName Integration"
-                switchView.isChecked = SettingsRepository.isIntegrationEnabled(sharedPref, prefKey)
-            }
-
-            switchView.setOnCheckedChangeListener { _, isChecked ->
-                SettingsRepository.setIntegrationEnabled(sharedPref, prefKey, isChecked)
-                val statusText = if (isChecked) "Enabled" else "Disabled"
-                showToast("$displayName Integration $statusText")
-            }
-        } catch (e: Throwable) {
-            // 방어 코드
-        }
-    }
-
-    private fun showEditDialog(itemToEdit: LinkItem, position: Int, rv: RecyclerView) {
-        val dialogView = getLayout("addlinks", LayoutInflater.from(requireContext()), null)
-        val etName = try { dialogView.findView<EditText>("etName") } catch (t: Throwable) { null }
-        val etLink = try { dialogView.findView<EditText>("etLink") } catch (t: Throwable) { null }
-        
-        if (etName == null || etLink == null) {
-            Toast.makeText(requireContext(), "Dialog fields not found", Toast.LENGTH_SHORT).show()
-            return
-        }
-
-        etName.setText(itemToEdit.name)
-        etLink.setText(itemToEdit.link)
-
-        val dlg = AlertDialog.Builder(requireContext())
-            .setTitle("Edit Link")
-            .setView(dialogView)
-            .setPositiveButton("Update", null)
-            .setNegativeButton("Cancel", null)
-            .create()
-
-        dlg.setOnShowListener {
-            val btnUpdate = dlg.getButton(AlertDialog.BUTTON_POSITIVE)
-            btnUpdate.setOnClickListener {
-                val name = etName.text.toString().trim()
-                val link = etLink.text.toString().trim()
-                val type = "StremioC"
-
-                if (link.isEmpty() || !(link.startsWith("http://") || link.startsWith("https://"))) {
-                    showToast("Enter a valid URL (http/https)")
-                    return@setOnClickListener
-                }
-
-                val updatedList = SettingsRepository.loadLinks(sharedPref)
-                val indexInDb = updatedList.indexOfFirst { it.id == itemToEdit.id }
-                
-                if (indexInDb != -1) {
-                    val newItem = itemToEdit.copy(name = name.ifBlank { link }, link = link, type = type)
-                    updatedList[indexInDb] = newItem
-                    SettingsRepository.saveLinks(sharedPref, updatedList)
-
-                    (rv.adapter as? LinksAdapter)?.updateItem(newItem, position)
-                    showToast("Link Updated Successfully")
-                }
-                dlg.dismiss()
-            }
-        }
-        dlg.show()
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {}
