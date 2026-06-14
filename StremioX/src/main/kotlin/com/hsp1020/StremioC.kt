@@ -1828,7 +1828,7 @@ private data class TmdbDetailResponse(
             title = this.title ?: this.name,
             originalTitle = this.original_title ?: this.original_name,
             mediaType = mediaType,
-            posterPath = this.posterPath,
+            poster_path = this.posterPath,
             overview = this.overview,
             origin_country = this.origin_country,
             original_language = this.original_language,
@@ -1869,3 +1869,11 @@ private data class TmdbEpisode(@JsonProperty("name") val name: String?, @JsonPro
 data class Trailers(@JsonProperty("key") val key: String? = null, @JsonProperty("type") val type: String? = null, @JsonProperty("published_at") val publishedAt: String? = null)
 data class ResultsTrailer(@JsonProperty("results") val results: ArrayList<Trailers>? = arrayListOf())
 data class ExternalIds(@JsonProperty("imdb_id") val imdb_id: String? = null, @JsonProperty("tvdb_id") val tvdb_id: String? = null)
+
+private fun String.urlEncodeLocal(): String = try {
+    java.net.URLEncoder.encode(this, "UTF-8").replace("+", "%20")
+} catch (e: Exception) {
+    this
+}
+
+private data class FlatTab(val key: String, val displayName: String, val urlPath: String)
