@@ -8,8 +8,8 @@ import kotlinx.coroutines.sync.withLock
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 
-// 공식 Cinemeta 주소로 원복 및 StremioC 상속
-class Cinemeta : StremioC("https://extendedratings.com/proxy/f873acb8-3861-444c-aca2-81a4c6bdd6cb, "Cinemeta") {
+// 새로운 XRDB Proxy 주소 반영 및 StremioC 상속
+class Cinemeta : StremioC("https://extendedratings.com/proxy/f873acb8-3861-444c-aca2-81a4c6bdd6cb", "Cinemeta") {
     
     override val hasMainPage = true
     
@@ -43,7 +43,7 @@ class Cinemeta : StremioC("https://extendedratings.com/proxy/f873acb8-3861-444c-
         "Reality-TV", "Talk-Show", "Game-Show"
     )
 
-    // 공식 Cinemeta 기반 동적 탭 생성
+    // 탭 이름 형식 변경: "Popular - Movie" 및 "Action - Movie"
     override val mainPage = mainPageOf(
         *buildList {
             val movieCatalogName = "Popular"
@@ -51,7 +51,7 @@ class Cinemeta : StremioC("https://extendedratings.com/proxy/f873acb8-3861-444c-
             
             add("$mainUrl/catalog/movie/top/skip=###.json" to "$movieCatalogName - $movieType")
             movieGenres.forEach { genre ->
-                add("$mainUrl/catalog/movie/top/genre=$genre&skip=###.json" to "$movieCatalogName - $movieType ($genre)")
+                add("$mainUrl/catalog/movie/top/genre=$genre&skip=###.json" to "$genre - $movieType")
             }
 
             val seriesCatalogName = "Popular"
@@ -59,7 +59,7 @@ class Cinemeta : StremioC("https://extendedratings.com/proxy/f873acb8-3861-444c-
             
             add("$mainUrl/catalog/series/top/skip=###.json" to "$seriesCatalogName - $seriesType")
             seriesGenres.forEach { genre ->
-                add("$mainUrl/catalog/series/top/genre=$genre&skip=###.json" to "$seriesCatalogName - $seriesType ($genre)")
+                add("$mainUrl/catalog/series/top/genre=$genre&skip=###.json" to "$genre - $seriesType")
             }
         }.toTypedArray()
     )
