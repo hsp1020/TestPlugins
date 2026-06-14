@@ -470,7 +470,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                                 val isGenreEnabled = prefs.getBoolean("genre_enabled_${name}_${catalogKey}_$genre", true)
                                 if (isGenreEnabled) {
                                     // 🔥 [장르 노출 포맷 수정]: "Popular : Action  - Series" 형태로 조합하여 추가
-                                    add("/catalog/${catalog.type}/${catalog.id}/genre=${genre.urlEncodeLocal()}&skip=###.json" to "$catalogName : $genre  - $displayType")
+                                    add("/catalog/${catalog.type}/${catalog.id}/genre=${genre.urlEncodeLocal()}&skip=###.json" to "$catalogName : $genre - $displayType")
                                 }
                             }
                         }
