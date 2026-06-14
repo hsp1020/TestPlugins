@@ -418,39 +418,85 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         return if (link.startsWith("/")) "https://image.tmdb.org/t/p/w300$link" else link
     }
 
-    private suspend fun getManifest(): Manifest? {
+    // 🔥 [v2.5.0 최적화]: 메인 화면 탭(mainPage) 전용 초고속 동기식 캐시 로더 (Stale-while-revalidate 패턴)
+    private fun getCachedManifestSync(): Manifest? {
         val originalBase = mainUrl.substringBefore("?").trimEnd('/')
         val currentUrl = if (originalBase.endsWith("manifest.json")) originalBase else "$originalBase/manifest.json"
         
-        val now = System.currentTimeMillis()
-        val isExpired = (now - lastCacheTime) > CACHE_TTL_MS
+        val context = CloudStreamApp.context ?: return null
+        val prefs = context.getSharedPreferences("StremioX_Manifest", Context.MODE_PRIVATE)
+        val cacheKey = "manifest_${currentUrl.toUniqueKey()}"
+        val timeKey = "manifest_time_${currentUrl.toUniqueKey()}"
+        
+        val diskCache = prefs.getString(cacheKey, null)
+        val isExpired = (System.currentTimeMillis() - prefs.getLong(timeKey, 0L)) > 3600000L // 1시간(1 Hour) TTL
 
-        if (cachedManifest != null && lastManifestUrl == currentUrl && !isExpired && !cachedManifest?.catalogs.isNullOrEmpty()) {
-            return cachedManifest
+        // 1. 디스크 캐시가 존재할 경우: 만료 여부와 상관없이 무조건 즉시 반환하여 UI 렉(Freezing) 100% 차단
+        if (!diskCache.isNullOrBlank()) {
+            if (isExpired) {
+                // 만료된 경우 백그라운드 스레드에서 조용히 통신하여 디스크 캐시 최신화 (앱 멈춤 없음)
+                CoroutineScope(Dispatchers.IO).launch {
+                    try {
+                        val res = app.get(currentUrl, timeout = 10L).text
+                        if (res.contains("\"catalogs\"")) {
+                            prefs.edit().putString(cacheKey, res).putLong(timeKey, System.currentTimeMillis()).apply()
+                        }
+                    } catch (e: Exception) {}
+                }
+            }
+            return try { jsonMapper.readValue(diskCache, Manifest::class.java) } catch (e: Exception) { null }
         }
 
-        val res = runSuspendCatching { 
-            val text = customSession.get(currentUrl, timeout = 120L).text
-            if (text.isNotBlank()) jsonMapper.readValue(text, Manifest::class.java) else null
-        }.getOrNull()
-
-        if (res != null && res.catalogs.isNotEmpty()) {
-            cachedManifest = res
-            lastManifestUrl = currentUrl
-            lastCacheTime = now
-            catalogSentIds.clear()
-            catalogSkipState.clear()
-        }       
-        return res ?: cachedManifest
+        // 2. 최초 설치 시 (캐시가 아예 없을 때): 1.5초 내로만 통신 허용하여 무한 대기 차단
+        return runBlocking(Dispatchers.IO) {
+            try {
+                withTimeout(1500L) {
+                    val res = app.get(currentUrl).text
+                    if (res.contains("\"catalogs\"")) {
+                        prefs.edit().putString(cacheKey, res).putLong(timeKey, System.currentTimeMillis()).apply()
+                        jsonMapper.readValue(res, Manifest::class.java)
+                    } else null
+                }
+            } catch (e: Exception) { null }
+        }
     }
 
+    // 🔥 [v2.5.0 최적화]: 검색(search) 전용 비동기 매니페스트 로더 (백그라운드 통신 보장)
+    private suspend fun getManifestAsync(): Manifest? {
+        val originalBase = mainUrl.substringBefore("?").trimEnd('/')
+        val currentUrl = if (originalBase.endsWith("manifest.json")) originalBase else "$originalBase/manifest.json"
+        
+        val context = CloudStreamApp.context ?: return null
+        val prefs = context.getSharedPreferences("StremioX_Manifest", Context.MODE_PRIVATE)
+        val cacheKey = "manifest_${currentUrl.toUniqueKey()}"
+        val timeKey = "manifest_time_${currentUrl.toUniqueKey()}"
+
+        val diskCache = prefs.getString(cacheKey, null)
+        val isExpired = (System.currentTimeMillis() - prefs.getLong(timeKey, 0L)) > 3600000L
+
+        // 캐시가 있고 신선하다면 즉시 반환
+        if (!diskCache.isNullOrBlank() && !isExpired) {
+            return try { jsonMapper.readValue(diskCache, Manifest::class.java) } catch (e: Exception) { null }
+        }
+
+        // 캐시가 없거나 만료되었다면 안전하게 비동기 통신(suspend)으로 가져옴
+        return runSuspendCatching {
+            val res = app.get(currentUrl, timeout = 15L).text
+            if (res.contains("\"catalogs\"")) {
+                prefs.edit().putString(cacheKey, res).putLong(timeKey, System.currentTimeMillis()).apply()
+                jsonMapper.readValue(res, Manifest::class.java)
+            } else null
+        }.getOrNull() ?: if (!diskCache.isNullOrBlank()) try { jsonMapper.readValue(diskCache, Manifest::class.java) } catch(e:Exception){null} else null
+    }
+   
+    
     // ==========================================
     // [v2.1.0] 설정값 동적 탭 구성 (mainPage) - 독자 정렬(Flat-Alignment) 시스템 구현
     // ==========================================
     override val mainPage: List<MainPageData>
         get() {
             val manifest = runBlocking {
-                try { getManifest() } catch (e: Exception) { null }
+                try { getCachedManifestSync() } catch (e: Exception) { null }
             } ?: return emptyList()
 
             val context = CloudStreamApp.context ?: return emptyList()
@@ -601,7 +647,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
     override suspend fun search(query: String): List<SearchResponse> {
         mainUrl = mainUrl.fixSourceUrl()
-        val manifest = getManifest()
+        val manifest = getManifestAsync()
         val supportedCatalogs = manifest?.catalogs?.filter { it.supportsSearch() } ?: emptyList()
         
         val searchResults = coroutineScope {
