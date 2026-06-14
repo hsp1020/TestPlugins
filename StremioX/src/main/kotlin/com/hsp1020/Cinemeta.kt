@@ -9,7 +9,7 @@ import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 
 // 공식 Cinemeta 주소로 원복 및 StremioC 상속
-class Cinemeta : StremioC("https://v3-cinemeta.strem.io", "Cinemeta") {
+class Cinemeta : StremioC("https://extendedratings.com/proxy/f873acb8-3861-444c-aca2-81a4c6bdd6cb, "Cinemeta") {
     
     override val hasMainPage = true
     
