@@ -1,10 +1,9 @@
-// 버전 정보: v1.9.4 - SharedPreferences 다중 폴백 경로 보완 및 [STREMIOSUB] 디버깅 강화 버전
+// 버전 정보: v2.0.0 - 동적 탭 변환, 순서 재배치, 장르 필터링 및 AIO 메타데이터 폴백 통합 코어
 package com.hsp1020
 
 import android.content.Context
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.databind.JsonNode
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CloudStreamApp
@@ -22,6 +21,8 @@ import com.lagradost.cloudstream3.LoadResponse.Companion.addMalId
 import com.lagradost.cloudstream3.LoadResponse.Companion.addAniListId
 import com.lagradost.cloudstream3.MainAPI
 import com.lagradost.cloudstream3.MainPageRequest
+import com.lagradost.cloudstream3.MainPageData
+import com.lagradost.cloudstream3.mainPageOf
 import com.lagradost.cloudstream3.Score
 import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.ShowStatus
@@ -47,18 +48,10 @@ import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.hsp1020.SubsExtractors.invokeOpenSubs
 import com.hsp1020.SubsExtractors.invokeWatchsomuch
 import com.lagradost.nicehttp.Requests
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Deferred
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.ConnectionPool
 import okhttp3.Dispatcher
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -104,7 +97,7 @@ private fun JsonNode?.intOrNull(): Int? {
 }
 
 open class StremioC(override var mainUrl: String, override var name: String) : MainAPI() {
-    override val supportedTypes = setOf(TvType.Others)
+    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Others)
     override val hasMainPage = true
      
     private var cachedManifest: Manifest? = null
@@ -163,9 +156,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         private val IMDB_ID_REGEX = "tt[0-9]+".toRegex()
         private val JSON_ID_EXTRACT_REGEX = "\"id\":\"([^\"]+)\"".toRegex()
         
-        private val globalPageCache = ConcurrentHashMap<String, Triple<List<SearchResponse>, Int, Long>>()
-        private val cacheMutexes = ConcurrentHashMap<String, Mutex>()
-        private val CACHE_TTL_MS = TimeUnit.HOURS.toMillis(1)
+        val globalPageCache = ConcurrentHashMap<String, Triple<List<SearchResponse>, Int, Long>>()
+        val cacheMutexes = ConcurrentHashMap<String, Mutex>()
+        const val CACHE_TTL_MS = 3600000L // 1 hour
         
         private val settingsCache = ConcurrentHashMap<String, Pair<Boolean, Long>>()
         
@@ -186,7 +179,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         @Volatile private var cachedClassLoader: ClassLoader? = null
 
         val jsonMapper: ObjectMapper by lazy {
-            jacksonObjectMapper()
+            com.fasterxml.jackson.module.kotlin.jacksonObjectMapper()
                 .configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
         }
 
@@ -418,22 +411,79 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         return res ?: cachedManifest
     }
 
+    // ==========================================
+    // [v2.0.0] 설정값 동적 탭 구성 (mainPage)
+    // ==========================================
+    override val mainPage: List<MainPageData>
+        get() {
+            val manifest = runBlocking {
+                try { getManifest() } catch (e: Exception) { null }
+            } ?: return emptyList()
+
+            val context = CloudStreamApp.context ?: return emptyList()
+            val prefs = context.getSharedPreferences("StremioX", Context.MODE_PRIVATE)
+
+            val rawCatalogs = manifest.catalogs ?: emptyList()
+            
+            // 정렬 정보 로드
+            val orderKey = "catalog_order_$name"
+            val orderJson = prefs.getString(orderKey, null)
+            val orderedKeys = mutableListOf<String>()
+            if (orderJson != null) {
+                try {
+                    val arr = org.json.JSONArray(orderJson)
+                    for (i in 0 until arr.length()) {
+                        orderedKeys.add(arr.getString(i))
+                    }
+                } catch (e: Exception) {}
+            }
+
+            val sortedCatalogs = rawCatalogs.sortedBy { cat ->
+                val key = "${cat.id}_${cat.type}"
+                val idx = orderedKeys.indexOf(key)
+                if (idx != -1) idx else Int.MAX_VALUE
+            }
+
+            return mainPageOf(
+                *buildList {
+                    sortedCatalogs.forEach { catalog ->
+                        val catalogKey = "${catalog.id}_${catalog.type}"
+                        val isCatalogEnabled = prefs.getBoolean("catalog_enabled_${name}_$catalogKey", true)
+                        if (!isCatalogEnabled) return@forEach
+
+                        val catalogName = catalog.name ?: catalog.id
+                        val displayType = catalog.type?.replaceFirstChar { it.uppercase() } ?: ""
+                        val requiresGenre = catalog.extra?.any { it.name == "genre" && it.isRequired == true } == true
+
+                        if (!requiresGenre) {
+                            add("/catalog/${catalog.type}/${catalog.id}/skip=###.json" to "$catalogName - $displayType")
+                        }
+
+                        val genres = catalog.genres ?: emptyList()
+                        genres.forEach { genre ->
+                            val isGenreEnabled = prefs.getBoolean("genre_enabled_${name}_${catalogKey}_$genre", true)
+                            if (isGenreEnabled) {
+                                add("/catalog/${catalog.type}/${catalog.id}/genre=${genre.urlEncodeLocal()}&skip=###.json" to "$genre - $displayType")
+                            }
+                        }
+                    }
+                }.toTypedArray()
+            )
+        }
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse = coroutineScope {
         var isNewRequest = false
         
         val deferred = pageMutex.withLock {
             if (page <= 1) {
-                catalogSentIds.clear()
+                catalogSentIds.remove(request.name)
                 activePageRequests.clear()
-                val now = System.currentTimeMillis()
-                globalPageCache.entries.removeIf { now - it.value.third > CACHE_TTL_MS }
-                cacheMutexes.clear() 
-                catalogSkipState.clear()
+                catalogSkipState.remove(request.name)
             }
             
             activePageRequests.getOrPut(page) {
                 isNewRequest = true
-                async { fetchMainPageData(page, request) }
+                async { fetchTabCatalogData(request) }
             }
         }
         
@@ -451,49 +501,40 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
     }
 
-    private suspend fun fetchMainPageData(page: Int, request: MainPageRequest): HomePageResponse {
-        mainUrl = mainUrl.fixSourceUrl()
-        val manifest = getManifest()
-        val targetCatalogs = manifest?.catalogs?.filter { !it.isSearchRequired() } ?: emptyList()
-        val lists = mutableListOf<HomePageList>()
-        
-        val chunkResults = coroutineScope {
-            targetCatalogs.map { catalog ->
-                async(Dispatchers.IO) {
-                    try {
-                        val catalogKey = "${catalog.id}-${catalog.type}"
-                        val currentSkip = catalogSkipState[catalogKey] ?: 0
-                        val cacheKey = "${this@StremioC.name}_${catalogKey}_$currentSkip"
-                        
-                        val resultPair = getOrFetchCachedPage(cacheKey) {
-                            val rawResult = catalog.toHomePageList(provider = this@StremioC, skip = currentSkip)
-                            Pair(rawResult.first.list, rawResult.second)
-                        }
-                        
-                        if (resultPair != null) {
-                            val displayType = catalog.type?.replaceFirstChar { it.uppercase() } ?: ""
-                            catalogSkipState[catalogKey] = currentSkip + resultPair.second
-                            val rowName = "${catalog.name ?: catalog.id} - $displayType"
-                            
-                            var seenForThisCatalog = catalogSentIds[catalogKey]
-                            if (seenForThisCatalog == null) {
-                                synchronized(catalogSentIds) {
-                                    seenForThisCatalog = catalogSentIds.getOrPut(catalogKey) { 
-                                        lruSet(500) 
-                                    }
-                                }
-                            }
-                            val filteredItems = resultPair.first.filter { item -> seenForThisCatalog!!.add(item.extractPureId()) }
-                            
-                            HomePageList(rowName, filteredItems)
-                        } else null
-                    } catch (e: Exception) { null }
+    private suspend fun fetchTabCatalogData(request: MainPageRequest): HomePageResponse {
+        val currentSkip = catalogSkipState[request.name] ?: 0
+        val targetPath = request.data.replace("###", currentSkip.toString())
+        val targetUrl = buildUrl(targetPath)
+        val cacheKey = "${this@StremioC.name}_${request.name}_$currentSkip"
+
+        val resultPair = getOrFetchCachedPage(cacheKey) {
+            val jsonText = customSession.get(targetUrl).text
+            val response = try {
+                jsonMapper.readValue(jsonText, CatalogResponse::class.java)
+            } catch (e: Exception) { null }
+
+            val metas = response?.metas ?: emptyList()
+            val mappedItems = metas.map { it.toSearchResponse(this@StremioC) }
+            Pair(mappedItems, metas.size)
+        }
+
+        if (resultPair != null) {
+            catalogSkipState[request.name] = currentSkip + resultPair.second
+            
+            var seenForThisCatalog = catalogSentIds[request.name]
+            if (seenForThisCatalog == null) {
+                synchronized(catalogSentIds) {
+                    seenForThisCatalog = catalogSentIds.getOrPut(request.name) { 
+                        lruSet(500) 
+                    }
                 }
-            }.awaitAll()
-        }.filterNotNull().filter { it.list.isNotEmpty() }
-        
-        lists.addAll(chunkResults)
-        return newHomePageResponse(lists, hasNext = true)
+            }
+            
+            val filteredItems = resultPair.first.filter { item -> seenForThisCatalog!!.add(item.extractPureId()) }
+            return newHomePageResponse(listOf(HomePageList(request.name, filteredItems)), hasNext = resultPair.second > 0)
+        }
+
+        return newHomePageResponse(emptyList(), hasNext = false)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -516,7 +557,35 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
     }
 
+    // ==========================================
+    // [v2.0.0] 모든 경우(All cases)에 지정된 AIO Metadata 주소로 직접 연동하여 로드 (폴백 구현)
+    // ==========================================
     override suspend fun load(url: String): LoadResponse = coroutineScope {
+        val parsed = parseIdAndType(url)
+        if (parsed != null) {
+            val (id, type) = parsed
+            // 영화나 시리즈에 상관없이 규격 외 ID나 매치 실패 시 로드를 위해 항상 AIO Metadata 프록시 경로로 연동
+            val isNative = id.startsWith("tt") || id.startsWith("kitsu:") || id.startsWith("mal:")
+            if (!isNative) {
+                val aioUrl = "https://aiometadata.elfhosted.com/stremio/b345b590-872c-4e13-bc4f-852f4e70c9ef/meta/$type/${id.urlEncodeLocal()}.json"
+                return@coroutineScope loadOriginal(aioUrl)
+            }
+        }
+
+        try {
+            loadOriginal(url)
+        } catch (e: Exception) {
+            if (parsed != null) {
+                val (id, type) = parsed
+                val aioUrl = "https://aiometadata.elfhosted.com/stremio/b345b590-872c-4e13-bc4f-852f4e70c9ef/meta/$type/${id.urlEncodeLocal()}.json"
+                loadOriginal(aioUrl)
+            } else {
+                throw e
+            }
+        }
+    }
+
+    private suspend fun loadOriginal(url: String): LoadResponse = coroutineScope {
         val res: CatalogEntry = if (url.startsWith("{")) {
             jsonMapper.readValue(url, CatalogEntry::class.java)
         } else {
@@ -663,6 +732,35 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         return@coroutineScope loadRes
     }
 
+    private fun parseIdAndType(url: String): Pair<String, String>? {
+        return try {
+            if (url.startsWith("{")) {
+                val root = jsonMapper.readTree(url)
+                val id = root.get("id")?.asText() ?: root.get("imdbId")?.asText()
+                val type = root.get("type")?.asText() ?: "movie"
+                if (id != null) Pair(id, type) else null
+            } else {
+                val cleanUrl = url.substringBefore("?")
+                if (cleanUrl.contains("/meta/")) {
+                    val parts = cleanUrl.substringAfter("/meta/").split("/")
+                    if (parts.size >= 2) {
+                        val type = parts[0]
+                        val id = parts[1].removeSuffix(".json")
+                        Pair(id, type)
+                    } else null
+                } else null
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun String.urlEncodeLocal(): String = try {
+        java.net.URLEncoder.encode(this, "UTF-8").replace("+", "%20")
+    } catch (e: Exception) {
+        this
+    }
+
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val loadData = try { jsonMapper.readValue(data, LoadData::class.java) } catch (e: Exception) { null } ?: return false
         
@@ -705,7 +803,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             )
         }
 
-        // --- Stremio 자막 애드온 설정 수집 및 정밀 디버깅 로그 구조 ---
         val customHosts = withContext(Dispatchers.IO) {
             val now = System.currentTimeMillis()
             if (cachedCustomHosts != null && now - cachedCustomHostsTime < SETTINGS_CACHE_TTL) {
@@ -714,7 +811,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             
             val context = CloudStreamApp.context
             
-            // 모든 SharedPreferences 파일을 전 탐색하여 stremio_addons 키가 어디에 있는지 정적 로깅
             try {
                 if (context != null) {
                     val sharedPrefsDir = java.io.File(context.applicationInfo.dataDir, "shared_prefs")
@@ -733,7 +829,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }
 
             val raw = try { 
-                // [원인 분석]: 로컬 SharedPreferences 이름이 구버전명인 "rebuild_key"가 아닌 "rebuild_preference"로 생성되어 있어, 1순위 타겟 이름을 수정합니다.
                 val rebuildPrefs = context?.getSharedPreferences("rebuild_preference", Context.MODE_PRIVATE)
                 var rawValue = rebuildPrefs?.getString("stremio_addons", "") ?: ""
                 
@@ -773,7 +868,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
         val builtInHosts = setOf("opensubtitles.stremio.homes", "subsense.nepiraw.com", "opensubtitles-v3.strem.io")
 
-        // 자막 필터링 및 매칭 과정을 하나도 놓치지 않고 수집하는 디버깅 인터셉터
         val subtitleInterceptor: (SubtitleFile) -> Unit = { sub ->
             println("[STREMIOSUB] Interceptor Triggered -> lang: '${sub.lang}', url: '${sub.url}'")
             try {
@@ -1033,7 +1127,15 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     
     private data class Extra(@JsonProperty("name") val name: String?, @JsonProperty("isRequired") val isRequired: Boolean? = false)
 
-    private data class Catalog(var name: String?, val id: String, val type: String?, val types: MutableList<String> = mutableListOf(), @JsonProperty("extra") val extra: List<Extra>? = null, @JsonProperty("extraSupported") val extraSupported: List<String>? = null) {
+    private data class Catalog(
+        var name: String?, 
+        val id: String, 
+        val type: String?, 
+        val types: MutableList<String> = mutableListOf(), 
+        @JsonProperty("extra") val extra: List<Extra>? = null, 
+        @JsonProperty("extraSupported") val extraSupported: List<String>? = null,
+        @JsonProperty("genres") val genres: List<String>? = null // 🔥 추가
+    ) {
         init { if (type != null) types.add(type) }
 
         fun isSearchRequired(): Boolean = extra?.any { it.name == "search" && it.isRequired == true } == true
