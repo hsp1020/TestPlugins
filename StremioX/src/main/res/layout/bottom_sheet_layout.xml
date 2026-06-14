@@ -100,7 +100,7 @@
                 android:nextFocusUp="@id/addlinks" />
         </LinearLayout>
 
-        <!-- History & Library Sync Toggle (CineStream 바로 위 연동 토글) -->
+        <!-- History &amp; Library Sync Toggle (CineStream 위에 신규 배치) -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -124,7 +124,7 @@
                 android:padding="5dp" />
         </LinearLayout>
 
-        <!-- History & Library Sync URL Input (온 상태에서만 노출될 가로정렬 입력단) -->
+        <!-- History &amp; Library Sync URL Input -->
         <LinearLayout
             android:id="@+id/layoutHistorySyncUrl"
             android:layout_width="match_parent"
@@ -145,6 +145,60 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:hint="https://aiometadata.elfhosted.com/stremio/..."
+                android:textColor="#FFFFFF"
+                android:textColorHint="#555555"
+                android:textSize="14sp"
+                android:padding="10dp"
+                android:layout_marginTop="5dp"
+                android:singleLine="true" />
+        </LinearLayout>
+
+        <!-- TMDb Language Selection (CineStream 위에 신규 배치) -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="10dp"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:text="TMDb Language"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+
+            <Button
+                android:id="@+id/btnSelectLanguage"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="ko-KR"
+                android:background="@null"
+                android:textColor="#2196F3"
+                android:focusable="true"
+                android:padding="5dp" />
+        </LinearLayout>
+
+        <!-- Custom Poster URL Input (CineStream 위에 신규 배치) -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginTop="10dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Custom Recommendation Poster URL"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+
+            <EditText
+                android:id="@+id/etCustomPosterUrl"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="https://extendedratings.com/poster/"
                 android:textColor="#FFFFFF"
                 android:textColorHint="#555555"
                 android:textSize="14sp"
