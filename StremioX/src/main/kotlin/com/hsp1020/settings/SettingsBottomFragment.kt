@@ -712,6 +712,13 @@ class SettingsBottomFragment(
                 return@launch
             }
 
+            // 🔥 [3번 문제 해결]: 설정창에서 받아온 최신 매니페스트를 디스크 캐시에 즉시 강제 주입(동기화)합니다.
+            val cleanUrl = item.link.substringBefore("?").trimEnd('/')
+            val currentUrl = if (cleanUrl.endsWith("manifest.json")) cleanUrl else "$cleanUrl/manifest.json"
+            val manifestPrefs = context.getSharedPreferences("StremioX_Manifest", Context.MODE_PRIVATE)
+            manifestPrefs.edit().putString(currentUrl.toUniqueKeyLocal(), manifestText).apply()
+
+            // AIOMetadata 표준 extra[genre].options 및 Cinemeta genres 이중 수집 대응
             val flatTabs = mutableListOf<ConfigFlatTab>()
             try {
                 val node = StremioC.jsonMapper.readTree(manifestText)
