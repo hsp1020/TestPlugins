@@ -1214,8 +1214,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             typeName: String? = null
         ): SearchResponse {
             val targetType = this.type ?: typeName ?: "movie"
-            val cleanBase = provider.mainUrl.cleanBaseUrl()
-            val metaUrl = "$cleanBase/meta/$targetType/${this.id}.json"
+            // 🔥 [기록/책갈피 통합]: 전 세계 모든 소스들의 메타데이터 주소를 지정된 단일 AIO Metadata 주소로 강제 일치시킵니다.
+            val unifiedBase = "https://aiometadata.elfhosted.com/stremio/b345b590-872c-4e13-bc4f-852f4e70c9ef"
+            val metaUrl = "$unifiedBase/meta/$targetType/${this.id.urlEncode()}.json"
 
             val baseName = if (!name.isNullOrBlank()) {
                 name
@@ -1600,10 +1601,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val finalSeriesType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.Anime else TvType.TvSeries
 
             if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
-                val cleanBase = provider.mainUrl.cleanBaseUrl()
+                // 🔥 [기록/책갈피 통합]: 상세정보 주소를 지정된 단일 AIO Metadata 주소로 강제 일치시킵니다.
+                val unifiedBase = "https://aiometadata.elfhosted.com/stremio/b345b590-872c-4e13-bc4f-852f4e70c9ef"
                 return@coroutineScope provider.newMovieLoadResponse(
-                    finalName, "$cleanBase/meta/${finalType ?: "movie"}/${this@CatalogEntry.id}.json", finalMovieType, 
+                    finalName, "$unifiedBase/meta/${finalType ?: "movie"}/${this@CatalogEntry.id}.json", finalMovieType, 
                     LoadData(
+                        
                         type = finalType, 
                         id = movieId, 
                         imdbId = cleanImdbId, 
@@ -1641,13 +1644,15 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     // 🔥 [기록/라이브러리 통합]: 네임스페이스를 StremioX로 통합 우회
                     this.apiName = "StremioX"
                 }                
-                    
+
             } else {
                 val finalEpisodes = processEpisodes(provider, cleanImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, cleanTmdbId?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, finalAniId, finalMalId, this@CatalogEntry.kitsuIdExt)
-                val cleanBase = provider.mainUrl.cleanBaseUrl()
+                // 🔥 [기록/책갈피 통합]: 상세정보 주소를 지정된 단일 AIO Metadata 주소로 강제 일치시킵니다.
+                val unifiedBase = "https://aiometadata.elfhosted.com/stremio/b345b590-872c-4e13-bc4f-852f4e70c9ef"
                 return@coroutineScope provider.newTvSeriesLoadResponse(
-                    finalName, "$cleanBase/meta/${finalType ?: "series"}/${this@CatalogEntry.id}.json", finalSeriesType, finalEpisodes
+                    finalName, "$unifiedBase/meta/${finalType ?: "series"}/${this@CatalogEntry.id}.json", finalSeriesType, finalEpisodes
                 ) {
+                    
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
                     this.showStatus = tmdbData?.fetchedStatus 
                     this.plot = finalDescription
