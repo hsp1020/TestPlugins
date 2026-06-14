@@ -100,7 +100,7 @@
                 android:nextFocusUp="@id/addlinks" />
         </LinearLayout>
 
-        <!-- History &amp; Library Sync Toggle -->
+        <!-- History & Library Sync Toggle -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -124,7 +124,7 @@
                 android:padding="5dp" />
         </LinearLayout>
 
-        <!-- History &amp; Library Sync URL Input -->
+        <!-- History & Library Sync URL Input -->
         <LinearLayout
             android:id="@+id/layoutHistorySyncUrl"
             android:layout_width="match_parent"
@@ -153,7 +153,7 @@
                 android:singleLine="true" />
         </LinearLayout>
 
-        <!-- TMDb Language Selection (텍스트 버튼에서 톱니바퀴 모양 이미지뷰로 교체완료) -->
+        <!-- TMDb Language Selection (CineStream 바로 위에 이쁜 톱니바퀴 아이콘 사양으로 이식) -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
