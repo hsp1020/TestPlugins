@@ -468,7 +468,7 @@ class SettingsBottomFragment(
             // 저장 클릭 시 TMDb API Key 필수값 체크 분기 적용
             val tmdbApiKeyVal = etTmdbApiKey.text.toString().trim()
             if (tmdbApiKeyVal.isEmpty()) {
-                showToast("TMDb API Key는 필수 입력 항목입니다.")
+                showToast("TMDb API key is a required field")
                 return@setOnClickListener
             }
 
