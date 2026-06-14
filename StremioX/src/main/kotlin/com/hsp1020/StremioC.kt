@@ -148,6 +148,30 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
     private fun cachedCustomStreamPlayProvider(): MainAPI? = cachedStreamPlayProvider
 
+    // 🔥 [기록/라이브러리 통합]: 설정창의 동기화 상태에 따라 저장 주소(URL)를 가공 및 단일화하는 헬퍼 함수
+    fun getUnifiedMetaUrl(type: String, id: String): String {
+        val context = CloudStreamApp.context ?: return "${mainUrl.cleanBaseUrl()}/meta/$type/${id.urlEncode()}.json"
+        val prefs = context.getSharedPreferences("StremioX", Context.MODE_PRIVATE)
+        val isSyncEnabled = prefs.getBoolean("history_sync_enabled", false)
+        val syncUrl = prefs.getString("history_sync_url", "") ?: ""
+
+        return if (isSyncEnabled && syncUrl.isNotBlank()) {
+            val cleanBase = syncUrl.cleanBaseUrl()
+            "$cleanBase/meta/$type/${id.urlEncode()}.json"
+        } else {
+            val cleanBase = mainUrl.cleanBaseUrl()
+            "$cleanBase/meta/$type/${id.urlEncode()}.json"
+        }
+    }
+
+    // 🔥 [기록/라이브러리 통합]: 동기화 여부에 따라 데이터베이스 저장 네임스페이스(apiName)를 동적으로 분기
+    fun getTargetApiName(): String {
+        val context = CloudStreamApp.context ?: return name
+        val prefs = context.getSharedPreferences("StremioX", Context.MODE_PRIVATE)
+        val isSyncEnabled = prefs.getBoolean("history_sync_enabled", false)
+        return if (isSyncEnabled) "StremioX" else name
+    }
+    
     companion object {
         private const val tmdbAPI = "https://api.themoviedb.org/3"
         private const val apiKey = "cc9982c4801545a1481d167137ea7b53"
@@ -1214,9 +1238,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             typeName: String? = null
         ): SearchResponse {
             val targetType = this.type ?: typeName ?: "movie"
-            // 🔥 [기록/책갈피 통합]: 전 세계 모든 소스들의 메타데이터 주소를 지정된 단일 AIO Metadata 주소로 강제 일치시킵니다.
-            val unifiedBase = "https://aiometadata.elfhosted.com/stremio/b345b590-872c-4e13-bc4f-852f4e70c9ef"
-            val metaUrl = "$unifiedBase/meta/$targetType/${this.id.urlEncode()}.json"
+            // 🔥 [기록/라이브러리 통합]: 동기화 여부에 맞춘 동적 단일화 저장 URL 획득 적용 [2]
+            val metaUrl = provider.getUnifiedMetaUrl(targetType, this.id)
 
             val baseName = if (!name.isNullOrBlank()) {
                 name
@@ -1601,12 +1624,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val finalSeriesType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.Anime else TvType.TvSeries
 
             if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
-                // 🔥 [기록/책갈피 통합]: 상세정보 주소를 지정된 단일 AIO Metadata 주소로 강제 일치시킵니다.
-                val unifiedBase = "https://aiometadata.elfhosted.com/stremio/b345b590-872c-4e13-bc4f-852f4e70c9ef"
+                // 🔥 [기록/라이브러리 통합]: 동기화 여부에 맞춘 동적 단일화 저장 URL 획득 적용 [2]
+                val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "movie", this@CatalogEntry.id)
                 return@coroutineScope provider.newMovieLoadResponse(
-                    finalName, "$unifiedBase/meta/${finalType ?: "movie"}/${this@CatalogEntry.id}.json", finalMovieType, 
+                    finalName, metaUrl, finalMovieType, 
                     LoadData(
-                        
                         type = finalType, 
                         id = movieId, 
                         imdbId = cleanImdbId, 
@@ -1641,18 +1663,17 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     finalMalId?.let { addMalId(it) }
                     finalAniId?.let { addAniListId(it) }
 
-                    // 🔥 [기록/라이브러리 통합]: 네임스페이스를 StremioX로 통합 우회
-                    this.apiName = "StremioX"
-                }                
+                    // 🔥 [기록/라이브러리 통합]: SharedPreferences 동기화 상태에 따른 네임스페이스(apiName) 가로채기 적용 [2]
+                    this.apiName = provider.getTargetApiName()
+                }
 
             } else {
                 val finalEpisodes = processEpisodes(provider, cleanImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, cleanTmdbId?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, finalAniId, finalMalId, this@CatalogEntry.kitsuIdExt)
-                // 🔥 [기록/책갈피 통합]: 상세정보 주소를 지정된 단일 AIO Metadata 주소로 강제 일치시킵니다.
-                val unifiedBase = "https://aiometadata.elfhosted.com/stremio/b345b590-872c-4e13-bc4f-852f4e70c9ef"
+                // 🔥 [기록/라이브러리 통합]: 동기화 여부에 맞춘 동적 단일화 저장 URL 획득 적용 [2]
+                val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "series", this@CatalogEntry.id)
                 return@coroutineScope provider.newTvSeriesLoadResponse(
-                    finalName, "$unifiedBase/meta/${finalType ?: "series"}/${this@CatalogEntry.id}.json", finalSeriesType, finalEpisodes
+                    finalName, metaUrl, finalSeriesType, finalEpisodes
                 ) {
-                    
                     posterUrl = finalPoster; backgroundPosterUrl = finalBackground; score = Score.from10(finalImdbRating); year = tmdbData?.fetchedYear
                     this.showStatus = tmdbData?.fetchedStatus 
                     this.plot = finalDescription
@@ -1661,7 +1682,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     this.recommendations = tmdbData?.fetchedRecommendations
                     addTrailer(finalTrailers.firstOrNull()); this.contentRating = tmdbData?.fetchedAgeRating
                     tmdbData?.fetchedLogo?.let { this.logoUrl = it }
-
+                    
                     val validImdb = cleanImdbId?.takeIf { it.startsWith("tt") }
                     validImdb?.let { addImdbId(it) }
                     if (validImdb == null) {
@@ -1671,11 +1692,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     finalMalId?.let { addMalId(it) }
                     finalAniId?.let { addAniListId(it) }
 
-                    // 🔥 [기록/라이브러리 통합]: 네임스페이스를 StremioX로 통합 우회
-                    this.apiName = "StremioX"
+                    // 🔥 [기록/라이브러리 통합]: SharedPreferences 동기화 상태에 따른 네임스페이스(apiName) 가로채기 적용 [2]
+                    this.apiName = provider.getTargetApiName()
                 }
-                
-            }
+            }           
         }
     }
 
