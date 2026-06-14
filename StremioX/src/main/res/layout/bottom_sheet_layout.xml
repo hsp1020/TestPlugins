@@ -100,6 +100,30 @@
                 android:nextFocusUp="@id/addlinks" />
         </LinearLayout>
 
+        <!-- TMDb Language Selection (싱크 위에 배치 완료) -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="10dp"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:text="TMDb Language"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+
+            <ImageView
+                android:id="@+id/btnSelectLanguage"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:padding="5dp"
+                android:focusable="true" />
+        </LinearLayout>
+
         <!-- History & Library Sync Toggle -->
         <LinearLayout
             android:layout_width="match_parent"
@@ -153,7 +177,7 @@
                 android:singleLine="true" />
         </LinearLayout>
 
-        <!-- TMDb Language Selection (CineStream 바로 위에 이쁜 톱니바퀴 아이콘 사양으로 이식) -->
+        <!-- Custom Poster Toggle (CineStream 위에 배치 완료) -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -165,31 +189,33 @@
                 android:layout_width="0dp"
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
-                android:text="TMDb Language"
+                android:text="Custom Poster URL Option"
                 android:textSize="18sp"
                 android:textStyle="bold" />
 
-            <ImageView
-                android:id="@+id/btnSelectLanguage"
+            <Switch
+                android:id="@+id/switchCustomPoster"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:padding="5dp"
-                android:focusable="true" />
+                android:focusable="true"
+                android:padding="5dp" />
         </LinearLayout>
 
-        <!-- Custom Poster URL Input -->
+        <!-- Custom Poster URL Input (스위치 켜짐 상태에서만 노출) -->
         <LinearLayout
+            android:id="@+id/layoutCustomPosterUrl"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:layout_marginTop="10dp">
+            android:layout_marginTop="5dp"
+            android:visibility="gone">
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="Custom Recommendation Poster URL"
-                android:textSize="18sp"
-                android:textStyle="bold" />
+                android:textColor="#AAAAAA"
+                android:textSize="14sp" />
 
             <EditText
                 android:id="@+id/etCustomPosterUrl"
