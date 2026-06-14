@@ -708,12 +708,14 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         val addonDeferred = async(Dispatchers.IO) {
             runSuspendCatching {
-                val text = customSession.get(buildUrl("/meta/${res.type}/$encodedId.json")).text
+                // 🔥 [싱크 주소 완전 일치]: 애드온 고유 보완 메타데이터 요청 주소도 싱크 주소로 정규화하여 탐색합니다.
+                val syncMetaUrl = this@StremioC.getUnifiedMetaUrl(res.type, res.id)
+                val text = customSession.get(syncMetaUrl).text
                 val response = if (text.isNotBlank()) jsonMapper.readValue(text, CatalogResponse::class.java) else null
                 response?.meta ?: response?.metas?.firstOrNull { it.id == res.id } ?: response?.metas?.firstOrNull()
             }.getOrNull()
         }
-
+        
         val tmdbIdFromRes = res.moviedb_id?.toString() ?: res.tmdbIdExt
         val targetTmdbId = resolvedTmdbId ?: if (res.id.startsWith("tmdb:")) res.id.removePrefix("tmdb:") else tmdbIdFromRes
         
