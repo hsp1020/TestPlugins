@@ -457,9 +457,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         return cachedManifest
     }
 
-    // ==========================================
-    // [v2.6.0 최적화] 설정값 동적 탭 구성 (mainPage) - 네트워크 차단 0.01초 렌더링
-    // ==========================================
+
     // ==========================================
     // [v2.6.1 최종 최적화] 설정값 동적 탭 구성 (mainPage) - 하이브리드 로드 (캐시 우선 + 최초 1회 퀵 통신)
     // ==========================================
@@ -566,6 +564,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse = coroutineScope {
+        // 🔥 [1번 문제 해결]: 검색(search) 비활성화 시 캐시가 고립되는 버그 원천 차단. 
+        // 스크롤을 할 때 UI 렉 없이 백그라운드 스레드에서 조용히 캐시를 최신화합니다.
+        launch(Dispatchers.IO) {
+            runSuspendCatching { getManifest() }
+        }
+
         var isNewRequest = false
         
         val deferred = pageMutex.withLock {
@@ -594,7 +598,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }
         }
     }
-
+    
     private suspend fun fetchTabCatalogData(request: MainPageRequest): HomePageResponse {
         val currentSkip = catalogSkipState[request.name] ?: 0
         val targetPath = request.data.replace("###", currentSkip.toString())
