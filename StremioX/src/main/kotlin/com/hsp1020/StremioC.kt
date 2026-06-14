@@ -103,7 +103,7 @@ private fun JsonNode?.intOrNull(): Int? {
     return this.asInt()
 }
 
-class StremioC(override var mainUrl: String, override var name: String) : MainAPI() {
+open class StremioC(override var mainUrl: String, override var name: String) : MainAPI() {
     override val supportedTypes = setOf(TvType.Others)
     override val hasMainPage = true
      
