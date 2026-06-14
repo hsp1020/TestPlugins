@@ -100,30 +100,6 @@
                 android:nextFocusUp="@id/addlinks" />
         </LinearLayout>
 
-        <!-- Cinemeta Toggle (신규 추가된 위치) -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="10dp"
-            android:gravity="center_vertical">
-
-            <TextView
-                android:layout_width="0dp"
-                android:layout_weight="1"
-                android:layout_height="wrap_content"
-                android:text="Cinemeta Catalogs"
-                android:textSize="18sp"
-                android:textStyle="bold" />
-
-            <Switch
-                android:id="@+id/switchCinemeta"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:focusable="true"
-                android:padding="5dp" />
-        </LinearLayout>
-
         <!-- CineStream Toggle -->
         <LinearLayout
             android:layout_width="match_parent"
