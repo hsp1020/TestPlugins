@@ -569,30 +569,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     // [v2.0.0] 모든 경우(All cases)에 지정된 AIO Metadata 주소로 직접 연동하여 로드 (폴백 구현)
     // ==========================================
     override suspend fun load(url: String): LoadResponse = coroutineScope {
-        val parsed = parseIdAndType(url)
-        if (parsed != null) {
-            val (id, type) = parsed
-            val isNative = id.startsWith("tt") || id.startsWith("kitsu:") || id.startsWith("mal:")
-            if (!isNative) {
-                val aioUrl = "https://aiometadata.elfhosted.com/stremio/b345b590-872c-4e13-bc4f-852f4e70c9ef/meta/$type/${id.urlEncodeLocal()}.json"
-                return@coroutineScope loadOriginal(aioUrl)
-            }
-        }
-
-        try {
-            loadOriginal(url)
-        } catch (e: Exception) {
-            if (parsed != null) {
-                val (id, type) = parsed
-                val aioUrl = "https://aiometadata.elfhosted.com/stremio/b345b590-872c-4e13-bc4f-852f4e70c9ef/meta/$type/${id.urlEncodeLocal()}.json"
-                loadOriginal(aioUrl)
-            } else {
-                throw e
-            }
-        }
-    }
-
-    private suspend fun loadOriginal(url: String): LoadResponse = coroutineScope {
         val res: CatalogEntry = if (url.startsWith("{")) {
             jsonMapper.readValue(url, CatalogEntry::class.java)
         } else {
