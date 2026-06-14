@@ -1,24 +1,28 @@
 package com.hsp1020
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.content.SharedPreferences
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
+import android.text.InputType
+import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.view.inputmethod.EditorInfo
 import android.widget.EditText
-import android.widget.RadioButton
+import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
-import androidx.recyclerview.widget.LinearLayoutManager
-import androidx.recyclerview.widget.RecyclerView
 import androidx.fragment.app.DialogFragment
-import com.hsp1020.BuildConfig
-import com.hsp1020.StremioXPlugin
 import androidx.core.content.edit
 import androidx.core.widget.addTextChangedListener
 
 class LanguageSelectFragment(
-    plugin: StremioXPlugin,
+    private val plugin: StremioXPlugin,
     private val sharedPref: SharedPreferences,
     private val onDismissCallback: (() -> Unit)? = null
 ) : DialogFragment() {
@@ -33,29 +37,25 @@ class LanguageSelectFragment(
             } else {
                 (displayMetrics.widthPixels * 0.9f).toInt()
             }
-            setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT)
-            setBackgroundDrawable(android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT))
+            // 태블릿 및 대화면 대응 다이얼로그 높이 최대치 세팅
+            val height = (displayMetrics.heightPixels * 0.75f).toInt()
+            setLayout(width, height)
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         }
     }
 
-    private val res = plugin.resources ?: throw Exception("Unable to access plugin resources")
-
-    @SuppressLint("UseCompatLoadingForDrawables")
-    private fun View.makeTvCompatible() {
-        val outlineId = res.getIdentifier("outline", "drawable", BuildConfig.LIBRARY_PACKAGE_NAME)
-        this.background = res.getDrawable(outlineId, null)
+    private fun getDarkThemeBg(): GradientDrawable {
+        return GradientDrawable().apply {
+            setColor(Color.parseColor("#050505"))
+            cornerRadius = 40f
+        }
     }
 
-    private fun getLayout(name: String, inflater: LayoutInflater, container: ViewGroup?): View {
-        val id = res.getIdentifier(name, "layout", BuildConfig.LIBRARY_PACKAGE_NAME)
-        val layout = res.getLayout(id)
-        return inflater.inflate(layout, container, false)
-    }
-
-    private fun <T : View> View.findView(name: String): T {
-        val id = res.getIdentifier(name, "id", BuildConfig.LIBRARY_PACKAGE_NAME)
-        if (id == 0) throw Exception("View ID $name not found.")
-        return this.findViewById(id)
+    private fun getButtonBg(): GradientDrawable {
+        return GradientDrawable().apply {
+            setColor(Color.parseColor("#151515"))
+            cornerRadius = 20f
+        }
     }
 
     private val languages = listOf(
@@ -118,81 +118,107 @@ class LanguageSelectFragment(
         "Taiwan (Chinese Traditional)" to "zh-TW"
     ).sortedBy { it.first.lowercase() }
 
-    private lateinit var adapter: LanguageAdapter
-
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
-        val root = getLayout("fragment_language_select", inflater, container)
-        val drawableId = res.getIdentifier("dialog_background", "drawable", BuildConfig.LIBRARY_PACKAGE_NAME)
-        if (drawableId != 0) {
-            root.background = res.getDrawable(drawableId, null)
+        val ctx = requireContext()
+        
+        val mainLayout = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(40, 40, 40, 40)
+            background = getDarkThemeBg()
         }
 
-        val recycler: RecyclerView = root.findView("languageRecycler")
-        val search: EditText = root.findView("searchLanguage")
-        recycler.makeTvCompatible()
-        search.makeTvCompatible()
+        val titleLabel = TextView(ctx).apply {
+            text = "Select TMDb Language"
+            textSize = 18f
+            setTextColor(Color.WHITE)
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            setPadding(10, 0, 10, 20)
+            gravity = Gravity.CENTER_HORIZONTAL
+        }
+        mainLayout.addView(titleLabel)
 
-        recycler.layoutManager = LinearLayoutManager(requireContext())
+        val searchBar = EditText(ctx).apply {
+            hint = "Search language..."
+            setHintTextColor(Color.GRAY)
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            setPadding(25, 20, 25, 20)
+            background = getButtonBg()
+            inputType = InputType.TYPE_CLASS_TEXT
+            imeOptions = EditorInfo.IME_ACTION_DONE
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                setMargins(0, 0, 0, 25)
+            }
+        }
+        mainLayout.addView(searchBar)
+
+        val scrollView = androidx.core.widget.NestedScrollView(ctx).apply {
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+        }
+        
+        val listContainer = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        scrollView.addView(listContainer)
+        mainLayout.addView(scrollView)
 
         val savedCode = sharedPref.getString("tmdb_language_code", "ko-KR") ?: "ko-KR"
+        val rowViews = mutableListOf<Pair<String, View>>()
 
-        adapter = LanguageAdapter(
-            languages.sortedBy { it.first.lowercase() },
-            savedCode
-        ) { code ->
-            sharedPref.edit { putString("tmdb_language_code", code) }
-            Toast.makeText(requireContext(), "Language set to $code", Toast.LENGTH_SHORT).show()
-            dismiss()
+        languages.forEach { (name, code) ->
+            val rowLayout = LinearLayout(ctx).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(15, 20, 15, 20)
+                isClickable = true
+                focusable = View.FOCUSABLE
+                
+                // 클릭 리플 선택 효과 연동
+                val outValue = android.util.TypedValue()
+                ctx.theme.resolveAttribute(android.R.attr.selectableItemBackground, outValue, true)
+                setBackgroundResource(outValue.resourceId)
+            }
+
+            val tvName = TextView(ctx).apply {
+                text = "$name ($code)"
+                textSize = 15f
+                setTextColor(if (code == savedCode) Color.parseColor("#2196F3") else Color.WHITE)
+                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            rowLayout.addView(tvName)
+
+            if (code == savedCode) {
+                val tvCheck = TextView(ctx).apply {
+                    text = "✓"
+                    textSize = 16f
+                    setTextColor(Color.parseColor("#2196F3"))
+                    setPadding(15, 0, 15, 0)
+                }
+                rowLayout.addView(tvCheck)
+            }
+
+            rowLayout.setOnClickListener {
+                sharedPref.edit { putString("tmdb_language_code", code) }
+                Toast.makeText(ctx, "Language set to $code", Toast.LENGTH_SHORT).show()
+                dismiss()
+            }
+
+            listContainer.addView(rowLayout)
+            rowViews.add(name to rowLayout)
         }
 
-        recycler.adapter = adapter
-
-        search.addTextChangedListener { text ->
-            adapter.filter(text.toString())
-        }
-
-        return root
-    }
-
-    inner class LanguageAdapter(
-        private val originalList: List<Pair<String, String>>,
-        private val selectedCode: String,
-        private val onClick: (String) -> Unit
-    ) : RecyclerView.Adapter<LanguageAdapter.VH>() {
-
-        private var filteredList = originalList.toMutableList()
-
-        inner class VH(val v: View) : RecyclerView.ViewHolder(v) {
-            val radio: RadioButton = v.findView("radio_language")
-        }
-
-        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
-            val view = getLayout("item_language", LayoutInflater.from(parent.context), parent)
-            return VH(view)
-        }
-
-        override fun onBindViewHolder(holder: VH, position: Int) {
-            val (name, code) = filteredList[position]
-
-            holder.radio.text = name
-            holder.radio.isChecked = code == selectedCode
-
-            holder.radio.setOnClickListener {
-                onClick(code)
+        searchBar.addTextChangedListener { text ->
+            val query = text.toString().trim().lowercase()
+            rowViews.forEach { (name, view) ->
+                view.visibility = if (query.isEmpty() || name.lowercase().contains(query)) {
+                    View.VISIBLE
+                } else {
+                    View.GONE
+                }
             }
         }
 
-        override fun getItemCount() = filteredList.size
-        
-        @SuppressLint("NotifyDataSetChanged")
-        fun filter(query: String) {
-            filteredList = if (query.isBlank()) {
-                originalList.toMutableList()
-            } else {
-                originalList.filter { it.first.contains(query, ignoreCase = true) }.toMutableList()
-            }
-            notifyDataSetChanged()
-        }
+        return mainLayout
     }
 
     override fun onDismiss(dialog: android.content.DialogInterface) {
