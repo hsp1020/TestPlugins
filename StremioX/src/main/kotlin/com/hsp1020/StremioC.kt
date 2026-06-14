@@ -1842,7 +1842,7 @@ private data class TmdbDetailResponse(
             title = this.title ?: this.name,
             originalTitle = this.original_title ?: this.original_name,
             mediaType = mediaType,
-            posterPath = this.posterPath,
+            poster_path = this.posterPath,
             overview = this.overview,
             origin_country = this.origin_country,
             original_language = this.original_language,
