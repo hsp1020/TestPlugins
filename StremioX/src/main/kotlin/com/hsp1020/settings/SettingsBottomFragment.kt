@@ -39,6 +39,7 @@ data class LinkItem(
 
 object SettingsRepository {
     private const val PREF_KEY_LINKS = "stremio_saved_links"
+    const val PREF_KEY_CINEMETA_ENABLED = "cinemeta_integration_enabled" // 🔥 추가: Cinemeta 온오프 키
     const val PREF_KEY_CINESTREAM_ENABLED = "cinestream_integration_enabled"
     const val PREF_KEY_STREAMPLAY_ENABLED = "streamplay_integration_enabled"
     const val PREF_KEY_VIXSRC_ENABLED = "vixsrc_integration_enabled"
@@ -61,7 +62,6 @@ object SettingsRepository {
             }
             list
         } catch (e: Exception) {
-            // FIX: Cloudstream Log.e accepts only 2 arguments (String, String)
             Log.e("SettingsRepository", "Failed to parse links: ${e.message}")
             mutableListOf()
         }
@@ -123,7 +123,6 @@ class SettingsBottomFragment(
         return inflater.inflate(layout, container, false)
     }
 
-    // [수정: 의존성 에러 교정] 정적 호출 불가 함수를 APIHolder와 공개된 동적 로더로 우회 검증
     private fun isCineStreamInstalled(): Boolean {
         return APIHolder.allProviders.any { it.name.equals("CineStream", true) } ||
                StremioC.loadProviderDynamically("megix", "com.megix.CineStreamProvider") != null
@@ -159,10 +158,10 @@ class SettingsBottomFragment(
         showlinks.makeTvCompatible()
         saveIcon.makeTvCompatible()
 
-        // UI Initialization: Toggles
+        // UI Initialization: Toggles (Cinemeta 토글을 CineStream 바로 위에 신규 배치)
+        setupToggle(view, "switchCinemeta", SettingsRepository.PREF_KEY_CINEMETA_ENABLED, true, "Cinemeta Catalog")
         setupToggle(view, "switchCineStream", SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, isCineStreamInstalled(), "CineStream")
         setupToggle(view, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
-        // VixSrc는 내장 코드로 실행되므로 설치여부(isInstalled)를 true로 고정합니다.
         setupToggle(view, "switchVixSrc", SettingsRepository.PREF_KEY_VIXSRC_ENABLED, true, "VixSrc")
 
         // Action: Add Link
@@ -309,7 +308,7 @@ class SettingsBottomFragment(
                 showToast("$displayName Integration $statusText")
             }
         } catch (e: Throwable) {
-            // Log.w("SettingsBottomFragment", "View $viewId not found in XML. Skipping toggle setup.")
+            // 레이아웃 파일에 토글이 없더라도 크래시 없이 건너뜀 (안정성 확보)
         }
     }
 
