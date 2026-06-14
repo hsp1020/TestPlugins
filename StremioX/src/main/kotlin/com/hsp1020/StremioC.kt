@@ -364,7 +364,13 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     private fun buildTmdbUrl(endpoint: String, vararg params: Pair<String, String>): String {
         val builder = "$tmdbAPI$endpoint".toHttpUrlOrNull()?.newBuilder() ?: return ""
         builder.addQueryParameter("api_key", apiKey)
-        builder.addQueryParameter("language", "ko-KR")
+        
+        // 🔥 [언어 코드 동적화]: SharedPreferences에서 언어 코드를 읽어오며 기본값은 한국어(ko-KR)로 동기화 [3]
+        val context = CloudStreamApp.context
+        val prefs = context?.getSharedPreferences("StremioX", Context.MODE_PRIVATE)
+        val langCode = prefs?.getString("tmdb_language_code", "ko-KR") ?: "ko-KR"
+        builder.addQueryParameter("language", langCode)
+        
         params.forEach { (key, value) ->
             builder.addQueryParameter(key, value)
         }
@@ -1352,29 +1358,50 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     .distinctBy { it.id }
                     .filter { it.id != null && it.id != tmdbIdStr.toIntOrNull() }
 
+                // 🔥 [포스터 URL 동적화]: 사용자가 입력한 커스텀 포스터 주소 동적 분기 및 tmdb 기본 이미지 폴백 로직 적용 [3]
+                val context = CloudStreamApp.context
+                val prefs = context?.getSharedPreferences("StremioX", Context.MODE_PRIVATE)
+                val customPosterBase = prefs?.getString("custom_poster_url", "") ?: ""
+
                 fetchedRecommendations = finalCombinedMedia.mapNotNull { media ->
                     val recTitle = media.title ?: media.name ?: media.originalTitle ?: return@mapNotNull null
                     val recTmdbId = media.id ?: return@mapNotNull null
                     val rawMediaType = media.mediaType ?: tmdbMediaType
                     val posterType = if (rawMediaType == "tv") "tv" else "movie"
                     val outType = if (rawMediaType == "tv") "series" else "movie"
-                    val customPosterUrl = "https://extendedratings.com/poster/tmdb:$posterType:$recTmdbId.jpg?config=aed081fd-73b1-460e-879d-377c5658691c"
+                    
+                    val resolvedPosterUrl = if (customPosterBase.isNotBlank()) {
+                        val cleanBase = customPosterBase.trim().trimEnd('/')
+                        "$cleanBase/tmdb:$posterType:$recTmdbId.jpg?config=aed081fd-73b1-460e-879d-377c5658691c"
+                    } else {
+                        // 주소가 비어있으면 TMDB 기본 포스터 이미지 경로를 자동 추적하여 폴백 처리 [3]
+                        if (!media.posterPath.isNullOrBlank()) "https://image.tmdb.org/t/p/w500${media.posterPath}" else TRANSPARENT_PIXEL
+                    }
                     
                     val thinData = LoadData(id = "tmdb:${media.id}", type = outType)
                     val thinDataJson = jsonMapper.writeValueAsString(thinData)
                     
                     provider.newMovieSearchResponse(recTitle, thinDataJson, if (outType == "movie") TvType.Movie else TvType.TvSeries) { 
-                        this.posterUrl = customPosterUrl 
+                        this.posterUrl = resolvedPosterUrl 
                     }
                 }.take(50)
+                                
             }
+
+            // 🔥 [연령 등급 동적화]: 선택한 언어 코드에 맞게 심의 등급 국가 코드를 동적으로 추출하여 매핑합니다. (미등록 시 US로 폴백) [3]
+            val context = CloudStreamApp.context
+            val prefs = context?.getSharedPreferences("StremioX", Context.MODE_PRIVATE)
+            val langCode = prefs?.getString("tmdb_language_code", "ko-KR") ?: "ko-KR"
+            val countryCode = langCode.substringAfter("-", "KR").uppercase()
 
             val fetchedAgeRating = if (isMovie) {
-                detailRes.release_dates?.results?.firstOrNull { it.iso_3166_1 == "KR" }?.release_dates?.firstOrNull { !it.certification.isNullOrEmpty() }?.certification
+                detailRes.release_dates?.results?.firstOrNull { it.iso_3166_1 == countryCode }?.release_dates?.firstOrNull { !it.certification.isNullOrEmpty() }?.certification
+                    ?: detailRes.release_dates?.results?.firstOrNull { it.iso_3166_1 == "US" }?.release_dates?.firstOrNull { !it.certification.isNullOrEmpty() }?.certification
             } else {
-                detailRes.content_ratings?.results?.firstOrNull { it.iso_3166_1 == "KR" }?.rating
+                detailRes.content_ratings?.results?.firstOrNull { it.iso_3166_1 == countryCode }?.rating
+                    ?: detailRes.content_ratings?.results?.firstOrNull { it.iso_3166_1 == "US" }?.rating
             }
-
+            
             val crewList = detailRes.credits?.crew?.filter { it.job == "Director" || it.job == "Writer" }?.groupBy { it.name ?: it.originalName }?.mapNotNull { (name, roles) ->
                 if (name == null) return@mapNotNull null
                 val sortedJobs = roles.mapNotNull { it.job }.distinct().sortedBy { if (it == "Director") 1 else 2 }.joinToString(", ")
