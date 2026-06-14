@@ -418,6 +418,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         return if (link.startsWith("/")) "https://image.tmdb.org/t/p/w300$link" else link
     }
 
+    // 🔥 [v2.6.0 최적화]: 백그라운드에서 매니페스트 로드 성공 시에만 디스크 캐시를 조용히 최신화합니다. (검색 부작용 원천 차단)
     private suspend fun getManifest(): Manifest? {
         val originalBase = mainUrl.substringBefore("?").trimEnd('/')
         val currentUrl = if (originalBase.endsWith("manifest.json")) originalBase else "$originalBase/manifest.json"
@@ -429,36 +430,76 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             return cachedManifest
         }
 
-        val res = runSuspendCatching { 
-            val text = customSession.get(currentUrl, timeout = 120L).text
-            if (text.isNotBlank()) jsonMapper.readValue(text, Manifest::class.java) else null
+        val resText = runSuspendCatching { 
+            customSession.get(currentUrl, timeout = 15L).text
         }.getOrNull()
 
-        if (res != null && res.catalogs.isNotEmpty()) {
-            cachedManifest = res
-            lastManifestUrl = currentUrl
-            lastCacheTime = now
-            catalogSentIds.clear()
-            catalogSkipState.clear()
-        }       
-        return res ?: cachedManifest
+        if (!resText.isNullOrBlank()) {
+            try {
+                val parsed = jsonMapper.readValue(resText, Manifest::class.java)
+                if (parsed.catalogs.isNotEmpty()) {
+                    cachedManifest = parsed
+                    lastManifestUrl = currentUrl
+                    lastCacheTime = now
+                    catalogSentIds.clear()
+                    catalogSkipState.clear()
+                    
+                    // 통신에 성공한 최신 매니페스트만 SharedPreferences에 안전하게 즉시 동기화(저장)합니다.
+                    val context = CloudStreamApp.context
+                    context?.getSharedPreferences("StremioX_Manifest", Context.MODE_PRIVATE)
+                        ?.edit()?.putString(currentUrl.toUniqueKey(), resText)?.apply()
+                        
+                    return parsed
+                }
+            } catch (e: Exception) {}
+        }
+        
+        return cachedManifest
     }
 
     // ==========================================
-    // [v2.1.0] 설정값 동적 탭 구성 (mainPage) - 독자 정렬(Flat-Alignment) 시스템 구현
+    // [v2.6.0 최적화] 설정값 동적 탭 구성 (mainPage) - 네트워크 차단 0.01초 렌더링
+    // ==========================================
+    // ==========================================
+    // [v2.6.1 최종 최적화] 설정값 동적 탭 구성 (mainPage) - 하이브리드 로드 (캐시 우선 + 최초 1회 퀵 통신)
     // ==========================================
     override val mainPage: List<MainPageData>
         get() {
-            val manifest = runBlocking {
-                try { getManifest() } catch (e: Exception) { null }
-            } ?: return emptyList()
-
             val context = CloudStreamApp.context ?: return emptyList()
             val prefs = context.getSharedPreferences("StremioX", Context.MODE_PRIVATE)
+            val manifestPrefs = context.getSharedPreferences("StremioX_Manifest", Context.MODE_PRIVATE)
 
-            val rawCatalogs = manifest.catalogs ?: emptyList()
+            val originalBase = mainUrl.substringBefore("?").trimEnd('/')
+            val currentUrl = if (originalBase.endsWith("manifest.json")) originalBase else "$originalBase/manifest.json"
+            val uniqueKey = currentUrl.toUniqueKey()
             
-            // 1. 매니페스트로부터 렌더링될 수 있는 모든 플랫 탭(Flat-Tab) 후보군을 플랫 리스트로 선출
+            // 1. 디스크 캐시 읽기
+            val diskCache = manifestPrefs.getString(uniqueKey, null)
+            
+            // 2. 하이브리드 파싱: 캐시가 있으면 즉시 사용, 없으면 2초 타임아웃을 건 안전한 최초 1회 통신 진행
+            val rawCatalogs = if (cachedManifest != null) {
+                cachedManifest?.catalogs ?: emptyList()
+            } else if (!diskCache.isNullOrBlank()) {
+                try {
+                    jsonMapper.readValue(diskCache, Manifest::class.java).catalogs ?: emptyList()
+                } catch (e: Exception) { emptyList() }
+            } else {
+                // 🔥 [최초 1회 통신 방어막]: 캐시가 없을 때만 실행되며, 앱 멈춤 방지를 위해 2초 만에 강제 종료(Timeout)시킵니다.
+                runBlocking(Dispatchers.IO) {
+                    try {
+                        withTimeout(2000L) {
+                            val res = app.get(currentUrl).text
+                            if (res.isNotBlank()) {
+                                manifestPrefs.edit().putString(uniqueKey, res).apply()
+                                jsonMapper.readValue(res, Manifest::class.java).catalogs ?: emptyList()
+                            } else emptyList()
+                        }
+                    } catch (e: Exception) { emptyList() }
+                }
+            }
+
+            if (rawCatalogs.isEmpty()) return emptyList()
+            
             val flatTabs = mutableListOf<FlatTab>()
             rawCatalogs.forEach { catalog ->
                 val catalogId = catalog.id
@@ -468,7 +509,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 
                 val requiresGenre = catalog.extra?.any { it.name == "genre" && it.isRequired == true } == true
 
-                // 기본 인기 탭 생성 (장르 필수 조건이 아닌 경우)
                 if (!requiresGenre) {
                     flatTabs.add(FlatTab(
                         key = "${catalogId}_${catalogType}_default",
@@ -477,22 +517,18 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     ))
                 }
 
-                // 개별 장르 탭들을 독자 탭 후보로 분리하여 생성
                 val genres = catalog.getGenresList()
                 genres.forEach { genre ->
-                    // [v2.1.2] 첫 글자 대문자 보정 유틸 적용 [3]
                     val capitalizedGenre = genre.replaceFirstChar { it.uppercase() }
                     flatTabs.add(FlatTab(
                         key = "${catalogId}_${catalogType}_genre_$genre",
-                        displayName = "$catalogName : $capitalizedGenre - $displayType",
+                        displayName = "$catalogName : $capitalizedGenre  - $displayType",
                         urlPath = "/catalog/$catalogType/$catalogId/genre=${genre.urlEncodeLocal()}&skip=###.json"
                     ))
                 }
             }
 
-            // 2. 단일 저장 평면 정렬 순서(Flat-Order) 정보 획득
-            val uniqueId = mainUrl.toUniqueKey()
-            val orderKey = "catalog_order_$uniqueId"
+            val orderKey = "catalog_order_$uniqueKey"
             val orderJson = prefs.getString(orderKey, null)
             val orderedKeys = mutableListOf<String>()
             if (orderJson != null) {
@@ -504,25 +540,21 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 } catch (e: Exception) {}
             }
 
-            // 3. 플랫 탭들을 저장된 우선순위에 맞추어 정렬 (신규 탭은 맨 뒤로 배치)
             val sortedTabs = flatTabs.sortedBy { tab ->
                 val idx = orderedKeys.indexOf(tab.key)
                 if (idx != -1) idx else Int.MAX_VALUE
             }
 
-            // 4. 활성화 여부를 개별적으로 검사하여 최종 드롭다운 탭 렌더링 리스트 산출
             return mainPageOf(
                 *buildList {
                     sortedTabs.forEach { tab ->
                         val isEnabled = if (tab.key.contains("_genre_")) {
-                            // 장르인 경우: 부모 카탈로그의 장르 마스터 토글이 켜져있고, 개별 장르 토글도 켜져있어야 함 [1]
                             val catalogKey = tab.key.substringBefore("_genre_")
-                            val isGenresMasterEnabled = prefs.getBoolean("genres_enabled_${uniqueId}_$catalogKey", true)
-                            val isIndividualGenreEnabled = prefs.getBoolean("tab_enabled_${uniqueId}_${tab.key}", true)
+                            val isGenresMasterEnabled = prefs.getBoolean("genres_enabled_${uniqueKey}_$catalogKey", true)
+                            val isIndividualGenreEnabled = prefs.getBoolean("tab_enabled_${uniqueKey}_${tab.key}", true)
                             isGenresMasterEnabled && isIndividualGenreEnabled
                         } else {
-                            // 일반 카테고리인 경우: 개별 토글만 검사
-                            prefs.getBoolean("tab_enabled_${uniqueId}_${tab.key}", true)
+                            prefs.getBoolean("tab_enabled_${uniqueKey}_${tab.key}", true)
                         }
                         
                         if (isEnabled) {
