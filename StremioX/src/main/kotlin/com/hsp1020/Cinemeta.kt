@@ -17,12 +17,11 @@ class Cinemeta : StremioC("https://v3-cinemeta.strem.io", "Cinemeta") {
     // [StremioC 완벽 동기화] 안정성 방어 상태 변수들
     // ==========================================
     private val catalogSkipState = ConcurrentHashMap<String, Int>()
-    private val catalogSentIds = ConcurrentHashMap<String, MutableSet<String>>() // 중복 아이템 렌더링 방지용
+    private val catalogSentIds = ConcurrentHashMap<String, MutableSet<String>>()
     
-    private val pageMutex = Mutex() // 동시 스크롤 요청 방어용
+    private val pageMutex = Mutex()
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
 
-    // StremioC 내부의 lruSet 로직 복제 (최대 사이즈 이상의 캐시 자동 삭제)
     private inline fun <T> lruSet(maxSize: Int): MutableSet<T> {
         return Collections.synchronizedSet(Collections.newSetFromMap(object : java.util.LinkedHashMap<T, Boolean>(maxSize, 0.75f, true) {
             override fun removeEldestEntry(eldest: MutableMap.MutableEntry<T, Boolean>): Boolean {
@@ -41,39 +40,40 @@ class Cinemeta : StremioC("https://v3-cinemeta.strem.io", "Cinemeta") {
         "Reality-TV", "Talk-Show", "Game-Show"
     )
 
-    override val mainPage = buildList {
-        val movieCatalogName = "Popular"
-        val movieType = "Movie"
-        
-        add("$mainUrl/catalog/movie/top/skip=###.json" to "$movieCatalogName - $movieType")
-        movieGenres.forEach { genre ->
-            add("$mainUrl/catalog/movie/top/genre=$genre&skip=###.json" to "$movieCatalogName - $movieType ($genre)")
-        }
+    // [빌드 에러 수정] mainPageOf 함수에 buildList 배열을 전개(*)하여 전달합니다.
+    override val mainPage = mainPageOf(
+        *buildList {
+            val movieCatalogName = "Popular"
+            val movieType = "Movie"
+            
+            add("$mainUrl/catalog/movie/top/skip=###.json" to "$movieCatalogName - $movieType")
+            movieGenres.forEach { genre ->
+                add("$mainUrl/catalog/movie/top/genre=$genre&skip=###.json" to "$movieCatalogName - $movieType ($genre)")
+            }
 
-        val seriesCatalogName = "Popular"
-        val seriesType = "Series"
-        
-        add("$mainUrl/catalog/series/top/skip=###.json" to "$seriesCatalogName - $seriesType")
-        seriesGenres.forEach { genre ->
-            add("$mainUrl/catalog/series/top/genre=$genre&skip=###.json" to "$seriesCatalogName - $seriesType ($genre)")
-        }
-    }
+            val seriesCatalogName = "Popular"
+            val seriesType = "Series"
+            
+            add("$mainUrl/catalog/series/top/skip=###.json" to "$seriesCatalogName - $seriesType")
+            seriesGenres.forEach { genre ->
+                add("$mainUrl/catalog/series/top/genre=$genre&skip=###.json" to "$seriesCatalogName - $seriesType ($genre)")
+            }
+        }.toTypedArray()
+    )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse = coroutineScope {
         var isNewRequest = false
         
-        // [StremioC 완벽 동기화] 중복 요청 방어 및 초기화 로직
         val deferred = pageMutex.withLock {
             if (page <= 1) {
                 catalogSentIds.clear()
                 activePageRequests.clear()
                 catalogSkipState.clear()
-                // StremioC 내부 캐시 초기화는 Companion object 이므로 생략해도 무방
             }
             
             activePageRequests.getOrPut(page) {
                 isNewRequest = true
-                async { fetchCinemetaData(request) } // 실제 데이터 패치 호출
+                async { fetchCinemetaData(request) }
             }
         }
         
@@ -96,11 +96,11 @@ class Cinemeta : StremioC("https://v3-cinemeta.strem.io", "Cinemeta") {
         val targetUrl = request.data.replace("###", currentSkip.toString())
         val cacheKey = "Cinemeta_${request.name}_$currentSkip"
 
-        // [StremioC 완벽 동기화] StremioC의 Companion Cache 재사용
+        // StremioC의 Companion Object 멤버 접근 시 명시적으로 'StremioC.' 를 붙여 컴파일 오류 원천 차단
         val resultPair = StremioC.getOrFetchCachedPage(cacheKey) {
-            val jsonText = customSession.get(targetUrl).text
+            val jsonText = StremioC.customSession.get(targetUrl).text
             val response = try {
-                jsonMapper.readValue(jsonText, CinemetaDirectResponse::class.java)
+                StremioC.jsonMapper.readValue(jsonText, CinemetaDirectResponse::class.java)
             } catch (e: Exception) { null }
 
             val metas = response?.metas ?: emptyList()
@@ -110,7 +110,6 @@ class Cinemeta : StremioC("https://v3-cinemeta.strem.io", "Cinemeta") {
                 val title = meta.name ?: meta.id
                 val metaUrl = "$mainUrl/meta/${meta.type ?: "movie"}/${meta.id}.json"
 
-                // StremioC.toSearchResponse 와 동일한 형태로 SearchResponse 생성
                 newMovieSearchResponse(title, metaUrl, type) {
                     this.posterUrl = meta.poster
                     this.score = meta.imdbRating?.toDoubleOrNull()?.let { Score.from10(it) }
@@ -122,7 +121,6 @@ class Cinemeta : StremioC("https://v3-cinemeta.strem.io", "Cinemeta") {
         if (resultPair != null) {
             catalogSkipState[request.name] = currentSkip + resultPair.second
             
-            // [StremioC 완벽 동기화] 이미 본 ID는 걸러내기 (중복 데이터 제거)
             var seenForThisCatalog = catalogSentIds[request.name]
             if (seenForThisCatalog == null) {
                 synchronized(catalogSentIds) {
