@@ -59,6 +59,11 @@ object SettingsRepository {
     const val PREF_KEY_CUSTOM_POSTER_ENABLED = "custom_poster_enabled"
     const val PREF_KEY_CUSTOM_POSTER_URL = "custom_poster_url"
 
+    // TMDb API 및 MdbList 정밀 연동 제어 키 정의
+    const val PREF_KEY_TMDB_API_KEY = "tmdb_api_key"
+    const val PREF_KEY_MDBLIST_ENABLED = "mdblist_enabled"
+    const val PREF_KEY_MDBLIST_API_KEY = "mdblist_api_key"
+
     fun loadLinks(sharedPref: SharedPreferences): MutableList<LinkItem> {
         val json = sharedPref.getString(PREF_KEY_LINKS, null) ?: return mutableListOf()
         val list = mutableListOf<LinkItem>()
@@ -268,7 +273,7 @@ class SettingsBottomFragment(
         setupToggle(view, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
         setupToggle(view, "switchVixSrc", SettingsRepository.PREF_KEY_VIXSRC_ENABLED, true, "VixSrc")
 
-        // [v2.2.0] 다국어 선택 및 커스텀 포스터 주소 바인딩 연동 (참고 코드 수치 규격 적용)
+        // 다국어 선택 및 커스텀 포스터 주소 바인딩 연동 (참고 코드 수치 규격 적용)
         val btnSelectLanguage: ImageView = try { view.findView("btnSelectLanguage") } catch (e: Throwable) {
             throw Exception("btnSelectLanguage ImageView not found in bottom_sheet_layout", e)
         }
@@ -303,6 +308,43 @@ class SettingsBottomFragment(
         etCustomPosterUrl.setOnFocusChangeListener { _, hasFocus ->
             if (!hasFocus) {
                 sharedPref.edit { putString(SettingsRepository.PREF_KEY_CUSTOM_POSTER_URL, etCustomPosterUrl.text.toString().trim()) }
+            }
+        }
+
+        // TMDb API Key 및 MdbList 수집 제어판 위젯 신규 연동
+        val etTmdbApiKey: EditText = try { view.findView("etTmdbApiKey") } catch (e: Throwable) {
+            throw Exception("etTmdbApiKey EditText not found in bottom_sheet_layout", e)
+        }
+        val switchMdbList: Switch = try { view.findView("switchMdbList") } catch (e: Throwable) {
+            throw Exception("switchMdbList Switch not found in bottom_sheet_layout", e)
+        }
+        val layoutMdbList: View = try { view.findView("layoutMdbList") } catch (e: Throwable) {
+            throw Exception("layoutMdbList View not found in bottom_sheet_layout", e)
+        }
+        val etMdbListApiKey: EditText = try { view.findView("etMdbListApiKey") } catch (e: Throwable) {
+            throw Exception("etMdbListApiKey EditText not found in bottom_sheet_layout", e)
+        }
+
+        etTmdbApiKey.setText(sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_API_KEY, ""))
+        etTmdbApiKey.setOnFocusChangeListener { _, hasFocus ->
+            if (!hasFocus) {
+                sharedPref.edit { putString(SettingsRepository.PREF_KEY_TMDB_API_KEY, etTmdbApiKey.text.toString().trim()) }
+            }
+        }
+
+        val isMdbListEnabled = sharedPref.getBoolean(SettingsRepository.PREF_KEY_MDBLIST_ENABLED, false)
+        switchMdbList.isChecked = isMdbListEnabled
+        layoutMdbList.visibility = if (isMdbListEnabled) View.VISIBLE else View.GONE
+        etMdbListApiKey.setText(sharedPref.getString(SettingsRepository.PREF_KEY_MDBLIST_API_KEY, ""))
+
+        switchMdbList.setOnCheckedChangeListener { _, isChecked ->
+            sharedPref.edit { putBoolean(SettingsRepository.PREF_KEY_MDBLIST_ENABLED, isChecked) }
+            layoutMdbList.visibility = if (isChecked) View.VISIBLE else View.GONE
+        }
+
+        etMdbListApiKey.setOnFocusChangeListener { _, hasFocus ->
+            if (!hasFocus) {
+                sharedPref.edit { putString(SettingsRepository.PREF_KEY_MDBLIST_API_KEY, etMdbListApiKey.text.toString().trim()) }
             }
         }
 
@@ -423,8 +465,17 @@ class SettingsBottomFragment(
         saveIcon.setOnClickListener {
             val context = this.context ?: return@setOnClickListener
 
+            // 저장 클릭 시 TMDb API Key 필수값 체크 분기 적용
+            val tmdbApiKeyVal = etTmdbApiKey.text.toString().trim()
+            if (tmdbApiKeyVal.isEmpty()) {
+                showToast("TMDb API Key는 필수 입력 항목입니다.")
+                return@setOnClickListener
+            }
+
             // 가로입력단 저장소 누수 방어 수치 수집 저장
             sharedPref.edit {
+                putString(SettingsRepository.PREF_KEY_TMDB_API_KEY, tmdbApiKeyVal)
+                putString(SettingsRepository.PREF_KEY_MDBLIST_API_KEY, etMdbListApiKey.text.toString().trim())
                 putString(SettingsRepository.PREF_KEY_HISTORY_SYNC_URL, etHistorySyncUrl.text.toString().trim())
                 putString(SettingsRepository.PREF_KEY_CUSTOM_POSTER_URL, etCustomPosterUrl.text.toString().trim())
             }
