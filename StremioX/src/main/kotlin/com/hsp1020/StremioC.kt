@@ -1637,7 +1637,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     
                     finalMalId?.let { addMalId(it) }
                     finalAniId?.let { addAniListId(it) }
-                }
+
+                    // 🔥 [기록/라이브러리 통합]: 네임스페이스를 StremioX로 통합 우회
+                    this.apiName = "StremioX"
+                }                
+                    
             } else {
                 val finalEpisodes = processEpisodes(provider, cleanImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, cleanTmdbId?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, finalAniId, finalMalId, this@CatalogEntry.kitsuIdExt)
                 val cleanBase = provider.mainUrl.cleanBaseUrl()
@@ -1652,7 +1656,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     this.recommendations = tmdbData?.fetchedRecommendations
                     addTrailer(finalTrailers.firstOrNull()); this.contentRating = tmdbData?.fetchedAgeRating
                     tmdbData?.fetchedLogo?.let { this.logoUrl = it }
-                    
+
                     val validImdb = cleanImdbId?.takeIf { it.startsWith("tt") }
                     validImdb?.let { addImdbId(it) }
                     if (validImdb == null) {
@@ -1661,7 +1665,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     
                     finalMalId?.let { addMalId(it) }
                     finalAniId?.let { addAniListId(it) }
+
+                    // 🔥 [기록/라이브러리 통합]: 네임스페이스를 StremioX로 통합 우회
+                    this.apiName = "StremioX"
                 }
+                
             }
         }
     }
