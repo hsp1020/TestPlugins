@@ -115,9 +115,9 @@ class Cinemeta : StremioC("https://extendedratings.com/proxy/f873acb8-3861-444c-
                 val title = meta.name ?: meta.id
                 val metaUrl = "$mainUrl/meta/${meta.type ?: "movie"}/${meta.id}.json"
 
+                // [수정] 평점 배지(this.score) 설정부를 제거하여 홈화면 포스터를 깔끔하게 연출합니다.
                 newMovieSearchResponse(title, metaUrl, type) {
                     this.posterUrl = meta.poster
-                    this.score = meta.imdbRating?.toDoubleOrNull()?.let { Score.from10(it) }
                 }
             }
             Pair(mappedItems, metas.size)
@@ -143,21 +143,18 @@ class Cinemeta : StremioC("https://extendedratings.com/proxy/f873acb8-3861-444c-
     }
 
     // ==========================================
-    // [수정] 모든 경우(All cases)에 지정된 AIO Metadata 주소로 직접 연동하여 로드
+    // 모든 경우(All cases)에 지정된 AIO Metadata 주소로 직접 연동하여 로드
     // ==========================================
     override suspend fun load(url: String): LoadResponse {
         val parsed = parseIdAndType(url)
         if (parsed != null) {
             val (id, type) = parsed
-            // 영화나 시리즈에 상관없이 모든 메타데이터 요청 주소를 AIO Metadata 프록시 경로로 생성하여 로드합니다.
             val aioUrl = "https://aiometadata.elfhosted.com/stremio/b345b590-872c-4e13-bc4f-852f4e70c9ef/meta/$type/${id.urlEncodeLocal()}.json"
             return super.load(aioUrl)
         }
-        // 예외 대응: 파싱이 완벽하게 실패한 경우에만 기존 보존된 URL로 시도
         return super.load(url)
     }
 
-    // JSON 본문(LoadData 등) 혹은 일반 URL 형태에서 ID와 Type을 정밀 추출하는 헬퍼 함수
     private fun parseIdAndType(url: String): Pair<String, String>? {
         return try {
             if (url.startsWith("{")) {
