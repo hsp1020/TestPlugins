@@ -105,7 +105,8 @@ class SettingsBottomFragment(
 
     private val res = plugin.resources ?: throw Exception("Unable to access plugin resources")
 
-    private data class ConfigFlatTab(val key: String, val displayName: String)
+    // 독자정렬(Flat-Tab) 구성을 위한 DTO 선언
+    private data class ConfigFlatTab(val key: String, val displayName: String, val isGenre: Boolean, val catalogKey: String)
 
     private fun getDrawable(name: String): Drawable {
         val id = res.getIdentifier(name, "drawable", BuildConfig.LIBRARY_PACKAGE_NAME)
@@ -433,7 +434,7 @@ class SettingsBottomFragment(
                         } ?: false
 
                         if (!requiresGenre) {
-                            flatTabs.add(ConfigFlatTab("${id}_${type}_default", "$name - $displayType"))
+                            flatTabs.add(ConfigFlatTab("${id}_${type}_default", "$name - $displayType", false, "${id}_${type}"))
                         }
 
                         val genres = mutableListOf<String>()
@@ -466,7 +467,9 @@ class SettingsBottomFragment(
                         }
 
                         genres.forEach { genre ->
-                            flatTabs.add(ConfigFlatTab("${id}_${type}_genre_$genre", "$name : $genre  - $displayType"))
+                            // [v2.1.1] 첫 글자 대문자 보정 유틸 적용
+                            val capitalizedGenre = genre.capitalizeFirstLocal()
+                            flatTabs.add(ConfigFlatTab("${id}_${type}_genre_$genre", "$name : $capitalizedGenre  - $displayType", true, "${id}_${type}"))
                         }
                     }
                 }
@@ -499,7 +502,8 @@ class SettingsBottomFragment(
             } catch (e: Exception) {}
         }
 
-        val mutableTabs = flatTabs.sortedBy { tab ->
+        // 마스터 탭 리스트 구성
+        val masterTabs = flatTabs.sortedBy { tab ->
             val idx = orderedKeys.indexOf(tab.key)
             if (idx != -1) idx else Int.MAX_VALUE
         }.toMutableList()
@@ -514,62 +518,157 @@ class SettingsBottomFragment(
         }
         scrollView.addView(container)
 
-        var rebuild: (() -> Unit)? = null
+        class TabRow(
+            val tab: ConfigFlatTab,
+            val checkBox: CheckBox,
+            val orderEdit: EditText,
+            val view: View
+        )
 
-        val dialog = AlertDialog.Builder(context)
-            .setTitle("$addonName - Catalog Settings")
-            .setView(scrollView)
-            .setPositiveButton("Save") { _, _ ->
-                val keysToSave = JSONArray()
-                mutableTabs.forEach {
-                    keysToSave.put(it.key)
+        val activeRows = mutableListOf<TabRow>()
+        var rebuildLayout: (() -> Unit)? = null
+
+        // Shifting Helper: 순서 텍스트박스 수치 입력 시 또는 버튼 클릭 시 순서 이동 연동 [2]
+        fun shiftItem(row: TabRow, newOrder: Int) {
+            val clampedOrder = newOrder.coerceIn(1, activeRows.size)
+            val oldIndex = activeRows.indexOf(row)
+            val newIndex = clampedOrder - 1
+
+            if (oldIndex == -1) return
+
+            if (oldIndex != newIndex) {
+                val targetTab = row.tab
+                val masterOldIndex = masterTabs.indexOf(targetTab)
+                
+                if (masterOldIndex != -1) {
+                    masterTabs.removeAt(masterOldIndex)
+                    val targetNeighborTab = activeRows[newIndex].tab
+                    val masterNewIndex = masterTabs.indexOf(targetNeighborTab)
+                    if (masterNewIndex != -1) {
+                        masterTabs.add(masterNewIndex, targetTab)
+                    } else {
+                        masterTabs.add(targetTab)
+                    }
                 }
-                prefs.edit().putString(orderKey, keysToSave.toString()).apply()
-                Toast.makeText(context, "Catalog settings saved. Reload to apply.", Toast.LENGTH_SHORT).show()
             }
-            .setNegativeButton("Cancel", null)
-            .create()
 
-        rebuild = {
+            // 키보드 포커스와 텍스트 선택 영역 저장을 위한 사전 포커스 탐색
+            val focusedView = container.findFocus() as? EditText
+            val selStart = focusedView?.selectionStart ?: 0
+            val selEnd = focusedView?.selectionEnd ?: 0
+
+            // 변경된 순서 목록을 바탕으로 visibleTabs 정규화
+            val visibleTabs = masterTabs.filter { tab ->
+                if (tab.isGenre) {
+                    val genresEnabledKey = "genres_enabled_${addonName}_${tab.catalogKey}"
+                    prefs.getBoolean(genresEnabledKey, true)
+                } else {
+                    true
+                }
+            }
+
+            val reorderedRows = mutableListOf<TabRow>()
+            visibleTabs.forEach { tab ->
+                activeRows.find { it.tab.key == tab.key }?.let { reorderedRows.add(it) }
+            }
+            activeRows.clear()
+            activeRows.addAll(reorderedRows)
+
+            // 뷰를 통째로 생성하지 않고, LinearLayout 상의 인덱스 순서만 스왑하여 포커스 상실 방지 [2]
+            for (i in activeRows.indices) {
+                val rowView = activeRows[i].view
+                val expectedIndex = i
+                if (container.getChildAt(expectedIndex) != rowView) {
+                    container.removeView(rowView)
+                    container.addView(rowView, expectedIndex)
+                }
+                activeRows[i].orderEdit.setText((i + 1).toString())
+            }
+
+            // 화살표 활성화 상태 업데이트
+            for (i in activeRows.indices) {
+                val itemLayout = activeRows[i].view as android.widget.LinearLayout
+                val upBtn = itemLayout.getChildAt(0) as android.widget.ImageButton
+                val downBtn = itemLayout.getChildAt(1) as android.widget.ImageButton
+                upBtn.isEnabled = i > 0
+                upBtn.alpha = if (upBtn.isEnabled) 1.0f else 0.3f
+                downBtn.isEnabled = i < activeRows.size - 1
+                downBtn.alpha = if (downBtn.isEnabled) 1.0f else 0.3f
+            }
+
+            focusedView?.requestFocus()
+            if (focusedView != null && selStart in 0..focusedView.text.length && selEnd in 0..focusedView.text.length) {
+                focusedView.setSelection(selStart, selEnd)
+            }
+        }
+
+        rebuildLayout = {
             container.removeAllViews()
+            activeRows.clear()
 
-            mutableTabs.forEachIndexed { index, tab ->
-                val enabledKey = "tab_enabled_${addonName}_${tab.key}"
-                val isCatEnabled = prefs.getBoolean(enabledKey, true)
+            // 부모의 장르 온오프 토글 스위치 상태를 감안하여 visible 목록 추려냄 [1]
+            val visibleTabs = masterTabs.filter { tab ->
+                if (tab.isGenre) {
+                    val genresEnabledKey = "genres_enabled_${addonName}_${tab.catalogKey}"
+                    prefs.getBoolean(genresEnabledKey, true)
+                } else {
+                    true
+                }
+            }
 
+            visibleTabs.forEachIndexed { index, tab ->
                 val itemLayout = android.widget.LinearLayout(context).apply {
                     orientation = android.widget.LinearLayout.HORIZONTAL
                     gravity = android.view.Gravity.CENTER_VERTICAL
                     setPadding(0, 10, 0, 10)
                 }
 
+                // Up Button
                 val upButton = android.widget.ImageButton(context).apply {
                     setImageResource(android.R.drawable.arrow_up_float)
                     background = null
                     this.isEnabled = index > 0
                     alpha = if (this.isEnabled) 1.0f else 0.3f
-                    setOnClickListener {
-                        Collections.swap(mutableTabs, index, index - 1)
-                        rebuild?.invoke()
-                    }
                 }
 
+                // Down Button
                 val downButton = android.widget.ImageButton(context).apply {
                     setImageResource(android.R.drawable.arrow_down_float)
                     background = null
-                    this.isEnabled = index < mutableTabs.size - 1
+                    this.isEnabled = index < visibleTabs.size - 1
                     alpha = if (this.isEnabled) 1.0f else 0.3f
-                    setOnClickListener {
-                        Collections.swap(mutableTabs, index, index + 1)
-                        rebuild?.invoke()
-                    }
                 }
 
                 itemLayout.addView(upButton)
                 itemLayout.addView(downButton)
 
+                // [v2.1.1] 수치 직접 대입 순서 텍스트박스 에디터 연동 [2]
+                val etOrder = EditText(context).apply {
+                    inputType = android.text.InputType.TYPE_CLASS_NUMBER
+                    imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+                    layoutParams = android.widget.LinearLayout.LayoutParams(90, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                        setMargins(0, 0, 10, 0)
+                    }
+                    gravity = android.view.Gravity.CENTER
+                    setTextColor(android.graphics.Color.WHITE)
+                    textSize = 13f
+                    setPadding(10, 10, 10, 10)
+                    setText((index + 1).toString())
+                    
+                    val gd = android.graphics.drawable.GradientDrawable().apply {
+                        setColor(android.graphics.Color.parseColor("#151515"))
+                        cornerRadius = 10f
+                    }
+                    background = gd
+                }
+                itemLayout.addView(etOrder)
+
+                // 활성화 토글 체크박스
+                val enabledKey = if (tab.isGenre) "genre_enabled_${addonName}_${tab.catalogKey}_${tab.key.substringAfter("_genre_")}" else "tab_enabled_${addonName}_${tab.catalogKey}"
+                val isEnabled = prefs.getBoolean(enabledKey, true)
+
                 val checkbox = android.widget.CheckBox(context).apply {
-                    isChecked = isCatEnabled
+                    isChecked = isEnabled
                     text = tab.displayName
                     textSize = 15f
                     setOnCheckedChangeListener { _, checked ->
@@ -579,12 +678,88 @@ class SettingsBottomFragment(
                 val checkParams = android.widget.LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 itemLayout.addView(checkbox, checkParams)
 
+                // [v2.1.1] 장르 온오프 토글스위치 마스터 제어 연동 및 노출 상태 제어 [1]
+                if (!tab.isGenre) {
+                    val catalogHasGenres = masterTabs.any { it.isGenre && it.catalogKey == tab.catalogKey }
+                    if (catalogHasGenres) {
+                        val genresEnabledKey = "genres_enabled_${addonName}_${tab.catalogKey}"
+                        val isGenresEnabled = prefs.getBoolean(genresEnabledKey, true)
+
+                        val genreToggle = android.widget.Switch(context).apply {
+                            isChecked = isGenresEnabled
+                            text = "Genre"
+                            textSize = 12f
+                            setOnCheckedChangeListener { _, checked ->
+                                prefs.edit().putBoolean(genresEnabledKey, checked).apply()
+                                rebuildLayout?.invoke() // ON/OFF 변경 시에만 리스트 가시성 전체 갱신 [1]
+                            }
+                        }
+                        itemLayout.addView(genreToggle)
+                    }
+                }
+
+                val row = TabRow(tab, checkbox, etOrder, itemLayout)
+                activeRows.add(row)
+
+                // 화살표 연동 리스너
+                upButton.setOnClickListener {
+                    etOrder.clearFocus()
+                    val cur = activeRows.indexOf(row) + 1
+                    if (cur > 1) {
+                        shiftItem(row, cur - 1)
+                    }
+                }
+                downButton.setOnClickListener {
+                    etOrder.clearFocus()
+                    val cur = activeRows.indexOf(row) + 1
+                    if (cur < activeRows.size) {
+                        shiftItem(row, cur + 1)
+                    }
+                }
+
+                // 에디터 처리 리스너
+                etOrder.setOnEditorActionListener { _, actionId, _ ->
+                    if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE || actionId == android.view.inputmethod.EditorInfo.IME_ACTION_NEXT) {
+                        etOrder.clearFocus()
+                        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+                        imm.hideSoftInputFromWindow(etOrder.windowToken, 0)
+                        true
+                    } else false
+                }
+
+                etOrder.setOnFocusChangeListener { _, hasFocus ->
+                    if (!hasFocus) {
+                        val inputVal = etOrder.text.toString().toIntOrNull() ?: (activeRows.indexOf(row) + 1)
+                        shiftItem(row, inputVal)
+                    }
+                }
+
                 container.addView(itemLayout)
             }
         }
 
-        rebuild.invoke()
+        val dialog = AlertDialog.Builder(context)
+            .setTitle("$addonName - Catalog Settings")
+            .setView(scrollView)
+            .setPositiveButton("Save") { _, _ ->
+                val keysToSave = JSONArray()
+                masterTabs.forEach {
+                    keysToSave.put(it.key)
+                }
+                prefs.edit().putString(orderKey, keysToSave.toString()).apply()
+                Toast.makeText(context, "Catalog settings saved. Reload to apply.", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .create()
+
+        rebuildLayout.invoke()
         dialog.show()
+    }
+
+    private fun String.capitalizeFirstLocal(): String = if (this.isNotEmpty()) {
+        this.substring(0, 1).uppercase() + this.substring(1)
+    } else {
+        this
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {}
