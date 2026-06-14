@@ -112,7 +112,7 @@
                 android:layout_width="0dp"
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
-                android:text="Cinemeta Catalog"
+                android:text="Cinemeta Catalogs"
                 android:textSize="18sp"
                 android:textStyle="bold" />
 
