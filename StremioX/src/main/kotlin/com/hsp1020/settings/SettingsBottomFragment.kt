@@ -2,7 +2,6 @@
 package com.hsp1020
 
 import android.annotation.SuppressLint
-import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.drawable.Drawable
@@ -16,6 +15,8 @@ import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
+import android.widget.CheckBox  // 🔥 추가 완료
+import android.widget.Switch    // 🔥 추가 완료
 import androidx.appcompat.app.AlertDialog
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import androidx.core.net.toUri
