@@ -100,7 +100,7 @@
                 android:nextFocusUp="@id/addlinks" />
         </LinearLayout>
 
-        <!-- TMDb API Key Input (List Link 아래 배치 완료) -->
+        <!-- TMDb API Key Input (List Link 아래 배치, 필수값) -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -151,7 +151,7 @@
                 android:focusable="true" />
         </LinearLayout>
 
-        <!-- MdbList Ratings Toggle (TMDb Language 아래 배치 완료) -->
+        <!-- MdbList Ratings Toggle (TMDb Language 아래 배치, 명칭 보정) -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -163,7 +163,7 @@
                 android:layout_width="0dp"
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
-                android:text="MdbList Ratings Option"
+                android:text="MDBList Ratings"
                 android:textSize="18sp"
                 android:textStyle="bold" />
 
@@ -257,7 +257,7 @@
                 android:singleLine="true" />
         </LinearLayout>
 
-        <!-- Custom Poster Toggle -->
+        <!-- Custom Poster Toggle (XRDB Poster 명칭 전면 보완 적용) -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -269,7 +269,7 @@
                 android:layout_width="0dp"
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
-                android:text="Custom Poster URL Option"
+                android:text="XRDB Poster"
                 android:textSize="18sp"
                 android:textStyle="bold" />
 
