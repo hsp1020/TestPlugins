@@ -109,7 +109,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
         val backupRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, 0, 0, 30) }
 
-        // 🔥 [V2 패치] 무거운 파일 처리를 I/O 스레드로 완전 격리
         val exportBtn = Button(ctx).apply {
             text = "Export Settings"; setTextColor(Color.WHITE); isAllCaps = false; background = getButtonBg()
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0,0,15,0) }
@@ -137,7 +136,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             }
         }
 
-        // 🔥 [V2 패치] I/O 스레드 격리 및 불필요한 editor.clear() 제거
         val importBtn = Button(ctx).apply {
             text = "Import Settings"; setTextColor(Color.WHITE); isAllCaps = false; background = getButtonBg()
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15,0,0,0) }
@@ -230,7 +228,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         countLayout.addView(addInstanceBtn)
         mainLayout.addView(countLayout)
 
-        // 🔥 [V2 패치] 렉의 원흉이었던 인스턴스 addView 루프를 RecyclerView로 완벽 교체
         val currentCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
         val rvInstances = RecyclerView(ctx).apply {
             layoutManager = LinearLayoutManager(ctx)
@@ -238,7 +235,9 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         }
         
         class InstanceAdapter : RecyclerView.Adapter<InstanceAdapter.VH>() {
-            inner class VH(val view: LinearLayout, val nameInput: EditText, val visSwitch: Switch, val searchSwitch: Switch, val configBtn: Button, val delBtn: Button) : RecyclerView.ViewHolder(view)
+            inner class VH(val view: LinearLayout, val nameInput: EditText, val visSwitch: Switch, val searchSwitch: Switch, val configBtn: Button, val delBtn: Button) : RecyclerView.ViewHolder(view) {
+                var textWatcher: TextWatcher? = null // 🔥 [버그 픽스] 스크롤 시 이름 오염을 막기 위한 TextWatcher 참조 변수
+            }
             
             override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
                 val card = LinearLayout(ctx).apply {
@@ -268,12 +267,20 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
             override fun onBindViewHolder(holder: VH, position: Int) {
                 val i = position + 1
+                
+                // 🔥 [버그 픽스] 기존에 붙어있던 리스너를 깔끔하게 제거하여 뷰 재사용 시 다른 인스턴스 데이터 오염 방지
+                if (holder.textWatcher != null) {
+                    holder.nameInput.removeTextChangedListener(holder.textWatcher)
+                }
+                
                 holder.nameInput.setText(prefs.getString("evo_name_$i", "Ultima Evo $i"))
-                holder.nameInput.addTextChangedListener(object: TextWatcher {
+                
+                holder.textWatcher = object: TextWatcher {
                     override fun afterTextChanged(s: Editable?) { prefs.edit().putString("evo_name_$i", s.toString()).apply() }
                     override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
                     override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
-                })
+                }
+                holder.nameInput.addTextChangedListener(holder.textWatcher)
                 
                 holder.visSwitch.setOnCheckedChangeListener(null)
                 holder.visSwitch.isChecked = prefs.getBoolean("evo_visibility_enabled_$i", true)
@@ -331,7 +338,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
         val allProviders = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
         
-        // 🔥 [V2 패치] 렉 유발하던 OOM 제조기 'Provider Auto-Add Settings'를 RecyclerView로 전면 개조
         val providerSettingsCard = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL; setPadding(25, 25, 25, 25); background = getCardBg(); layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, 20) } }
         val headerRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         headerRow.addView(TextView(ctx).apply { text = "Provider Auto-Add Settings"; setTextColor(Color.WHITE); textSize = 14f; typeface = android.graphics.Typeface.DEFAULT_BOLD; layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) })
@@ -368,27 +374,38 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         }
         mainContainer.addView(providerSettingsCard)
 
-        // 🔥 [V2 패치] 시한폭탄 파싱을 방지하기 위한 구조체 사용
-        data class CatalogData(val providerName: String, val catalogName: String, var isChecked: Boolean, var customName: String)
+        data class CatalogData(val providerName: String, val catalogName: String, var isChecked: Boolean, var customName: String, var orderIndex: Int)
         val catalogList = mutableListOf<CatalogData>()
 
         for (provider in allProviders) {
             val staticCats = provider.mainPage.map { it.name }
+            // 구버전(문자열 파싱) 호환성 유지를 위해 fallback으로 dynamic_catalogs 읽기
             val dynamicCats = prefs.getString("dynamic_catalogs_${provider.name}", "")?.split("|||") ?: emptyList()
             val combined = (staticCats + dynamicCats).filter { it.isNotBlank() }.distinct()
+            
             combined.forEach { cName ->
                 val isAutoAdd = prefs.getBoolean("auto_add_${instanceId}_${provider.name}", false)
                 val isChecked = prefs.getBoolean("cat_toggle_${instanceId}_${provider.name}_$cName", isAutoAdd)
                 val customName = prefs.getString("cat_rename_${instanceId}_${provider.name}_$cName", cName) ?: cName
-                catalogList.add(CatalogData(provider.name, cName, isChecked, customName))
+                // 🔥 [버그 픽스] V1에서 사용하던 order 저장값을 드디어 정상적으로 읽어옵니다.
+                val orderIndex = prefs.getString("cat_order_${instanceId}_${provider.name}_$cName", "999")?.toIntOrNull() ?: 999
+                catalogList.add(CatalogData(provider.name, cName, isChecked, customName, orderIndex))
             }
         }
 
-        // 🔥 [V2 패치] 렉 유발하던 OOM 제조기 '카탈로그 리스트'를 RecyclerView + ItemTouchHelper 로 전면 개조
+        // 🔥 [버그 픽스] 체크된 항목 최상단 + Order Index 오름차순 정렬 로직 완벽 복구
+        val initChecked = catalogList.filter { it.isChecked }.sortedBy { it.orderIndex }
+        val initUnchecked = catalogList.filter { !it.isChecked }.sortedBy { it.orderIndex }
+        catalogList.clear()
+        catalogList.addAll(initChecked)
+        catalogList.addAll(initUnchecked)
+
         val rvCatalogs = RecyclerView(ctx).apply { layoutManager = LinearLayoutManager(ctx); layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f) }
         
         class CatalogAdapter : RecyclerView.Adapter<CatalogAdapter.CVH>() {
-            inner class CVH(val view: LinearLayout, val dragHandle: ImageView, val cb: CheckBox, val tvSource: TextView, val etRename: EditText) : RecyclerView.ViewHolder(view)
+            inner class CVH(val view: LinearLayout, val dragHandle: ImageView, val cb: CheckBox, val tvSource: TextView, val etRename: EditText) : RecyclerView.ViewHolder(view) {
+                var textWatcher: TextWatcher? = null // 🔥 [버그 픽스] 스크롤 시 에디트텍스트 오염 차단용 참조 변수
+            }
             override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): CVH {
                 val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(10, 8, 10, 8); background = getCardBg(); layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 5, 0, 5) } }
                 val dragHandle = ImageView(ctx).apply { setImageResource(android.R.drawable.ic_menu_sort_by_size); setPadding(10, 0, 20, 0) }
@@ -401,27 +418,38 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             override fun onBindViewHolder(holder: CVH, position: Int) {
                 val data = catalogList[position]
                 holder.tvSource.text = data.providerName
+                
+                // 🔥 [버그 픽스] 스크롤 꼬임 방지: 새로운 데이터 세팅 전 기존 TextWatcher 안전 제거
+                if (holder.textWatcher != null) {
+                    holder.etRename.removeTextChangedListener(holder.textWatcher)
+                }
+
                 holder.etRename.setText(data.customName)
                 holder.etRename.isEnabled = data.isChecked
+                
+                holder.textWatcher = object: TextWatcher {
+                    override fun afterTextChanged(s: Editable?) { data.customName = s.toString() }
+                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+                }
+                holder.etRename.addTextChangedListener(holder.textWatcher)
+
                 holder.cb.setOnCheckedChangeListener(null)
                 holder.cb.isChecked = data.isChecked
                 
                 holder.cb.setOnCheckedChangeListener { _, isChecked ->
+                    if (data.isChecked == isChecked) return@setOnCheckedChangeListener
                     data.isChecked = isChecked
                     holder.etRename.isEnabled = isChecked
-                    // 렌더링 렉 없이 즉각적으로 어댑터 내부 데이터만 조작
+                    
+                    // 🔥 [버그 픽스] 체크박스 조작 시 실시간으로 체크된 것 위로, 해제된 것 아래로 즉각 정렬
                     val checkedItems = catalogList.filter { it.isChecked }
                     val uncheckedItems = catalogList.filter { !it.isChecked }
                     catalogList.clear()
                     catalogList.addAll(checkedItems)
                     catalogList.addAll(uncheckedItems)
-                    notifyDataSetChanged()
+                    notifyDataSetChanged() // 배열 순서가 바뀌었으므로 화면 갱신
                 }
-                holder.etRename.addTextChangedListener(object: TextWatcher {
-                    override fun afterTextChanged(s: Editable?) { data.customName = s.toString() }
-                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
-                })
             }
             override fun getItemCount() = catalogList.size
         }
@@ -457,16 +485,17 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 
                 val activeCatsForGson = mutableListOf<EvoCatalogConfig>()
                 for ((index, item) in catalogList.withIndex()) {
+                    val finalOrder = index + 1 // 드래그 앤 드롭된 최종 순서를 orderIndex로 저장
                     editor.putBoolean("cat_toggle_${instanceId}_${item.providerName}_${item.catalogName}", item.isChecked)
                     editor.putString("cat_rename_${instanceId}_${item.providerName}_${item.catalogName}", item.customName)
+                    editor.putString("cat_order_${instanceId}_${item.providerName}_${item.catalogName}", finalOrder.toString())
                     
                     if (item.isChecked) {
                         val origData = APIHolder.allProviders.find { it.name == item.providerName }?.mainPage?.find { it.name == item.catalogName }?.data ?: ""
-                        activeCatsForGson.add(EvoCatalogConfig(item.providerName, item.catalogName, item.customName, origData, index))
+                        activeCatsForGson.add(EvoCatalogConfig(item.providerName, item.catalogName, item.customName, origData, finalOrder))
                     }
                 }
                 
-                // 🔥 [V2 패치] Gson을 활용하여 모든 카탈로그 설정을 단 하나의 JSON 파일로 직렬화하여 저장
                 val jsonStr = UltimaEvoPlugin.gson.toJson(activeCatsForGson)
                 editor.putString("evo_active_cats_json_$instanceId", jsonStr)
                 editor.commit()
