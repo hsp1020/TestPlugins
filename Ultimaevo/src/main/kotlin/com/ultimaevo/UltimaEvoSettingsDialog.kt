@@ -95,12 +95,11 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val ctx = requireContext()
         val prefs = ctx.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
 
-        // 🔥 [버그픽스] BottomSheet 환경에 최적화된 NestedScrollView 적용 및 크래시 유발 스크롤바 삭제
-        // 대신 위아래로 내용이 이어짐을 알려주는 그라데이션 페이드 효과(Fading Edge) 적용!
+        // 🔥 [UX 패치] 메인 스크롤뷰 그라데이션을 120으로 강하게 설정
         val scrollView = androidx.core.widget.NestedScrollView(ctx).apply { 
             background = getDarkThemeBg()
             isVerticalFadingEdgeEnabled = true
-            setFadingEdgeLength(100)
+            setFadingEdgeLength(120)
         }
         
         val mainLayout = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL; setPadding(40, 40, 40, 40) }
@@ -256,9 +255,13 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         mainLayout.addView(countLayout)
 
         val currentCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
+        
+        // 🔥 [UX 패치] 인스턴스 목록(RecyclerView)에도 명시적으로 페이딩 엣지 추가하여 120으로 통일
         val rvInstances = RecyclerView(ctx).apply {
             layoutManager = LinearLayoutManager(ctx)
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            isVerticalFadingEdgeEnabled = true
+            setFadingEdgeLength(120)
         }
         
         class InstanceAdapter : RecyclerView.Adapter<InstanceAdapter.VH>() {
@@ -370,13 +373,13 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val toggleArrow = TextView(ctx).apply { text = "▼"; setTextColor(Color.WHITE); textSize = 14f; setPadding(15, 10, 15, 10) }
         headerRow.addView(toggleArrow); providerSettingsCard.addView(headerRow)
 
-        // 🔥 [버그픽스] 크래시 방지 및 시각적 스크롤 인지(페이드 효과) 적용
+        // 🔥 [UX 패치] 프로바이더 뷰 그라데이션을 120으로 강하게 설정
         val rvProviders = RecyclerView(ctx).apply { 
             layoutManager = LinearLayoutManager(ctx)
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 400)
             visibility = View.GONE 
             isVerticalFadingEdgeEnabled = true
-            setFadingEdgeLength(50)
+            setFadingEdgeLength(120)
         }
         
         val tempAutoAddSettings = mutableMapOf<String, Boolean>()
@@ -430,12 +433,12 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         catalogList.addAll(initChecked)
         catalogList.addAll(initUnchecked)
 
-        // 🔥 [버그픽스] 크래시 방지 및 시각적 스크롤 인지(페이드 효과) 적용
+        // 🔥 [UX 패치] 카탈로그 뷰 그라데이션을 120으로 강하게 설정
         val rvCatalogs = RecyclerView(ctx).apply { 
             layoutManager = LinearLayoutManager(ctx)
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f) 
             isVerticalFadingEdgeEnabled = true
-            setFadingEdgeLength(80)
+            setFadingEdgeLength(120)
         }
         
         class CatalogAdapter : RecyclerView.Adapter<CatalogAdapter.CVH>() {
