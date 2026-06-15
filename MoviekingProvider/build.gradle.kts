@@ -1,7 +1,6 @@
 version = 1
 
 cloudstream {
-    name = "MovieKing" 
     description = "한국 드라마 및 TV 프로그램 다시보기 제공"
     authors = listOf("hsp1020") // 본인 계정명으로 변경
     language = "ko"
