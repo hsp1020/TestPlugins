@@ -36,6 +36,7 @@ import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CommonActivity.showToast
 import org.json.JSONArray
 import org.json.JSONObject
+import com.google.gson.JsonParser // 🔥 [V4 패치] Gson 파서 임포트
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -540,7 +541,6 @@ class SettingsBottomFragment(
         val context = requireContext()
         val currentSavedCode = sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, "ko-KR") ?: "ko-KR"
         
-        // 🔥 [V4 패치] 임시 상태 변수 설정 (Apply를 누르기 전까지는 DB에 저장되지 않음)
         var selectedCode = currentSavedCode
         var selectedLangName = languages.find { it.second == currentSavedCode }?.first ?: "South Korea (Korean)"
 
@@ -574,12 +574,10 @@ class SettingsBottomFragment(
         val langDialog = AlertDialog.Builder(context)
             .setTitle("Select TMDB Language")
             .setView(container)
-            // 🔥 [V4 패치] Apply 버튼을 눌러야만 실제 SharedPreferences에 저장되도록 개선
             .setPositiveButton("Apply") { _, _ ->
                 sharedPref.edit { putString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, selectedCode) }
                 Toast.makeText(context, "Language set to $selectedCode ($selectedLangName)", Toast.LENGTH_SHORT).show()
             }
-            // Cancel 버튼이나 바깥을 누르면 아무것도 저장하지 않고 그냥 닫힘 (안전한 폐기)
             .setNegativeButton("Cancel", null)
             .create()
 
@@ -615,14 +613,12 @@ class SettingsBottomFragment(
             override fun onBindViewHolder(holder: VH, position: Int) {
                 val (langName, code) = filteredList[position]
                 
-                // 🔥 [V4 패치] 임시 선택된 상태(selectedCode)와 비교하여 UI 렌더링
                 val isSelected = code == selectedCode
                 holder.tvName.text = langName
                 holder.tvName.setTextColor(if (isSelected) android.graphics.Color.parseColor("#2196F3") else android.graphics.Color.WHITE)
                 holder.tvCheck.visibility = if (isSelected) View.VISIBLE else View.GONE
                 
                 holder.view.setOnClickListener {
-                    // 터치 시 변수만 업데이트하고 RecyclerView UI를 다시 그려서 파란색 체크를 옮김 (DB 저장 안 함)
                     selectedCode = code
                     selectedLangName = langName
                     notifyDataSetChanged()
@@ -670,23 +666,23 @@ class SettingsBottomFragment(
 
             val flatTabs = mutableListOf<ConfigFlatTab>()
             try {
-                val node = StremioC.jsonMapper.readTree(manifestText)
-                val catsNode = node.get("catalogs")
-                if (catsNode != null && catsNode.isArray) {
+                // 🔥 [V4 패치] StremioC에서 제거된 Jackson 대신 Gson 파서로 매니페스트 트리 탐색 치환 완료!
+                val node = JsonParser.parseString(manifestText).asJsonObject
+                val catsNode = node.get("catalogs")?.takeIf { it.isJsonArray }?.asJsonArray
+                
+                if (catsNode != null) {
                     for (i in 0 until catsNode.size()) {
-                        val cat = catsNode.get(i)
-                        val id = cat.get("id")?.asText() ?: ""
-                        val type = cat.get("type")?.asText() ?: "movie"
-                        val name = cat.get("name")?.asText() ?: id
+                        val cat = catsNode.get(i).asJsonObject
+                        val id = cat.get("id")?.asString ?: ""
+                        val type = cat.get("type")?.asString ?: "movie"
+                        val name = cat.get("name")?.asString ?: id
                         val displayType = type.replaceFirstChar { it.uppercase() }
                         
-                        val requiresGenre = cat.get("extra")?.let { extraArr ->
+                        val requiresGenre = cat.get("extra")?.takeIf { it.isJsonArray }?.asJsonArray?.let { extraArr ->
                             var found = false
-                            if (extraArr.isArray) {
-                                for (j in 0 until extraArr.size()) {
-                                    val extraObj = extraArr.get(j)
-                                    if (extraObj.get("name")?.asText() == "genre" && extraObj.get("isRequired")?.asBoolean() == true) found = true
-                                }
+                            for (j in 0 until extraArr.size()) {
+                                val extraObj = extraArr.get(j).asJsonObject
+                                if (extraObj.get("name")?.asString == "genre" && extraObj.get("isRequired")?.asBoolean == true) found = true
                             }
                             found
                         } ?: false
@@ -696,18 +692,16 @@ class SettingsBottomFragment(
                         }
 
                         val genres = mutableListOf<String>()
-                        cat.get("genres")?.let { gArr ->
-                            if (gArr.isArray) for (j in 0 until gArr.size()) genres.add(gArr.get(j).asText())
+                        cat.get("genres")?.takeIf { it.isJsonArray }?.asJsonArray?.let { gArr ->
+                            for (j in 0 until gArr.size()) genres.add(gArr.get(j).asString)
                         }
                         if (genres.isEmpty()) {
-                            cat.get("extra")?.let { extraArr ->
-                                if (extraArr.isArray) {
-                                    for (j in 0 until extraArr.size()) {
-                                        val extraObj = extraArr.get(j)
-                                        if (extraObj.get("name")?.asText() == "genre") {
-                                            extraObj.get("options")?.let { optsArr ->
-                                                if (optsArr.isArray) for (k in 0 until optsArr.size()) genres.add(optsArr.get(k).asText())
-                                            }
+                            cat.get("extra")?.takeIf { it.isJsonArray }?.asJsonArray?.let { extraArr ->
+                                for (j in 0 until extraArr.size()) {
+                                    val extraObj = extraArr.get(j).asJsonObject
+                                    if (extraObj.get("name")?.asString == "genre") {
+                                        extraObj.get("options")?.takeIf { it.isJsonArray }?.asJsonArray?.let { optsArr ->
+                                            for (k in 0 until optsArr.size()) genres.add(optsArr.get(k).asString)
                                         }
                                     }
                                 }
@@ -867,10 +861,10 @@ class SettingsBottomFragment(
             switchView.isEnabled = isInstalled
             if (!isInstalled) {
                 switchView.isChecked = false
-                switchView.text = "Not Installed"
+                switchView.text = "$displayName (Not Installed)"
                 SettingsRepository.setIntegrationEnabled(sharedPref, prefKey, false)
             } else {
-                switchView.text = "Integration"
+                switchView.text = "$displayName Integration"
                 switchView.isChecked = SettingsRepository.isIntegrationEnabled(sharedPref, prefKey)
             }
             switchView.setOnCheckedChangeListener { _, isChecked ->
@@ -985,3 +979,4 @@ class SettingsBottomFragment(
         }
     }
 }
+
