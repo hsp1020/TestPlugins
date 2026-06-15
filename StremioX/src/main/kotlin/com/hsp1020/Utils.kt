@@ -1,5 +1,4 @@
 // 파일명: hsp1020/Utils.kt
-// v1.18 (Ultimate Performance Refactored: 불필요한 자석 링크 및 캐시 스탬피드 기능 완전 폐기)
 package com.hsp1020
 
 import com.google.gson.annotations.SerializedName
@@ -16,10 +15,7 @@ import java.net.URLEncoder
 import java.time.LocalDate
 import java.time.ZoneId
 import java.util.Locale
-import java.util.concurrent.TimeUnit
 import kotlin.math.round
-
-// 🔥 [API Key 동적화 수선]: mdbList 상수가 완전히 지워졌습니다. [2]
 
 private val QUALITY_REGEX = Regex("(\\d{3,4}[pP])")
 private val TT_REGEX = Regex("^tt\\d+$")
@@ -46,7 +42,7 @@ private val RATING_SOURCES = mapOf(
     "re" to RatingMeta("RE", "👍", 10)
 )
 
-// 🔥 [최적화 완료]: 수석님 지시에 따라 사용하지 않는 자석 링크(Magnet) 트래커 요청 및 Cache Stampede 유발 변수 완전 폐기
+// 🔥 [V3 패치] 캐시 스탬피드를 유발하던 미사용 자석 링크(Magnet) 트래커 변수 완전 폐기
 
 suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false): List<String> {
     if (id.isNullOrBlank()) return emptyList()
@@ -138,6 +134,19 @@ fun fixUrl(url: String, domain: String): String {
            else if (url.startsWith("/")) "$domain$url" 
            else "$domain/$url"
 }
+
+data class TorrentioResponse(
+    @SerializedName("streams") val streams: List<TorrentioStream> = emptyList()
+)
+
+data class TorrentioStream(
+    @SerializedName("name") val name: String? = null, 
+    @SerializedName("title") val title: String? = null, 
+    @SerializedName("infoHash") val infoHash: String? = null, 
+    @SerializedName("fileIdx") val fileIdx: Int? = null
+)
+
+// 🔥 [V3 패치]generateMagnetLink 함수 완전 삭제
 
 suspend fun fetchTmdbLogoUrl(
     tmdbAPI: String, 
