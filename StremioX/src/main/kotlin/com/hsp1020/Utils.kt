@@ -1,4 +1,5 @@
-// v1.17 (Ultimate Performance Refactored: 트래커 메모리 캐싱 도입(네트워크 딜레이 100% 제거), 불필요한 I/O 원천 차단)
+// 파일명: hsp1020/Utils.kt
+// v1.18 (Ultimate Performance Refactored: 불필요한 자석 링크 및 캐시 스탬피드 기능 완전 폐기)
 package com.hsp1020
 
 import com.google.gson.annotations.SerializedName
@@ -45,21 +46,17 @@ private val RATING_SOURCES = mapOf(
     "re" to RatingMeta("RE", "👍", 10)
 )
 
-// ✨ 자석 링크 속도 개선: 트래커 메모리 캐시 저장소
-@Volatile private var cachedTrackers: List<String>? = null
-@Volatile private var lastTrackerFetchTime: Long = 0L
+// 🔥 [최적화 완료]: 수석님 지시에 따라 사용하지 않는 자석 링크(Magnet) 트래커 요청 및 Cache Stampede 유발 변수 완전 폐기
 
 suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false): List<String> {
     if (id.isNullOrBlank()) return emptyList()
 
-    // 🔥 [MdbList 설정 동적화]: SharedPreferences에서 토글 상태와 API Key 동적 로드 [2]
     val context = com.lagradost.cloudstream3.CloudStreamApp.context ?: return emptyList()
     val prefs = context.getSharedPreferences("StremioX", android.content.Context.MODE_PRIVATE)
     
     val mdbListEnabled = prefs.getBoolean("mdblist_enabled", false)
     val mdbListApiKey = prefs.getString("mdblist_api_key", "") ?: ""
     
-    // 비활성화 상태이거나 Key 기입이 비어있으면 아예 네트워크 통신을 태우지 않고 즉시 리턴 [2]
     if (!mdbListEnabled || mdbListApiKey.isBlank()) return emptyList()
     
     return try {
@@ -97,6 +94,7 @@ suspend fun fetchMdbListRatings(id: String?, isTmdb: Boolean = false): List<Stri
             "${meta.icon} ${String.format(Locale.US, "%.1f", score)}"
         }
     } catch (e: Exception) { 
+        e.printStackTrace()
         emptyList() 
     }
 }
@@ -139,55 +137,6 @@ fun fixUrl(url: String, domain: String): String {
     return if (url.startsWith("//")) "https:$url" 
            else if (url.startsWith("/")) "$domain$url" 
            else "$domain/$url"
-}
-
-data class TorrentioResponse(
-    @SerializedName("streams") val streams: List<TorrentioStream> = emptyList()
-)
-
-data class TorrentioStream(
-    @SerializedName("name") val name: String? = null, 
-    @SerializedName("title") val title: String? = null, 
-    @SerializedName("infoHash") val infoHash: String? = null, 
-    @SerializedName("fileIdx") val fileIdx: Int? = null
-)
-
-suspend fun generateMagnetLink(trackerUrls: List<String>, hash: String?): String = coroutineScope {
-    require(hash?.isNotBlank() == true)
-
-    val now = System.currentTimeMillis()
-    
-    // ✨ 핵심 최적화: 트래커 리스트가 캐시에 있고, 받아온 지 1일이 지나지 않았다면 네트워크 요청 생략!
-    val finalTrackers = if (cachedTrackers != null && (now - lastTrackerFetchTime) < TimeUnit.DAYS.toMillis(1)) {
-        cachedTrackers!!
-    } else {
-        val fetched = trackerUrls.map { url ->
-            async(Dispatchers.IO) {
-                try {
-                    app.get(url).text
-                        .lineSequence()
-                        .map { it.trim() }
-                        .filter { it.isNotEmpty() && !it.startsWith("#") }
-                        .toList()
-                } catch (_: Exception) {
-                    emptyList<String>()
-                }
-            }
-        }.awaitAll().flatten().distinct().take(15) // 최대 15개로 제한
-        
-        cachedTrackers = fetched
-        lastTrackerFetchTime = now
-        fetched
-    }
-
-    buildString {
-        append("magnet:?xt=urn:btih:").append(hash)
-        append("&dn=").append(URLEncoder.encode(hash, "UTF-8"))
-
-        finalTrackers.forEach { tracker ->
-            append("&tr=").append(URLEncoder.encode(tracker, "UTF-8"))
-        }
-    }
 }
 
 suspend fun fetchTmdbLogoUrl(
