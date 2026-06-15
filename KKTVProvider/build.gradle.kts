@@ -1,7 +1,6 @@
 version = 1
 
 cloudstream {
-    name = "CUTV" 
     description = "스포츠 생중계 제공"
     authors = listOf("hsp1020") // 본인 계정명으로 변경
     language = "ko"
