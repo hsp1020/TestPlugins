@@ -29,6 +29,7 @@ class TvchakProvider : MainAPI() {
         var currentMainUrl = "https://tvchak200.com"
         var isDomainChecked = false
         private val domainMutex = Mutex()
+        private val cfMutex = Mutex() // ⭐ CF 동시 다발적 우회를 막기 위한 자물쇠 추가
         private const val PREFS_NAME = "TvChak_Domain_Cache"
         private const val PREF_KEY = "current_domain"
 
@@ -39,6 +40,7 @@ class TvchakProvider : MainAPI() {
             println("TVCHAK_DEBUG: [Tvchak DBG] 💾 영구 도메인 저장 완료: $newDomain")
         }
     }
+
 
     override var mainUrl = currentMainUrl
     override var name = "TVChak"
@@ -209,21 +211,38 @@ class TvchakProvider : MainAPI() {
         var res = app.get(url, headers = getHeaders(referer))
         
         if (isCloudflareChallenge(res.text)) {
-            println("TVCHAK_DEBUG: [SafeGet] 🧱 Cloudflare 막힘 감지. 우회 루틴 호출...")
-            val bypass = solveCloudflare(mainUrl)
-            if (bypass != null) {
-                cfCookies = bypass.first
-                cfUserAgent = bypass.second
-                println("TVCHAK_DEBUG: [SafeGet] 🔓 우회 성공! 새로운 쿠키로 재요청: $url")
-                res = app.get(url, headers = getHeaders(referer)) // 새 헤더로 재요청
-            } else {
-                println("TVCHAK_DEBUG: [SafeGet] ❌ 우회 실패. 데이터가 정상적으로 표시되지 않을 수 있습니다.")
+            println("TVCHAK_DEBUG: [SafeGet] 🧱 Cloudflare 막힘 감지. 우회 대기열 진입 -> $url")
+            
+            // ⭐ 여러 카테고리가 동시에 진입하는 것을 막고 한 줄 서기로 만듭니다.
+            cfMutex.withLock {
+                // 1. 대기하는 동안 혹시 앞선 탭(카테고리)이 이미 쿠키를 뚫어왔을 수 있으므로 
+                // 새로 갱신된 헤더로 한번 더 요청해봅니다.
+                res = app.get(url, headers = getHeaders(referer))
+                
+                if (!isCloudflareChallenge(res.text)) {
+                    println("TVCHAK_DEBUG: [SafeGet] 🚀 앞서 다른 탭이 우회를 완료했습니다! 묻어가기 통과 -> $url")
+                    return res
+                }
+
+                // 2. 내가 1빠라면 직접 총대를 메고 우회 웹뷰를 띄웁니다.
+                println("TVCHAK_DEBUG: [SafeGet] 🔒 [대표 지정] 내가 직접 CF 우회 시작...")
+                val bypass = solveCloudflare(mainUrl)
+                if (bypass != null) {
+                    cfCookies = bypass.first
+                    cfUserAgent = bypass.second
+                    println("TVCHAK_DEBUG: [SafeGet] 🔓 우회 성공! 새로운 쿠키로 재요청: $url")
+                    res = app.get(url, headers = getHeaders(referer)) // 새 헤더로 재요청
+                } else {
+                    println("TVCHAK_DEBUG: [SafeGet] ❌ 우회 실패. 데이터가 정상적으로 표시되지 않을 수 있습니다.")
+                }
             }
         } else {
             println("TVCHAK_DEBUG: [SafeGet] 🟢 정상 응답 획득 (CF 없음 또는 이미 통과)")
         }
         return res
     }
+
+
     // =========================================================================
     // [Cloudflare 우회용 변수 및 함수 추가 끝]
     // =========================================================================
