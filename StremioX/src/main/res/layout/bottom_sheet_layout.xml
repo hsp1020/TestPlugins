@@ -15,7 +15,7 @@
         android:paddingBottom="20dp"
         tools:background="@color/cardview_dark_background">
 
-        <!-- Stremio Settings Header (우측 상단 EXPORT / IMPORT / SAVE 정렬) -->
+        <!-- Stremio Settings Header -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -43,7 +43,9 @@
                 android:textSize="14sp"
                 android:textStyle="bold"
                 android:padding="10dp"
-                android:focusable="true" />
+                android:focusable="true"
+                android:background="?attr/selectableItemBackground"
+                android:clickable="true" />
 
             <TextView
                 android:id="@+id/tvImport"
@@ -56,7 +58,9 @@
                 android:textSize="14sp"
                 android:textStyle="bold"
                 android:padding="10dp"
-                android:focusable="true" />
+                android:focusable="true"
+                android:background="?attr/selectableItemBackground"
+                android:clickable="true" />
 
             <ImageView
                 android:id="@+id/saveIcon"
@@ -65,7 +69,9 @@
                 android:layout_marginTop="20dp"
                 android:layout_marginBottom="5dp"
                 android:padding="5dp"
-                android:focusable="true" />
+                android:focusable="true"
+                android:background="?attr/selectableItemBackground"
+                android:clickable="true" />
         </LinearLayout>
 
         <ImageView
@@ -99,7 +105,9 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:focusable="true"
-                android:padding="5dp" />
+                android:padding="5dp"
+                android:background="?attr/selectableItemBackground"
+                android:clickable="true" />
         </LinearLayout>
 
         <!-- List Link -->
@@ -124,10 +132,12 @@
                 android:layout_height="wrap_content"
                 android:padding="5dp"
                 android:focusable="true"
-                android:nextFocusUp="@id/addlinks" />
+                android:nextFocusUp="@id/addlinks"
+                android:background="?attr/selectableItemBackground"
+                android:clickable="true" />
         </LinearLayout>
 
-        <!-- TMDb API Key Input (List Link 아래 배치, 필수값) -->
+        <!-- TMDb API Key Input -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -175,10 +185,12 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:padding="5dp"
-                android:focusable="true" />
+                android:focusable="true"
+                android:background="?attr/selectableItemBackground"
+                android:clickable="true" />
         </LinearLayout>
 
-        <!-- MdbList Ratings Toggle (TMDb Language 아래 배치, 명칭 보정) -->
+        <!-- MdbList Ratings Toggle -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -202,7 +214,7 @@
                 android:padding="5dp" />
         </LinearLayout>
 
-        <!-- MdbList API Key Input (스위치 켜짐 상태에서만 노출) -->
+        <!-- MdbList API Key Input -->
         <LinearLayout
             android:id="@+id/layoutMdbList"
             android:layout_width="match_parent"
@@ -284,7 +296,7 @@
                 android:singleLine="true" />
         </LinearLayout>
 
-        <!-- Custom Poster Toggle (XRDB Poster 명칭 보정) -->
+        <!-- XRDB Poster Toggle -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -308,7 +320,7 @@
                 android:padding="5dp" />
         </LinearLayout>
 
-        <!-- Custom Poster URL Input (스위치 켜짐 상태에서만 노출) -->
+        <!-- Custom Poster URL Input -->
         <LinearLayout
             android:id="@+id/layoutCustomPosterUrl"
             android:layout_width="match_parent"
@@ -337,77 +349,36 @@
                 android:singleLine="true" />
         </LinearLayout>
 
-        <!-- CineStream Toggle -->
-        <LinearLayout
+        <!-- 🔥 [수정됨] TextView를 제거하고 Switch 자체가 영역을 덮도록 수정 (중복 텍스트 방지) -->
+        <Switch
+            android:id="@+id/switchCineStream"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="horizontal"
             android:layout_marginTop="10dp"
-            android:gravity="center_vertical">
+            android:focusable="true"
+            android:padding="5dp"
+            android:textSize="18sp"
+            android:textStyle="bold" />
 
-            <TextView
-                android:layout_width="0dp"
-                android:layout_weight="1"
-                android:layout_height="wrap_content"
-                android:text="CineStream"
-                android:textSize="18sp"
-                android:textStyle="bold" />
-
-            <Switch
-                android:id="@+id/switchCineStream"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:focusable="true"
-                android:padding="5dp" />
-        </LinearLayout>
-
-        <!-- StreamPlay Toggle -->
-        <LinearLayout
+        <Switch
+            android:id="@+id/switchStreamPlay"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="horizontal"
             android:layout_marginTop="10dp"
-            android:gravity="center_vertical">
+            android:focusable="true"
+            android:padding="5dp"
+            android:textSize="18sp"
+            android:textStyle="bold" />
 
-            <TextView
-                android:layout_width="0dp"
-                android:layout_weight="1"
-                android:layout_height="wrap_content"
-                android:text="StreamPlay"
-                android:textSize="18sp"
-                android:textStyle="bold" />
-
-            <Switch
-                android:id="@+id/switchStreamPlay"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:focusable="true"
-                android:padding="5dp" />
-        </LinearLayout>
-
-        <!-- VixSrc Toggle -->
-        <LinearLayout
+        <Switch
+            android:id="@+id/switchVixSrc"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="horizontal"
             android:layout_marginTop="10dp"
-            android:gravity="center_vertical">
-
-            <TextView
-                android:layout_width="0dp"
-                android:layout_weight="1"
-                android:layout_height="wrap_content"
-                android:text="VixSrc"
-                android:textSize="18sp"
-                android:textStyle="bold" />
-
-            <Switch
-                android:id="@+id/switchVixSrc"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:focusable="true"
-                android:padding="5dp" />
-        </LinearLayout>
+            android:focusable="true"
+            android:padding="5dp"
+            android:textSize="18sp"
+            android:textStyle="bold" />
 
     </LinearLayout>
 </androidx.core.widget.NestedScrollView>
