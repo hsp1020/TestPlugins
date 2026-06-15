@@ -451,20 +451,41 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val tempAutoAddSettings = mutableMapOf<String, Boolean>()
         class ProviderAdapter : RecyclerView.Adapter<ProviderAdapter.PVH>() {
             inner class PVH(val view: LinearLayout, val tvName: TextView, val switch: Switch) : RecyclerView.ViewHolder(view)
+            
             override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): PVH {
-                val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, 15, 0, 15) }
-                val tv = TextView(ctx).apply { setTextColor(Color.LTGRAY); textSize = 13f; layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
-                val sw = Switch(ctx).apply { text = "Auto-add"; textSize = 12f }
-                row.addView(tv); row.addView(sw)
+                val row = LinearLayout(ctx).apply { 
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, 15, 0, 15) 
+                }
+                
+                val tv = TextView(ctx).apply { 
+                    setTextColor(Color.LTGRAY)
+                    textSize = 13f
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) 
+                }
+                
+                // 🔥 [수정된 부분] 기존에 있던 `text = "Auto-add"` 속성을 완전히 제거했습니다.
+                // 이제 옆에 군더더기 글자 없이 깔끔한 토글 스위치 형태만 렌더링됩니다.
+                val sw = Switch(ctx)
+                
+                row.addView(tv)
+                row.addView(sw)
                 return PVH(row, tv, sw)
             }
+            
             override fun onBindViewHolder(holder: PVH, position: Int) {
                 val pName = allProviders[position].name
+                // 왼쪽에 프로바이더 이름만 단독으로 예쁘게 출력됩니다.
                 holder.tvName.text = pName
+                
                 holder.switch.setOnCheckedChangeListener(null)
                 holder.switch.isChecked = prefs.getBoolean("auto_add_${instanceId}_$pName", false)
-                holder.switch.setOnCheckedChangeListener { _, isChecked -> tempAutoAddSettings[pName] = isChecked }
+                holder.switch.setOnCheckedChangeListener { _, isChecked -> 
+                    tempAutoAddSettings[pName] = isChecked 
+                }
             }
+            
             override fun getItemCount() = allProviders.size
         }
         rvProviders.adapter = ProviderAdapter()
