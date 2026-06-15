@@ -1,7 +1,8 @@
-// v1.53
+// 파일명: hsp1020/ultimaevo/UltimaEvoProvider.kt
 package com.ultimaevo
 
 import android.content.Context
+import com.google.gson.reflect.TypeToken
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
@@ -21,13 +22,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
-/**
- * 백그라운드 및 설정 창 수동 싱크를 공통으로 담당하는 주기적 백그라운드 자동 싱크 엔진
- */
 object UltimaEvoSyncManager {
     private var isSyncing = false
-    private const val SYNC_THROTTLE_MS = 6 * 60 * 60 * 1000L // 6시간 주기 제한
+    private const val SYNC_THROTTLE_MS = 6 * 60 * 60 * 1000L 
 
     fun triggerAutoSync(context: Context) {
         if (isSyncing) return
@@ -39,12 +38,12 @@ object UltimaEvoSyncManager {
         if (now - lastSync < SYNC_THROTTLE_MS) return
 
         isSyncing = true
+        // 🔥 [V2 패치] Job 통제는 Provider 수명에 맡기되, 내부적으로 타임아웃 방어막 설치
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                // 백그라운드 주기 자동 싱크는 forceSyncAll = false 로 작동하여 불필요한 네트워크를 아낍니다.
                 performSync(context, forceSyncAll = false, null)
             } catch (e: Exception) {
-                // 예외 무시
+                e.printStackTrace()
             } finally {
                 isSyncing = false
             }
@@ -59,12 +58,9 @@ object UltimaEvoSyncManager {
         val prefs = context.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
         val instanceCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
 
-        // 🌟 수동 싱크와 자동 싱크의 대상을 스마트하게 분기합니다.
         val targetProviders = if (forceSyncAll) {
-            // 수동 싱크 시: 새로 설치된 플러그인 목록까지 완벽히 발굴하기 위해 전체 대상 스캔
             APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
         } else {
-            // 백그라운드 싱크 시: 리소스 절약을 위해 사용자가 활성화한 프로바이더만 선별 스캔
             APIHolder.allProviders.filter { provider ->
                 !provider.mainUrl.startsWith("ultima_evo") && provider.hasMainPage &&
                 (1..instanceCount).any { instId ->
@@ -86,25 +82,29 @@ object UltimaEvoSyncManager {
                 async(Dispatchers.IO) {
                     semaphore.withPermit {
                         try {
-                            val reqName = provider.mainPage.firstOrNull()?.name ?: "Home"
-                            val reqData = provider.mainPage.firstOrNull()?.data ?: ""
-                            val response = provider.getMainPage(1, MainPageRequest(reqName, reqData, false))
+                            // 🔥 [V2 패치] 싱크 중 서버 무응답 데드락 방지를 위한 타임아웃 15초 강제
+                            withTimeoutOrNull(15000L) {
+                                val reqName = provider.mainPage.firstOrNull()?.name ?: "Home"
+                                val reqData = provider.mainPage.firstOrNull()?.data ?: ""
+                                val response = provider.getMainPage(1, MainPageRequest(reqName, reqData, false))
 
-                            if (response != null && response.items.isNotEmpty()) {
-                                val names = response.items.map { it.name }.filter { it.isNotBlank() }.distinct()
-                                val namesStr = names.joinToString("|||")
+                                if (response != null && response.items.isNotEmpty()) {
+                                    val names = response.items.map { it.name }.filter { it.isNotBlank() }.distinct()
+                                    // 이 부분은 프로바이더별 카탈로그 구조 저장용이므로 Gson 대신 기존 문자열 보존
+                                    val namesStr = names.joinToString("|||")
 
-                                val oldNamesStr = prefs.getString("dynamic_catalogs_${provider.name}", "") ?: ""
+                                    val oldNamesStr = prefs.getString("dynamic_catalogs_${provider.name}", "") ?: ""
 
-                                if (namesStr != oldNamesStr) {
-                                    prefs.edit().putString("dynamic_catalogs_${provider.name}", namesStr).apply()
-                                    anyChange = true
+                                    if (namesStr != oldNamesStr) {
+                                        prefs.edit().putString("dynamic_catalogs_${provider.name}", namesStr).apply()
+                                        anyChange = true
+                                    }
                                 }
                             }
                         } catch (e: Exception) {
+                            e.printStackTrace()
                             if (e is CancellationException) throw e
                         }
-
                         current++
                         onProgress?.invoke(current, total)
                     }
@@ -125,13 +125,11 @@ object UltimaEvoSyncManager {
     }
 }
 
-
 class UltimaEvoProvider(private val instanceId: Int, private val customName: String) : MainAPI() {
     override var mainUrl = "ultima_evo_$instanceId"
     override var name = customName
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.Live)
 
-    // 동적 생성에 최적화된 메모리 캐시 저장소
     private var cachedMainPageList: List<MainPageData> = emptyList()
 
     fun invalidateCache() {
@@ -153,87 +151,66 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
         get() {
             val context = UltimaEvoPlugin.pluginContext ?: return emptyList()
 
-            // 백그라운드 자동 싱크 트리거 검사 (6시간 주기 검사)
             UltimaEvoSyncManager.triggerAutoSync(context)
 
             val prefs = context.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
-            
             val isVisible = prefs.getBoolean("evo_visibility_enabled_$instanceId", true)
             if (!isVisible) return emptyList()
 
-            // 유효한 메모리 캐시가 존재하는 경우 빌드 생략 및 즉시 반환
             if (cachedMainPageList.isNotEmpty()) {
                 return cachedMainPageList
             }
 
-            // 인스턴스 내에서 활성화되어 있거나 개별 Auto-add 설정이 보장된 모든 프로바이더 수집
-            val targetProviders = APIHolder.allProviders.filter { provider ->
-                !provider.mainUrl.startsWith("ultima_evo") && (
-                    prefs.getBoolean("ext_toggle_${instanceId}_${provider.name}", false) ||
-                    prefs.getBoolean("auto_add_${instanceId}_${provider.name}", false)
-                )
-            }
-
-            val pages = mutableListOf<Pair<MainPageData, Int>>()
-
-            for (provider in targetProviders) {
-                val isAutoAddEnabled = prefs.getBoolean("auto_add_${instanceId}_${provider.name}", false)
-
-                val staticCats = provider.mainPage.map { it.name }
-                val dynamicCats = prefs.getString("dynamic_catalogs_${provider.name}", "")?.split("|||") ?: emptyList()
-                val combinedCats = (staticCats + dynamicCats).filter { it.isNotBlank() }.distinct()
-
-                for (cName in combinedCats) {
-                    val tKey = "cat_toggle_${instanceId}_${provider.name}_$cName"
-                    val rKey = "cat_rename_${instanceId}_${provider.name}_$cName"
-                    val oKey = "cat_order_${instanceId}_${provider.name}_$cName"
-
-                    // 명시적 설정이 없을 때는 프로바이더 개별 Auto-add를 기본 필터 플래그로 활용 (블랙/화이트 통합 처리)
-                    val isEnabled = prefs.getBoolean(tKey, isAutoAddEnabled)
-
-                    if (isEnabled) {
-                        val customCatalogName = prefs.getString(rKey, cName)?.ifBlank { cName } ?: cName
-                        val orderIndex = prefs.getString(oKey, "999")?.toIntOrNull() ?: 999
-                        
-                        val originalData = provider.mainPage.find { it.name == cName }?.data 
-                            ?: provider.mainPage.firstOrNull()?.data 
-                            ?: ""
-
-                        val combinedData = "${provider.name}|||$originalData|||$customCatalogName|||$cName"
-                        pages.add(Pair(MainPageData(customCatalogName, combinedData), orderIndex))
+            // 🔥 [V2 패치] 기존의 살인적인 이중 for문 + 수백 번의 SharedPreferences I/O를 전면 폐기!
+            // 설정창에서 미리 완성해둔 Gson 데이터 단 1회 읽기로 O(1) 수준의 압도적인 성능 달성
+            val activeCatsJson = prefs.getString("evo_active_cats_json_$instanceId", "") ?: ""
+            if (activeCatsJson.isNotBlank()) {
+                try {
+                    val listType = object : TypeToken<List<EvoCatalogConfig>>() {}.type
+                    val configs: List<EvoCatalogConfig> = UltimaEvoPlugin.gson.fromJson(activeCatsJson, listType)
+                    
+                    val pages = configs.map { config ->
+                        // Gson 구조체에 담긴 데이터를 Cloudstream MainPageData 규격에 맞게 인코딩
+                        val combinedData = UltimaEvoPlugin.gson.toJson(config)
+                        MainPageData(config.customCatalogName, combinedData)
                     }
+                    cachedMainPageList = pages
+                    return cachedMainPageList
+                } catch (e: Exception) {
+                    e.printStackTrace()
                 }
             }
-            
-            cachedMainPageList = pages.sortedBy { it.second }.map { it.first }
-            return cachedMainPageList
+
+            return emptyList()
         }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         return withContext(Dispatchers.IO) {
             try {
-                val parts = request.data.split("|||")
-                if (parts.size < 3) return@withContext newHomePageResponse(emptyList(), false)
+                // 🔥 [V2 패치] 시한폭탄 문자열 쪼개기를 폐기하고 Gson으로 안전하게 복원
+                val config = UltimaEvoPlugin.gson.fromJson(request.data, EvoCatalogConfig::class.java)
+                if (config == null) return@withContext newHomePageResponse(emptyList(), false)
 
-                val targetProviderName = parts[0]
-                val originalData = parts[1]
-                val customCatalogTitle = parts[2]
-                val originalCatalogName = parts.getOrNull(3) ?: ""
+                val targetProvider = APIHolder.allProviders.find { it.name == config.providerName } 
+                    ?: return@withContext newHomePageResponse(emptyList(), false)
 
-                val targetProvider = APIHolder.allProviders.find { it.name == targetProviderName } ?: return@withContext newHomePageResponse(emptyList(), false)
-
-                val originalRequest = MainPageRequest(request.name, originalData, request.horizontalImages)
-                val response = targetProvider.getMainPage(page, originalRequest) ?: return@withContext newHomePageResponse(emptyList(), false)
+                val originalRequest = MainPageRequest(request.name, config.originalData, request.horizontalImages)
                 
-                val filteredItems = if (originalCatalogName.isNotEmpty() && response.items.size > 1) {
-                    response.items.filter { it.name == originalCatalogName }
+                // 🔥 [V2 패치] 응답 없는 서버 무한 대기(ANR) 방지를 위한 타임아웃 15초 강제
+                val response = withTimeoutOrNull(15000L) {
+                    targetProvider.getMainPage(page, originalRequest)
+                } ?: return@withContext newHomePageResponse(emptyList(), false)
+                
+                val filteredItems = if (config.originalCatalogName.isNotEmpty() && response.items.size > 1) {
+                    response.items.filter { it.name == config.originalCatalogName }
                 } else {
                     response.items
                 }
 
-                val modifiedItems = filteredItems.map { it.copy(name = customCatalogTitle) }
+                val modifiedItems = filteredItems.map { it.copy(name = config.customCatalogName) }
                 newHomePageResponse(modifiedItems, response.hasNext)
             } catch (e: Exception) {
+                e.printStackTrace()
                 if (e is CancellationException) throw e
                 newHomePageResponse(emptyList(), false)
             }
@@ -243,30 +220,20 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
     override suspend fun load(url: String): LoadResponse? {
         return withContext(Dispatchers.IO) {
             val allProviders = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
-            
             val exactProvider = allProviders.find { url.startsWith(it.mainUrl) }
+            
             if (exactProvider != null) {
                 try {
                     val res = exactProvider.load(url)
                     if (res != null) return@withContext res
                 } catch (e: Exception) {
+                    e.printStackTrace()
                     if (e is CancellationException) throw e
                 }
             }
             
-            val domainMatchProviders = allProviders.filter { p -> 
-                val domain = p.mainUrl.replace("https://", "").replace("http://", "").substringBefore("/")
-                domain.isNotBlank() && url.contains(domain) 
-            }
-            for (p in domainMatchProviders) {
-                if (p == exactProvider) continue
-                try {
-                    val res = p.load(url)
-                    if (res != null) return@withContext res
-                } catch (e: Exception) {
-                    if (e is CancellationException) throw e
-                }
-            }
+            // 🔥 [V2 패치] 수석님 지시 반영: 1:1 매칭 원칙 고수. 
+            // exactProvider가 실패했다면 불필요한 도메인 폴백 루프(15초 딜레이)를 싹 지우고 즉시 Null 반환(Fail-Fast)
             null
         }
     }
@@ -278,16 +245,17 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
         val isSearchEnabled = prefs.getBoolean("evo_search_enabled_$instanceId", true)
         if (!isSearchEnabled) return emptyList()
 
-        val activeCatsStr = prefs.getString("evo_active_cats_$instanceId", "") ?: ""
-        if (activeCatsStr.isBlank()) return emptyList()
+        val activeCatsJson = prefs.getString("evo_active_cats_json_$instanceId", "") ?: ""
+        if (activeCatsJson.isBlank()) return emptyList()
 
-        val chunkSeparator = if (activeCatsStr.contains("%%%")) "%%%" else "|||"
-        val fieldSeparator = if (activeCatsStr.contains("%%%")) ";;;" else "|~|"
-
-        val providersToSearch = activeCatsStr.split(chunkSeparator).mapNotNull { chunk ->
-            val parts = chunk.split(fieldSeparator, limit = 5)
-            if (parts.isNotEmpty()) parts[0] else null
-        }.distinct()
+        val providersToSearch = try {
+            val listType = object : TypeToken<List<EvoCatalogConfig>>() {}.type
+            val configs: List<EvoCatalogConfig> = UltimaEvoPlugin.gson.fromJson(activeCatsJson, listType)
+            configs.map { it.providerName }.distinct()
+        } catch (e: Exception) {
+            e.printStackTrace()
+            emptyList()
+        }
 
         val semaphore = Semaphore(5)
 
@@ -297,11 +265,13 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
                 async<List<SearchResponse>>(Dispatchers.IO) {
                     semaphore.withPermit {
                         try {
-                            println("[UltimaEvo-Debug] [Provider-$instanceId] ${provider.name} 검색 시도")
-                            provider.search(query) ?: emptyList()
+                            // 🔥 [V2 패치] 검색 시 불량 서버 무한 대기 방지용 타임아웃 15초 
+                            withTimeoutOrNull(15000L) {
+                                provider.search(query) ?: emptyList()
+                            } ?: emptyList()
                         } catch (e: Exception) {
+                            e.printStackTrace()
                             if (e is CancellationException) throw e
-                            println("[UltimaEvo-Debug] [Provider-$instanceId] ${provider.name} 에러 무시: ${e.message}")
                             emptyList()
                         }
                     }
@@ -310,7 +280,6 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
             
             val results: List<SearchResponse> = deferredResults.awaitAll().flatten()
             val finalRes: List<SearchResponse> = results.distinctBy { it.url }
-            println("[UltimaEvo-Debug] [Provider-$instanceId] 병렬 검색 최종 결과: ${finalRes.size}개")
             finalRes
         }
     }
