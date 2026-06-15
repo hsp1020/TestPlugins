@@ -95,7 +95,12 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val ctx = requireContext()
         val prefs = ctx.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
 
-        val scrollView = ScrollView(ctx).apply { background = getDarkThemeBg() }
+        // 🔥 [UX 패치] 메인 윈도우 스크롤바 항상 표시 적용
+        val scrollView = ScrollView(ctx).apply { 
+            background = getDarkThemeBg()
+            isVerticalScrollBarEnabled = true
+            isScrollbarFadingEnabled = false 
+        }
         val mainLayout = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL; setPadding(40, 40, 40, 40) }
 
         mainLayout.addView(TextView(ctx).apply {
@@ -128,7 +133,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         clipboard.setPrimaryClip(ClipData.newPlainText("Ultima Backup", backupStr))
                         
-                        // 🔥 [수정] Toast 대신 StremioX와 동일한 AlertDialog 팝업 적용
                         AlertDialog.Builder(ctx)
                             .setTitle("Export Successful")
                             .setMessage("Compressed backup data has been successfully copied to your clipboard.\n\nPlease paste it somewhere safe (e.g., Notes, Messenger).")
@@ -168,7 +172,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
                         if (parsedJson.length() == 0) throw Exception("Empty Data")
 
-                        // 🔥 [수정] StremioX와 100% 동일한 경고 및 복원 성공 연계 다이얼로그 적용
                         AlertDialog.Builder(ctx)
                             .setTitle("Backup Data Detected")
                             .setMessage("Valid compressed backup data found in clipboard!\n\nWarning: Restoring will overwrite settings.\nAre you sure you want to proceed?")
@@ -195,7 +198,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                             .show()
                     } catch (e: Exception) {
                         e.printStackTrace()
-                        // 🔥 [수정] 파싱 실패 시에도 Toast가 아닌 깔끔한 AlertDialog 에러창 띄우기
                         AlertDialog.Builder(ctx)
                             .setTitle("Invalid Backup Data")
                             .setMessage("No valid backup data found in your clipboard.\n\nPlease copy the exact backup text and try again.")
@@ -255,6 +257,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val rvInstances = RecyclerView(ctx).apply {
             layoutManager = LinearLayoutManager(ctx)
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            // 메인 화면 인스턴스 뷰는 ScrollView 내부에 있으므로 여기 스크롤바는 필요 없음
         }
         
         class InstanceAdapter : RecyclerView.Adapter<InstanceAdapter.VH>() {
@@ -366,7 +369,14 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val toggleArrow = TextView(ctx).apply { text = "▼"; setTextColor(Color.WHITE); textSize = 14f; setPadding(15, 10, 15, 10) }
         headerRow.addView(toggleArrow); providerSettingsCard.addView(headerRow)
 
-        val rvProviders = RecyclerView(ctx).apply { layoutManager = LinearLayoutManager(ctx); layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 400); visibility = View.GONE }
+        // 🔥 [UX 패치] 프로바이더 뷰 스크롤바 항상 보이도록 지정
+        val rvProviders = RecyclerView(ctx).apply { 
+            layoutManager = LinearLayoutManager(ctx)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 400)
+            visibility = View.GONE 
+            isVerticalScrollBarEnabled = true
+            isScrollbarFadingEnabled = false 
+        }
         
         val tempAutoAddSettings = mutableMapOf<String, Boolean>()
         class ProviderAdapter : RecyclerView.Adapter<ProviderAdapter.PVH>() {
@@ -419,7 +429,13 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         catalogList.addAll(initChecked)
         catalogList.addAll(initUnchecked)
 
-        val rvCatalogs = RecyclerView(ctx).apply { layoutManager = LinearLayoutManager(ctx); layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f) }
+        // 🔥 [UX 패치] 카탈로그 뷰 스크롤바 항상 보이도록 지정
+        val rvCatalogs = RecyclerView(ctx).apply { 
+            layoutManager = LinearLayoutManager(ctx)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f) 
+            isVerticalScrollBarEnabled = true
+            isScrollbarFadingEnabled = false 
+        }
         
         class CatalogAdapter : RecyclerView.Adapter<CatalogAdapter.CVH>() {
             inner class CVH(val view: LinearLayout, val dragHandle: ImageView, val cb: CheckBox, val tvSource: TextView, val etRename: EditText) : RecyclerView.ViewHolder(view) {
