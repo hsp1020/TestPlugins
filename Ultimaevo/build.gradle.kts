@@ -1,6 +1,7 @@
 version = 1
 
 cloudstream {
+    name = "UltimaEvo" 
     description = "All in one Catalogs"
     authors = listOf("hsp1020") // 본인 계정명으로 변경
     language = "ko"
