@@ -19,7 +19,6 @@ import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
-import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.*
@@ -44,7 +43,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
     private var lastClickTime: Long = 0
     private var activeAlertDialog: AlertDialog? = null
 
-    // 🔥 [버그 픽스 1] "Save & Close"를 누르기 전까지는 DB를 건드리지 않도록 가상 메모리 모델 구축
     data class InstanceData(var originalId: Int, var name: String, var visibility: Boolean, var search: Boolean)
     private var maxIdGen = 1
     private val instanceMemoryList = mutableListOf<InstanceData>()
@@ -58,11 +56,70 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         (view.parent as? View)?.setBackgroundColor(Color.TRANSPARENT)
     }
 
+    // 🔥 [스파게티/데드코드 픽스] 반쪽짜리 함수와 미사용 함수를 모두 지우고, 단일 완벽 동기화 함수로 통합!
+    private fun commitMemoryToDb(prefs: SharedPreferences) {
+        val editor = prefs.edit()
+        val newCount = instanceMemoryList.size
+        val oldCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
+        
+        editor.putString("evo_instance_count", newCount.toString())
+        
+        for (i in 0 until newCount) {
+            val targetId = i + 1
+            val item = instanceMemoryList[i]
+            
+            editor.putString("evo_name_$targetId", item.name)
+            editor.putBoolean("evo_visibility_enabled_$targetId", item.visibility)
+            editor.putBoolean("evo_search_enabled_$targetId", item.search)
+            
+            if (item.originalId != targetId) {
+                val srcId = item.originalId
+                editor.putString("evo_active_cats_json_$targetId", prefs.getString("evo_active_cats_json_$srcId", ""))
+                
+                prefs.all.keys.forEach { key ->
+                    if (key.startsWith("cat_toggle_${srcId}_") || 
+                        key.startsWith("cat_rename_${srcId}_") || 
+                        key.startsWith("cat_order_${srcId}_") || 
+                        key.startsWith("auto_add_${srcId}_") ||
+                        key.startsWith("ext_toggle_${srcId}_")) {
+                        
+                        val newKey = key.replaceFirst("_${srcId}_", "_${targetId}_")
+                        when (val value = prefs.all[key]) {
+                            is Boolean -> editor.putBoolean(newKey, value)
+                            is String -> editor.putString(newKey, value)
+                            is Int -> editor.putInt(newKey, value)
+                        }
+                    }
+                }
+            }
+        }
+        
+        val maxIdToCheck = maxOf(oldCount, maxIdGen)
+        for (i in (newCount + 1)..maxIdToCheck) {
+            editor.remove("evo_name_$i")
+            editor.remove("evo_visibility_enabled_$i")
+            editor.remove("evo_search_enabled_$i")
+            editor.remove("evo_active_cats_json_$i")
+            
+            prefs.all.keys.forEach { key ->
+                if (key.startsWith("cat_toggle_${i}_") || 
+                    key.startsWith("cat_rename_${i}_") || 
+                    key.startsWith("cat_order_${i}_") || 
+                    key.startsWith("auto_add_${i}_") ||
+                    key.startsWith("ext_toggle_${i}_")) {
+                    editor.remove(key)
+                }
+            }
+        }
+        
+        editor.apply()
+        APIHolder.allProviders.forEach { p -> if (p is UltimaEvoProvider) p.invalidateCache() }
+    }
+
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
         val ctx = requireContext()
         val prefs = ctx.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
 
-        // 다이얼로그 오픈 시 DB에서 읽어와 가상 메모리에 100% 복제
         maxIdGen = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
         instanceMemoryList.clear()
         for (i in 1..maxIdGen) {
@@ -100,6 +157,9 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 if (SystemClock.elapsedRealtime() - lastClickTime < 1000 || activeAlertDialog?.isShowing == true) return@setOnClickListener
                 lastClickTime = SystemClock.elapsedRealtime()
                 
+                // 단일 저장 함수 호출
+                commitMemoryToDb(prefs)
+
                 viewLifecycleOwner.lifecycleScope.launch {
                     try {
                         val backupStr = withContext(Dispatchers.IO) {
@@ -195,6 +255,10 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 if (SystemClock.elapsedRealtime() - lastClickTime < 1000) return@setOnClickListener
                 lastClickTime = SystemClock.elapsedRealtime()
                 this.isEnabled = false
+                
+                // 단일 저장 함수 호출
+                commitMemoryToDb(prefs)
+                
                 viewLifecycleOwner.lifecycleScope.launch {
                     try {
                         UltimaEvoSyncManager.performSync(ctx, forceSyncAll = true) { current, total ->
@@ -224,6 +288,12 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             inputType = InputType.TYPE_CLASS_NUMBER; imeOptions = EditorInfo.IME_ACTION_DONE; setText(instanceMemoryList.size.toString())
             setTextColor(Color.WHITE); background = getButtonBg(); setPadding(30, 20, 30, 20)
             layoutParams = LinearLayout.LayoutParams(150, LinearLayout.LayoutParams.WRAP_CONTENT); gravity = Gravity.CENTER
+            
+            setOnClickListener {
+                requestFocus()
+                val imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
+            }
         }
         
         instanceCountInput.setOnFocusChangeListener { _, hasFocus ->
@@ -273,6 +343,12 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 val nameInput = EditText(ctx).apply {
                     setHintTextColor(Color.GRAY); setTextColor(Color.WHITE); textSize = 14f; setPadding(20, 20, 20, 20); background = getButtonBg()
                     layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f); setSingleLine(true)
+                    
+                    setOnClickListener {
+                        requestFocus()
+                        val imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                        imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
+                    }
                 }
                 nameRow.addView(nameLabel); nameRow.addView(nameInput); card.addView(nameRow)
 
@@ -298,7 +374,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 
                 holder.nameInput.setText(data.name)
                 
-                // 오직 메모리 배열 데이터만 수정함 (DB 건드리지 않음)
                 holder.textWatcher = object: TextWatcher {
                     override fun afterTextChanged(s: Editable?) { data.name = s.toString() }
                     override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -330,67 +405,12 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         rvInstances.adapter = InstanceAdapter()
         mainLayout.addView(rvInstances)
 
-        // 🔥 [버그 픽스] 이 버튼을 눌렀을 때 비로소 메모리에 쌓인 짓거리들을 DB로 완벽하게 덮어씀 (Commit)
         val saveBtn = Button(ctx).apply {
             text = "Save & Close"; setTextColor(Color.WHITE); isAllCaps = false; background = getButtonBg()
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 30, 0, 0) }
             setOnClickListener {
-                val editor = prefs.edit()
-                val newCount = instanceMemoryList.size
-                val oldCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
-                
-                editor.putString("evo_instance_count", newCount.toString())
-                
-                for (i in 0 until newCount) {
-                    val targetId = i + 1
-                    val item = instanceMemoryList[i]
-                    
-                    editor.putString("evo_name_$targetId", item.name)
-                    editor.putBoolean("evo_visibility_enabled_$targetId", item.visibility)
-                    editor.putBoolean("evo_search_enabled_$targetId", item.search)
-                    
-                    if (item.originalId != targetId) {
-                        val srcId = item.originalId
-                        editor.putString("evo_active_cats_json_$targetId", prefs.getString("evo_active_cats_json_$srcId", ""))
-                        
-                        prefs.all.keys.forEach { key ->
-                            if (key.startsWith("cat_toggle_${srcId}_") || 
-                                key.startsWith("cat_rename_${srcId}_") || 
-                                key.startsWith("cat_order_${srcId}_") || 
-                                key.startsWith("auto_add_${srcId}_") ||
-                                key.startsWith("ext_toggle_${srcId}_")) {
-                                
-                                val newKey = key.replaceFirst("_${srcId}_", "_${targetId}_")
-                                when (val value = prefs.all[key]) {
-                                    is Boolean -> editor.putBoolean(newKey, value)
-                                    is String -> editor.putString(newKey, value)
-                                    is Int -> editor.putInt(newKey, value)
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                val maxIdToCheck = maxOf(oldCount, maxIdGen)
-                for (i in (newCount + 1)..maxIdToCheck) {
-                    editor.remove("evo_name_$i")
-                    editor.remove("evo_visibility_enabled_$i")
-                    editor.remove("evo_search_enabled_$i")
-                    editor.remove("evo_active_cats_json_$i")
-                    
-                    prefs.all.keys.forEach { key ->
-                        if (key.startsWith("cat_toggle_${i}_") || 
-                            key.startsWith("cat_rename_${i}_") || 
-                            key.startsWith("cat_order_${i}_") || 
-                            key.startsWith("auto_add_${i}_") ||
-                            key.startsWith("ext_toggle_${i}_")) {
-                            editor.remove(key)
-                        }
-                    }
-                }
-                
-                editor.apply()
-                APIHolder.allProviders.forEach { p -> if (p is UltimaEvoProvider) p.invalidateCache() }
+                // 단일 저장 함수 호출
+                commitMemoryToDb(prefs)
                 dismiss()
             }
         }
@@ -489,7 +509,15 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 val dragHandle = ImageView(ctx).apply { setImageResource(android.R.drawable.ic_menu_sort_by_size); setPadding(10, 0, 20, 0) }
                 val cb = CheckBox(ctx).apply { setPadding(0, 0, 5, 0) }
                 val tvSource = TextView(ctx).apply { setTextColor(Color.parseColor("#AAAAAA")); textSize = 11f; setPadding(15, 8, 15, 8); background = GradientDrawable().apply { setColor(Color.parseColor("#222222")); cornerRadius = 15f }; layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(5, 0, 10, 0) } }
-                val etRename = EditText(ctx).apply { setTextColor(Color.WHITE); setHintTextColor(Color.DKGRAY); textSize = 13f; setPadding(15, 10, 15, 10); background = getButtonBg(); setSingleLine(true); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
+                val etRename = EditText(ctx).apply { 
+                    setTextColor(Color.WHITE); setHintTextColor(Color.DKGRAY); textSize = 13f; setPadding(15, 10, 15, 10); background = getButtonBg(); setSingleLine(true); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) 
+                    
+                    setOnClickListener {
+                        requestFocus()
+                        val imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                        imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
+                    }
+                }
                 row.addView(dragHandle); row.addView(cb); row.addView(tvSource); row.addView(etRename)
                 return CVH(row, dragHandle, cb, tvSource, etRename)
             }
@@ -552,10 +580,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
         val dialog = AlertDialog.Builder(ctx).setView(mainContainer).create()
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-        
-        // 🔥 [버그 픽스 2] 키보드가 안 뜨는 버그 해결을 위해 다이얼로그 포커스 제한 플래그 삭제
-        dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
-        dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE or WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
 
         applyBtn.setOnClickListener {
             viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
