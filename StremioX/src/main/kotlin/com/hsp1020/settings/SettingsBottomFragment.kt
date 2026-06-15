@@ -539,7 +539,7 @@ class SettingsBottomFragment(
 
     private fun showLanguageSelectDialog() {
         val context = requireContext()
-        val currentSavedCode = sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, "ko-KR") ?: "ko-KR"
+        val currentSavedCode = sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, "en-US") ?: "en-US"
         
         var selectedCode = currentSavedCode
         var selectedLangName = languages.find { it.second == currentSavedCode }?.first ?: "South Korea (Korean)"
