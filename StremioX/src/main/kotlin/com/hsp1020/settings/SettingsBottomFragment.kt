@@ -27,7 +27,7 @@ import androidx.appcompat.app.AlertDialog
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import androidx.core.net.toUri
 import androidx.core.content.edit
-import androidx.lifecycle.lifecycleScope // 🔥 [V3 패치] 라이프사이클 스코프 임포트
+import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.ItemTouchHelper
@@ -244,7 +244,6 @@ class SettingsBottomFragment(
         tvExport.makeTvCompatible()
         tvImport.makeTvCompatible()
 
-        // 🔥 [V3 패치] viewLifecycleOwner.lifecycleScope 사용으로 메모리 릭(Leak) 차단
         tvExport.setOnClickListener {
             val ctx = requireContext()
             viewLifecycleOwner.lifecycleScope.launch {
@@ -274,7 +273,6 @@ class SettingsBottomFragment(
             }
         }
 
-        // 🔥 [V3 패치] viewLifecycleOwner.lifecycleScope 사용으로 메모리 릭(Leak) 차단
         tvImport.setOnClickListener {
             val ctx = requireContext()
             val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -541,6 +539,10 @@ class SettingsBottomFragment(
     private fun showLanguageSelectDialog() {
         val context = requireContext()
         val currentSavedCode = sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, "ko-KR") ?: "ko-KR"
+        
+        // 🔥 [V4 패치] 임시 상태 변수 설정 (Apply를 누르기 전까지는 DB에 저장되지 않음)
+        var selectedCode = currentSavedCode
+        var selectedLangName = languages.find { it.second == currentSavedCode }?.first ?: "South Korea (Korean)"
 
         val container = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -572,6 +574,12 @@ class SettingsBottomFragment(
         val langDialog = AlertDialog.Builder(context)
             .setTitle("Select TMDB Language")
             .setView(container)
+            // 🔥 [V4 패치] Apply 버튼을 눌러야만 실제 SharedPreferences에 저장되도록 개선
+            .setPositiveButton("Apply") { _, _ ->
+                sharedPref.edit { putString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, selectedCode) }
+                Toast.makeText(context, "Language set to $selectedCode ($selectedLangName)", Toast.LENGTH_SHORT).show()
+            }
+            // Cancel 버튼이나 바깥을 누르면 아무것도 저장하지 않고 그냥 닫힘 (안전한 폐기)
             .setNegativeButton("Cancel", null)
             .create()
 
@@ -606,14 +614,18 @@ class SettingsBottomFragment(
 
             override fun onBindViewHolder(holder: VH, position: Int) {
                 val (langName, code) = filteredList[position]
+                
+                // 🔥 [V4 패치] 임시 선택된 상태(selectedCode)와 비교하여 UI 렌더링
+                val isSelected = code == selectedCode
                 holder.tvName.text = langName
-                holder.tvName.setTextColor(if (code == currentSavedCode) android.graphics.Color.parseColor("#2196F3") else android.graphics.Color.WHITE)
-                holder.tvCheck.visibility = if (code == currentSavedCode) View.VISIBLE else View.GONE
+                holder.tvName.setTextColor(if (isSelected) android.graphics.Color.parseColor("#2196F3") else android.graphics.Color.WHITE)
+                holder.tvCheck.visibility = if (isSelected) View.VISIBLE else View.GONE
                 
                 holder.view.setOnClickListener {
-                    sharedPref.edit { putString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, code) }
-                    Toast.makeText(context, "Language set to $code ($langName)", Toast.LENGTH_SHORT).show()
-                    langDialog.dismiss()
+                    // 터치 시 변수만 업데이트하고 RecyclerView UI를 다시 그려서 파란색 체크를 옮김 (DB 저장 안 함)
+                    selectedCode = code
+                    selectedLangName = langName
+                    notifyDataSetChanged()
                 }
             }
             override fun getItemCount() = filteredList.size
@@ -640,7 +652,6 @@ class SettingsBottomFragment(
         val progressDialog = AlertDialog.Builder(context).setMessage("Loading Stremio Addon Manifest...").setCancelable(false).create()
         progressDialog.show()
 
-        // 🔥 [V3 패치] viewLifecycleOwner.lifecycleScope 사용으로 메모리 릭 차단
         viewLifecycleOwner.lifecycleScope.launch {
             val manifestText = withContext(Dispatchers.IO) {
                 try { com.lagradost.cloudstream3.app.get(item.link, timeout = 30L).text } catch (e: Exception) { e.printStackTrace(); null }
@@ -856,10 +867,10 @@ class SettingsBottomFragment(
             switchView.isEnabled = isInstalled
             if (!isInstalled) {
                 switchView.isChecked = false
-                switchView.text = "Not Installed"
+                switchView.text = "$displayName (Not Installed)"
                 SettingsRepository.setIntegrationEnabled(sharedPref, prefKey, false)
             } else {
-                switchView.text = "Integration"
+                switchView.text = "$displayName Integration"
                 switchView.isChecked = SettingsRepository.isIntegrationEnabled(sharedPref, prefKey)
             }
             switchView.setOnCheckedChangeListener { _, isChecked ->
