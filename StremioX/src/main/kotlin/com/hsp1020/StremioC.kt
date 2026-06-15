@@ -776,18 +776,18 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             kitsuVideos = kitsuVideos
         )
 
-        // 토글이 OFF면 mdbRatings는 텅 빈 상태(emptyList)가 됩니다.
         val mdbRatings = mdbDeferred?.await() ?: emptyList()
-        
-        // 데이터가 "있을 때만" 아래 블록이 실행됩니다!
-        if (mdbRatings.isNotEmpty()) { 
-            // 👉 토글 ON 시: 여기에 진입해서 플롯을 덧붙이고, 기본 평점을 null로 날려버림
+        if (mdbRatings.isNotEmpty()) {
             val ratingStr = mdbRatings.joinToString("  ")
-            loadRes.plot = "$ratingStr | ${loadRes.plot}"
-            loadRes.rating = null 
+            val currentPlot = loadRes.plot 
+            
+            // 1. MDBList 평점을 플롯에 덧붙임
+            loadRes.plot = if (!currentPlot.isNullOrBlank()) "$ratingStr | $currentPlot" else ratingStr
+            
+            // 2. 🔥 [빌드 픽스] Cloudstream 최신 규격인 'score' 변수를 null로 밀어버림!
+            loadRes.score = null 
         }
         
-        // 👉 토글 OFF 시: if 블록 자체를 무시(Skip)하고 원래 만들어둔 loadRes를 그대로 반환함
         return@coroutineScope loadRes
         
     }
