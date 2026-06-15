@@ -44,6 +44,11 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
     private var lastClickTime: Long = 0
     private var activeAlertDialog: AlertDialog? = null
 
+    // 🔥 [버그 픽스 1] "Save & Close"를 누르기 전까지는 DB를 건드리지 않도록 가상 메모리 모델 구축
+    data class InstanceData(var originalId: Int, var name: String, var visibility: Boolean, var search: Boolean)
+    private var maxIdGen = 1
+    private val instanceMemoryList = mutableListOf<InstanceData>()
+
     private fun getDarkThemeBg() = GradientDrawable().apply { setColor(Color.parseColor("#000000")); cornerRadius = 40f }
     private fun getCardBg() = GradientDrawable().apply { setColor(Color.parseColor("#0C0C0C")); setStroke(2, Color.parseColor("#1A1A1A")); cornerRadius = 30f }
     private fun getButtonBg() = GradientDrawable().apply { setColor(Color.parseColor("#151515")); cornerRadius = 20f }
@@ -53,49 +58,22 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         (view.parent as? View)?.setBackgroundColor(Color.TRANSPARENT)
     }
 
-    private fun shiftAndDeleteInstance(prefs: SharedPreferences, startIndex: Int, latestCount: Int) {
-        val editor = prefs.edit()
-        for (j in startIndex until latestCount) {
-            val curr = j
-            val next = j + 1
-            editor.putString("evo_name_$curr", prefs.getString("evo_name_$next", "Ultima Evo $next"))
-            editor.putBoolean("evo_visibility_enabled_$curr", prefs.getBoolean("evo_visibility_enabled_$next", true))
-            editor.putBoolean("evo_search_enabled_$curr", prefs.getBoolean("evo_search_enabled_$next", true))
-            editor.putString("evo_active_cats_json_$curr", prefs.getString("evo_active_cats_json_$next", ""))
-            
-            prefs.all.keys.forEach { key ->
-                if (key.startsWith("cat_toggle_${next}_") || key.startsWith("cat_rename_${next}_") || 
-                    key.startsWith("auto_add_${next}_")) {
-                    val newKey = key.replaceFirst("_${next}_", "_${curr}_")
-                    when (val value = prefs.all[key]) {
-                        is Boolean -> editor.putBoolean(newKey, value)
-                        is String -> editor.putString(newKey, value)
-                    }
-                }
-            }
-        }
-        
-        editor.remove("evo_name_$latestCount")
-        editor.remove("evo_visibility_enabled_$latestCount")
-        editor.remove("evo_search_enabled_$latestCount")
-        editor.remove("evo_active_cats_json_$latestCount")
-        prefs.all.keys.forEach { key ->
-            if (key.startsWith("cat_toggle_${latestCount}_") || key.startsWith("cat_rename_${latestCount}_") || 
-                key.startsWith("auto_add_${latestCount}_")) {
-                editor.remove(key)
-            }
-        }
-        
-        val newCount = if (latestCount > 0) latestCount - 1 else 0
-        editor.putString("evo_instance_count", newCount.toString())
-        editor.apply()
-    }
-
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
         val ctx = requireContext()
         val prefs = ctx.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
 
-        // 🔥 [UX 패치] 메인 스크롤뷰 그라데이션을 120으로 강하게 설정
+        // 다이얼로그 오픈 시 DB에서 읽어와 가상 메모리에 100% 복제
+        maxIdGen = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
+        instanceMemoryList.clear()
+        for (i in 1..maxIdGen) {
+            instanceMemoryList.add(InstanceData(
+                originalId = i,
+                name = prefs.getString("evo_name_$i", "Ultima Evo $i") ?: "Ultima Evo $i",
+                visibility = prefs.getBoolean("evo_visibility_enabled_$i", true),
+                search = prefs.getBoolean("evo_search_enabled_$i", true)
+            ))
+        }
+
         val scrollView = androidx.core.widget.NestedScrollView(ctx).apply { 
             background = getDarkThemeBg()
             isVerticalFadingEdgeEnabled = true
@@ -232,13 +210,38 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         }
         mainLayout.addView(syncAllBtn)
 
+        val rvInstances = RecyclerView(ctx).apply {
+            layoutManager = LinearLayoutManager(ctx)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            isVerticalFadingEdgeEnabled = true
+            setFadingEdgeLength(120)
+        }
+
         val countLayout = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, 0, 0, 20) }
         countLayout.addView(TextView(ctx).apply { text = "Instances:"; textSize = 15f; setTextColor(Color.LTGRAY); setPadding(0,0,20,0) })
         
         val instanceCountInput = EditText(ctx).apply {
-            inputType = InputType.TYPE_CLASS_NUMBER; imeOptions = EditorInfo.IME_ACTION_DONE; setText(prefs.getString("evo_instance_count", "1"))
+            inputType = InputType.TYPE_CLASS_NUMBER; imeOptions = EditorInfo.IME_ACTION_DONE; setText(instanceMemoryList.size.toString())
             setTextColor(Color.WHITE); background = getButtonBg(); setPadding(30, 20, 30, 20)
             layoutParams = LinearLayout.LayoutParams(150, LinearLayout.LayoutParams.WRAP_CONTENT); gravity = Gravity.CENTER
+        }
+        
+        instanceCountInput.setOnFocusChangeListener { _, hasFocus ->
+            if (!hasFocus) {
+                val newCount = instanceCountInput.text.toString().toIntOrNull() ?: instanceMemoryList.size
+                if (newCount < instanceMemoryList.size) {
+                    while(instanceMemoryList.size > newCount) {
+                        instanceMemoryList.removeLast()
+                    }
+                    rvInstances.adapter?.notifyDataSetChanged()
+                } else if (newCount > instanceMemoryList.size) {
+                    while(instanceMemoryList.size < newCount) {
+                        maxIdGen++
+                        instanceMemoryList.add(InstanceData(maxIdGen, "Ultima Evo ${instanceMemoryList.size + 1}", true, true))
+                    }
+                    rvInstances.adapter?.notifyDataSetChanged()
+                }
+            }
         }
         countLayout.addView(instanceCountInput)
 
@@ -246,24 +249,15 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             text = "+"; textSize = 20f; setTextColor(Color.WHITE); background = getButtonBg()
             layoutParams = LinearLayout.LayoutParams(120, LinearLayout.LayoutParams.MATCH_PARENT).apply { setMargins(20, 0, 0, 0) }
             setOnClickListener {
-                val current = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
-                prefs.edit().putString("evo_instance_count", (current + 1).toString()).apply()
-                val act = activity; dismiss(); UltimaEvoSettingsDialog().show(act!!.supportFragmentManager, "UltimaEvoSettingsDialog")
+                maxIdGen++
+                instanceMemoryList.add(InstanceData(maxIdGen, "Ultima Evo ${instanceMemoryList.size + 1}", true, true))
+                rvInstances.adapter?.notifyItemInserted(instanceMemoryList.size - 1)
+                instanceCountInput.setText(instanceMemoryList.size.toString())
             }
         }
         countLayout.addView(addInstanceBtn)
         mainLayout.addView(countLayout)
 
-        val currentCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
-        
-        // 🔥 [UX 패치] 인스턴스 목록(RecyclerView)에도 명시적으로 페이딩 엣지 추가하여 120으로 통일
-        val rvInstances = RecyclerView(ctx).apply {
-            layoutManager = LinearLayoutManager(ctx)
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            isVerticalFadingEdgeEnabled = true
-            setFadingEdgeLength(120)
-        }
-        
         class InstanceAdapter : RecyclerView.Adapter<InstanceAdapter.VH>() {
             inner class VH(val view: LinearLayout, val nameInput: EditText, val visSwitch: Switch, val searchSwitch: Switch, val configBtn: Button, val delBtn: Button) : RecyclerView.ViewHolder(view) {
                 var textWatcher: TextWatcher? = null 
@@ -296,61 +290,108 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             }
 
             override fun onBindViewHolder(holder: VH, position: Int) {
-                val i = position + 1
+                val data = instanceMemoryList[position]
                 
                 if (holder.textWatcher != null) {
                     holder.nameInput.removeTextChangedListener(holder.textWatcher)
                 }
                 
-                holder.nameInput.setText(prefs.getString("evo_name_$i", "Ultima Evo $i"))
+                holder.nameInput.setText(data.name)
                 
+                // 오직 메모리 배열 데이터만 수정함 (DB 건드리지 않음)
                 holder.textWatcher = object: TextWatcher {
-                    override fun afterTextChanged(s: Editable?) { prefs.edit().putString("evo_name_$i", s.toString()).apply() }
+                    override fun afterTextChanged(s: Editable?) { data.name = s.toString() }
                     override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
                     override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
                 }
                 holder.nameInput.addTextChangedListener(holder.textWatcher)
                 
                 holder.visSwitch.setOnCheckedChangeListener(null)
-                holder.visSwitch.isChecked = prefs.getBoolean("evo_visibility_enabled_$i", true)
-                holder.visSwitch.setOnCheckedChangeListener { _, isChecked -> prefs.edit().putBoolean("evo_visibility_enabled_$i", isChecked).apply() }
+                holder.visSwitch.isChecked = data.visibility
+                holder.visSwitch.setOnCheckedChangeListener { _, isChecked -> data.visibility = isChecked }
                 
                 holder.searchSwitch.setOnCheckedChangeListener(null)
-                holder.searchSwitch.isChecked = prefs.getBoolean("evo_search_enabled_$i", true)
-                holder.searchSwitch.setOnCheckedChangeListener { _, isChecked -> prefs.edit().putBoolean("evo_search_enabled_$i", isChecked).apply() }
+                holder.searchSwitch.isChecked = data.search
+                holder.searchSwitch.setOnCheckedChangeListener { _, isChecked -> data.search = isChecked }
 
-                holder.configBtn.setOnClickListener { showEditCatalogsDialog(i, ctx) }
+                holder.configBtn.setOnClickListener { showEditCatalogsDialog(data.originalId, ctx) }
+                
                 holder.delBtn.setOnClickListener {
-                    AlertDialog.Builder(ctx).setTitle("Delete").setMessage("Delete this catalog?")
-                        .setPositiveButton("Yes") { _, _ -> shiftAndDeleteInstance(prefs, i, currentCount); dismiss(); UltimaEvoSettingsDialog().show(activity!!.supportFragmentManager, "UltimaEvoSettingsDialog") }
-                        .setNegativeButton("No", null).show()
+                    val pos = holder.adapterPosition
+                    if (pos != RecyclerView.NO_POSITION) {
+                        instanceMemoryList.removeAt(pos)
+                        notifyItemRemoved(pos)
+                        instanceCountInput.setText(instanceMemoryList.size.toString())
+                    }
                 }
             }
-            override fun getItemCount() = currentCount
+            override fun getItemCount() = instanceMemoryList.size
         }
         rvInstances.adapter = InstanceAdapter()
         mainLayout.addView(rvInstances)
 
+        // 🔥 [버그 픽스] 이 버튼을 눌렀을 때 비로소 메모리에 쌓인 짓거리들을 DB로 완벽하게 덮어씀 (Commit)
         val saveBtn = Button(ctx).apply {
             text = "Save & Close"; setTextColor(Color.WHITE); isAllCaps = false; background = getButtonBg()
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 30, 0, 0) }
             setOnClickListener {
+                val editor = prefs.edit()
+                val newCount = instanceMemoryList.size
                 val oldCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
-                val newCount = instanceCountInput.text.toString().toIntOrNull() ?: oldCount
-                if (newCount < oldCount) {
-                    AlertDialog.Builder(ctx).setTitle("Warning").setMessage("Reducing instances will delete data. Proceed?")
-                        .setPositiveButton("Yes") { _, _ ->
-                            val editor = prefs.edit()
-                            editor.putString("evo_instance_count", newCount.toString())
-                            for (i in (newCount + 1)..oldCount) {
-                                editor.remove("evo_name_$i"); editor.remove("evo_visibility_enabled_$i"); editor.remove("evo_search_enabled_$i"); editor.remove("evo_active_cats_json_$i")
+                
+                editor.putString("evo_instance_count", newCount.toString())
+                
+                for (i in 0 until newCount) {
+                    val targetId = i + 1
+                    val item = instanceMemoryList[i]
+                    
+                    editor.putString("evo_name_$targetId", item.name)
+                    editor.putBoolean("evo_visibility_enabled_$targetId", item.visibility)
+                    editor.putBoolean("evo_search_enabled_$targetId", item.search)
+                    
+                    if (item.originalId != targetId) {
+                        val srcId = item.originalId
+                        editor.putString("evo_active_cats_json_$targetId", prefs.getString("evo_active_cats_json_$srcId", ""))
+                        
+                        prefs.all.keys.forEach { key ->
+                            if (key.startsWith("cat_toggle_${srcId}_") || 
+                                key.startsWith("cat_rename_${srcId}_") || 
+                                key.startsWith("cat_order_${srcId}_") || 
+                                key.startsWith("auto_add_${srcId}_") ||
+                                key.startsWith("ext_toggle_${srcId}_")) {
+                                
+                                val newKey = key.replaceFirst("_${srcId}_", "_${targetId}_")
+                                when (val value = prefs.all[key]) {
+                                    is Boolean -> editor.putBoolean(newKey, value)
+                                    is String -> editor.putString(newKey, value)
+                                    is Int -> editor.putInt(newKey, value)
+                                }
                             }
-                            editor.apply(); dismiss()
-                        }.setNegativeButton("No") { _, _ -> instanceCountInput.setText(oldCount.toString()) }.show()
-                } else {
-                    prefs.edit().putString("evo_instance_count", newCount.toString()).apply()
-                    dismiss()
+                        }
+                    }
                 }
+                
+                val maxIdToCheck = maxOf(oldCount, maxIdGen)
+                for (i in (newCount + 1)..maxIdToCheck) {
+                    editor.remove("evo_name_$i")
+                    editor.remove("evo_visibility_enabled_$i")
+                    editor.remove("evo_search_enabled_$i")
+                    editor.remove("evo_active_cats_json_$i")
+                    
+                    prefs.all.keys.forEach { key ->
+                        if (key.startsWith("cat_toggle_${i}_") || 
+                            key.startsWith("cat_rename_${i}_") || 
+                            key.startsWith("cat_order_${i}_") || 
+                            key.startsWith("auto_add_${i}_") ||
+                            key.startsWith("ext_toggle_${i}_")) {
+                            editor.remove(key)
+                        }
+                    }
+                }
+                
+                editor.apply()
+                APIHolder.allProviders.forEach { p -> if (p is UltimaEvoProvider) p.invalidateCache() }
+                dismiss()
             }
         }
         mainLayout.addView(saveBtn)
@@ -373,7 +414,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val toggleArrow = TextView(ctx).apply { text = "▼"; setTextColor(Color.WHITE); textSize = 14f; setPadding(15, 10, 15, 10) }
         headerRow.addView(toggleArrow); providerSettingsCard.addView(headerRow)
 
-        // 🔥 [UX 패치] 프로바이더 뷰 그라데이션을 120으로 강하게 설정
         val rvProviders = RecyclerView(ctx).apply { 
             layoutManager = LinearLayoutManager(ctx)
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 400)
@@ -433,7 +473,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         catalogList.addAll(initChecked)
         catalogList.addAll(initUnchecked)
 
-        // 🔥 [UX 패치] 카탈로그 뷰 그라데이션을 120으로 강하게 설정
         val rvCatalogs = RecyclerView(ctx).apply { 
             layoutManager = LinearLayoutManager(ctx)
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f) 
@@ -513,6 +552,10 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
         val dialog = AlertDialog.Builder(ctx).setView(mainContainer).create()
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        
+        // 🔥 [버그 픽스 2] 키보드가 안 뜨는 버그 해결을 위해 다이얼로그 포커스 제한 플래그 삭제
+        dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
+        dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE or WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
 
         applyBtn.setOnClickListener {
             viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
