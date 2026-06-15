@@ -119,7 +119,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     private val catalogSkipState = ConcurrentHashMap<String, Int>()
     
     private val pageMutex = Mutex()
-    private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
+    private val activePageRequests = mutableMapOf<String, Deferred<HomePageResponse>>()
 
     private fun getCineStreamProvider(forceSearch: Boolean = false): MainAPI? {
         if (cachedCineStreamProvider != null) return cachedCustomCineStreamProvider()
@@ -539,20 +539,26 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             )
         }
 
+    // 2. getMainPage 함수 내부
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse = coroutineScope {
         launch(Dispatchers.IO) {
             runSuspendCatching { getManifest() }.onFailure { it.printStackTrace() }
         }
 
+        // 🔥 고유 요청 키 생성 (예: "액션 영화_2")
+        val requestKey = "${request.name}_$page"
         var isNewRequest = false
+        
         val deferred = pageMutex.withLock {
             if (page <= 1) {
                 catalogSentIds.remove(request.name)
-                activePageRequests.clear()
+                // 🔥 전체 삭제가 아닌, 현재 카탈로그와 관련된 캐시만 안전하게 골라서 삭제
+                activePageRequests.entries.removeIf { it.key.startsWith("${request.name}_") }
                 catalogSkipState.remove(request.name)
             }
             
-            activePageRequests.getOrPut(page) {
+            // 🔥 고유 키로 캐싱하여 타 카탈로그와 100% 격리
+            activePageRequests.getOrPut(requestKey) {
                 isNewRequest = true
                 async { fetchTabCatalogData(request) }
             }
@@ -567,11 +573,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }
         } finally {
             pageMutex.withLock {
-                activePageRequests.remove(page)
+                // 🔥 고유 키로 삭제
+                activePageRequests.remove(requestKey)
             }
         }
     }
-    
+
     private suspend fun fetchTabCatalogData(request: MainPageRequest): HomePageResponse {
         val currentSkip = catalogSkipState[request.name] ?: 0
         val targetPath = request.data.replace("###", currentSkip.toString())
