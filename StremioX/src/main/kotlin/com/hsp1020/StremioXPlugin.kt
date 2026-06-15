@@ -1,4 +1,4 @@
-// v1.2 (Feature: StremioX 의존성 제거 및 모든 저장된 링크를 StremioC로 구동하도록 변경)
+// 파일명: hsp1020/StremioXPlugin.kt
 package com.hsp1020
 
 import android.content.Context
@@ -22,7 +22,9 @@ class StremioXPlugin : Plugin() {
         // [v2.2.1] 기록/즐겨찾기 단일 네임스페이스 격리 및 복원을 위해 백그라운드 공유 프로바이더를 조용히 상시 등록 [1]
         try {
             registerMainAPI(StremioC("", "StremioX"))
-        } catch (_: Throwable) {}
+        } catch (e: Throwable) {
+            e.printStackTrace()
+        }
 
         println("[StremioXPlugin v1.2-TRACKING] 기본 StremioX, StremioC 카탈로그 등록 건너뜀")
 
@@ -53,7 +55,7 @@ class StremioXPlugin : Plugin() {
                         id = obj.optLong("id", System.currentTimeMillis()),
                         name = obj.optString("name", ""),
                         link = obj.optString("link", ""),
-                        type = obj.optString("type", "StremioC") // [v1.2 수정] 파싱 시 기본값도 StremioC
+                        type = obj.optString("type", "StremioC")
                     )
                 )
             }
@@ -69,35 +71,40 @@ class StremioXPlugin : Plugin() {
                         break
                     }
                 }
+                
+                // 🔥 [위험한 플러그인 교체 타이밍 수정] Unload 후 명확한 딜레이를 부여하고 독립적으로 다시 Register 하도록 개선
                 if (found != null) {
                     try {
                         println("[StremioXPlugin v1.2-TRACKING] 기존 플러그인 발견, 언로드 시도: ${found.internalName}")
                         PluginManager.unloadPlugin(found.filePath)
+                        Thread.sleep(250) // 비동기 언로드 처리 꼬임 방지를 위한 안전 딜레이 확보
                     } catch (e: Throwable) {
                         Log.e("StremioXPlugin", "unload failed ${e.message}")
                         println("[StremioXPlugin v1.2-TRACKING] 플러그인 언로드 실패: ${e.message}")
+                        e.printStackTrace()
                     }
-                } else {
-                    try {
-                        println("[StremioXPlugin v1.2-TRACKING] 새로운 확장 등록 시도: ${item.name} 타입: ${item.type}")
-                        // [v1.2 수정] 과거 데이터(StremioX)든 최신 데이터(StremioC)든 무조건 StremioC 객체로 통일하여 생성합니다.
-                        when (item.type) {
-                            "StremioX", "StremioC" -> {
-                                try {
-                                    registerMainAPI(StremioC(item.link, item.name))
-                                } catch (_: Throwable) {
-                                    try { registerMainAPI(StremioC("", item.name)) } catch (_: Throwable) {}
-                                }
-                            }
-                            else -> {
-                                try { registerMainAPI(StremioC(item.link, item.name)) } catch (_: Throwable) {}
+                } 
+                
+                try {
+                    println("[StremioXPlugin v1.2-TRACKING] 새로운 확장 등록 시도: ${item.name} 타입: ${item.type}")
+                    when (item.type) {
+                        "StremioX", "StremioC" -> {
+                            try {
+                                registerMainAPI(StremioC(item.link, item.name))
+                            } catch (e: Throwable) {
+                                e.printStackTrace()
+                                try { registerMainAPI(StremioC("", item.name)) } catch (e2: Throwable) { e2.printStackTrace() }
                             }
                         }
-                        println("[StremioXPlugin v1.2-TRACKING] 확장 등록 완료 (StremioC 강제): ${item.name}")
-                    } catch (e: Throwable) {
-                        Log.e("StremioXPlugin", "register failed ${e.message}")
-                        println("[StremioXPlugin v1.2-TRACKING] 확장 등록 실패: ${e.message}")
+                        else -> {
+                            try { registerMainAPI(StremioC(item.link, item.name)) } catch (e: Throwable) { e.printStackTrace() }
+                        }
                     }
+                    println("[StremioXPlugin v1.2-TRACKING] 확장 등록 완료 (StremioC 강제): ${item.name}")
+                } catch (e: Throwable) {
+                    Log.e("StremioXPlugin", "register failed ${e.message}")
+                    println("[StremioXPlugin v1.2-TRACKING] 확장 등록 실패: ${e.message}")
+                    e.printStackTrace()
                 }
             }
             try {
@@ -106,10 +113,12 @@ class StremioXPlugin : Plugin() {
             } catch (e: Throwable) {
                 Log.w("StremioXPlugin", "afterPluginsLoaded invoke failed ${e.message}")
                 println("[StremioXPlugin v1.2-TRACKING] afterPluginsLoadedEvent 호출 실패: ${e.message}")
+                e.printStackTrace()
             }
         } catch (e: Throwable) {
             Log.e("StremioXPlugin", "reload error ${e.message}")
             println("[StremioXPlugin v1.2-TRACKING] reload 함수 에러: ${e.message}")
+            e.printStackTrace()
         }
     }
 
