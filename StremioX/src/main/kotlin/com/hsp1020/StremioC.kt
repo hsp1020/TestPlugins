@@ -365,7 +365,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val prefs = context?.getSharedPreferences("StremioX", Context.MODE_PRIVATE)
         val tmdbKey = prefs?.getString("tmdb_api_key", "") ?: ""
         builder.addQueryParameter("api_key", tmdbKey)
-        val langCode = prefs?.getString("tmdb_language_code", "ko-KR") ?: "ko-KR"
+        val langCode = prefs?.getString("tmdb_language_code", "en-US") ?: "en-US"
         builder.addQueryParameter("language", langCode)
         params.forEach { (key, value) -> builder.addQueryParameter(key, value) }
         return builder.build().toString()
@@ -1329,7 +1329,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
             val context = CloudStreamApp.context
             val prefs = context?.getSharedPreferences("StremioX", Context.MODE_PRIVATE)
-            val langCode = prefs?.getString("tmdb_language_code", "ko-KR") ?: "ko-KR"
+            val langCode = prefs?.getString("tmdb_language_code", "en-US") ?: "en-US"
             val customPosterEnabled = prefs?.getBoolean("custom_poster_enabled", false) ?: false
             val customPosterBase = prefs?.getString("custom_poster_url", "") ?: ""
             
