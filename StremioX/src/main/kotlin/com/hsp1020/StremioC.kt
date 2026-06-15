@@ -1647,7 +1647,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                                 val ani = mappings.get("anilist_id").intOrNull()?.takeIf { it > 0 }
                                 Pair(mal, ani)
                             } else null
-                        }.getOrNull()
+                        }.onFailure { it.printStackTrace() }.getOrNull()
                         if (fetchedZip != null) {
                             aniZipCache[cacheKey] = Pair(fetchedZip, System.currentTimeMillis())
                         }
