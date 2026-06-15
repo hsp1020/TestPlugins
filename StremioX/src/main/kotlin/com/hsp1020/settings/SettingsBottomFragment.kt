@@ -19,7 +19,7 @@ import android.widget.TextView
 import android.widget.Toast
 import android.widget.CheckBox
 import android.widget.Switch
-import android.widget.FrameLayout
+import android.widget.LinearLayout
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.util.Base64
@@ -29,6 +29,7 @@ import androidx.core.net.toUri
 import androidx.core.content.edit
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import androidx.recyclerview.widget.ItemTouchHelper
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CommonActivity.showToast
@@ -58,12 +59,10 @@ object SettingsRepository {
     const val PREF_KEY_HISTORY_SYNC_ENABLED = "history_sync_enabled"
     const val PREF_KEY_HISTORY_SYNC_URL = "history_sync_url"
     
-    // TMDB 다국어 및 추천목록 포스터 설정 키 정의
     const val PREF_KEY_TMDB_LANG_CODE = "tmdb_language_code"
     const val PREF_KEY_CUSTOM_POSTER_ENABLED = "custom_poster_enabled"
     const val PREF_KEY_CUSTOM_POSTER_URL = "custom_poster_url"
 
-    // TMDB API 및 MdbList 정밀 연동 제어 키 정의
     const val PREF_KEY_TMDB_API_KEY = "tmdb_api_key"
     const val PREF_KEY_MDBLIST_ENABLED = "mdblist_enabled"
     const val PREF_KEY_MDBLIST_API_KEY = "mdblist_api_key"
@@ -86,7 +85,7 @@ object SettingsRepository {
             }
             list
         } catch (e: Exception) {
-            Log.e("SettingsRepository", "Failed to parse links: ${e.message}")
+            e.printStackTrace()
             mutableListOf()
         }
     }
@@ -123,6 +122,14 @@ class SettingsBottomFragment(
 ) : BottomSheetDialogFragment() {
 
     private val res = plugin.resources ?: throw Exception("Unable to access plugin resources")
+    
+    // 🔥 [최적화] 리플렉션 무분별 호출 방지를 위한 캐싱
+    private val resourceCache = mutableMapOf<String, Int>()
+    private fun getCachedResId(name: String, type: String): Int {
+        return resourceCache.getOrPut("$type/$name") {
+            res.getIdentifier(name, type, BuildConfig.LIBRARY_PACKAGE_NAME)
+        }
+    }
 
     private data class ConfigFlatTab(val key: String, val displayName: String, val isGenre: Boolean, val catalogKey: String)
 
@@ -187,24 +194,24 @@ class SettingsBottomFragment(
     ).sortedBy { it.first.lowercase() }
 
     private fun getDrawable(name: String): Drawable {
-        val id = res.getIdentifier(name, "drawable", BuildConfig.LIBRARY_PACKAGE_NAME)
+        val id = getCachedResId(name, "drawable")
         return res.getDrawable(id, null) ?: throw Exception("Drawable $name not found")
     }
 
     private fun <T : View> View.findView(name: String): T {
-        val id = res.getIdentifier(name, "id", BuildConfig.LIBRARY_PACKAGE_NAME)
+        val id = getCachedResId(name, "id")
         if (id == 0) throw Exception("View ID $name not found.")
         return this.findViewById(id)
     }
 
     @SuppressLint("UseCompatLoadingForDrawables")
     private fun View.makeTvCompatible() {
-        val outlineId = res.getIdentifier("outline", "drawable", BuildConfig.LIBRARY_PACKAGE_NAME)
+        val outlineId = getCachedResId("outline", "drawable")
         this.background = res.getDrawable(outlineId, null)
     }
 
     private fun getLayout(name: String, inflater: LayoutInflater, container: ViewGroup?): View {
-        val id = res.getIdentifier(name, "layout", BuildConfig.LIBRARY_PACKAGE_NAME)
+        val id = getCachedResId(name, "layout")
         val layout = res.getLayout(id)
         return inflater.inflate(layout, container, false)
     }
@@ -226,15 +233,9 @@ class SettingsBottomFragment(
     ): View {
         val view = getLayout("bottom_sheet_layout", inflater, container)
 
-        val addlinks: ImageView = try { view.findView("addlinks") } catch (e: Throwable) {
-            throw Exception("addlinks ImageView not found in bottom_sheet_layout", e)
-        }
-        val showlinks: ImageView = try { view.findView("showlinks") } catch (e: Throwable) {
-            throw Exception("showlinks ImageView not found in bottom_sheet_layout", e)
-        }
-        val saveIcon: ImageView = try { view.findView("saveIcon") } catch (e: Throwable) {
-            throw Exception("saveIcon ImageView not found in bottom_sheet_layout", e)
-        }
+        val addlinks: ImageView = try { view.findView("addlinks") } catch (e: Throwable) { throw Exception("addlinks ImageView not found", e) }
+        val showlinks: ImageView = try { view.findView("showlinks") } catch (e: Throwable) { throw Exception("showlinks ImageView not found", e) }
+        val saveIcon: ImageView = try { view.findView("saveIcon") } catch (e: Throwable) { throw Exception("saveIcon ImageView not found", e) }
 
         addlinks.setImageDrawable(getDrawable("settings_icon"))
         showlinks.setImageDrawable(getDrawable("settings_icon"))
@@ -244,47 +245,46 @@ class SettingsBottomFragment(
         showlinks.makeTvCompatible()
         saveIcon.makeTvCompatible()
 
-        val tvExport: TextView = try { view.findView("tvExport") } catch (e: Throwable) {
-            throw Exception("tvExport TextView not found in bottom_sheet_layout", e)
-        }
-        val tvImport: TextView = try { view.findView("tvImport") } catch (e: Throwable) {
-            throw Exception("tvImport TextView not found in bottom_sheet_layout", e)
-        }
+        val tvExport: TextView = try { view.findView("tvExport") } catch (e: Throwable) { throw Exception("tvExport TextView not found", e) }
+        val tvImport: TextView = try { view.findView("tvImport") } catch (e: Throwable) { throw Exception("tvImport TextView not found", e) }
 
         tvExport.makeTvCompatible()
         tvImport.makeTvCompatible()
 
-        // 🔥 [완벽 쾌속 수출]: GZIP 동기식 다이렉트 클립보드 복사 (0.01초 소요)
+        // 🔥 [완벽 쾌속 수출]: 백그라운드 IO 코루틴 적용으로 메인 스레드 블로킹(UI 렉) 해결
         tvExport.setOnClickListener {
             val ctx = requireContext()
-            try {
-                val json = JSONObject()
-                sharedPref.all.forEach { (key, value) -> json.put(key, value) }
-                
-                val jsonString = json.toString()
-                val bos = java.io.ByteArrayOutputStream()
-                java.util.zip.GZIPOutputStream(bos).use { it.write(jsonString.toByteArray(Charsets.UTF_8)) }
-                val backupStr = Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
+            CoroutineScope(Dispatchers.Main).launch {
+                try {
+                    val backupStr = withContext(Dispatchers.IO) {
+                        val json = JSONObject()
+                        sharedPref.all.forEach { (key, value) -> json.put(key, value) }
+                        val jsonString = json.toString()
+                        val bos = java.io.ByteArrayOutputStream()
+                        java.util.zip.GZIPOutputStream(bos).use { it.write(jsonString.toByteArray(Charsets.UTF_8)) }
+                        Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
+                    }
 
-                val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                val clip = ClipData.newPlainText("StremioX Backup", backupStr)
-                clipboard.setPrimaryClip(clip)
+                    val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    val clip = ClipData.newPlainText("StremioX Backup", backupStr)
+                    clipboard.setPrimaryClip(clip)
 
-                AlertDialog.Builder(ctx)
-                    .setTitle("Export Successful")
-                    .setMessage("Compressed backup data has been successfully copied to your clipboard.\n\nPlease paste it somewhere safe (e.g., Notes, Messenger).")
-                    .setPositiveButton("OK", null)
-                    .show()
-            } catch (e: Exception) {
-                Toast.makeText(ctx, "Failed to export settings", Toast.LENGTH_SHORT).show()
+                    AlertDialog.Builder(ctx)
+                        .setTitle("Export Successful")
+                        .setMessage("Compressed backup data has been successfully copied to your clipboard.\n\nPlease paste it somewhere safe (e.g., Notes, Messenger).")
+                        .setPositiveButton("OK", null)
+                        .show()
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    Toast.makeText(ctx, "Failed to export settings", Toast.LENGTH_SHORT).show()
+                }
             }
         }
 
-        // 🔥 [완벽 쾌속 복원]: GZIP 압축 해제 + 사전 검증 후 다이렉트 복원
+        // 🔥 [완벽 쾌속 복원]: IO 코루틴 적용 및 타 앱 설정 날림 방지를 위해 editor.clear() 완전 제거(Merge 방식)
         tvImport.setOnClickListener {
             val ctx = requireContext()
             val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            
             val clipData = clipboard.primaryClip
             val clipboardText = if (clipData != null && clipData.itemCount > 0) {
                 clipData.getItemAt(0).text?.toString()?.trim() ?: ""
@@ -295,65 +295,62 @@ class SettingsBottomFragment(
                 return@setOnClickListener
             }
 
-            try {
-                val decodedBytes = Base64.decode(clipboardText, Base64.NO_WRAP)
-                
-                // GZIP 압축 여부를 자동으로 판단하여 해제 (과거 일반 텍스트도 호환)
-                val jsonString = try {
-                    val bais = java.io.ByteArrayInputStream(decodedBytes)
-                    java.util.zip.GZIPInputStream(bais).bufferedReader(Charsets.UTF_8).readText()
-                } catch (e: Exception) {
-                    String(decodedBytes, Charsets.UTF_8)
-                }
-                
-                val parsedJson = JSONObject(jsonString)
-                if (parsedJson.length() == 0) throw Exception("Empty JSON Data")
-
-                AlertDialog.Builder(ctx)
-                    .setTitle("Backup Data Detected")
-                    .setMessage("Valid backup data found in clipboard!\n\nWarning: Restoring will permanently overwrite all current settings.\nAre you sure you want to proceed?")
-                    .setPositiveButton("Restore") { _, _ ->
-                        val editor = sharedPref.edit()
-                        editor.clear()
-                        
-                        val keys = parsedJson.keys()
-                        while (keys.hasNext()) {
-                            val key = keys.next()
-                            when (val value = parsedJson.get(key)) {
-                                is Boolean -> editor.putBoolean(key, value)
-                                is String -> editor.putString(key, value)
-                                is Int -> editor.putInt(key, value)
-                            }
+            CoroutineScope(Dispatchers.Main).launch {
+                try {
+                    val parsedJson = withContext(Dispatchers.IO) {
+                        val decodedBytes = Base64.decode(clipboardText, Base64.NO_WRAP)
+                        val jsonString = try {
+                            val bais = java.io.ByteArrayInputStream(decodedBytes)
+                            java.util.zip.GZIPInputStream(bais).bufferedReader(Charsets.UTF_8).readText()
+                        } catch (e: Exception) {
+                            String(decodedBytes, Charsets.UTF_8)
                         }
-                        editor.apply()
-
-                        AlertDialog.Builder(ctx)
-                            .setTitle("Import Result")
-                            .setMessage("Restore completed successfully!\nPlease restart the app.")
-                            .setPositiveButton("OK") { _, _ -> dismiss() }
-                            .show()
+                        JSONObject(jsonString)
                     }
-                    .setNegativeButton("Cancel", null)
-                    .show()
 
-            } catch (e: Exception) {
-                AlertDialog.Builder(ctx)
-                    .setTitle("Invalid Backup Data")
-                    .setMessage("No valid backup data found in your clipboard.\n\nPlease copy the exact backup text and try again.")
-                    .setPositiveButton("OK", null)
-                    .show()
+                    if (parsedJson.length() == 0) throw Exception("Empty JSON Data")
+
+                    AlertDialog.Builder(ctx)
+                        .setTitle("Backup Data Detected")
+                        .setMessage("Valid backup data found in clipboard!\n\nAre you sure you want to proceed? (Existing unrelated settings will be kept safely)")
+                        .setPositiveButton("Restore") { _, _ ->
+                            val editor = sharedPref.edit()
+                            // editor.clear() // 🚨 타 앱 설정 연쇄 삭제 방지를 위해 제거
+                            
+                            val keys = parsedJson.keys()
+                            while (keys.hasNext()) {
+                                val key = keys.next()
+                                when (val value = parsedJson.get(key)) {
+                                    is Boolean -> editor.putBoolean(key, value)
+                                    is String -> editor.putString(key, value)
+                                    is Int -> editor.putInt(key, value)
+                                }
+                            }
+                            editor.apply()
+
+                            AlertDialog.Builder(ctx)
+                                .setTitle("Import Result")
+                                .setMessage("Restore completed successfully!\nPlease restart the app.")
+                                .setPositiveButton("OK") { _, _ -> dismiss() }
+                                .show()
+                        }
+                        .setNegativeButton("Cancel", null)
+                        .show()
+
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    AlertDialog.Builder(ctx)
+                        .setTitle("Invalid Backup Data")
+                        .setMessage("No valid backup data found in your clipboard.\n\nPlease copy the exact backup text and try again.")
+                        .setPositiveButton("OK", null)
+                        .show()
+                }
             }
         }
 
-        val switchHistorySync: Switch = try { view.findView("switchHistorySync") } catch (e: Throwable) {
-            throw Exception("switchHistorySync Switch not found", e)
-        }
-        val layoutHistorySyncUrl: View = try { view.findView("layoutHistorySyncUrl") } catch (e: Throwable) {
-            throw Exception("layoutHistorySyncUrl View not found", e)
-        }
-        val etHistorySyncUrl: EditText = try { view.findView("etHistorySyncUrl") } catch (e: Throwable) {
-            throw Exception("etHistorySyncUrl EditText not found", e)
-        }
+        val switchHistorySync: Switch = try { view.findView("switchHistorySync") } catch (e: Throwable) { throw Exception("switchHistorySync Switch not found", e) }
+        val layoutHistorySyncUrl: View = try { view.findView("layoutHistorySyncUrl") } catch (e: Throwable) { throw Exception("layoutHistorySyncUrl View not found", e) }
+        val etHistorySyncUrl: EditText = try { view.findView("etHistorySyncUrl") } catch (e: Throwable) { throw Exception("etHistorySyncUrl EditText not found", e) }
 
         val isSyncEnabled = sharedPref.getBoolean(SettingsRepository.PREF_KEY_HISTORY_SYNC_ENABLED, false)
         switchHistorySync.isChecked = isSyncEnabled
@@ -375,18 +372,10 @@ class SettingsBottomFragment(
         setupToggle(view, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
         setupToggle(view, "switchVixSrc", SettingsRepository.PREF_KEY_VIXSRC_ENABLED, true, "VixSrc")
 
-        val btnSelectLanguage: ImageView = try { view.findView("btnSelectLanguage") } catch (e: Throwable) {
-            throw Exception("btnSelectLanguage ImageView not found", e)
-        }
-        val switchCustomPoster: Switch = try { view.findView("switchCustomPoster") } catch (e: Throwable) {
-            throw Exception("switchCustomPoster Switch not found", e)
-        }
-        val layoutCustomPosterUrl: View = try { view.findView("layoutCustomPosterUrl") } catch (e: Throwable) {
-            throw Exception("layoutCustomPosterUrl View not found", e)
-        }
-        val etCustomPosterUrl: EditText = try { view.findView("etCustomPosterUrl") } catch (e: Throwable) {
-            throw Exception("etCustomPosterUrl EditText not found", e)
-        }
+        val btnSelectLanguage: ImageView = try { view.findView("btnSelectLanguage") } catch (e: Throwable) { throw Exception("btnSelectLanguage ImageView not found", e) }
+        val switchCustomPoster: Switch = try { view.findView("switchCustomPoster") } catch (e: Throwable) { throw Exception("switchCustomPoster Switch not found", e) }
+        val layoutCustomPosterUrl: View = try { view.findView("layoutCustomPosterUrl") } catch (e: Throwable) { throw Exception("layoutCustomPosterUrl View not found", e) }
+        val etCustomPosterUrl: EditText = try { view.findView("etCustomPosterUrl") } catch (e: Throwable) { throw Exception("etCustomPosterUrl EditText not found", e) }
 
         btnSelectLanguage.setImageDrawable(getDrawable("settings_icon"))
         btnSelectLanguage.makeTvCompatible()
@@ -411,18 +400,10 @@ class SettingsBottomFragment(
             }
         }
 
-        val etTmdbApiKey: EditText = try { view.findView("etTmdbApiKey") } catch (e: Throwable) {
-            throw Exception("etTmdbApiKey EditText not found", e)
-        }
-        val switchMdbList: Switch = try { view.findView("switchMdbList") } catch (e: Throwable) {
-            throw Exception("switchMdbList Switch not found", e)
-        }
-        val layoutMdbList: View = try { view.findView("layoutMdbList") } catch (e: Throwable) {
-            throw Exception("layoutMdbList View not found", e)
-        }
-        val etMdbListApiKey: EditText = try { view.findView("etMdbListApiKey") } catch (e: Throwable) {
-            throw Exception("etMdbListApiKey EditText not found", e)
-        }
+        val etTmdbApiKey: EditText = try { view.findView("etTmdbApiKey") } catch (e: Throwable) { throw Exception("etTmdbApiKey EditText not found", e) }
+        val switchMdbList: Switch = try { view.findView("switchMdbList") } catch (e: Throwable) { throw Exception("switchMdbList Switch not found", e) }
+        val layoutMdbList: View = try { view.findView("layoutMdbList") } catch (e: Throwable) { throw Exception("layoutMdbList View not found", e) }
+        val etMdbListApiKey: EditText = try { view.findView("etMdbListApiKey") } catch (e: Throwable) { throw Exception("etMdbListApiKey EditText not found", e) }
 
         etTmdbApiKey.setText(sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_API_KEY, ""))
         etTmdbApiKey.setOnFocusChangeListener { _, hasFocus ->
@@ -449,14 +430,10 @@ class SettingsBottomFragment(
 
         addlinks.setOnClickListener {
             val dialogView = getLayout("addlinks", inflater, container)
-            
             val etName = try { dialogView.findView<EditText>("etName") } catch (t: Throwable) { null }
             val etLink = try { dialogView.findView<EditText>("etLink") } catch (t: Throwable) { null }
 
-            if (etName == null || etLink == null) {
-                Toast.makeText(requireContext(), "Dialog fields not found", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
+            if (etName == null || etLink == null) return@setOnClickListener
 
             val dlg = AlertDialog.Builder(requireContext())
                 .setView(dialogView)
@@ -465,29 +442,20 @@ class SettingsBottomFragment(
                 .create()
 
             dlg.setOnShowListener {
-                val btnSave = dlg.getButton(AlertDialog.BUTTON_POSITIVE)
-                btnSave.setOnClickListener {
+                dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                     val name = etName.text.toString().trim()
                     val link = etLink.text.toString().trim()
                     val type = "StremioC"
 
-                    if (link.isEmpty()) {
-                        showToast("Please enter a link")
-                        return@setOnClickListener
-                    }
+                    if (link.isEmpty()) { showToast("Please enter a link"); return@setOnClickListener }
 
                     val valid = try {
                         val uri = link.toUri()
                         val scheme = uri.scheme?.lowercase()
                         scheme == "http" || scheme == "https"
-                    } catch (_: Exception) {
-                        false
-                    }
+                    } catch (_: Exception) { false }
 
-                    if (!valid) {
-                        showToast("Enter a valid URL (http/https)")
-                        return@setOnClickListener
-                    }
+                    if (!valid) { showToast("Enter a valid URL (http/https)"); return@setOnClickListener }
 
                     val item = LinkItem(name = name.ifBlank { link }, link = link, type = type)
                     try {
@@ -496,9 +464,7 @@ class SettingsBottomFragment(
                         SettingsRepository.saveLinks(sharedPref, list)
                         Toast.makeText(requireContext(), "Link saved", Toast.LENGTH_SHORT).show()
                         dlg.dismiss()
-                    } catch (e: Throwable) {
-                        showToast("Failed to save link")
-                    }
+                    } catch (e: Throwable) { e.printStackTrace(); showToast("Failed to save link") }
                 }
             }
             dlg.show()
@@ -544,16 +510,11 @@ class SettingsBottomFragment(
                         AlertDialog.Builder(requireContext())
                             .setTitle(itemToEdit.name)
                             .setItems(choices) { _, which ->
-                                if (which == 0) {
-                                    showEditDialog(itemToEdit, position, rv)
-                                } else {
-                                    showCatalogConfigDialog(itemToEdit)
-                                }
-                            }
-                            .show()
+                                if (which == 0) showEditDialog(itemToEdit, position, rv)
+                                else showCatalogConfigDialog(itemToEdit)
+                            }.show()
                     }
                 )
-
                 rv.adapter = adapter
             }
             dlg.show()
@@ -561,7 +522,6 @@ class SettingsBottomFragment(
 
         saveIcon.setOnClickListener {
             val context = this.context ?: return@setOnClickListener
-
             val tmdbApiKeyVal = etTmdbApiKey.text.toString().trim()
             if (tmdbApiKeyVal.isEmpty()) {
                 showToast("TMDB API key is a required field")
@@ -578,10 +538,7 @@ class SettingsBottomFragment(
             AlertDialog.Builder(context)
                 .setTitle("Save & Reload")
                 .setMessage("Changes have been saved. Do you want to restart the app to apply them?")
-                .setPositiveButton("Yes") { _, _ ->
-                    dismiss()
-                    restartApp()
-                }
+                .setPositiveButton("Yes") { _, _ -> dismiss(); restartApp() }
                 .setNegativeButton("No", null)
                 .show()
         }
@@ -589,16 +546,13 @@ class SettingsBottomFragment(
         return view
     }
 
+    // 🔥 [최적화] RecyclerView를 적용하여 다국어 검색 시 하드코딩된 View 생성 및 렌더링 부하 완벽 제거
     private fun showLanguageSelectDialog() {
         val context = requireContext()
-        val prefs = sharedPref
+        val currentSavedCode = sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, "ko-KR") ?: "ko-KR"
 
-        val scrollView = androidx.core.widget.NestedScrollView(context).apply {
-            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        }
-
-        val container = android.widget.LinearLayout(context).apply {
-            orientation = android.widget.LinearLayout.VERTICAL
+        val container = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
             setPadding(40, 30, 40, 30)
         }
 
@@ -612,76 +566,77 @@ class SettingsBottomFragment(
                 setColor(android.graphics.Color.parseColor("#151515"))
                 cornerRadius = 10f
             }
-            layoutParams = android.widget.LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                 setMargins(0, 0, 0, 20)
             }
         }
         container.addView(searchBar)
 
-        val currentSavedCode = prefs.getString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, "ko-KR") ?: "ko-KR"
-        val rowViews = mutableListOf<Pair<String, View>>()
+        val rv = RecyclerView(context).apply {
+            layoutManager = LinearLayoutManager(context)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 800) // Height fixed for popup
+        }
+        container.addView(rv)
 
-        val langDialog = AlertDialog.Builder(context).create()
+        val langDialog = AlertDialog.Builder(context)
+            .setTitle("Select TMDB Language")
+            .setView(container)
+            .setNegativeButton("Cancel", null)
+            .create()
 
-        languages.forEach { (langName, code) ->
-            val rowLayout = android.widget.LinearLayout(context).apply {
-                orientation = android.widget.LinearLayout.HORIZONTAL
-                gravity = android.view.Gravity.CENTER_VERTICAL
-                setPadding(10, 15, 10, 15)
-                isClickable = true
-                focusable = View.FOCUSABLE
-                background = android.graphics.drawable.GradientDrawable().apply {
-                    setColor(android.graphics.Color.TRANSPARENT)
+        class LangAdapter : RecyclerView.Adapter<LangAdapter.VH>() {
+            var filteredList = languages
+
+            inner class VH(val view: LinearLayout, val tvName: TextView, val tvCheck: TextView) : RecyclerView.ViewHolder(view)
+
+            override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
+                val rowLayout = LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    setPadding(10, 20, 10, 20)
+                    isClickable = true
+                    focusable = View.FOCUSABLE
+                    layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                 }
-            }
-
-            val tvName = TextView(context).apply {
-                text = langName
-                textSize = 15f
-                setTextColor(if (code == currentSavedCode) android.graphics.Color.parseColor("#2196F3") else android.graphics.Color.WHITE)
-                layoutParams = android.widget.LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            }
-            rowLayout.addView(tvName)
-
-            if (code == currentSavedCode) {
+                val tvName = TextView(context).apply {
+                    textSize = 15f
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                }
                 val tvCheck = TextView(context).apply {
                     text = "✓"
                     textSize = 16f
                     setTextColor(android.graphics.Color.parseColor("#2196F3"))
                     setPadding(10, 0, 10, 0)
                 }
+                rowLayout.addView(tvName)
                 rowLayout.addView(tvCheck)
+                return VH(rowLayout, tvName, tvCheck)
             }
 
-            rowLayout.setOnClickListener {
-                prefs.edit { putString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, code) }
-                Toast.makeText(context, "Language set to $code ($langName)", Toast.LENGTH_SHORT).show()
-                langDialog.dismiss()
+            override fun onBindViewHolder(holder: VH, position: Int) {
+                val (langName, code) = filteredList[position]
+                holder.tvName.text = langName
+                holder.tvName.setTextColor(if (code == currentSavedCode) android.graphics.Color.parseColor("#2196F3") else android.graphics.Color.WHITE)
+                holder.tvCheck.visibility = if (code == currentSavedCode) View.VISIBLE else View.GONE
+                
+                holder.view.setOnClickListener {
+                    sharedPref.edit { putString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, code) }
+                    Toast.makeText(context, "Language set to $code ($langName)", Toast.LENGTH_SHORT).show()
+                    langDialog.dismiss()
+                }
             }
-
-            container.addView(rowLayout)
-            rowViews.add(langName to rowLayout)
+            override fun getItemCount() = filteredList.size
         }
 
-        scrollView.addView(container)
-
-        langDialog.apply {
-            setTitle("Select TMDB Language")
-            setView(scrollView)
-            setButton(AlertDialog.BUTTON_NEGATIVE, "Cancel") { d, _ -> d.dismiss() }
-        }
+        val adapter = LangAdapter()
+        rv.adapter = adapter
 
         searchBar.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
                 val query = s.toString().trim().lowercase()
-                rowViews.forEach { (name, view) ->
-                    view.visibility = if (query.isEmpty() || name.lowercase().contains(query)) {
-                        View.VISIBLE
-                    } else {
-                        View.GONE
-                    }
-                }
+                adapter.filteredList = if (query.isEmpty()) languages else languages.filter { it.first.lowercase().contains(query) }
+                adapter.notifyDataSetChanged()
             }
             override fun afterTextChanged(s: android.text.Editable?) {}
         })
@@ -691,19 +646,12 @@ class SettingsBottomFragment(
 
     private fun showCatalogConfigDialog(item: LinkItem) {
         val context = requireContext()
-        val progressDialog = AlertDialog.Builder(context)
-            .setMessage("Loading Stremio Addon Manifest...")
-            .setCancelable(false)
-            .create()
+        val progressDialog = AlertDialog.Builder(context).setMessage("Loading Stremio Addon Manifest...").setCancelable(false).create()
         progressDialog.show()
 
         CoroutineScope(Dispatchers.Main).launch {
             val manifestText = withContext(Dispatchers.IO) {
-                try {
-                    com.lagradost.cloudstream3.app.get(item.link, timeout = 30L).text
-                } catch (e: Exception) {
-                    null
-                }
+                try { com.lagradost.cloudstream3.app.get(item.link, timeout = 30L).text } catch (e: Exception) { e.printStackTrace(); null }
             }
             progressDialog.dismiss()
 
@@ -712,13 +660,11 @@ class SettingsBottomFragment(
                 return@launch
             }
 
-            // 🔥 [3번 문제 해결]: 설정창에서 받아온 최신 매니페스트를 디스크 캐시에 즉시 강제 주입(동기화)합니다.
             val cleanUrl = item.link.substringBefore("?").trimEnd('/')
             val currentUrl = if (cleanUrl.endsWith("manifest.json")) cleanUrl else "$cleanUrl/manifest.json"
             val manifestPrefs = context.getSharedPreferences("StremioX_Manifest", Context.MODE_PRIVATE)
             manifestPrefs.edit().putString(currentUrl.toUniqueKeyLocal(), manifestText).apply()
 
-            // AIOMetadata 표준 extra[genre].options 및 Cinemeta genres 이중 수집 대응
             val flatTabs = mutableListOf<ConfigFlatTab>()
             try {
                 val node = StremioC.jsonMapper.readTree(manifestText)
@@ -736,9 +682,7 @@ class SettingsBottomFragment(
                             if (extraArr.isArray) {
                                 for (j in 0 until extraArr.size()) {
                                     val extraObj = extraArr.get(j)
-                                    if (extraObj.get("name")?.asText() == "genre" && extraObj.get("isRequired")?.asBoolean() == true) {
-                                        found = true
-                                    }
+                                    if (extraObj.get("name")?.asText() == "genre" && extraObj.get("isRequired")?.asBoolean() == true) found = true
                                 }
                             }
                             found
@@ -750,11 +694,7 @@ class SettingsBottomFragment(
 
                         val genres = mutableListOf<String>()
                         cat.get("genres")?.let { gArr ->
-                            if (gArr.isArray) {
-                                for (j in 0 until gArr.size()) {
-                                    genres.add(gArr.get(j).asText())
-                                }
-                            }
+                            if (gArr.isArray) for (j in 0 until gArr.size()) genres.add(gArr.get(j).asText())
                         }
                         if (genres.isEmpty()) {
                             cat.get("extra")?.let { extraArr ->
@@ -763,11 +703,7 @@ class SettingsBottomFragment(
                                         val extraObj = extraArr.get(j)
                                         if (extraObj.get("name")?.asText() == "genre") {
                                             extraObj.get("options")?.let { optsArr ->
-                                                if (optsArr.isArray) {
-                                                    for (k in 0 until optsArr.size()) {
-                                                        genres.add(optsArr.get(k).asText())
-                                                    }
-                                                }
+                                                if (optsArr.isArray) for (k in 0 until optsArr.size()) genres.add(optsArr.get(k).asText())
                                             }
                                         }
                                     }
@@ -781,34 +717,27 @@ class SettingsBottomFragment(
                         }
                     }
                 }
-            } catch (e: Exception) {
-                // 파싱 예외
-            }
+            } catch (e: Exception) { e.printStackTrace() }
 
-            if (flatTabs.isEmpty()) {
-                Toast.makeText(context, "No catalogs found in manifest.", Toast.LENGTH_LONG).show()
-                return@launch
-            }
-
+            if (flatTabs.isEmpty()) { Toast.makeText(context, "No catalogs found in manifest.", Toast.LENGTH_LONG).show(); return@launch }
             displayCatalogListDialog(item.name, flatTabs, item.link)
         }
     }
 
+    // 🔥 [최적화] RecyclerView + ItemTouchHelper 적용으로 렉없는 카탈로그 드래그 정렬 지원 및 뷰 재사용성 극대화
     private fun displayCatalogListDialog(addonName: String, flatTabs: List<ConfigFlatTab>, linkUrl: String) {
         val context = requireContext()
         val prefs = sharedPref
-
         val uniqueId = linkUrl.toUniqueKeyLocal()
         val orderKey = "catalog_order_$uniqueId"
+        
         val orderJson = prefs.getString(orderKey, null)
         val orderedKeys = mutableListOf<String>()
         if (orderJson != null) {
             try {
                 val arr = JSONArray(orderJson)
-                for (i in 0 until arr.length()) {
-                    orderedKeys.add(arr.getString(i))
-                }
-            } catch (e: Exception) {}
+                for (i in 0 until arr.length()) orderedKeys.add(arr.getString(i))
+            } catch (e: Exception) { e.printStackTrace() }
         }
 
         val masterTabs = flatTabs.sortedBy { tab ->
@@ -816,250 +745,120 @@ class SettingsBottomFragment(
             if (idx != -1) idx else Int.MAX_VALUE
         }.toMutableList()
 
-        val scrollView = androidx.core.widget.NestedScrollView(context).apply {
-            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        val rv = RecyclerView(context).apply {
+            layoutManager = LinearLayoutManager(context)
+            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1000)
+            setPadding(30, 20, 30, 20)
         }
 
-        val container = android.widget.LinearLayout(context).apply {
-            orientation = android.widget.LinearLayout.VERTICAL
-            setPadding(40, 30, 40, 30)
-        }
-        scrollView.addView(container)
-
-        class TabRow(
-            val tab: ConfigFlatTab,
-            val checkBox: CheckBox,
-            val orderEdit: EditText,
-            val view: View
-        )
-
-        val activeRows = mutableListOf<TabRow>()
-        var rebuildLayout: (() -> Unit)? = null
-
-        fun shiftItem(row: TabRow, newOrder: Int) {
-            val clampedOrder = newOrder.coerceIn(1, activeRows.size)
-            val oldIndex = activeRows.indexOf(row)
-            val newIndex = clampedOrder - 1
-
-            if (oldIndex == -1) return
-
-            if (oldIndex != newIndex) {
-                val targetTab = row.tab
-                val masterOldIndex = masterTabs.indexOf(targetTab)
-                
-                if (masterOldIndex != -1) {
-                    masterTabs.removeAt(masterOldIndex)
-                    val targetNeighborTab = activeRows[newIndex].tab
-                    val masterNewIndex = masterTabs.indexOf(targetNeighborTab)
-                    if (masterNewIndex != -1) {
-                        masterTabs.add(masterNewIndex, targetTab)
-                    } else {
-                        masterTabs.add(targetTab)
-                    }
-                }
+        class CatalogAdapter : RecyclerView.Adapter<CatalogAdapter.VH>() {
+            var visibleTabs = mutableListOf<ConfigFlatTab>()
+            
+            fun updateVisibleTabs() {
+                visibleTabs = masterTabs.filter { tab ->
+                    if (tab.isGenre) prefs.getBoolean("genres_enabled_${uniqueId}_${tab.catalogKey}", true) else true
+                }.toMutableList()
+                notifyDataSetChanged()
             }
 
-            val focusedView = container.findFocus() as? EditText
-            val selStart = focusedView?.selectionStart ?: 0
-            val selEnd = focusedView?.selectionEnd ?: 0
+            inner class VH(val view: LinearLayout, val checkbox: CheckBox, val genreSwitch: Switch, val dragHandle: ImageView) : RecyclerView.ViewHolder(view)
 
-            val visibleTabs = masterTabs.filter { tab ->
-                if (tab.isGenre) {
-                    val genresEnabledKey = "genres_enabled_${uniqueId}_${tab.catalogKey}"
-                    prefs.getBoolean(genresEnabledKey, true)
-                } else {
-                    true
-                }
-            }
-
-            val reorderedRows = mutableListOf<TabRow>()
-            visibleTabs.forEach { tab ->
-                activeRows.find { it.tab.key == tab.key }?.let { reorderedRows.add(it) }
-            }
-            activeRows.clear()
-            activeRows.addAll(reorderedRows)
-
-            for (i in activeRows.indices) {
-                val rowView = activeRows[i].view
-                val expectedIndex = i
-                if (container.getChildAt(expectedIndex) != rowView) {
-                    container.removeView(rowView)
-                    container.addView(rowView, expectedIndex)
-                }
-                activeRows[i].orderEdit.setText((i + 1).toString())
-            }
-
-            for (i in activeRows.indices) {
-                val itemLayout = activeRows[i].view as android.widget.LinearLayout
-                val upBtn = itemLayout.getChildAt(0) as android.widget.ImageButton
-                val downBtn = itemLayout.getChildAt(1) as android.widget.ImageButton
-                upBtn.isEnabled = i > 0
-                upBtn.alpha = if (upBtn.isEnabled) 1.0f else 0.3f
-                downBtn.isEnabled = i < activeRows.size - 1
-                downBtn.alpha = if (downBtn.isEnabled) 1.0f else 0.3f
-            }
-
-            focusedView?.requestFocus()
-            if (focusedView != null && selStart in 0..focusedView.text.length && selEnd in 0..focusedView.text.length) {
-                focusedView.setSelection(selStart, selEnd)
-            }
-        }
-
-        rebuildLayout = {
-            container.removeAllViews()
-            activeRows.clear()
-
-            val visibleTabs = masterTabs.filter { tab ->
-                if (tab.isGenre) {
-                    val genresEnabledKey = "genres_enabled_${uniqueId}_${tab.catalogKey}"
-                    prefs.getBoolean(genresEnabledKey, true)
-                } else {
-                    true
-                }
-            }
-
-            visibleTabs.forEachIndexed { index, tab ->
-                val itemLayout = android.widget.LinearLayout(context).apply {
-                    orientation = android.widget.LinearLayout.HORIZONTAL
+            override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
+                val layout = LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
                     gravity = android.view.Gravity.CENTER_VERTICAL
-                    setPadding(0, 10, 0, 10)
+                    setPadding(0, 15, 0, 15)
+                    layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                 }
-
-                val upButton = android.widget.ImageButton(context).apply {
-                    setImageResource(android.R.drawable.arrow_up_float)
-                    background = null
-                    this.isEnabled = index > 0
-                    alpha = if (this.isEnabled) 1.0f else 0.3f
+                val dragHandle = ImageView(context).apply {
+                    setImageResource(android.R.drawable.ic_menu_sort_by_size)
+                    setPadding(20, 0, 30, 0)
                 }
-
-                val downButton = android.widget.ImageButton(context).apply {
-                    setImageResource(android.R.drawable.arrow_down_float)
-                    background = null
-                    this.isEnabled = index < visibleTabs.size - 1
-                    alpha = if (this.isEnabled) 1.0f else 0.3f
-                }
-
-                itemLayout.addView(upButton)
-                itemLayout.addView(downButton)
-
-                val etOrder = EditText(context).apply {
-                    inputType = android.text.InputType.TYPE_CLASS_NUMBER
-                    imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
-                    layoutParams = android.widget.LinearLayout.LayoutParams(90, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                        setMargins(0, 0, 10, 0)
-                    }
-                    gravity = android.view.Gravity.CENTER
-                    setTextColor(android.graphics.Color.WHITE)
-                    textSize = 13f
-                    setPadding(10, 10, 10, 10)
-                    setText((index + 1).toString())
-                    
-                    val gd = android.graphics.drawable.GradientDrawable().apply {
-                        setColor(android.graphics.Color.parseColor("#151515"))
-                        cornerRadius = 10f
-                    }
-                    background = gd
-                }
-                itemLayout.addView(etOrder)
-
-                val enabledKey = "tab_enabled_${uniqueId}_${tab.key}"
-                val isEnabled = prefs.getBoolean(enabledKey, true)
-
-                val checkbox = android.widget.CheckBox(context).apply {
-                    isChecked = isEnabled
-                    text = tab.displayName
+                val checkbox = CheckBox(context).apply {
                     textSize = 15f
-                    setOnCheckedChangeListener { _, checked ->
-                        prefs.edit().putBoolean(enabledKey, checked).apply()
-                    }
+                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 }
-                val checkParams = android.widget.LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                itemLayout.addView(checkbox, checkParams)
-
-                if (!tab.isGenre) {
-                    val catalogHasGenres = masterTabs.any { it.isGenre && it.catalogKey == tab.catalogKey }
-                    if (catalogHasGenres) {
-                        val genresEnabledKey = "genres_enabled_${uniqueId}_${tab.catalogKey}"
-                        val isGenresEnabled = prefs.getBoolean(genresEnabledKey, true)
-
-                        val genreToggle = android.widget.Switch(context).apply {
-                            isChecked = isGenresEnabled
-                            text = "Genre"
-                            textSize = 12f
-                            setOnCheckedChangeListener { _, checked ->
-                                prefs.edit().putBoolean(genresEnabledKey, checked).apply()
-                                rebuildLayout?.invoke()
-                            }
-                        }
-                        itemLayout.addView(genreToggle)
-                    }
+                val genreSwitch = Switch(context).apply {
+                    text = "Genre"
+                    textSize = 12f
+                    setPadding(20, 0, 20, 0)
                 }
-
-                val row = TabRow(tab, checkbox, etOrder, itemLayout)
-                activeRows.add(row)
-
-                upButton.setOnClickListener {
-                    etOrder.clearFocus()
-                    val cur = activeRows.indexOf(row) + 1
-                    if (cur > 1) {
-                        shiftItem(row, cur - 1)
-                    }
-                }
-                downButton.setOnClickListener {
-                    etOrder.clearFocus()
-                    val cur = activeRows.indexOf(row) + 1
-                    if (cur < activeRows.size) {
-                        shiftItem(row, cur + 1)
-                    }
-                }
-
-                etOrder.setOnEditorActionListener { _, actionId, _ ->
-                    if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE || actionId == android.view.inputmethod.EditorInfo.IME_ACTION_NEXT) {
-                        etOrder.clearFocus()
-                        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
-                        imm.hideSoftInputFromWindow(etOrder.windowToken, 0)
-                        true
-                    } else false
-                }
-
-                etOrder.setOnFocusChangeListener { _, hasFocus ->
-                    if (!hasFocus) {
-                        val inputVal = etOrder.text.toString().toIntOrNull() ?: (activeRows.indexOf(row) + 1)
-                        shiftItem(row, inputVal)
-                    }
-                }
-
-                container.addView(itemLayout)
+                layout.addView(dragHandle)
+                layout.addView(checkbox)
+                layout.addView(genreSwitch)
+                return VH(layout, checkbox, genreSwitch, dragHandle)
             }
+
+            override fun onBindViewHolder(holder: VH, position: Int) {
+                val tab = visibleTabs[position]
+                val enabledKey = "tab_enabled_${uniqueId}_${tab.key}"
+                
+                holder.checkbox.setOnCheckedChangeListener(null)
+                holder.checkbox.isChecked = prefs.getBoolean(enabledKey, true)
+                holder.checkbox.text = tab.displayName
+                holder.checkbox.setOnCheckedChangeListener { _, isChecked ->
+                    prefs.edit().putBoolean(enabledKey, isChecked).apply()
+                }
+
+                if (!tab.isGenre && masterTabs.any { it.isGenre && it.catalogKey == tab.catalogKey }) {
+                    holder.genreSwitch.visibility = View.VISIBLE
+                    val genresEnabledKey = "genres_enabled_${uniqueId}_${tab.catalogKey}"
+                    holder.genreSwitch.setOnCheckedChangeListener(null)
+                    holder.genreSwitch.isChecked = prefs.getBoolean(genresEnabledKey, true)
+                    holder.genreSwitch.setOnCheckedChangeListener { _, isChecked ->
+                        prefs.edit().putBoolean(genresEnabledKey, isChecked).apply()
+                        updateVisibleTabs()
+                    }
+                } else {
+                    holder.genreSwitch.visibility = View.GONE
+                }
+            }
+            override fun getItemCount() = visibleTabs.size
         }
 
-        val dialog = AlertDialog.Builder(context)
+        val adapter = CatalogAdapter()
+        adapter.updateVisibleTabs()
+        rv.adapter = adapter
+
+        val touchHelper = ItemTouchHelper(object : ItemTouchHelper.SimpleCallback(ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0) {
+            override fun onMove(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder, target: RecyclerView.ViewHolder): Boolean {
+                val fromPos = viewHolder.adapterPosition
+                val toPos = target.adapterPosition
+                
+                val movedTab = adapter.visibleTabs[fromPos]
+                Collections.swap(adapter.visibleTabs, fromPos, toPos)
+                adapter.notifyItemMoved(fromPos, toPos)
+
+                // Master 목록 동기화
+                val masterFrom = masterTabs.indexOf(movedTab)
+                val targetTab = adapter.visibleTabs[fromPos]
+                val masterTo = masterTabs.indexOf(targetTab)
+                
+                if (masterFrom != -1 && masterTo != -1) {
+                    masterTabs.removeAt(masterFrom)
+                    masterTabs.add(masterTo, movedTab)
+                }
+                return true
+            }
+            override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {}
+        })
+        touchHelper.attachToRecyclerView(rv)
+
+        AlertDialog.Builder(context)
             .setTitle("$addonName - Catalog Settings")
-            .setView(scrollView)
+            .setView(rv)
             .setPositiveButton("Save") { _, _ ->
                 val keysToSave = JSONArray()
-                masterTabs.forEach {
-                    keysToSave.put(it.key)
-                }
+                masterTabs.forEach { keysToSave.put(it.key) }
                 prefs.edit().putString(orderKey, keysToSave.toString()).apply()
                 Toast.makeText(context, "Catalog settings saved. Reload to apply.", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("Cancel", null)
-            .create()
-
-        rebuildLayout.invoke()
-        dialog.show()
+            .show()
     }
 
-    private fun String.capitalizeFirstLocal(): String = if (this.isNotEmpty()) {
-        this.substring(0, 1).uppercase() + this.substring(1)
-    } else {
-        this
-    }
-
-    private fun String.toUniqueKeyLocal(): String {
-        return this.lowercase().filter { it.isLetter() }
-    }
+    private fun String.capitalizeFirstLocal(): String = if (this.isNotEmpty()) this.substring(0, 1).uppercase() + this.substring(1) else this
+    private fun String.toUniqueKeyLocal(): String = this.lowercase().filter { it.isLetter() }
 
     private fun setupToggle(view: View, viewId: String, prefKey: String, isInstalled: Boolean, displayName: String) {
         try {
@@ -1073,15 +872,11 @@ class SettingsBottomFragment(
                 switchView.text = "$displayName Integration"
                 switchView.isChecked = SettingsRepository.isIntegrationEnabled(sharedPref, prefKey)
             }
-
             switchView.setOnCheckedChangeListener { _, isChecked ->
                 SettingsRepository.setIntegrationEnabled(sharedPref, prefKey, isChecked)
-                val statusText = if (isChecked) "Enabled" else "Disabled"
-                showToast("$displayName Integration $statusText")
+                showToast("$displayName Integration " + if (isChecked) "Enabled" else "Disabled")
             }
-        } catch (e: Throwable) {
-            // 방어 코드
-        }
+        } catch (e: Throwable) { e.printStackTrace() }
     }
 
     private fun showEditDialog(itemToEdit: LinkItem, position: Int, rv: RecyclerView) {
@@ -1089,10 +884,7 @@ class SettingsBottomFragment(
         val etName = try { dialogView.findView<EditText>("etName") } catch (t: Throwable) { null }
         val etLink = try { dialogView.findView<EditText>("etLink") } catch (t: Throwable) { null }
         
-        if (etName == null || etLink == null) {
-            Toast.makeText(requireContext(), "Dialog fields not found", Toast.LENGTH_SHORT).show()
-            return
-        }
+        if (etName == null || etLink == null) return
 
         etName.setText(itemToEdit.name)
         etLink.setText(itemToEdit.link)
@@ -1105,8 +897,7 @@ class SettingsBottomFragment(
             .create()
 
         dlg.setOnShowListener {
-            val btnUpdate = dlg.getButton(AlertDialog.BUTTON_POSITIVE)
-            btnUpdate.setOnClickListener {
+            dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val name = etName.text.toString().trim()
                 val link = etLink.text.toString().trim()
                 val type = "StremioC"
@@ -1123,7 +914,6 @@ class SettingsBottomFragment(
                     val newItem = itemToEdit.copy(name = name.ifBlank { link }, link = link, type = type)
                     updatedList[indexInDb] = newItem
                     SettingsRepository.saveLinks(sharedPref, updatedList)
-
                     (rv.adapter as? LinksAdapter)?.updateItem(newItem, position)
                     showToast("Link Updated Successfully")
                 }
@@ -1165,18 +955,16 @@ class SettingsBottomFragment(
         }
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
-            val layoutId = res.getIdentifier("item_saved_link", "layout", BuildConfig.LIBRARY_PACKAGE_NAME)
+            val layoutId = getCachedResId("item_saved_link", "layout")
             val v = layoutInflater.inflate(res.getLayout(layoutId), parent, false)
             return VH(v)
         }
 
         override fun onBindViewHolder(holder: VH, position: Int) {
             val item = items[position]
-
             holder.tvName.text = item.name
             holder.tvLink.text = item.link
             holder.tvType.text = item.type
-
             holder.btnDelete.setOnClickListener { onDelete(item) }
             holder.itemView.setOnClickListener { onEdit(item, position) }
         }
