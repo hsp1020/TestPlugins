@@ -19,6 +19,7 @@ import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.*
@@ -56,64 +57,17 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         (view.parent as? View)?.setBackgroundColor(Color.TRANSPARENT)
     }
 
-    // 🔥 [스파게티/데드코드 픽스] 반쪽짜리 함수와 미사용 함수를 모두 지우고, 단일 완벽 동기화 함수로 통합!
-    private fun commitMemoryToDb(prefs: SharedPreferences) {
+    private fun saveMemoryToPrefs(prefs: SharedPreferences) {
         val editor = prefs.edit()
-        val newCount = instanceMemoryList.size
-        val oldCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
-        
-        editor.putString("evo_instance_count", newCount.toString())
-        
-        for (i in 0 until newCount) {
-            val targetId = i + 1
-            val item = instanceMemoryList[i]
-            
-            editor.putString("evo_name_$targetId", item.name)
-            editor.putBoolean("evo_visibility_enabled_$targetId", item.visibility)
-            editor.putBoolean("evo_search_enabled_$targetId", item.search)
-            
-            if (item.originalId != targetId) {
-                val srcId = item.originalId
-                editor.putString("evo_active_cats_json_$targetId", prefs.getString("evo_active_cats_json_$srcId", ""))
-                
-                prefs.all.keys.forEach { key ->
-                    if (key.startsWith("cat_toggle_${srcId}_") || 
-                        key.startsWith("cat_rename_${srcId}_") || 
-                        key.startsWith("cat_order_${srcId}_") || 
-                        key.startsWith("auto_add_${srcId}_") ||
-                        key.startsWith("ext_toggle_${srcId}_")) {
-                        
-                        val newKey = key.replaceFirst("_${srcId}_", "_${targetId}_")
-                        when (val value = prefs.all[key]) {
-                            is Boolean -> editor.putBoolean(newKey, value)
-                            is String -> editor.putString(newKey, value)
-                            is Int -> editor.putInt(newKey, value)
-                        }
-                    }
-                }
-            }
+        val currentInstanceCount = instanceMemoryList.size
+        editor.putString("evo_instance_count", currentInstanceCount.toString())
+        for (i in 1..currentInstanceCount) {
+            val data = instanceMemoryList[i - 1]
+            editor.putString("evo_name_$i", data.name)
+            editor.putBoolean("evo_visibility_enabled_$i", data.visibility)
+            editor.putBoolean("evo_search_enabled_$i", data.search)
         }
-        
-        val maxIdToCheck = maxOf(oldCount, maxIdGen)
-        for (i in (newCount + 1)..maxIdToCheck) {
-            editor.remove("evo_name_$i")
-            editor.remove("evo_visibility_enabled_$i")
-            editor.remove("evo_search_enabled_$i")
-            editor.remove("evo_active_cats_json_$i")
-            
-            prefs.all.keys.forEach { key ->
-                if (key.startsWith("cat_toggle_${i}_") || 
-                    key.startsWith("cat_rename_${i}_") || 
-                    key.startsWith("cat_order_${i}_") || 
-                    key.startsWith("auto_add_${i}_") ||
-                    key.startsWith("ext_toggle_${i}_")) {
-                    editor.remove(key)
-                }
-            }
-        }
-        
         editor.apply()
-        APIHolder.allProviders.forEach { p -> if (p is UltimaEvoProvider) p.invalidateCache() }
     }
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
@@ -157,8 +111,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 if (SystemClock.elapsedRealtime() - lastClickTime < 1000 || activeAlertDialog?.isShowing == true) return@setOnClickListener
                 lastClickTime = SystemClock.elapsedRealtime()
                 
-                // 단일 저장 함수 호출
-                commitMemoryToDb(prefs)
+                saveMemoryToPrefs(prefs)
 
                 viewLifecycleOwner.lifecycleScope.launch {
                     try {
@@ -256,8 +209,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 lastClickTime = SystemClock.elapsedRealtime()
                 this.isEnabled = false
                 
-                // 단일 저장 함수 호출
-                commitMemoryToDb(prefs)
+                saveMemoryToPrefs(prefs) 
                 
                 viewLifecycleOwner.lifecycleScope.launch {
                     try {
@@ -409,8 +361,62 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             text = "Save & Close"; setTextColor(Color.WHITE); isAllCaps = false; background = getButtonBg()
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 30, 0, 0) }
             setOnClickListener {
-                // 단일 저장 함수 호출
-                commitMemoryToDb(prefs)
+                val editor = prefs.edit()
+                val newCount = instanceMemoryList.size
+                val oldCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
+                
+                editor.putString("evo_instance_count", newCount.toString())
+                
+                for (i in 0 until newCount) {
+                    val targetId = i + 1
+                    val item = instanceMemoryList[i]
+                    
+                    editor.putString("evo_name_$targetId", item.name)
+                    editor.putBoolean("evo_visibility_enabled_$targetId", item.visibility)
+                    editor.putBoolean("evo_search_enabled_$targetId", item.search)
+                    
+                    if (item.originalId != targetId) {
+                        val srcId = item.originalId
+                        editor.putString("evo_active_cats_json_$targetId", prefs.getString("evo_active_cats_json_$srcId", ""))
+                        
+                        prefs.all.keys.forEach { key ->
+                            if (key.startsWith("cat_toggle_${srcId}_") || 
+                                key.startsWith("cat_rename_${srcId}_") || 
+                                key.startsWith("cat_order_${srcId}_") || 
+                                key.startsWith("auto_add_${srcId}_") ||
+                                key.startsWith("ext_toggle_${srcId}_")) {
+                                
+                                val newKey = key.replaceFirst("_${srcId}_", "_${targetId}_")
+                                when (val value = prefs.all[key]) {
+                                    is Boolean -> editor.putBoolean(newKey, value)
+                                    is String -> editor.putString(newKey, value)
+                                    is Int -> editor.putInt(newKey, value)
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                val maxIdToCheck = maxOf(oldCount, maxIdGen)
+                for (i in (newCount + 1)..maxIdToCheck) {
+                    editor.remove("evo_name_$i")
+                    editor.remove("evo_visibility_enabled_$i")
+                    editor.remove("evo_search_enabled_$i")
+                    editor.remove("evo_active_cats_json_$i")
+                    
+                    prefs.all.keys.forEach { key ->
+                        if (key.startsWith("cat_toggle_${i}_") || 
+                            key.startsWith("cat_rename_${i}_") || 
+                            key.startsWith("cat_order_${i}_") || 
+                            key.startsWith("auto_add_${i}_") ||
+                            key.startsWith("ext_toggle_${i}_")) {
+                            editor.remove(key)
+                        }
+                    }
+                }
+                
+                editor.apply()
+                APIHolder.allProviders.forEach { p -> if (p is UltimaEvoProvider) p.invalidateCache() }
                 dismiss()
             }
         }
@@ -580,6 +586,12 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
         val dialog = AlertDialog.Builder(ctx).setView(mainContainer).create()
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+
+        // 🔥 [키보드 버그 최종 픽스] AlertDialog가 화면에 뜰 때 키보드 차단 플래그를 영구 해제
+        dialog.setOnShowListener {
+            dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
+            dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        }
 
         applyBtn.setOnClickListener {
             viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
