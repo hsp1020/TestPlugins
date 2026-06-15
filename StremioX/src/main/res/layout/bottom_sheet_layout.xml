@@ -44,7 +44,7 @@
                 android:textStyle="bold"
                 android:padding="10dp"
                 android:focusable="true"
-                android:background="?attr/selectableItemBackground"
+                android:background="?android:attr/selectableItemBackground"
                 android:clickable="true" />
 
             <TextView
@@ -59,7 +59,7 @@
                 android:textStyle="bold"
                 android:padding="10dp"
                 android:focusable="true"
-                android:background="?attr/selectableItemBackground"
+                android:background="?android:attr/selectableItemBackground"
                 android:clickable="true" />
 
             <ImageView
@@ -70,7 +70,7 @@
                 android:layout_marginBottom="5dp"
                 android:padding="5dp"
                 android:focusable="true"
-                android:background="?attr/selectableItemBackground"
+                android:background="?android:attr/selectableItemBackground"
                 android:clickable="true" />
         </LinearLayout>
 
@@ -106,7 +106,7 @@
                 android:layout_height="wrap_content"
                 android:focusable="true"
                 android:padding="5dp"
-                android:background="?attr/selectableItemBackground"
+                android:background="?android:attr/selectableItemBackground"
                 android:clickable="true" />
         </LinearLayout>
 
@@ -133,7 +133,7 @@
                 android:padding="5dp"
                 android:focusable="true"
                 android:nextFocusUp="@id/addlinks"
-                android:background="?attr/selectableItemBackground"
+                android:background="?android:attr/selectableItemBackground"
                 android:clickable="true" />
         </LinearLayout>
 
@@ -186,7 +186,7 @@
                 android:layout_height="wrap_content"
                 android:padding="5dp"
                 android:focusable="true"
-                android:background="?attr/selectableItemBackground"
+                android:background="?android:attr/selectableItemBackground"
                 android:clickable="true" />
         </LinearLayout>
 
@@ -349,7 +349,6 @@
                 android:singleLine="true" />
         </LinearLayout>
 
-        <!-- 🔥 [수정됨] TextView를 제거하고 Switch 자체가 영역을 덮도록 수정 (중복 텍스트 방지) -->
         <Switch
             android:id="@+id/switchCineStream"
             android:layout_width="match_parent"
