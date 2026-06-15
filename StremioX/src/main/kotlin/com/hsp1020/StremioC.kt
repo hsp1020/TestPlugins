@@ -1,4 +1,3 @@
-// 버전 정보: v2.1.2 - 플랫 정렬 및 장르 대소문자 보완, AIO 장르 파싱 규격 이중화 대응 완료 코어
 package com.hsp1020
 
 import android.content.Context
@@ -63,6 +62,7 @@ import java.net.URLEncoder
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import java.lang.ref.WeakReference
 
 inline fun <T> runSuspendCatching(block: () -> T): Result<T> {
     return try {
@@ -86,6 +86,15 @@ private inline fun <T> lruSet(maxSize: Int): MutableSet<T> {
             return size > maxSize
         }
     }))
+}
+
+// 🔥 [최적화] 무한대로 증가하여 OOM을 일으키던 캐시들을 통제하기 위한 Thread-Safe LRU Cache 생성기
+private inline fun <K, V> lruCacheMap(maxSize: Int): MutableMap<K, V> {
+    return Collections.synchronizedMap(object : java.util.LinkedHashMap<K, V>(maxSize, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<K, V>): Boolean {
+            return size > maxSize
+        }
+    })
 }
 
 private fun JsonNode?.textOrNull(): String? {
@@ -148,7 +157,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
     private fun cachedCustomStreamPlayProvider(): MainAPI? = cachedStreamPlayProvider
 
-    // 🔥 [기록/라이브러리 통합]: 설정창의 동기화 상태에 따라 저장 주소(URL)를 가공 및 단일화하는 헬퍼 함수
     fun getUnifiedMetaUrl(type: String, id: String): String {
         val context = CloudStreamApp.context ?: return "${mainUrl.cleanBaseUrl()}/meta/$type/${id.urlEncode()}.json"
         val prefs = context.getSharedPreferences("StremioX", Context.MODE_PRIVATE)
@@ -164,7 +172,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
     }
 
-    // 🔥 [기록/라이브러리 통합]: 동기화 여부에 따라 데이터베이스 저장 네임스페이스(apiName)를 동적으로 분기
     fun getTargetApiName(): String {
         val context = CloudStreamApp.context ?: return name
         val prefs = context.getSharedPreferences("StremioX", Context.MODE_PRIVATE)
@@ -179,7 +186,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         private val IMDB_ID_REGEX = "tt[0-9]+".toRegex()
         private val JSON_ID_EXTRACT_REGEX = "\"id\":\"([^\"]+)\"".toRegex()
         
-        val globalPageCache = ConcurrentHashMap<String, Triple<List<SearchResponse>, Int, Long>>()
+        // 🔥 [최적화] ConcurrentHashMap -> LRU Cache 로 교체하여 OOM 방지
+        val globalPageCache = lruCacheMap<String, Triple<List<SearchResponse>, Int, Long>>(100)
+        // 🔥 [최적화] Mutex는 메모리를 차지하지 않으므로 삭제 락/데드락을 피하기 위해 단순 맵 유지
         val cacheMutexes = ConcurrentHashMap<String, Mutex>()
         const val CACHE_TTL_MS = 3600000L // 1 hour
         
@@ -199,18 +208,20 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         @Volatile private var hasSyncedCineStreamSettings = false
         
-        @Volatile private var cachedClassLoader: ClassLoader? = null
+        // 🔥 [개선] ClassLoader 메모리 누수 방지를 위한 WeakReference 적용
+        @Volatile private var cachedClassLoaderRef: WeakReference<ClassLoader>? = null
 
         val jsonMapper: ObjectMapper by lazy {
             jacksonObjectMapper()
                 .configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
         }
 
-        private val tmdbDetailsCache = ConcurrentHashMap<String, Pair<TmdbDetailResponse, Long>>()
-        private val tmdbSeasonCache = ConcurrentHashMap<String, Pair<TmdbSeasonDetail, Long>>()
-        private val kitsuMetaCache = ConcurrentHashMap<String, Pair<String, Long>>()
-        private val tmdbFindCache = ConcurrentHashMap<String, Pair<Pair<String, String>?, Long>>()
-        private val aniZipCache = ConcurrentHashMap<String, Pair<Pair<Int?, Int?>?, Long>>()
+        // 🔥 [최적화] 메타데이터 캐시들도 LruCache로 일괄 교체
+        private val tmdbDetailsCache = lruCacheMap<String, Pair<TmdbDetailResponse, Long>>(100)
+        private val tmdbSeasonCache = lruCacheMap<String, Pair<TmdbSeasonDetail, Long>>(150)
+        private val kitsuMetaCache = lruCacheMap<String, Pair<String, Long>>(100)
+        private val tmdbFindCache = lruCacheMap<String, Pair<Pair<String, String>?, Long>>(100)
+        private val aniZipCache = lruCacheMap<String, Pair<Pair<Int?, Int?>?, Long>>(100)
         private const val METADATA_CACHE_TTL = 12 * 60 * 60 * 1000L
 
         suspend fun getOrFetchKitsu(url: String): String? {
@@ -250,12 +261,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
 
         fun loadProviderDynamically(pluginKeyword: String, className: String): MainAPI? {
-            val loader = cachedClassLoader
+            val loader = cachedClassLoaderRef?.get()
             if (loader != null) {
                 try {
                     val clazz = loader.loadClass(className)
                     return clazz.newInstance() as? MainAPI
-                } catch (e: Exception) {}
+                } catch (e: Exception) { e.printStackTrace() }
             }
             try {
                 val pmClass = Class.forName("com.lagradost.cloudstream3.plugins.PluginManager")
@@ -285,11 +296,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 }
                 
                 if (foundLoader != null) {
-                    cachedClassLoader = foundLoader
+                    cachedClassLoaderRef = WeakReference(foundLoader)
                     val clazz = foundLoader.loadClass(className)
                     return clazz.newInstance() as? MainAPI
                 }
-            } catch (e: Exception) {}
+            } catch (e: Exception) { e.printStackTrace() }
             return null
         }
 
@@ -321,24 +332,19 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             fetchBlock: suspend () -> Pair<List<SearchResponse>, Int>?
         ): Pair<List<SearchResponse>, Int>? {
             val now = System.currentTimeMillis()
-            globalPageCache.entries.removeIf { now - it.value.third > CACHE_TTL_MS }
-
+            
             globalPageCache[key]?.let { entry ->
-                return Pair(entry.first, entry.second)
+                if (now - entry.third <= CACHE_TTL_MS) return Pair(entry.first, entry.second)
             }
 
-            if (cacheMutexes.size > 200) {
-                val activeKeys = globalPageCache.keys().asSequence().toSet()
-                cacheMutexes.entries.removeIf { (k, mutex) ->
-                    !activeKeys.contains(k) && !mutex.isLocked
-                }
-            }
-
+            // 🔥 [개선] 치명적인 데드락(Race Condition)을 유발하던 removeIf 로직 완전히 삭제
             val mutex = cacheMutexes.getOrPut(key) { Mutex() }
 
             return mutex.withLock {
                 globalPageCache[key]?.let { entry ->
-                    return@withLock Pair(entry.first, entry.second)
+                    if (now - entry.third <= CACHE_TTL_MS) {
+                        return@withLock Pair(entry.first, entry.second)
+                    }
                 }
 
                 val result = fetchBlock()
@@ -354,27 +360,20 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         return try {
             JSON_ID_EXTRACT_REGEX.find(this.url)?.groupValues?.get(1) ?: this.url
         } catch (e: Exception) {
+            e.printStackTrace()
             this.url
         }
     }
 
     private fun buildTmdbUrl(endpoint: String, vararg params: Pair<String, String>): String {
         val builder = "$tmdbAPI$endpoint".toHttpUrlOrNull()?.newBuilder() ?: return ""
-        
         val context = CloudStreamApp.context
         val prefs = context?.getSharedPreferences("StremioX", Context.MODE_PRIVATE)
-        
-        // 🔥 [TMDb API Key 동적화]: 하드코딩 대신 설정창에서 기입한 필수 API Key를 실시간 바인딩합니다. [1]
         val tmdbKey = prefs?.getString("tmdb_api_key", "") ?: ""
         builder.addQueryParameter("api_key", tmdbKey)
-        
-        // 언어 코드 동적화 유지 [3]
         val langCode = prefs?.getString("tmdb_language_code", "ko-KR") ?: "ko-KR"
         builder.addQueryParameter("language", langCode)
-        
-        params.forEach { (key, value) ->
-            builder.addQueryParameter(key, value)
-        }
+        params.forEach { (key, value) -> builder.addQueryParameter(key, value) }
         return builder.build().toString()
     }
 
@@ -418,7 +417,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         return if (link.startsWith("/")) "https://image.tmdb.org/t/p/w300$link" else link
     }
 
-    // 🔥 [v2.6.0 최적화]: 백그라운드에서 매니페스트 로드 성공 시에만 디스크 캐시를 조용히 최신화합니다. (검색 부작용 원천 차단)
     private suspend fun getManifest(): Manifest? {
         val originalBase = mainUrl.substringBefore("?").trimEnd('/')
         val currentUrl = if (originalBase.endsWith("manifest.json")) originalBase else "$originalBase/manifest.json"
@@ -444,23 +442,19 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     catalogSentIds.clear()
                     catalogSkipState.clear()
                     
-                    // 통신에 성공한 최신 매니페스트만 SharedPreferences에 안전하게 즉시 동기화(저장)합니다.
                     val context = CloudStreamApp.context
                     context?.getSharedPreferences("StremioX_Manifest", Context.MODE_PRIVATE)
                         ?.edit()?.putString(currentUrl.toUniqueKey(), resText)?.apply()
                         
                     return parsed
                 }
-            } catch (e: Exception) {}
+            } catch (e: Exception) { e.printStackTrace() }
         }
         
         return cachedManifest
     }
 
 
-    // ==========================================
-    // [v2.6.1 최종 최적화] 설정값 동적 탭 구성 (mainPage) - 하이브리드 로드 (캐시 우선 + 최초 1회 퀵 통신)
-    // ==========================================
     override val mainPage: List<MainPageData>
         get() {
             val context = CloudStreamApp.context ?: return emptyList()
@@ -471,29 +465,21 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val currentUrl = if (originalBase.endsWith("manifest.json")) originalBase else "$originalBase/manifest.json"
             val uniqueKey = currentUrl.toUniqueKey()
             
-            // 1. 디스크 캐시 읽기
             val diskCache = manifestPrefs.getString(uniqueKey, null)
             
-            // 2. 하이브리드 파싱: 캐시가 있으면 즉시 사용, 없으면 2초 타임아웃을 건 안전한 최초 1회 통신 진행
+            // 🔥 [개선] 메인 스레드를 2초간 정지시키던 runBlocking 제거
+            // 캐시가 비어있으면 렉 없이 빈 리스트를 반환하여 ANR을 방어하고, 갱신은 getMainPage()의 비동기 코루틴이 알아서 처리합니다.
             val rawCatalogs = if (cachedManifest != null) {
                 cachedManifest?.catalogs ?: emptyList()
             } else if (!diskCache.isNullOrBlank()) {
                 try {
                     jsonMapper.readValue(diskCache, Manifest::class.java).catalogs ?: emptyList()
-                } catch (e: Exception) { emptyList() }
-            } else {
-                // 🔥 [최초 1회 통신 방어막]: 캐시가 없을 때만 실행되며, 앱 멈춤 방지를 위해 2초 만에 강제 종료(Timeout)시킵니다.
-                runBlocking(Dispatchers.IO) {
-                    try {
-                        withTimeout(2000L) {
-                            val res = app.get(currentUrl).text
-                            if (res.isNotBlank()) {
-                                manifestPrefs.edit().putString(uniqueKey, res).apply()
-                                jsonMapper.readValue(res, Manifest::class.java).catalogs ?: emptyList()
-                            } else emptyList()
-                        }
-                    } catch (e: Exception) { emptyList() }
+                } catch (e: Exception) { 
+                    e.printStackTrace()
+                    emptyList() 
                 }
+            } else {
+                emptyList()
             }
 
             if (rawCatalogs.isEmpty()) return emptyList()
@@ -535,7 +521,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     for (i in 0 until arr.length()) {
                         orderedKeys.add(arr.getString(i))
                     }
-                } catch (e: Exception) {}
+                } catch (e: Exception) { e.printStackTrace() }
             }
 
             val sortedTabs = flatTabs.sortedBy { tab ->
@@ -564,14 +550,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse = coroutineScope {
-        // 🔥 [1번 문제 해결]: 검색(search) 비활성화 시 캐시가 고립되는 버그 원천 차단. 
-        // 스크롤을 할 때 UI 렉 없이 백그라운드 스레드에서 조용히 캐시를 최신화합니다.
         launch(Dispatchers.IO) {
             runSuspendCatching { getManifest() }
         }
 
         var isNewRequest = false
-        
         val deferred = pageMutex.withLock {
             if (page <= 1) {
                 catalogSentIds.remove(request.name)
@@ -609,7 +592,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val jsonText = customSession.get(targetUrl).text
             val response = try {
                 jsonMapper.readValue(jsonText, CatalogResponse::class.java)
-            } catch (e: Exception) { null }
+            } catch (e: Exception) { e.printStackTrace(); null }
 
             val metas = response?.metas ?: emptyList()
             val mappedItems = metas.map { it.toSearchResponse(this@StremioC) }
@@ -643,7 +626,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val searchResults = coroutineScope {
             supportedCatalogs.map { catalog ->
                 async(Dispatchers.IO) {
-                    try { catalog.search(query, this@StremioC) } catch (e: CancellationException) { throw e } catch (e: Exception) { emptyList() }
+                    try { catalog.search(query, this@StremioC) } catch (e: CancellationException) { throw e } catch (e: Exception) { e.printStackTrace(); emptyList() }
                 }
             }.awaitAll().flatten()
         }
@@ -666,11 +649,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 jsonMapper.treeToValue(metaNode, CatalogEntry::class.java) 
                     ?: throw IllegalStateException("Failed to bind JSON to CatalogEntry")
             } catch (e: Exception) {
+                e.printStackTrace()
                 throw IllegalStateException("Metadata not found or parsing failed: $url", e)
             }
         }
         
-        val normalizedId = try { normalizeId(res.id) } catch (e: Exception) { res.id }
+        val normalizedId = try { normalizeId(res.id) } catch (e: Exception) { e.printStackTrace(); res.id }
         val encodedId = normalizedId.urlEncode()
 
         val isKitsuOrMal = res.id.startsWith("kitsu:") || res.id.startsWith("mal:")
@@ -751,7 +735,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         val addonDeferred = async(Dispatchers.IO) {
             runSuspendCatching {
-                // 🔥 res.type ?: "movie" 로 널 허용 예외 처리를 연동하여 컴파일 에러를 해결합니다.
                 val syncMetaUrl = this@StremioC.getUnifiedMetaUrl(res.type ?: "movie", res.id)
                 val text = customSession.get(syncMetaUrl).text
                 val response = if (text.isNotBlank()) jsonMapper.readValue(text, CatalogResponse::class.java) else null
@@ -806,7 +789,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
-        val loadData = try { jsonMapper.readValue(data, LoadData::class.java) } catch (e: Exception) { null } ?: return false
+        val loadData = try { jsonMapper.readValue(data, LoadData::class.java) } catch (e: Exception) { e.printStackTrace(); null } ?: return false
         
         val primaryId = if (loadData.id?.startsWith("tmdb:") == true && !loadData.imdbId.isNullOrBlank()) {
             loadData.imdbId
@@ -847,7 +830,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             )
         }
 
-        // --- Stremio 자막 애드온 설정 수집 및 정밀 디버깅 로그 구조 ---
         val customHosts = withContext(Dispatchers.IO) {
             val now = System.currentTimeMillis()
             if (cachedCustomHosts != null && now - cachedCustomHostsTime < SETTINGS_CACHE_TTL) {
@@ -856,7 +838,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             
             val context = CloudStreamApp.context
             
-            // 모든 SharedPreferences 파일을 전 탐색하여 stremio_addons 키가 어디에 있는지 정적 로깅
             try {
                 if (context != null) {
                     val sharedPrefsDir = java.io.File(context.applicationInfo.dataDir, "shared_prefs")
@@ -872,10 +853,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 }
             } catch (e: Exception) {
                 println("[STREMIOSUB] Setup Scan Warning: ${e.message}")
+                e.printStackTrace()
             }
 
             val raw = try { 
-                // [원인 분석]: 로컬 SharedPreferences 이름이 구버전명인 "rebuild_key"가 아닌 "rebuild_preference"로 생성되어 있어, 1순위 타겟 이름을 수정합니다.
                 val rebuildPrefs = context?.getSharedPreferences("rebuild_preference", Context.MODE_PRIVATE)
                 var rawValue = rebuildPrefs?.getString("stremio_addons", "") ?: ""
                 
@@ -892,6 +873,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 }
             } catch (t: Throwable) {
                 println("[STREMIOSUB] Attempt 1 (rebuild_preference) Crash: ${t.message}. Trying Fallback.")
+                t.printStackTrace()
                 try {
                     val prefs = CloudStreamApp.context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
                     val v = prefs?.getString("stremio_addons", "") ?: ""
@@ -899,6 +881,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     if (v.startsWith("\"") && v.endsWith("\"") && v.length >= 2) v.substring(1, v.length - 1) else v
                 } catch (e: Exception) {
                     println("[STREMIOSUB] Attempt 2 (default SharedPreferences) Failed: ${e.message}")
+                    e.printStackTrace()
                     ""
                 }
             }
@@ -915,7 +898,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
         val builtInHosts = setOf("opensubtitles.stremio.homes", "subsense.nepiraw.com", "opensubtitles-v3.strem.io")
 
-        // 자막 필터링 및 매칭 과정을 하나도 놓치지 않고 수집하는 디버깅 인터셉터
         val subtitleInterceptor: (SubtitleFile) -> Unit = { sub ->
             println("[STREMIOSUB] Interceptor Triggered -> lang: '${sub.lang}', url: '${sub.url}'")
             try {
@@ -949,6 +931,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 }
             } catch (e: Exception) {
                 println("[STREMIOSUB] Interceptor Crash: ${e.message}")
+                e.printStackTrace()
                 subtitleCallback.invoke(sub)
             }
         }
@@ -1018,7 +1001,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                             }
                         } catch (t: Throwable) {}
                     }
-                } catch (e: Exception) {}
+                } catch (e: Exception) { e.printStackTrace() }
             }
             hasSyncedCineStreamSettings = true 
         } catch (e: Exception) {
@@ -1206,7 +1189,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             return try {
                 val text = StremioC.customSession.get(provider.buildUrl(path), timeout = 120L).text
                 if (text.isNotBlank()) jsonMapper.readValue(text, CatalogResponse::class.java).metas ?: emptyList() else emptyList()
-            } catch (e: Throwable) { emptyList() }
+            } catch (e: Throwable) { e.printStackTrace(); emptyList() }
         }
 
         suspend fun search(query: String, provider: StremioC): List<SearchResponse> {
@@ -1284,7 +1267,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             typeName: String? = null
         ): SearchResponse {
             val targetType = this.type ?: typeName ?: "movie"
-            // 🔥 [기록/라이브러리 통합]: 동기화 여부에 맞춘 동적 단일화 저장 URL 획득 적용 [2]
             val metaUrl = provider.getUnifiedMetaUrl(targetType, this.id)
 
             val baseName = if (!name.isNullOrBlank()) {
@@ -1342,7 +1324,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
             val episodeTmdbMeta = ConcurrentHashMap<String, TmdbEpisode>()
 
-            // 🔥 [설정 동적화 수선]: 변수 스코프 충돌 방지를 위해 SharedPreferences 값을 coroutineScope 직전에 로드합니다. [3]
             val context = CloudStreamApp.context
             val prefs = context?.getSharedPreferences("StremioX", Context.MODE_PRIVATE)
             val langCode = prefs?.getString("tmdb_language_code", "ko-KR") ?: "ko-KR"
@@ -1377,7 +1358,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                                             fetchedSeason
                                         }
                                         seasonRes?.episodes?.forEach { ep -> if (ep.episodeNumber != null) episodeTmdbMeta["${seasonNum}_${ep.episodeNumber}"] = ep }
-                                    }
+                                    }.onFailure { it.printStackTrace() }
                                 }
                             }
                         }
@@ -1412,7 +1393,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     val resolvedPosterUrl = if (customPosterEnabled && customPosterBase.isNotBlank()) {
                         val rawUrl = customPosterBase.trim()
                         if (rawUrl.contains("posterType") || rawUrl.contains("recTmdbId") || rawUrl.contains("{type}") || rawUrl.contains("{tmdb_id}")) {
-                            // 1. 사용자가 변수명이 포함된 전체 템플릿 주소를 입력한 경우 -> 달러($) 및 중괄호({}) 규격 모두를 실시간 동적 치환 [3]
                             rawUrl.replace("\$posterType", posterType)
                                   .replace("posterType", posterType)
                                   .replace("{type}", posterType)
@@ -1420,12 +1400,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                                   .replace("recTmdbId", recTmdbId.toString())
                                   .replace("{tmdb_id}", recTmdbId.toString())
                         } else {
-                            // 2. 사용자가 베이스 주소(예: https://extendedratings.com/poster)만 입력한 경우
                             val cleanBase = rawUrl.trimEnd('/')
                             "$cleanBase/tmdb:$posterType:$recTmdbId.jpg?config=aed081fd-73b1-460e-879d-377c5658691c"
                         }
                     } else {
-                        // 3. 토글이 OFF 상태이거나 무효값인 경우 -> TMDB 기본 포스터로 로드
                         val path = media.poster_path
                         if (!path.isNullOrBlank()) "https://image.tmdb.org/t/p/w500$path" else TRANSPARENT_PIXEL
                     }
@@ -1439,8 +1417,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 }.take(50)
             }
             
-                      
-            // 🔥 [연령 등급 동적화]: 선택한 국가 코드를 정교하게 자동 추출하여 대칭 (미등록 시 US로 폴백) [3]
             val countryCode = langCode.substringAfter("-", "KR").uppercase()
 
             val fetchedAgeRating = if (isMovie) {
@@ -1604,7 +1580,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 try {
                     val refinedMediaType = foundMediaType ?: if (finalType == "series" || finalType == "tv") "tv" else if (isSingleMovie(finalType, finalVideos) || finalType == "movie" || finalVideos.isNullOrEmpty()) "movie" else "tv"
                     tmdbData = fetchTmdbDetails(provider, refinedMediaType, tmdbIdStr!!, refinedMediaType == "movie", finalImdbId, finalType, finalVideos, preFetchedDetail)
-                } catch (e: Exception) {}
+                } catch (e: Exception) { e.printStackTrace() }
             }
 
             var finalName = originalName ?: this@CatalogEntry.name ?: "Unknown Content"
@@ -1703,7 +1679,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val finalSeriesType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.Anime else TvType.TvSeries
 
             if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
-                // 🔥 [기록/라이브러리 통합]: 동기화 여부에 맞춘 동적 단일화 저장 URL 획득 적용 [2]
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "movie", this@CatalogEntry.id)
                 return@coroutineScope provider.newMovieLoadResponse(
                     finalName, metaUrl, finalMovieType, 
@@ -1742,13 +1717,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     finalMalId?.let { addMalId(it) }
                     finalAniId?.let { addAniListId(it) }
 
-                    // 🔥 [기록/라이브러리 통합]: SharedPreferences 동기화 상태에 따른 네임스페이스(apiName) 가로채기 적용 [2]
                     this.apiName = provider.getTargetApiName()
                 }
 
             } else {
                 val finalEpisodes = processEpisodes(provider, cleanImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, cleanTmdbId?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, finalAniId, finalMalId, this@CatalogEntry.kitsuIdExt)
-                // 🔥 [기록/라이브러리 통합]: 동기화 여부에 맞춘 동적 단일화 저장 URL 획득 적용 [2]
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "series", this@CatalogEntry.id)
                 return@coroutineScope provider.newTvSeriesLoadResponse(
                     finalName, metaUrl, finalSeriesType, finalEpisodes
@@ -1771,7 +1744,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     finalMalId?.let { addMalId(it) }
                     finalAniId?.let { addAniListId(it) }
 
-                    // 🔥 [기록/라이브러리 통합]: SharedPreferences 동기화 상태에 따른 네임스페이스(apiName) 가로채기 적용 [2]
                     this.apiName = provider.getTargetApiName()
                 }
             }           
@@ -1995,16 +1967,3 @@ private data class TmdbEpisode(@JsonProperty("name") val name: String?, @JsonPro
 data class Trailers(@JsonProperty("key") val key: String? = null, @JsonProperty("type") val type: String? = null, @JsonProperty("published_at") val publishedAt: String? = null)
 data class ResultsTrailer(@JsonProperty("results") val results: ArrayList<Trailers>? = arrayListOf())
 data class ExternalIds(@JsonProperty("imdb_id") val imdb_id: String? = null, @JsonProperty("tvdb_id") val tvdb_id: String? = null)
-
-// URL에서 안전한 고유 알파벳 식별자만 추출하는 함수
-private fun String.toUniqueKey(): String {
-    return this.lowercase().filter { it.isLetter() }
-}
-
-private fun String.urlEncodeLocal(): String = try {
-    java.net.URLEncoder.encode(this, "UTF-8").replace("+", "%20")
-} catch (e: Exception) {
-    this
-}
-
-private data class FlatTab(val key: String, val displayName: String, val urlPath: String)
