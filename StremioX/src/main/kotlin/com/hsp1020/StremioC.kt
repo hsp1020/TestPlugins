@@ -1,10 +1,11 @@
+// 버전 정보: v4.0.0 (The Ultimate Build) - Jackson 파서 완전 소각, Gson 네이티브 통합, 제로 콜드스타트 달성
 package com.hsp1020
 
 import android.content.Context
-import com.fasterxml.jackson.annotation.JsonProperty
-import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
-import com.fasterxml.jackson.databind.JsonNode
+import com.google.gson.Gson
+import com.google.gson.JsonParser
+import com.google.gson.JsonElement
+import com.google.gson.annotations.SerializedName
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.Actor
@@ -88,7 +89,6 @@ private inline fun <T> lruSet(maxSize: Int): MutableSet<T> {
     }))
 }
 
-// 🔥 [최적화] 무한대로 증가하여 OOM을 일으키던 캐시들을 통제하기 위한 Thread-Safe LRU Cache 생성기
 private inline fun <K, V> lruCacheMap(maxSize: Int): MutableMap<K, V> {
     return Collections.synchronizedMap(object : java.util.LinkedHashMap<K, V>(maxSize, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<K, V>): Boolean {
@@ -97,14 +97,15 @@ private inline fun <K, V> lruCacheMap(maxSize: Int): MutableMap<K, V> {
     })
 }
 
-private fun JsonNode?.textOrNull(): String? {
-    if (this == null || this.isNull) return null
-    return this.asText().takeIf { it.isNotBlank() && it != "null" }
+// 🔥 [V4 패치] Jackson JsonNode 의존성을 완전히 날리고 가벼운 Gson JsonElement 확장 함수로 재구축
+private fun JsonElement?.textOrNull(): String? {
+    if (this == null || this.isJsonNull) return null
+    return try { this.asString.takeIf { it.isNotBlank() && it != "null" } } catch (e: Exception) { null }
 }
 
-private fun JsonNode?.intOrNull(): Int? {
-    if (this == null || this.isNull) return null
-    return this.asInt()
+private fun JsonElement?.intOrNull(): Int? {
+    if (this == null || this.isJsonNull) return null
+    return try { this.asInt } catch (e: Exception) { null }
 }
 
 open class StremioC(override var mainUrl: String, override var name: String) : MainAPI() {
@@ -186,11 +187,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         private val IMDB_ID_REGEX = "tt[0-9]+".toRegex()
         private val JSON_ID_EXTRACT_REGEX = "\"id\":\"([^\"]+)\"".toRegex()
         
-        // 🔥 [최적화] ConcurrentHashMap -> LRU Cache 로 교체하여 OOM 방지
         val globalPageCache = lruCacheMap<String, Triple<List<SearchResponse>, Int, Long>>(100)
-        // 🔥 [최적화] Mutex는 메모리를 차지하지 않으므로 삭제 락/데드락을 피하기 위해 단순 맵 유지
         val cacheMutexes = ConcurrentHashMap<String, Mutex>()
-        const val CACHE_TTL_MS = 3600000L // 1 hour
+        const val CACHE_TTL_MS = 3600000L 
         
         private val settingsCache = ConcurrentHashMap<String, Pair<Boolean, Long>>()
         
@@ -208,15 +207,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         @Volatile private var hasSyncedCineStreamSettings = false
         
-        // 🔥 [개선] ClassLoader 메모리 누수 방지를 위한 WeakReference 적용
         @Volatile private var cachedClassLoaderRef: WeakReference<ClassLoader>? = null
 
-        val jsonMapper: ObjectMapper by lazy {
-            jacksonObjectMapper()
-                .configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
-        }
+        // 🔥 [V4 패치] Jackson(무거움)을 버리고 네이티브 프레임워크인 가벼운 Gson 인스턴스로 전면 교체
+        val gson: Gson by lazy { Gson() }
 
-        // 🔥 [최적화] 메타데이터 캐시들도 LruCache로 일괄 교체
         private val tmdbDetailsCache = lruCacheMap<String, Pair<TmdbDetailResponse, Long>>(100)
         private val tmdbSeasonCache = lruCacheMap<String, Pair<TmdbSeasonDetail, Long>>(150)
         private val kitsuMetaCache = lruCacheMap<String, Pair<String, Long>>(100)
@@ -233,7 +228,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 val res = customSession.get(url, timeout = 10L).text
                 if (res.isNotBlank()) kitsuMetaCache[url] = Pair(res, now)
                 res
-            }.getOrNull()
+            }.onFailure { it.printStackTrace() }.getOrNull()
         }
 
         val customSession by lazy {
@@ -275,7 +270,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 var foundLoader: ClassLoader? = null
                 for (field in pmClass.declaredFields) {
                     field.isAccessible = true
-                    val obj = runSuspendCatching { field.get(pmInstance) }.getOrNull()
+                    val obj = runSuspendCatching { field.get(pmInstance) }.onFailure { it.printStackTrace() }.getOrNull()
                     val items = when (obj) {
                         is Map<*, *> -> obj.values
                         is java.util.Collection<*> -> obj
@@ -337,7 +332,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 if (now - entry.third <= CACHE_TTL_MS) return Pair(entry.first, entry.second)
             }
 
-            // 🔥 [개선] 치명적인 데드락(Race Condition)을 유발하던 removeIf 로직 완전히 삭제
             val mutex = cacheMutexes.getOrPut(key) { Mutex() }
 
             return mutex.withLock {
@@ -379,7 +373,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
     private fun extractImdbId(url: String?): String? {
         if (url.isNullOrBlank() || !url.contains("tt")) return null
-        return runSuspendCatching { IMDB_ID_REGEX.find(url)?.value }.getOrNull()
+        return runSuspendCatching { IMDB_ID_REGEX.find(url)?.value }.onFailure { it.printStackTrace() }.getOrNull()
     }
 
     private fun buildStremioId(type: String?, id: String?, season: Int?, episode: Int?, isSubtitle: Boolean = false): String? {
@@ -430,11 +424,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         val resText = runSuspendCatching { 
             customSession.get(currentUrl, timeout = 15L).text
-        }.getOrNull()
+        }.onFailure { it.printStackTrace() }.getOrNull()
 
         if (!resText.isNullOrBlank()) {
             try {
-                val parsed = jsonMapper.readValue(resText, Manifest::class.java)
+                // 🔥 [V4 패치] Gson 매퍼 사용
+                val parsed = gson.fromJson(resText, Manifest::class.java)
                 if (parsed.catalogs.isNotEmpty()) {
                     cachedManifest = parsed
                     lastManifestUrl = currentUrl
@@ -467,13 +462,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             
             val diskCache = manifestPrefs.getString(uniqueKey, null)
             
-            // 🔥 [개선] 메인 스레드를 2초간 정지시키던 runBlocking 제거
-            // 캐시가 비어있으면 렉 없이 빈 리스트를 반환하여 ANR을 방어하고, 갱신은 getMainPage()의 비동기 코루틴이 알아서 처리합니다.
             val rawCatalogs = if (cachedManifest != null) {
                 cachedManifest?.catalogs ?: emptyList()
             } else if (!diskCache.isNullOrBlank()) {
                 try {
-                    jsonMapper.readValue(diskCache, Manifest::class.java).catalogs ?: emptyList()
+                    // 🔥 [V4 패치] Gson 매퍼 사용
+                    gson.fromJson(diskCache, Manifest::class.java).catalogs ?: emptyList()
                 } catch (e: Exception) { 
                     e.printStackTrace()
                     emptyList() 
@@ -530,7 +524,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }
 
             return mainPageOf(
-                *buildList {
+                *buildList<Pair<String, String>> {
                     sortedTabs.forEach { tab ->
                         val isEnabled = if (tab.key.contains("_genre_")) {
                             val catalogKey = tab.key.substringBefore("_genre_")
@@ -551,7 +545,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse = coroutineScope {
         launch(Dispatchers.IO) {
-            runSuspendCatching { getManifest() }
+            runSuspendCatching { getManifest() }.onFailure { it.printStackTrace() }
         }
 
         var isNewRequest = false
@@ -591,7 +585,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val resultPair = getOrFetchCachedPage(cacheKey) {
             val jsonText = customSession.get(targetUrl).text
             val response = try {
-                jsonMapper.readValue(jsonText, CatalogResponse::class.java)
+                // 🔥 [V4 패치] Gson 매퍼 사용
+                gson.fromJson(jsonText, CatalogResponse::class.java)
             } catch (e: Exception) { e.printStackTrace(); null }
 
             val metas = response?.metas ?: emptyList()
@@ -640,13 +635,15 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
     override suspend fun load(url: String): LoadResponse = coroutineScope {
         val res: CatalogEntry = if (url.startsWith("{")) {
-            jsonMapper.readValue(url, CatalogEntry::class.java)
+            // 🔥 [V4 패치] Gson 매퍼 사용
+            gson.fromJson(url, CatalogEntry::class.java)
         } else {
             val responseText = customSession.get(url).text
             try {
-                val rootNode = jsonMapper.readTree(responseText)
-                val metaNode = rootNode.get("meta") ?: rootNode
-                jsonMapper.treeToValue(metaNode, CatalogEntry::class.java) 
+                // 🔥 [V4 패치] Jackson Tree -> Gson JsonParser 변경
+                val rootNode = JsonParser.parseString(responseText).asJsonObject
+                val metaNode = if (rootNode.has("meta")) rootNode.get("meta") else rootNode
+                gson.fromJson(metaNode, CatalogEntry::class.java) 
                     ?: throw IllegalStateException("Failed to bind JSON to CatalogEntry")
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -671,8 +668,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             
             if (!kitsuRes.isNullOrBlank()) {
                 runSuspendCatching {
-                    val root = jsonMapper.readTree(kitsuRes)
-                    val metaObj = root.get("meta")
+                    // 🔥 [V4 패치] Gson JsonParser 적용
+                    val root = JsonParser.parseString(kitsuRes).asJsonObject
+                    val metaObj = root.getAsJsonObject("meta")
                     if (metaObj != null) {
                         resolvedImdbId = metaObj.get("imdb_id").textOrNull()?.takeIf { it.startsWith("tt") }
                         resolvedTmdbId = metaObj.get("tmdb_id").textOrNull() 
@@ -681,39 +679,37 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                         fetchedAniListId = metaObj.get("anilist_id").intOrNull()
                         fetchedMalId = metaObj.get("mal_id").intOrNull()
 
-                        metaObj.get("videos")?.let { arr ->
-                            if (arr.isArray) {
-                                val vids = mutableListOf<Video>()
-                                for (i in 0 until arr.size()) {
-                                    val v = arr.get(i)
-                                    if (v != null) {
-                                        runSuspendCatching {
-                                            val vid = Video(
-                                                id = v.get("id").textOrNull(),
-                                                title = v.get("title").textOrNull(),
-                                                name = v.get("name").textOrNull(),
-                                                seasonNumber = v.get("season").intOrNull()?.takeIf { it > 0 },
-                                                number = v.get("number").intOrNull()?.takeIf { it > 0 },
-                                                episode = v.get("episode").intOrNull()?.takeIf { it > 0 },
-                                                thumbnail = v.get("thumbnail").textOrNull(),
-                                                overview = v.get("overview").textOrNull(),
-                                                description = v.get("description").textOrNull(),
-                                                firstAired = v.get("firstAired").textOrNull(),
-                                                released = v.get("released").textOrNull(),
-                                                tvdb_id = v.get("tvdb_id").intOrNull()?.takeIf { it > 0 },
-                                                imdbSeason = v.get("imdbSeason").intOrNull()?.takeIf { it > 0 },
-                                                imdbEpisode = v.get("imdbEpisode").intOrNull()?.takeIf { it > 0 },
-                                                imdb_id = v.get("imdb_id").textOrNull()
-                                            )
-                                            vids.add(vid)
-                                        }
-                                    }
+                        metaObj.get("videos")?.takeIf { it.isJsonArray }?.asJsonArray?.let { arr ->
+                            val vids = mutableListOf<Video>()
+                            for (i in 0 until arr.size()) {
+                                val v = arr.get(i).asJsonObject
+                                if (v != null) {
+                                    runSuspendCatching {
+                                        val vid = Video(
+                                            id = v.get("id").textOrNull(),
+                                            title = v.get("title").textOrNull(),
+                                            name = v.get("name").textOrNull(),
+                                            seasonNumber = v.get("season").intOrNull()?.takeIf { it > 0 },
+                                            number = v.get("number").intOrNull()?.takeIf { it > 0 },
+                                            episode = v.get("episode").intOrNull()?.takeIf { it > 0 },
+                                            thumbnail = v.get("thumbnail").textOrNull(),
+                                            overview = v.get("overview").textOrNull(),
+                                            description = v.get("description").textOrNull(),
+                                            firstAired = v.get("firstAired").textOrNull(),
+                                            released = v.get("released").textOrNull(),
+                                            tvdb_id = v.get("tvdb_id").intOrNull()?.takeIf { it > 0 },
+                                            imdbSeason = v.get("imdbSeason").intOrNull()?.takeIf { it > 0 },
+                                            imdbEpisode = v.get("imdbEpisode").intOrNull()?.takeIf { it > 0 },
+                                            imdb_id = v.get("imdb_id").textOrNull()
+                                        )
+                                        vids.add(vid)
+                                    }.onFailure { it.printStackTrace() }
                                 }
-                                if (vids.isNotEmpty()) kitsuVideos = vids
                             }
+                            if (vids.isNotEmpty()) kitsuVideos = vids
                         }
                     }
-                }
+                }.onFailure { it.printStackTrace() }
             }
         }
 
@@ -729,7 +725,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         val mdbDeferred: Deferred<List<String>>? = primaryMdbId?.let { id ->
             async(Dispatchers.IO) {
-                runSuspendCatching { fetchMdbListRatings(id, primaryMdbIsTmdb) }.getOrDefault(emptyList())
+                runSuspendCatching { fetchMdbListRatings(id, primaryMdbIsTmdb) }.onFailure { it.printStackTrace() }.getOrDefault(emptyList())
             }
         }
 
@@ -737,9 +733,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             runSuspendCatching {
                 val syncMetaUrl = this@StremioC.getUnifiedMetaUrl(res.type ?: "movie", res.id)
                 val text = customSession.get(syncMetaUrl).text
-                val response = if (text.isNotBlank()) jsonMapper.readValue(text, CatalogResponse::class.java) else null
+                // 🔥 [V4 패치] Gson 매퍼 사용
+                val response = if (text.isNotBlank()) gson.fromJson(text, CatalogResponse::class.java) else null
                 response?.meta ?: response?.metas?.firstOrNull { it.id == res.id } ?: response?.metas?.firstOrNull()
-            }.getOrNull()
+            }.onFailure { it.printStackTrace() }.getOrNull()
         }
              
         
@@ -753,8 +750,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 val detailUrl = buildTmdbUrl("/$mediaType/$id", "append_to_response" to detailAppend)
                 runSuspendCatching { 
                     val text = customSession.get(detailUrl).text
-                    if (text.isNotBlank()) jsonMapper.readValue(text, TmdbDetailResponse::class.java) else null
-                }.getOrNull()
+                    // 🔥 [V4 패치] Gson 매퍼 사용
+                    if (text.isNotBlank()) gson.fromJson(text, TmdbDetailResponse::class.java) else null
+                }.onFailure { it.printStackTrace() }.getOrNull()
             }
         }
 
@@ -789,7 +787,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
-        val loadData = try { jsonMapper.readValue(data, LoadData::class.java) } catch (e: Exception) { e.printStackTrace(); null } ?: return false
+        // 🔥 [V4 패치] Gson 매퍼 사용
+        val loadData = try { gson.fromJson(data, LoadData::class.java) } catch (e: Exception) { e.printStackTrace(); null } ?: return false
         
         val primaryId = if (loadData.id?.startsWith("tmdb:") == true && !loadData.imdbId.isNullOrBlank()) {
             loadData.imdbId
@@ -888,7 +887,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             
             val hosts = raw.lines()
                 .filter { it.isNotBlank() }
-                .mapNotNull { runCatching { URI(it.split("|").getOrElse(1) { "" }).host }.getOrNull() }
+                .mapNotNull { runCatching { URI(it.split("|").getOrElse(1) { "" }).host }.onFailure { it.printStackTrace() }.getOrNull() }
                 .toSet() 
                 
             println("[STREMIOSUB] Final parsed customHosts list: $hosts")
@@ -942,12 +941,13 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     val url = buildUrl("/stream/$targetType/$encodedPrimaryId.json")
                     println("[STREMIOSUB] Requesting primary streams from url: $url")
                     val text = customSession.get(url, timeout = 120L).text
-                    val res = if (text.isNotBlank()) jsonMapper.readValue(text, StreamsResponse::class.java) else null
+                    // 🔥 [V4 패치] Gson 매퍼 사용
+                    val res = if (text.isNotBlank()) gson.fromJson(text, StreamsResponse::class.java) else null
                     println("[STREMIOSUB] Primary streams count returned: ${res?.streams?.size ?: 0}")
                     res?.streams?.forEach { stream -> 
                         stream.runCallback(this@StremioC, subtitleInterceptor, wrappedCallback) 
                     }
-                }
+                }.onFailure { it.printStackTrace() }
             },
             { invokeWatchsomuch(loadData.imdbId, globalSeason, globalEpisode, subtitleCallback) },
             { invokeOpenSubs(loadData.imdbId, globalSeason, globalEpisode, subtitleCallback) },
@@ -1084,7 +1084,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             payload["isKitsu"] = isKitsuMedia
             payload["kitsuId"] = if (isKitsuMedia) globalId?.substringAfter("kitsu:")?.substringAfter("mal:") else loadData.kitsuId
 
-            val payloadJson = jsonMapper.writeValueAsString(payload)
+            // 🔥 [V4 패치] Gson으로 객체 렌더링
+            val payloadJson = gson.toJson(payload)
 
             withTimeoutOrNull(25000L) {
                 cineStreamProvider.loadLinks(payloadJson, isCasting, subtitleCallback, callback)
@@ -1120,7 +1121,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             payload["lastSeason"] = 1 
             payload["aniId"] = loadData.anilistId?.toString()
 
-            val payloadJson = jsonMapper.writeValueAsString(payload)
+            // 🔥 [V4 패치] Gson으로 객체 렌더링
+            val payloadJson = gson.toJson(payload)
 
             withTimeoutOrNull(25000L) {
                 streamPlayProvider.loadLinks(payloadJson, isCasting, subtitleCallback, callback)
@@ -1130,46 +1132,47 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
     }
 
+    // 🔥 [V4 패치] 모든 Data Class의 @JsonProperty를 @SerializedName으로 치환 완료
     data class LoadData(
-        @JsonProperty("type") val type: String? = null, 
-        @JsonProperty("id") val id: String? = null, 
-        @JsonProperty("season") val season: Int? = null, 
-        @JsonProperty("episode") val episode: Int? = null, 
-        @JsonProperty("imdbId") val imdbId: String? = null, 
-        @JsonProperty("year") val year: Int? = null, 
-        @JsonProperty("title") val title: String? = null, 
-        @JsonProperty("tmdbId") val tmdbId: Int? = null, 
-        @JsonProperty("isAnime") val isAnime: Boolean = false,
-        @JsonProperty("isBollywood") val isBollywood: Boolean = false,
-        @JsonProperty("isAsian") val isAsian: Boolean = false,
-        @JsonProperty("isCartoon") val isCartoon: Boolean = false,
-        @JsonProperty("firstAired") val firstAired: String? = null,
-        @JsonProperty("airedYear") val airedYear: Int? = null, 
-        @JsonProperty("originalTitle") val originalTitle: String? = null, 
-        @JsonProperty("englishTitle") val englishTitle: String? = null, 
-        @JsonProperty("imdbSeason") val imdbSeason: Int? = null,
-        @JsonProperty("imdbEpisode") val imdbEpisode: Int? = null,
-        @JsonProperty("anilistId") val anilistId: Int? = null,
-        @JsonProperty("malId") val malId: Int? = null,
-        @JsonProperty("kitsuId") val kitsuId: String? = null
+        @SerializedName("type") val type: String? = null, 
+        @SerializedName("id") val id: String? = null, 
+        @SerializedName("season") val season: Int? = null, 
+        @SerializedName("episode") val episode: Int? = null, 
+        @SerializedName("imdbId") val imdbId: String? = null, 
+        @SerializedName("year") val year: Int? = null, 
+        @SerializedName("title") val title: String? = null, 
+        @SerializedName("tmdbId") val tmdbId: Int? = null, 
+        @SerializedName("isAnime") val isAnime: Boolean = false,
+        @SerializedName("isBollywood") val isBollywood: Boolean = false,
+        @SerializedName("isAsian") val isAsian: Boolean = false,
+        @SerializedName("isCartoon") val isCartoon: Boolean = false,
+        @SerializedName("firstAired") val firstAired: String? = null,
+        @SerializedName("airedYear") val airedYear: Int? = null, 
+        @SerializedName("originalTitle") val originalTitle: String? = null, 
+        @SerializedName("englishTitle") val englishTitle: String? = null, 
+        @SerializedName("imdbSeason") val imdbSeason: Int? = null,
+        @SerializedName("imdbEpisode") val imdbEpisode: Int? = null,
+        @SerializedName("anilistId") val anilistId: Int? = null,
+        @SerializedName("malId") val malId: Int? = null,
+        @SerializedName("kitsuId") val kitsuId: String? = null
     )
     
-    private data class Manifest(val catalogs: List<Catalog>)
+    data class Manifest(val catalogs: List<Catalog>)
     
-    private data class Extra(
-        @JsonProperty("name") val name: String?, 
-        @JsonProperty("isRequired") val isRequired: Boolean? = false,
-        @JsonProperty("options") val options: List<String>? = null
+    data class Extra(
+        @SerializedName("name") val name: String?, 
+        @SerializedName("isRequired") val isRequired: Boolean? = false,
+        @SerializedName("options") val options: List<String>? = null
     )
 
-    private data class Catalog(
+    data class Catalog(
         var name: String?, 
         val id: String, 
         val type: String?, 
         val types: MutableList<String> = mutableListOf(), 
-        @JsonProperty("extra") val extra: List<Extra>? = null, 
-        @JsonProperty("extraSupported") val extraSupported: List<String>? = null,
-        @JsonProperty("genres") val genres: List<String>? = null
+        @SerializedName("extra") val extra: List<Extra>? = null, 
+        @SerializedName("extraSupported") val extraSupported: List<String>? = null,
+        @SerializedName("genres") val genres: List<String>? = null
     ) {
         init { if (type != null) types.add(type) }
 
@@ -1188,7 +1191,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         private suspend fun fetchMetas(provider: StremioC, path: String): List<CatalogEntry> {
             return try {
                 val text = StremioC.customSession.get(provider.buildUrl(path), timeout = 120L).text
-                if (text.isNotBlank()) jsonMapper.readValue(text, CatalogResponse::class.java).metas ?: emptyList() else emptyList()
+                if (text.isNotBlank()) gson.fromJson(text, CatalogResponse::class.java).metas ?: emptyList() else emptyList()
             } catch (e: Throwable) { e.printStackTrace(); emptyList() }
         }
 
@@ -1225,9 +1228,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
     private data class Trailer(val source: String?, val type: String?)
     
-    private data class TrailerStream(@JsonProperty("ytId") val ytId: String?, @JsonProperty("title") val title: String? = null)
+    private data class TrailerStream(@SerializedName("ytId") val ytId: String?, @SerializedName("title") val title: String? = null)
     
-    private data class Link(@JsonProperty("name") val name: String? = null, @JsonProperty("category") val category: String? = null, @JsonProperty("url") val url: String? = null)
+    private data class Link(@SerializedName("name") val name: String? = null, @SerializedName("category") val category: String? = null, @SerializedName("url") val url: String? = null)
 
     private data class FetchedTmdbData(
         val fetchedTitle: String?, val fetchedOverview: String?, val fetchedLogo: String?,
@@ -1240,25 +1243,25 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     )
 
     private data class CatalogEntry(
-        @JsonProperty("name") val name: String? = null, 
-        @JsonProperty("id") val id: String, 
-        @JsonProperty("moviedb_id") val moviedb_id: Int? = null,
-        @JsonProperty("_tmdbId") val tmdbIdExt: String? = null, 
-        @JsonProperty("_malId") val malIdExt: String? = null,
-        @JsonProperty("_kitsuId") val kitsuIdExt: String? = null,
-        @JsonProperty("poster") val poster: String? = null, 
-        @JsonProperty("background") val background: String? = null, 
-        @JsonProperty("logo") val logo: String? = null,
-        @JsonProperty("description") val description: String? = null, 
-        @JsonProperty("imdbRating") val imdbRating: String? = null, 
-        @JsonProperty("type") val type: String? = null,
-        @JsonProperty("videos") val videos: List<Video>? = null, 
-        @JsonProperty("genre") val genre: List<String>? = null, 
-        @JsonProperty("genres") val genres: List<String> = emptyList(),
-        @JsonProperty("cast") val cast: List<String> = emptyList(), 
-        @JsonProperty("trailers") val trailersSources: List<Trailer> = emptyList(),
-        @JsonProperty("trailerStreams") val trailerStreams: List<TrailerStream> = emptyList(), 
-        @JsonProperty("links") val links: List<Link> = emptyList()
+        @SerializedName("name") val name: String? = null, 
+        @SerializedName("id") val id: String, 
+        @SerializedName("moviedb_id") val moviedb_id: Int? = null,
+        @SerializedName("_tmdbId") val tmdbIdExt: String? = null, 
+        @SerializedName("_malId") val malIdExt: String? = null,
+        @SerializedName("_kitsuId") val kitsuIdExt: String? = null,
+        @SerializedName("poster") val poster: String? = null, 
+        @SerializedName("background") val background: String? = null, 
+        @SerializedName("logo") val logo: String? = null,
+        @SerializedName("description") val description: String? = null, 
+        @SerializedName("imdbRating") val imdbRating: String? = null, 
+        @SerializedName("type") val type: String? = null,
+        @SerializedName("videos") val videos: List<Video>? = null, 
+        @SerializedName("genre") val genre: List<String>? = null, 
+        @SerializedName("genres") val genres: List<String> = emptyList(),
+        @SerializedName("cast") val cast: List<String> = emptyList(), 
+        @SerializedName("trailers") val trailersSources: List<Trailer> = emptyList(),
+        @SerializedName("trailerStreams") val trailerStreams: List<TrailerStream> = emptyList(), 
+        @SerializedName("links") val links: List<Link> = emptyList()
     ) {
 
         fun toSearchResponse(
@@ -1311,7 +1314,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 val detailAppend = if (isMovie) "release_dates,credits,images,videos,external_ids,recommendations,translations" else "content_ratings,credits,images,videos,external_ids,recommendations,translations"
                 val detailUrl = provider.buildTmdbUrl("/$tmdbMediaType/$tmdbIdStr", "append_to_response" to detailAppend)
                 val text = StremioC.customSession.get(detailUrl).text
-                val fetched = if (text.isNotBlank()) jsonMapper.readValue(text, TmdbDetailResponse::class.java) else null
+                val fetched = if (text.isNotBlank()) gson.fromJson(text, TmdbDetailResponse::class.java) else null
                 if (fetched != null) {
                     tmdbDetailsCache[cacheKey] = Pair(fetched, System.currentTimeMillis())
                 }
@@ -1351,7 +1354,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                                             cachedSeason.first
                                         } else {
                                             val fetchedSeasonText = StremioC.customSession.get(provider.buildTmdbUrl("/tv/$tmdbIdStr/season/$seasonNum")).text
-                                            val fetchedSeason = if (fetchedSeasonText.isNotBlank()) jsonMapper.readValue(fetchedSeasonText, TmdbSeasonDetail::class.java) else null
+                                            val fetchedSeason = if (fetchedSeasonText.isNotBlank()) gson.fromJson(fetchedSeasonText, TmdbSeasonDetail::class.java) else null
                                             if (fetchedSeason != null) {
                                                 tmdbSeasonCache[seasonCacheKey] = Pair(fetchedSeason, System.currentTimeMillis())
                                             }
@@ -1370,7 +1373,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                         runSuspendCatching {
                             val colUrl = provider.buildTmdbUrl("/collection/${detailRes.belongs_to_collection.id}")
                             val colText = StremioC.customSession.get(colUrl).text
-                            if (colText.isNotBlank()) jsonMapper.readValue(colText, TmdbCollectionDetail::class.java).parts ?: emptyList() else emptyList()
+                            if (colText.isNotBlank()) gson.fromJson(colText, TmdbCollectionDetail::class.java).parts ?: emptyList() else emptyList()
                         }.getOrDefault(emptyList())
                     } else emptyList()
                 }
@@ -1409,7 +1412,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     }
                     
                     val thinData = LoadData(id = "tmdb:${media.id}", type = outType)
-                    val thinDataJson = jsonMapper.writeValueAsString(thinData)
+                    val thinDataJson = gson.toJson(thinData)
                     
                     provider.newMovieSearchResponse(recTitle, thinDataJson, if (outType == "movie") TvType.Movie else TvType.TvSeries) { 
                         this.posterUrl = resolvedPosterUrl 
@@ -1547,7 +1550,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     } else {
                         val fetchedFind = runSuspendCatching {
                             val fetchedFindText = StremioC.customSession.get(provider.buildTmdbUrl("/find/$finalImdbId", "external_source" to "imdb_id")).text
-                            val findRes = if (fetchedFindText.isNotBlank()) jsonMapper.readValue(fetchedFindText, TmdbFindResponse::class.java) else null
+                            val findRes = if (fetchedFindText.isNotBlank()) gson.fromJson(fetchedFindText, TmdbFindResponse::class.java) else null
                             val movieMatch = findRes?.movie_results?.firstOrNull()
                             if (movieMatch?.id != null) Pair(movieMatch.id.toString(), "movie") else findRes?.tv_results?.firstOrNull()?.id?.let { Pair(it.toString(), "tv") }
                         }.getOrNull()
@@ -1640,8 +1643,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     } else {
                         val fetchedZip = runSuspendCatching {
                             val mappingRes = StremioC.customSession.get("https://api.ani.zip/mappings?imdb_id=$finalImdbId", timeout = 5L).text
-                            val node = jsonMapper.readTree(mappingRes)
-                            val mappings = node.get("mappings")
+                            val node = JsonParser.parseString(mappingRes).asJsonObject
+                            val mappings = node.getAsJsonObject("mappings")
                             if (mappings != null) {
                                 val mal = mappings.get("mal_id").intOrNull()?.takeIf { it > 0 }
                                 val ani = mappings.get("anilist_id").intOrNull()?.takeIf { it > 0 }
@@ -1751,21 +1754,21 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     }
 
     private data class Video(
-        @JsonProperty("id") val id: String? = null,
-        @JsonProperty("title") val title: String? = null,
-        @JsonProperty("name") val name: String? = null,
-        @JsonProperty("season") val seasonNumber: Int? = null,
-        @JsonProperty("number") val number: Int? = null,
-        @JsonProperty("episode") val episode: Int? = null,
-        @JsonProperty("thumbnail") val thumbnail: String? = null,
-        @JsonProperty("overview") val overview: String? = null,
-        @JsonProperty("description") val description: String? = null,
-        @JsonProperty("firstAired") val firstAired: String? = null,
-        @JsonProperty("released") val released: String? = null,
-        @JsonProperty("tvdb_id") val tvdb_id: Int? = null,
-        @JsonProperty("imdbSeason") val imdbSeason: Int? = null,
-        @JsonProperty("imdbEpisode") val imdbEpisode: Int? = null,
-        @JsonProperty("imdb_id") val imdb_id: String? = null
+        @SerializedName("id") val id: String? = null,
+        @SerializedName("title") val title: String? = null,
+        @SerializedName("name") val name: String? = null,
+        @SerializedName("season") val seasonNumber: Int? = null,
+        @SerializedName("number") val number: Int? = null,
+        @SerializedName("episode") val episode: Int? = null,
+        @SerializedName("thumbnail") val thumbnail: String? = null,
+        @SerializedName("overview") val overview: String? = null,
+        @SerializedName("description") val description: String? = null,
+        @SerializedName("firstAired") val firstAired: String? = null,
+        @SerializedName("released") val released: String? = null,
+        @SerializedName("tvdb_id") val tvdb_id: Int? = null,
+        @SerializedName("imdbSeason") val imdbSeason: Int? = null,
+        @SerializedName("imdbEpisode") val imdbEpisode: Int? = null,
+        @SerializedName("imdb_id") val imdb_id: String? = null
     ) {
         fun toEpisode(provider: StremioC, type: String?, imdbId: String?, tmdbMetaMap: Map<String, TmdbEpisode>, displaySeason: Int, displayEpisode: Int, showTitle: String?, tmdbId: Int?, isAnime: Boolean, isBollywood: Boolean, isAsian: Boolean, isCartoon: Boolean, imdbSeason: Int?, imdbEpisode: Int?, originalTitle: String?, englishTitle: String?, aniListId: Int?, malId: Int?, kitsuId: String?): Episode {
             val tmdbEp = tmdbMetaMap["${displaySeason}_${displayEpisode}"] ?: tmdbMetaMap["${seasonNumber ?: 0}_${episode ?: number ?: 0}"]
@@ -1813,22 +1816,22 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
     }
 
-    private data class StreamsResponse(@JsonProperty("streams") val streams: List<Stream>)    
-    private data class Subtitle(@JsonProperty("url") val url: String?, @JsonProperty("lang") val lang: String?, @JsonProperty("lang_code") val lang_code: String?, @JsonProperty("id") val id: String?)    
-    private data class ProxyHeaders(@JsonProperty("request") val request: Map<String, String>?)   
-    private data class BehaviorHints(@JsonProperty("proxyHeaders") val proxyHeaders: ProxyHeaders?, @JsonProperty("headers") val headers: Map<String, String>?)
+    private data class StreamsResponse(@SerializedName("streams") val streams: List<Stream>)    
+    private data class Subtitle(@SerializedName("url") val url: String?, @SerializedName("lang") val lang: String?, @SerializedName("lang_code") val lang_code: String?, @SerializedName("id") val id: String?)    
+    private data class ProxyHeaders(@SerializedName("request") val request: Map<String, String>?)   
+    private data class BehaviorHints(@SerializedName("proxyHeaders") val proxyHeaders: ProxyHeaders?, @SerializedName("headers") val headers: Map<String, String>?)
 
     private data class Stream(
-        @JsonProperty("name") val name: String?,
-        @JsonProperty("title") val title: String?,
-        @JsonProperty("url") val url: String?,
-        @JsonProperty("description") val description: String?,
-        @JsonProperty("ytId") val ytId: String?,
-        @JsonProperty("externalUrl") val externalUrl: String?,
-        @JsonProperty("behaviorHints") val behaviorHints: BehaviorHints?,
-        @JsonProperty("infoHash") val infoHash: String?,
-        @JsonProperty("sources") val sources: List<String> = emptyList(),
-        @JsonProperty("subtitles") val subtitles: List<Subtitle> = emptyList()
+        @SerializedName("name") val name: String?,
+        @SerializedName("title") val title: String?,
+        @SerializedName("url") val url: String?,
+        @SerializedName("description") val description: String?,
+        @SerializedName("ytId") val ytId: String?,
+        @SerializedName("externalUrl") val externalUrl: String?,
+        @SerializedName("behaviorHints") val behaviorHints: BehaviorHints?,
+        @SerializedName("infoHash") val infoHash: String?,
+        @SerializedName("sources") val sources: List<String> = emptyList(),
+        @SerializedName("subtitles") val subtitles: List<Subtitle> = emptyList()
     ) {
         suspend fun runCallback(provider: StremioC, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
             if (url != null) {
@@ -1860,64 +1863,64 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     }
 }
 
-private data class TraktRelatedIds(@JsonProperty("tmdb") val tmdb: Int?)
-private data class TraktRelatedItem(@JsonProperty("ids") val ids: TraktRelatedIds?)
-private data class SimklIds(@JsonProperty("tmdb") val tmdb: Int?, @JsonProperty("simkl") val simkl: Int?)
-private data class SimklRecItem(@JsonProperty("type") val type: String?, @JsonProperty("ids") val ids: SimklIds?)
-private data class SimklRecResponse(@JsonProperty("users_recommendations") val users_recommendations: List<SimklRecItem>?)
-private data class SimklDetailResponse(@JsonProperty("ids") val ids: SimklIds?)
+private data class TraktRelatedIds(@SerializedName("tmdb") val tmdb: Int?)
+private data class TraktRelatedItem(@SerializedName("ids") val ids: TraktRelatedIds?)
+private data class SimklIds(@SerializedName("tmdb") val tmdb: Int?, @SerializedName("simkl") val simkl: Int?)
+private data class SimklRecItem(@SerializedName("type") val type: String?, @SerializedName("ids") val ids: SimklIds?)
+private data class SimklRecResponse(@SerializedName("users_recommendations") val users_recommendations: List<SimklRecItem>?)
+private data class SimklDetailResponse(@SerializedName("ids") val ids: SimklIds?)
 
 private data class TmdbFindResponse(
-    @JsonProperty("movie_results") val movie_results: List<TmdbFindResult>? = null,
-    @JsonProperty("tv_results") val tv_results: List<TmdbFindResult>? = null
+    @SerializedName("movie_results") val movie_results: List<TmdbFindResult>? = null,
+    @SerializedName("tv_results") val tv_results: List<TmdbFindResult>? = null
 )
 
 private data class TmdbFindResult(
-    @JsonProperty("id") val id: Int? = null,
-    @JsonProperty("media_type") val media_type: String? = null
+    @SerializedName("id") val id: Int? = null,
+    @SerializedName("media_type") val media_type: String? = null
 )
 
 private data class TmdbCollection(
-    @JsonProperty("id") val id: Int? = null,
-    @JsonProperty("name") val name: String? = null,
-    @JsonProperty("poster_path") val poster_path: String? = null,
-    @JsonProperty("backdrop_path") val backdrop_path: String? = null
+    @SerializedName("id") val id: Int? = null,
+    @SerializedName("name") val name: String? = null,
+    @SerializedName("poster_path") val poster_path: String? = null,
+    @SerializedName("backdrop_path") val backdrop_path: String? = null
 )
 
 private data class TmdbCollectionDetail(
-    @JsonProperty("id") val id: Int? = null,
-    @JsonProperty("name") val name: String? = null,
-    @JsonProperty("parts") val parts: List<TmdbMedia>? = null
+    @SerializedName("id") val id: Int? = null,
+    @SerializedName("name") val name: String? = null,
+    @SerializedName("parts") val parts: List<TmdbMedia>? = null
 )
 
-private data class TmdbTranslations(@JsonProperty("translations") val translations: List<TmdbTranslationItem>?)
-private data class TmdbTranslationItem(@JsonProperty("iso_3166_1") val iso_3166_1: String?, @JsonProperty("iso_639_1") val iso_639_1: String?, @JsonProperty("data") val data: TmdbTranslationData?)
-private data class TmdbTranslationData(@JsonProperty("title") val title: String?, @JsonProperty("name") val name: String?, @JsonProperty("overview") val overview: String?)
+private data class TmdbTranslations(@SerializedName("translations") val translations: List<TmdbTranslationItem>?)
+private data class TmdbTranslationItem(@SerializedName("iso_3166_1") val iso_3166_1: String?, @SerializedName("iso_639_1") val iso_639_1: String?, @SerializedName("data") val data: TmdbTranslationData?)
+private data class TmdbTranslationData(@SerializedName("title") val title: String?, @SerializedName("name") val name: String?, @SerializedName("overview") val overview: String?)
 
 private data class TmdbDetailResponse(
-    @JsonProperty("id") val id: Int? = null,
-    @JsonProperty("number_of_seasons") val number_of_seasons: Int? = null,
-    @JsonProperty("title") val title: String? = null, 
-    @JsonProperty("name") val name: String? = null, 
-    @JsonProperty("original_title") val original_title: String? = null, 
-    @JsonProperty("original_name") val original_name: String? = null, 
-    @JsonProperty("overview") val overview: String? = null, 
-    @JsonProperty("release_date") val releaseDate: String? = null, 
-    @JsonProperty("first_air_date") val firstAirDate: String? = null, 
-    @JsonProperty("status") val status: String? = null, 
-    @JsonProperty("poster_path") val posterPath: String? = null, 
-    @JsonProperty("origin_country") val origin_country: List<String>? = null, 
-    @JsonProperty("original_language") val original_language: String? = null, 
-    @JsonProperty("belongs_to_collection") val belongs_to_collection: TmdbCollection? = null, 
-    @JsonProperty("recommendations") val recommendations: TmdbRecommendations? = null,
-    @JsonProperty("runtime") val runtime: Int? = null, 
-    @JsonProperty("release_dates") val release_dates: TmdbReleaseDates? = null, 
-    @JsonProperty("content_ratings") val content_ratings: TmdbContentRatings? = null, 
-    @JsonProperty("credits") val credits: TmdbCredits? = null, 
-    @JsonProperty("images") val images: TmdbImages? = null, 
-    @JsonProperty("videos") val videos: ResultsTrailer? = null, 
-    @JsonProperty("external_ids") val external_ids: ExternalIds? = null, 
-    @JsonProperty("translations") val translations: TmdbTranslations? = null
+    @SerializedName("id") val id: Int? = null,
+    @SerializedName("number_of_seasons") val number_of_seasons: Int? = null,
+    @SerializedName("title") val title: String? = null, 
+    @SerializedName("name") val name: String? = null, 
+    @SerializedName("original_title") val original_title: String? = null, 
+    @SerializedName("original_name") val original_name: String? = null, 
+    @SerializedName("overview") val overview: String? = null, 
+    @SerializedName("release_date") val releaseDate: String? = null, 
+    @SerializedName("first_air_date") val firstAirDate: String? = null, 
+    @SerializedName("status") val status: String? = null, 
+    @SerializedName("poster_path") val posterPath: String? = null, 
+    @SerializedName("origin_country") val origin_country: List<String>? = null, 
+    @SerializedName("original_language") val original_language: String? = null, 
+    @SerializedName("belongs_to_collection") val belongs_to_collection: TmdbCollection? = null, 
+    @SerializedName("recommendations") val recommendations: TmdbRecommendations? = null,
+    @SerializedName("runtime") val runtime: Int? = null, 
+    @SerializedName("release_dates") val release_dates: TmdbReleaseDates? = null, 
+    @SerializedName("content_ratings") val content_ratings: TmdbContentRatings? = null, 
+    @SerializedName("credits") val credits: TmdbCredits? = null, 
+    @SerializedName("images") val images: TmdbImages? = null, 
+    @SerializedName("videos") val videos: ResultsTrailer? = null, 
+    @SerializedName("external_ids") val external_ids: ExternalIds? = null, 
+    @SerializedName("translations") val translations: TmdbTranslations? = null
 ) {
     fun toTmdbMedia(mediaType: String): TmdbMedia {
         return TmdbMedia(
@@ -1936,38 +1939,37 @@ private data class TmdbDetailResponse(
     }
 }
 
-private data class TmdbImages(@JsonProperty("logos") val logos: List<TmdbLogo>? = null)
-private data class TmdbLogo(@JsonProperty("file_path") val file_path: String? = null)
-private data class TmdbRecommendations(@JsonProperty("results") val results: List<TmdbMedia>? = null)
+private data class TmdbImages(@SerializedName("logos") val logos: List<TmdbLogo>? = null)
+private data class TmdbLogo(@SerializedName("file_path") val file_path: String? = null)
+private data class TmdbRecommendations(@SerializedName("results") val results: List<TmdbMedia>? = null)
 private data class TmdbMedia(
-    @JsonProperty("id") val id: Int? = null,
-    @JsonProperty("name") val name: String? = null,
-    @JsonProperty("title") val title: String? = null,
-    @JsonProperty("original_title") val originalTitle: String? = null,
-    @JsonProperty("media_type") val mediaType: String? = null,
-    @JsonProperty("poster_path") val poster_path: String? = null,
-    @JsonProperty("overview") val overview: String? = null,
-    @JsonProperty("origin_country") val origin_country: List<String>? = null,
-    @JsonProperty("original_language") val original_language: String? = null,
-    @JsonProperty("release_date") val releaseDate: String? = null,
-    @JsonProperty("first_air_date") val firstAirDate: String? = null
+    @SerializedName("id") val id: Int? = null,
+    @SerializedName("name") val name: String? = null,
+    @SerializedName("title") val title: String? = null,
+    @SerializedName("original_title") val originalTitle: String? = null,
+    @SerializedName("media_type") val mediaType: String? = null,
+    @SerializedName("poster_path") val poster_path: String? = null,
+    @SerializedName("overview") val overview: String? = null,
+    @SerializedName("origin_country") val origin_country: List<String>? = null,
+    @SerializedName("original_language") val original_language: String? = null,
+    @SerializedName("release_date") val releaseDate: String? = null,
+    @SerializedName("first_air_date") val firstAirDate: String? = null
 )
 
-private data class TmdbReleaseDates(@JsonProperty("results") val results: List<TmdbReleaseDateResult>?)
-private data class TmdbReleaseDateResult(@JsonProperty("iso_3166_1") val iso_3166_1: String?, @JsonProperty("release_dates") val release_dates: List<TmdbReleaseDate>?)
-private data class TmdbReleaseDate(@JsonProperty("certification") val certification: String?)
-private data class TmdbContentRatings(@JsonProperty("results") val results: List<TmdbContentRatingResult>?)
-private data class TmdbContentRatingResult(@JsonProperty("iso_3166_1") val iso_3166_1: String?, @JsonProperty("rating") val rating: String?)
-private data class TmdbCredits(@JsonProperty("cast") val cast: List<TmdbCast>? = null, @JsonProperty("crew") val crew: List<TmdbCrew>? = null)
-private data class TmdbCast(@JsonProperty("name") val name: String?, @JsonProperty("original_name") val originalName: String?, @JsonProperty("character") val character: String?, @JsonProperty("profile_path") val profilePath: String?)
-private data class TmdbCrew(@JsonProperty("name") val name: String?, @JsonProperty("original_name") val originalName: String?, @JsonProperty("job") val job: String?, @JsonProperty("profile_path") val profilePath: String?)
-private data class TmdbSeasonDetail(@JsonProperty("episodes") val episodes: List<TmdbEpisode>? = null)
-private data class TmdbEpisode(@JsonProperty("name") val name: String?, @JsonProperty("overview") val overview: String?, @JsonProperty("episode_number") val episodeNumber: Int?, @JsonProperty("air_date") val airDate: String?, @JsonProperty("vote_average") val voteAverage: Double?, @JsonProperty("runtime") val runtime: Int?)
+private data class TmdbReleaseDates(@SerializedName("results") val results: List<TmdbReleaseDateResult>?)
+private data class TmdbReleaseDateResult(@SerializedName("iso_3166_1") val iso_3166_1: String?, @SerializedName("release_dates") val release_dates: List<TmdbReleaseDate>?)
+private data class TmdbReleaseDate(@SerializedName("certification") val certification: String?)
+private data class TmdbContentRatings(@SerializedName("results") val results: List<TmdbContentRatingResult>?)
+private data class TmdbContentRatingResult(@SerializedName("iso_3166_1") val iso_3166_1: String?, @SerializedName("rating") val rating: String?)
+private data class TmdbCredits(@SerializedName("cast") val cast: List<TmdbCast>? = null, @SerializedName("crew") val crew: List<TmdbCrew>? = null)
+private data class TmdbCast(@SerializedName("name") val name: String?, @SerializedName("original_name") val originalName: String?, @SerializedName("character") val character: String?, @SerializedName("profile_path") val profilePath: String?)
+private data class TmdbCrew(@SerializedName("name") val name: String?, @SerializedName("original_name") val originalName: String?, @SerializedName("job") val job: String?, @SerializedName("profile_path") val profilePath: String?)
+private data class TmdbSeasonDetail(@SerializedName("episodes") val episodes: List<TmdbEpisode>? = null)
+private data class TmdbEpisode(@SerializedName("name") val name: String?, @SerializedName("overview") val overview: String?, @SerializedName("episode_number") val episodeNumber: Int?, @SerializedName("air_date") val airDate: String?, @SerializedName("vote_average") val voteAverage: Double?, @SerializedName("runtime") val runtime: Int?)
 
-data class Trailers(@JsonProperty("key") val key: String? = null, @JsonProperty("type") val type: String? = null, @JsonProperty("published_at") val publishedAt: String? = null)
-data class ResultsTrailer(@JsonProperty("results") val results: ArrayList<Trailers>? = arrayListOf())
-data class ExternalIds(@JsonProperty("imdb_id") val imdb_id: String? = null, @JsonProperty("tvdb_id") val tvdb_id: String? = null)
-
+data class Trailers(@SerializedName("key") val key: String? = null, @SerializedName("type") val type: String? = null, @SerializedName("published_at") val publishedAt: String? = null)
+data class ResultsTrailer(@SerializedName("results") val results: ArrayList<Trailers>? = arrayListOf())
+data class ExternalIds(@SerializedName("imdb_id") val imdb_id: String? = null, @SerializedName("tvdb_id") val tvdb_id: String? = null)
 
 // URL에서 안전한 고유 알파벳 식별자만 추출하는 함수
 private fun String.toUniqueKey(): String {
