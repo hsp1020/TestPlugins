@@ -775,12 +775,17 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             resolvedTmdbId = resolvedTmdbId,
             kitsuVideos = kitsuVideos
         )
-        
+
         val mdbRatings = mdbDeferred?.await() ?: emptyList()
         if (mdbRatings.isNotEmpty()) {
             val ratingStr = mdbRatings.joinToString("  ")
             val currentPlot = loadRes.plot 
+            
+            // 1. MDBList 평점을 플롯에 덧붙임
             loadRes.plot = if (!currentPlot.isNullOrBlank()) "$ratingStr | $currentPlot" else ratingStr
+            
+            // 2. 🔥 [UX 개선 추가] MDBList가 활성화되었으므로, 불필요한 상단 기본 평점 제거!
+            loadRes.rating = null 
         }
         
         return@coroutineScope loadRes
