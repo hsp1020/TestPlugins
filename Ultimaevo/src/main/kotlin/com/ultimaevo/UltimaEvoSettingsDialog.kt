@@ -447,8 +447,27 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             isVerticalFadingEdgeEnabled = true
             setFadingEdgeLength(120)
         }
-        
+
+        // 🔥 [V3 패치] 프로바이더용 데이터 모델 생성 및 실시간 정렬 로직 추가
+        data class ProviderData(val pName: String, var isChecked: Boolean)
+        val providerList = mutableListOf<ProviderData>()
         val tempAutoAddSettings = mutableMapOf<String, Boolean>()
+
+        // 1. 프로바이더 목록 불러와서 체크 상태 매핑
+        for (provider in allProviders) {
+            val pName = provider.name
+            val isChecked = prefs.getBoolean("auto_add_${instanceId}_$pName", false)
+            providerList.add(ProviderData(pName, isChecked))
+            tempAutoAddSettings[pName] = isChecked
+        }
+
+        // 2. 초기 정렬: 체크된 항목 최상단, 해제된 항목 하단 배치
+        val initProvChecked = providerList.filter { it.isChecked }
+        val initProvUnchecked = providerList.filter { !it.isChecked }
+        providerList.clear()
+        providerList.addAll(initProvChecked)
+        providerList.addAll(initProvUnchecked)
+
         class ProviderAdapter : RecyclerView.Adapter<ProviderAdapter.PVH>() {
             inner class PVH(val view: LinearLayout, val tvName: TextView, val switch: Switch) : RecyclerView.ViewHolder(view)
             
@@ -458,35 +477,40 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     gravity = Gravity.CENTER_VERTICAL
                     setPadding(0, 15, 0, 15) 
                 }
-                
                 val tv = TextView(ctx).apply { 
                     setTextColor(Color.LTGRAY)
                     textSize = 13f
                     layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) 
                 }
+                // 불필요한 라벨 제거 적용됨
+                val sw = Switch(ctx) 
                 
-                // 🔥 [수정된 부분] 기존에 있던 `text = "Auto-add"` 속성을 완전히 제거했습니다.
-                // 이제 옆에 군더더기 글자 없이 깔끔한 토글 스위치 형태만 렌더링됩니다.
-                val sw = Switch(ctx)
-                
-                row.addView(tv)
-                row.addView(sw)
+                row.addView(tv); row.addView(sw)
                 return PVH(row, tv, sw)
             }
             
             override fun onBindViewHolder(holder: PVH, position: Int) {
-                val pName = allProviders[position].name
-                // 왼쪽에 프로바이더 이름만 단독으로 예쁘게 출력됩니다.
-                holder.tvName.text = pName
+                val data = providerList[position]
+                holder.tvName.text = data.pName
                 
                 holder.switch.setOnCheckedChangeListener(null)
-                holder.switch.isChecked = prefs.getBoolean("auto_add_${instanceId}_$pName", false)
+                holder.switch.isChecked = data.isChecked
+                
                 holder.switch.setOnCheckedChangeListener { _, isChecked -> 
-                    tempAutoAddSettings[pName] = isChecked 
+                    if (data.isChecked == isChecked) return@setOnCheckedChangeListener
+                    data.isChecked = isChecked
+                    tempAutoAddSettings[data.pName] = isChecked 
+                    
+                    // 🔥 [UX 개선] 스위치 조작 시 실시간으로 위/아래 자동 재정렬
+                    val checkedItems = providerList.filter { it.isChecked }
+                    val uncheckedItems = providerList.filter { !it.isChecked }
+                    providerList.clear()
+                    providerList.addAll(checkedItems)
+                    providerList.addAll(uncheckedItems)
+                    notifyDataSetChanged() // 화면 즉시 갱신
                 }
             }
-            
-            override fun getItemCount() = allProviders.size
+            override fun getItemCount() = providerList.size
         }
         rvProviders.adapter = ProviderAdapter()
         providerSettingsCard.addView(rvProviders)
