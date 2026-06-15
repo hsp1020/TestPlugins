@@ -214,7 +214,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="MdbList API Key"
+                android:text="MDBList API Key (Required)"
                 android:textColor="#AAAAAA"
                 android:textSize="14sp" />
 
@@ -267,7 +267,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Sync Metadata Base URL"
+                android:text="Sync Metadata Base URL (Required)"
                 android:textColor="#AAAAAA"
                 android:textSize="14sp" />
 
@@ -320,7 +320,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Custom Recommendation Poster URL"
+                android:text="Custom Recommendation Poster URL (Required)"
                 android:textColor="#AAAAAA"
                 android:textSize="14sp" />
 
@@ -328,7 +328,7 @@
                 android:id="@+id/etCustomPosterUrl"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:hint="https://extendedratings.com/poster/"
+                android:hint="https://extendedratings.com/poster/..."
                 android:textColor="#FFFFFF"
                 android:textColorHint="#555555"
                 android:textSize="14sp"
