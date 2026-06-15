@@ -27,6 +27,7 @@ import androidx.appcompat.app.AlertDialog
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import androidx.core.net.toUri
 import androidx.core.content.edit
+import androidx.lifecycle.lifecycleScope // 🔥 [V3 패치] 라이프사이클 스코프 임포트
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.ItemTouchHelper
@@ -35,15 +36,11 @@ import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CommonActivity.showToast
 import org.json.JSONArray
 import org.json.JSONObject
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Collections
 
-// ==========================================
-// Data & Repository Layer
-// ==========================================
 data class LinkItem(
     val id: Long = System.currentTimeMillis(),
     val name: String,
@@ -113,9 +110,6 @@ object SettingsRepository {
     }
 }
 
-// ==========================================
-// UI Layer
-// ==========================================
 class SettingsBottomFragment(
     private val plugin: StremioXPlugin,
     private val sharedPref: SharedPreferences
@@ -123,7 +117,6 @@ class SettingsBottomFragment(
 
     private val res = plugin.resources ?: throw Exception("Unable to access plugin resources")
     
-    // 🔥 [최적화] 리플렉션 무분별 호출 방지를 위한 캐싱
     private val resourceCache = mutableMapOf<String, Int>()
     private fun getCachedResId(name: String, type: String): Int {
         return resourceCache.getOrPut("$type/$name") {
@@ -251,10 +244,10 @@ class SettingsBottomFragment(
         tvExport.makeTvCompatible()
         tvImport.makeTvCompatible()
 
-        // 🔥 [완벽 쾌속 수출]: 백그라운드 IO 코루틴 적용으로 메인 스레드 블로킹(UI 렉) 해결
+        // 🔥 [V3 패치] viewLifecycleOwner.lifecycleScope 사용으로 메모리 릭(Leak) 차단
         tvExport.setOnClickListener {
             val ctx = requireContext()
-            CoroutineScope(Dispatchers.Main).launch {
+            viewLifecycleOwner.lifecycleScope.launch {
                 try {
                     val backupStr = withContext(Dispatchers.IO) {
                         val json = JSONObject()
@@ -281,7 +274,7 @@ class SettingsBottomFragment(
             }
         }
 
-        // 🔥 [완벽 쾌속 복원]: IO 코루틴 적용 및 타 앱 설정 날림 방지를 위해 editor.clear() 완전 제거(Merge 방식)
+        // 🔥 [V3 패치] viewLifecycleOwner.lifecycleScope 사용으로 메모리 릭(Leak) 차단
         tvImport.setOnClickListener {
             val ctx = requireContext()
             val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -295,7 +288,7 @@ class SettingsBottomFragment(
                 return@setOnClickListener
             }
 
-            CoroutineScope(Dispatchers.Main).launch {
+            viewLifecycleOwner.lifecycleScope.launch {
                 try {
                     val parsedJson = withContext(Dispatchers.IO) {
                         val decodedBytes = Base64.decode(clipboardText, Base64.NO_WRAP)
@@ -315,7 +308,6 @@ class SettingsBottomFragment(
                         .setMessage("Valid backup data found in clipboard!\n\nAre you sure you want to proceed? (Existing unrelated settings will be kept safely)")
                         .setPositiveButton("Restore") { _, _ ->
                             val editor = sharedPref.edit()
-                            // editor.clear() // 🚨 타 앱 설정 연쇄 삭제 방지를 위해 제거
                             
                             val keys = parsedJson.keys()
                             while (keys.hasNext()) {
@@ -546,7 +538,6 @@ class SettingsBottomFragment(
         return view
     }
 
-    // 🔥 [최적화] RecyclerView를 적용하여 다국어 검색 시 하드코딩된 View 생성 및 렌더링 부하 완벽 제거
     private fun showLanguageSelectDialog() {
         val context = requireContext()
         val currentSavedCode = sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, "ko-KR") ?: "ko-KR"
@@ -574,7 +565,7 @@ class SettingsBottomFragment(
 
         val rv = RecyclerView(context).apply {
             layoutManager = LinearLayoutManager(context)
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 800) // Height fixed for popup
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 800)
         }
         container.addView(rv)
 
@@ -649,7 +640,8 @@ class SettingsBottomFragment(
         val progressDialog = AlertDialog.Builder(context).setMessage("Loading Stremio Addon Manifest...").setCancelable(false).create()
         progressDialog.show()
 
-        CoroutineScope(Dispatchers.Main).launch {
+        // 🔥 [V3 패치] viewLifecycleOwner.lifecycleScope 사용으로 메모리 릭 차단
+        viewLifecycleOwner.lifecycleScope.launch {
             val manifestText = withContext(Dispatchers.IO) {
                 try { com.lagradost.cloudstream3.app.get(item.link, timeout = 30L).text } catch (e: Exception) { e.printStackTrace(); null }
             }
@@ -724,7 +716,6 @@ class SettingsBottomFragment(
         }
     }
 
-    // 🔥 [최적화] RecyclerView + ItemTouchHelper 적용으로 렉없는 카탈로그 드래그 정렬 지원 및 뷰 재사용성 극대화
     private fun displayCatalogListDialog(addonName: String, flatTabs: List<ConfigFlatTab>, linkUrl: String) {
         val context = requireContext()
         val prefs = sharedPref
@@ -829,7 +820,6 @@ class SettingsBottomFragment(
                 Collections.swap(adapter.visibleTabs, fromPos, toPos)
                 adapter.notifyItemMoved(fromPos, toPos)
 
-                // Master 목록 동기화
                 val masterFrom = masterTabs.indexOf(movedTab)
                 val targetTab = adapter.visibleTabs[fromPos]
                 val masterTo = masterTabs.indexOf(targetTab)
@@ -938,9 +928,6 @@ class SettingsBottomFragment(
         }
     }
 
-    // ==========================================
-    // RecyclerView Adapter
-    // ==========================================
     inner class LinksAdapter(
         private val items: MutableList<LinkItem>,
         private val onDelete: (LinkItem) -> Unit,
