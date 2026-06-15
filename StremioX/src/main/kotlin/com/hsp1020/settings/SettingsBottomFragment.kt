@@ -867,10 +867,10 @@ class SettingsBottomFragment(
             switchView.isEnabled = isInstalled
             if (!isInstalled) {
                 switchView.isChecked = false
-                switchView.text = "$displayName (Not Installed)"
+                switchView.text = "Not Installed"
                 SettingsRepository.setIntegrationEnabled(sharedPref, prefKey, false)
             } else {
-                switchView.text = "$displayName Integration"
+                switchView.text = "Integration"
                 switchView.isChecked = SettingsRepository.isIntegrationEnabled(sharedPref, prefKey)
             }
             switchView.setOnCheckedChangeListener { _, isChecked ->
