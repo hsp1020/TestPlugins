@@ -95,12 +95,14 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val ctx = requireContext()
         val prefs = ctx.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
 
-        // 🔥 [UX 패치] 메인 윈도우 스크롤바 항상 표시 적용
-        val scrollView = ScrollView(ctx).apply { 
+        // 🔥 [버그픽스] BottomSheet 환경에 최적화된 NestedScrollView 적용 및 크래시 유발 스크롤바 삭제
+        // 대신 위아래로 내용이 이어짐을 알려주는 그라데이션 페이드 효과(Fading Edge) 적용!
+        val scrollView = androidx.core.widget.NestedScrollView(ctx).apply { 
             background = getDarkThemeBg()
-            isVerticalScrollBarEnabled = true
-            isScrollbarFadingEnabled = false 
+            isVerticalFadingEdgeEnabled = true
+            setFadingEdgeLength(100)
         }
+        
         val mainLayout = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL; setPadding(40, 40, 40, 40) }
 
         mainLayout.addView(TextView(ctx).apply {
@@ -257,7 +259,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val rvInstances = RecyclerView(ctx).apply {
             layoutManager = LinearLayoutManager(ctx)
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            // 메인 화면 인스턴스 뷰는 ScrollView 내부에 있으므로 여기 스크롤바는 필요 없음
         }
         
         class InstanceAdapter : RecyclerView.Adapter<InstanceAdapter.VH>() {
@@ -369,13 +370,13 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val toggleArrow = TextView(ctx).apply { text = "▼"; setTextColor(Color.WHITE); textSize = 14f; setPadding(15, 10, 15, 10) }
         headerRow.addView(toggleArrow); providerSettingsCard.addView(headerRow)
 
-        // 🔥 [UX 패치] 프로바이더 뷰 스크롤바 항상 보이도록 지정
+        // 🔥 [버그픽스] 크래시 방지 및 시각적 스크롤 인지(페이드 효과) 적용
         val rvProviders = RecyclerView(ctx).apply { 
             layoutManager = LinearLayoutManager(ctx)
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 400)
             visibility = View.GONE 
-            isVerticalScrollBarEnabled = true
-            isScrollbarFadingEnabled = false 
+            isVerticalFadingEdgeEnabled = true
+            setFadingEdgeLength(50)
         }
         
         val tempAutoAddSettings = mutableMapOf<String, Boolean>()
@@ -429,12 +430,12 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         catalogList.addAll(initChecked)
         catalogList.addAll(initUnchecked)
 
-        // 🔥 [UX 패치] 카탈로그 뷰 스크롤바 항상 보이도록 지정
+        // 🔥 [버그픽스] 크래시 방지 및 시각적 스크롤 인지(페이드 효과) 적용
         val rvCatalogs = RecyclerView(ctx).apply { 
             layoutManager = LinearLayoutManager(ctx)
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f) 
-            isVerticalScrollBarEnabled = true
-            isScrollbarFadingEnabled = false 
+            isVerticalFadingEdgeEnabled = true
+            setFadingEdgeLength(80)
         }
         
         class CatalogAdapter : RecyclerView.Adapter<CatalogAdapter.CVH>() {
