@@ -127,7 +127,13 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         }
                         val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         clipboard.setPrimaryClip(ClipData.newPlainText("Ultima Backup", backupStr))
-                        Toast.makeText(ctx, "Exported to Clipboard", Toast.LENGTH_SHORT).show()
+                        
+                        // 🔥 [수정] Toast 대신 StremioX와 동일한 AlertDialog 팝업 적용
+                        AlertDialog.Builder(ctx)
+                            .setTitle("Export Successful")
+                            .setMessage("Compressed backup data has been successfully copied to your clipboard.\n\nPlease paste it somewhere safe (e.g., Notes, Messenger).")
+                            .setPositiveButton("OK", null)
+                            .show()
                     } catch (e: Exception) {
                         e.printStackTrace()
                         Toast.makeText(ctx, "Export failed", Toast.LENGTH_SHORT).show()
@@ -144,7 +150,10 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 lastClickTime = SystemClock.elapsedRealtime()
 
                 val clipboardText = (ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).primaryClip?.getItemAt(0)?.text?.toString()?.trim() ?: ""
-                if (clipboardText.isEmpty()) { Toast.makeText(ctx, "Clipboard is empty", Toast.LENGTH_SHORT).show(); return@setOnClickListener }
+                if (clipboardText.isEmpty()) { 
+                    Toast.makeText(ctx, "Clipboard is empty", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener 
+                }
 
                 viewLifecycleOwner.lifecycleScope.launch {
                     try {
@@ -159,8 +168,11 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
                         if (parsedJson.length() == 0) throw Exception("Empty Data")
 
-                        AlertDialog.Builder(ctx).setTitle("Restore").setMessage("Proceed with import?")
-                            .setPositiveButton("OK") { _, _ ->
+                        // 🔥 [수정] StremioX와 100% 동일한 경고 및 복원 성공 연계 다이얼로그 적용
+                        AlertDialog.Builder(ctx)
+                            .setTitle("Backup Data Detected")
+                            .setMessage("Valid compressed backup data found in clipboard!\n\nWarning: Restoring will overwrite settings.\nAre you sure you want to proceed?")
+                            .setPositiveButton("Restore") { _, _ ->
                                 val editor = prefs.edit()
                                 val keys = parsedJson.keys()
                                 while (keys.hasNext()) {
@@ -172,12 +184,23 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                                     }
                                 }
                                 editor.apply()
-                                Toast.makeText(ctx, "Imported successfully. Restart app.", Toast.LENGTH_LONG).show()
-                                dismiss()
-                            }.setNegativeButton("Cancel", null).show()
+                                
+                                AlertDialog.Builder(ctx)
+                                    .setTitle("Import Result")
+                                    .setMessage("Restore completed successfully!\nPlease restart the app.")
+                                    .setPositiveButton("OK") { _, _ -> dismiss() }
+                                    .show()
+                            }
+                            .setNegativeButton("Cancel", null)
+                            .show()
                     } catch (e: Exception) {
                         e.printStackTrace()
-                        Toast.makeText(ctx, "Invalid Backup Data", Toast.LENGTH_SHORT).show()
+                        // 🔥 [수정] 파싱 실패 시에도 Toast가 아닌 깔끔한 AlertDialog 에러창 띄우기
+                        AlertDialog.Builder(ctx)
+                            .setTitle("Invalid Backup Data")
+                            .setMessage("No valid backup data found in your clipboard.\n\nPlease copy the exact backup text and try again.")
+                            .setPositiveButton("OK", null)
+                            .show()
                     }
                 }
             }
@@ -236,7 +259,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         
         class InstanceAdapter : RecyclerView.Adapter<InstanceAdapter.VH>() {
             inner class VH(val view: LinearLayout, val nameInput: EditText, val visSwitch: Switch, val searchSwitch: Switch, val configBtn: Button, val delBtn: Button) : RecyclerView.ViewHolder(view) {
-                var textWatcher: TextWatcher? = null // 🔥 [버그 픽스] 스크롤 시 이름 오염을 막기 위한 TextWatcher 참조 변수
+                var textWatcher: TextWatcher? = null 
             }
             
             override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
@@ -268,7 +291,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             override fun onBindViewHolder(holder: VH, position: Int) {
                 val i = position + 1
                 
-                // 🔥 [버그 픽스] 기존에 붙어있던 리스너를 깔끔하게 제거하여 뷰 재사용 시 다른 인스턴스 데이터 오염 방지
                 if (holder.textWatcher != null) {
                     holder.nameInput.removeTextChangedListener(holder.textWatcher)
                 }
@@ -379,7 +401,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
         for (provider in allProviders) {
             val staticCats = provider.mainPage.map { it.name }
-            // 구버전(문자열 파싱) 호환성 유지를 위해 fallback으로 dynamic_catalogs 읽기
             val dynamicCats = prefs.getString("dynamic_catalogs_${provider.name}", "")?.split("|||") ?: emptyList()
             val combined = (staticCats + dynamicCats).filter { it.isNotBlank() }.distinct()
             
@@ -387,13 +408,11 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 val isAutoAdd = prefs.getBoolean("auto_add_${instanceId}_${provider.name}", false)
                 val isChecked = prefs.getBoolean("cat_toggle_${instanceId}_${provider.name}_$cName", isAutoAdd)
                 val customName = prefs.getString("cat_rename_${instanceId}_${provider.name}_$cName", cName) ?: cName
-                // 🔥 [버그 픽스] V1에서 사용하던 order 저장값을 드디어 정상적으로 읽어옵니다.
                 val orderIndex = prefs.getString("cat_order_${instanceId}_${provider.name}_$cName", "999")?.toIntOrNull() ?: 999
                 catalogList.add(CatalogData(provider.name, cName, isChecked, customName, orderIndex))
             }
         }
 
-        // 🔥 [버그 픽스] 체크된 항목 최상단 + Order Index 오름차순 정렬 로직 완벽 복구
         val initChecked = catalogList.filter { it.isChecked }.sortedBy { it.orderIndex }
         val initUnchecked = catalogList.filter { !it.isChecked }.sortedBy { it.orderIndex }
         catalogList.clear()
@@ -404,7 +423,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         
         class CatalogAdapter : RecyclerView.Adapter<CatalogAdapter.CVH>() {
             inner class CVH(val view: LinearLayout, val dragHandle: ImageView, val cb: CheckBox, val tvSource: TextView, val etRename: EditText) : RecyclerView.ViewHolder(view) {
-                var textWatcher: TextWatcher? = null // 🔥 [버그 픽스] 스크롤 시 에디트텍스트 오염 차단용 참조 변수
+                var textWatcher: TextWatcher? = null 
             }
             override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): CVH {
                 val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(10, 8, 10, 8); background = getCardBg(); layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 5, 0, 5) } }
@@ -419,7 +438,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 val data = catalogList[position]
                 holder.tvSource.text = data.providerName
                 
-                // 🔥 [버그 픽스] 스크롤 꼬임 방지: 새로운 데이터 세팅 전 기존 TextWatcher 안전 제거
                 if (holder.textWatcher != null) {
                     holder.etRename.removeTextChangedListener(holder.textWatcher)
                 }
@@ -442,13 +460,12 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     data.isChecked = isChecked
                     holder.etRename.isEnabled = isChecked
                     
-                    // 🔥 [버그 픽스] 체크박스 조작 시 실시간으로 체크된 것 위로, 해제된 것 아래로 즉각 정렬
                     val checkedItems = catalogList.filter { it.isChecked }
                     val uncheckedItems = catalogList.filter { !it.isChecked }
                     catalogList.clear()
                     catalogList.addAll(checkedItems)
                     catalogList.addAll(uncheckedItems)
-                    notifyDataSetChanged() // 배열 순서가 바뀌었으므로 화면 갱신
+                    notifyDataSetChanged() 
                 }
             }
             override fun getItemCount() = catalogList.size
@@ -485,7 +502,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 
                 val activeCatsForGson = mutableListOf<EvoCatalogConfig>()
                 for ((index, item) in catalogList.withIndex()) {
-                    val finalOrder = index + 1 // 드래그 앤 드롭된 최종 순서를 orderIndex로 저장
+                    val finalOrder = index + 1 
                     editor.putBoolean("cat_toggle_${instanceId}_${item.providerName}_${item.catalogName}", item.isChecked)
                     editor.putString("cat_rename_${instanceId}_${item.providerName}_${item.catalogName}", item.customName)
                     editor.putString("cat_order_${instanceId}_${item.providerName}_${item.catalogName}", finalOrder.toString())
