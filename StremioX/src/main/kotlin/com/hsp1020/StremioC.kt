@@ -1,4 +1,4 @@
-// 버전 정보: v4.0.0 (The Ultimate Build) - Jackson 파서 완전 소각, Gson 네이티브 통합, 제로 콜드스타트 달성
+// 버전 정보: v4.1.0 - Gson + Kotlin Data Class 초기화 우회 버그(검색 먹통) 완벽 해결 및 Score UI 적용
 package com.hsp1020
 
 import android.content.Context
@@ -97,7 +97,6 @@ private inline fun <K, V> lruCacheMap(maxSize: Int): MutableMap<K, V> {
     })
 }
 
-// 🔥 [V4 패치] Jackson JsonNode 의존성을 완전히 날리고 가벼운 Gson JsonElement 확장 함수로 재구축
 private fun JsonElement?.textOrNull(): String? {
     if (this == null || this.isJsonNull) return null
     return try { this.asString.takeIf { it.isNotBlank() && it != "null" } } catch (e: Exception) { null }
@@ -209,7 +208,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         
         @Volatile private var cachedClassLoaderRef: WeakReference<ClassLoader>? = null
 
-        // 🔥 [V4 패치] Jackson(무거움)을 버리고 네이티브 프레임워크인 가벼운 Gson 인스턴스로 전면 교체
         val gson: Gson by lazy { Gson() }
 
         private val tmdbDetailsCache = lruCacheMap<String, Pair<TmdbDetailResponse, Long>>(100)
@@ -365,7 +363,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val prefs = context?.getSharedPreferences("StremioX", Context.MODE_PRIVATE)
         val tmdbKey = prefs?.getString("tmdb_api_key", "") ?: ""
         builder.addQueryParameter("api_key", tmdbKey)
-        val langCode = prefs?.getString("tmdb_language_code", "en-US") ?: "en-US"
+        val langCode = prefs?.getString("tmdb_language_code", "ko-KR") ?: "ko-KR"
         builder.addQueryParameter("language", langCode)
         params.forEach { (key, value) -> builder.addQueryParameter(key, value) }
         return builder.build().toString()
@@ -428,9 +426,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         if (!resText.isNullOrBlank()) {
             try {
-                // 🔥 [V4 패치] Gson 매퍼 사용
                 val parsed = gson.fromJson(resText, Manifest::class.java)
-                if (parsed.catalogs.isNotEmpty()) {
+                if (parsed?.catalogs?.isNotEmpty() == true) {
                     cachedManifest = parsed
                     lastManifestUrl = currentUrl
                     lastCacheTime = now
@@ -466,7 +463,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 cachedManifest?.catalogs ?: emptyList()
             } else if (!diskCache.isNullOrBlank()) {
                 try {
-                    // 🔥 [V4 패치] Gson 매퍼 사용
                     gson.fromJson(diskCache, Manifest::class.java).catalogs ?: emptyList()
                 } catch (e: Exception) { 
                     e.printStackTrace()
@@ -480,7 +476,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             
             val flatTabs = mutableListOf<FlatTab>()
             rawCatalogs.forEach { catalog ->
-                val catalogId = catalog.id
+                val catalogId = catalog.id ?: ""
                 val catalogType = catalog.type ?: "movie"
                 val catalogName = catalog.name ?: catalogId
                 val displayType = catalogType.replaceFirstChar { it.uppercase() }
@@ -585,7 +581,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         val resultPair = getOrFetchCachedPage(cacheKey) {
             val jsonText = customSession.get(targetUrl).text
             val response = try {
-                // 🔥 [V4 패치] Gson 매퍼 사용
                 gson.fromJson(jsonText, CatalogResponse::class.java)
             } catch (e: Exception) { e.printStackTrace(); null }
 
@@ -635,12 +630,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
     override suspend fun load(url: String): LoadResponse = coroutineScope {
         val res: CatalogEntry = if (url.startsWith("{")) {
-            // 🔥 [V4 패치] Gson 매퍼 사용
             gson.fromJson(url, CatalogEntry::class.java)
         } else {
             val responseText = customSession.get(url).text
             try {
-                // 🔥 [V4 패치] Jackson Tree -> Gson JsonParser 변경
                 val rootNode = JsonParser.parseString(responseText).asJsonObject
                 val metaNode = if (rootNode.has("meta")) rootNode.get("meta") else rootNode
                 gson.fromJson(metaNode, CatalogEntry::class.java) 
@@ -651,10 +644,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }
         }
         
-        val normalizedId = try { normalizeId(res.id) } catch (e: Exception) { e.printStackTrace(); res.id }
+        val normalizedId = try { normalizeId(res.id ?: "") } catch (e: Exception) { e.printStackTrace(); res.id ?: "" }
         val encodedId = normalizedId.urlEncode()
 
-        val isKitsuOrMal = res.id.startsWith("kitsu:") || res.id.startsWith("mal:")
+        val isKitsuOrMal = res.id?.startsWith("kitsu:") == true || res.id?.startsWith("mal:") == true
         var fetchedAniListId: Int? = null
         var fetchedMalId: Int? = null
         var resolvedImdbId: String? = null
@@ -668,7 +661,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             
             if (!kitsuRes.isNullOrBlank()) {
                 runSuspendCatching {
-                    // 🔥 [V4 패치] Gson JsonParser 적용
                     val root = JsonParser.parseString(kitsuRes).asJsonObject
                     val metaObj = root.getAsJsonObject("meta")
                     if (metaObj != null) {
@@ -714,8 +706,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
 
         val primaryMdbId = resolvedTmdbId ?: resolvedImdbId ?: when {
-            res.id.startsWith("tt") -> res.id
-            res.id.startsWith("tmdb:") -> res.id.removePrefix("tmdb:")
+            res.id?.startsWith("tt") == true -> res.id
+            res.id?.startsWith("tmdb:") == true -> res.id.removePrefix("tmdb:")
             res.moviedb_id != null -> res.moviedb_id.toString()
             res.tmdbIdExt != null -> res.tmdbIdExt
             else -> null
@@ -731,9 +723,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         val addonDeferred = async(Dispatchers.IO) {
             runSuspendCatching {
-                val syncMetaUrl = this@StremioC.getUnifiedMetaUrl(res.type ?: "movie", res.id)
+                val syncMetaUrl = this@StremioC.getUnifiedMetaUrl(res.type ?: "movie", res.id ?: "")
                 val text = customSession.get(syncMetaUrl).text
-                // 🔥 [V4 패치] Gson 매퍼 사용
                 val response = if (text.isNotBlank()) gson.fromJson(text, CatalogResponse::class.java) else null
                 response?.meta ?: response?.metas?.firstOrNull { it.id == res.id } ?: response?.metas?.firstOrNull()
             }.onFailure { it.printStackTrace() }.getOrNull()
@@ -741,7 +732,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
              
         
         val tmdbIdFromRes = res.moviedb_id?.toString() ?: res.tmdbIdExt
-        val targetTmdbId = resolvedTmdbId ?: if (res.id.startsWith("tmdb:")) res.id.removePrefix("tmdb:") else tmdbIdFromRes
+        val targetTmdbId = resolvedTmdbId ?: if (res.id?.startsWith("tmdb:") == true) res.id.removePrefix("tmdb:") else tmdbIdFromRes
         
         val tmdbDeferred = targetTmdbId?.let { id ->
             async(Dispatchers.IO) {
@@ -750,7 +741,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 val detailUrl = buildTmdbUrl("/$mediaType/$id", "append_to_response" to detailAppend)
                 runSuspendCatching { 
                     val text = customSession.get(detailUrl).text
-                    // 🔥 [V4 패치] Gson 매퍼 사용
                     if (text.isNotBlank()) gson.fromJson(text, TmdbDetailResponse::class.java) else null
                 }.onFailure { it.printStackTrace() }.getOrNull()
             }
@@ -775,25 +765,21 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             resolvedTmdbId = resolvedTmdbId,
             kitsuVideos = kitsuVideos
         )
-
+        
         val mdbRatings = mdbDeferred?.await() ?: emptyList()
         if (mdbRatings.isNotEmpty()) {
             val ratingStr = mdbRatings.joinToString("  ")
             val currentPlot = loadRes.plot 
             
-            // 1. MDBList 평점을 플롯에 덧붙임
+            // 🔥 [UX 개선] MDBList가 켜지면 플롯에 병합하고, Cloudstream의 구형 rating 대신 새로운 score 객체를 제거
             loadRes.plot = if (!currentPlot.isNullOrBlank()) "$ratingStr | $currentPlot" else ratingStr
-            
-            // 2. 🔥 [빌드 픽스] Cloudstream 최신 규격인 'score' 변수를 null로 밀어버림!
             loadRes.score = null 
         }
         
         return@coroutineScope loadRes
-        
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
-        // 🔥 [V4 패치] Gson 매퍼 사용
         val loadData = try { gson.fromJson(data, LoadData::class.java) } catch (e: Exception) { e.printStackTrace(); null } ?: return false
         
         val primaryId = if (loadData.id?.startsWith("tmdb:") == true && !loadData.imdbId.isNullOrBlank()) {
@@ -947,7 +933,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     val url = buildUrl("/stream/$targetType/$encodedPrimaryId.json")
                     println("[STREMIOSUB] Requesting primary streams from url: $url")
                     val text = customSession.get(url, timeout = 120L).text
-                    // 🔥 [V4 패치] Gson 매퍼 사용
                     val res = if (text.isNotBlank()) gson.fromJson(text, StreamsResponse::class.java) else null
                     println("[STREMIOSUB] Primary streams count returned: ${res?.streams?.size ?: 0}")
                     res?.streams?.forEach { stream -> 
@@ -1090,7 +1075,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             payload["isKitsu"] = isKitsuMedia
             payload["kitsuId"] = if (isKitsuMedia) globalId?.substringAfter("kitsu:")?.substringAfter("mal:") else loadData.kitsuId
 
-            // 🔥 [V4 패치] Gson으로 객체 렌더링
             val payloadJson = gson.toJson(payload)
 
             withTimeoutOrNull(25000L) {
@@ -1127,7 +1111,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             payload["lastSeason"] = 1 
             payload["aniId"] = loadData.anilistId?.toString()
 
-            // 🔥 [V4 패치] Gson으로 객체 렌더링
             val payloadJson = gson.toJson(payload)
 
             withTimeoutOrNull(25000L) {
@@ -1138,7 +1121,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
     }
 
-    // 🔥 [V4 패치] 모든 Data Class의 @JsonProperty를 @SerializedName으로 치환 완료
+    // 🔥 [V4 패치] Gson 우회 버그 방어를 위한 Custom Getter 및 Null-Safety 타입 적용
     data class LoadData(
         @SerializedName("type") val type: String? = null, 
         @SerializedName("id") val id: String? = null, 
@@ -1172,15 +1155,15 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     )
 
     data class Catalog(
-        var name: String?, 
-        val id: String, 
-        val type: String?, 
-        val types: MutableList<String> = mutableListOf(), 
+        @SerializedName("name") var name: String? = null, 
+        @SerializedName("id") val id: String? = null, 
+        @SerializedName("type") val type: String? = null, 
+        @SerializedName("types") val parsedTypes: List<String>? = null, 
         @SerializedName("extra") val extra: List<Extra>? = null, 
         @SerializedName("extraSupported") val extraSupported: List<String>? = null,
         @SerializedName("genres") val genres: List<String>? = null
     ) {
-        init { if (type != null) types.add(type) }
+        val activeTypes: List<String> get() = if (!parsedTypes.isNullOrEmpty()) parsedTypes else listOfNotNull(type)
 
         fun getGenresList(): List<String> {
             val list = mutableListOf<String>()
@@ -1203,7 +1186,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         suspend fun search(query: String, provider: StremioC): List<SearchResponse> {
             val allMetasWithType = coroutineScope {
-                types.map { type ->
+                activeTypes.map { type ->
                     async(Dispatchers.IO) {
                         val path = "/catalog/${type}/${id}/search=${query.urlEncode()}.json"
                         fetchMetas(provider, path).map { it to type }
@@ -1211,13 +1194,13 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 }.awaitAll().flatten()
             }
             return allMetasWithType.distinctBy { it.first.id }.map { (meta, type) ->
-                meta.toSearchResponse(provider, catalogName = name ?: id, typeName = type)
+                meta.toSearchResponse(provider, catalogName = name ?: id ?: "", typeName = type)
             }
         }
 
         suspend fun toHomePageList(provider: StremioC, skip: Int): Pair<HomePageList, Int> {
             val allMetas = coroutineScope {
-                types.map { type ->
+                activeTypes.map { type ->
                     async(Dispatchers.IO) {
                         val path = if (skip > 0) "/catalog/$type/$id/skip=$skip.json" else "/catalog/$type/$id.json"
                         fetchMetas(provider, path)
@@ -1250,7 +1233,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
     private data class CatalogEntry(
         @SerializedName("name") val name: String? = null, 
-        @SerializedName("id") val id: String, 
+        @SerializedName("id") val id: String? = null, 
         @SerializedName("moviedb_id") val moviedb_id: Int? = null,
         @SerializedName("_tmdbId") val tmdbIdExt: String? = null, 
         @SerializedName("_malId") val malIdExt: String? = null,
@@ -1263,11 +1246,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         @SerializedName("type") val type: String? = null,
         @SerializedName("videos") val videos: List<Video>? = null, 
         @SerializedName("genre") val genre: List<String>? = null, 
-        @SerializedName("genres") val genres: List<String> = emptyList(),
-        @SerializedName("cast") val cast: List<String> = emptyList(), 
-        @SerializedName("trailers") val trailersSources: List<Trailer> = emptyList(),
-        @SerializedName("trailerStreams") val trailerStreams: List<TrailerStream> = emptyList(), 
-        @SerializedName("links") val links: List<Link> = emptyList()
+        @SerializedName("genres") val genres: List<String>? = null,
+        @SerializedName("cast") val cast: List<String>? = null, 
+        @SerializedName("trailers") val trailersSources: List<Trailer>? = null,
+        @SerializedName("trailerStreams") val trailerStreams: List<TrailerStream>? = null, 
+        @SerializedName("links") val links: List<Link>? = null
     ) {
 
         fun toSearchResponse(
@@ -1276,12 +1259,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             typeName: String? = null
         ): SearchResponse {
             val targetType = this.type ?: typeName ?: "movie"
-            val metaUrl = provider.getUnifiedMetaUrl(targetType, this.id)
+            val metaUrl = provider.getUnifiedMetaUrl(targetType, this.id ?: "")
 
             val baseName = if (!name.isNullOrBlank()) {
                 name
             } else {
-                id
+                id ?: ""
             }
 
             val finalName = if (!catalogName.isNullOrBlank() && !typeName.isNullOrBlank()) {
@@ -1335,7 +1318,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
             val context = CloudStreamApp.context
             val prefs = context?.getSharedPreferences("StremioX", Context.MODE_PRIVATE)
-            val langCode = prefs?.getString("tmdb_language_code", "en-US") ?: "en-US"
+            val langCode = prefs?.getString("tmdb_language_code", "ko-KR") ?: "ko-KR"
             val customPosterEnabled = prefs?.getBoolean("custom_poster_enabled", false) ?: false
             val customPosterBase = prefs?.getString("custom_poster_url", "") ?: ""
             
@@ -1535,17 +1518,17 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         ): LoadResponse = coroutineScope {
             val detailedEntry = addonDeferred?.await() ?: this@CatalogEntry
 
-            var finalImdbId = if (this@CatalogEntry.id.startsWith("tt")) this@CatalogEntry.id 
+            var finalImdbId = if (this@CatalogEntry.id?.startsWith("tt") == true) this@CatalogEntry.id 
                               else imdbId?.takeIf { it.startsWith("tt") || it.startsWith("kitsu:") || it.startsWith("mal:") }
             
-            if (finalImdbId == null && detailedEntry.links.isNotEmpty()) {
+            if (finalImdbId == null && detailedEntry.links?.isNotEmpty() == true) {
                 finalImdbId = detailedEntry.links.firstOrNull { it.category == "imdb" }?.url?.substringAfterLast("/")?.takeIf { it.startsWith("tt") }
             }
             if (finalImdbId == null) {
                 finalImdbId = provider.extractImdbId(detailedEntry.logo) ?: provider.extractImdbId(detailedEntry.poster) ?: provider.extractImdbId(detailedEntry.background)
             }
 
-            var tmdbIdStr: String? = resolvedTmdbId ?: if (this@CatalogEntry.id.startsWith("tmdb:")) this@CatalogEntry.id.removePrefix("tmdb:") else this@CatalogEntry.moviedb_id?.toString() ?: this@CatalogEntry.tmdbIdExt ?: detailedEntry.tmdbIdExt
+            var tmdbIdStr: String? = resolvedTmdbId ?: if (this@CatalogEntry.id?.startsWith("tmdb:") == true) this@CatalogEntry.id.removePrefix("tmdb:") else this@CatalogEntry.moviedb_id?.toString() ?: this@CatalogEntry.tmdbIdExt ?: detailedEntry.tmdbIdExt
 
             val findApiDeferred = if (tmdbIdStr == null && finalImdbId?.startsWith("tt") == true) {
                 async(Dispatchers.IO) {
@@ -1604,7 +1587,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 finalDescription = if (finalDescription.isNullOrBlank()) originalName else "$finalDescription | $originalName"
             }
 
-            val fallbackMovieId = this@CatalogEntry.kitsuIdExt?.let { "kitsu:$it" } ?: this@CatalogEntry.id
+            val fallbackMovieId = this@CatalogEntry.kitsuIdExt?.let { "kitsu:$it" } ?: this@CatalogEntry.id ?: ""
             if (tmdbData != null && finalVideos.isNullOrEmpty() && tmdbData.episodeTmdbMeta.isNotEmpty()) {
                 val generatedVideos = tmdbData.episodeTmdbMeta.mapNotNull { (key, tmdbEp) ->
                     val parts = key.split("_")
@@ -1688,7 +1671,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val finalSeriesType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.Anime else TvType.TvSeries
 
             if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
-                val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "movie", this@CatalogEntry.id)
+                val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "movie", this@CatalogEntry.id ?: "")
                 return@coroutineScope provider.newMovieLoadResponse(
                     finalName, metaUrl, finalMovieType, 
                     LoadData(
@@ -1731,7 +1714,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
             } else {
                 val finalEpisodes = processEpisodes(provider, cleanImdbId, tmdbData?.episodeTmdbMeta ?: emptyMap(), finalVideos, finalType, finalName, cleanTmdbId?.toIntOrNull(), isAnimeMedia, isBollywood, isAsian, isCartoon, tmdbData?.fetchedOriginalTitle, tmdbData?.fetchedEnglishTitle, finalAniId, finalMalId, this@CatalogEntry.kitsuIdExt)
-                val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "series", this@CatalogEntry.id)
+                val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "series", this@CatalogEntry.id ?: "")
                 return@coroutineScope provider.newTvSeriesLoadResponse(
                     finalName, metaUrl, finalSeriesType, finalEpisodes
                 ) {
@@ -1977,7 +1960,6 @@ data class Trailers(@SerializedName("key") val key: String? = null, @SerializedN
 data class ResultsTrailer(@SerializedName("results") val results: ArrayList<Trailers>? = arrayListOf())
 data class ExternalIds(@SerializedName("imdb_id") val imdb_id: String? = null, @SerializedName("tvdb_id") val tvdb_id: String? = null)
 
-// URL에서 안전한 고유 알파벳 식별자만 추출하는 함수
 private fun String.toUniqueKey(): String {
     return this.lowercase().filter { it.isLetter() }
 }
