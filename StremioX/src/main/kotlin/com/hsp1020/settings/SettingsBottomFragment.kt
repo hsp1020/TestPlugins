@@ -23,7 +23,7 @@ import android.widget.LinearLayout
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.util.Base64
-import androidx.app.AlertDialog
+import android.app.AlertDialog // ◀️ androidx.appcompat.app.AlertDialog를 네이티브 플랫폼 AlertDialog로 교체
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import androidx.core.net.toUri
 import androidx.core.content.edit
