@@ -1398,6 +1398,10 @@ class SettingsBottomFragment(
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
             val layoutId = getCachedResId("item_saved_link", "layout")
             val v = layoutInflater.inflate(res.getLayout(layoutId), parent, false)
+            
+            // ◀️ [추가] 리스트 안의 각 링크 카드에도 둥근 테두리를 세련되게 직접 주입
+            v.background = getCardBg() 
+            
             return VH(v)
         }
 
