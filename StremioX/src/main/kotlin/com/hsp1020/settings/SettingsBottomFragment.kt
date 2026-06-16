@@ -687,9 +687,7 @@ class SettingsBottomFragment(
                             found
                         } ?: false
 
-                        if (!requiresGenre) {
-                            flatTabs.add(ConfigFlatTab("${id}_${type}_default", "$name - $displayType", false, "${id}_${type}"))
-                        }
+                        flatTabs.add(ConfigFlatTab("${id}_${type}_default", "$name - $displayType", false, "${id}_${type}"))
 
                         val genres = mutableListOf<String>()
                         cat.get("genres")?.takeIf { it.isJsonArray }?.asJsonArray?.let { gArr ->
