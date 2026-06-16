@@ -134,12 +134,10 @@ class SettingsBottomFragment(
 
     private data class ConfigFlatTab(val key: String, val displayName: String, val isGenre: Boolean, val catalogKey: String)
 
-    // 🔥 [UltimaEvo 완벽 밀착 테마 복사: 모서리 곡률 및 불필요 오버헤드 감축]
     private fun getDarkThemeBg() = GradientDrawable().apply { setColor(Color.parseColor("#000000")); cornerRadius = 25f }
     private fun getCardBg() = GradientDrawable().apply { setColor(Color.parseColor("#0C0C0C")); setStroke(2, Color.parseColor("#1A1A1A")); cornerRadius = 18f }
-    private fun getButtonBg() = GradientDrawable().apply { setColor(Color.parseColor("#151515")); cornerRadius = 12f } // 지나친 곡률 축소 적용
+    private fun getButtonBg() = GradientDrawable().apply { setColor(Color.parseColor("#151515")); cornerRadius = 12f }
 
-    // 🔥 [정중앙 정렬 유지 및 화면비 보존, 키보드 동작 설정 일괄 정규화]
     private fun setupCustomDialog(dialog: AlertDialog, contentView: View) {
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         dialog.setOnShowListener {
@@ -761,13 +759,13 @@ class SettingsBottomFragment(
         etName?.background = getButtonBg()
         etName?.setTextColor(Color.WHITE)
         etName?.setHintTextColor(Color.GRAY)
-        etName?.setPadding(25, 20, 25, 20)
+        etName?.setPadding(25, 5, 25, 5) // 🔥 [패치] 가이드라벨 상단 짤림 버그 수정을 위한 내부 세로 패딩 조절
         if (isEdit) etName?.setText(itemToEdit?.name)
         
         etLink?.background = getButtonBg()
         etLink?.setTextColor(Color.WHITE)
         etLink?.setHintTextColor(Color.GRAY)
-        etLink?.setPadding(25, 20, 25, 20)
+        etLink?.setPadding(25, 5, 25, 5) // 🔥 [패치] 가이드라벨 상단 짤림 버그 수정을 위한 내부 세로 패딩 조절
         if (isEdit) etLink?.setText(itemToEdit?.link)
 
         val footer = LinearLayout(ctx).apply {
@@ -892,7 +890,7 @@ class SettingsBottomFragment(
                 val tvCheck = TextView(context).apply {
                     text = "✓"
                     textSize = 16f
-                    setTextColor(Color.parseColor("#2196F3"))
+                    setTextColor(Color.parseColor("#FF5555")) // 🔥 [패치] 체크 아이콘 색상을 테마에 맞게 파란색에서 빨간색으로 변경
                     setPadding(10, 0, 10, 0)
                 }
                 rowLayout.addView(tvName)
@@ -905,7 +903,7 @@ class SettingsBottomFragment(
                 
                 val isSelected = code == selectedCode
                 holder.tvName.text = langName
-                holder.tvName.setTextColor(if (isSelected) Color.parseColor("#2196F3") else Color.WHITE)
+                holder.tvName.setTextColor(if (isSelected) Color.parseColor("#FF5555") else Color.WHITE) // 🔥 [패치] 선택 언어 텍스트 색상을 테마에 맞게 파란색에서 빨간색으로 변경
                 holder.tvCheck.visibility = if (isSelected) View.VISIBLE else View.GONE
                 
                 holder.view.setOnClickListener {
@@ -1398,10 +1396,7 @@ class SettingsBottomFragment(
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
             val layoutId = getCachedResId("item_saved_link", "layout")
             val v = layoutInflater.inflate(res.getLayout(layoutId), parent, false)
-            
-            // ◀️ [추가] 리스트 안의 각 링크 카드에도 둥근 테두리를 세련되게 직접 주입
             v.background = getCardBg() 
-            
             return VH(v)
         }
 
