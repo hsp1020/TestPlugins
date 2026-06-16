@@ -23,7 +23,7 @@ import android.widget.LinearLayout
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.util.Base64
-import android.app.AlertDialog // ◀️ androidx.appcompat.app.AlertDialog 대신 안드로이드 네이티브 플랫폼 AlertDialog 임포트
+import androidx.app.AlertDialog
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import androidx.core.net.toUri
 import androidx.core.content.edit
@@ -36,7 +36,7 @@ import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CommonActivity.showToast
 import org.json.JSONArray
 import org.json.JSONObject
-import com.google.gson.JsonParser
+import com.google.gson.JsonParser // 🔥 [V4 패치] Gson 파서 임포트
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -126,20 +126,6 @@ class SettingsBottomFragment(
     }
 
     private data class ConfigFlatTab(val key: String, val displayName: String, val isGenre: Boolean, val catalogKey: String)
-
-    private fun getDarkThemeBg() = android.graphics.drawable.GradientDrawable().apply {
-        setColor(android.graphics.Color.parseColor("#000000"))
-        cornerRadius = 40f
-    }
-    private fun getCardBg() = android.graphics.drawable.GradientDrawable().apply {
-        setColor(android.graphics.Color.parseColor("#0C0C0C"))
-        setStroke(2, android.graphics.Color.parseColor("#1A1A1A"))
-        cornerRadius = 30f
-    }
-    private fun getButtonBg() = android.graphics.drawable.GradientDrawable().apply {
-        setColor(android.graphics.Color.parseColor("#151515"))
-        cornerRadius = 20f
-    }
 
     private val languages = listOf(
         "South Africa (Afrikaans)" to "af-ZA",
@@ -680,6 +666,7 @@ class SettingsBottomFragment(
 
             val flatTabs = mutableListOf<ConfigFlatTab>()
             try {
+                // 🔥 [V4 패치] StremioC에서 제거된 Jackson 대신 Gson 파서로 매니페스트 트리 탐색 치환 완료!
                 val node = JsonParser.parseString(manifestText).asJsonObject
                 val catsNode = node.get("catalogs")?.takeIf { it.isJsonArray }?.asJsonArray
                 
@@ -700,6 +687,7 @@ class SettingsBottomFragment(
                             found
                         } ?: false
 
+                        // 🔥 [V4.1.4 패치] 장르 선택이 필수인 카탈로그도 하위 장르를 일괄 제어할 마스터 스위치를 제공하기 위해 설정 목록 구성 시 마스터 탭 항목을 항상 생성하도록 변경
                         flatTabs.add(ConfigFlatTab("${id}_${type}_default", "$name - $displayType", false, "${id}_${type}"))
 
                         val genres = mutableListOf<String>()
@@ -751,35 +739,27 @@ class SettingsBottomFragment(
             val idx = orderedKeys.indexOf(tab.key)
             if (idx != -1) idx else Int.MAX_VALUE
         }
+        // 🔥 [V4.1.6 패치] 초기 로딩 시에도 체크 활성화된 항목이 최상단 그룹에 위치하도록 분할 및 병합 정렬 적용
         val checkedInit = sortedTabs.filter { prefs.getBoolean("tab_enabled_${uniqueId}_${it.key}", true) }
         val uncheckedInit = sortedTabs.filter { !prefs.getBoolean("tab_enabled_${uniqueId}_${it.key}", true) }
         val masterTabs = (checkedInit + uncheckedInit).toMutableList()
 
+        // 🔥 [V4.1.8 패치] 키보드 노출/비노출 시 다이얼로그 레이아웃이 축소되거나 무너지는 현상을 원천 방지하기 위해 RecyclerView를 감싸는 안정적인 부모 컨테이너 생성
         val dialogContainer = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(25, 40, 25, 30)
-            background = getDarkThemeBg()
+            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         }
-
-        val titleView = TextView(context).apply {
-            text = "$addonName - Catalog Settings"
-            textSize = 20f
-            typeface = android.graphics.Typeface.DEFAULT_BOLD
-            setTextColor(android.graphics.Color.WHITE)
-            setPadding(0, 0, 0, 30)
-            gravity = android.view.Gravity.CENTER
-        }
-        dialogContainer.addView(titleView)
 
         val rv = RecyclerView(context).apply {
             layoutManager = LinearLayoutManager(context)
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f).apply {
-                setMargins(0, 0, 0, 20)
-            }
+            // 🔥 [V4.1.8 패치] UltimaEvo와 동일하게 0 높이에 가중치(1f)를 주어, 키보드가 켜질 때 다이얼로그 윈도우 축소에 비례하여 RecyclerView도 유연하게 축소(Resize)되도록 세팅
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
             setPadding(30, 20, 30, 20)
+            // 🔥 [UX 개선] 대량의 카탈로그 및 장르 목록 스크롤 시 상/하단 잔여 상태를 인지할 수 있도록 수직 페이딩 엣지 효과 이식
             isVerticalFadingEdgeEnabled = true
             setFadingEdgeLength(120)
         }
+
         dialogContainer.addView(rv)
 
         class CatalogAdapter : RecyclerView.Adapter<CatalogAdapter.VH>() {
@@ -806,13 +786,17 @@ class SettingsBottomFragment(
                     setPadding(20, 0, 30, 0)
                 }
                 
+                // 🔥 [V4.1.5 패치] 구버전의 고속 점프 정렬용 번호 입력 텍스트박스 추가 이식
                 val etOrder = EditText(context).apply {
                     inputType = android.text.InputType.TYPE_CLASS_NUMBER
                     imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
                     setTextColor(android.graphics.Color.WHITE)
                     textSize = 12f
                     setPadding(10, 10, 10, 10)
-                    background = getButtonBg()
+                    background = android.graphics.drawable.GradientDrawable().apply {
+                        setColor(android.graphics.Color.parseColor("#151515"))
+                        cornerRadius = 10f
+                    }
                     gravity = android.view.Gravity.CENTER
                     layoutParams = LinearLayout.LayoutParams(90, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                         setMargins(0, 0, 15, 0)
@@ -849,6 +833,7 @@ class SettingsBottomFragment(
                 holder.checkbox.text = tab.displayName
                 holder.checkbox.setOnCheckedChangeListener { _, isChecked ->
                     prefs.edit().putBoolean(enabledKey, isChecked).apply()
+                    // 🔥 [V4.1.6 패치] 체크 토글 시 활성 항목은 상단으로, 비활성 항목은 하단 그룹으로 실시간 강제 재배치 정렬
                     val checkedTabs = masterTabs.filter { prefs.getBoolean("tab_enabled_${uniqueId}_${it.key}", true) }
                     val uncheckedTabs = masterTabs.filter { !prefs.getBoolean("tab_enabled_${uniqueId}_${it.key}", true) }
                     masterTabs.clear()
@@ -870,11 +855,13 @@ class SettingsBottomFragment(
                     holder.genreSwitch.visibility = View.GONE
                 }
                 
+                // 🔥 [V4.1.5 패치] 번호 텍스트박스 바인딩 및 키보드 완료 이벤트 핸들러 이식
                 holder.etOrder.setOnFocusChangeListener(null)
                 holder.etOrder.setText((position + 1).toString())
                 
                 holder.etOrder.setOnFocusChangeListener { _, hasFocus ->
                     if (hasFocus) {
+                        // 🔥 [V4.1.8 패치] 입력 칸 포커싱 시 키보드가 완전히 올라온 후 해당 줄이 키보드 위쪽 화면으로 부드럽게 스크롤되어 노출되도록 딜레이 스크롤 처리
                         rv.postDelayed({
                             val curPos = holder.adapterPosition
                             if (curPos != RecyclerView.NO_POSITION) {
@@ -903,11 +890,14 @@ class SettingsBottomFragment(
 
             override fun getItemCount() = visibleTabs.size
             
+            // 🔥 [V4.1.5 패치] 수동 번호 입력 직접 점프 이동 및 masterTabs 순서 동기화 비즈니스 로직 (RecyclerView 레이아웃 연산 에러 예방용 핸들러 탑재)
             fun shiftItemInRecyclerView(oldPos: Int, newOrder: Int) {
+                // RecyclerView가 레이아웃 중이거나 스크롤 중일 때 동기식 데이터 변경 연산 시 크래시(IllegalStateException) 유발을 방지하기 위해 메인 스레드 큐로 지연(post) 실행 처리
                 rv.post {
                     if (oldPos !in visibleTabs.indices) return@post
                     val item = visibleTabs[oldPos]
                     
+                    // 🔥 [V4.1.6 패치] Ultima와 동일하게 체크 상태(활성화 여부)에 따른 그룹 내 최대 가용 범위 제한(Clamping) 공식 적용
                     val isEnabled = prefs.getBoolean("tab_enabled_${uniqueId}_${item.key}", true)
                     val checkedCount = visibleTabs.count { prefs.getBoolean("tab_enabled_${uniqueId}_${it.key}", true) }
                     
@@ -921,6 +911,7 @@ class SettingsBottomFragment(
                         visibleTabs.removeAt(oldPos)
                         visibleTabs.add(newPos, item)
                         
+                        // 정렬 순서를 masterTabs(전체 탭 데이터셋) 내부 순서에도 정밀하게 매핑 동기화
                         val masterFrom = masterTabs.indexOf(item)
                         if (masterFrom != -1) {
                             masterTabs.removeAt(masterFrom)
@@ -939,6 +930,7 @@ class SettingsBottomFragment(
                         }
                         
                         notifyItemMoved(oldPos, newPos)
+                        // 주변 영향받은 범위만 부분적 갱신하여 텍스트박스 내부 번호 즉시 업데이트 (키보드 닫힘 유발 최소화)
                         notifyItemRangeChanged(minOf(oldPos, newPos), maxOf(oldPos, newPos) + 1)
                     } else {
                         notifyItemChanged(oldPos)
@@ -959,6 +951,7 @@ class SettingsBottomFragment(
                 val movedTab = adapter.visibleTabs[fromPos]
                 Collections.swap(adapter.visibleTabs, fromPos, toPos)
                 
+                // 🔥 [V4.1.5 패치] 드래그앤드롭 이동 시에도 텍스트박스 내부 번호가 실시간 동기화되도록 notify 호출 범위 보정
                 adapter.notifyItemMoved(fromPos, toPos)
                 adapter.notifyItemChanged(fromPos)
                 adapter.notifyItemChanged(toPos)
@@ -977,55 +970,24 @@ class SettingsBottomFragment(
         })
         touchHelper.attachToRecyclerView(rv)
 
-        val footer = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 30, 0, 0)
-        }
-        val saveBtn = Button(context).apply {
-            text = "Save"
-            setTextColor(android.graphics.Color.WHITE)
-            isAllCaps = false
-            background = getButtonBg()
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                setMargins(0, 0, 15, 0)
-            }
-        }
-        val cancelBtn = Button(context).apply {
-            text = "Cancel"
-            setTextColor(android.graphics.Color.WHITE)
-            isAllCaps = false
-            background = getButtonBg()
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                setMargins(15, 0, 0, 0)
-            }
-        }
-        footer.addView(saveBtn)
-        footer.addView(cancelBtn)
-        dialogContainer.addView(footer)
-
         val dialog = AlertDialog.Builder(context)
+            .setTitle("$addonName - Catalog Settings")
+            // naked RecyclerView가 아닌 안정적인 dialogContainer 레이아웃을 다이얼로그의 루트 뷰로 바인딩
             .setView(dialogContainer)
+            .setPositiveButton("Save") { _, _ ->
+                val keysToSave = JSONArray()
+                masterTabs.forEach { keysToSave.put(it.key) }
+                prefs.edit().putString(orderKey, keysToSave.toString()).apply()
+                Toast.makeText(context, "Catalog settings saved. Reload to apply.", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
             .create()
 
-        dialog.window?.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT))
-
+        // 🔥 [V4.1.5 패치] AlertDialog가 화면에 뜰 때 키보드가 정상적으로 노출되도록 입력 차단 플래그 영구 해제
         dialog.setOnShowListener {
             dialog.window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or android.view.WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
             dialog.window?.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         }
-
-        saveBtn.setOnClickListener {
-            val keysToSave = JSONArray()
-            masterTabs.forEach { keysToSave.put(it.key) }
-            prefs.edit().putString(orderKey, keysToSave.toString()).apply()
-            Toast.makeText(context, "Catalog settings saved. Reload to apply.", Toast.LENGTH_SHORT).show()
-            dialog.dismiss()
-        }
-
-        cancelBtn.setOnClickListener {
-            dialog.dismiss()
-        }
-
         dialog.show()
     }
 
