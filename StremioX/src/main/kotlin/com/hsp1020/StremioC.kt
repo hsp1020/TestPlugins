@@ -1,4 +1,3 @@
-// 버전 정보: v4.1.0 - Gson + Kotlin Data Class 초기화 우회 버그(검색 먹통) 완벽 해결 및 Score UI 적용
 package com.hsp1020
 
 import android.content.Context
@@ -540,6 +539,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse = coroutineScope {
+        // 🔥 [PAGINATION-DEBUG] 메인 페이지 요청 진입 로그
+        println("[PAGINATION-DEBUG] ===== getMainPage START =====")
+        println("[PAGINATION-DEBUG] Requested Page: $page, Tab Name: ${request.name}")
+        println("[PAGINATION-DEBUG] Request Data: ${request.data}")
+
         launch(Dispatchers.IO) {
             runSuspendCatching { getManifest() }.onFailure { it.printStackTrace() }
         }
@@ -547,6 +551,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         var isNewRequest = false
         val deferred = pageMutex.withLock {
             if (page <= 1) {
+                // 🔥 [PAGINATION-DEBUG] 1페이지 요청 시 초기화 로직 확인 로그
+                println("[PAGINATION-DEBUG] Page <= 1 detected. Clearing states for Tab: ${request.name}")
                 catalogSentIds.remove(request.name)
                 activePageRequests.clear()
                 catalogSkipState.remove(request.name)
@@ -554,43 +560,59 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             
             activePageRequests.getOrPut(page) {
                 isNewRequest = true
-                async { fetchTabCatalogData(request) }
+                println("[PAGINATION-DEBUG] Creating new async request for Page: $page")
+                async { fetchTabCatalogData(request, page) }
             }
         }
         
         return@coroutineScope try {
             val response = deferred.await()
             if (!isNewRequest && page > 1) {
+                println("[PAGINATION-DEBUG] Returning empty list because it's not a new request for Page: $page")
                 newHomePageResponse(emptyList(), hasNext = true)
             } else {
+                val listSize = response.items.firstOrNull()?.list?.size ?: 0
+                println("[PAGINATION-DEBUG] Returning response for Page: $page with $listSize items.")
                 response
             }
         } finally {
             pageMutex.withLock {
                 activePageRequests.remove(page)
             }
+            println("[PAGINATION-DEBUG] ===== getMainPage END (Page: $page) =====")
         }
     }
     
-    private suspend fun fetchTabCatalogData(request: MainPageRequest): HomePageResponse {
+    // 🔥 [PAGINATION-DEBUG] 로그 추적을 위해 파라미터에 page 추가
+    private suspend fun fetchTabCatalogData(request: MainPageRequest, page: Int): HomePageResponse {
         val currentSkip = catalogSkipState[request.name] ?: 0
+        println("[PAGINATION-DEBUG] [fetchTabCatalogData] Current Skip State: $currentSkip for Tab: ${request.name}")
+        
         val targetPath = request.data.replace("###", currentSkip.toString())
         val targetUrl = buildUrl(targetPath)
+        println("[PAGINATION-DEBUG] [fetchTabCatalogData] Target URL: $targetUrl")
+        
         val cacheKey = "${this@StremioC.name}_${request.name}_$currentSkip"
+        println("[PAGINATION-DEBUG] [fetchTabCatalogData] Cache Key: $cacheKey")
 
         val resultPair = getOrFetchCachedPage(cacheKey) {
+            println("[PAGINATION-DEBUG] [fetchTabCatalogData] Fetching from network or cache...")
             val jsonText = customSession.get(targetUrl).text
             val response = try {
                 gson.fromJson(jsonText, CatalogResponse::class.java)
             } catch (e: Exception) { e.printStackTrace(); null }
 
             val metas = response?.metas ?: emptyList()
+            println("[PAGINATION-DEBUG] [fetchTabCatalogData] Network/JSON parsed ${metas.size} items.")
+            
             val mappedItems = metas.map { it.toSearchResponse(this@StremioC) }
             Pair(mappedItems, metas.size)
         }
 
         if (resultPair != null) {
+            println("[PAGINATION-DEBUG] [fetchTabCatalogData] ResultPair acquired. Size: ${resultPair.first.size}, Returned Meta Size: ${resultPair.second}")
             catalogSkipState[request.name] = currentSkip + resultPair.second
+            println("[PAGINATION-DEBUG] [fetchTabCatalogData] Next Skip State updated to: ${catalogSkipState[request.name]}")
             
             var seenForThisCatalog = catalogSentIds[request.name]
             if (seenForThisCatalog == null) {
@@ -601,10 +623,23 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 }
             }
             
-            val filteredItems = resultPair.first.filter { item -> seenForThisCatalog!!.add(item.extractPureId()) }
+            var duplicateCount = 0
+            val filteredItems = resultPair.first.filter { item -> 
+                val pureId = item.extractPureId()
+                val isNew = seenForThisCatalog!!.add(pureId)
+                if (!isNew) {
+                    duplicateCount++
+                    // println("[PAGINATION-DEBUG] Duplicate ID skipped: $pureId") // 너무 많으면 도배되므로 주석처리
+                }
+                isNew
+            }
+            
+            println("[PAGINATION-DEBUG] [fetchTabCatalogData] Deduplication complete. Duplicates found: $duplicateCount. Final items to return: ${filteredItems.size}")
+            
             return newHomePageResponse(listOf(HomePageList(request.name, filteredItems)), hasNext = resultPair.second > 0)
         }
 
+        println("[PAGINATION-DEBUG] [fetchTabCatalogData] ResultPair is null. Returning empty.")
         return newHomePageResponse(emptyList(), hasNext = false)
     }
 
@@ -771,7 +806,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val ratingStr = mdbRatings.joinToString("  ")
             val currentPlot = loadRes.plot 
             
-            // 🔥 [UX 개선] MDBList가 켜지면 플롯에 병합하고, Cloudstream의 구형 rating 대신 새로운 score 객체를 제거
             loadRes.plot = if (!currentPlot.isNullOrBlank()) "$ratingStr | $currentPlot" else ratingStr
             loadRes.score = null 
         }
@@ -1121,7 +1155,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
     }
 
-    // 🔥 [V4 패치] Gson 우회 버그 방어를 위한 Custom Getter 및 Null-Safety 타입 적용
     data class LoadData(
         @SerializedName("type") val type: String? = null, 
         @SerializedName("id") val id: String? = null, 
