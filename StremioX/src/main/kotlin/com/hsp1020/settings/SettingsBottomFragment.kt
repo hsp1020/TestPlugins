@@ -526,24 +526,13 @@ class SettingsBottomFragment(
                 putString(SettingsRepository.PREF_KEY_CUSTOM_POSTER_URL, etCustomPosterUrl.text.toString().trim())
             }
 
-        val dialog = AlertDialog.Builder(context)
-            .setTitle("$addonName - Catalog Settings")
-            .setView(rv)
-            .setPositiveButton("Save") { _, _ ->
-                val keysToSave = JSONArray()
-                masterTabs.forEach { keysToSave.put(it.key) }
-                prefs.edit().putString(orderKey, keysToSave.toString()).apply()
-                Toast.makeText(context, "Catalog settings saved. Reload to apply.", Toast.LENGTH_SHORT).show()
-            }
-            .setNegativeButton("Cancel", null)
-            .create()
-
-        // 🔥 [V4.1.5 패치] AlertDialog가 화면에 뜰 때 키보드가 정상적으로 노출되도록 입력 차단 플래그 영구 해제
-        dialog.setOnShowListener {
-            dialog.window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or android.view.WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
-            dialog.window?.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+            AlertDialog.Builder(context)
+                .setTitle("Save & Reload")
+                .setMessage("Changes have been saved. Do you want to restart the app to apply them?")
+                .setPositiveButton("Yes") { _, _ -> dismiss(); restartApp() }
+                .setNegativeButton("No", null)
+                .show()
         }
-        dialog.show()
 
         return view
     }
@@ -698,6 +687,7 @@ class SettingsBottomFragment(
                             found
                         } ?: false
 
+                        // 🔥 [V4.1.4 패치] 장르 선택이 필수인 카탈로그도 하위 장르를 일괄 제어할 마스터 스위치를 제공하기 위해 설정 목록 구성 시 마스터 탭 항목을 항상 생성하도록 변경
                         flatTabs.add(ConfigFlatTab("${id}_${type}_default", "$name - $displayType", false, "${id}_${type}"))
 
                         val genres = mutableListOf<String>()
@@ -869,9 +859,10 @@ class SettingsBottomFragment(
                     } else false
                 }
             }
+
             override fun getItemCount() = visibleTabs.size
             
-            // 🔥 [V4.1.5 패치] 수동 번호 입력 직접 점프 이동 및 masterTabs 순서 동기화 비즈니스 로직
+            // 🔥 [V4.1.5 패치] 수동 번호 입력 직접 점프 이동 및 masterTabs 순서 동기화 비즈니스 로직 (RecyclerView 레이아웃 연산 에러 예방용 핸들러 탑재)
             fun shiftItemInRecyclerView(oldPos: Int, newOrder: Int) {
                 // RecyclerView가 레이아웃 중이거나 스크롤 중일 때 동기식 데이터 변경 연산 시 크래시(IllegalStateException) 유발을 방지하기 위해 메인 스레드 큐로 지연(post) 실행 처리
                 rv.post {
@@ -911,6 +902,7 @@ class SettingsBottomFragment(
                 }
             }
         }
+
         val adapter = CatalogAdapter()
         adapter.updateVisibleTabs()
         rv.adapter = adapter
@@ -942,7 +934,7 @@ class SettingsBottomFragment(
         })
         touchHelper.attachToRecyclerView(rv)
 
-        AlertDialog.Builder(context)
+        val dialog = AlertDialog.Builder(context)
             .setTitle("$addonName - Catalog Settings")
             .setView(rv)
             .setPositiveButton("Save") { _, _ ->
@@ -952,7 +944,14 @@ class SettingsBottomFragment(
                 Toast.makeText(context, "Catalog settings saved. Reload to apply.", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("Cancel", null)
-            .show()
+            .create()
+
+        // 🔥 [V4.1.5 패치] AlertDialog가 화면에 뜰 때 키보드가 정상적으로 노출되도록 입력 차단 플래그 영구 해제
+        dialog.setOnShowListener {
+            dialog.window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or android.view.WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
+            dialog.window?.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        }
+        dialog.show()
     }
 
     private fun String.capitalizeFirstLocal(): String = if (this.isNotEmpty()) this.substring(0, 1).uppercase() + this.substring(1) else this
@@ -1082,4 +1081,3 @@ class SettingsBottomFragment(
         }
     }
 }
-
