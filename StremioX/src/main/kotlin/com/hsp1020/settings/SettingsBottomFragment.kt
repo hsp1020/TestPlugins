@@ -758,7 +758,7 @@ class SettingsBottomFragment(
                 notifyDataSetChanged()
             }
 
-            inner class VH(val view: LinearLayout, val checkbox: CheckBox, val genreSwitch: Switch, val dragHandle: ImageView) : RecyclerView.ViewHolder(view)
+            inner class VH(val view: LinearLayout, val checkbox: CheckBox, val etOrder: EditText, val genreSwitch: Switch, val dragHandle: ImageView) : RecyclerView.ViewHolder(view)
 
             override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
                 val layout = LinearLayout(context).apply {
@@ -771,6 +771,29 @@ class SettingsBottomFragment(
                     setImageResource(android.R.drawable.ic_menu_sort_by_size)
                     setPadding(20, 0, 30, 0)
                 }
+                
+                // 🔥 [V4.1.5 패치] 구버전의 고속 점프 정렬용 번호 입력 텍스트박스 추가 이식
+                val etOrder = EditText(context).apply {
+                    inputType = android.text.InputType.TYPE_CLASS_NUMBER
+                    imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+                    setTextColor(android.graphics.Color.WHITE)
+                    textSize = 12f
+                    setPadding(10, 10, 10, 10)
+                    background = android.graphics.drawable.GradientDrawable().apply {
+                        setColor(android.graphics.Color.parseColor("#151515"))
+                        cornerRadius = 10f
+                    }
+                    gravity = android.view.Gravity.CENTER
+                    layoutParams = LinearLayout.LayoutParams(90, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                        setMargins(0, 0, 15, 0)
+                    }
+                    setOnClickListener {
+                        requestFocus()
+                        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+                        imm.showSoftInput(this, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+                    }
+                }
+                
                 val checkbox = CheckBox(context).apply {
                     textSize = 15f
                     layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
@@ -781,9 +804,10 @@ class SettingsBottomFragment(
                     setPadding(20, 0, 20, 0)
                 }
                 layout.addView(dragHandle)
+                layout.addView(etOrder)
                 layout.addView(checkbox)
                 layout.addView(genreSwitch)
-                return VH(layout, checkbox, genreSwitch, dragHandle)
+                return VH(layout, checkbox, etOrder, genreSwitch, dragHandle)
             }
 
             override fun onBindViewHolder(holder: VH, position: Int) {
@@ -809,8 +833,69 @@ class SettingsBottomFragment(
                 } else {
                     holder.genreSwitch.visibility = View.GONE
                 }
+                
+                // 🔥 [V4.1.5 패치] 번호 텍스트박스 바인딩 및 키보드 완료 이벤트 핸들러 이식
+                holder.etOrder.setOnFocusChangeListener(null)
+                holder.etOrder.setText((position + 1).toString())
+                
+                holder.etOrder.setOnFocusChangeListener { _, hasFocus ->
+                    if (!hasFocus) {
+                        val inputVal = holder.etOrder.text.toString().toIntOrNull()
+                        if (inputVal != null) {
+                            shiftItemInRecyclerView(position, inputVal)
+                        } else {
+                            holder.etOrder.setText((position + 1).toString())
+                        }
+                    }
+                }
+                
+                holder.etOrder.setOnEditorActionListener { _, actionId, _ ->
+                    if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE || actionId == android.view.inputmethod.EditorInfo.IME_ACTION_NEXT) {
+                        holder.etOrder.clearFocus()
+                        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+                        imm.hideSoftInputFromWindow(holder.etOrder.windowToken, 0)
+                        true
+                    } else false
+                }
             }
             override fun getItemCount() = visibleTabs.size
+            
+            // 🔥 [V4.1.5 패치] 수동 번호 입력 직접 점프 이동 및 masterTabs 순서 동기화 비즈니스 로직
+            fun shiftItemInRecyclerView(oldPos: Int, newOrder: Int) {
+                if (oldPos !in visibleTabs.indices) return
+                val item = visibleTabs[oldPos]
+                val clampedOrder = newOrder.coerceIn(1, visibleTabs.size)
+                val newPos = clampedOrder - 1
+                
+                if (oldPos != newPos) {
+                    visibleTabs.removeAt(oldPos)
+                    visibleTabs.add(newPos, item)
+                    
+                    // 정렬 순서를 masterTabs(전체 탭 데이터셋) 내부 순서에도 정밀하게 매핑 동기화
+                    val masterFrom = masterTabs.indexOf(item)
+                    if (masterFrom != -1) {
+                        masterTabs.removeAt(masterFrom)
+                        
+                        val referenceTab = if (newPos + 1 in visibleTabs.indices) visibleTabs[newPos + 1] else if (newPos - 1 in visibleTabs.indices) visibleTabs[newPos - 1] else null
+                        var masterTo = if (referenceTab != null) masterTabs.indexOf(referenceTab) else -1
+                        
+                        if (masterTo != -1) {
+                            if (referenceTab == visibleTabs.getOrNull(newPos - 1)) {
+                                masterTo += 1
+                            }
+                            masterTabs.add(masterTo.coerceIn(0, masterTabs.size), item)
+                        } else {
+                            masterTabs.add(item)
+                        }
+                    }
+                    
+                    notifyItemMoved(oldPos, newPos)
+                    // 주변 영향받은 범위만 부분적 갱신하여 텍스트박스 내부 번호 즉시 업데이트 (키보드 닫힘 유발 최소화)
+                    notifyItemRangeChanged(minOf(oldPos, newPos), maxOf(oldPos, newPos) + 1)
+                } else {
+                    notifyItemChanged(oldPos)
+                }
+            }
         }
 
         val adapter = CatalogAdapter()
@@ -824,7 +909,11 @@ class SettingsBottomFragment(
                 
                 val movedTab = adapter.visibleTabs[fromPos]
                 Collections.swap(adapter.visibleTabs, fromPos, toPos)
+                
+                // 🔥 [V4.1.5 패치] 드래그앤드롭 이동 시에도 텍스트박스 내부 번호가 실시간 동기화되도록 notify 호출 범위 보정
                 adapter.notifyItemMoved(fromPos, toPos)
+                adapter.notifyItemChanged(fromPos)
+                adapter.notifyItemChanged(toPos)
 
                 val masterFrom = masterTabs.indexOf(movedTab)
                 val targetTab = adapter.visibleTabs[fromPos]
