@@ -910,7 +910,7 @@ class SettingsBottomFragment(
                     }
                 }
             }
-
+        }
         val adapter = CatalogAdapter()
         adapter.updateVisibleTabs()
         rv.adapter = adapter
