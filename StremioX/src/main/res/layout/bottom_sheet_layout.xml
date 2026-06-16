@@ -4,6 +4,7 @@
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:background="#000000"
     android:layoutDirection="ltr">
 
     <LinearLayout
@@ -12,8 +13,7 @@
         android:orientation="vertical"
         android:paddingStart="?android:attr/listPreferredItemPaddingStart"
         android:paddingEnd="?android:attr/listPreferredItemPaddingEnd"
-        android:paddingBottom="20dp"
-        tools:background="@color/cardview_dark_background">
+        android:paddingBottom="20dp">
 
         <!-- Stremio Settings Header -->
         <LinearLayout
@@ -29,6 +29,7 @@
                 android:layout_marginTop="20dp"
                 android:layout_marginBottom="5dp"
                 android:text="Stremio Settings"
+                android:textColor="#FFFFFF"
                 android:textSize="20sp"
                 android:textStyle="bold" />
 
@@ -97,6 +98,7 @@
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
                 android:text="All Link"
+                android:textColor="#FFFFFF"
                 android:textSize="18sp"
                 android:textStyle="bold" />
 
@@ -123,6 +125,7 @@
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
                 android:text="List Link"
+                android:textColor="#FFFFFF"
                 android:textSize="18sp"
                 android:textStyle="bold" />
 
@@ -148,6 +151,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="TMDB API Key (Required)"
+                android:textColor="#FFFFFF"
                 android:textSize="18sp"
                 android:textStyle="bold" />
 
@@ -161,6 +165,7 @@
                 android:textSize="14sp"
                 android:padding="10dp"
                 android:layout_marginTop="5dp"
+                android:background="@android:color/transparent"
                 android:singleLine="true" />
         </LinearLayout>
 
@@ -177,6 +182,7 @@
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
                 android:text="TMDB Language"
+                android:textColor="#FFFFFF"
                 android:textSize="18sp"
                 android:textStyle="bold" />
 
@@ -203,6 +209,7 @@
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
                 android:text="MDBList Ratings"
+                android:textColor="#FFFFFF"
                 android:textSize="18sp"
                 android:textStyle="bold" />
 
@@ -240,6 +247,7 @@
                 android:textSize="14sp"
                 android:padding="10dp"
                 android:layout_marginTop="5dp"
+                android:background="@android:color/transparent"
                 android:singleLine="true" />
         </LinearLayout>
 
@@ -256,6 +264,7 @@
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
                 android:text="History &amp; Library Sync"
+                android:textColor="#FFFFFF"
                 android:textSize="18sp"
                 android:textStyle="bold" />
 
@@ -293,6 +302,7 @@
                 android:textSize="14sp"
                 android:padding="10dp"
                 android:layout_marginTop="5dp"
+                android:background="@android:color/transparent"
                 android:singleLine="true" />
         </LinearLayout>
 
@@ -309,6 +319,7 @@
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
                 android:text="XRDB Poster"
+                android:textColor="#FFFFFF"
                 android:textSize="18sp"
                 android:textStyle="bold" />
 
@@ -346,6 +357,7 @@
                 android:textSize="14sp"
                 android:padding="10dp"
                 android:layout_marginTop="5dp"
+                android:background="@android:color/transparent"
                 android:singleLine="true" />
         </LinearLayout>
 
@@ -362,6 +374,7 @@
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
                 android:text="CineStream"
+                android:textColor="#FFFFFF"
                 android:textSize="18sp"
                 android:textStyle="bold" />
 
@@ -386,6 +399,7 @@
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
                 android:text="StreamPlay"
+                android:textColor="#FFFFFF"
                 android:textSize="18sp"
                 android:textStyle="bold" />
 
@@ -410,6 +424,7 @@
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
                 android:text="VixSrc"
+                android:textColor="#FFFFFF"
                 android:textSize="18sp"
                 android:textStyle="bold" />
 
