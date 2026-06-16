@@ -526,13 +526,24 @@ class SettingsBottomFragment(
                 putString(SettingsRepository.PREF_KEY_CUSTOM_POSTER_URL, etCustomPosterUrl.text.toString().trim())
             }
 
-            AlertDialog.Builder(context)
-                .setTitle("Save & Reload")
-                .setMessage("Changes have been saved. Do you want to restart the app to apply them?")
-                .setPositiveButton("Yes") { _, _ -> dismiss(); restartApp() }
-                .setNegativeButton("No", null)
-                .show()
+        val dialog = AlertDialog.Builder(context)
+            .setTitle("$addonName - Catalog Settings")
+            .setView(rv)
+            .setPositiveButton("Save") { _, _ ->
+                val keysToSave = JSONArray()
+                masterTabs.forEach { keysToSave.put(it.key) }
+                prefs.edit().putString(orderKey, keysToSave.toString()).apply()
+                Toast.makeText(context, "Catalog settings saved. Reload to apply.", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("Cancel", null)
+            .create()
+
+        // 🔥 [V4.1.5 패치] AlertDialog가 화면에 뜰 때 키보드가 정상적으로 노출되도록 입력 차단 플래그 영구 해제
+        dialog.setOnShowListener {
+            dialog.window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or android.view.WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
+            dialog.window?.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         }
+        dialog.show()
 
         return view
     }
@@ -862,41 +873,43 @@ class SettingsBottomFragment(
             
             // 🔥 [V4.1.5 패치] 수동 번호 입력 직접 점프 이동 및 masterTabs 순서 동기화 비즈니스 로직
             fun shiftItemInRecyclerView(oldPos: Int, newOrder: Int) {
-                if (oldPos !in visibleTabs.indices) return
-                val item = visibleTabs[oldPos]
-                val clampedOrder = newOrder.coerceIn(1, visibleTabs.size)
-                val newPos = clampedOrder - 1
-                
-                if (oldPos != newPos) {
-                    visibleTabs.removeAt(oldPos)
-                    visibleTabs.add(newPos, item)
+                // RecyclerView가 레이아웃 중이거나 스크롤 중일 때 동기식 데이터 변경 연산 시 크래시(IllegalStateException) 유발을 방지하기 위해 메인 스레드 큐로 지연(post) 실행 처리
+                rv.post {
+                    if (oldPos !in visibleTabs.indices) return@post
+                    val item = visibleTabs[oldPos]
+                    val clampedOrder = newOrder.coerceIn(1, visibleTabs.size)
+                    val newPos = clampedOrder - 1
                     
-                    // 정렬 순서를 masterTabs(전체 탭 데이터셋) 내부 순서에도 정밀하게 매핑 동기화
-                    val masterFrom = masterTabs.indexOf(item)
-                    if (masterFrom != -1) {
-                        masterTabs.removeAt(masterFrom)
+                    if (oldPos != newPos) {
+                        visibleTabs.removeAt(oldPos)
+                        visibleTabs.add(newPos, item)
                         
-                        val referenceTab = if (newPos + 1 in visibleTabs.indices) visibleTabs[newPos + 1] else if (newPos - 1 in visibleTabs.indices) visibleTabs[newPos - 1] else null
-                        var masterTo = if (referenceTab != null) masterTabs.indexOf(referenceTab) else -1
-                        
-                        if (masterTo != -1) {
-                            if (referenceTab == visibleTabs.getOrNull(newPos - 1)) {
-                                masterTo += 1
+                        // 정렬 순서를 masterTabs(전체 탭 데이터셋) 내부 순서에도 정밀하게 매핑 동기화
+                        val masterFrom = masterTabs.indexOf(item)
+                        if (masterFrom != -1) {
+                            masterTabs.removeAt(masterFrom)
+                            
+                            val referenceTab = if (newPos + 1 in visibleTabs.indices) visibleTabs[newPos + 1] else if (newPos - 1 in visibleTabs.indices) visibleTabs[newPos - 1] else null
+                            var masterTo = if (referenceTab != null) masterTabs.indexOf(referenceTab) else -1
+                            
+                            if (masterTo != -1) {
+                                if (referenceTab == visibleTabs.getOrNull(newPos - 1)) {
+                                    masterTo += 1
+                                }
+                                masterTabs.add(masterTo.coerceIn(0, masterTabs.size), item)
+                            } else {
+                                masterTabs.add(item)
                             }
-                            masterTabs.add(masterTo.coerceIn(0, masterTabs.size), item)
-                        } else {
-                            masterTabs.add(item)
                         }
+                        
+                        notifyItemMoved(oldPos, newPos)
+                        // 주변 영향받은 범위만 부분적 갱신하여 텍스트박스 내부 번호 즉시 업데이트 (키보드 닫힘 유발 최소화)
+                        notifyItemRangeChanged(minOf(oldPos, newPos), maxOf(oldPos, newPos) + 1)
+                    } else {
+                        notifyItemChanged(oldPos)
                     }
-                    
-                    notifyItemMoved(oldPos, newPos)
-                    // 주변 영향받은 범위만 부분적 갱신하여 텍스트박스 내부 번호 즉시 업데이트 (키보드 닫힘 유발 최소화)
-                    notifyItemRangeChanged(minOf(oldPos, newPos), maxOf(oldPos, newPos) + 1)
-                } else {
-                    notifyItemChanged(oldPos)
                 }
             }
-        }
 
         val adapter = CatalogAdapter()
         adapter.updateVisibleTabs()
