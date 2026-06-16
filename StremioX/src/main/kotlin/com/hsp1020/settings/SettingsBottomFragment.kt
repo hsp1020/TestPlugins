@@ -23,7 +23,7 @@ import android.widget.LinearLayout
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.util.Base64
-import android.app.AlertDialog
+import androidx.appcompat.app.AlertDialog // ◀️ 기존 App 테마의 모던 디자인(색상, 모서리, 버튼) 유지를 위해 AppCompat AlertDialog 복원
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import androidx.core.net.toUri
 import androidx.core.content.edit
@@ -745,15 +745,16 @@ class SettingsBottomFragment(
         val masterTabs = (checkedInit + uncheckedInit).toMutableList()
 
         // 🔥 [V4.1.8 패치] 키보드 노출/비노출 시 다이얼로그 레이아웃이 축소되거나 무너지는 현상을 원천 방지하기 위해 RecyclerView를 감싸는 안정적인 부모 컨테이너 생성
-        val dialogContainer = LinearLayout(context).apply {
-            orientation = LinearLayout.VERTICAL
+        // LinearLayout의 weight=1f 연산 버그를 우회하기 위해 FrameLayout을 부모 컨테이너로 채택
+        // 높이를 MATCH_PARENT로 설정하여 가상 키보드 동작 시 윈도우 크기에 맞추어 완벽하게 반응하고 복원되도록 설계
+        val dialogContainer = android.widget.FrameLayout(context).apply {
             layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         }
 
         val rv = RecyclerView(context).apply {
             layoutManager = LinearLayoutManager(context)
-            // 🔥 [V4.1.8 패치] UltimaEvo와 동일하게 0 높이에 가중치(1f)를 주어, 키보드가 켜질 때 다이얼로그 윈도우 축소에 비례하여 RecyclerView도 유연하게 축소(Resize)되도록 세팅
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+            // FrameLayout 내에서 MATCH_PARENT를 주어 weight 버그를 완전히 탈피
+            layoutParams = android.widget.FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             setPadding(30, 20, 30, 20)
             // 🔥 [UX 개선] 대량의 카탈로그 및 장르 목록 스크롤 시 상/하단 잔여 상태를 인지할 수 있도록 수직 페이딩 엣지 효과 이식
             isVerticalFadingEdgeEnabled = true
