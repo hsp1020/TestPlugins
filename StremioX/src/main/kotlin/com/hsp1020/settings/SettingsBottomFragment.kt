@@ -23,7 +23,7 @@ import android.widget.LinearLayout
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.util.Base64
-import androidx.appcompat.app.AlertDialog
+import android.app.AlertDialog // ◀️ androidx.appcompat.app.AlertDialog 대신 안드로이드 네이티브 플랫폼 AlertDialog 임포트
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import androidx.core.net.toUri
 import androidx.core.content.edit
@@ -773,7 +773,6 @@ class SettingsBottomFragment(
 
         val rv = RecyclerView(context).apply {
             layoutManager = LinearLayoutManager(context)
-            // 0dp 및 1f 가중치 레이아웃 설정 (키보드 개폐 시 실시간 100% Remeasure 유도)
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f).apply {
                 setMargins(0, 0, 0, 20)
             }
