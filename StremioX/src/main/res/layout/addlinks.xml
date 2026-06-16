@@ -3,34 +3,45 @@
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:orientation="vertical"
-    android:padding="18dp"
-    android:background="@android:color/transparent">
+    android:padding="20dp"
+    android:background="#000000"> <!-- 투명 대신 강제 블랙 배경 처리 -->
 
     <TextView
-        android:layout_width="wrap_content"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Add link"
-        android:textSize="18sp"
-        android:textStyle="bold" />
+        android:text="Add Link"
+        android:textColor="#FFFFFF"
+        android:gravity="center"
+        android:textSize="20sp"
+        android:textStyle="bold"
+        android:layout_marginBottom="20dp" />
 
     <EditText
         android:id="@+id/etName"
         android:layout_width="match_parent"
-        android:layout_height="48dp"
+        android:layout_height="35dp" 
         android:autofillHints=""
-        android:hint="Extension Name"
+        android:hint="Name (Optional)"
         android:inputType="text"
-        android:layout_marginTop="12dp"
-        android:textColorHint="#666" />
+        android:textColor="#FFFFFF"
+        android:textColorHint="#666666"
+        android:textSize="14sp"
+        android:paddingHorizontal="12dp"
+        android:background="#151515" /> <!-- 두께를 줄이고 패딩 최적화 -->
 
     <EditText
         android:id="@+id/etLink"
         android:layout_width="match_parent"
-        android:layout_height="48dp"
+        android:layout_height="35dp"
         android:autofillHints="Manifest URL"
-        android:hint="Link (https://...)"
+        android:hint="URL (http/https)"
         android:inputType="textUri"
-        android:layout_marginTop="8dp"
-        android:textColorHint="#666" />
+        android:layout_marginTop="12dp"
+        android:textColor="#FFFFFF"
+        android:textColorHint="#666666"
+        android:textSize="14sp"
+        android:paddingHorizontal="12dp"
+        android:layout_marginBottom="10dp"
+        android:background="#151515" />
 
 </LinearLayout>
