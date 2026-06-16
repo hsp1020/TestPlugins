@@ -552,14 +552,35 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         }
         
         class CatalogAdapter : RecyclerView.Adapter<CatalogAdapter.CVH>() {
-            inner class CVH(val view: LinearLayout, val dragHandle: ImageView, val cb: CheckBox, val tvSource: TextView, val etRename: EditText) : RecyclerView.ViewHolder(view) {
+            inner class CVH(val view: LinearLayout, val dragHandle: ImageView, val cb: CheckBox, val etOrder: EditText, val tvSource: TextView, val etRename: EditText) : RecyclerView.ViewHolder(view) {
                 var textWatcher: TextWatcher? = null 
             }
             override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): CVH {
                 val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(10, 8, 10, 8); background = getCardBg(); layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 5, 0, 5) } }
                 val dragHandle = ImageView(ctx).apply { setImageResource(android.R.drawable.ic_menu_sort_by_size); setPadding(10, 0, 20, 0) }
                 val cb = CheckBox(ctx).apply { setPadding(0, 0, 5, 0) }
-                val tvSource = TextView(ctx).apply { setTextColor(Color.parseColor("#AAAAAA")); textSize = 11f; setPadding(15, 8, 15, 8); background = GradientDrawable().apply { setColor(Color.parseColor("#222222")); cornerRadius = 15f }; layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(5, 0, 10, 0) } }
+                
+                // 🔥 [V4.1.5 패치] 구버전의 번호 직접 입력식 정렬 고속 점프용 텍스트박스 복원생성
+                val etOrder = EditText(ctx).apply {
+                    inputType = InputType.TYPE_CLASS_NUMBER
+                    imeOptions = EditorInfo.IME_ACTION_DONE
+                    setTextColor(Color.WHITE)
+                    textSize = 12f
+                    setPadding(10, 10, 10, 10)
+                    background = getButtonBg()
+                    gravity = Gravity.CENTER
+                    layoutParams = LinearLayout.LayoutParams(80, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                        setMargins(0, 0, 15, 0)
+                    }
+                    
+                    setOnClickListener {
+                        requestFocus()
+                        val imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                        imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
+                    }
+                }
+                
+                val tvSource = TextView(ctx).apply { setTextColor(Color.parseColor("#AAAAAA")); textSize = 11f; setPadding(15, 8, 15, 8); background = GradientDrawable().apply { setColor(Color.parseColor("#222222")); cornerRadius = 15f }; layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(5, 0, 10, 0) } }
                 val etRename = EditText(ctx).apply { 
                     setTextColor(Color.WHITE); setHintTextColor(Color.DKGRAY); textSize = 13f; setPadding(15, 10, 15, 10); background = getButtonBg(); setSingleLine(true); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) 
                     
@@ -569,8 +590,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
                     }
                 }
-                row.addView(dragHandle); row.addView(cb); row.addView(tvSource); row.addView(etRename)
-                return CVH(row, dragHandle, cb, tvSource, etRename)
+                row.addView(dragHandle); row.addView(cb); row.addView(etOrder); row.addView(tvSource); row.addView(etRename)
+                return CVH(row, dragHandle, cb, etOrder, tvSource, etRename)
             }
             override fun onBindViewHolder(holder: CVH, position: Int) {
                 val data = catalogList[position]
@@ -605,8 +626,61 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     catalogList.addAll(uncheckedItems)
                     notifyDataSetChanged() 
                 }
+                
+                // 🔥 [V4.1.5 패치] 입력창 값 세팅 및 리스너 등록 처리 (스크롤 과정에서의 변수 오염 및 루프 방지)
+                holder.etOrder.setOnFocusChangeListener(null)
+                holder.etOrder.setText((position + 1).toString())
+                
+                holder.etOrder.setOnFocusChangeListener { _, hasFocus ->
+                    if (!hasFocus) {
+                        val inputVal = holder.etOrder.text.toString().toIntOrNull()
+                        if (inputVal != null) {
+                            shiftItemInRecyclerView(position, inputVal)
+                        } else {
+                            holder.etOrder.setText((position + 1).toString())
+                        }
+                    }
+                }
+                
+                holder.etOrder.setOnEditorActionListener { _, actionId, _ ->
+                    if (actionId == EditorInfo.IME_ACTION_DONE || actionId == EditorInfo.IME_ACTION_NEXT) {
+                        holder.etOrder.clearFocus()
+                        val imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                        imm.hideSoftInputFromWindow(holder.etOrder.windowToken, 0)
+                        true
+                    } else false
+                }
             }
             override fun getItemCount() = catalogList.size
+            
+            // 🔥 [V4.1.5 패치] 입력값 가용 범위 제한 처리(Clamping) 및 시퀀스 정규화 비즈니스 로직 이식
+            fun shiftItemInRecyclerView(oldPos: Int, newOrder: Int) {
+                if (oldPos !in catalogList.indices) return
+                val item = catalogList[oldPos]
+                val checkedCount = catalogList.count { it.isChecked }
+                
+                val groupMin = if (item.isChecked) 1 else checkedCount + 1
+                val groupMax = if (item.isChecked) checkedCount else catalogList.size
+                
+                val clampedOrder = newOrder.coerceIn(groupMin, groupMax)
+                val newPos = clampedOrder - 1
+                
+                if (oldPos != newPos) {
+                    catalogList.removeAt(oldPos)
+                    catalogList.add(newPos, item)
+                    
+                    // 정렬 정보 순서 일관수(1..N) 매핑 적용
+                    for (i in catalogList.indices) {
+                        catalogList[i].orderIndex = i + 1
+                    }
+                    
+                    notifyItemMoved(oldPos, newPos)
+                    // 영향 범위 영역만 국소 부분 업데이트(전체 노티 시 키보드가 내려가 타이핑 환경이 깨지는 현상 원천 예방)
+                    notifyItemRangeChanged(minOf(oldPos, newPos), maxOf(oldPos, newPos) + 1)
+                } else {
+                    notifyItemChanged(oldPos)
+                }
+            }
         }
         val catalogAdapter = CatalogAdapter()
         rvCatalogs.adapter = catalogAdapter
@@ -616,7 +690,14 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 val from = viewHolder.adapterPosition
                 val to = target.adapterPosition
                 Collections.swap(catalogList, from, to)
+                
+                // 🔥 [V4.1.5 패치] 마우스 드래그 정렬 시에도 텍스트박스의 순서 번호들이 실시간으로 즉시 동기화되도록 바인딩 데이터 업데이트 적용
+                for (i in catalogList.indices) {
+                    catalogList[i].orderIndex = i + 1
+                }
                 catalogAdapter.notifyItemMoved(from, to)
+                catalogAdapter.notifyItemChanged(from)
+                catalogAdapter.notifyItemChanged(to)
                 return true
             }
             override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {}
