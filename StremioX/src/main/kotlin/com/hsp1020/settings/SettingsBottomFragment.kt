@@ -502,11 +502,7 @@ class SettingsBottomFragment(
                             .setTitle(itemToEdit.name)
                             .setItems(choices) { _, which ->
                                 if (which == 0) showEditDialog(itemToEdit, position, rv)
-                                else {
-                                    // 🔥 선생님 말씀대로, 밑에 깔린 다이얼로그를 즉시 종료하여 단일 창 환경 구성 (이것 한 줄만 원본에 추가)
-                                    dlg.dismiss()
-                                    showCatalogConfigDialog(itemToEdit)
-                                }
+                                else showCatalogConfigDialog(itemToEdit)
                             }.show()
                     }
                 )
@@ -751,13 +747,15 @@ class SettingsBottomFragment(
         // 🔥 [V4.1.8 패치] 키보드 노출/비노출 시 다이얼로그 레이아웃이 축소되거나 무너지는 현상을 원천 방지하기 위해 RecyclerView를 감싸는 안정적인 부모 컨테이너 생성
         val dialogContainer = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            // 🔥 [완벽 버그 픽스] AlertDialog는 내부적으로 AT_MOST(최대 화면크기) 측정을 사용합니다. MATCH_PARENT를 주면 자식들의 높이만으로 크기를 산정합니다.
+            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
 
         val rv = RecyclerView(context).apply {
             layoutManager = LinearLayoutManager(context)
-            // 🔥 [V4.1.8 패치] UltimaEvo와 동일하게 0 높이에 가중치(1f)를 주어, 키보드가 켜질 때 다이얼로그 윈도우 축소에 비례하여 RecyclerView도 유연하게 축소(Resize)되도록 세팅
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+            // 🔥 [완벽 버그 픽스] AlertDialog 안에서 높이 0, 가중치 1f를 쓰면 안드로이드 측정 버그로 인해 창이 닫힐 때 영구적으로 0픽셀로 찌그러집니다. 
+            // WRAP_CONTENT로 설정하면, 키보드가 켜질 때 화면에 맞게 자동으로 줄어들고(Scroll 가능), 닫힐 때 원래 크기로 100% 정상 원복됩니다.
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             setPadding(30, 20, 30, 20)
             // 🔥 [UX 개선] 대량의 카탈로그 및 장르 목록 스크롤 시 상/하단 잔여 상태를 인지할 수 있도록 수직 페이딩 엣지 효과 이식
             isVerticalFadingEdgeEnabled = true
@@ -865,7 +863,8 @@ class SettingsBottomFragment(
                 
                 holder.etOrder.setOnFocusChangeListener { _, hasFocus ->
                     if (hasFocus) {
-                        // 🔥 [V4.1.8 패치] 입력 칸 포커싱 시 키보드가 완전히 올라온 후 해당 줄이 키보드 위쪽 화면으로 부드럽게 스크롤되어 노출되도록 딜레이 스크롤 처리
+                        // 🔥 [V4.1.8 패치] 레이아웃이 정상적으로 축소(WRAP_CONTENT)되면서, 
+                        // 선생님이 원본에 작성하신 이 부드러운 스크롤 로직이 키보드 높이 위로 완벽하게 작동하게 됩니다.
                         rv.postDelayed({
                             val curPos = holder.adapterPosition
                             if (curPos != RecyclerView.NO_POSITION) {
