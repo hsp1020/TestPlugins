@@ -735,10 +735,14 @@ class SettingsBottomFragment(
             } catch (e: Exception) { e.printStackTrace() }
         }
 
-        val masterTabs = flatTabs.sortedBy { tab ->
+        val sortedTabs = flatTabs.sortedBy { tab ->
             val idx = orderedKeys.indexOf(tab.key)
             if (idx != -1) idx else Int.MAX_VALUE
-        }.toMutableList()
+        }
+        // 🔥 [V4.1.6 패치] 초기 로딩 시에도 체크 활성화된 항목이 최상단 그룹에 위치하도록 분할 및 병합 정렬 적용
+        val checkedInit = sortedTabs.filter { prefs.getBoolean("tab_enabled_${uniqueId}_${it.key}", true) }
+        val uncheckedInit = sortedTabs.filter { !prefs.getBoolean("tab_enabled_${uniqueId}_${it.key}", true) }
+        val masterTabs = (checkedInit + uncheckedInit).toMutableList()
 
         val rv = RecyclerView(context).apply {
             layoutManager = LinearLayoutManager(context)
@@ -820,6 +824,13 @@ class SettingsBottomFragment(
                 holder.checkbox.text = tab.displayName
                 holder.checkbox.setOnCheckedChangeListener { _, isChecked ->
                     prefs.edit().putBoolean(enabledKey, isChecked).apply()
+                    // 🔥 [V4.1.6 패치] 체크 토글 시 활성 항목은 상단으로, 비활성 항목은 하단 그룹으로 실시간 강제 재배치 정렬
+                    val checkedTabs = masterTabs.filter { prefs.getBoolean("tab_enabled_${uniqueId}_${it.key}", true) }
+                    val uncheckedTabs = masterTabs.filter { !prefs.getBoolean("tab_enabled_${uniqueId}_${it.key}", true) }
+                    masterTabs.clear()
+                    masterTabs.addAll(checkedTabs)
+                    masterTabs.addAll(uncheckedTabs)
+                    updateVisibleTabs()
                 }
 
                 if (!tab.isGenre && masterTabs.any { it.isGenre && it.catalogKey == tab.catalogKey }) {
@@ -868,7 +879,15 @@ class SettingsBottomFragment(
                 rv.post {
                     if (oldPos !in visibleTabs.indices) return@post
                     val item = visibleTabs[oldPos]
-                    val clampedOrder = newOrder.coerceIn(1, visibleTabs.size)
+                    
+                    // 🔥 [V4.1.6 패치] Ultima와 동일하게 체크 상태(활성화 여부)에 따른 그룹 내 최대 가용 범위 제한(Clamping) 공식 적용
+                    val isEnabled = prefs.getBoolean("tab_enabled_${uniqueId}_${item.key}", true)
+                    val checkedCount = visibleTabs.count { prefs.getBoolean("tab_enabled_${uniqueId}_${it.key}", true) }
+                    
+                    val groupMin = if (isEnabled) 1 else checkedCount + 1
+                    val groupMax = if (isEnabled) checkedCount else visibleTabs.size
+                    
+                    val clampedOrder = newOrder.coerceIn(groupMin, groupMax)
                     val newPos = clampedOrder - 1
                     
                     if (oldPos != newPos) {
