@@ -4,7 +4,7 @@
     android:padding="20dp"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:background="#000000"> <!-- 이질적인 회색 배경을 퓨어 블랙으로 통일 -->
+    android:background="@android:color/transparent"> <!-- Kotlin의 getDarkThemeBg() 적용을 위해 투명화 -->
 
     <TextView
         android:layout_width="match_parent"
