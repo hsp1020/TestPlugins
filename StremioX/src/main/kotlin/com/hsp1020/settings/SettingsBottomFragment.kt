@@ -23,7 +23,7 @@ import android.widget.LinearLayout
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.util.Base64
-import android.app.AlertDialog // ◀️ androidx.appcompat.app.AlertDialog를 네이티브 플랫폼 AlertDialog로 교체
+import android.app.AlertDialog
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import androidx.core.net.toUri
 import androidx.core.content.edit
@@ -744,23 +744,74 @@ class SettingsBottomFragment(
         val uncheckedInit = sortedTabs.filter { !prefs.getBoolean("tab_enabled_${uniqueId}_${it.key}", true) }
         val masterTabs = (checkedInit + uncheckedInit).toMutableList()
 
-        // 🔥 [V4.1.8 패치] 키보드 노출/비노출 시 다이얼로그 레이아웃이 축소되거나 무너지는 현상을 원천 방지하기 위해 RecyclerView를 감싸는 안정적인 부모 컨테이너 생성
+        // 🔥 [V4.1.9 패치] 네이티브 AlertController의 리사이징 버그(키보드 닫힐 때 레이아웃 원복 불가)를 완전히 회피하기 위해, UltimaEvo와 동일하게 네이티브 버튼 및 타이틀을 제거하고 커스텀 컨테이너로 다이얼로그 전체를 빌드 (layoutParams를 설정하지 않고 가용한 최대 창 크기를 확보)
         val dialogContainer = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            setPadding(35, 40, 35, 30)
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(android.graphics.Color.parseColor("#0C0C0C"))
+                setStroke(2, android.graphics.Color.parseColor("#1A1A1A"))
+                cornerRadius = 40f
+            }
         }
+
+        // 커스텀 다이얼로그 타이틀 추가
+        val titleTv = TextView(context).apply {
+            text = "$addonName - Catalog Settings"
+            textSize = 20f
+            setTextColor(android.graphics.Color.WHITE)
+            setTypeface(null, android.graphics.Typeface.BOLD)
+            setPadding(0, 0, 0, 30)
+            gravity = android.view.Gravity.CENTER
+        }
+        dialogContainer.addView(titleTv)
 
         val rv = RecyclerView(context).apply {
             layoutManager = LinearLayoutManager(context)
             // 🔥 [V4.1.8 패치] UltimaEvo와 동일하게 0 높이에 가중치(1f)를 주어, 키보드가 켜질 때 다이얼로그 윈도우 축소에 비례하여 RecyclerView도 유연하게 축소(Resize)되도록 세팅
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
-            setPadding(30, 20, 30, 20)
+            setPadding(10, 10, 10, 10)
             // 🔥 [UX 개선] 대량의 카탈로그 및 장르 목록 스크롤 시 상/하단 잔여 상태를 인지할 수 있도록 수직 페이딩 엣지 효과 이식
             isVerticalFadingEdgeEnabled = true
             setFadingEdgeLength(120)
         }
-
         dialogContainer.addView(rv)
+
+        // 커스텀 다이얼로그 하단 푸터 버튼바 추가
+        val footer = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 30, 0, 0)
+        }
+        
+        val saveBtn = Button(context).apply {
+            text = "Save"
+            setTextColor(android.graphics.Color.WHITE)
+            isAllCaps = false
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(android.graphics.Color.parseColor("#151515"))
+                cornerRadius = 20f
+            }
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                setMargins(0, 0, 15, 0)
+            }
+        }
+        
+        val cancelBtn = Button(context).apply {
+            text = "Cancel"
+            setTextColor(android.graphics.Color.WHITE)
+            isAllCaps = false
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(android.graphics.Color.parseColor("#151515"))
+                cornerRadius = 20f
+            }
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                setMargins(15, 0, 0, 0)
+            }
+        }
+        
+        footer.addView(saveBtn)
+        footer.addView(cancelBtn)
+        dialogContainer.addView(footer)
 
         class CatalogAdapter : RecyclerView.Adapter<CatalogAdapter.VH>() {
             var visibleTabs = mutableListOf<ConfigFlatTab>()
@@ -971,23 +1022,32 @@ class SettingsBottomFragment(
         touchHelper.attachToRecyclerView(rv)
 
         val dialog = AlertDialog.Builder(context)
-            .setTitle("$addonName - Catalog Settings")
             // naked RecyclerView가 아닌 안정적인 dialogContainer 레이아웃을 다이얼로그의 루트 뷰로 바인딩
             .setView(dialogContainer)
-            .setPositiveButton("Save") { _, _ ->
-                val keysToSave = JSONArray()
-                masterTabs.forEach { keysToSave.put(it.key) }
-                prefs.edit().putString(orderKey, keysToSave.toString()).apply()
-                Toast.makeText(context, "Catalog settings saved. Reload to apply.", Toast.LENGTH_SHORT).show()
-            }
-            .setNegativeButton("Cancel", null)
             .create()
+
+        // 리스너 바인딩 연계
+        saveBtn.setOnClickListener {
+            val keysToSave = JSONArray()
+            masterTabs.forEach { keysToSave.put(it.key) }
+            prefs.edit().putString(orderKey, keysToSave.toString()).apply()
+            Toast.makeText(context, "Catalog settings saved. Reload to apply.", Toast.LENGTH_SHORT).show()
+            dialog.dismiss()
+        }
+        
+        cancelBtn.setOnClickListener {
+            dialog.dismiss()
+        }
 
         // 🔥 [V4.1.5 패치] AlertDialog가 화면에 뜰 때 키보드가 정상적으로 노출되도록 입력 차단 플래그 영구 해제
         dialog.setOnShowListener {
             dialog.window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or android.view.WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
             dialog.window?.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         }
+        
+        // 뒷배경을 투명화하여 카드 레이아웃의 둥근 모서리가 정상적으로 출력되도록 지정
+        dialog.window?.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(android.graphics.Color.TRANSPARENT))
+        
         dialog.show()
     }
 
