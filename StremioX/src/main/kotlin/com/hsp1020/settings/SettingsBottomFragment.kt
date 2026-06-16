@@ -743,6 +743,9 @@ class SettingsBottomFragment(
             layoutManager = LinearLayoutManager(context)
             layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1000)
             setPadding(30, 20, 30, 20)
+            // 🔥 [UX 개선] 대량의 카탈로그 및 장르 목록 스크롤 시 상/하단 잔여 상태를 인지할 수 있도록 수직 페이딩 엣지 효과 이식
+            isVerticalFadingEdgeEnabled = true
+            setFadingEdgeLength(120)
         }
 
         class CatalogAdapter : RecyclerView.Adapter<CatalogAdapter.VH>() {
