@@ -114,9 +114,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
     private var lastManifestUrl: String = ""
     private var lastCacheTime: Long = 0
     
-    private val catalogSentIds = ConcurrentHashMap<String, MutableSet<String>>()
-    private val catalogSkipState = ConcurrentHashMap<String, Int>()
-    
     private val pageMutex = Mutex()
     private val activePageRequests = mutableMapOf<Int, Deferred<HomePageResponse>>()
 
@@ -215,6 +212,10 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         private val tmdbFindCache = lruCacheMap<String, Pair<Pair<String, String>?, Long>>(100)
         private val aniZipCache = lruCacheMap<String, Pair<Pair<Int?, Int?>?, Long>>(100)
         private const val METADATA_CACHE_TTL = 12 * 60 * 60 * 1000L
+
+        // 🔥 [V4.1.3] 중복 제거 및 페이지네이션 skip 오프셋 추적 필드를 companion object(정적 영역)로 이관하여 안전하게 보존
+        val catalogSentIds = ConcurrentHashMap<String, MutableSet<String>>()
+        val catalogSkipState = ConcurrentHashMap<String, Int>()
 
         suspend fun getOrFetchKitsu(url: String): String? {
             val now = System.currentTimeMillis()
@@ -430,8 +431,11 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                     cachedManifest = parsed
                     lastManifestUrl = currentUrl
                     lastCacheTime = now
-                    catalogSentIds.clear()
-                    catalogSkipState.clear()
+                    
+                    // 🔥 [V4.1.3 멀티테넌트 예방 조치] 공용 companion 영역에서 다른 프로바이더의 캐시 상태까지 다 날려버리지 않도록 prefix가 일치하는 고유 키들만 제거
+                    val prefix = "${this@StremioC.name}_"
+                    catalogSentIds.keys.filter { it.startsWith(prefix) }.forEach { catalogSentIds.remove(it) }
+                    catalogSkipState.keys.filter { it.startsWith(prefix) }.forEach { catalogSkipState.remove(it) }
                     
                     val context = CloudStreamApp.context
                     context?.getSharedPreferences("StremioX_Manifest", Context.MODE_PRIVATE)
@@ -549,13 +553,15 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
 
         var isNewRequest = false
+        val stateKey = "${this@StremioC.name}_${request.name}" // 🔥 [V4.1.3] 동일 탭 이름의 다른 스트레미오 프로바이더간 상태 전이 및 꼬임 현상 원천 봉쇄
+
         val deferred = pageMutex.withLock {
             if (page <= 1) {
-                // 🔥 [PAGINATION-DEBUG] 1페이지 요청 시 초기화 로직 확인 로그
-                println("[PAGINATION-DEBUG] Page <= 1 detected. Clearing states for Tab: ${request.name}")
-                catalogSentIds.remove(request.name)
+                // 🔥 [PAGINATION-DEBUG] 1페이지 요청 시 정적 메모리 내 대상 탭 초기화 진행
+                println("[PAGINATION-DEBUG] Page <= 1 detected. Clearing states for Tab Key: $stateKey")
+                catalogSentIds.remove(stateKey)
                 activePageRequests.clear()
-                catalogSkipState.remove(request.name)
+                catalogSkipState.remove(stateKey)
             }
             
             activePageRequests.getOrPut(page) {
@@ -583,10 +589,24 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         }
     }
     
-    // 🔥 [PAGINATION-DEBUG] 로그 추적을 위해 파라미터에 page 추가
     private suspend fun fetchTabCatalogData(request: MainPageRequest, page: Int): HomePageResponse {
-        val currentSkip = catalogSkipState[request.name] ?: 0
-        println("[PAGINATION-DEBUG] [fetchTabCatalogData] Current Skip State: $currentSkip for Tab: ${request.name}")
+        val stateKey = "${this@StremioC.name}_${request.name}"
+
+        // 🔥 [V4.1.3] 콜드 스타트 구원 방어막 (Silent Pre-fetch)
+        // 앱을 재시작했으나 Cloudstream 코어에서 1페이지를 로컬 DB 캐시로 불러와 플러그인의 page=1을 무시하고, 바로 2페이지를 요청할 경우
+        // 백그라운드에서 동기적으로 1페이지(skip=0)의 실제 응답 크기와 중복제거 아이디 세트를 우선 채워놓도록 처리합니다.
+        if (page > 1 && !catalogSkipState.containsKey(stateKey)) {
+            println("[PAGINATION-DEBUG] [fetchTabCatalogData] Cold start detected on Page $page. Silently pre-fetching Page 1 to restore state.")
+            try {
+                // page=1로 재귀 진입하여 무한 루프에 빠지지 않고 안전하게 1회만 실행됨
+                fetchTabCatalogData(request, 1) 
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        val currentSkip = catalogSkipState[stateKey] ?: 0
+        println("[PAGINATION-DEBUG] [fetchTabCatalogData] Current Skip State: $currentSkip for Tab Key: $stateKey")
         
         val targetPath = request.data.replace("###", currentSkip.toString())
         val targetUrl = buildUrl(targetPath)
@@ -611,13 +631,13 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         if (resultPair != null) {
             println("[PAGINATION-DEBUG] [fetchTabCatalogData] ResultPair acquired. Size: ${resultPair.first.size}, Returned Meta Size: ${resultPair.second}")
-            catalogSkipState[request.name] = currentSkip + resultPair.second
-            println("[PAGINATION-DEBUG] [fetchTabCatalogData] Next Skip State updated to: ${catalogSkipState[request.name]}")
+            catalogSkipState[stateKey] = currentSkip + resultPair.second
+            println("[PAGINATION-DEBUG] [fetchTabCatalogData] Next Skip State updated to: ${catalogSkipState[stateKey]}")
             
-            var seenForThisCatalog = catalogSentIds[request.name]
+            var seenForThisCatalog = catalogSentIds[stateKey]
             if (seenForThisCatalog == null) {
                 synchronized(catalogSentIds) {
-                    seenForThisCatalog = catalogSentIds.getOrPut(request.name) { 
+                    seenForThisCatalog = catalogSentIds.getOrPut(stateKey) { 
                         lruSet(500) 
                     }
                 }
@@ -629,7 +649,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 val isNew = seenForThisCatalog!!.add(pureId)
                 if (!isNew) {
                     duplicateCount++
-                    // println("[PAGINATION-DEBUG] Duplicate ID skipped: $pureId") // 너무 많으면 도배되므로 주석처리
                 }
                 isNew
             }
@@ -1620,7 +1639,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 finalDescription = if (finalDescription.isNullOrBlank()) originalName else "$finalDescription | $originalName"
             }
 
-            val fallbackMovieId = this@CatalogEntry.kitsuIdExt?.let { "kitsu:$it" } ?: this@CatalogEntry.id ?: ""
+            val movieId = this@CatalogEntry.kitsuIdExt?.let { "kitsu:$it" } ?: this@CatalogEntry.id ?: ""
             if (tmdbData != null && finalVideos.isNullOrEmpty() && tmdbData.episodeTmdbMeta.isNotEmpty()) {
                 val generatedVideos = tmdbData.episodeTmdbMeta.mapNotNull { (key, tmdbEp) ->
                     val parts = key.split("_")
@@ -1628,7 +1647,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                         val s = parts[0].toIntOrNull() ?: return@mapNotNull null
                         val e = parts[1].toIntOrNull() ?: return@mapNotNull null
                         Video(
-                            id = fallbackMovieId, 
+                            id = movieId, 
                             title = tmdbEp.name,
                             seasonNumber = s,
                             episode = e,
@@ -1644,8 +1663,6 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
             val fallbackTrailers = finalTrailerStreams?.mapNotNull { it.ytId }?.ifEmpty { finalTrailersSources?.mapNotNull { it.source } }?.distinct()?.map { if (it.startsWith("http")) it else "https://m.youtube.com/watch?v=$it" } ?: emptyList()
             val finalTrailers = tmdbData?.fetchedTrailers?.ifEmpty { fallbackTrailers } ?: fallbackTrailers
-
-            val movieId = if (!finalVideos.isNullOrEmpty() && !finalVideos[0].id.isNullOrBlank()) finalVideos[0].id else fallbackMovieId
 
             val countries = tmdbData?.fetchedOriginCountry ?: emptyList()
             val isBollywood = countries.any { it.contains("IN", true) || it.contains("India", true) }
