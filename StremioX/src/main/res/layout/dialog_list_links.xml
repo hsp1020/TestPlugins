@@ -1,27 +1,28 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:orientation="vertical"
-    android:padding="16dp"
+    android:padding="20dp"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:background="#2E3440">
+    android:background="#000000"> <!-- 이질적인 회색 배경을 퓨어 블랙으로 통일 -->
 
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="Saved Links"
-        android:textColor="#ECEFF4"
+        android:textColor="#FFFFFF"
         android:textSize="20sp"
         android:textStyle="bold"
         android:gravity="center"
-        android:paddingBottom="12dp"/>
+        android:paddingBottom="20dp"/>
 
     <TextView
         android:id="@+id/tvNoLinks"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="There are no links yet."
-        android:textColor="#8FBCBB"
+        android:text="No saved links"
+        android:textColor="#888888"
+        android:textSize="15sp"
         android:gravity="center"
         android:padding="24dp"
         android:visibility="gone"/>
@@ -30,5 +31,7 @@
         android:id="@+id/rvLinks"
         android:layout_width="match_parent"
         android:layout_height="300dp"
+        android:requiresFadingEdge="vertical"
+        android:fadingEdgeLength="40dp"
         android:scrollbars="vertical"/>
 </LinearLayout>
