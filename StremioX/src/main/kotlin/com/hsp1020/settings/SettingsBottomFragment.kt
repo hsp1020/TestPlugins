@@ -744,14 +744,23 @@ class SettingsBottomFragment(
         val uncheckedInit = sortedTabs.filter { !prefs.getBoolean("tab_enabled_${uniqueId}_${it.key}", true) }
         val masterTabs = (checkedInit + uncheckedInit).toMutableList()
 
+        // 🔥 [V4.1.8 패치] 키보드 노출/비노출 시 다이얼로그 레이아웃이 축소되거나 무너지는 현상을 원천 방지하기 위해 RecyclerView를 감싸는 안정적인 부모 컨테이너 생성
+        val dialogContainer = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        }
+
         val rv = RecyclerView(context).apply {
             layoutManager = LinearLayoutManager(context)
-            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1000)
+            // 🔥 [V4.1.8 패치] UltimaEvo와 동일하게 0 높이에 가중치(1f)를 주어, 키보드가 켜질 때 다이얼로그 윈도우 축소에 비례하여 RecyclerView도 유연하게 축소(Resize)되도록 세팅
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
             setPadding(30, 20, 30, 20)
             // 🔥 [UX 개선] 대량의 카탈로그 및 장르 목록 스크롤 시 상/하단 잔여 상태를 인지할 수 있도록 수직 페이딩 엣지 효과 이식
             isVerticalFadingEdgeEnabled = true
             setFadingEdgeLength(120)
         }
+
+        dialogContainer.addView(rv)
 
         class CatalogAdapter : RecyclerView.Adapter<CatalogAdapter.VH>() {
             var visibleTabs = mutableListOf<ConfigFlatTab>()
@@ -851,7 +860,15 @@ class SettingsBottomFragment(
                 holder.etOrder.setText((position + 1).toString())
                 
                 holder.etOrder.setOnFocusChangeListener { _, hasFocus ->
-                    if (!hasFocus) {
+                    if (hasFocus) {
+                        // 🔥 [V4.1.8 패치] 입력 칸 포커싱 시 키보드가 완전히 올라온 후 해당 줄이 키보드 위쪽 화면으로 부드럽게 스크롤되어 노출되도록 딜레이 스크롤 처리
+                        rv.postDelayed({
+                            val curPos = holder.adapterPosition
+                            if (curPos != RecyclerView.NO_POSITION) {
+                                rv.smoothScrollToPosition(curPos)
+                            }
+                        }, 150)
+                    } else {
                         val inputVal = holder.etOrder.text.toString().toIntOrNull()
                         if (inputVal != null) {
                             shiftItemInRecyclerView(position, inputVal)
@@ -955,7 +972,8 @@ class SettingsBottomFragment(
 
         val dialog = AlertDialog.Builder(context)
             .setTitle("$addonName - Catalog Settings")
-            .setView(rv)
+            // naked RecyclerView가 아닌 안정적인 dialogContainer 레이아웃을 다이얼로그의 루트 뷰로 바인딩
+            .setView(dialogContainer)
             .setPositiveButton("Save") { _, _ ->
                 val keysToSave = JSONArray()
                 masterTabs.forEach { keysToSave.put(it.key) }
