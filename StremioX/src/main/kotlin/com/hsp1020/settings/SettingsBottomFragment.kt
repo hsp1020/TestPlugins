@@ -5,11 +5,18 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
+import android.text.InputType
 import android.widget.Button
 import android.widget.CompoundButton
 import android.widget.EditText
@@ -23,7 +30,7 @@ import android.widget.LinearLayout
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.util.Base64
-import android.app.AlertDialog // ◀️ androidx.appcompat.app.AlertDialog 폐기 및 네이티브 플랫폼 적용
+import android.app.AlertDialog
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import androidx.core.net.toUri
 import androidx.core.content.edit
@@ -127,21 +134,18 @@ class SettingsBottomFragment(
 
     private data class ConfigFlatTab(val key: String, val displayName: String, val isGenre: Boolean, val catalogKey: String)
 
-    // 🔥 [이질적인 회색 로딩창 및 메뉴를 다크 테마로 강제 변환하는 헬퍼 함수]
-    private fun applyDarkThemeToDialog(dialog: AlertDialog) {
-        dialog.window?.setBackgroundDrawable(android.graphics.drawable.GradientDrawable().apply {
-            setColor(android.graphics.Color.parseColor("#0C0C0C")) // 앱 테마에 맞는 퓨어 다크 그레이
-            cornerRadius = 30f
-        })
-    }
+    // 🔥 [UltimaEvo 완벽 밀착 테마 복사: 모서리 곡률 및 불필요 오버헤드 감축]
+    private fun getDarkThemeBg() = GradientDrawable().apply { setColor(Color.parseColor("#000000")); cornerRadius = 25f }
+    private fun getCardBg() = GradientDrawable().apply { setColor(Color.parseColor("#0C0C0C")); setStroke(2, Color.parseColor("#1A1A1A")); cornerRadius = 18f }
+    private fun getButtonBg() = GradientDrawable().apply { setColor(Color.parseColor("#151515")); cornerRadius = 12f } // 지나친 곡률 축소 적용
 
-    // 🔥 [버튼 색상 적용 및 키보드 축소 버그 방지 윈도우 플래그 세팅 헬퍼]
-    private fun configureDialogWindow(dialog: AlertDialog) {
-        dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.setTextColor(android.graphics.Color.parseColor("#2196F3"))
-        dialog.getButton(AlertDialog.BUTTON_NEGATIVE)?.setTextColor(android.graphics.Color.parseColor("#FF5555"))
-        dialog.getButton(AlertDialog.BUTTON_NEUTRAL)?.setTextColor(android.graphics.Color.parseColor("#2196F3"))
-        dialog.window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or android.view.WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
-        dialog.window?.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+    // 🔥 [정중앙 정렬 유지 및 화면비 보존, 키보드 동작 설정 일괄 정규화]
+    private fun setupCustomDialog(dialog: AlertDialog, contentView: View) {
+        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        dialog.setOnShowListener {
+            dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
+            dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        }
     }
 
     private val languages = listOf(
@@ -279,14 +283,36 @@ class SettingsBottomFragment(
                     val clip = ClipData.newPlainText("StremioX Backup", backupStr)
                     clipboard.setPrimaryClip(clip)
 
-                    val dlg = AlertDialog.Builder(ctx, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                        .setTitle("Export Successful")
-                        .setMessage("Compressed backup data has been successfully copied to your clipboard.\n\nPlease paste it somewhere safe (e.g., Notes, Messenger).")
-                        .setPositiveButton("OK", null)
-                        .create()
-                    applyDarkThemeToDialog(dlg)
+                    val container = LinearLayout(ctx).apply {
+                        orientation = LinearLayout.VERTICAL
+                        setPadding(40, 40, 40, 40)
+                        background = getDarkThemeBg()
+                        addView(TextView(ctx).apply {
+                            text = "Export Successful"
+                            textSize = 18f
+                            setTextColor(Color.WHITE)
+                            typeface = android.graphics.Typeface.DEFAULT_BOLD
+                            setPadding(0, 0, 0, 20)
+                            gravity = android.view.Gravity.CENTER
+                        })
+                        addView(TextView(ctx).apply {
+                            text = "Compressed backup data has been successfully copied to your clipboard.\n\nPlease paste it somewhere safe (e.g., Notes, Messenger)."
+                            setTextColor(Color.LTGRAY)
+                            textSize = 14f
+                            setPadding(0, 0, 0, 30)
+                        })
+                        addView(Button(ctx).apply {
+                            text = "OK"
+                            setTextColor(Color.WHITE)
+                            isAllCaps = false
+                            background = getButtonBg()
+                            setOnClickListener {  }
+                        })
+                    }
+                    val dlg = AlertDialog.Builder(ctx).setView(container).create()
+                    setupCustomDialog(dlg, container)
+                    container.findViewById<Button>(container.childCount - 1).setOnClickListener { dlg.dismiss() }
                     dlg.show()
-                    configureDialogWindow(dlg)
                 } catch (e: Exception) {
                     e.printStackTrace()
                     Toast.makeText(ctx, "Failed to export settings", Toast.LENGTH_SHORT).show()
@@ -322,48 +348,132 @@ class SettingsBottomFragment(
 
                     if (parsedJson.length() == 0) throw Exception("Empty JSON Data")
 
-                    val dlg = AlertDialog.Builder(ctx, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                        .setTitle("Backup Data Detected")
-                        .setMessage("Valid backup data found in clipboard!\n\nAre you sure you want to proceed? (Existing unrelated settings will be kept safely)")
-                        .setPositiveButton("Restore") { _, _ ->
-                            val editor = sharedPref.edit()
-                            
-                            val keys = parsedJson.keys()
-                            while (keys.hasNext()) {
-                                val key = keys.next()
-                                when (val value = parsedJson.get(key)) {
-                                    is Boolean -> editor.putBoolean(key, value)
-                                    is String -> editor.putString(key, value)
-                                    is Int -> editor.putInt(key, value)
-                                }
-                            }
-                            editor.apply()
-
-                            val resultDlg = AlertDialog.Builder(ctx, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                                .setTitle("Import Result")
-                                .setMessage("Restore completed successfully!\nPlease restart the app.")
-                                .setPositiveButton("OK") { _, _ -> dismiss() }
-                                .create()
-                            applyDarkThemeToDialog(resultDlg)
-                            resultDlg.show()
-                            configureDialogWindow(resultDlg)
+                    val container = LinearLayout(ctx).apply {
+                        orientation = LinearLayout.VERTICAL
+                        setPadding(40, 40, 40, 40)
+                        background = getDarkThemeBg()
+                        addView(TextView(ctx).apply {
+                            text = "Backup Data Detected"
+                            textSize = 18f
+                            setTextColor(Color.WHITE)
+                            typeface = android.graphics.Typeface.DEFAULT_BOLD
+                            setPadding(0, 0, 0, 20)
+                            gravity = android.view.Gravity.CENTER
+                        })
+                        addView(TextView(ctx).apply {
+                            text = "Valid backup data found in clipboard!\n\nAre you sure you want to proceed? (Existing unrelated settings will be kept safely)"
+                            setTextColor(Color.LTGRAY)
+                            textSize = 14f
+                            setPadding(0, 0, 0, 30)
+                        })
+                        val btnRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+                        val cancelBtn = Button(ctx).apply {
+                            text = "Cancel"
+                            setTextColor(Color.WHITE)
+                            isAllCaps = false
+                            background = getButtonBg()
+                            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) }
                         }
-                        .setNegativeButton("Cancel", null)
-                        .create()
-                    applyDarkThemeToDialog(dlg)
+                        val restoreBtn = Button(ctx).apply {
+                            text = "Restore"
+                            setTextColor(Color.WHITE)
+                            isAllCaps = false
+                            background = getButtonBg()
+                            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) }
+                        }
+                        btnRow.addView(cancelBtn)
+                        btnRow.addView(restoreBtn)
+                        addView(btnRow)
+                    }
+
+                    val dlg = AlertDialog.Builder(ctx).setView(container).create()
+                    setupCustomDialog(dlg, container)
+
+                    val btnRow = container.getChildAt(2) as LinearLayout
+                    val cancelBtn = btnRow.getChildAt(0) as Button
+                    val restoreBtn = btnRow.getChildAt(1) as Button
+
+                    cancelBtn.setOnClickListener { dlg.dismiss() }
+                    restoreBtn.setOnClickListener {
+                        val editor = sharedPref.edit()
+                        val keys = parsedJson.keys()
+                        while (keys.hasNext()) {
+                            val key = keys.next()
+                            when (val value = parsedJson.get(key)) {
+                                is Boolean -> editor.putBoolean(key, value)
+                                is String -> editor.putString(key, value)
+                                is Int -> editor.putInt(key, value)
+                            }
+                        }
+                        editor.apply()
+                        dlg.dismiss()
+
+                        val resContainer = LinearLayout(ctx).apply {
+                            orientation = LinearLayout.VERTICAL
+                            setPadding(40, 40, 40, 40)
+                            background = getDarkThemeBg()
+                            addView(TextView(ctx).apply {
+                                text = "Import Result"
+                                textSize = 18f
+                                setTextColor(Color.WHITE)
+                                typeface = android.graphics.Typeface.DEFAULT_BOLD
+                                setPadding(0, 0, 0, 20)
+                                gravity = android.view.Gravity.CENTER
+                            })
+                            addView(TextView(ctx).apply {
+                                text = "Restore completed successfully!\nPlease restart the app."
+                                setTextColor(Color.LTGRAY)
+                                textSize = 14f
+                                setPadding(0, 0, 0, 30)
+                            })
+                            addView(Button(ctx).apply {
+                                text = "OK"
+                                setTextColor(Color.WHITE)
+                                isAllCaps = false
+                                background = getButtonBg()
+                            })
+                        }
+                        val resultDlg = AlertDialog.Builder(ctx).setView(resContainer).create()
+                        setupCustomDialog(resultDlg, resContainer)
+                        resContainer.findViewById<Button>(resContainer.childCount - 1).setOnClickListener {
+                            resultDlg.dismiss()
+                            dismiss()
+                        }
+                        resultDlg.show()
+                    }
                     dlg.show()
-                    configureDialogWindow(dlg)
 
                 } catch (e: Exception) {
                     e.printStackTrace()
-                    val errDlg = AlertDialog.Builder(ctx, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                        .setTitle("Invalid Backup Data")
-                        .setMessage("No valid backup data found in your clipboard.\n\nPlease copy the exact backup text and try again.")
-                        .setPositiveButton("OK", null)
-                        .create()
-                    applyDarkThemeToDialog(errDlg)
+                    val errContainer = LinearLayout(ctx).apply {
+                        orientation = LinearLayout.VERTICAL
+                        setPadding(40, 40, 40, 40)
+                        background = getDarkThemeBg()
+                        addView(TextView(ctx).apply {
+                            text = "Invalid Backup Data"
+                            textSize = 18f
+                            setTextColor(Color.WHITE)
+                            typeface = android.graphics.Typeface.DEFAULT_BOLD
+                            setPadding(0, 0, 0, 20)
+                            gravity = android.view.Gravity.CENTER
+                        })
+                        addView(TextView(ctx).apply {
+                            text = "No valid backup data found in your clipboard.\n\nPlease copy the exact backup text and try again."
+                            setTextColor(Color.LTGRAY)
+                            textSize = 14f
+                            setPadding(0, 0, 0, 30)
+                        })
+                        addView(Button(ctx).apply {
+                            text = "OK"
+                            setTextColor(Color.WHITE)
+                            isAllCaps = false
+                            background = getButtonBg()
+                        })
+                    }
+                    val errDlg = AlertDialog.Builder(ctx).setView(errContainer).create()
+                    setupCustomDialog(errDlg, errContainer)
+                    errContainer.findViewById<Button>(errContainer.childCount - 1).setOnClickListener { errDlg.dismiss() }
                     errDlg.show()
-                    configureDialogWindow(errDlg)
                 }
             }
         }
@@ -449,70 +559,28 @@ class SettingsBottomFragment(
         }
 
         addlinks.setOnClickListener {
-            val dialogView = getLayout("addlinks", inflater, container)
-            val etName = try { dialogView.findView<EditText>("etName") } catch (t: Throwable) { null }
-            val etLink = try { dialogView.findView<EditText>("etLink") } catch (t: Throwable) { null }
-
-            if (etName == null || etLink == null) return@setOnClickListener
-
-            val dlg = AlertDialog.Builder(requireContext(), android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setView(dialogView)
-                .setPositiveButton("Save", null)
-                .setNegativeButton("Cancel", null)
-                .create()
-            
-            applyDarkThemeToDialog(dlg)
-
-            dlg.setOnShowListener {
-                configureDialogWindow(dlg)
-                dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                    val name = etName.text.toString().trim()
-                    val link = etLink.text.toString().trim()
-                    val type = "StremioC"
-
-                    if (link.isEmpty()) { showToast("Please enter a link"); return@setOnClickListener }
-
-                    val valid = try {
-                        val uri = link.toUri()
-                        val scheme = uri.scheme?.lowercase()
-                        scheme == "http" || scheme == "https"
-                    } catch (_: Exception) { false }
-
-                    if (!valid) { showToast("Enter a valid URL (http/https)"); return@setOnClickListener }
-
-                    val item = LinkItem(name = name.ifBlank { link }, link = link, type = type)
-                    try {
-                        val list = SettingsRepository.loadLinks(sharedPref)
-                        list.add(0, item)
-                        SettingsRepository.saveLinks(sharedPref, list)
-                        Toast.makeText(requireContext(), "Link saved", Toast.LENGTH_SHORT).show()
-                        dlg.dismiss()
-                    } catch (e: Throwable) { e.printStackTrace(); showToast("Failed to save link") }
-                }
-            }
-            dlg.show()
+            showLinkEditorDialog(false, null, -1, null)
         }
 
         showlinks.setOnClickListener {
-            val dialogView = getLayout("dialog_list_links", inflater, container)
-            val dlg = AlertDialog.Builder(requireContext(), android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setView(dialogView)
-                .setPositiveButton("Close", null)
-                .create()
+            val ctx = requireContext()
+            val inflater = LayoutInflater.from(ctx)
+            val dialogView = getLayout("dialog_list_links", inflater, null) as LinearLayout
             
-            applyDarkThemeToDialog(dlg)
-
+            dialogView.background = getDarkThemeBg()
+            dialogView.setPadding(40, 40, 40, 40)
+            
             val rv: RecyclerView = dialogView.findView("rvLinks")
             val tvNoLinks: TextView = dialogView.findView("tvNoLinks")
+            
             val list = SettingsRepository.loadLinks(sharedPref)
-
             if (list.isEmpty()) {
                 tvNoLinks.visibility = View.VISIBLE
                 rv.visibility = View.GONE
             } else {
                 tvNoLinks.visibility = View.GONE
                 rv.visibility = View.VISIBLE
-                rv.layoutManager = LinearLayoutManager(requireContext())
+                rv.layoutManager = LinearLayoutManager(ctx)
 
                 val adapter = LinksAdapter(
                     items = list,
@@ -531,22 +599,75 @@ class SettingsBottomFragment(
                         }
                     },
                     onEdit = { itemToEdit, position ->
-                        val choices = arrayOf("Edit Link Info", "Configure Catalogs & Genres")
-                        val editDlg = AlertDialog.Builder(requireContext(), android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                            .setTitle(itemToEdit.name)
-                            .setItems(choices) { _, which ->
-                                if (which == 0) showEditDialog(itemToEdit, position, rv)
-                                else showCatalogConfigDialog(itemToEdit)
-                            }.create()
-                        applyDarkThemeToDialog(editDlg)
-                        editDlg.show()
-                        configureDialogWindow(editDlg)
+                        val choiceContainer = LinearLayout(ctx).apply {
+                            orientation = LinearLayout.VERTICAL
+                            setPadding(40, 40, 40, 40)
+                            background = getDarkThemeBg()
+                        }
+                        
+                        choiceContainer.addView(TextView(ctx).apply {
+                            text = itemToEdit.name
+                            textSize = 18f
+                            typeface = android.graphics.Typeface.DEFAULT_BOLD
+                            setTextColor(Color.WHITE)
+                            setPadding(0, 0, 0, 30)
+                            gravity = android.view.Gravity.CENTER
+                        })
+
+                        val optEdit = Button(ctx).apply {
+                            text = "Edit Link Info"
+                            setTextColor(Color.WHITE)
+                            isAllCaps = false
+                            background = getButtonBg()
+                            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, 15) }
+                        }
+                        
+                        val optCatalog = Button(ctx).apply {
+                            text = "Configure Catalogs & Genres"
+                            setTextColor(Color.WHITE)
+                            isAllCaps = false
+                            background = getButtonBg()
+                            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                        }
+                        
+                        choiceContainer.addView(optEdit)
+                        choiceContainer.addView(optCatalog)
+
+                        val choiceDlg = AlertDialog.Builder(ctx).setView(choiceContainer).create()
+                        choiceDlg.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+                        
+                        optEdit.setOnClickListener {
+                            choiceDlg.dismiss()
+                            showLinkEditorDialog(true, itemToEdit, position, rv)
+                        }
+                        optCatalog.setOnClickListener {
+                            choiceDlg.dismiss()
+                            showCatalogConfigDialog(itemToEdit)
+                        }
+                        choiceDlg.show()
                     }
                 )
                 rv.adapter = adapter
             }
+
+            val footer = LinearLayout(ctx).apply {
+                orientation = LinearLayout.HORIZONTAL
+                setPadding(0, 20, 0, 0)
+            }
+            val closeBtn = Button(ctx).apply {
+                text = "Close"
+                setTextColor(Color.WHITE)
+                isAllCaps = false
+                background = getButtonBg()
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            }
+            footer.addView(closeBtn)
+            dialogView.addView(footer)
+
+            val dlg = AlertDialog.Builder(ctx).setView(dialogView).create()
+            setupCustomDialog(dlg, dialogView)
+            closeBtn.setOnClickListener { dlg.dismiss() }
             dlg.show()
-            configureDialogWindow(dlg)
         }
 
         saveIcon.setOnClickListener {
@@ -564,18 +685,149 @@ class SettingsBottomFragment(
                 putString(SettingsRepository.PREF_KEY_CUSTOM_POSTER_URL, etCustomPosterUrl.text.toString().trim())
             }
 
-            val dlg = AlertDialog.Builder(context, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setTitle("Save & Reload")
-                .setMessage("Changes have been saved. Do you want to restart the app to apply them?")
-                .setPositiveButton("Yes") { _, _ -> dismiss(); restartApp() }
-                .setNegativeButton("No", null)
-                .create()
-            applyDarkThemeToDialog(dlg)
+            val container = LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(40, 40, 40, 40)
+                background = getDarkThemeBg()
+                addView(TextView(context).apply {
+                    text = "Save & Reload"
+                    textSize = 18f
+                    setTextColor(Color.WHITE)
+                    typeface = android.graphics.Typeface.DEFAULT_BOLD
+                    setPadding(0, 0, 0, 20)
+                    gravity = android.view.Gravity.CENTER
+                })
+                addView(TextView(context).apply {
+                    text = "Changes have been saved. Do you want to restart the app to apply them?"
+                    setTextColor(Color.LTGRAY)
+                    textSize = 14f
+                    setPadding(0, 0, 0, 30)
+                })
+                val btnRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
+                val cancelBtn = Button(context).apply {
+                    text = "No"
+                    setTextColor(Color.WHITE)
+                    isAllCaps = false
+                    background = getButtonBg()
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) }
+                }
+                val restartBtn = Button(context).apply {
+                    text = "Yes"
+                    setTextColor(Color.WHITE)
+                    isAllCaps = false
+                    background = getButtonBg()
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) }
+                }
+                btnRow.addView(cancelBtn)
+                btnRow.addView(restartBtn)
+                addView(btnRow)
+            }
+
+            val dlg = AlertDialog.Builder(context).setView(container).create()
+            setupCustomDialog(dlg, container)
+
+            val btnRow = container.getChildAt(2) as LinearLayout
+            val cancelBtn = btnRow.getChildAt(0) as Button
+            val restartBtn = btnRow.getChildAt(1) as Button
+
+            cancelBtn.setOnClickListener { dlg.dismiss() }
+            restartBtn.setOnClickListener { dismiss(); restartApp() }
             dlg.show()
-            configureDialogWindow(dlg)
         }
 
         return view
+    }
+
+    private fun showLinkEditorDialog(isEdit: Boolean, itemToEdit: LinkItem?, position: Int, rv: RecyclerView?) {
+        val ctx = requireContext()
+        val inflater = LayoutInflater.from(ctx)
+        val dialogView = getLayout("addlinks", inflater, null) as LinearLayout
+        
+        dialogView.background = getDarkThemeBg()
+        dialogView.setPadding(40, 40, 40, 40)
+        
+        val titleTv = dialogView.getChildAt(0) as? TextView
+        if (titleTv != null) {
+            titleTv.text = if (isEdit) "Edit Link" else "Add Link"
+            titleTv.setTextColor(Color.WHITE)
+            titleTv.textSize = 20f
+            titleTv.typeface = android.graphics.Typeface.DEFAULT_BOLD
+            titleTv.gravity = android.view.Gravity.CENTER
+        }
+        
+        val etName = try { dialogView.findView<EditText>("etName") } catch (t: Throwable) { null }
+        val etLink = try { dialogView.findView<EditText>("etLink") } catch (t: Throwable) { null }
+        
+        etName?.background = getButtonBg()
+        etName?.setTextColor(Color.WHITE)
+        etName?.setHintTextColor(Color.GRAY)
+        etName?.setPadding(25, 20, 25, 20)
+        if (isEdit) etName?.setText(itemToEdit?.name)
+        
+        etLink?.background = getButtonBg()
+        etLink?.setTextColor(Color.WHITE)
+        etLink?.setHintTextColor(Color.GRAY)
+        etLink?.setPadding(25, 20, 25, 20)
+        if (isEdit) etLink?.setText(itemToEdit?.link)
+
+        val footer = LinearLayout(ctx).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 30, 0, 0)
+        }
+        val saveBtn = Button(ctx).apply {
+            text = if (isEdit) "Update" else "Save"
+            setTextColor(Color.WHITE)
+            isAllCaps = false
+            background = getButtonBg()
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) }
+        }
+        val cancelBtn = Button(ctx).apply {
+            text = "Cancel"
+            setTextColor(Color.WHITE)
+            isAllCaps = false
+            background = getButtonBg()
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) }
+        }
+        footer.addView(cancelBtn)
+        footer.addView(saveBtn)
+        dialogView.addView(footer)
+
+        val dlg = AlertDialog.Builder(ctx).setView(dialogView).create()
+        setupCustomDialog(dlg, dialogView)
+
+        saveBtn.setOnClickListener {
+            if (etName == null || etLink == null) return@setOnClickListener
+            val name = etName.text.toString().trim()
+            val link = etLink.text.toString().trim()
+            val type = "StremioC"
+
+            if (link.isEmpty()) { showToast("Please enter a link"); return@setOnClickListener }
+            val valid = try { val uri = link.toUri(); val scheme = uri.scheme?.lowercase(); scheme == "http" || scheme == "https" } catch (_: Exception) { false }
+            if (!valid) { showToast("Enter a valid URL (http/https)"); return@setOnClickListener }
+
+            if (isEdit && itemToEdit != null) {
+                val updatedList = SettingsRepository.loadLinks(sharedPref)
+                val indexInDb = updatedList.indexOfFirst { it.id == itemToEdit.id }
+                if (indexInDb != -1) {
+                    val newItem = itemToEdit.copy(name = name.ifBlank { link }, link = link, type = type)
+                    updatedList[indexInDb] = newItem
+                    SettingsRepository.saveLinks(sharedPref, updatedList)
+                    (rv?.adapter as? LinksAdapter)?.updateItem(newItem, position)
+                    showToast("Link Updated Successfully")
+                }
+            } else {
+                val item = LinkItem(name = name.ifBlank { link }, link = link, type = type)
+                try {
+                    val list = SettingsRepository.loadLinks(sharedPref)
+                    list.add(0, item)
+                    SettingsRepository.saveLinks(sharedPref, list)
+                    Toast.makeText(ctx, "Link saved", Toast.LENGTH_SHORT).show()
+                } catch (e: Throwable) { e.printStackTrace(); showToast("Failed to save link") }
+            }
+            dlg.dismiss()
+        }
+        cancelBtn.setOnClickListener { dlg.dismiss() }
+        dlg.show()
     }
 
     private fun showLanguageSelectDialog() {
@@ -587,19 +839,26 @@ class SettingsBottomFragment(
 
         val container = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(40, 30, 40, 30)
+            setPadding(40, 40, 40, 40)
+            background = getDarkThemeBg()
         }
+
+        container.addView(TextView(context).apply {
+            text = "Select TMDB Language"
+            textSize = 20f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, 0, 30)
+            gravity = android.view.Gravity.CENTER
+        })
 
         val searchBar = EditText(context).apply {
             hint = "Search language..."
-            setHintTextColor(android.graphics.Color.GRAY)
-            setTextColor(android.graphics.Color.WHITE)
+            setHintTextColor(Color.GRAY)
+            setTextColor(Color.WHITE)
             textSize = 15f
-            setPadding(20, 20, 20, 20)
-            background = android.graphics.drawable.GradientDrawable().apply {
-                setColor(android.graphics.Color.parseColor("#151515"))
-                cornerRadius = 10f
-            }
+            setPadding(25, 20, 25, 20)
+            background = getButtonBg()
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
                 setMargins(0, 0, 0, 20)
             }
@@ -608,21 +867,9 @@ class SettingsBottomFragment(
 
         val rv = RecyclerView(context).apply {
             layoutManager = LinearLayoutManager(context)
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 800)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 600)
         }
         container.addView(rv)
-
-        val langDialog = AlertDialog.Builder(context, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("Select TMDB Language")
-            .setView(container)
-            .setPositiveButton("Apply") { _, _ ->
-                sharedPref.edit { putString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, selectedCode) }
-                Toast.makeText(context, "Language set to $selectedCode ($selectedLangName)", Toast.LENGTH_SHORT).show()
-            }
-            .setNegativeButton("Cancel", null)
-            .create()
-            
-        applyDarkThemeToDialog(langDialog)
 
         class LangAdapter : RecyclerView.Adapter<LangAdapter.VH>() {
             var filteredList = languages
@@ -645,7 +892,7 @@ class SettingsBottomFragment(
                 val tvCheck = TextView(context).apply {
                     text = "✓"
                     textSize = 16f
-                    setTextColor(android.graphics.Color.parseColor("#2196F3"))
+                    setTextColor(Color.parseColor("#2196F3"))
                     setPadding(10, 0, 10, 0)
                 }
                 rowLayout.addView(tvName)
@@ -658,7 +905,7 @@ class SettingsBottomFragment(
                 
                 val isSelected = code == selectedCode
                 holder.tvName.text = langName
-                holder.tvName.setTextColor(if (isSelected) android.graphics.Color.parseColor("#2196F3") else android.graphics.Color.WHITE)
+                holder.tvName.setTextColor(if (isSelected) Color.parseColor("#2196F3") else Color.WHITE)
                 holder.tvCheck.visibility = if (isSelected) View.VISIBLE else View.GONE
                 
                 holder.view.setOnClickListener {
@@ -683,19 +930,57 @@ class SettingsBottomFragment(
             override fun afterTextChanged(s: android.text.Editable?) {}
         })
 
+        val footer = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 30, 0, 0)
+        }
+        val applyBtn = Button(context).apply {
+            text = "Apply"
+            setTextColor(Color.WHITE)
+            isAllCaps = false
+            background = getButtonBg()
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) }
+        }
+        val cancelBtn = Button(context).apply {
+            text = "Cancel"
+            setTextColor(Color.WHITE)
+            isAllCaps = false
+            background = getButtonBg()
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) }
+        }
+        footer.addView(cancelBtn)
+        footer.addView(applyBtn)
+        container.addView(footer)
+
+        val langDialog = AlertDialog.Builder(context).setView(container).create()
+        setupCustomDialog(langDialog, container)
+
+        applyBtn.setOnClickListener {
+            sharedPref.edit { putString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, selectedCode) }
+            Toast.makeText(context, "Language set to $selectedCode ($selectedLangName)", Toast.LENGTH_SHORT).show()
+            langDialog.dismiss()
+        }
+        cancelBtn.setOnClickListener { langDialog.dismiss() }
         langDialog.show()
-        configureDialogWindow(langDialog)
     }
 
     private fun showCatalogConfigDialog(item: LinkItem) {
         val context = requireContext()
-        val progressDialog = AlertDialog.Builder(context, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setMessage("Loading Stremio Addon Manifest...")
-            .setCancelable(false)
-            .create()
-        applyDarkThemeToDialog(progressDialog)
+        
+        val progressContainer = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(40, 40, 40, 40)
+            background = getDarkThemeBg()
+            addView(TextView(context).apply {
+                text = "Loading Stremio Addon Manifest..."
+                setTextColor(Color.WHITE)
+                textSize = 16f
+                gravity = android.view.Gravity.CENTER
+            })
+        }
+        val progressDialog = AlertDialog.Builder(context).setView(progressContainer).setCancelable(false).create()
+        setupCustomDialog(progressDialog, progressContainer)
         progressDialog.show()
-        configureDialogWindow(progressDialog)
 
         viewLifecycleOwner.lifecycleScope.launch {
             val manifestText = withContext(Dispatchers.IO) {
@@ -715,7 +1000,6 @@ class SettingsBottomFragment(
 
             val flatTabs = mutableListOf<ConfigFlatTab>()
             try {
-                // 🔥 [V4 패치] StremioC에서 제거된 Jackson 대신 Gson 파서로 매니페스트 트리 탐색 치환 완료!
                 val node = JsonParser.parseString(manifestText).asJsonObject
                 val catsNode = node.get("catalogs")?.takeIf { it.isJsonArray }?.asJsonArray
                 
@@ -736,7 +1020,6 @@ class SettingsBottomFragment(
                             found
                         } ?: false
 
-                        // 🔥 [V4.1.4 패치] 장르 선택이 필수인 카탈로그도 하위 장르를 일괄 제어할 마스터 스위치를 제공하기 위해 설정 목록 구성 시 마스터 탭 항목을 항상 생성하도록 변경
                         flatTabs.add(ConfigFlatTab("${id}_${type}_default", "$name - $displayType", false, "${id}_${type}"))
 
                         val genres = mutableListOf<String>()
@@ -788,27 +1071,34 @@ class SettingsBottomFragment(
             val idx = orderedKeys.indexOf(tab.key)
             if (idx != -1) idx else Int.MAX_VALUE
         }
-        // 🔥 [V4.1.6 패치] 초기 로딩 시에도 체크 활성화된 항목이 최상단 그룹에 위치하도록 분할 및 병합 정렬 적용
         val checkedInit = sortedTabs.filter { prefs.getBoolean("tab_enabled_${uniqueId}_${it.key}", true) }
         val uncheckedInit = sortedTabs.filter { !prefs.getBoolean("tab_enabled_${uniqueId}_${it.key}", true) }
         val masterTabs = (checkedInit + uncheckedInit).toMutableList()
 
         val dialogContainer = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
-            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            setPadding(25, 40, 25, 30)
+            background = getDarkThemeBg()
         }
+
+        val titleView = TextView(context).apply {
+            text = "$addonName - Catalog Settings"
+            textSize = 20f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+            setPadding(0, 0, 0, 30)
+            gravity = android.view.Gravity.CENTER
+        }
+        dialogContainer.addView(titleView)
 
         val rv = RecyclerView(context).apply {
             layoutManager = LinearLayoutManager(context)
-            // 🔥 키보드 축소 대응 버그 픽스: 0dp, 가중치 1f
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f).apply {
                 setMargins(0, 0, 0, 20)
             }
-            setPadding(30, 20, 30, 20)
             isVerticalFadingEdgeEnabled = true
             setFadingEdgeLength(120)
         }
-
         dialogContainer.addView(rv)
 
         class CatalogAdapter : RecyclerView.Adapter<CatalogAdapter.VH>() {
@@ -827,42 +1117,43 @@ class SettingsBottomFragment(
                 val layout = LinearLayout(context).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = android.view.Gravity.CENTER_VERTICAL
-                    setPadding(0, 15, 0, 15)
-                    layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                    setPadding(10, 8, 10, 8)
+                    background = getCardBg()
+                    layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                        setMargins(0, 5, 0, 5)
+                    }
                 }
                 val dragHandle = ImageView(context).apply {
                     setImageResource(android.R.drawable.ic_menu_sort_by_size)
-                    setPadding(20, 0, 30, 0)
+                    setPadding(10, 0, 20, 0)
                 }
                 
-                // 🔥 [V4.1.5 패치] 구버전의 고속 점프 정렬용 번호 입력 텍스트박스 추가 이식
                 val etOrder = EditText(context).apply {
-                    inputType = android.text.InputType.TYPE_CLASS_NUMBER
-                    imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
-                    setTextColor(android.graphics.Color.WHITE)
+                    inputType = InputType.TYPE_CLASS_NUMBER
+                    imeOptions = EditorInfo.IME_ACTION_DONE
+                    setTextColor(Color.WHITE)
                     textSize = 12f
                     setPadding(10, 10, 10, 10)
-                    background = android.graphics.drawable.GradientDrawable().apply {
-                        setColor(android.graphics.Color.parseColor("#151515"))
-                        cornerRadius = 10f
-                    }
+                    background = getButtonBg()
                     gravity = android.view.Gravity.CENTER
                     layoutParams = LinearLayout.LayoutParams(90, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
                         setMargins(0, 0, 15, 0)
                     }
                     setOnClickListener {
                         requestFocus()
-                        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
-                        imm.showSoftInput(this, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+                        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                        imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
                     }
                 }
                 
                 val checkbox = CheckBox(context).apply {
                     textSize = 15f
+                    setTextColor(Color.WHITE)
                     layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
                 }
                 val genreSwitch = Switch(context).apply {
                     text = "Genre"
+                    setTextColor(Color.WHITE)
                     textSize = 12f
                     setPadding(20, 0, 20, 0)
                 }
@@ -882,7 +1173,6 @@ class SettingsBottomFragment(
                 holder.checkbox.text = tab.displayName
                 holder.checkbox.setOnCheckedChangeListener { _, isChecked ->
                     prefs.edit().putBoolean(enabledKey, isChecked).apply()
-                    // 🔥 [V4.1.6 패치] 체크 토글 시 활성 항목은 상단으로, 비활성 항목은 하단 그룹으로 실시간 강제 재배치 정렬
                     val checkedTabs = masterTabs.filter { prefs.getBoolean("tab_enabled_${uniqueId}_${it.key}", true) }
                     val uncheckedTabs = masterTabs.filter { !prefs.getBoolean("tab_enabled_${uniqueId}_${it.key}", true) }
                     masterTabs.clear()
@@ -904,7 +1194,6 @@ class SettingsBottomFragment(
                     holder.genreSwitch.visibility = View.GONE
                 }
                 
-                // 🔥 [V4.1.5 패치] 번호 텍스트박스 바인딩 및 키보드 완료 이벤트 핸들러 이식
                 holder.etOrder.setOnFocusChangeListener(null)
                 holder.etOrder.setText((position + 1).toString())
                 
@@ -927,9 +1216,9 @@ class SettingsBottomFragment(
                 }
                 
                 holder.etOrder.setOnEditorActionListener { _, actionId, _ ->
-                    if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_DONE || actionId == android.view.inputmethod.EditorInfo.IME_ACTION_NEXT) {
+                    if (actionId == EditorInfo.IME_ACTION_DONE || actionId == EditorInfo.IME_ACTION_NEXT) {
                         holder.etOrder.clearFocus()
-                        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+                        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
                         imm.hideSoftInputFromWindow(holder.etOrder.windowToken, 0)
                         true
                     } else false
@@ -938,7 +1227,6 @@ class SettingsBottomFragment(
 
             override fun getItemCount() = visibleTabs.size
             
-            // 🔥 [V4.1.5 패치] 수동 번호 입력 직접 점프 이동 및 masterTabs 순서 동기화 비즈니스 로직
             fun shiftItemInRecyclerView(oldPos: Int, newOrder: Int) {
                 rv.post {
                     if (oldPos !in visibleTabs.indices) return@post
@@ -1013,21 +1301,48 @@ class SettingsBottomFragment(
         })
         touchHelper.attachToRecyclerView(rv)
 
-        val dialog = AlertDialog.Builder(context, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("$addonName - Catalog Settings")
-            .setView(dialogContainer)
-            .setPositiveButton("Save") { _, _ ->
-                val keysToSave = JSONArray()
-                masterTabs.forEach { keysToSave.put(it.key) }
-                prefs.edit().putString(orderKey, keysToSave.toString()).apply()
-                Toast.makeText(context, "Catalog settings saved. Reload to apply.", Toast.LENGTH_SHORT).show()
+        val footer = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 30, 0, 0)
+        }
+        val cancelBtn = Button(context).apply {
+            text = "Cancel"
+            setTextColor(Color.WHITE)
+            isAllCaps = false
+            background = getButtonBg()
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                setMargins(0, 0, 15, 0)
             }
-            .setNegativeButton("Cancel", null)
-            .create()
+        }
+        val saveBtn = Button(context).apply {
+            text = "Save"
+            setTextColor(Color.WHITE)
+            isAllCaps = false
+            background = getButtonBg()
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                setMargins(15, 0, 0, 0)
+            }
+        }
+        footer.addView(cancelBtn)
+        footer.addView(saveBtn)
+        dialogContainer.addView(footer)
 
-        applyDarkThemeToDialog(dialog)
+        val dialog = AlertDialog.Builder(context).setView(dialogContainer).create()
+        setupCustomDialog(dialog, dialogContainer)
+
+        saveBtn.setOnClickListener {
+            val keysToSave = JSONArray()
+            masterTabs.forEach { keysToSave.put(it.key) }
+            prefs.edit().putString(orderKey, keysToSave.toString()).apply()
+            Toast.makeText(context, "Catalog settings saved. Reload to apply.", Toast.LENGTH_SHORT).show()
+            dialog.dismiss()
+        }
+
+        cancelBtn.setOnClickListener {
+            dialog.dismiss()
+        }
+
         dialog.show()
-        configureDialogWindow(dialog)
     }
 
     private fun String.capitalizeFirstLocal(): String = if (this.isNotEmpty()) this.substring(0, 1).uppercase() + this.substring(1) else this
@@ -1050,53 +1365,6 @@ class SettingsBottomFragment(
                 showToast("$displayName Integration " + if (isChecked) "Enabled" else "Disabled")
             }
         } catch (e: Throwable) { e.printStackTrace() }
-    }
-
-    private fun showEditDialog(itemToEdit: LinkItem, position: Int, rv: RecyclerView) {
-        val dialogView = getLayout("addlinks", LayoutInflater.from(requireContext()), null)
-        val etName = try { dialogView.findView<EditText>("etName") } catch (t: Throwable) { null }
-        val etLink = try { dialogView.findView<EditText>("etLink") } catch (t: Throwable) { null }
-        
-        if (etName == null || etLink == null) return
-
-        etName.setText(itemToEdit.name)
-        etLink.setText(itemToEdit.link)
-
-        val dlg = AlertDialog.Builder(requireContext(), android.R.style.Theme_DeviceDefault_Dialog_Alert)
-            .setTitle("Edit Link")
-            .setView(dialogView)
-            .setPositiveButton("Update", null)
-            .setNegativeButton("Cancel", null)
-            .create()
-
-        applyDarkThemeToDialog(dlg)
-
-        dlg.setOnShowListener {
-            configureDialogWindow(dlg)
-            dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                val name = etName.text.toString().trim()
-                val link = etLink.text.toString().trim()
-                val type = "StremioC"
-
-                if (link.isEmpty() || !(link.startsWith("http://") || link.startsWith("https://"))) {
-                    showToast("Enter a valid URL (http/https)")
-                    return@setOnClickListener
-                }
-
-                val updatedList = SettingsRepository.loadLinks(sharedPref)
-                val indexInDb = updatedList.indexOfFirst { it.id == itemToEdit.id }
-                
-                if (indexInDb != -1) {
-                    val newItem = itemToEdit.copy(name = name.ifBlank { link }, link = link, type = type)
-                    updatedList[indexInDb] = newItem
-                    SettingsRepository.saveLinks(sharedPref, updatedList)
-                    (rv.adapter as? LinksAdapter)?.updateItem(newItem, position)
-                    showToast("Link Updated Successfully")
-                }
-                dlg.dismiss()
-            }
-        }
-        dlg.show()
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {}
