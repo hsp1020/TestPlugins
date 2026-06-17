@@ -81,7 +81,8 @@ object UltimaEvoSyncManager {
                 async(Dispatchers.IO) {
                     semaphore.withPermit {
                         try {
-                            withTimeoutOrNull(15000L) {
+                            // 🔥 타임아웃 15초 -> 30초 연장
+                            withTimeoutOrNull(30000L) {
                                 val reqName = provider.mainPage.firstOrNull()?.name ?: "Home"
                                 val reqData = provider.mainPage.firstOrNull()?.data ?: ""
                                 val response = provider.getMainPage(1, MainPageRequest(reqName, reqData, false))
@@ -160,14 +161,12 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
 
             val pages = mutableListOf<Pair<MainPageData, Int>>()
 
-            // 1. JSON에 수동으로 예쁘게 저장된 설정 로드 (O(1) 속도)
             val activeCatsJson = prefs.getString("evo_active_cats_json_$instanceId", "") ?: ""
             val listType = object : TypeToken<List<EvoCatalogConfig>>() {}.type
             val savedConfigs: List<EvoCatalogConfig> = if (activeCatsJson.isNotBlank()) {
                 try { UltimaEvoPlugin.gson.fromJson(activeCatsJson, listType) ?: emptyList() } catch (e: Exception) { emptyList() }
             } else emptyList()
 
-            // 식별용 셋(Set) 생성
             val savedSet = savedConfigs.map { "${it.providerName}:::${it.originalCatalogName}" }.toSet()
 
             savedConfigs.forEach { config ->
@@ -175,8 +174,6 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
                 pages.add(Pair(MainPageData(config.customCatalogName, combinedData), config.orderIndex))
             }
 
-            // 2. 🔥 [버그 픽스] 수석님 지시 반영: Auto-Add 동적(Dynamic) 로드 로직 완벽 부활!
-            // JSON에 아직 저장되지 않은 새로운 카탈로그가 백그라운드에서 감지되었을 때 자동으로 화면 맨 밑에 붙여줍니다.
             var dynamicOrder = 10000 
             val targetProviders = APIHolder.allProviders.filter { !it.mainUrl.startsWith("ultima_evo") }
 
@@ -188,7 +185,6 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
                     val combinedCats = (staticCats + dynamicCats).filter { it.isNotBlank() }.distinct()
 
                     for (cName in combinedCats) {
-                        // JSON 저장소에 없는 완전히 새로운 카탈로그인 경우만 검사
                         if (!savedSet.contains("${p.name}:::$cName")) {
                             val isEnabled = prefs.getBoolean("cat_toggle_${instanceId}_${p.name}_$cName", true)
                             if (isEnabled) {
@@ -219,7 +215,8 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
 
                 val originalRequest = MainPageRequest(request.name, config.originalData, request.horizontalImages)
                 
-                val response = withTimeoutOrNull(15000L) {
+                // 🔥 타임아웃 15초 -> 30초 연장 (CUTV의 웹뷰 인증이 끝날 때까지 기다려줌)
+                val response = withTimeoutOrNull(30000L) {
                     targetProvider.getMainPage(page, originalRequest)
                 } ?: return@withContext newHomePageResponse(emptyList(), false)
                 
@@ -253,7 +250,6 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
                     if (e is CancellationException) throw e
                 }
             }
-            // 1:1 매칭 Fail-Fast! 쓰레기 도메인 폴백 싹 다 날림.
             null
         }
     }
@@ -285,7 +281,8 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
                 async<List<SearchResponse>>(Dispatchers.IO) {
                     semaphore.withPermit {
                         try {
-                            withTimeoutOrNull(15000L) {
+                            // 🔥 타임아웃 15초 -> 30초 연장
+                            withTimeoutOrNull(30000L) {
                                 provider.search(query) ?: emptyList()
                             } ?: emptyList()
                         } catch (e: Exception) {
