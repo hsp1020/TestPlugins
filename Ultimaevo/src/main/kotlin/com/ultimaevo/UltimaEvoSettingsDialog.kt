@@ -1,3 +1,4 @@
+// 파일명: hsp1020/ultimaevo/UltimaEvoSettingsDialog.kt
 package com.ultimaevo
 
 import android.app.AlertDialog
@@ -13,7 +14,6 @@ import android.os.SystemClock
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
-import android.util.Base64
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
@@ -41,7 +41,7 @@ import java.util.zip.GZIPOutputStream
 class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
     private var lastClickTime: Long = 0
-    private var activeAlertDialog: AlertDialog? = null
+    private var activeAlertDialog: AlertDialog? = null // 🔥 [누수 방지] 클래스 전역 수동 소멸 감시 필드 선언
 
     data class InstanceData(var originalId: Int, var name: String, var visibility: Boolean, var search: Boolean)
     private var maxIdGen = 1
@@ -52,6 +52,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
     private fun getButtonBg() = GradientDrawable().apply { setColor(Color.parseColor("#151515")); cornerRadius = 12f }
 
     private fun setupCustomDialog(dialog: AlertDialog, contentView: View) {
+        activeAlertDialog = dialog
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         dialog.setOnShowListener {
             dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
@@ -62,6 +63,12 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         (view.parent as? View)?.setBackgroundColor(Color.TRANSPARENT)
+    }
+
+    override fun onDestroyView() {
+        activeAlertDialog?.dismiss()
+        activeAlertDialog = null
+        super.onDestroyView()
     }
 
     private fun saveMemoryToPrefs(prefs: SharedPreferences) {
@@ -143,7 +150,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                             setTextColor(Color.WHITE)
                             typeface = android.graphics.Typeface.DEFAULT_BOLD
                             setPadding(0, 0, 0, 20)
-                            gravity = Gravity.CENTER
+                            gravity = android.view.Gravity.CENTER
                         })
                         container.addView(TextView(ctx).apply {
                             text = "Compressed backup data has been successfully copied to your clipboard.\n\nPlease paste it somewhere safe (e.g., Notes, Messenger)."
@@ -190,8 +197,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         val parsedJson = withContext(Dispatchers.IO) {
                             val decodedBytes = Base64.decode(clipboardText, Base64.NO_WRAP)
                             val jsonString = try {
-                                val bais = ByteArrayInputStream(decodedBytes)
-                                GZIPInputStream(bais).bufferedReader(Charsets.UTF_8).readText()
+                                val bais = java.io.ByteArrayInputStream(decodedBytes)
+                                java.util.zip.GZIPInputStream(bais).bufferedReader(Charsets.UTF_8).readText()
                             } catch (e: Exception) { String(decodedBytes, Charsets.UTF_8) }
                             JSONObject(jsonString)
                         }
@@ -209,7 +216,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                             setTextColor(Color.WHITE)
                             typeface = android.graphics.Typeface.DEFAULT_BOLD
                             setPadding(0, 0, 0, 20)
-                            gravity = Gravity.CENTER
+                            gravity = android.view.Gravity.CENTER
                         })
                         container.addView(TextView(ctx).apply {
                             text = "Valid compressed backup data found in clipboard!\n\nWarning: Restoring will overwrite settings.\nAre you sure you want to proceed?"
@@ -291,6 +298,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                             resultDlg.show()
                         }
                         dlg.show()
+
                     } catch (e: Exception) {
                         e.printStackTrace()
                         val errContainer = LinearLayout(ctx).apply {
@@ -412,7 +420,14 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
         class InstanceAdapter : RecyclerView.Adapter<InstanceAdapter.VH>() {
             inner class VH(val view: LinearLayout, val nameInput: EditText, val visSwitch: Switch, val searchSwitch: Switch, val configBtn: Button, val delBtn: Button) : RecyclerView.ViewHolder(view) {
-                var textWatcher: TextWatcher? = null 
+                var targetData: InstanceData? = null
+                init {
+                    nameInput.addTextChangedListener(object: TextWatcher {
+                        override fun afterTextChanged(s: Editable?) { targetData?.name = s.toString() }
+                        override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                        override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+                    })
+                }
             }
             
             override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
@@ -450,18 +465,9 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             override fun onBindViewHolder(holder: VH, position: Int) {
                 val data = instanceMemoryList[position]
                 
-                if (holder.textWatcher != null) {
-                    holder.nameInput.removeTextChangedListener(holder.textWatcher)
-                }
-                
+                holder.targetData = null // 🔥 [메모리 최적화] 스크롤 시 불필요 객체 생성 방지를 위해 참조 클리어
                 holder.nameInput.setText(data.name)
-                
-                holder.textWatcher = object: TextWatcher {
-                    override fun afterTextChanged(s: Editable?) { data.name = s.toString() }
-                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
-                }
-                holder.nameInput.addTextChangedListener(holder.textWatcher)
+                holder.targetData = data // 새로운 데이터 주소 바인딩
                 
                 holder.visSwitch.setOnCheckedChangeListener(null)
                 holder.visSwitch.isChecked = data.visibility
@@ -601,7 +607,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): PVH {
                 val row = LinearLayout(ctx).apply { 
                     orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
                     setPadding(0, 15, 0, 15) 
                 }
                 val tv = TextView(ctx).apply { 
@@ -678,7 +684,14 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         
         class CatalogAdapter : RecyclerView.Adapter<CatalogAdapter.CVH>() {
             inner class CVH(val view: LinearLayout, val dragHandle: ImageView, val cb: CheckBox, val etOrder: EditText, val tvSource: TextView, val etRename: EditText) : RecyclerView.ViewHolder(view) {
-                var textWatcher: TextWatcher? = null 
+                var targetData: CatalogData? = null
+                init {
+                    etRename.addTextChangedListener(object: TextWatcher {
+                        override fun afterTextChanged(s: Editable?) { targetData?.customName = s.toString() }
+                        override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                        override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+                    })
+                }
             }
             override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): CVH {
                 val row = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(10, 8, 10, 8); background = getCardBg(); layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 5, 0, 5) } }
@@ -721,20 +734,11 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 val data = catalogList[position]
                 holder.tvSource.text = data.providerName
                 
-                if (holder.textWatcher != null) {
-                    holder.etRename.removeTextChangedListener(holder.textWatcher)
-                }
-
+                holder.targetData = null // 🔥 [메모리 최적화] 스크롤 시 불필요 객체 생성 방지를 위해 참조 클리어
                 holder.etRename.setText(data.customName)
                 holder.etRename.isEnabled = data.isChecked
+                holder.targetData = data // 새로운 데이터 주소 바인딩
                 
-                holder.textWatcher = object: TextWatcher {
-                    override fun afterTextChanged(s: Editable?) { data.customName = s.toString() }
-                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
-                }
-                holder.etRename.addTextChangedListener(holder.textWatcher)
-
                 holder.cb.setOnCheckedChangeListener(null)
                 holder.cb.isChecked = data.isChecked
                 
