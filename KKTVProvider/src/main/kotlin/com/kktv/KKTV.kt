@@ -33,26 +33,21 @@ class CUTVProvider(private val sharedPref: SharedPreferences) : MainAPI() {
     private var cfCookies: String? = null
     private var cfUserAgent: String? = null
 
-    // SharedPreferences에 수동으로 저장된 우회 쿠키 가져오기
     private fun loadSavedCookies() {
         val savedCookies = sharedPref.getString("cf_cookies", null)
         val savedUA = sharedPref.getString("cf_user_agent", null)
         if (!savedCookies.isNullOrBlank()) {
             cfCookies = savedCookies
             cfUserAgent = savedUA ?: userAgent
-            println("[CUTV_DEBUG] SharedPreferences에서 우회 쿠키 로딩 성공: $cfCookies")
         }
     }
 
-    // UI 스레드에서 Toast 메시지 출력
     private fun showToastOnMain(message: String) {
         try {
             Handler(Looper.getMainLooper()).post {
                 com.lagradost.cloudstream3.CommonActivity.showToast(message)
             }
-        } catch (e: Exception) {
-            println("[CUTV_DEBUG] Toast 출력 실패: ${e.message}")
-        }
+        } catch (e: Exception) {}
     }
 
     private fun getHeaders(referer: String? = null): Map<String, String> {
@@ -63,12 +58,8 @@ class CUTVProvider(private val sharedPref: SharedPreferences) : MainAPI() {
             "Accept-Language" to "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
             "Upgrade-Insecure-Requests" to "1"
         )
-        cfCookies?.let {
-            headers["Cookie"] = it
-        }
-        referer?.let {
-            headers["Referer"] = it
-        }
+        cfCookies?.let { headers["Cookie"] = it }
+        referer?.let { headers["Referer"] = it }
         return headers
     }
 
@@ -83,15 +74,12 @@ class CUTVProvider(private val sharedPref: SharedPreferences) : MainAPI() {
             "Sec-Fetch-Site" to "cross-site"
         )
         if (posterUrl.contains("cu-tv.com")) {
-            cfCookies?.let {
-                headers["Cookie"] = it
-            }
+            cfCookies?.let { headers["Cookie"] = it }
         }
         return headers
     }
 
-    private val defaultHeaders: Map<String, String>
-        get() = getHeaders()
+    private val defaultHeaders: Map<String, String> get() = getHeaders()
 
     private fun isCloudflareChallenge(html: String): Boolean {
         val lowerHtml = html.lowercase()
@@ -105,9 +93,7 @@ class CUTVProvider(private val sharedPref: SharedPreferences) : MainAPI() {
 
     private fun extractDomainFromStreamUrl(url: String): String? {
         var cleanUrl = url
-        if (cleanUrl.startsWith("EMBED#")) {
-            cleanUrl = cleanUrl.removePrefix("EMBED#")
-        }
+        if (cleanUrl.startsWith("EMBED#")) cleanUrl = cleanUrl.removePrefix("EMBED#")
         if (cleanUrl.contains("liveUrl=")) {
             try {
                 cleanUrl.substringAfter("liveUrl=").substringBefore("&").let {
@@ -118,27 +104,28 @@ class CUTVProvider(private val sharedPref: SharedPreferences) : MainAPI() {
         return try {
             val uri = Uri.parse(cleanUrl)
             uri.host
-        } catch (e: Exception) {
-            null
-        }
+        } catch (e: Exception) { null }
     }
 
-    // 보이지 않는 백그라운드 웹뷰를 통한 자동 우회 시도 (수동 우회가 안 되어있을 때의 폴백용)
+    // 우회 실패/쿠키 만료 시 홈 화면에 노출될 더미(에러 안내) 아이템
+    private fun getCookieErrorResponse(requestName: String): HomePageResponse {
+        val errorItem = newLiveSearchResponse(name = "쿠키를 최신화해주세요", url = mainUrl) {
+            this.posterUrl = "" // 썸네일을 빈 값으로 설정하여 Placeholder 작동 유도
+        }
+        return newHomePageResponse(
+            list = listOf(HomePageList(requestName, listOf(errorItem), isHorizontalImages = true)),
+            hasNext = false
+        )
+    }
+
     private suspend fun solveCloudflare(url: String): Pair<String, String>? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
         val context = try {
             Class.forName("android.app.ActivityThread")
                 .getMethod("currentApplication")
                 .invoke(null) as? android.content.Context
-        } catch (e: Exception) {
-            null
-        }
+        } catch (e: Exception) { null }
 
-        if (context == null) {
-            println("[CUTV_DEBUG] [Cloudflare Bypass] ERROR: Context를 획득하지 못했습니다.")
-            return@withContext null
-        }
-
-        println("[CUTV_DEBUG] [Cloudflare Bypass] 진입 -> URL: $url")
+        if (context == null) return@withContext null
 
         try {
             val cookieManager = CookieManager.getInstance()
@@ -148,88 +135,41 @@ class CUTVProvider(private val sharedPref: SharedPreferences) : MainAPI() {
 
         suspendCancellableCoroutine<Pair<String, String>?> { continuation ->
             val webView = WebView(context)
-            
             webView.settings.javaScriptEnabled = true
             webView.settings.domStorageEnabled = true
-            webView.settings.databaseEnabled = true
             webView.settings.userAgentString = userAgent
 
             webView.webViewClient = object : WebViewClient() {
                 var solved = false
-
                 override fun onPageFinished(view: WebView?, url: String?) {
                     super.onPageFinished(view, url)
                     if (url == null) return
-                    checkCookies(url)
-                }
-
-                fun checkCookies(currentUrl: String) {
                     if (solved) return
                     val cookieManager = CookieManager.getInstance()
-                    val cookies = cookieManager.getCookie(currentUrl) ?: ""
-
+                    val cookies = cookieManager.getCookie(url) ?: ""
                     if (cookies.contains("cf_clearance")) {
                         solved = true
-                        if (continuation.isActive) {
-                            continuation.resume(Pair(cookies, userAgent))
-                        }
-                        try {
-                            webView.stopLoading()
-                            webView.destroy()
-                        } catch (e: Exception) {}
+                        if (continuation.isActive) continuation.resume(Pair(cookies, userAgent))
+                        try { webView.stopLoading(); webView.destroy() } catch (e: Exception) {}
                     }
                 }
             }
-
             webView.loadUrl(url)
 
             val handler = Handler(Looper.getMainLooper())
             val timeoutRunnable = Runnable {
                 if (continuation.isActive) {
-                    val cookieManager = CookieManager.getInstance()
-                    val cookies = cookieManager.getCookie(url) ?: ""
-                    if (cookies.isNotBlank() && cookies.contains("cf_clearance")) {
-                        continuation.resume(Pair(cookies, userAgent))
-                    } else {
-                        continuation.resume(null)
-                    }
-                    try {
-                        webView.stopLoading()
-                        webView.destroy()
-                    } catch (e: Exception) {}
+                    val cookies = CookieManager.getInstance().getCookie(url) ?: ""
+                    if (cookies.contains("cf_clearance")) continuation.resume(Pair(cookies, userAgent))
+                    else continuation.resume(null)
+                    try { webView.stopLoading(); webView.destroy() } catch (e: Exception) {}
                 }
             }
             handler.postDelayed(timeoutRunnable, 15000)
 
-            val intervalRunnable = object : Runnable {
-                override fun run() {
-                    if (continuation.isActive) {
-                        webView.url?.let { currentUrl ->
-                            val cookieManager = CookieManager.getInstance()
-                            val cookies = cookieManager.getCookie(currentUrl) ?: ""
-                            if (cookies.contains("cf_clearance")) {
-                                handler.removeCallbacks(timeoutRunnable)
-                                continuation.resume(Pair(cookies, userAgent))
-                                try {
-                                    webView.stopLoading()
-                                    webView.destroy()
-                                } catch (e: Exception) {}
-                                return
-                            }
-                        }
-                        handler.postDelayed(this, 1500)
-                    }
-                }
-            }
-            handler.postDelayed(intervalRunnable, 1500)
-
             continuation.invokeOnCancellation {
                 handler.removeCallbacks(timeoutRunnable)
-                handler.removeCallbacks(intervalRunnable)
-                try {
-                    webView.stopLoading()
-                    webView.destroy()
-                } catch (e: Exception) {}
+                try { webView.stopLoading(); webView.destroy() } catch (e: Exception) {}
             }
         }
     }
@@ -239,12 +179,9 @@ class CUTVProvider(private val sharedPref: SharedPreferences) : MainAPI() {
         val items = mutableListOf<SearchResponse>()
         
         try {
-            // 1. SharedPreferences에 저장된 수동 우회 쿠키 우선 적재
             loadSavedCookies()
 
-            // 2. 수동 저장 쿠키가 없을 때만 자동 우회 시도 (백그라운드)
             if (cfCookies == null) {
-                println("[CUTV_DEBUG] [Cloudflare Bypass] 시작: 수동 쿠키가 없으므로 자동 우회 절차를 시도합니다.")
                 val cfResult = solveCloudflare(mainUrl)
                 if (cfResult != null) {
                     cfCookies = cfResult.first
@@ -254,46 +191,38 @@ class CUTVProvider(private val sharedPref: SharedPreferences) : MainAPI() {
 
             var doc = app.get(url, headers = defaultHeaders).document
 
-            // 3. 만약 챌린지가 다시 감지되면 수동 우회 쿠키 리로드 진행 및 안내 문구 활성화
             if (isCloudflareChallenge(doc.html())) {
-                println("[CUTV_DEBUG] [Cloudflare Bypass] Cloudflare 챌린지 감지됨.")
                 cfCookies = null
                 cfUserAgent = null
-                
-                loadSavedCookies() // SharedPreferences 재확인
+                loadSavedCookies()
                 
                 if (cfCookies == null) {
-                    // 수동 쿠키도 없으면 마지막으로 자동 우회 재시도
                     val cfResult = solveCloudflare(mainUrl)
                     if (cfResult != null) {
                         cfCookies = cfResult.first
                         cfUserAgent = cfResult.second
                         doc = app.get(url, headers = defaultHeaders).document
                     } else {
-                        // 모든 우회 실패 시 사용자에게 알림
-                        showToastOnMain("안전한 접근을 위해 확장 프로그램 설정 창(⚙️)에서 우회(체크박스 확인)를 진행해 주세요.")
-                        return newHomePageResponse(request.name, emptyList())
+                        showToastOnMain("설정(⚙️)에서 수동으로 '사람인지 확인하세요' 우회를 진행해 주세요.")
+                        // 우회 최종 실패 시 에러 아이템 노출
+                        return getCookieErrorResponse(request.name)
                     }
                 } else {
                     doc = app.get(url, headers = defaultHeaders).document
                 }
             }
 
-            println("[CUTV_DEBUG] === START CUTV 팩트 체크 디버깅 ===")
-            println("[CUTV_DEBUG] 접속 메인 URL: $url")
-            println("[CUTV_DEBUG] 메인 HTML 크기: ${doc.html().length}자")
-
             val iframeSrc = doc.select("iframe").mapNotNull { it.attr("src") }
                 .firstOrNull { it.contains("galaxy-stream") || it.contains("hudtv") || it.contains("cli") }
 
+            // iframe 파싱 실패 시에도 빈 리스트 대신 에러 아이템 노출
             if (iframeSrc.isNullOrBlank()) {
                 println("[CUTV_DEBUG] FAIL: iframeSrc를 찾을 수 없습니다.")
-                return newHomePageResponse(request.name, emptyList())
+                return getCookieErrorResponse(request.name)
             }
 
             val iframeHtml = app.get(iframeSrc, headers = defaultHeaders, referer = url).text
             
-            // 썸네일 베이스 URL 동적 추출
             var dynamicThumbBase = "" 
             val jsonRegex = """window\.galaxystream\.data2\s*=\s*'(.*?)';""".toRegex()
             val matchResult = jsonRegex.find(iframeHtml)
@@ -309,56 +238,35 @@ class CUTVProvider(private val sharedPref: SharedPreferences) : MainAPI() {
 
                 if (firstOncahotUrl != null) {
                     val extractedHost = extractDomainFromStreamUrl(firstOncahotUrl)
-                    if (!extractedHost.isNullOrBlank()) {
-                        dynamicThumbBase = "https://$extractedHost/thumbs"
-                    }
+                    if (!extractedHost.isNullOrBlank()) dynamicThumbBase = "https://$extractedHost/thumbs"
                 }
 
                 if (dynamicThumbBase.isBlank()) {
                     val hostRegex = """([a-zA-Z0-9.-]*oncahot\.com)""".toRegex(RegexOption.IGNORE_CASE)
                     val hostMatch = hostRegex.find(iframeHtml)
-                    if (hostMatch != null) {
-                        val cleanDomain = hostMatch.groupValues[1]
-                        dynamicThumbBase = "https://$cleanDomain/thumbs"
-                    }
+                    if (hostMatch != null) dynamicThumbBase = "https://${hostMatch.groupValues[1]}/thumbs"
                 }
 
                 if (dynamicThumbBase.isBlank()) {
                     val iframeDoc = Jsoup.parse(iframeHtml)
-                    val scriptSrc = iframeDoc.select("script").map { it.attr("src") }
-                        .firstOrNull { it.contains("script.bootstrap.js") }
-
+                    val scriptSrc = iframeDoc.select("script").map { it.attr("src") }.firstOrNull { it.contains("script.bootstrap.js") }
                     if (!scriptSrc.isNullOrBlank()) {
                         val iframeUri = Uri.parse(iframeSrc)
-                        val scriptUrl = if (scriptSrc.startsWith("http")) {
-                            scriptSrc
-                        } else {
-                            val cleanPath = scriptSrc.replace("../", "")
-                            "${iframeUri.scheme}://${iframeUri.host}/$cleanPath"
-                        }
-                        
+                        val scriptUrl = if (scriptSrc.startsWith("http")) scriptSrc else "${iframeUri.scheme}://${iframeUri.host}/${scriptSrc.replace("../", "")}"
                         try {
                             val scriptHtml = app.get(scriptUrl, headers = defaultHeaders, referer = iframeSrc).text
                             val fallbackRegex = """(https?(?::|\\:)(?:/|\\/)+[a-zA-Z0-9.-]+(?:/|\\/)+thumbs)""".toRegex(RegexOption.IGNORE_CASE)
                             val scriptMatch = fallbackRegex.find(scriptHtml)
-                            if (scriptMatch != null) {
-                                dynamicThumbBase = scriptMatch.groupValues[1].replace("\\", "")
-                            }
+                            if (scriptMatch != null) dynamicThumbBase = scriptMatch.groupValues[1].replace("\\", "")
                         } catch (e: Exception) {}
                     }
                 }
 
                 if (dynamicThumbBase.isBlank()) {
-                    val firstUrl = matches.asSequence()
-                        .map { item -> listOfNotNull(item["surl"], item["surl2"], item["surl3"]) }
-                        .flatten()
-                        .firstOrNull { it.isNotBlank() }
-
+                    val firstUrl = matches.asSequence().map { item -> listOfNotNull(item["surl"], item["surl2"], item["surl3"]) }.flatten().firstOrNull { it.isNotBlank() }
                     if (firstUrl != null) {
                         val extractedHost = extractDomainFromStreamUrl(firstUrl)
-                        if (!extractedHost.isNullOrBlank()) {
-                            dynamicThumbBase = "https://$extractedHost/thumbs"
-                        }
+                        if (!extractedHost.isNullOrBlank()) dynamicThumbBase = "https://$extractedHost/thumbs"
                     }
                 }
             }
@@ -398,6 +306,13 @@ class CUTVProvider(private val sharedPref: SharedPreferences) : MainAPI() {
             }
         } catch (e: Exception) {
             e.printStackTrace()
+            // 그 외 치명적인 파싱 에러 발생 시에도 빈 리스트 대신 에러 아이템 노출
+            return getCookieErrorResponse(request.name)
+        }
+
+        // 아이템이 하나도 채워지지 않았다면 (목록이 비었다면) 에러 응답
+        if (items.isEmpty()) {
+            return getCookieErrorResponse(request.name)
         }
 
         return newHomePageResponse(
