@@ -222,6 +222,7 @@ class SettingsFragment(
                         statusTextView.text = "현재 상태 : 우회 완료 (쿠키 저장됨)"
                         statusTextView.setTextColor(Color.parseColor("#55FF55"))
                         showToast("우회 성공! 쿠키가 안전하게 저장되었습니다.")
+                        dismiss() // 토스트 출력 후 설정 창 자동 종료
                     }
                 }
             }
