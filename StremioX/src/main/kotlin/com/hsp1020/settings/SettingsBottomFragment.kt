@@ -687,6 +687,21 @@ class SettingsBottomFragment(
                 putString(SettingsRepository.PREF_KEY_CUSTOM_POSTER_URL, etCustomPosterUrl.text.toString().trim())
             }
 
+            val cancelBtn = Button(context).apply {
+                text = "No"
+                setTextColor(Color.WHITE)
+                isAllCaps = false
+                background = getButtonBg()
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) }
+            }
+            val restartBtn = Button(context).apply {
+                text = "Yes"
+                setTextColor(Color.WHITE)
+                isAllCaps = false
+                background = getButtonBg()
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) }
+            }
+
             val container = LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(40, 40, 40, 40)
@@ -705,23 +720,11 @@ class SettingsBottomFragment(
                     textSize = 14f
                     setPadding(0, 0, 0, 30)
                 })
-                val btnRow = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
-                val cancelBtn = Button(context).apply {
-                    text = "No"
-                    setTextColor(Color.WHITE)
-                    isAllCaps = false
-                    background = getButtonBg()
-                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) }
+                val btnRow = LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    addView(cancelBtn)
+                    addView(restartBtn)
                 }
-                val restartBtn = Button(context).apply {
-                    text = "Yes"
-                    setTextColor(Color.WHITE)
-                    isAllCaps = false
-                    background = getButtonBg()
-                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) }
-                }
-                btnRow.addView(cancelBtn)
-                btnRow.addView(restartBtn)
                 addView(btnRow)
             }
 
