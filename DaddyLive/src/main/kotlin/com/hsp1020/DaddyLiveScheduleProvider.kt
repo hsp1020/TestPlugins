@@ -115,8 +115,8 @@ class DaddyLiveScheduleProvider : MainAPI() {
             val response = app.get(mainUrl)
             debugLog("getMainPage: Received response with status ${response.code}")
             val doc = response.document
-            
-            val categories = doc.select(".schedule__category")
+
+            val categories = doc.select("#schedule .schedule__category")
             debugLog("getMainPage: Parsing schedule categories. Total categories: ${categories.size}")
             
             val schedule = categories.map {
@@ -139,10 +139,11 @@ class DaddyLiveScheduleProvider : MainAPI() {
             val response = app.get(mainUrl)
             debugLog("search: Page loaded with status ${response.code}")
             val doc = response.document
-            val schedule = doc.select(".schedule__category").map {
+
+            val schedule = doc.select("#schedule .schedule__category").map {
                 searchResponseBuilder(it)
             }.flatten()
-            
+
             val matches = schedule.filter {
                 query.lowercase().replace(" ", "") in it.name.lowercase().replace(" ", "")
             }
@@ -197,11 +198,11 @@ class DaddyLiveScheduleProvider : MainAPI() {
             }
 
             debugLog("load: Searching DOM matrix for data-title matched with: '$dataTitle'")
-            val event = doc.select(".schedule__event").firstOrNull {
+            val event = doc.select("#schedule .schedule__event").firstOrNull {
                 val candidate = it.select("div.schedule__eventHeader").attr("data-title")
                 candidate == dataTitle
             }
-            
+
             if (event == null) {
                 debugLog("load ERROR: FAILED to match any event in HTML with data-title: '$dataTitle'")
                 throw NoSuchElementException("No scheduled event found for '$dataTitle'")
