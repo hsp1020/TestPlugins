@@ -39,10 +39,10 @@
         "name": "DaddyLive"
     },
     {
-        "fileHash": "sha256-636fb56708cc1ac67c0b6a112f5a5774204f2fcae7865061496944315b7c7b9e",
+        "fileHash": "sha256-8c373d2edac851f3acc0cb07272511d9b2cf00187ad673b1d89d0458d4555f1f",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 29068,
+        "fileSize": 30573,
         "status": 1,
         "language": "ko",
         "authors": [
