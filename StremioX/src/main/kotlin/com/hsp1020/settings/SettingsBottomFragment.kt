@@ -285,31 +285,33 @@ class SettingsBottomFragment(
                         orientation = LinearLayout.VERTICAL
                         setPadding(40, 40, 40, 40)
                         background = getDarkThemeBg()
-                        addView(TextView(ctx).apply {
-                            text = "Export Successful"
-                            textSize = 18f
-                            setTextColor(Color.WHITE)
-                            typeface = android.graphics.Typeface.DEFAULT_BOLD
-                            setPadding(0, 0, 0, 20)
-                            gravity = android.view.Gravity.CENTER
-                        })
-                        addView(TextView(ctx).apply {
-                            text = "Compressed backup data has been successfully copied to your clipboard.\n\nPlease paste it somewhere safe (e.g., Notes, Messenger)."
-                            setTextColor(Color.LTGRAY)
-                            textSize = 14f
-                            setPadding(0, 0, 0, 30)
-                        })
-                        addView(Button(ctx).apply {
-                            text = "OK"
-                            setTextColor(Color.WHITE)
-                            isAllCaps = false
-                            background = getButtonBg()
-                            setOnClickListener {  }
-                        })
                     }
+                    container.addView(TextView(ctx).apply {
+                        text = "Export Successful"
+                        textSize = 18f
+                        setTextColor(Color.WHITE)
+                        typeface = android.graphics.Typeface.DEFAULT_BOLD
+                        setPadding(0, 0, 0, 20)
+                        gravity = android.view.Gravity.CENTER
+                    })
+                    container.addView(TextView(ctx).apply {
+                        text = "Compressed backup data has been successfully copied to your clipboard.\n\nPlease paste it somewhere safe (e.g., Notes, Messenger)."
+                        setTextColor(Color.LTGRAY)
+                        textSize = 14f
+                        setPadding(0, 0, 0, 30)
+                    })
+                    val okBtn = Button(ctx).apply {
+                        text = "OK"
+                        setTextColor(Color.WHITE)
+                        isAllCaps = false
+                        background = getButtonBg()
+                        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                    }
+                    container.addView(okBtn)
+
                     val dlg = AlertDialog.Builder(ctx).setView(container).create()
                     setupCustomDialog(dlg, container)
-                    container.findViewById<Button>(container.childCount - 1).setOnClickListener { dlg.dismiss() }
+                    okBtn.setOnClickListener { dlg.dismiss() } // ◀️ [버그 픽스] findViewById 제거하고 직접 바인딩하여 NullPointerException 원천 제거
                     dlg.show()
                 } catch (e: Exception) {
                     e.printStackTrace()
@@ -350,46 +352,42 @@ class SettingsBottomFragment(
                         orientation = LinearLayout.VERTICAL
                         setPadding(40, 40, 40, 40)
                         background = getDarkThemeBg()
-                        addView(TextView(ctx).apply {
-                            text = "Backup Data Detected"
-                            textSize = 18f
-                            setTextColor(Color.WHITE)
-                            typeface = android.graphics.Typeface.DEFAULT_BOLD
-                            setPadding(0, 0, 0, 20)
-                            gravity = android.view.Gravity.CENTER
-                        })
-                        addView(TextView(ctx).apply {
-                            text = "Valid backup data found in clipboard!\n\nAre you sure you want to proceed? (Existing unrelated settings will be kept safely)"
-                            setTextColor(Color.LTGRAY)
-                            textSize = 14f
-                            setPadding(0, 0, 0, 30)
-                        })
-                        val btnRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
-                        val cancelBtn = Button(ctx).apply {
-                            text = "Cancel"
-                            setTextColor(Color.WHITE)
-                            isAllCaps = false
-                            background = getButtonBg()
-                            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) }
-                        }
-                        val restoreBtn = Button(ctx).apply {
-                            text = "Restore"
-                            setTextColor(Color.WHITE)
-                            isAllCaps = false
-                            background = getButtonBg()
-                            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) }
-                        }
-                        btnRow.addView(cancelBtn)
-                        btnRow.addView(restoreBtn)
-                        addView(btnRow)
                     }
+                    container.addView(TextView(ctx).apply {
+                        text = "Backup Data Detected"
+                        textSize = 18f
+                        setTextColor(Color.WHITE)
+                        typeface = android.graphics.Typeface.DEFAULT_BOLD
+                        setPadding(0, 0, 0, 20)
+                        gravity = android.view.Gravity.CENTER
+                    })
+                    container.addView(TextView(ctx).apply {
+                        text = "Valid backup data found in clipboard!\n\nAre you sure you want to proceed? (Existing unrelated settings will be kept safely)"
+                        setTextColor(Color.LTGRAY)
+                        textSize = 14f
+                        setPadding(0, 0, 0, 30)
+                    })
+                    val btnRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+                    val cancelBtn = Button(ctx).apply {
+                        text = "Cancel"
+                        setTextColor(Color.WHITE)
+                        isAllCaps = false
+                        background = getButtonBg()
+                        layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) }
+                    }
+                    val restoreBtn = Button(ctx).apply {
+                        text = "Restore"
+                        setTextColor(Color.WHITE)
+                        isAllCaps = false
+                        background = getButtonBg()
+                        layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) }
+                    }
+                    btnRow.addView(cancelBtn)
+                    btnRow.addView(restoreBtn)
+                    container.addView(btnRow)
 
                     val dlg = AlertDialog.Builder(ctx).setView(container).create()
                     setupCustomDialog(dlg, container)
-
-                    val btnRow = container.getChildAt(2) as LinearLayout
-                    val cancelBtn = btnRow.getChildAt(0) as Button
-                    val restoreBtn = btnRow.getChildAt(1) as Button
 
                     cancelBtn.setOnClickListener { dlg.dismiss() }
                     restoreBtn.setOnClickListener {
@@ -410,30 +408,33 @@ class SettingsBottomFragment(
                             orientation = LinearLayout.VERTICAL
                             setPadding(40, 40, 40, 40)
                             background = getDarkThemeBg()
-                            addView(TextView(ctx).apply {
-                                text = "Import Result"
-                                textSize = 18f
-                                setTextColor(Color.WHITE)
-                                typeface = android.graphics.Typeface.DEFAULT_BOLD
-                                setPadding(0, 0, 0, 20)
-                                gravity = android.view.Gravity.CENTER
-                            })
-                            addView(TextView(ctx).apply {
-                                text = "Restore completed successfully!\nPlease restart the app."
-                                setTextColor(Color.LTGRAY)
-                                textSize = 14f
-                                setPadding(0, 0, 0, 30)
-                            })
-                            addView(Button(ctx).apply {
-                                text = "OK"
-                                setTextColor(Color.WHITE)
-                                isAllCaps = false
-                                background = getButtonBg()
-                            })
                         }
+                        resContainer.addView(TextView(ctx).apply {
+                            text = "Import Result"
+                            textSize = 18f
+                            setTextColor(Color.WHITE)
+                            typeface = android.graphics.Typeface.DEFAULT_BOLD
+                            setPadding(0, 0, 0, 20)
+                            gravity = android.view.Gravity.CENTER
+                        })
+                        resContainer.addView(TextView(ctx).apply {
+                            text = "Restore completed successfully!\nPlease restart the app."
+                            setTextColor(Color.LTGRAY)
+                            textSize = 14f
+                            setPadding(0, 0, 0, 30)
+                        })
+                        val okBtn2 = Button(ctx).apply {
+                            text = "OK"
+                            setTextColor(Color.WHITE)
+                            isAllCaps = false
+                            background = getButtonBg()
+                            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                        }
+                        resContainer.addView(okBtn2)
+
                         val resultDlg = AlertDialog.Builder(ctx).setView(resContainer).create()
                         setupCustomDialog(resultDlg, resContainer)
-                        resContainer.findViewById<Button>(resContainer.childCount - 1).setOnClickListener {
+                        okBtn2.setOnClickListener { // ◀️ [버그 픽스] findViewById 제거하고 직접 바인딩하여 NullPointerException 원천 제거
                             resultDlg.dismiss()
                             dismiss()
                         }
@@ -447,30 +448,33 @@ class SettingsBottomFragment(
                         orientation = LinearLayout.VERTICAL
                         setPadding(40, 40, 40, 40)
                         background = getDarkThemeBg()
-                        addView(TextView(ctx).apply {
-                            text = "Invalid Backup Data"
-                            textSize = 18f
-                            setTextColor(Color.WHITE)
-                            typeface = android.graphics.Typeface.DEFAULT_BOLD
-                            setPadding(0, 0, 0, 20)
-                            gravity = android.view.Gravity.CENTER
-                        })
-                        addView(TextView(ctx).apply {
-                            text = "No valid backup data found in your clipboard.\n\nPlease copy the exact backup text and try again."
-                            setTextColor(Color.LTGRAY)
-                            textSize = 14f
-                            setPadding(0, 0, 0, 30)
-                        })
-                        addView(Button(ctx).apply {
-                            text = "OK"
-                            setTextColor(Color.WHITE)
-                            isAllCaps = false
-                            background = getButtonBg()
-                        })
                     }
+                    errContainer.addView(TextView(ctx).apply {
+                        text = "Invalid Backup Data"
+                        textSize = 18f
+                        setTextColor(Color.WHITE)
+                        typeface = android.graphics.Typeface.DEFAULT_BOLD
+                        setPadding(0, 0, 0, 20)
+                        gravity = android.view.Gravity.CENTER
+                    })
+                    errContainer.addView(TextView(ctx).apply {
+                        text = "No valid backup data found in your clipboard.\n\nPlease copy the exact backup text and try again."
+                        setTextColor(Color.LTGRAY)
+                        textSize = 14f
+                        setPadding(0, 0, 0, 30)
+                    })
+                    val okBtn = Button(ctx).apply {
+                        text = "OK"
+                        setTextColor(Color.WHITE)
+                        isAllCaps = false
+                        background = getButtonBg()
+                        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                    }
+                    errContainer.addView(okBtn)
+
                     val errDlg = AlertDialog.Builder(ctx).setView(errContainer).create()
                     setupCustomDialog(errDlg, errContainer)
-                    errContainer.findViewById<Button>(errContainer.childCount - 1).setOnClickListener { errDlg.dismiss() }
+                    okBtn.setOnClickListener { errDlg.dismiss() } // ◀️ [버그 픽스] findViewById 제거하고 직접 바인딩하여 NullPointerException 원천 제거
                     errDlg.show()
                 }
             }
@@ -724,10 +728,6 @@ class SettingsBottomFragment(
             val dlg = AlertDialog.Builder(context).setView(container).create()
             setupCustomDialog(dlg, container)
 
-            val btnRow = container.getChildAt(2) as LinearLayout
-            val cancelBtn = btnRow.getChildAt(0) as Button
-            val restartBtn = btnRow.getChildAt(1) as Button
-
             cancelBtn.setOnClickListener { dlg.dismiss() }
             restartBtn.setOnClickListener { dismiss(); restartApp() }
             dlg.show()
@@ -759,13 +759,13 @@ class SettingsBottomFragment(
         etName?.background = getButtonBg()
         etName?.setTextColor(Color.WHITE)
         etName?.setHintTextColor(Color.GRAY)
-        etName?.setPadding(25, 5, 25, 5) // 🔥 [패치] 가이드라벨 상단 짤림 버그 수정을 위한 내부 세로 패딩 조절
+        etName?.setPadding(25, 5, 25, 5) 
         if (isEdit) etName?.setText(itemToEdit?.name)
         
         etLink?.background = getButtonBg()
         etLink?.setTextColor(Color.WHITE)
         etLink?.setHintTextColor(Color.GRAY)
-        etLink?.setPadding(25, 5, 25, 5) // 🔥 [패치] 가이드라벨 상단 짤림 버그 수정을 위한 내부 세로 패딩 조절
+        etLink?.setPadding(25, 5, 25, 5) 
         if (isEdit) etLink?.setText(itemToEdit?.link)
 
         val footer = LinearLayout(ctx).apply {
@@ -890,7 +890,7 @@ class SettingsBottomFragment(
                 val tvCheck = TextView(context).apply {
                     text = "✓"
                     textSize = 16f
-                    setTextColor(Color.parseColor("#FF5555")) // 🔥 [패치] 체크 아이콘 색상을 테마에 맞게 파란색에서 빨간색으로 변경
+                    setTextColor(Color.parseColor("#FF5555")) 
                     setPadding(10, 0, 10, 0)
                 }
                 rowLayout.addView(tvName)
@@ -903,7 +903,7 @@ class SettingsBottomFragment(
                 
                 val isSelected = code == selectedCode
                 holder.tvName.text = langName
-                holder.tvName.setTextColor(if (isSelected) Color.parseColor("#FF5555") else Color.WHITE) // 🔥 [패치] 선택 언어 텍스트 색상을 테마에 맞게 파란색에서 빨간색으로 변경
+                holder.tvName.setTextColor(if (isSelected) Color.parseColor("#FF5555") else Color.WHITE) 
                 holder.tvCheck.visibility = if (isSelected) View.VISIBLE else View.GONE
                 
                 holder.view.setOnClickListener {
