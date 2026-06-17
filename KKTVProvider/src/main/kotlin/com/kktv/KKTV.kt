@@ -42,14 +42,6 @@ class CUTVProvider(private val sharedPref: SharedPreferences) : MainAPI() {
         }
     }
 
-    private fun showToastOnMain(message: String) {
-        try {
-            Handler(Looper.getMainLooper()).post {
-                com.lagradost.cloudstream3.CommonActivity.showToast(message)
-            }
-        } catch (e: Exception) {}
-    }
-
     private fun getHeaders(referer: String? = null): Map<String, String> {
         val currentUA = cfUserAgent ?: userAgent
         val headers = mutableMapOf(
@@ -110,7 +102,7 @@ class CUTVProvider(private val sharedPref: SharedPreferences) : MainAPI() {
     // 우회 실패/쿠키 만료 시 홈 화면에 노출될 더미(에러 안내) 아이템
     private fun getCookieErrorResponse(requestName: String): HomePageResponse {
         val errorItem = newLiveSearchResponse(name = "쿠키를 최신화해주세요", url = mainUrl) {
-            this.posterUrl = "" // 썸네일을 빈 값으로 설정하여 Placeholder 작동 유도
+            this.posterUrl = "" // 빈 값으로 전달하여 Placeholder 노출
         }
         return newHomePageResponse(
             list = listOf(HomePageList(requestName, listOf(errorItem), isHorizontalImages = true)),
@@ -118,6 +110,7 @@ class CUTVProvider(private val sharedPref: SharedPreferences) : MainAPI() {
         )
     }
 
+    // 15초 타임아웃 유지 (자동 우회 1회 실행용)
     private suspend fun solveCloudflare(url: String): Pair<String, String>? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
         val context = try {
             Class.forName("android.app.ActivityThread")
@@ -165,7 +158,7 @@ class CUTVProvider(private val sharedPref: SharedPreferences) : MainAPI() {
                     try { webView.stopLoading(); webView.destroy() } catch (e: Exception) {}
                 }
             }
-            handler.postDelayed(timeoutRunnable, 15000)
+            handler.postDelayed(timeoutRunnable, 15000) // 15초로 복구
 
             continuation.invokeOnCancellation {
                 handler.removeCallbacks(timeoutRunnable)
@@ -179,45 +172,40 @@ class CUTVProvider(private val sharedPref: SharedPreferences) : MainAPI() {
         val items = mutableListOf<SearchResponse>()
         
         try {
+            // 1. 저장된 쿠키 불러오기
             loadSavedCookies()
 
-            if (cfCookies == null) {
-                val cfResult = solveCloudflare(mainUrl)
-                if (cfResult != null) {
-                    cfCookies = cfResult.first
-                    cfUserAgent = cfResult.second
-                }
-            }
-
+            // 2. 일단 현재 쿠키로 페이지 요청 시도
             var doc = app.get(url, headers = defaultHeaders).document
 
+            // 3. 만약 챌린지가 감지되었다면 딱 '한 번'만 우회를 시도함
             if (isCloudflareChallenge(doc.html())) {
                 cfCookies = null
                 cfUserAgent = null
-                loadSavedCookies()
                 
-                if (cfCookies == null) {
-                    val cfResult = solveCloudflare(mainUrl)
-                    if (cfResult != null) {
-                        cfCookies = cfResult.first
-                        cfUserAgent = cfResult.second
-                        doc = app.get(url, headers = defaultHeaders).document
-                    } else {
-                        showToastOnMain("설정(⚙️)에서 수동으로 '사람인지 확인하세요' 우회를 진행해 주세요.")
-                        // 우회 최종 실패 시 에러 아이템 노출
+                val cfResult = solveCloudflare(mainUrl) // 최대 15초 대기
+                if (cfResult != null) {
+                    cfCookies = cfResult.first
+                    cfUserAgent = cfResult.second
+                    
+                    // 우회 성공 시 새로 발급받은 쿠키로 재요청
+                    doc = app.get(url, headers = defaultHeaders).document
+                    
+                    // 또 챌린지가 뜬다면 (사람이 직접 풀어야 하는 단계) 에러 아이템 반환
+                    if (isCloudflareChallenge(doc.html())) {
                         return getCookieErrorResponse(request.name)
                     }
                 } else {
-                    doc = app.get(url, headers = defaultHeaders).document
+                    // 타임아웃 또는 우회 실패 시 에러 아이템 반환
+                    return getCookieErrorResponse(request.name)
                 }
             }
 
+            // --- 정상 파싱 로직 시작 ---
             val iframeSrc = doc.select("iframe").mapNotNull { it.attr("src") }
                 .firstOrNull { it.contains("galaxy-stream") || it.contains("hudtv") || it.contains("cli") }
 
-            // iframe 파싱 실패 시에도 빈 리스트 대신 에러 아이템 노출
             if (iframeSrc.isNullOrBlank()) {
-                println("[CUTV_DEBUG] FAIL: iframeSrc를 찾을 수 없습니다.")
                 return getCookieErrorResponse(request.name)
             }
 
@@ -306,11 +294,9 @@ class CUTVProvider(private val sharedPref: SharedPreferences) : MainAPI() {
             }
         } catch (e: Exception) {
             e.printStackTrace()
-            // 그 외 치명적인 파싱 에러 발생 시에도 빈 리스트 대신 에러 아이템 노출
             return getCookieErrorResponse(request.name)
         }
 
-        // 아이템이 하나도 채워지지 않았다면 (목록이 비었다면) 에러 응답
         if (items.isEmpty()) {
             return getCookieErrorResponse(request.name)
         }
