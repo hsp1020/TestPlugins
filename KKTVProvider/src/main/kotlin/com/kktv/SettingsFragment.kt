@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.SharedPreferences
 import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.view.Gravity
 import android.view.LayoutInflater
@@ -14,8 +15,8 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
+import androidx.core.widget.NestedScrollView
 import com.google.android.material.bottomsheet.BottomSheetBehavior
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
@@ -32,72 +33,98 @@ class SettingsFragment(
         return (this * density).toInt()
     }
 
+    // Ultima Evo의 테마 디자인 차용
+    private fun getDarkThemeBg() = GradientDrawable().apply { setColor(Color.parseColor("#000000")); cornerRadius = 25f }
+    private fun getCardBg() = GradientDrawable().apply { setColor(Color.parseColor("#0C0C0C")); setStroke(2, Color.parseColor("#1A1A1A")); cornerRadius = 18f }
+    private fun getButtonBg() = GradientDrawable().apply { setColor(Color.parseColor("#151515")); cornerRadius = 12f }
+
     override fun onCreateView(
         inflater: LayoutInflater, container: ViewGroup?,
         savedInstanceState: Bundle?,
     ): View {
-        val context = requireContext()
+        val ctx = requireContext()
 
-        val scrollView = ScrollView(context).apply {
+        val scrollView = NestedScrollView(ctx).apply {
+            background = getDarkThemeBg()
+            isVerticalFadingEdgeEnabled = true
+            setFadingEdgeLength(120)
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
-            isFillViewport = true
         }
 
-        // 전체 레이아웃 구성
-        val root = LinearLayout(context).apply {
+        val mainLayout = LinearLayout(ctx).apply {
             orientation = LinearLayout.VERTICAL
+            setPadding(40, 40, 40, 40)
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             )
-            setPadding(16.dp(context), 16.dp(context), 16.dp(context), 16.dp(context))
         }
-        scrollView.addView(root)
 
-        // 타이틀
-        val titleTextView = TextView(context).apply {
-            text = "CUTV 설정"
-            textSize = 20f
+        // 타이틀 헤더
+        mainLayout.addView(TextView(ctx).apply {
+            text = "CUTV 우회 설정"
+            textSize = 22f
             setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(0, 0, 0, 8.dp(context))
-        }
-        root.addView(titleTextView)
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            setPadding(0, 0, 0, 15)
+            gravity = Gravity.CENTER
+        })
 
-        // 설명 문구
-        val descTextView = TextView(context).apply {
-            text = "사이트 보안 강화로 인해 자동 우회가 차단될 수 있습니다.\n아래 화면에서 '사람인지 확인하세요' 체크박스가 나타나면 직접 클릭하여 완료해 주세요.\n우회가 완료되면 자동으로 쿠키가 수집됩니다."
-            textSize = 12f
-            setTextColor(Color.LTGRAY)
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(0, 0, 0, 16.dp(context))
-        }
-        root.addView(descTextView)
+        // 안내 문구
+        mainLayout.addView(TextView(ctx).apply {
+            text = "사이트 보안 강화로 자동 우회가 차단되었습니다.\n아래 화면에 체크박스가 뜨면 직접 클릭해 주세요."
+            textSize = 13f
+            setTextColor(Color.parseColor("#CCCCCC"))
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, 30)
+        })
 
-        // 쿠키 상태 텍스트
-        val statusTextView = TextView(context).apply {
-            val savedCookie = sharedPref.getString("cf_cookies", null)
-            text = if (savedCookie != null) "상태: 우회 완료 (쿠키 저장됨)" else "상태: 우회 필요 (저장된 쿠키 없음)"
-            textSize = 14f
-            setTextColor(if (savedCookie != null) Color.GREEN else Color.RED)
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(0, 0, 0, 16.dp(context))
-        }
-        root.addView(statusTextView)
-
-        // 웹뷰 컨테이너
-        val webView = WebView(context).apply {
+        // 쿠키 상태 표시 (카드 UI)
+        val statusCard = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(30, 30, 30, 30)
+            background = getCardBg()
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                400.dp(context)
-            )
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, 0, 0, 20) }
         }
 
+        val statusTextView = TextView(ctx).apply {
+            val savedCookie = sharedPref.getString("cf_cookies", null)
+            text = if (savedCookie != null) "현재 상태 : 우회 완료 (쿠키 저장됨)" else "현재 상태 : 우회 필요 (저장된 쿠키 없음)"
+            textSize = 14f
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            setTextColor(if (savedCookie != null) Color.parseColor("#55FF55") else Color.parseColor("#FF5555"))
+            gravity = Gravity.CENTER
+        }
+        statusCard.addView(statusTextView)
+        mainLayout.addView(statusCard)
+
+        // 웹뷰 컨테이너 (카드 UI)
+        val webViewCard = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(10, 10, 10, 10)
+            background = getCardBg()
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                400.dp(ctx)
+            ).apply { setMargins(0, 0, 0, 30) }
+        }
+        val webView = WebView(ctx).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.MATCH_PARENT
+            )
+        }
+        webViewCard.addView(webView)
+        mainLayout.addView(webViewCard)
+
         // 버튼 행 구성
-        val buttonsLayout = LinearLayout(context).apply {
+        val buttonsLayout = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_HORIZONTAL
             layoutParams = LinearLayout.LayoutParams(
@@ -106,10 +133,13 @@ class SettingsFragment(
             )
         }
 
-        val btnReload = Button(context).apply {
+        val btnReload = Button(ctx).apply {
             text = "페이지 새로고침"
+            setTextColor(Color.WHITE)
+            isAllCaps = false
+            background = getButtonBg()
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                rightMargin = 8.dp(context)
+                rightMargin = 15
             }
             setOnClickListener {
                 webView.visibility = View.VISIBLE
@@ -118,8 +148,11 @@ class SettingsFragment(
             }
         }
 
-        val btnReset = Button(context).apply {
+        val btnReset = Button(ctx).apply {
             text = "쿠키 초기화"
+            setTextColor(Color.parseColor("#FF5555")) // 초기화 버튼은 붉은색 포인트
+            isAllCaps = false
+            background = getButtonBg()
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
             setOnClickListener {
                 sharedPref.edit().apply {
@@ -127,8 +160,8 @@ class SettingsFragment(
                     remove("cf_user_agent")
                     apply()
                 }
-                statusTextView.text = "상태: 우회 필요 (저장된 쿠키 없음)"
-                statusTextView.setTextColor(Color.RED)
+                statusTextView.text = "현재 상태 : 우회 필요 (저장된 쿠키 없음)"
+                statusTextView.setTextColor(Color.parseColor("#FF5555"))
                 webView.visibility = View.VISIBLE
                 
                 val cookieManager = CookieManager.getInstance()
@@ -142,11 +175,11 @@ class SettingsFragment(
 
         buttonsLayout.addView(btnReload)
         buttonsLayout.addView(btnReset)
-        root.addView(buttonsLayout)
+        mainLayout.addView(buttonsLayout)
 
         setupWebView(webView, statusTextView)
-        root.addView(webView)
-
+        
+        scrollView.addView(mainLayout)
         return scrollView
     }
 
@@ -157,11 +190,12 @@ class SettingsFragment(
             skipCollapsed = true
             isDraggable = false
         }
+        // 배경 투명화 처리 (둥근 모서리 보존)
+        (view?.parent as? View)?.setBackgroundColor(Color.TRANSPARENT)
     }
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun setupWebView(webView: WebView, statusTextView: TextView) {
-        // 제공자 소스와 동일한 고정 User-Agent 세팅
         val userAgent = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
         webView.settings.javaScriptEnabled = true
         webView.settings.domStorageEnabled = true
@@ -178,7 +212,6 @@ class SettingsFragment(
                 val cookieManager = CookieManager.getInstance()
                 val cookies = cookieManager.getCookie(url) ?: ""
 
-                // Cloudflare 통과 인증 쿠키(cf_clearance) 검출 시 영구 저장
                 if (cookies.contains("cf_clearance")) {
                     sharedPref.edit().apply {
                         putString("cf_cookies", cookies)
@@ -186,10 +219,9 @@ class SettingsFragment(
                         apply()
                     }
                     activity?.runOnUiThread {
-                        statusTextView.text = "상태: 우회 완료 (쿠키 저장됨)"
-                        statusTextView.setTextColor(Color.GREEN)
+                        statusTextView.text = "현재 상태 : 우회 완료 (쿠키 저장됨)"
+                        statusTextView.setTextColor(Color.parseColor("#55FF55"))
                         showToast("우회 성공! 쿠키가 안전하게 저장되었습니다.")
-                        webView.visibility = View.GONE
                     }
                 }
             }
