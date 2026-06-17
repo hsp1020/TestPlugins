@@ -103,38 +103,20 @@ class CUTVProvider : MainAPI() {
     }
 
     private suspend fun solveCloudflare(url: String): Pair<String, String>? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-        // 리플렉션을 통해 현재 화면에 구동 중인 Foreground Activity 획득
-        val activity = try {
-            val activityThreadClass = Class.forName("android.app.ActivityThread")
-            val activityThread = activityThreadClass.getMethod("currentActivityThread").invoke(null)
-            val activitiesField = activityThreadClass.getDeclaredField("mActivities")
-            activitiesField.isAccessible = true
-            val activities = activitiesField.get(activityThread) as? Map<*, *>
-            var activeActivity: android.app.Activity? = null
-            if (activities != null) {
-                for (activityRecord in activities.values) {
-                    val activityRecordClass = activityRecord!!.javaClass
-                    val pausedField = activityRecordClass.getDeclaredField("paused")
-                    pausedField.isAccessible = true
-                    if (!pausedField.getBoolean(activityRecord)) {
-                        val activityField = activityRecordClass.getDeclaredField("activity")
-                        activityField.isAccessible = true
-                        activeActivity = activityField.get(activityRecord) as android.app.Activity
-                        break
-                    }
-                }
-            }
-            activeActivity
+        val context = try {
+            Class.forName("android.app.ActivityThread")
+                .getMethod("currentApplication")
+                .invoke(null) as? android.content.Context
         } catch (e: Exception) {
             null
         }
 
-        if (activity == null) {
-            println("[CUTV_DEBUG] [Cloudflare Bypass] ERROR: Activity Context를 획득하지 못했습니다.")
+        if (context == null) {
+            println("[CUTV_DEBUG] [Cloudflare Bypass] ERROR: Context를 획득하지 못했습니다.")
             return@withContext null
         }
 
-        println("[CUTV_DEBUG] [Cloudflare Bypass] 진입 -> URL: $url (Activity: ${activity.localClassName})")
+        println("[CUTV_DEBUG] [Cloudflare Bypass] 진입 -> URL: $url")
 
         try {
             val cookieManager = CookieManager.getInstance()
@@ -146,69 +128,15 @@ class CUTVProvider : MainAPI() {
         }
 
         suspendCancellableCoroutine<Pair<String, String>?> { continuation ->
-            val webView = WebView(activity)
+            val webView = WebView(context)
             
-            // WebView 설정을 실제 모바일 기기 규격에 맞춰 세팅 (탐지 회피 및 렌더링 활성화)
-            webView.settings.apply {
-                javaScriptEnabled = true
-                domStorageEnabled = true
-                databaseEnabled = true
-                useWideViewPort = true
-                loadWithOverviewMode = true
-                cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
-                javaScriptCanOpenWindowsAutomatically = true
-                mediaPlaybackRequiresUserGesture = false
-                userAgentString = userAgent
-                // 혼합 콘텐츠 허용 (Cloudflare 내부 보안 subresource 스크립트 차단 방지)
-                mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-            }
+            webView.settings.javaScriptEnabled = true
+            webView.settings.domStorageEnabled = true
+            webView.settings.databaseEnabled = true
             
+            // 일반 모바일 Chrome 브라우저 User-Agent 강제 주입 (; wv 제거)
+            webView.settings.userAgentString = userAgent
             println("[CUTV_DEBUG] [Cloudflare Bypass] WebView User-Agent 강제 설정: $userAgent")
-
-            // 쿠키 수집 설정 및 제3자 쿠키 전송 허용
-            val cookieManager = CookieManager.getInstance()
-            cookieManager.setAcceptCookie(true)
-            cookieManager.setAcceptThirdPartyCookies(webView, true)
-
-            // ⚠️ [물리적 크기 탐지 우회 적용]
-            // 가로, 세로 크기를 MATCH_PARENT로 온전히 주어 정상 디바이스 상태로 가정한 뒤,
-            // 화면 왼쪽 및 위쪽의 바깥 좌표(-3000f)로 밀어내어 사용자 화면에만 보이지 않게 처리합니다.
-            val rootLayout = activity.findViewById<android.view.ViewGroup>(android.R.id.content)
-            if (rootLayout == null) {
-                println("[CUTV_DEBUG] [Cloudflare Bypass] ERROR: 루트 레이아웃을 찾을 수 없습니다.")
-                if (continuation.isActive) {
-                    continuation.resume(null)
-                }
-                return@suspendCancellableCoroutine
-            }
-            
-            val layoutParams = android.view.ViewGroup.LayoutParams(
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT
-            )
-            
-            try {
-                rootLayout.addView(webView, layoutParams)
-                // 좌표 자체를 화면 디스플레이 바깥 가상 영역으로 격리 배치
-                webView.translationX = -3000f
-                webView.translationY = -3000f
-            } catch (e: Exception) {
-                println("[CUTV_DEBUG] [Cloudflare Bypass] WARNING: 뷰 계층 추가 실패: ${e.message}")
-            }
-
-            // 안전한 메모리 해제 및 뷰 이탈 처리를 위한 정리 함수
-            fun cleanup() {
-                activity.runOnUiThread {
-                    try {
-                        webView.stopLoading()
-                        rootLayout.removeView(webView)
-                        webView.destroy()
-                        println("[CUTV_DEBUG] [Cloudflare Bypass] 웹뷰 리소스 제거 및 뷰 계층 이탈 완료")
-                    } catch (e: Exception) {
-                        println("[CUTV_DEBUG] [Cloudflare Bypass] WARNING: 웹뷰 제거 중 예외 발생: ${e.message}")
-                    }
-                }
-            }
 
             webView.webViewClient = object : WebViewClient() {
                 var solved = false
@@ -221,8 +149,9 @@ class CUTVProvider : MainAPI() {
 
                 fun checkCookies(currentUrl: String) {
                     if (solved) return
+                    val cookieManager = CookieManager.getInstance()
                     val cookies = cookieManager.getCookie(currentUrl) ?: ""
-                    println("[CUTV_DEBUG] [Cloudflare Bypass] 실시간 쿠키 체크 ($currentUrl): $cookies")
+                    println("[CUTV_DEBUG] [Cloudflare Bypass] 실시간 쿠키 체크: $cookies")
 
                     if (cookies.contains("cf_clearance")) {
                         solved = true
@@ -230,7 +159,10 @@ class CUTVProvider : MainAPI() {
                         if (continuation.isActive) {
                             continuation.resume(Pair(cookies, userAgent))
                         }
-                        cleanup()
+                        try {
+                            webView.stopLoading()
+                            webView.destroy()
+                        } catch (e: Exception) {}
                     }
                 }
             }
@@ -241,6 +173,7 @@ class CUTVProvider : MainAPI() {
             val timeoutRunnable = Runnable {
                 if (continuation.isActive) {
                     println("[CUTV_DEBUG] [Cloudflare Bypass] 실패: 15초 타임아웃 초과")
+                    val cookieManager = CookieManager.getInstance()
                     val cookies = cookieManager.getCookie(url) ?: ""
                     if (cookies.isNotBlank() && cookies.contains("cf_clearance")) {
                         println("[CUTV_DEBUG] [Cloudflare Bypass] 타임아웃되었으나 수집된 cf_clearance 쿠키 반환 시도: $cookies")
@@ -248,7 +181,10 @@ class CUTVProvider : MainAPI() {
                     } else {
                         continuation.resume(null)
                     }
-                    cleanup()
+                    try {
+                        webView.stopLoading()
+                        webView.destroy()
+                    } catch (e: Exception) {}
                 }
             }
             handler.postDelayed(timeoutRunnable, 15000)
@@ -256,15 +192,19 @@ class CUTVProvider : MainAPI() {
             val intervalRunnable = object : Runnable {
                 override fun run() {
                     if (continuation.isActive) {
-                        // webView.url이 일시적으로 null일 경우, 최초 요청했던 대상 도메인 주소를 백업 타겟으로 할당하여 안정적으로 검사 수행
-                        val currentUrl = webView.url ?: url
-                        val cookies = cookieManager.getCookie(currentUrl) ?: ""
-                        if (cookies.contains("cf_clearance")) {
-                            println("[CUTV_DEBUG] [Cloudflare Bypass] 성공 (인터벌 체크): cf_clearance 쿠키 발견!")
-                            handler.removeCallbacks(timeoutRunnable)
-                            continuation.resume(Pair(cookies, userAgent))
-                            cleanup()
-                            return
+                        webView.url?.let { currentUrl ->
+                            val cookieManager = CookieManager.getInstance()
+                            val cookies = cookieManager.getCookie(currentUrl) ?: ""
+                            if (cookies.contains("cf_clearance")) {
+                                println("[CUTV_DEBUG] [Cloudflare Bypass] 성공 (인터벌 체크): cf_clearance 쿠키 발견!")
+                                handler.removeCallbacks(timeoutRunnable)
+                                continuation.resume(Pair(cookies, userAgent))
+                                try {
+                                    webView.stopLoading()
+                                    webView.destroy()
+                                } catch (e: Exception) {}
+                                return
+                            }
                         }
                         handler.postDelayed(this, 1500)
                     }
@@ -275,7 +215,10 @@ class CUTVProvider : MainAPI() {
             continuation.invokeOnCancellation {
                 handler.removeCallbacks(timeoutRunnable)
                 handler.removeCallbacks(intervalRunnable)
-                cleanup()
+                try {
+                    webView.stopLoading()
+                    webView.destroy()
+                } catch (e: Exception) {}
             }
         }
     }
@@ -507,6 +450,7 @@ class CUTVProvider : MainAPI() {
             this.posterHeaders = getPosterHeaders(posterUrl, iframeUrl)
         }
     }
+
 
     override suspend fun loadLinks(
         data: String,
