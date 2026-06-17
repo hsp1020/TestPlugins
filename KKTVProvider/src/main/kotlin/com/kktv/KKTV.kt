@@ -1,6 +1,6 @@
 package com.kktv
 
-import android.content.Context
+import android.content.SharedPreferences
 import android.net.Uri
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
@@ -17,7 +17,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import com.fasterxml.jackson.module.kotlin.readValue
 
-class CUTVProvider : MainAPI() {
+class CUTVProvider(private val sharedPref: SharedPreferences) : MainAPI() {
     override var mainUrl = "https://cu-tv.com"
     override var name = "CUTV"
     override val supportedTypes = setOf(TvType.Live)
@@ -33,22 +33,10 @@ class CUTVProvider : MainAPI() {
     private var cfCookies: String? = null
     private var cfUserAgent: String? = null
 
-    // SharedPreferences에 저장된 수동 우회 쿠키 가져오기
-    private fun getSharedPrefs(): android.content.SharedPreferences? {
-        val context = try {
-            Class.forName("android.app.ActivityThread")
-                .getMethod("currentApplication")
-                .invoke(null) as? android.content.Context
-        } catch (e: Exception) {
-            null
-        }
-        return context?.getSharedPreferences("CUTV_PREFS", Context.MODE_PRIVATE)
-    }
-
+    // SharedPreferences에 수동으로 저장된 우회 쿠키 가져오기
     private fun loadSavedCookies() {
-        val prefs = getSharedPrefs() ?: return
-        val savedCookies = prefs.getString("cf_cookies", null)
-        val savedUA = prefs.getString("cf_user_agent", null)
+        val savedCookies = sharedPref.getString("cf_cookies", null)
+        val savedUA = sharedPref.getString("cf_user_agent", null)
         if (!savedCookies.isNullOrBlank()) {
             cfCookies = savedCookies
             cfUserAgent = savedUA ?: userAgent
@@ -56,6 +44,7 @@ class CUTVProvider : MainAPI() {
         }
     }
 
+    // UI 스레드에서 Toast 메시지 출력
     private fun showToastOnMain(message: String) {
         try {
             Handler(Looper.getMainLooper()).post {
@@ -134,7 +123,7 @@ class CUTVProvider : MainAPI() {
         }
     }
 
-    // 자동 우회 로직 (폴백용으로 보존)
+    // 보이지 않는 백그라운드 웹뷰를 통한 자동 우회 시도 (수동 우회가 안 되어있을 때의 폴백용)
     private suspend fun solveCloudflare(url: String): Pair<String, String>? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
         val context = try {
             Class.forName("android.app.ActivityThread")
@@ -253,7 +242,7 @@ class CUTVProvider : MainAPI() {
             // 1. SharedPreferences에 저장된 수동 우회 쿠키 우선 적재
             loadSavedCookies()
 
-            // 2. 수동 저장 쿠키가 없을 때만 자동 우회 시도
+            // 2. 수동 저장 쿠키가 없을 때만 자동 우회 시도 (백그라운드)
             if (cfCookies == null) {
                 println("[CUTV_DEBUG] [Cloudflare Bypass] 시작: 수동 쿠키가 없으므로 자동 우회 절차를 시도합니다.")
                 val cfResult = solveCloudflare(mainUrl)
@@ -271,7 +260,7 @@ class CUTVProvider : MainAPI() {
                 cfCookies = null
                 cfUserAgent = null
                 
-                loadSavedCookies() // SharedPreferences 확인
+                loadSavedCookies() // SharedPreferences 재확인
                 
                 if (cfCookies == null) {
                     // 수동 쿠키도 없으면 마지막으로 자동 우회 재시도
@@ -281,7 +270,8 @@ class CUTVProvider : MainAPI() {
                         cfUserAgent = cfResult.second
                         doc = app.get(url, headers = defaultHeaders).document
                     } else {
-                        showToastOnMain("안전한 접근을 위해 플러그인 설정 화면에서 수동 우회(체크박스 확인)를 진행해 주세요.")
+                        // 모든 우회 실패 시 사용자에게 알림
+                        showToastOnMain("안전한 접근을 위해 확장 프로그램 설정 창(⚙️)에서 우회(체크박스 확인)를 진행해 주세요.")
                         return newHomePageResponse(request.name, emptyList())
                     }
                 } else {
