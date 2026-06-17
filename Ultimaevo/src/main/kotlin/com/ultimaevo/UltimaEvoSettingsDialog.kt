@@ -1,4 +1,3 @@
-// 파일명: hsp1020/ultimaevo/UltimaEvoSettingsDialog.kt
 package com.ultimaevo
 
 import android.app.AlertDialog
@@ -48,9 +47,17 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
     private var maxIdGen = 1
     private val instanceMemoryList = mutableListOf<InstanceData>()
 
-    private fun getDarkThemeBg() = GradientDrawable().apply { setColor(Color.parseColor("#000000")); cornerRadius = 40f }
-    private fun getCardBg() = GradientDrawable().apply { setColor(Color.parseColor("#0C0C0C")); setStroke(2, Color.parseColor("#1A1A1A")); cornerRadius = 30f }
-    private fun getButtonBg() = GradientDrawable().apply { setColor(Color.parseColor("#151515")); cornerRadius = 20f }
+    private fun getDarkThemeBg() = GradientDrawable().apply { setColor(Color.parseColor("#000000")); cornerRadius = 25f }
+    private fun getCardBg() = GradientDrawable().apply { setColor(Color.parseColor("#0C0C0C")); setStroke(2, Color.parseColor("#1A1A1A")); cornerRadius = 18f }
+    private fun getButtonBg() = GradientDrawable().apply { setColor(Color.parseColor("#151515")); cornerRadius = 12f }
+
+    private fun setupCustomDialog(dialog: AlertDialog, contentView: View) {
+        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        dialog.setOnShowListener {
+            dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
+            dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        }
+    }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
@@ -125,11 +132,38 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                         clipboard.setPrimaryClip(ClipData.newPlainText("Ultima Backup", backupStr))
                         
-                        AlertDialog.Builder(ctx)
-                            .setTitle("Export Successful")
-                            .setMessage("Compressed backup data has been successfully copied to your clipboard.\n\nPlease paste it somewhere safe (e.g., Notes, Messenger).")
-                            .setPositiveButton("OK", null)
-                            .show()
+                        val container = LinearLayout(ctx).apply {
+                            orientation = LinearLayout.VERTICAL
+                            setPadding(40, 40, 40, 40)
+                            background = getDarkThemeBg()
+                        }
+                        container.addView(TextView(ctx).apply {
+                            text = "Export Successful"
+                            textSize = 18f
+                            setTextColor(Color.WHITE)
+                            typeface = android.graphics.Typeface.DEFAULT_BOLD
+                            setPadding(0, 0, 0, 20)
+                            gravity = Gravity.CENTER
+                        })
+                        container.addView(TextView(ctx).apply {
+                            text = "Compressed backup data has been successfully copied to your clipboard.\n\nPlease paste it somewhere safe (e.g., Notes, Messenger)."
+                            setTextColor(Color.LTGRAY)
+                            textSize = 14f
+                            setPadding(0, 0, 0, 30)
+                        })
+                        val okBtn = Button(ctx).apply {
+                            text = "OK"
+                            setTextColor(Color.WHITE)
+                            isAllCaps = false
+                            background = getButtonBg()
+                            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                        }
+                        container.addView(okBtn)
+
+                        val dlg = AlertDialog.Builder(ctx).setView(container).create()
+                        setupCustomDialog(dlg, container)
+                        okBtn.setOnClickListener { dlg.dismiss() }
+                        dlg.show()
                     } catch (e: Exception) {
                         e.printStackTrace()
                         Toast.makeText(ctx, "Export failed", Toast.LENGTH_SHORT).show()
@@ -164,37 +198,133 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
                         if (parsedJson.length() == 0) throw Exception("Empty Data")
 
-                        AlertDialog.Builder(ctx)
-                            .setTitle("Backup Data Detected")
-                            .setMessage("Valid compressed backup data found in clipboard!\n\nWarning: Restoring will overwrite settings.\nAre you sure you want to proceed?")
-                            .setPositiveButton("Restore") { _, _ ->
-                                val editor = prefs.edit()
-                                val keys = parsedJson.keys()
-                                while (keys.hasNext()) {
-                                    val key = keys.next()
-                                    when (val value = parsedJson.get(key)) {
-                                        is Boolean -> editor.putBoolean(key, value)
-                                        is String -> editor.putString(key, value)
-                                        is Int -> editor.putInt(key, value)
-                                    }
+                        val container = LinearLayout(ctx).apply {
+                            orientation = LinearLayout.VERTICAL
+                            setPadding(40, 40, 40, 40)
+                            background = getDarkThemeBg()
+                        }
+                        container.addView(TextView(ctx).apply {
+                            text = "Backup Data Detected"
+                            textSize = 18f
+                            setTextColor(Color.WHITE)
+                            typeface = android.graphics.Typeface.DEFAULT_BOLD
+                            setPadding(0, 0, 0, 20)
+                            gravity = Gravity.CENTER
+                        })
+                        container.addView(TextView(ctx).apply {
+                            text = "Valid compressed backup data found in clipboard!\n\nWarning: Restoring will overwrite settings.\nAre you sure you want to proceed?"
+                            setTextColor(Color.LTGRAY)
+                            textSize = 14f
+                            setPadding(0, 0, 0, 30)
+                        })
+                        val btnRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
+                        val cancelBtn = Button(ctx).apply {
+                            text = "Cancel"
+                            setTextColor(Color.WHITE)
+                            isAllCaps = false
+                            background = getButtonBg()
+                            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) }
+                        }
+                        val restoreBtn = Button(ctx).apply {
+                            text = "Restore"
+                            setTextColor(Color.WHITE)
+                            isAllCaps = false
+                            background = getButtonBg()
+                            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) }
+                        }
+                        btnRow.addView(cancelBtn)
+                        btnRow.addView(restoreBtn)
+                        container.addView(btnRow)
+
+                        val dlg = AlertDialog.Builder(ctx).setView(container).create()
+                        setupCustomDialog(dlg, container)
+
+                        cancelBtn.setOnClickListener { dlg.dismiss() }
+                        restoreBtn.setOnClickListener {
+                            val editor = prefs.edit()
+                            val keys = parsedJson.keys()
+                            while (keys.hasNext()) {
+                                val key = keys.next()
+                                when (val value = parsedJson.get(key)) {
+                                    is Boolean -> editor.putBoolean(key, value)
+                                    is String -> editor.putString(key, value)
+                                    is Int -> editor.putInt(key, value)
                                 }
-                                editor.apply()
-                                
-                                AlertDialog.Builder(ctx)
-                                    .setTitle("Import Result")
-                                    .setMessage("Restore completed successfully!\nPlease restart the app.")
-                                    .setPositiveButton("OK") { _, _ -> dismiss() }
-                                    .show()
                             }
-                            .setNegativeButton("Cancel", null)
-                            .show()
+                            editor.apply()
+                            dlg.dismiss()
+                            
+                            val resContainer = LinearLayout(ctx).apply {
+                                orientation = LinearLayout.VERTICAL
+                                setPadding(40, 40, 40, 40)
+                                background = getDarkThemeBg()
+                            }
+                            resContainer.addView(TextView(ctx).apply {
+                                text = "Import Result"
+                                textSize = 18f
+                                setTextColor(Color.WHITE)
+                                typeface = android.graphics.Typeface.DEFAULT_BOLD
+                                setPadding(0, 0, 0, 20)
+                                gravity = android.view.Gravity.CENTER
+                            })
+                            resContainer.addView(TextView(ctx).apply {
+                                text = "Restore completed successfully!\nPlease restart the app."
+                                setTextColor(Color.LTGRAY)
+                                textSize = 14f
+                                setPadding(0, 0, 0, 30)
+                            })
+                            val okBtn2 = Button(ctx).apply {
+                                text = "OK"
+                                setTextColor(Color.WHITE)
+                                isAllCaps = false
+                                background = getButtonBg()
+                                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                            }
+                            resContainer.addView(okBtn2)
+
+                            val resultDlg = AlertDialog.Builder(ctx).setView(resContainer).create()
+                            setupCustomDialog(resultDlg, resContainer)
+                            okBtn2.setOnClickListener {
+                                resultDlg.dismiss()
+                                dismiss()
+                            }
+                            resultDlg.show()
+                        }
+                        dlg.show()
                     } catch (e: Exception) {
                         e.printStackTrace()
-                        AlertDialog.Builder(ctx)
-                            .setTitle("Invalid Backup Data")
-                            .setMessage("No valid backup data found in your clipboard.\n\nPlease copy the exact backup text and try again.")
-                            .setPositiveButton("OK", null)
-                            .show()
+                        val errContainer = LinearLayout(ctx).apply {
+                            orientation = LinearLayout.VERTICAL
+                            setPadding(40, 40, 40, 40)
+                            background = getDarkThemeBg()
+                        }
+                        errContainer.addView(TextView(ctx).apply {
+                            text = "Invalid Backup Data"
+                            textSize = 18f
+                            setTextColor(Color.WHITE)
+                            typeface = android.graphics.Typeface.DEFAULT_BOLD
+                            setPadding(0, 0, 0, 20)
+                            gravity = android.view.Gravity.CENTER
+                        })
+                        errContainer.addView(TextView(ctx).apply {
+                            text = "No valid backup data found in your clipboard.\n\nPlease copy the exact backup text and try again."
+                            setTextColor(Color.LTGRAY)
+                            textSize = 14f
+                            setPadding(0, 0, 0, 30)
+                        })
+                        val okBtn = Button(ctx).apply {
+                            text = "OK"
+                            setTextColor(Color.WHITE)
+                            isAllCaps = false
+                            background = getButtonBg()
+                            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                        }
+                        errContainer.addView(okBtn)
+
+                        val errDlg = AlertDialog.Builder(ctx).setView(errContainer).create()
+                        setupCustomDialog(errDlg, errContainer)
+                        okBtn.setOnClickListener { errDlg.dismiss() }
+                        errDlg.show()
                     }
                 }
             }
@@ -448,12 +578,10 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             setFadingEdgeLength(120)
         }
 
-        // 🔥 [V3 패치] 프로바이더용 데이터 모델 생성 및 실시간 정렬 로직 추가
         data class ProviderData(val pName: String, var isChecked: Boolean)
         val providerList = mutableListOf<ProviderData>()
         val tempAutoAddSettings = mutableMapOf<String, Boolean>()
 
-        // 1. 프로바이더 목록 불러와서 체크 상태 매핑
         for (provider in allProviders) {
             val pName = provider.name
             val isChecked = prefs.getBoolean("auto_add_${instanceId}_$pName", false)
@@ -461,7 +589,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             tempAutoAddSettings[pName] = isChecked
         }
 
-        // 2. 초기 정렬: 체크된 항목 최상단, 해제된 항목 하단 배치
         val initProvChecked = providerList.filter { it.isChecked }
         val initProvUnchecked = providerList.filter { !it.isChecked }
         providerList.clear()
@@ -482,7 +609,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     textSize = 13f
                     layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) 
                 }
-                // 불필요한 라벨 제거 적용됨
                 val sw = Switch(ctx) 
                 
                 row.addView(tv); row.addView(sw)
@@ -501,13 +627,12 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     data.isChecked = isChecked
                     tempAutoAddSettings[data.pName] = isChecked 
                     
-                    // 🔥 [UX 개선] 스위치 조작 시 실시간으로 위/아래 자동 재정렬
                     val checkedItems = providerList.filter { it.isChecked }
                     val uncheckedItems = providerList.filter { !it.isChecked }
                     providerList.clear()
                     providerList.addAll(checkedItems)
                     providerList.addAll(uncheckedItems)
-                    notifyDataSetChanged() // 화면 즉시 갱신
+                    notifyDataSetChanged() 
                 }
             }
             override fun getItemCount() = providerList.size
@@ -560,7 +685,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 val dragHandle = ImageView(ctx).apply { setImageResource(android.R.drawable.ic_menu_sort_by_size); setPadding(10, 0, 20, 0) }
                 val cb = CheckBox(ctx).apply { setPadding(0, 0, 5, 0) }
                 
-                // 🔥 [V4.1.5 패치] 구버전의 번호 직접 입력식 정렬 고속 점프용 텍스트박스 복원생성
                 val etOrder = EditText(ctx).apply {
                     inputType = InputType.TYPE_CLASS_NUMBER
                     imeOptions = EditorInfo.IME_ACTION_DONE
@@ -627,7 +751,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     notifyDataSetChanged() 
                 }
                 
-                // 🔥 [V4.1.5 패치] 입력창 값 세팅 및 리스너 등록 처리 (스크롤 과정에서의 변수 오염 및 루프 방지)
                 holder.etOrder.setOnFocusChangeListener(null)
                 holder.etOrder.setText((position + 1).toString())
                 
@@ -653,7 +776,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             }
             override fun getItemCount() = catalogList.size
             
-            // 🔥 [V4.1.5 패치] 입력값 가용 범위 제한 처리(Clamping) 및 시퀀스 정규화 비즈니스 로직 이식
             fun shiftItemInRecyclerView(oldPos: Int, newOrder: Int) {
                 if (oldPos !in catalogList.indices) return
                 val item = catalogList[oldPos]
@@ -669,13 +791,11 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     catalogList.removeAt(oldPos)
                     catalogList.add(newPos, item)
                     
-                    // 정렬 정보 순서 일관수(1..N) 매핑 적용
                     for (i in catalogList.indices) {
                         catalogList[i].orderIndex = i + 1
                     }
                     
                     notifyItemMoved(oldPos, newPos)
-                    // 영향 범위 영역만 국소 부분 업데이트(전체 노티 시 키보드가 내려가 타이핑 환경이 깨지는 현상 원천 예방)
                     notifyItemRangeChanged(minOf(oldPos, newPos), maxOf(oldPos, newPos) + 1)
                 } else {
                     notifyItemChanged(oldPos)
@@ -691,7 +811,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 val to = target.adapterPosition
                 Collections.swap(catalogList, from, to)
                 
-                // 🔥 [V4.1.5 패치] 마우스 드래그 정렬 시에도 텍스트박스의 순서 번호들이 실시간으로 즉시 동기화되도록 바인딩 데이터 업데이트 적용
                 for (i in catalogList.indices) {
                     catalogList[i].orderIndex = i + 1
                 }
@@ -706,18 +825,12 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         mainContainer.addView(rvCatalogs)
 
         val footer = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, 30, 0, 0) }
-        val applyBtn = Button(ctx).apply { text = "Save"; setTextColor(Color.WHITE); isAllCaps = false; background = getButtonBg(); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0,0,15,0) } }
-        val closeBtn = Button(ctx).apply { text = "Cancel"; setTextColor(Color.WHITE); isAllCaps = false; background = getButtonBg(); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15,0,0,0) } }
-        footer.addView(applyBtn); footer.addView(closeBtn); mainContainer.addView(footer)
+        val cancelBtn = Button(ctx).apply { text = "Cancel"; setTextColor(Color.WHITE); isAllCaps = false; background = getButtonBg(); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0,0,15,0) } }
+        val applyBtn = Button(ctx).apply { text = "Save"; setTextColor(Color.WHITE); isAllCaps = false; background = getButtonBg(); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15,0,0,0) } }
+        footer.addView(cancelBtn); footer.addView(applyBtn); mainContainer.addView(footer)
 
         val dialog = AlertDialog.Builder(ctx).setView(mainContainer).create()
-        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-
-        // 🔥 [키보드 버그 최종 픽스] AlertDialog가 화면에 뜰 때 키보드 차단 플래그를 영구 해제
-        dialog.setOnShowListener {
-            dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
-            dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-        }
+        setupCustomDialog(dialog, mainContainer)
 
         applyBtn.setOnClickListener {
             viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
@@ -748,7 +861,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             }
         }
 
-        closeBtn.setOnClickListener { dialog.dismiss() }
+        cancelBtn.setOnClickListener { dialog.dismiss() }
         dialog.show()
     }
 }
