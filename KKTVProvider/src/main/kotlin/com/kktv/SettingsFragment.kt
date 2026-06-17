@@ -213,16 +213,24 @@ class SettingsFragment(
                 val cookies = cookieManager.getCookie(url) ?: ""
 
                 if (cookies.contains("cf_clearance")) {
-                    sharedPref.edit().apply {
-                        putString("cf_cookies", cookies)
-                        putString("cf_user_agent", userAgent)
-                        apply()
-                    }
-                    activity?.runOnUiThread {
-                        statusTextView.text = "현재 상태 : 우회 완료 (쿠키 저장됨)"
-                        statusTextView.setTextColor(Color.parseColor("#55FF55"))
-                        showToast("우회 성공! 쿠키가 안전하게 저장되었습니다.")
-                        dismiss() // 토스트 출력 후 설정 창 자동 종료
+                    // 저장된 쿠키와 현재 쿠키에서 cf_clearance 고유 값만 추출
+                    val savedCookies = sharedPref.getString("cf_cookies", "") ?: ""
+                    val savedCf = savedCookies.split(";").map { it.trim() }.firstOrNull { it.startsWith("cf_clearance=") }
+                    val currentCf = cookies.split(";").map { it.trim() }.firstOrNull { it.startsWith("cf_clearance=") }
+
+                    // 저장된 쿠키가 아예 없거나(null), 기존과 다른 새로운 쿠키가 발급되었을 때만 우회 성공 처리 및 자동 종료
+                    if (currentCf != null && currentCf != savedCf) {
+                        sharedPref.edit().apply {
+                            putString("cf_cookies", cookies)
+                            putString("cf_user_agent", userAgent)
+                            apply()
+                        }
+                        activity?.runOnUiThread {
+                            statusTextView.text = "현재 상태 : 우회 완료 (쿠키 저장됨)"
+                            statusTextView.setTextColor(Color.parseColor("#55FF55"))
+                            showToast("우회 성공! 새로운 쿠키가 저장되었습니다.")
+                            dismiss() // 토스트 출력 후 설정 창 자동 종료
+                        }
                     }
                 }
             }
