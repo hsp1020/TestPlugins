@@ -103,7 +103,7 @@ class CUTVProvider : MainAPI() {
     }
 
     private suspend fun solveCloudflare(url: String): Pair<String, String>? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-        // 리플렉션을 통해 현재 백그라운드에서 실행 중인 Foreground Activity 획득
+        // 리플렉션을 통해 현재 화면에 구동 중인 Foreground Activity 획득
         val activity = try {
             val activityThreadClass = Class.forName("android.app.ActivityThread")
             val activityThread = activityThreadClass.getMethod("currentActivityThread").invoke(null)
@@ -159,6 +159,8 @@ class CUTVProvider : MainAPI() {
                 javaScriptCanOpenWindowsAutomatically = true
                 mediaPlaybackRequiresUserGesture = false
                 userAgentString = userAgent
+                // 혼합 콘텐츠 허용 (Cloudflare 내부 보안 subresource 스크립트 차단 방지)
+                mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             }
             
             println("[CUTV_DEBUG] [Cloudflare Bypass] WebView User-Agent 강제 설정: $userAgent")
@@ -168,8 +170,9 @@ class CUTVProvider : MainAPI() {
             cookieManager.setAcceptCookie(true)
             cookieManager.setAcceptThirdPartyCookies(webView, true)
 
-            // Throttling 방지를 위해 루트 레이아웃에 1x1 크기로 웹뷰를 부착
-            // 투명도(alpha)를 0.01f로 주어 눈에는 보이지 않으나 실제로 렌더링되도록 처리합니다.
+            // ⚠️ [물리적 크기 탐지 우회 적용]
+            // 가로, 세로 크기를 MATCH_PARENT로 온전히 주어 정상 디바이스 상태로 가정한 뒤,
+            // 화면 왼쪽 및 위쪽의 바깥 좌표(-3000f)로 밀어내어 사용자 화면에만 보이지 않게 처리합니다.
             val rootLayout = activity.findViewById<android.view.ViewGroup>(android.R.id.content)
             if (rootLayout == null) {
                 println("[CUTV_DEBUG] [Cloudflare Bypass] ERROR: 루트 레이아웃을 찾을 수 없습니다.")
@@ -178,11 +181,17 @@ class CUTVProvider : MainAPI() {
                 }
                 return@suspendCancellableCoroutine
             }
-            val layoutParams = android.view.ViewGroup.LayoutParams(1, 1)
+            
+            val layoutParams = android.view.ViewGroup.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT
+            )
             
             try {
                 rootLayout.addView(webView, layoutParams)
-                webView.alpha = 0.01f
+                // 좌표 자체를 화면 디스플레이 바깥 가상 영역으로 격리 배치
+                webView.translationX = -3000f
+                webView.translationY = -3000f
             } catch (e: Exception) {
                 println("[CUTV_DEBUG] [Cloudflare Bypass] WARNING: 뷰 계층 추가 실패: ${e.message}")
             }
@@ -213,7 +222,7 @@ class CUTVProvider : MainAPI() {
                 fun checkCookies(currentUrl: String) {
                     if (solved) return
                     val cookies = cookieManager.getCookie(currentUrl) ?: ""
-                    println("[CUTV_DEBUG] [Cloudflare Bypass] 실시간 쿠키 체크: $cookies")
+                    println("[CUTV_DEBUG] [Cloudflare Bypass] 실시간 쿠키 체크 ($currentUrl): $cookies")
 
                     if (cookies.contains("cf_clearance")) {
                         solved = true
@@ -247,15 +256,15 @@ class CUTVProvider : MainAPI() {
             val intervalRunnable = object : Runnable {
                 override fun run() {
                     if (continuation.isActive) {
-                        webView.url?.let { currentUrl ->
-                            val cookies = cookieManager.getCookie(currentUrl) ?: ""
-                            if (cookies.contains("cf_clearance")) {
-                                println("[CUTV_DEBUG] [Cloudflare Bypass] 성공 (인터벌 체크): cf_clearance 쿠키 발견!")
-                                handler.removeCallbacks(timeoutRunnable)
-                                continuation.resume(Pair(cookies, userAgent))
-                                cleanup()
-                                return
-                            }
+                        // webView.url이 일시적으로 null일 경우, 최초 요청했던 대상 도메인 주소를 백업 타겟으로 할당하여 안정적으로 검사 수행
+                        val currentUrl = webView.url ?: url
+                        val cookies = cookieManager.getCookie(currentUrl) ?: ""
+                        if (cookies.contains("cf_clearance")) {
+                            println("[CUTV_DEBUG] [Cloudflare Bypass] 성공 (인터벌 체크): cf_clearance 쿠키 발견!")
+                            handler.removeCallbacks(timeoutRunnable)
+                            continuation.resume(Pair(cookies, userAgent))
+                            cleanup()
+                            return
                         }
                         handler.postDelayed(this, 1500)
                     }
