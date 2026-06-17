@@ -14,6 +14,7 @@ import android.os.SystemClock
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
+import android.util.Base64
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
