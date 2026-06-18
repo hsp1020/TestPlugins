@@ -521,19 +521,20 @@ class YoutubeProvider(
     }
 
 
-    private fun getSavedContinuationToken(key: String): String? {
-        val hashedKey = YoutubeUtils.sha1(key)
+    private fun getSavedContinuationToken(key: String, page: Int = 0): String? {
+        val pageKey = if (page > 0) "${key}_page_$page" else key
+        val hashedKey = YoutubeUtils.sha1(pageKey)
         val cached = continuationTokenCache[hashedKey]
         
         if (key.startsWith("chip_") || key.contains("chip", ignoreCase = true)) {
-            Log.d("YoutubeUtils", "[CHIP] getSavedContinuationToken - Key: $key, HashedKey: $hashedKey, MemoryCachedToken: $cached")
+            Log.d("YoutubeUtils", "[CHIP] getSavedContinuationToken - Page: $page, Key: $pageKey, HashedKey: $hashedKey, CachedToken: $cached")
         }
 
         if (cached != null) return cached
         
         val token = appPrefs?.getString("cont_token_$hashedKey", null)
         if (key.startsWith("chip_") || key.contains("chip", ignoreCase = true)) {
-            Log.d("YoutubeUtils", "[CHIP] getSavedContinuationToken - Prefs Loaded Token: $token")
+            Log.d("YoutubeUtils", "[CHIP] getSavedContinuationToken - Page: $page, Loaded from Prefs: $token")
         }
 
         if (token != null) {
@@ -542,11 +543,12 @@ class YoutubeProvider(
         return token
     }
 
-    private fun saveContinuationToken(key: String, token: String?) {
-        val hashedKey = YoutubeUtils.sha1(key)
+    private fun saveContinuationToken(key: String, page: Int = 0, token: String?) {
+        val pageKey = if (page > 0) "${key}_page_$page" else key
+        val hashedKey = YoutubeUtils.sha1(pageKey)
         
         if (key.startsWith("chip_") || key.contains("chip", ignoreCase = true)) {
-            Log.d("YoutubeUtils", "[CHIP] saveContinuationToken - Key: $key, HashedKey: $hashedKey, NewTokenToSave: $token")
+            Log.d("YoutubeUtils", "[CHIP] saveContinuationToken - Page: $page, Key: $pageKey, HashedKey: $hashedKey, NewTokenToSave: $token")
         }
 
         if (token.isNullOrBlank()) {
@@ -561,8 +563,10 @@ class YoutubeProvider(
             }
         }
     }
-
     
+    
+
+
 
     private fun getEpisodeMetaString(videoData: Map<*, *>?): String {
         if (videoData == null) return ""
@@ -1382,7 +1386,7 @@ class YoutubeProvider(
 
         if (page > maxPages) {
             if (isChip) {
-                Log.d("YoutubeUtils", "[CHIP] getMainPage - Stop paging. Page limit exceeded ($page > $maxPages)")
+                Log.d("YoutubeUtils", "[CHIP] getMainPage - Paging limit reached ($page > $maxPages)")
             }
             return newHomePageResponse(request, emptyList(), hasNext = false)
         }
@@ -1397,9 +1401,31 @@ class YoutubeProvider(
                     savedApiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
                     savedVisitorData = savedVisitorData ?: appPrefs?.getString("yt_visitor_data", null)
                     savedClientVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION)
-                    val tokenToUse = requestData.removePrefix("chip_")
 
-                    Log.d("YoutubeUtils", "[CHIP] Page 1 - parsed tokenToUse: $tokenToUse, savedApiKey: $savedApiKey")
+                    // 보완책: 메인 홈 비동기 응답 지연 시, 칩 1페이지에서 직접 API Key를 동기 획득하여 병렬 로딩 실패 방지
+                    if (savedApiKey.isNullOrBlank()) {
+                        Log.w("YoutubeUtils", "[CHIP] API Key is missing on Page 1. Synchronously fetching mainUrl to retrieve configs...")
+                        try {
+                            val html = app.get(mainUrl, interceptor = ytInterceptor).text
+                            savedApiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY") ?: savedApiKey
+                            savedVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA") ?: savedVisitorData
+                            savedClientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: savedClientVersion ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
+                            
+                            if (!savedApiKey.isNullOrBlank()) {
+                                appPrefs?.edit()
+                                    ?.putString("yt_api_key", savedApiKey)
+                                    ?.putString("yt_visitor_data", savedVisitorData)
+                                    ?.putString("yt_client_version", savedClientVersion)
+                                    ?.apply()
+                                Log.d("YoutubeUtils", "[CHIP] Configs retrieved successfully. Key: $savedApiKey")
+                            }
+                        } catch (e: Exception) {
+                            Log.e("YoutubeUtils", "[CHIP] Failed to fetch mainUrl for configs", e)
+                        }
+                    }
+
+                    val tokenToUse = requestData.removePrefix("chip_")
+                    Log.d("YoutubeUtils", "[CHIP] Page 1 - tokenToUse: $tokenToUse, savedApiKey: $savedApiKey")
 
                     if (!savedApiKey.isNullOrBlank()) {
                         val apiUrl = "$mainUrl/youtubei/v1/browse?key=$savedApiKey"
@@ -1416,7 +1442,6 @@ class YoutubeProvider(
                         )
                         
                         val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
-                        Log.d("YoutubeUtils", "[CHIP] Page 1 - POST HTTP Request to $apiUrl with payload: $payload")
                         val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                         
                         if (response != null) {
@@ -1424,17 +1449,10 @@ class YoutubeProvider(
                                 ?: response["onResponseReceivedEndpoints"]
                                 ?: response["onResponseReceivedCommands"] 
                                 ?: response
-                            
-                            Log.d("YoutubeUtils", "[CHIP] Page 1 - Parsing response list items...")
                             processRecursive(actions, results, seenIds, playlistMode = false)
-                            
                             nextContinuation = findTokenRecursive(response)
-                            Log.d("YoutubeUtils", "[CHIP] Page 1 - Extracted nextContinuation: $nextContinuation")
-                        } else {
-                            Log.e("YoutubeUtils", "[CHIP] Page 1 - Response object is null!")
+                            Log.d("YoutubeUtils", "[CHIP] Page 1 - parsed nextContinuation: $nextContinuation")
                         }
-                    } else {
-                        Log.e("YoutubeUtils", "[CHIP] Page 1 - Cannot request browse API because API Key is missing.")
                     }
                 } else {
                     val targetUrl = if(requestData == "Home") mainUrl else requestData
@@ -1487,9 +1505,18 @@ class YoutubeProvider(
                 if (isChip) {
                     Log.d("YoutubeUtils", "[CHIP] Page $page - Loading continuation tokens...")
                 }
-                var tokenToUse = getSavedContinuationToken(requestData)
-                if (isChip) {
-                    Log.d("YoutubeUtils", "[CHIP] Page $page - Loaded tokenToUse: $tokenToUse")
+                var tokenToUse = getSavedContinuationToken(requestData, page)
+
+                // 보완책: 동시성 쓰레드 병렬성 때문에 뒷 페이지가 토큰을 아직 찾지 못했을 때 코루틴 delay 대기열 구동
+                if (isChip && tokenToUse.isNullOrBlank() && page > 2) {
+                    Log.w("YoutubeUtils", "[CHIP] Page $page token is empty. Suspending coroutine thread and waiting for previous page to write the token...")
+                    var retries = 0
+                    while (tokenToUse.isNullOrBlank() && retries < 15) {
+                        kotlinx.coroutines.delay(300L)
+                        tokenToUse = getSavedContinuationToken(requestData, page)
+                        retries++
+                    }
+                    Log.d("YoutubeUtils", "[CHIP] Page $page wait finished. Retrieved tokenToUse: $tokenToUse")
                 }
                 
                 if (tokenToUse.isNullOrBlank() && page == 2) { 
@@ -1517,7 +1544,7 @@ class YoutubeProvider(
                             tokenToUse = findTokenRecursive(response)
                             Log.d("YoutubeUtils", "[CHIP] Page 2 - Fallback outer call succeeded. Found nested tokenToUse: $tokenToUse")
                             if (!tokenToUse.isNullOrBlank()) {
-                                saveContinuationToken(requestData, tokenToUse)
+                                saveContinuationToken(requestData, page, tokenToUse)
                                 
                                 val innerApiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
                                 val innerPayload = mapOf(
@@ -1531,7 +1558,6 @@ class YoutubeProvider(
                                     ),
                                     "continuation" to tokenToUse
                                 )
-                                Log.d("YoutubeUtils", "[CHIP] Page 2 - Sending inner HTTP Request to $innerApiUrl")
                                 val innerResponse = app.post(innerApiUrl, json = innerPayload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                                 if (innerResponse != null) {
                                     val actions = innerResponse["onResponseReceivedActions"] 
@@ -1600,9 +1626,13 @@ class YoutubeProvider(
         }
 
         if (isChip) {
-            Log.d("YoutubeUtils", "[CHIP] getMainPage EXIT - Saving nextContinuation for requestData: $requestData -> $nextContinuation")
+            Log.d("YoutubeUtils", "[CHIP] getMainPage EXIT - Saving nextContinuation for requestData: $requestData -> $nextContinuation (intended for page: ${page + 1})")
         }
-        saveContinuationToken(requestData, nextContinuation)
+        // 다음 페이지 호출을 위해 전용 page + 1 슬롯 키로 분리하여 세이브 처리 진행
+        saveContinuationToken(requestData, page + 1, nextContinuation)
+        
+    
+                 
 
 
         // 시청기록(History) 행의 경우, 일자별 시간 경계는 유지하되 일자 내부에서만 일반 영상이 쇼츠보다 앞에 오도록 그룹 스왑 정렬
