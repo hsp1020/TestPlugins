@@ -1192,7 +1192,7 @@ class SettingsBottomFragment(
                 return VH(layout, checkbox, etOrder, genreSwitch, dragHandle)
             }
 
-                override fun onBindViewHolder(holder: VH, position: Int) {
+            override fun onBindViewHolder(holder: VH, position: Int) {
                 val tab = visibleTabs[position]
                 val enabledKey = "tab_enabled_${uniqueId}_${tab.key}"
                 
