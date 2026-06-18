@@ -832,18 +832,28 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             override fun onMove(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder, target: RecyclerView.ViewHolder): Boolean {
                 val from = viewHolder.adapterPosition
                 val to = target.adapterPosition
-                Collections.swap(catalogList, from, to)
                 
+                if (from == RecyclerView.NO_POSITION || to == RecyclerView.NO_POSITION) return false
+                
+                Collections.swap(catalogList, from, to)
+                catalogAdapter.notifyItemMoved(from, to) // 단순 이동만 시켜서 스크롤 연산 방해 차단
+                return true
+            }
+
+            override fun clearView(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder) {
+                super.clearView(recyclerView, viewHolder)
+                // 🚨 드래그가 완벽히 끝나서 손을 뗐을 때, 순서 인덱스를 재정렬하고 화면을 일괄 새로고침합니다.
                 for (i in catalogList.indices) {
                     catalogList[i].orderIndex = i + 1
                 }
-                catalogAdapter.notifyItemMoved(from, to)
-                catalogAdapter.notifyItemChanged(from)
-                catalogAdapter.notifyItemChanged(to)
-                return true
+                catalogAdapter.notifyDataSetChanged()
             }
+
             override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {}
         })
+        
+
+        
         touchHelper.attachToRecyclerView(rvCatalogs)
         mainContainer.addView(rvCatalogs)
 
