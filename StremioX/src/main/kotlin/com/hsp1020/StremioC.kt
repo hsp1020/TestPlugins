@@ -782,17 +782,23 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }
         }
 
-        // ◀️ 기존의 addonDeferred 블록 전체를 아래 코드로 교체합니다.
+        // ◀️ 기존의 addonDeferred 블록 전체를 아래 코드로 완전히 교체합니다.
         val addonDeferred = async(Dispatchers.IO) {
             runSuspendCatching {
-                // 🔥 [수정] MAL/Kitsu ID인 경우, 앞서 변환 완료된 IMDB ID 또는 TMDB ID를 사용하여 aiometadata 서버에 요청합니다.
+                // Kitsu를 통해 IMDB ID 또는 TMDB ID 매핑 여부 확인
+                val isMapped = isKitsuOrMal && (resolvedImdbId != null || resolvedTmdbId != null)
+                
                 val targetId = if (isKitsuOrMal) {
                     resolvedImdbId ?: resolvedTmdbId?.let { "tmdb:$it" } ?: res.id
                 } else {
                     res.id
                 }
-                val targetType = if (isKitsuOrMal && resolvedImdbId != null) {
-                    res.type ?: "series"
+                
+                // 🔥 [핵심 수정] aiometadata 같은 TMDB 기반 애드온은 'anime' 타입을 메타 조회용으로 이해하지 못합니다.
+                // 따라서 애니메이션이 IMDB/TMDB ID로 매핑되었을 경우, 타입을 반드시 'series' 또는 'movie'로 강제 치환해 주어야
+                // 애드온 서버가 'series/ttXXXX' 규격으로 저장된 커스텀 포스터를 정상적으로 찾아서 반환합니다.
+                val targetType = if (isMapped) {
+                    if (res.type == "movie") "movie" else "series"
                 } else {
                     res.type ?: "movie"
                 }
@@ -803,7 +809,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
                 response?.meta ?: response?.metas?.firstOrNull { it.id == targetId } ?: response?.metas?.firstOrNull()
             }.onFailure { it.printStackTrace() }.getOrNull()
         }
+
         
+
         
         val tmdbIdFromRes = res.moviedb_id?.toString() ?: res.tmdbIdExt
         val targetTmdbId = resolvedTmdbId ?: if (res.id?.startsWith("tmdb:") == true) res.id.removePrefix("tmdb:") else tmdbIdFromRes
