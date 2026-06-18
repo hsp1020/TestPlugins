@@ -782,15 +782,28 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }
         }
 
+        // ◀️ 기존의 addonDeferred 블록 전체를 아래 코드로 교체합니다.
         val addonDeferred = async(Dispatchers.IO) {
             runSuspendCatching {
-                val syncMetaUrl = this@StremioC.getUnifiedMetaUrl(res.type ?: "movie", res.id ?: "")
+                // 🔥 [수정] MAL/Kitsu ID인 경우, 앞서 변환 완료된 IMDB ID 또는 TMDB ID를 사용하여 aiometadata 서버에 요청합니다.
+                val targetId = if (isKitsuOrMal) {
+                    resolvedImdbId ?: resolvedTmdbId?.let { "tmdb:$it" } ?: res.id
+                } else {
+                    res.id
+                }
+                val targetType = if (isKitsuOrMal && resolvedImdbId != null) {
+                    res.type ?: "series"
+                } else {
+                    res.type ?: "movie"
+                }
+
+                val syncMetaUrl = this@StremioC.getUnifiedMetaUrl(targetType, targetId ?: "")
                 val text = customSession.get(syncMetaUrl).text
                 val response = if (text.isNotBlank()) gson.fromJson(text, CatalogResponse::class.java) else null
-                response?.meta ?: response?.metas?.firstOrNull { it.id == res.id } ?: response?.metas?.firstOrNull()
+                response?.meta ?: response?.metas?.firstOrNull { it.id == targetId } ?: response?.metas?.firstOrNull()
             }.onFailure { it.printStackTrace() }.getOrNull()
         }
-             
+        
         
         val tmdbIdFromRes = res.moviedb_id?.toString() ?: res.tmdbIdExt
         val targetTmdbId = resolvedTmdbId ?: if (res.id?.startsWith("tmdb:") == true) res.id.removePrefix("tmdb:") else tmdbIdFromRes
