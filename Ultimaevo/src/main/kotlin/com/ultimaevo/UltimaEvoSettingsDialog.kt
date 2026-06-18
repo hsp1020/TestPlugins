@@ -628,7 +628,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 
                 holder.switch.setOnCheckedChangeListener(null)
                 holder.switch.isChecked = data.isChecked
-                
+
                 holder.switch.setOnCheckedChangeListener { _, isChecked -> 
                     if (data.isChecked == isChecked) return@setOnCheckedChangeListener
                     data.isChecked = isChecked
@@ -639,8 +639,14 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     providerList.clear()
                     providerList.addAll(checkedItems)
                     providerList.addAll(uncheckedItems)
-                    notifyDataSetChanged() 
-                }
+                    
+                    // 🚨 레이아웃을 다시 그리는 도중 데이터 변경 알림이 발생하는 타이밍 방어
+                    if (rvProviders.isComputingLayout) {
+                        rvProviders.post { notifyDataSetChanged() }
+                    } else {
+                        notifyDataSetChanged()
+                    }
+                }             
             }
             override fun getItemCount() = providerList.size
         }
@@ -742,7 +748,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 
                 holder.cb.setOnCheckedChangeListener(null)
                 holder.cb.isChecked = data.isChecked
-                
+
                 holder.cb.setOnCheckedChangeListener { _, isChecked ->
                     if (data.isChecked == isChecked) return@setOnCheckedChangeListener
                     data.isChecked = isChecked
@@ -753,7 +759,13 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     catalogList.clear()
                     catalogList.addAll(checkedItems)
                     catalogList.addAll(uncheckedItems)
-                    notifyDataSetChanged() 
+                    
+                    // 🚨 리사이클러뷰가 레이아웃 연산 중이면 한 프레임 뒤에 notify하도록 방어 처리
+                    if (rvCatalogs.isComputingLayout) {
+                        rvCatalogs.post { notifyDataSetChanged() }
+                    } else {
+                        notifyDataSetChanged()
+                    }
                 }
                 
                 holder.etOrder.setOnFocusChangeListener(null)
@@ -800,12 +812,18 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         catalogList[i].orderIndex = i + 1
                     }
                     
-                    notifyItemMoved(oldPos, newPos)
-                    notifyItemRangeChanged(minOf(oldPos, newPos), maxOf(oldPos, newPos) + 1)
+                    // 🚨 포커스 해제 작업(startActivity 등)과 꼬이지 않도록 안전하게 대기열(Post)에 작업 예약
+                    rvCatalogs.post {
+                        notifyItemMoved(oldPos, newPos)
+                        notifyItemRangeChanged(minOf(oldPos, newPos), maxOf(oldPos, newPos) + 1)
+                    }
                 } else {
-                    notifyItemChanged(oldPos)
+                    // 🚨 포커스 복구 연산 중 바로 동기 알림이 가는 것을 방어
+                    rvCatalogs.post {
+                        notifyItemChanged(oldPos)
+                    }
                 }
-            }
+            }                            
         }
         val catalogAdapter = CatalogAdapter()
         rvCatalogs.adapter = catalogAdapter
