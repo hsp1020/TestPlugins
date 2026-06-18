@@ -1306,28 +1306,30 @@ class SettingsBottomFragment(
 
         val touchHelper = ItemTouchHelper(object : ItemTouchHelper.SimpleCallback(ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0) {
             override fun onMove(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder, target: RecyclerView.ViewHolder): Boolean {
-                val fromPos = viewHolder.adapterPosition
-                val toPos = target.adapterPosition
+                val from = viewHolder.adapterPosition
+                val to = target.adapterPosition
                 
-                val movedTab = adapter.visibleTabs[fromPos]
-                Collections.swap(adapter.visibleTabs, fromPos, toPos)
+                if (from == RecyclerView.NO_POSITION || to == RecyclerView.NO_POSITION) return false
                 
-                adapter.notifyItemMoved(fromPos, toPos)
-                adapter.notifyItemChanged(fromPos)
-                adapter.notifyItemChanged(toPos)
-
-                val masterFrom = masterTabs.indexOf(movedTab)
-                val targetTab = adapter.visibleTabs[fromPos]
-                val masterTo = masterTabs.indexOf(targetTab)
-                
-                if (masterFrom != -1 && masterTo != -1) {
-                    masterTabs.removeAt(masterFrom)
-                    masterTabs.add(masterTo, movedTab)
-                }
+                Collections.swap(catalogList, from, to)
+                catalogAdapter.notifyItemMoved(from, to) // 단순 이동만 시켜서 스크롤 연산 방해 차단
                 return true
             }
+
+            override fun clearView(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder) {
+                super.clearView(recyclerView, viewHolder)
+                // 🚨 드래그가 완벽히 끝나서 손을 뗐을 때, 순서 인덱스를 재정렬하고 화면을 일괄 새로고침합니다.
+                for (i in catalogList.indices) {
+                    catalogList[i].orderIndex = i + 1
+                }
+                catalogAdapter.notifyDataSetChanged()
+            }
+
             override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {}
         })
+
+        
+        
         touchHelper.attachToRecyclerView(rv)
 
         val footer = LinearLayout(context).apply {
