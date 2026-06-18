@@ -2,6 +2,8 @@
 package com.ultimaevo
 
 import android.content.Context
+import android.content.ContextWrapper  // 추가
+import android.content.Intent          // 추가
 import com.google.gson.reflect.TypeToken
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.HomePageResponse
@@ -81,7 +83,6 @@ object UltimaEvoSyncManager {
                 async(Dispatchers.IO) {
                     semaphore.withPermit {
                         try {
-                            // 🔥 타임아웃 15초 -> 30초 연장
                             withTimeoutOrNull(30000L) {
                                 val reqName = provider.mainPage.firstOrNull()?.name ?: "Home"
                                 val reqData = provider.mainPage.firstOrNull()?.data ?: ""
@@ -143,6 +144,24 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
 
     init {
         println("[UltimaEvo-Debug] [Provider-$instanceId] 인스턴스 할당됨: $customName")
+        applyAdBlockPatch() // 초기화 단계에서 광고 차단 시도
+    }
+
+    // 외부 브라우저(HTTP/HTTPS 광고) 강제 열기 명령만 선택적으로 파괴하는 동적 모니터링 함수
+    private fun applyAdBlockPatch() {
+        try {
+            // LiveEventsProvider의 static context 변수가 초기화되어 있는지 체크
+            val liveEventsContext = com.cncverse.LiveEventsProvider.context
+            if (liveEventsContext != null && liveEventsContext !is PreventAdContextWrapper) {
+                // 기존 컨텍스트를 차단 래퍼로 덮어씌움 (웹뷰 내부 추출 기능은 유지)
+                com.cncverse.LiveEventsProvider.context = PreventAdContextWrapper(liveEventsContext)
+                println("[UltimaEvo_AdBlock] LiveEventsProvider 컨텍스트 가로채기 차단 완료")
+            }
+        } catch (e: NoClassDefFoundError) {
+            // 해당 플러그인이 빌드되어 있지 않거나 미설치 시 조용히 스킵
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     override val mainPage: List<MainPageData>
@@ -205,6 +224,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
         }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
+        applyAdBlockPatch() // ⚙️ 혹시 모를 로드 타이밍 꼬임 방지를 위해 실시간 체크
         return withContext(Dispatchers.IO) {
             try {
                 val config = UltimaEvoPlugin.gson.fromJson(request.data, EvoCatalogConfig::class.java)
@@ -215,7 +235,6 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
 
                 val originalRequest = MainPageRequest(request.name, config.originalData, request.horizontalImages)
                 
-                // 🔥 타임아웃 15초 -> 30초 연장 (CUTV의 웹뷰 인증이 끝날 때까지 기다려줌)
                 val response = withTimeoutOrNull(30000L) {
                     targetProvider.getMainPage(page, originalRequest)
                 } ?: return@withContext newHomePageResponse(emptyList(), false)
@@ -237,6 +256,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
     }
 
     override suspend fun load(url: String): LoadResponse? {
+        applyAdBlockPatch() // ⚙️ 사용자가 영상을 로딩하는 단계에서 최종 확인
         return withContext(Dispatchers.IO) {
             val allProviders = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
             val exactProvider = allProviders.find { url.startsWith(it.mainUrl) }
@@ -255,6 +275,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
+        applyAdBlockPatch()
         val context = UltimaEvoPlugin.pluginContext ?: return emptyList()
         val prefs = context.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
         
@@ -281,7 +302,6 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
                 async<List<SearchResponse>>(Dispatchers.IO) {
                     semaphore.withPermit {
                         try {
-                            // 🔥 타임아웃 15초 -> 30초 연장
                             withTimeoutOrNull(30000L) {
                                 provider.search(query) ?: emptyList()
                             } ?: emptyList()
@@ -297,6 +317,31 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
             val results: List<SearchResponse> = deferredResults.awaitAll().flatten()
             val finalRes: List<SearchResponse> = results.distinctBy { it.url }
             finalRes
+        }
+    }
+}
+
+// 외부 브라우저(인터넷 광고) 열기 명령만 골라서 차단해주는 ContextWrapper 클래스 정의
+class PreventAdContextWrapper(base: Context) : ContextWrapper(base) {
+    override fun startActivity(intent: Intent?) {
+        if (intent?.action == Intent.ACTION_VIEW) {
+            val uri = intent.data
+            val scheme = uri?.scheme
+            val host = uri?.host
+
+            // 외부 브라우저 호출(http/https 프로토콜) 감지
+            if (scheme == "http" || scheme == "https") {
+                // 플러그인 텔레그램 공식 채널(t.me) 주소 이동을 제외한 모든 외부 이동 명령 원천 차단
+                if (host != "t.me") {
+                    println("[UltimaEvo_AdBlock] 도메인 무관 외부 브라우저 광고 강제 실행 차단 완료 (차단된 URL: $uri)")
+                    return // 광고 웹브라우저 창 호출 명령 차단
+                }
+            }
+        }
+        try {
+            super.startActivity(intent)
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
     }
 }
