@@ -99,10 +99,14 @@ class CUTVProvider(private val sharedPref: SharedPreferences) : MainAPI() {
         } catch (e: Exception) { null }
     }
 
-    // 우회 실패/쿠키 만료 시 홈 화면에 노출될 더미(에러 안내) 아이템
     private fun getCookieErrorResponse(requestName: String): HomePageResponse {
+        // [핵심 변경점] 에러 판단 시 저장된 수명이 다한 쿠키를 즉시 파기합니다.
+        sharedPref.edit().remove("cf_cookies").remove("cf_user_agent").apply()
+        cfCookies = null
+        cfUserAgent = null
+
         val errorItem = newLiveSearchResponse(name = "쿠키를 최신화해주세요", url = mainUrl) {
-            this.posterUrl = "" // 빈 값으로 전달하여 Placeholder 노출
+            this.posterUrl = "" 
         }
         return newHomePageResponse(
             list = listOf(HomePageList(requestName, listOf(errorItem), isHorizontalImages = true)),
@@ -158,7 +162,7 @@ class CUTVProvider(private val sharedPref: SharedPreferences) : MainAPI() {
                     try { webView.stopLoading(); webView.destroy() } catch (e: Exception) {}
                 }
             }
-            handler.postDelayed(timeoutRunnable, 15000) // 15초로 복구
+            handler.postDelayed(timeoutRunnable, 15000)
 
             continuation.invokeOnCancellation {
                 handler.removeCallbacks(timeoutRunnable)
@@ -172,13 +176,10 @@ class CUTVProvider(private val sharedPref: SharedPreferences) : MainAPI() {
         val items = mutableListOf<SearchResponse>()
         
         try {
-            // 1. 저장된 쿠키 불러오기
             loadSavedCookies()
 
-            // 2. 일단 현재 쿠키로 페이지 요청 시도
             var doc = app.get(url, headers = defaultHeaders).document
 
-            // 3. 만약 챌린지가 감지되었다면 딱 '한 번'만 우회를 시도함
             if (isCloudflareChallenge(doc.html())) {
                 cfCookies = null
                 cfUserAgent = null
@@ -188,20 +189,16 @@ class CUTVProvider(private val sharedPref: SharedPreferences) : MainAPI() {
                     cfCookies = cfResult.first
                     cfUserAgent = cfResult.second
                     
-                    // 우회 성공 시 새로 발급받은 쿠키로 재요청
                     doc = app.get(url, headers = defaultHeaders).document
                     
-                    // 또 챌린지가 뜬다면 (사람이 직접 풀어야 하는 단계) 에러 아이템 반환
                     if (isCloudflareChallenge(doc.html())) {
                         return getCookieErrorResponse(request.name)
                     }
                 } else {
-                    // 타임아웃 또는 우회 실패 시 에러 아이템 반환
                     return getCookieErrorResponse(request.name)
                 }
             }
 
-            // --- 정상 파싱 로직 시작 ---
             val iframeSrc = doc.select("iframe").mapNotNull { it.attr("src") }
                 .firstOrNull { it.contains("galaxy-stream") || it.contains("hudtv") || it.contains("cli") }
 
