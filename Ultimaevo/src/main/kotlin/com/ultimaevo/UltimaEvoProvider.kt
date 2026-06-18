@@ -144,22 +144,13 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
 
     init {
         println("[UltimaEvo-Debug] [Provider-$instanceId] 인스턴스 할당됨: $customName")
-        
-        // 2초 주기로 활성화된 타 플러그인의 인스턴스를 감시하여 패치 주입
-        CoroutineScope(Dispatchers.IO).launch {
-            for (i in 1..10) {
-                if (applyAdBlockPatch()) {
-                    break // 패치 성공 혹은 대상 플러그인 미로드 확인 시 즉시 대기 루프 탈출
-                }
-                kotlinx.coroutines.delay(2000L)
-            }
-        }
+        applyAdBlockPatch() // 초기 바인딩 시 일회성 시도
     }
 
-    // 클래스로더 격리를 완벽하게 우회하는 동적 리플렉션 패치 함수
-    private fun applyAdBlockPatch(): Boolean {
+    // 클래스로더 격리를 가볍게 우회하는 일회성 온디맨드 패치 함수 (감시 루프 제거)
+    private fun applyAdBlockPatch() {
         try {
-            // [우회 기법 핵심] 클래스로더가 격리되어 Class.forName이 실패하므로, APIHolder에 등록된 실제 객체 인스턴스에서 클래스를 획득합니다.
+            // 실행 중인 플러그인 리스트에서 정확하게 대상 인스턴스를 확보
             val liveEventsInstance = APIHolder.allProviders.find { 
                 it::class.java.name.contains("LiveEventsProvider") 
             }
@@ -172,14 +163,12 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
 
                 if (liveEventsContext is Context && liveEventsContext !is PreventAdContextWrapper) {
                     field.set(null, PreventAdContextWrapper(liveEventsContext))
-                    println("[UltimaEvo_AdBlock] LiveEventsProvider 컨텍스트 가로채기 차단 완료")
+                    println("[UltimaEvo_AdBlock] LiveEventsProvider 가로채기 광고 차단 패치 적용 완료")
                 }
-                return true
             }
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        return false
     }
 
     override val mainPage: List<MainPageData>
@@ -242,7 +231,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
         }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
-        applyAdBlockPatch() 
+        applyAdBlockPatch() // 통합 카탈로그 로드 시점에 즉시 광고 차단 패치 적용
         return withContext(Dispatchers.IO) {
             try {
                 val config = UltimaEvoPlugin.gson.fromJson(request.data, EvoCatalogConfig::class.java)
@@ -274,7 +263,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        applyAdBlockPatch() 
+        applyAdBlockPatch() // 영상 상세 정보 로드(클릭) 시점에 다시 한 번 체크하여 보장
         return withContext(Dispatchers.IO) {
             val allProviders = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
             val exactProvider = allProviders.find { url.startsWith(it.mainUrl) }
