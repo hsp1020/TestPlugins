@@ -167,10 +167,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hexated/cloudstream-extensions-hexated/master/StremioX/icon.png",
-        "fileHash": "sha256-c4f8589c87e3d93f580c4f7f07f86e9002a26b3f667d022b9f290d0de1364051",
+        "fileHash": "sha256-9e3fc503ee492fd63250962459485b2c0b935f723bc0070613d3eeb343713b4b",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 225415,
+        "fileSize": 225446,
         "status": 1,
         "language": "en",
         "authors": [
@@ -277,10 +277,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/phisher98/TVVVV/refs/heads/main/Icons/UltimaBeta.png",
-        "fileHash": "sha256-81f6eb27466cbf3b49a20bfd0b0cd137b2eb9d65ac734da4c633da7e5cb198da",
+        "fileHash": "sha256-f490c0b4f0394b91b5ddab1f467752d2684d290d004595c998099da9cdebbf9b",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 59426,
+        "fileSize": 59522,
         "status": 1,
         "language": "ko",
         "authors": [
