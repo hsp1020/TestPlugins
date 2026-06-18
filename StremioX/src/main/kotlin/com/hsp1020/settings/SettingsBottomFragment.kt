@@ -1323,22 +1323,18 @@ class SettingsBottomFragment(
                     masterTabs.add(masterTo, movedTab)
                 }
 
-                adapter.notifyItemMoved(fromPos, toPos) // 단순 이동만 시켜서 스크롤 연산 방해 차단
+                adapter.notifyItemMoved(fromPos, toPos)
                 return true
-            }
-
-            override fun clearView(recyclerView: RecyclerView, viewHolder: java.lang.Object) {
-                // 부모의 타입을 RecyclerView.ViewHolder로 맞춥니다.
             }
 
             override fun clearView(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder) {
                 super.clearView(recyclerView, viewHolder)
-                // 🚨 드래그 동작이 완전히 끝나서 드롭했을 때 순서 텍스트 숫자를 일괄 새로고침합니다.
+                // 🚨 드래그가 완전히 끝나고 사용자가 손을 뗐을 때 순서 텍스트를 일괄 갱신합니다.
                 adapter.notifyDataSetChanged()
             }
 
             override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {}
-        })        
+        })
         
         touchHelper.attachToRecyclerView(rv)
 
