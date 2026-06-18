@@ -1388,14 +1388,13 @@ class YoutubeProvider(
 
 
 
-    
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         isSearchContext = false
         val rawRequestData = request.data
         val requestData = YoutubeUtils.urlDecode(rawRequestData)
         val maxPages = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
         
-        // 고유 이름 기반의 칩 주소 패턴 식별
+        // 고유 이름 기반의 칩 주소 패턴 식별 (chip_name_카테고리명 형태)
         val isChip = requestData.startsWith("chip_name_")
         if (isChip) {
             Log.d("YoutubeUtils", "[CHIP] getMainPage ENTRY - Page: $page, requestData: $requestData")
@@ -1419,6 +1418,7 @@ class YoutubeProvider(
                     savedVisitorData = savedVisitorData ?: appPrefs?.getString("yt_visitor_data", null)
                     savedClientVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION)
 
+                    // 보완책: 메인 홈 비동기 응답 지연 시, 칩 1페이지에서 직접 API Key를 동기 획득하여 병렬 로딩 실패 방지
                     if (savedApiKey.isNullOrBlank()) {
                         Log.w("YoutubeUtils", "[CHIP] API Key is missing on Page 1. Synchronously fetching mainUrl to retrieve configs...")
                         try {
@@ -1501,20 +1501,41 @@ class YoutubeProvider(
                         if (requestData == "Home") {
                             val chipBar = safeGet(initialData, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0, "tabRenderer", "content", "richGridRenderer", "header", "feedFilterChipBarRenderer", "contents") as? List<*>
                             if (chipBar != null) {
-                                val jsonArray = org.json.JSONArray()
+                                // 기존에 저장되어 있던 모든 칩 목록을 영구 보존을 위해 먼저 불러와 맵으로 매핑합니다.
+                                val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
+                                val cachedChipsMap = try {
+                                    mapper.readValue<List<CachedChip>>(cachedChipsJson).associateBy { it.name }.toMutableMap()
+                                } catch (e: Exception) {
+                                    mutableMapOf<String, CachedChip>()
+                                }
+
+                                var modifiedChips = false
                                 for (chipItem in chipBar) {
                                     val chipMap = (chipItem as? Map<*, *>)?.get("chipCloudChipRenderer") as? Map<*, *> ?: continue
                                     val text = getText(chipMap["text"])
                                     val token = safeGet(chipMap, "navigationEndpoint", "continuationCommand", "token") as? String
                                     if (text.isNotBlank() && !token.isNullOrBlank()) {
-                                        val obj = org.json.JSONObject()
-                                        obj.put("name", text)
-                                        obj.put("token", token)
-                                        jsonArray.put(obj)
+                                        val oldChip = cachedChipsMap[text]
+                                        // 칩 토큰이 새로 갱신되었거나 신규 칩인 경우에만 맵에 갱신/추가합니다. (다른 칩 삭제 방지)
+                                        if (oldChip?.token != token) {
+                                            cachedChipsMap[text] = CachedChip(text, token)
+                                            modifiedChips = true
+                                        }
                                     }
                                 }
-                                if (jsonArray.length() > 0) {
+                                
+                                // 변경사항이 있거나 전체 개수가 늘어난 경우에만 SharedPreference 파일에 영구 기록합니다.
+                                val originalSize = try { mapper.readValue<List<CachedChip>>(cachedChipsJson).size } catch(e: Exception) { 0 }
+                                if (modifiedChips || cachedChipsMap.size > originalSize) {
+                                    val jsonArray = org.json.JSONArray()
+                                    cachedChipsMap.values.forEach { chip ->
+                                        val obj = org.json.JSONObject()
+                                        obj.put("name", chip.name)
+                                        obj.put("token", chip.token)
+                                        jsonArray.put(obj)
+                                    }
                                     appPrefs?.edit()?.putString("yt_cached_chips", jsonArray.toString())?.apply()
+                                    Log.d("YoutubeUtils", "[CHIP] Merged and preserved yt_cached_chips. Total unique chips cached: ${cachedChipsMap.size}")
                                 }
                             }
                         }
@@ -1533,7 +1554,8 @@ class YoutubeProvider(
                 }
                 var tokenToUse = getSavedContinuationToken(requestData, page)
 
-                if (isChip && tokenToUse.isNullOrBlank() && page > 2) {
+                // 보완책: page >= 2 로 조건을 넓혀 2페이지 또한 1페이지가 완전히 끝나서 저장할 때까지 안전하게 대기하도록 제어합니다.
+                if (isChip && tokenToUse.isNullOrBlank() && page >= 2) {
                     Log.w("YoutubeUtils", "[CHIP] Page $page token is empty. Suspending coroutine thread and waiting for previous page to write the token...")
                     var retries = 0
                     while (tokenToUse.isNullOrBlank() && retries < 15) {
@@ -1666,12 +1688,10 @@ class YoutubeProvider(
         if (isChip) {
             Log.d("YoutubeUtils", "[CHIP] getMainPage EXIT - Saving nextContinuation for requestData: $requestData -> $nextContinuation (intended for page: ${page + 1})")
         }
+        // 다음 페이지 호출을 위해 전용 page + 1 슬롯 키로 분리하여 세이브 처리 진행
         saveContinuationToken(requestData, page + 1, nextContinuation)
 
-        
-
-
-        // 시청기록(History) 행의 경우, 일자별 시간 경계는 유지하되 일자 내부에서만 일반 영상이 쇼츠보다 앞에 오도록 그룹 스왑 정렬
+        // 시청기록(History) 행 그룹 스왑 정렬 처리
         if (requestData.contains("history", ignoreCase = true) || requestData.contains("기록")) {
             val sorted = mutableListOf<SearchResponse>()
             val tempShorts = mutableListOf<SearchResponse>()
@@ -1701,6 +1721,8 @@ class YoutubeProvider(
 
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
     }
+
+    
 
     override suspend fun search(query: String): List<SearchResponse> {
         return search(query, 1)?.items ?: emptyList()
