@@ -521,13 +521,21 @@ class YoutubeProvider(
     }
 
 
-
     private fun getSavedContinuationToken(key: String): String? {
         val hashedKey = YoutubeUtils.sha1(key)
         val cached = continuationTokenCache[hashedKey]
+        
+        if (key.startsWith("chip_") || key.contains("chip", ignoreCase = true)) {
+            Log.d("YoutubeUtils", "[CHIP] getSavedContinuationToken - Key: $key, HashedKey: $hashedKey, MemoryCachedToken: $cached")
+        }
+
         if (cached != null) return cached
         
         val token = appPrefs?.getString("cont_token_$hashedKey", null)
+        if (key.startsWith("chip_") || key.contains("chip", ignoreCase = true)) {
+            Log.d("YoutubeUtils", "[CHIP] getSavedContinuationToken - Prefs Loaded Token: $token")
+        }
+
         if (token != null) {
             continuationTokenCache[hashedKey] = token
         }
@@ -536,6 +544,11 @@ class YoutubeProvider(
 
     private fun saveContinuationToken(key: String, token: String?) {
         val hashedKey = YoutubeUtils.sha1(key)
+        
+        if (key.startsWith("chip_") || key.contains("chip", ignoreCase = true)) {
+            Log.d("YoutubeUtils", "[CHIP] saveContinuationToken - Key: $key, HashedKey: $hashedKey, NewTokenToSave: $token")
+        }
+
         if (token.isNullOrBlank()) {
             val removed = continuationTokenCache.remove(hashedKey)
             if (removed != null) {
@@ -548,6 +561,8 @@ class YoutubeProvider(
             }
         }
     }
+
+    
 
     private fun getEpisodeMetaString(videoData: Map<*, *>?): String {
         if (videoData == null) return ""
@@ -1186,6 +1201,7 @@ class YoutubeProvider(
         return null
     }
 
+
     private fun findTokenRecursive(data: Any?): String? {
         if (data is Map<*, *>) {
             val renderer = data["continuationItemRenderer"] as? Map<*, *>
@@ -1197,7 +1213,10 @@ class YoutubeProvider(
                         ?: (endpoint["searchContinuationEndpoint"] as? Map<*, *>)?.get("token") as? String
                         ?: (endpoint["command"] as? Map<*, *>)?.get("token") as? String
                         ?: endpoint["token"] as? String
-                    if (!token.isNullOrBlank()) return token
+                    if (!token.isNullOrBlank()) {
+                        Log.d("YoutubeUtils", "[CHIP] findTokenRecursive - Found token in [continuationItemRenderer]: $token")
+                        return token
+                    }
                 }
             }
 
@@ -1208,29 +1227,38 @@ class YoutubeProvider(
             if (nextData != null) {
                 val token = nextData["continuation"] as? String
                     ?: nextData["token"] as? String
-                if (!token.isNullOrBlank()) return token
+                if (!token.isNullOrBlank()) {
+                    Log.d("YoutubeUtils", "[CHIP] findTokenRecursive - Found token in [nextContinuationData]: $token")
+                    return token
+                }
             }
 
             for ((k, v) in data) {
                 val keyStr = k as? String ?: continue
-                if (keyStr == "feedFilterChipBarRenderer" || 
+                // 가설 검증: 불필요한 상단 헤더 및 최신 칩 관련 규격(chipViewModel, chipCloud)을 필터링 스킵하는 시점 기록
+                if (keyStr == "header" ||
+                    keyStr == "feedFilterChipBarRenderer" || 
                     keyStr == "chipCloudRenderer" || 
                     keyStr == "relatedChipCloudRenderer" ||
-                    keyStr == "chipCloudChipRenderer") {
+                    keyStr == "chipCloudChipRenderer" ||
+                    keyStr == "chipViewModel" ||
+                    keyStr == "chipCloud") {
+                    Log.d("YoutubeUtils", "[CHIP] findTokenRecursive - Skipping key to prevent false extraction: $keyStr")
                     continue
                 }
                 val t = findTokenRecursive(v)
                 if (t != null) return t
             }
         } else if (data is List<*>) {
-            for (i in data) {
-                val t = findTokenRecursive(i)
+            for (item in data) {
+                val t = findTokenRecursive(item)
                 if (t != null) return t
             }
         }
         return null
     }
-    
+
+   
     override val mainPage: List<MainPageData>
         get() {
             val customSections = getCustomHomepages()
@@ -1339,19 +1367,29 @@ class YoutubeProvider(
         savedContinuationToken = null
     }
 
+
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         isSearchContext = false
         val rawRequestData = request.data
         val requestData = YoutubeUtils.urlDecode(rawRequestData)
         val maxPages = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
+        
+        val isChip = requestData.startsWith("chip_")
+        if (isChip) {
+            Log.d("YoutubeUtils", "[CHIP] getMainPage ENTRY - Page: $page, requestData: $requestData")
+        }
+
         if (page > maxPages) {
+            if (isChip) {
+                Log.d("YoutubeUtils", "[CHIP] getMainPage - Stop paging. Page limit exceeded ($page > $maxPages)")
+            }
             return newHomePageResponse(request, emptyList(), hasNext = false)
         }
 
         val results = mutableListOf<SearchResponse>()
         val seenIds = mutableSetOf<String>()
         var nextContinuation: String? = null
-        val isChip = requestData.startsWith("chip_")
 
         try {
             if (page == 1) {
@@ -1360,6 +1398,8 @@ class YoutubeProvider(
                     savedVisitorData = savedVisitorData ?: appPrefs?.getString("yt_visitor_data", null)
                     savedClientVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION)
                     val tokenToUse = requestData.removePrefix("chip_")
+
+                    Log.d("YoutubeUtils", "[CHIP] Page 1 - parsed tokenToUse: $tokenToUse, savedApiKey: $savedApiKey")
 
                     if (!savedApiKey.isNullOrBlank()) {
                         val apiUrl = "$mainUrl/youtubei/v1/browse?key=$savedApiKey"
@@ -1376,6 +1416,7 @@ class YoutubeProvider(
                         )
                         
                         val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
+                        Log.d("YoutubeUtils", "[CHIP] Page 1 - POST HTTP Request to $apiUrl with payload: $payload")
                         val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                         
                         if (response != null) {
@@ -1383,9 +1424,17 @@ class YoutubeProvider(
                                 ?: response["onResponseReceivedEndpoints"]
                                 ?: response["onResponseReceivedCommands"] 
                                 ?: response
+                            
+                            Log.d("YoutubeUtils", "[CHIP] Page 1 - Parsing response list items...")
                             processRecursive(actions, results, seenIds, playlistMode = false)
+                            
                             nextContinuation = findTokenRecursive(response)
+                            Log.d("YoutubeUtils", "[CHIP] Page 1 - Extracted nextContinuation: $nextContinuation")
+                        } else {
+                            Log.e("YoutubeUtils", "[CHIP] Page 1 - Response object is null!")
                         }
+                    } else {
+                        Log.e("YoutubeUtils", "[CHIP] Page 1 - Cannot request browse API because API Key is missing.")
                     }
                 } else {
                     val targetUrl = if(requestData == "Home") mainUrl else requestData
@@ -1426,7 +1475,6 @@ class YoutubeProvider(
                             }
                         }
 
-                        // 수동 추가 플레이리스트 행인 경우, URL 내부에서 playlistId 정밀 추출 수행
                         val playlistId = if (requestData.contains("list=")) {
                             requestData.substringAfter("list=", "").substringBefore("&")
                         } else null
@@ -1436,7 +1484,13 @@ class YoutubeProvider(
                     }
                 }
             } else {
+                if (isChip) {
+                    Log.d("YoutubeUtils", "[CHIP] Page $page - Loading continuation tokens...")
+                }
                 var tokenToUse = getSavedContinuationToken(requestData)
+                if (isChip) {
+                    Log.d("YoutubeUtils", "[CHIP] Page $page - Loaded tokenToUse: $tokenToUse")
+                }
                 
                 if (tokenToUse.isNullOrBlank() && page == 2) { 
                     val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
@@ -1457,9 +1511,11 @@ class YoutubeProvider(
                             "continuation" to rawToken
                         )
                         val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
+                        Log.w("YoutubeUtils", "[CHIP] Page 2 - tokenToUse was empty! Triggering double-call recovery fallback using rawToken: $rawToken")
                         val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                         if (response != null) {
                             tokenToUse = findTokenRecursive(response)
+                            Log.d("YoutubeUtils", "[CHIP] Page 2 - Fallback outer call succeeded. Found nested tokenToUse: $tokenToUse")
                             if (!tokenToUse.isNullOrBlank()) {
                                 saveContinuationToken(requestData, tokenToUse)
                                 
@@ -1475,6 +1531,7 @@ class YoutubeProvider(
                                     ),
                                     "continuation" to tokenToUse
                                 )
+                                Log.d("YoutubeUtils", "[CHIP] Page 2 - Sending inner HTTP Request to $innerApiUrl")
                                 val innerResponse = app.post(innerApiUrl, json = innerPayload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                                 if (innerResponse != null) {
                                     val actions = innerResponse["onResponseReceivedActions"] 
@@ -1489,6 +1546,7 @@ class YoutubeProvider(
 
                                     processRecursive(actions, results, seenIds, playlistMode = false, playlistId = playlistId)
                                     nextContinuation = findTokenRecursive(innerResponse)
+                                    Log.d("YoutubeUtils", "[CHIP] Page 2 - Fallback nested nextContinuation: $nextContinuation")
                                 }
                             }
                         }
@@ -1511,6 +1569,9 @@ class YoutubeProvider(
                         "continuation" to tokenToUse
                     )
                     val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
+                    if (isChip) {
+                        Log.d("YoutubeUtils", "[CHIP] Page $page - Sending HTTP Request to $apiUrl using tokenToUse: $tokenToUse")
+                    }
                     val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                     if (response != null) {
                         val actions = response["onResponseReceivedActions"] 
@@ -1525,14 +1586,24 @@ class YoutubeProvider(
 
                         processRecursive(actions, results, seenIds, playlistMode = false, playlistId = playlistId)
                         nextContinuation = findTokenRecursive(response)
+                        if (isChip) {
+                            Log.d("YoutubeUtils", "[CHIP] Page $page - Extracted nextContinuation: $nextContinuation")
+                        }
                     }
                 }
             }
         } catch (e: Exception) { 
+            if (isChip) {
+                Log.e("YoutubeUtils", "[CHIP] Exception occurred inside getMainPage parsing pipeline: ${e.message}", e)
+            }
             logError(e) 
         }
 
+        if (isChip) {
+            Log.d("YoutubeUtils", "[CHIP] getMainPage EXIT - Saving nextContinuation for requestData: $requestData -> $nextContinuation")
+        }
         saveContinuationToken(requestData, nextContinuation)
+
 
         // 시청기록(History) 행의 경우, 일자별 시간 경계는 유지하되 일자 내부에서만 일반 영상이 쇼츠보다 앞에 오도록 그룹 스왑 정렬
         if (requestData.contains("history", ignoreCase = true) || requestData.contains("기록")) {
