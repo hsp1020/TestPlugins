@@ -277,10 +277,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/phisher98/TVVVV/refs/heads/main/Icons/UltimaBeta.png",
-        "fileHash": "sha256-7ffc991306e813528324511a8862a40dfb01876d3e2826a0261cda886599e932",
+        "fileHash": "sha256-b519a2e447cf037d0492a6c0c7bdf457f096edbc891d67b284be7502d2726269",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 58643,
+        "fileSize": 58261,
         "status": 1,
         "language": "ko",
         "authors": [
