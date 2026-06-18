@@ -1275,13 +1275,12 @@ class YoutubeProvider(
         return null
     }
 
-   
+
     override val mainPage: List<MainPageData>
         get() {
             val customSections = getCustomHomepages()
             val list = mutableListOf<MainPageData>()
 
-            // 개별 칩들의 이름 기반 동적 매핑 테이블 구축
             val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
             val cachedChipsMap = try {
                 mapper.readValue<List<CachedChip>>(cachedChipsJson).associateBy { it.name }
@@ -1304,8 +1303,8 @@ class YoutubeProvider(
                         val chipName = url.removePrefix("chip_name_")
                         val activeChip = cachedChipsMap[chipName]
                         if (activeChip != null) {
-                            // 안정적인 고유 칩 이름을 매개로 하여 유튜브로부터 발급받은 최신 active token을 실시간 기입
-                            list.add(MainPageData(activeChip.name, "chip_${activeChip.token}", horizontalImages = true))
+                            // 토큰이 아닌 영구적이고 안정적인 이름을 고유 데이터 ID로 주입합니다.
+                            list.add(MainPageData(activeChip.name, "chip_name_${activeChip.name}", horizontalImages = true))
                         }
                     }
                     else -> {
@@ -1318,6 +1317,9 @@ class YoutubeProvider(
 
             return list
         }
+
+        
+
 
 
     private fun getCustomHomepages(): List<CustomSection> {
@@ -1386,13 +1388,15 @@ class YoutubeProvider(
 
 
 
+    
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         isSearchContext = false
         val rawRequestData = request.data
         val requestData = YoutubeUtils.urlDecode(rawRequestData)
         val maxPages = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
         
-        val isChip = requestData.startsWith("chip_")
+        // 고유 이름 기반의 칩 주소 패턴 식별
+        val isChip = requestData.startsWith("chip_name_")
         if (isChip) {
             Log.d("YoutubeUtils", "[CHIP] getMainPage ENTRY - Page: $page, requestData: $requestData")
         }
@@ -1415,7 +1419,6 @@ class YoutubeProvider(
                     savedVisitorData = savedVisitorData ?: appPrefs?.getString("yt_visitor_data", null)
                     savedClientVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION)
 
-                    // 보완책: 메인 홈 비동기 응답 지연 시, 칩 1페이지에서 직접 API Key를 동기 획득하여 병렬 로딩 실패 방지
                     if (savedApiKey.isNullOrBlank()) {
                         Log.w("YoutubeUtils", "[CHIP] API Key is missing on Page 1. Synchronously fetching mainUrl to retrieve configs...")
                         try {
@@ -1437,10 +1440,20 @@ class YoutubeProvider(
                         }
                     }
 
-                    val tokenToUse = requestData.removePrefix("chip_")
-                    Log.d("YoutubeUtils", "[CHIP] Page 1 - tokenToUse: $tokenToUse, savedApiKey: $savedApiKey")
+                    // 안정적인 칩 이름(예: 요리, 축구)으로부터 현재 세션의 활성 토큰 실시간 검색
+                    val chipCategoryName = requestData.removePrefix("chip_name_")
+                    val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
+                    val cachedChips = try {
+                        mapper.readValue<List<CachedChip>>(cachedChipsJson)
+                    } catch (e: Exception) {
+                        emptyList<CachedChip>()
+                    }
+                    val activeChip = cachedChips.find { it.name == chipCategoryName }
+                    val tokenToUse = activeChip?.token
 
-                    if (!savedApiKey.isNullOrBlank()) {
+                    Log.d("YoutubeUtils", "[CHIP] Page 1 for category [$chipCategoryName] - Resolved Token: $tokenToUse")
+
+                    if (!tokenToUse.isNullOrBlank() && !savedApiKey.isNullOrBlank()) {
                         val apiUrl = "$mainUrl/youtubei/v1/browse?key=$savedApiKey"
                         val payload = mapOf(
                             "context" to mapOf(
@@ -1464,7 +1477,7 @@ class YoutubeProvider(
                                 ?: response
                             processRecursive(actions, results, seenIds, playlistMode = false)
                             nextContinuation = findTokenRecursive(response)
-                            Log.d("YoutubeUtils", "[CHIP] Page 1 - parsed nextContinuation: $nextContinuation")
+                            Log.d("YoutubeUtils", "[CHIP] Page 1 for category [$chipCategoryName] - Extracted nextContinuation: $nextContinuation")
                         }
                     }
                 } else {
@@ -1520,7 +1533,6 @@ class YoutubeProvider(
                 }
                 var tokenToUse = getSavedContinuationToken(requestData, page)
 
-                // 보완책: 동시성 쓰레드 병렬성 때문에 뒷 페이지가 토큰을 아직 찾지 못했을 때 코루틴 delay 대기열 구동
                 if (isChip && tokenToUse.isNullOrBlank() && page > 2) {
                     Log.w("YoutubeUtils", "[CHIP] Page $page token is empty. Suspending coroutine thread and waiting for previous page to write the token...")
                     var retries = 0
@@ -1537,55 +1549,68 @@ class YoutubeProvider(
                     val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION) ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
 
                     if (isChip && !apiKey.isNullOrBlank()) {
-                        val rawToken = requestData.removePrefix("chip_")
-                        val apiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
-                        val payload = mapOf(
-                            "context" to mapOf(
-                                "client" to mapOf(
-                                    "clientName" to "WEB", 
-                                    "clientVersion" to cVersion, 
-                                    "hl" to lang,
-                                    "platform" to "DESKTOP"
-                                )
-                            ),
-                            "continuation" to rawToken
-                        )
-                        val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
-                        Log.w("YoutubeUtils", "[CHIP] Page 2 - tokenToUse was empty! Triggering double-call recovery fallback using rawToken: $rawToken")
-                        val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
-                        if (response != null) {
-                            tokenToUse = findTokenRecursive(response)
-                            Log.d("YoutubeUtils", "[CHIP] Page 2 - Fallback outer call succeeded. Found nested tokenToUse: $tokenToUse")
-                            if (!tokenToUse.isNullOrBlank()) {
-                                saveContinuationToken(requestData, page, tokenToUse)
-                                
-                                val innerApiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
-                                val innerPayload = mapOf(
-                                    "context" to mapOf(
-                                        "client" to mapOf(
-                                            "clientName" to "WEB", 
-                                            "clientVersion" to cVersion, 
-                                            "hl" to lang,
-                                            "platform" to "DESKTOP"
-                                        )
-                                    ),
-                                    "continuation" to tokenToUse
-                                )
-                                val innerResponse = app.post(innerApiUrl, json = innerPayload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
-                                if (innerResponse != null) {
-                                    val actions = innerResponse["onResponseReceivedActions"] 
-                                        ?: innerResponse["onResponseReceivedEndpoints"]
-                                        ?: innerResponse["onResponseReceivedCommands"] 
-                                        ?: innerResponse["continuationContents"] 
-                                        ?: innerResponse
-                                    
-                                    val playlistId = if (requestData.contains("list=")) {
-                                        requestData.substringAfter("list=", "").substringBefore("&")
-                                    } else null
+                        // 요리/축구 등의 이름을 실시간 조회하여 Fallback 기동용 최신 원본 토큰 확보
+                        val chipCategoryName = requestData.removePrefix("chip_name_")
+                        val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
+                        val cachedChips = try {
+                            mapper.readValue<List<CachedChip>>(cachedChipsJson)
+                        } catch (e: Exception) {
+                            emptyList<CachedChip>()
+                        }
+                        val activeChip = cachedChips.find { it.name == chipCategoryName }
+                        val rawToken = activeChip?.token
 
-                                    processRecursive(actions, results, seenIds, playlistMode = false, playlistId = playlistId)
-                                    nextContinuation = findTokenRecursive(innerResponse)
-                                    Log.d("YoutubeUtils", "[CHIP] Page 2 - Fallback nested nextContinuation: $nextContinuation")
+                        Log.w("YoutubeUtils", "[CHIP] Page 2 - tokenToUse was empty! Triggering double-call recovery fallback for category [$chipCategoryName] using rawToken: $rawToken")
+                        
+                        if (!rawToken.isNullOrBlank()) {
+                            val apiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
+                            val payload = mapOf(
+                                "context" to mapOf(
+                                    "client" to mapOf(
+                                        "clientName" to "WEB", 
+                                        "clientVersion" to cVersion, 
+                                        "hl" to lang,
+                                        "platform" to "DESKTOP"
+                                    )
+                                ),
+                                "continuation" to rawToken
+                            )
+                            val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
+                            val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                            if (response != null) {
+                                tokenToUse = findTokenRecursive(response)
+                                Log.d("YoutubeUtils", "[CHIP] Page 2 - Fallback outer call succeeded. Found nested tokenToUse: $tokenToUse")
+                                if (!tokenToUse.isNullOrBlank()) {
+                                    saveContinuationToken(requestData, page, tokenToUse)
+                                    
+                                    val innerApiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
+                                    val innerPayload = mapOf(
+                                        "context" to mapOf(
+                                            "client" to mapOf(
+                                                "clientName" to "WEB", 
+                                                "clientVersion" to cVersion, 
+                                                "hl" to lang,
+                                                "platform" to "DESKTOP"
+                                            )
+                                        ),
+                                        "continuation" to tokenToUse
+                                    )
+                                    val innerResponse = app.post(innerApiUrl, json = innerPayload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                                    if (innerResponse != null) {
+                                        val actions = innerResponse["onResponseReceivedActions"] 
+                                            ?: innerResponse["onResponseReceivedEndpoints"]
+                                            ?: innerResponse["onResponseReceivedCommands"] 
+                                            ?: innerResponse["continuationContents"] 
+                                            ?: innerResponse
+                                        
+                                        val playlistId = if (requestData.contains("list=")) {
+                                            requestData.substringAfter("list=", "").substringBefore("&")
+                                        } else null
+
+                                        processRecursive(actions, results, seenIds, playlistMode = false, playlistId = playlistId)
+                                        nextContinuation = findTokenRecursive(innerResponse)
+                                        Log.d("YoutubeUtils", "[CHIP] Page 2 - Fallback nested nextContinuation: $nextContinuation")
+                                    }
                                 }
                             }
                         }
@@ -1641,11 +1666,9 @@ class YoutubeProvider(
         if (isChip) {
             Log.d("YoutubeUtils", "[CHIP] getMainPage EXIT - Saving nextContinuation for requestData: $requestData -> $nextContinuation (intended for page: ${page + 1})")
         }
-        // 다음 페이지 호출을 위해 전용 page + 1 슬롯 키로 분리하여 세이브 처리 진행
         saveContinuationToken(requestData, page + 1, nextContinuation)
+
         
-    
-                 
 
 
         // 시청기록(History) 행의 경우, 일자별 시간 경계는 유지하되 일자 내부에서만 일반 영상이 쇼츠보다 앞에 오도록 그룹 스왑 정렬
