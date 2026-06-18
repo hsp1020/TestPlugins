@@ -2,8 +2,8 @@
 package com.ultimaevo
 
 import android.content.Context
-import android.content.ContextWrapper  // 추가
-import android.content.Intent          // 추가
+import android.content.ContextWrapper
+import android.content.Intent
 import com.google.gson.reflect.TypeToken
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.HomePageResponse
@@ -144,30 +144,42 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
 
     init {
         println("[UltimaEvo-Debug] [Provider-$instanceId] 인스턴스 할당됨: $customName")
-        applyAdBlockPatch() 
+        
+        // 2초 주기로 활성화된 타 플러그인의 인스턴스를 감시하여 패치 주입
+        CoroutineScope(Dispatchers.IO).launch {
+            for (i in 1..10) {
+                if (applyAdBlockPatch()) {
+                    break // 패치 성공 혹은 대상 플러그인 미로드 확인 시 즉시 대기 루프 탈출
+                }
+                kotlinx.coroutines.delay(2000L)
+            }
+        }
     }
 
-    // 런타임 리플렉션 기술을 적용하여 컴파일타임 에러를 원천 제거한 패치 함수
-    private fun applyAdBlockPatch() {
+    // 클래스로더 격리를 완벽하게 우회하는 동적 리플렉션 패치 함수
+    private fun applyAdBlockPatch(): Boolean {
         try {
-            // 다른 플러그인의 클래스를 문자열로 동적 탐색하여 컴파일 의존성을 끊습니다.
-            val clazz = Class.forName("com.cncverse.LiveEventsProvider")
-            val field = clazz.getDeclaredField("context")
-            field.isAccessible = true
-            val liveEventsContext = field.get(null)
-
-            // liveEventsContext가 Context 타입이면서 아직 패치되지 않은 상태인지 안전하게 비교 검사
-            if (liveEventsContext is Context && liveEventsContext !is PreventAdContextWrapper) {
-                field.set(null, PreventAdContextWrapper(liveEventsContext))
-                println("[UltimaEvo_AdBlock] LiveEventsProvider 컨텍스트 리플렉션 패치 주입 완료")
+            // [우회 기법 핵심] 클래스로더가 격리되어 Class.forName이 실패하므로, APIHolder에 등록된 실제 객체 인스턴스에서 클래스를 획득합니다.
+            val liveEventsInstance = APIHolder.allProviders.find { 
+                it::class.java.name.contains("LiveEventsProvider") 
             }
-        } catch (e: ClassNotFoundException) {
-            // 해당 플러그인이 미설치된 상태라면 에러 없이 조용히 패스
-        } catch (e: LinkageError) {
-            // 클래스 참조 링크가 실패한 경우 무시
+            
+            if (liveEventsInstance != null) {
+                val clazz = liveEventsInstance::class.java
+                val field = clazz.getDeclaredField("context")
+                field.isAccessible = true
+                val liveEventsContext = field.get(null)
+
+                if (liveEventsContext is Context && liveEventsContext !is PreventAdContextWrapper) {
+                    field.set(null, PreventAdContextWrapper(liveEventsContext))
+                    println("[UltimaEvo_AdBlock] LiveEventsProvider 컨텍스트 가로채기 차단 완료")
+                }
+                return true
+            }
         } catch (e: Exception) {
             e.printStackTrace()
         }
+        return false
     }
 
     override val mainPage: List<MainPageData>
