@@ -521,7 +521,13 @@ class YoutubeProvider(
     }
 
 
-    private fun getSavedContinuationToken(key: String, page: Int = 0): String? {
+    // 기존 검색(search) 및 1인자 호출 호환용 오버로딩
+    private fun getSavedContinuationToken(key: String): String? {
+        return getSavedContinuationToken(key, 0)
+    }
+
+    // 칩 페이지네이션을 위한 페이지 번호(page) 지정 버전
+    private fun getSavedContinuationToken(key: String, page: Int): String? {
         val pageKey = if (page > 0) "${key}_page_$page" else key
         val hashedKey = YoutubeUtils.sha1(pageKey)
         val cached = continuationTokenCache[hashedKey]
@@ -543,12 +549,18 @@ class YoutubeProvider(
         return token
     }
 
-    private fun saveContinuationToken(key: String, page: Int = 0, token: String?) {
+    // 기존 검색(search) 및 2인자 호출 호환용 오버로딩 (Null 수용 가능)
+    private fun saveContinuationToken(key: String, token: String?) {
+        saveContinuationToken(key, 0, token)
+    }
+
+    // 칩 페이지네이션을 위한 페이지 번호(page) 지정 버전
+    private fun saveContinuationToken(key: String, page: Int, token: String?) {
         val pageKey = if (page > 0) "${key}_page_$page" else key
         val hashedKey = YoutubeUtils.sha1(pageKey)
         
         if (key.startsWith("chip_") || key.contains("chip", ignoreCase = true)) {
-            Log.d("YoutubeUtils", "[CHIP] saveContinuationToken - Page: $page, Key: $pageKey, HashedKey: $hashedKey, NewTokenToSave: $token")
+            Log.d("YoutubeUtils", "[CHIP] saveContinuationToken - Page: $page, Key: $pageKey, HashedKey: $hashedKey, TokenToSave: $token")
         }
 
         if (token.isNullOrBlank()) {
@@ -563,6 +575,7 @@ class YoutubeProvider(
             }
         }
     }
+
     
     
 
