@@ -144,26 +144,33 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
 
     init {
         println("[UltimaEvo-Debug] [Provider-$instanceId] 인스턴스 할당됨: $customName")
-        applyAdBlockPatch() // 초기 바인딩 시 일회성 시도
+        applyAdBlockPatch() 
     }
 
-    // 클래스로더 격리를 가볍게 우회하는 일회성 온디맨드 패치 함수 (감시 루프 제거)
+    // com.cncverse 패키지 하위의 모든 프로바이더를 런타임에 동적으로 탐색하여 일괄 차단하는 함수
     private fun applyAdBlockPatch() {
         try {
-            // 실행 중인 플러그인 리스트에서 정확하게 대상 인스턴스를 확보
-            val liveEventsInstance = APIHolder.allProviders.find { 
-                it::class.java.name.contains("LiveEventsProvider") 
+            // 메모리에 로드된 프로바이더 중 cncverse 계열 패키지인 것만 필터링
+            val cncverseProviders = APIHolder.allProviders.filter { 
+                it::class.java.name.startsWith("com.cncverse.") 
             }
             
-            if (liveEventsInstance != null) {
-                val clazz = liveEventsInstance::class.java
-                val field = clazz.getDeclaredField("context")
-                field.isAccessible = true
-                val liveEventsContext = field.get(null)
+            for (provider in cncverseProviders) {
+                try {
+                    val clazz = provider::class.java
+                    val field = clazz.getDeclaredField("context")
+                    field.isAccessible = true
+                    val targetContext = field.get(null)
 
-                if (liveEventsContext is Context && liveEventsContext !is PreventAdContextWrapper) {
-                    field.set(null, PreventAdContextWrapper(liveEventsContext))
-                    println("[UltimaEvo_AdBlock] LiveEventsProvider 가로채기 광고 차단 패치 적용 완료")
+                    // 타겟 컨텍스트가 존재하며, 아직 광고 차단기로 래핑되지 않은 경우에만 주입
+                    if (targetContext is Context && targetContext !is PreventAdContextWrapper) {
+                        field.set(null, PreventAdContextWrapper(targetContext))
+                        println("[UltimaEvo_AdBlock] ${clazz.simpleName} 광고 가로채기 차단 패치 주입 완료")
+                    }
+                } catch (e: NoSuchFieldException) {
+                    // context 변수가 없는 헬퍼 클래스 등은 안전하게 건너뜀
+                } catch (e: Exception) {
+                    e.printStackTrace()
                 }
             }
         } catch (e: Exception) {
@@ -231,7 +238,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
         }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
-        applyAdBlockPatch() // 통합 카탈로그 로드 시점에 즉시 광고 차단 패치 적용
+        applyAdBlockPatch() 
         return withContext(Dispatchers.IO) {
             try {
                 val config = UltimaEvoPlugin.gson.fromJson(request.data, EvoCatalogConfig::class.java)
@@ -263,7 +270,7 @@ class UltimaEvoProvider(private val instanceId: Int, private val customName: Str
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        applyAdBlockPatch() // 영상 상세 정보 로드(클릭) 시점에 다시 한 번 체크하여 보장
+        applyAdBlockPatch() 
         return withContext(Dispatchers.IO) {
             val allProviders = APIHolder.allProviders.filter { it.hasMainPage && !it.mainUrl.startsWith("ultima_evo") }
             val exactProvider = allProviders.find { url.startsWith(it.mainUrl) }
