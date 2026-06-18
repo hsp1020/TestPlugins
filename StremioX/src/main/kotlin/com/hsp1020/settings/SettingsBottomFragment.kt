@@ -1129,11 +1129,18 @@ class SettingsBottomFragment(
                 visibleTabs = masterTabs.filter { tab ->
                     if (tab.isGenre) prefs.getBoolean("genres_enabled_${uniqueId}_${tab.catalogKey}", true) else true
                 }.toMutableList()
-                notifyDataSetChanged()
+                
+                // 🚨 리사이클러뷰 레이아웃 계산 중 업데이트 충돌 방지 안전 펜스
+                if (rv.isComputingLayout) {
+                    rv.post { notifyDataSetChanged() }
+                } else {
+                    notifyDataSetChanged()
+                }
             }
 
             inner class VH(val view: LinearLayout, val checkbox: CheckBox, val etOrder: EditText, val genreSwitch: Switch, val dragHandle: ImageView) : RecyclerView.ViewHolder(view)
 
+            
             override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
                 val layout = LinearLayout(context).apply {
                     orientation = LinearLayout.HORIZONTAL
@@ -1185,7 +1192,7 @@ class SettingsBottomFragment(
                 return VH(layout, checkbox, etOrder, genreSwitch, dragHandle)
             }
 
-            override fun onBindViewHolder(holder: VH, position: Int) {
+                        override fun onBindViewHolder(holder: VH, position: Int) {
                 val tab = visibleTabs[position]
                 val enabledKey = "tab_enabled_${uniqueId}_${tab.key}"
                 
@@ -1219,19 +1226,19 @@ class SettingsBottomFragment(
                 holder.etOrder.setText((position + 1).toString())
                 
                 holder.etOrder.setOnFocusChangeListener { _, hasFocus ->
+                    val curPos = holder.adapterPosition // 🚨 캡처될 하드코딩 position 변수 대신 실시간 어댑터 포지션 확보
+                    if (curPos == RecyclerView.NO_POSITION) return@setOnFocusChangeListener
+
                     if (hasFocus) {
                         rv.postDelayed({
-                            val curPos = holder.adapterPosition
-                            if (curPos != RecyclerView.NO_POSITION) {
-                                rv.smoothScrollToPosition(curPos)
-                            }
+                            rv.smoothScrollToPosition(curPos)
                         }, 150)
                     } else {
                         val inputVal = holder.etOrder.text.toString().toIntOrNull()
                         if (inputVal != null) {
-                            shiftItemInRecyclerView(position, inputVal)
+                            shiftItemInRecyclerView(curPos, inputVal) // 🚨 실시간 획득한 curPos 전달하여 크래시 및 정렬 오작동 원천 차단
                         } else {
-                            holder.etOrder.setText((position + 1).toString())
+                            holder.etOrder.setText((curPos + 1).toString()) // 🚨 실시간 포지션으로 표시 갱신
                         }
                     }
                 }
@@ -1245,6 +1252,7 @@ class SettingsBottomFragment(
                     } else false
                 }
             }
+
 
             override fun getItemCount() = visibleTabs.size
             
