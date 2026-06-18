@@ -193,7 +193,8 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         private const val SETTINGS_CACHE_TTL = 60_000L
 
         val networkSemaphore = Semaphore(35)
-
+        val homeNetworkSemaphore = Semaphore(10)
+        
         @Volatile private var cachedCineStreamProvider: MainAPI? = null
         @Volatile private var hasSearchedCineStream = false
 
@@ -588,7 +589,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             println("[PAGINATION-DEBUG] ===== getMainPage END (Page: $page) =====")
         }
     }
-    
+
     private suspend fun fetchTabCatalogData(request: MainPageRequest, page: Int): HomePageResponse {
         val stateKey = "${this@StremioC.name}_${request.name}"
 
@@ -617,7 +618,12 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
 
         val resultPair = getOrFetchCachedPage(cacheKey) {
             println("[PAGINATION-DEBUG] [fetchTabCatalogData] Fetching from network or cache...")
-            val jsonText = customSession.get(targetUrl).text
+            
+            // ◀️ 10개 세마포어 획득 후 네트워크 호출 진행 (대기열 구성)
+            val jsonText = StremioC.homeNetworkSemaphore.withPermit {
+                customSession.get(targetUrl).text
+            }
+            
             val response = try {
                 gson.fromJson(jsonText, CatalogResponse::class.java)
             } catch (e: Exception) { e.printStackTrace(); null }
@@ -661,6 +667,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
         println("[PAGINATION-DEBUG] [fetchTabCatalogData] ResultPair is null. Returning empty.")
         return newHomePageResponse(emptyList(), hasNext = false)
     }
+                
 
     override suspend fun search(query: String): List<SearchResponse> {
         mainUrl = mainUrl.fixSourceUrl()
