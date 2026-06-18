@@ -1724,9 +1724,9 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val cleanTmdbId = tmdbIdStr?.substringBefore(":")
 
             val hasAnimeTrackerIds = finalMalId != null || finalAniId != null || this@CatalogEntry.kitsuIdExt != null
-            val finalMovieType = TvType.Movie
-            val finalSeriesType = TvType.TvSeries
-    
+            val finalMovieType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.AnimeMovie else TvType.Movie
+            val finalSeriesType = if (isAnimeMedia && hasAnimeTrackerIds) TvType.Anime else TvType.TvSeries
+
             if (finalVideos.isNullOrEmpty() || isSingleMovie(finalType, finalVideos)) {
                 val metaUrl = provider.getUnifiedMetaUrl(finalType ?: "movie", this@CatalogEntry.id ?: "")
                 return@coroutineScope provider.newMovieLoadResponse(
