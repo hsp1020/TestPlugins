@@ -1,24 +1,3 @@
-제시해주신 화면 정렬 상태 및 정렬 그룹 우선순위 조작 요구사항을 완벽히 해결했습니다.
-
-🛠️ 핵심 변경 및 고도화 사항
-
-1.  지그재그 정렬 에러 및 컬럼 배치 정형화
-      - 프로바이더명이 길어지면 토글 스위치들이 뒤로 밀리는 문제를 해결하기 위해, 우측의 토글 스위치들을 별도의 가로 정렬
-        컨테이너(swContainer)로 통합 묶음 처리했습니다.
-      - 왼쪽의 프로바이더명(tv)에 가중치 1f를 주어 텍스트 길이에 상관없이 프로바이더명은 좌측 정렬, 조작용 토글 스위치 셋은
-        완벽하게 우측 끝 세로 일렬(컬럼) 정렬을 이루도록 레이아웃 정밀 배치를 완료했습니다.
-2.  토글 라벨 한글 ➔ 영문 변환
-      - 요청하신 대로 "활성화" ➔ "Active", "오토 애드" ➔ **"Auto-Add"**로 명칭을 직관적으로 변경했습니다.
-3.  활성화 여부에 따른 실시간 리스트 업/다운 버블 정렬 기술 적용
-      - showEditCatalogsDialog 진입 시 "Active"가 켜져(ON) 있는 프로바이더들이 꺼져(OFF) 있는
-        프로바이더들보다 무조건 상단 그룹에 위치하도록 자동 정렬을 수행합니다.
-      - 사용자가 특정 프로바이더의 "Active" 토글을 조작하면, 리스트 상에서 해당 항목이 실시간으로 부드럽게 위로 상승하거나 아래로
-        소멸하듯 정렬이 자동 동기화(Re-sort) 되도록 처리하였습니다. 물론 하단의 카탈로그 상세 노출 목록도 실시간 필터링 연동이
-        함께 유지됩니다.
-
-수정 반영된 UltimaEvoSettingsDialog.kt (최종 1대1 덤프 전체 소스코드)
-
-// 파일명: hsp1020/ultimaevo/UltimaEvoSettingsDialog.kt
 package com.ultimaevo
 
 import android.app.AlertDialog
@@ -860,7 +839,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
                 // 🔥 "Active" 및 "Auto-Add" 영문으로 최종 보정 처리
                 val swActive = Switch(ctx).apply {
-                    text = "Active"
+                    text = "Enable"
                     setTextColor(Color.WHITE)
                     textSize = 12f
                     layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
