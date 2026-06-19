@@ -499,42 +499,77 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             text = "Save & Close"; setTextColor(Color.WHITE); isAllCaps = false; background = getButtonBg()
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 30, 0, 0) }
             setOnClickListener {
-                val editor = prefs.edit()
-                val newCount = instanceMemoryList.size
-                val oldCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
-                
-                editor.putString("evo_instance_count", newCount.toString())
-                
-                for (i in 0 until newCount) {
-                    val targetId = i + 1
-                    val item = instanceMemoryList[i]
+                // 🚨 디스크 입출력으로 인한 UI 스레드 지연(ANR)을 예방하기 위해 IO 코루틴 스레드로 작업을 분기합니다.
+                viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
+                    val editor = prefs.edit()
+                    val newCount = instanceMemoryList.size
+                    val oldCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
                     
-                    editor.putString("evo_name_$targetId", item.name)
-                    editor.putBoolean("evo_visibility_enabled_$targetId", item.visibility)
-                    editor.putBoolean("evo_search_enabled_$targetId", item.search)
-
-                    if (item.originalId != targetId) {
-                        val srcId = item.originalId
-                        editor.putString("evo_active_cats_json_$targetId", prefs.getString("evo_active_cats_json_$srcId", ""))
+                    editor.putString("evo_instance_count", newCount.toString())
+                    
+                    for (i in 0 until newCount) {
+                        val targetId = i + 1
+                        val item = instanceMemoryList[i]
                         
-                        prefs.all.keys.forEach { key ->
-                            if (key.startsWith("cat_toggle_${srcId}_") || 
-                                key.startsWith("cat_rename_${srcId}_") || 
-                                key.startsWith("cat_order_${srcId}_") || 
-                                key.startsWith("auto_add_${srcId}_") ||
-                                key.startsWith("ext_toggle_${srcId}_") ||
-                                key.startsWith("provider_enabled_${srcId}_")) { // 🚨 [수정] 복사 대상에 추가
-                                
-                                val newKey = key.replaceFirst("_${srcId}_", "_${targetId}_")
-                                when (val value = prefs.all[key]) {
-                                    is Boolean -> editor.putBoolean(newKey, value)
-                                    is String -> editor.putString(newKey, value)
-                                    is Int -> editor.putInt(newKey, value)
+                        editor.putString("evo_name_$targetId", item.name)
+                        editor.putBoolean("evo_visibility_enabled_$targetId", item.visibility)
+                        editor.putBoolean("evo_search_enabled_$targetId", item.search)
+                        
+                        if (item.originalId != targetId) {
+                            val srcId = item.originalId
+                            editor.putString("evo_active_cats_json_$targetId", prefs.getString("evo_active_cats_json_$srcId", ""))
+                            
+                            prefs.all.keys.forEach { key ->
+                                if (key.startsWith("cat_toggle_${srcId}_") || 
+                                    key.startsWith("cat_rename_${srcId}_") || 
+                                    key.startsWith("cat_order_${srcId}_") || 
+                                    key.startsWith("auto_add_${srcId}_") ||
+                                    key.startsWith("ext_toggle_${srcId}_") ||
+                                    key.startsWith("provider_enabled_${srcId}_")) {
+                                    
+                                    val newKey = key.replaceFirst("_${srcId}_", "_${targetId}_")
+                                    when (val value = prefs.all[key]) {
+                                        is Boolean -> editor.putBoolean(newKey, value)
+                                        is String -> editor.putString(newKey, value)
+                                        is Int -> editor.putInt(newKey, value)
+                                    }
                                 }
                             }
                         }
-                    }                    
+                    }
+                    
+                    val maxIdToCheck = maxOf(oldCount, maxIdGen)
+                    for (i in (newCount + 1)..maxIdToCheck) {
+                        editor.remove("evo_name_$i")
+                        editor.remove("evo_visibility_enabled_$i")
+                        editor.remove("evo_search_enabled_$i")
+                        editor.remove("evo_active_cats_json_$i")
+                        
+                        prefs.all.keys.forEach { key ->
+                            if (key.startsWith("cat_toggle_${i}_") || 
+                                key.startsWith("cat_rename_${i}_") || 
+                                key.startsWith("cat_order_${i}_") || 
+                                key.startsWith("auto_add_${i}_") ||
+                                key.startsWith("ext_toggle_${i}_") ||
+                                key.startsWith("provider_enabled_${i}_")) {
+                                editor.remove(key)
+                            }
+                        }
+                    }
+                    
+                    // 🚨 [필수 반영] apply() 대신 commit()을 사용하여 물리 디스크 파일 기록 완료를 강제 보장합니다.
+                    editor.commit()
+                    
+                    // 🚨 기록이 확실히 완료된 뒤에 캐시를 강제 갱신하여 프로바이더가 최신 데이터를 정상적으로 가져가도록 유도합니다.
+                    APIHolder.allProviders.forEach { p -> if (p is UltimaEvoProvider) p.invalidateCache() }
+                    
+                    // 🚨 작업 완료 후 메인 스레드로 복귀하여 안전하게 다이얼로그를 닫습니다.
+                    withContext(Dispatchers.Main) {
+                        dismiss()
+                    }
                 }
+            }
+        }
 
                 val maxIdToCheck = maxOf(oldCount, maxIdGen)
                 for (i in (newCount + 1)..maxIdToCheck) {
