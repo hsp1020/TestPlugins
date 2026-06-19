@@ -55,12 +55,14 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
     private fun setupCustomDialog(dialog: AlertDialog, contentView: View) {
         activeAlertDialog = dialog
+        dialog.setCanceledOnTouchOutside(false) // 🚨 [기능 수정] 모든 부속 팝업/부속창 밖 터치 시 종료 차단 (뒤로가기는 정상 동작)
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         dialog.setOnShowListener {
             dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
             dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         }
     }
+
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
@@ -125,9 +127,11 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
     }
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
-        isCancelable = false // 🚨 [기능 추가] 설정창 밖 터치로 꺼지는 문제 해결
+        isCancelable = true // 🚨 [기능 수정] 뒤로가기 허용
+        dialog?.setCanceledOnTouchOutside(false) // 🚨 [기능 수정] 메인 설정창 밖 터치 시 종료만 차단
         val ctx = requireContext()
         val prefs = ctx.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
+    
 
         maxIdGen = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
         instanceMemoryList.clear()
