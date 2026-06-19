@@ -20,6 +20,25 @@
         "name": "AnilifeProvider"
     },
     {
+        "fileHash": "sha256-dbffd2f96f555a290d38030934b253aea86fcf6971747f8f0e6bc4b25e937acc",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
+        "fileSize": 32248,
+        "status": 1,
+        "language": "ko",
+        "authors": [
+            "hsp1020"
+        ],
+        "tvTypes": [
+            "Live"
+        ],
+        "version": 1,
+        "internalName": "CUTVProvider",
+        "description": "\uc2a4\ud3ec\uce20 \uc0dd\uc911\uacc4 \uc81c\uacf5",
+        "url": "https://raw.githubusercontent.com/hsp1020/TestPlugins/builds/CUTVProvider.cs3",
+        "name": "CUTVProvider"
+    },
+    {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/DaddyLive/live-streaming.png",
         "fileHash": "sha256-6b66bfd7bddf6a53f7f437d0ce25df30292717b748259af33a22e12f590c60de",
         "apiVersion": 1,
@@ -37,25 +56,6 @@
         "description": "Live TV from DaddyLive. You might need a VPN",
         "url": "https://raw.githubusercontent.com/hsp1020/TestPlugins/builds/DaddyLive.cs3",
         "name": "DaddyLive"
-    },
-    {
-        "fileHash": "sha256-3aa452e0d889bfc2d6a82ac6f587b496a41ea2fbdbd32da010be4cb395239935",
-        "apiVersion": 1,
-        "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 32245,
-        "status": 1,
-        "language": "ko",
-        "authors": [
-            "hsp1020"
-        ],
-        "tvTypes": [
-            "Live"
-        ],
-        "version": 1,
-        "internalName": "KKTVProvider",
-        "description": "\uc2a4\ud3ec\uce20 \uc0dd\uc911\uacc4 \uc81c\uacf5",
-        "url": "https://raw.githubusercontent.com/hsp1020/TestPlugins/builds/KKTVProvider.cs3",
-        "name": "KKTVProvider"
     },
     {
         "iconUrl": "https://m135.kotbc2.com/img/ktblogo.gif",
