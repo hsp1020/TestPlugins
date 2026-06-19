@@ -278,10 +278,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/Ultima%20Evo/UltimaBeta.jpg",
-        "fileHash": "sha256-3d57376a8ab684322d818362049c57b587961804f37cd31132ebf2d3d7f3c169",
+        "fileHash": "sha256-c3a2e63fff9421e3d54c34fe63c0eeadb99783763848b9959aea8bdebf94af1d",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 64696,
+        "fileSize": 64705,
         "status": 1,
         "language": "ko",
         "authors": [
