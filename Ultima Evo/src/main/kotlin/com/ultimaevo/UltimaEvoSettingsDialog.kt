@@ -63,6 +63,18 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         }
     }
 
+    private fun restartApp() {
+        val context = requireContext().applicationContext
+        val packageManager = context.packageManager
+        val intent = packageManager.getLaunchIntentForPackage(context.packageName)
+        val componentName = intent?.component
+
+        if (componentName != null) {
+            val restartIntent = android.content.Intent.makeRestartActivityTask(componentName)
+            context.startActivity(restartIntent)
+            Runtime.getRuntime().exit(0)
+        }
+    }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
@@ -602,10 +614,67 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     
                     editor.commit()
                     APIHolder.allProviders.forEach { p -> if (p is UltimaEvoProvider) p.invalidateCache() }
+                    
+                    // 🚨 [수정] SettingsBottomFragment와 완벽하게 대칭되는 Save & Reload (No/Yes) 커스텀 팝업 구현
                     withContext(Dispatchers.Main) {
-                        showSavedPopup(ctx, "Catalog Settings", "Catalog settings saved. Reload to apply.") {
-                            dismiss()
+                        val cancelBtn = Button(ctx).apply {
+                            text = "No"
+                            setTextColor(Color.WHITE)
+                            isAllCaps = false
+                            background = getButtonBg()
+                            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) }
                         }
+                        val restartBtn = Button(ctx).apply {
+                            text = "Yes"
+                            setTextColor(Color.WHITE)
+                            isAllCaps = false
+                            background = getButtonBg()
+                            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) }
+                        }
+
+                        val container = LinearLayout(ctx).apply {
+                            orientation = LinearLayout.VERTICAL
+                            setPadding(40, 40, 40, 40)
+                            background = getDarkThemeBg()
+                            addView(TextView(ctx).apply {
+                                text = "Save & Reload"
+                                textSize = 18f
+                                setTextColor(Color.WHITE)
+                                typeface = android.graphics.Typeface.DEFAULT_BOLD
+                                setPadding(0, 0, 0, 20)
+                                gravity = Gravity.CENTER
+                            })
+                            addView(TextView(ctx).apply {
+                                text = "Changes have been saved. Do you want to restart the app to apply them?"
+                                setTextColor(Color.LTGRAY)
+                                textSize = 14f
+                                setPadding(0, 0, 0, 30)
+                            })
+                            val btnRow = LinearLayout(ctx).apply {
+                                orientation = LinearLayout.HORIZONTAL
+                                addView(cancelBtn)
+                                addView(restartBtn)
+                            }
+                            addView(btnRow)
+                        }
+
+                        val dlg = AlertDialog.Builder(ctx).setView(container).create()
+                        setupCustomDialog(dlg, container)
+
+                        // No 클릭 시: 단순히 설정을 종료하고 화면을 닫음
+                        cancelBtn.setOnClickListener { 
+                            dlg.dismiss()
+                            dismiss() 
+                        }
+                        
+                        // Yes 클릭 시: 다이얼로그 전체를 닫고 앱을 완전 재시작 처리
+                        restartBtn.setOnClickListener { 
+                            dlg.dismiss()
+                            dismiss() 
+                            restartApp() 
+                        }
+                        
+                        dlg.show()
                     }
                 }
             }
