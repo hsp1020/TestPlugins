@@ -331,14 +331,18 @@ open class YoutubeExtractor : ExtractorApi() {
         val visitorData = VISITOR_DATA_REGEX.find(html)?.groupValues?.get(1) ?: ""
         val sts = STS_REGEX.find(html)?.groupValues?.get(1)?.toIntOrNull() ?: 0
 
+        // ✅ 수정된 부분: 앱의 빈 설정이 아닌, YoutubeProvider(플러그인)가 등록하며 넘긴 올바른 설정 파일을 획득
         val context = com.lagradost.cloudstream3.AcraApplication.context
-        val prefs = context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
+        val provider = com.lagradost.cloudstream3.APIHolder.allProviders.find { it.name == "YouTube" }
+        val prefs = (provider as? com.lagradost.cloudstream3.ar.youtube.YoutubeProvider)?.appPrefs 
+            ?: context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
+        
         val langCode = prefs?.getString("youtube_language", "ko") ?: "ko"
         
         val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(prefs, langCode, visitorData, false)
         
         println("[TRACK] =========================================")
-        println("[TRACK] 1. Auth Headers Check")
+        println("[TRACK] 1. Auth Headers Check (Fixed Plugin Prefs)")
         println("[TRACK] -> Extracted Cookies length: ${cookies.length}")
         println("[TRACK] -> SAPISID Extracted: ${!sapisidVal.isNullOrBlank()}")
 
@@ -450,8 +454,12 @@ open class YoutubeExtractor : ExtractorApi() {
         val cleanedUrl = url.replace(schemaStripRegex, "")
         val videoId = YoutubeUtils.extractYoutubeId(cleanedUrl) ?: cleanedUrl
 
+        // ✅ 수정된 부분: 여기서도 플러그인의 올바른 설정 파일 획득
         val context = com.lagradost.cloudstream3.AcraApplication.context
-        val sharedPref = context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
+        val provider = com.lagradost.cloudstream3.APIHolder.allProviders.find { it.name == "YouTube" }
+        val sharedPref = (provider as? com.lagradost.cloudstream3.ar.youtube.YoutubeProvider)?.appPrefs 
+            ?: context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
+            
         val downloaderType = sharedPref?.getString("downloader_app_type", "none") ?: "none"
         val customPkg = sharedPref?.getString("downloader_custom_package", "") ?: ""
 
@@ -553,7 +561,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         val bitrate = format.optInt("bitrate", 128000)
                         if (codec.isEmpty()) codec = if (cleanMimeType.contains("webm")) "opus" else "mp4a.40.2"
                         
-                        // --- Audio Track 메타데이터 파싱 디버깅 구간 ---
                         var language = format.optString("language", "").ifEmpty { null }
                         var audioTrackId = format.optString("audioTrackId", "").ifEmpty { null }
                         var trackDisplayName = format.optString("language", "")
@@ -561,8 +568,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         val audioTrack = format.optJSONObject("audioTrack")
                         
                         println("[TRACK] -> Found Audio Stream (itag: ${format.optString("itag")})")
-                        println("[TRACK]    Raw audioTrack JSON: ${audioTrack?.toString() ?: "null"}")
-                        println("[TRACK]    Raw language field: $language, Raw audioTrackId field: $audioTrackId")
 
                         if (audioTrack != null) {
                             audioTrackId = audioTrack.optString("id", audioTrackId)
