@@ -1,10 +1,3 @@
-치명적인 동적 레이아웃 연산 크래시 방지 대책(isComputingLayout 및 post 우회)과 provider_enabled 키 동기화 및
-누수 차단, 그리고 드래그앤드롭 정렬 완료 시 마스터 데이터 보정까지 모두 보강한 UltimaEvoSettingsDialog.kt 전체 무결성
-코드입니다.
-
-인스턴스 설정 및 프로바이더 정렬 설정 시 발생할 수 있는 교착 상태가 모두 차단되어 있어, 파일 전체를 그대로 덮어씌워 사용하실 수 있습니다.
-
-// 파일명: hsp1020/ultimaevo/UltimaEvoSettingsDialog.kt
 package com.ultimaevo
 
 import android.app.AlertDialog
