@@ -17,7 +17,7 @@ cloudstream {
     status = 1 // Will be 3 if unspecified
 
     tvTypes = listOf("Other", "Live", "TvSeries")
-    iconUrl = "https://upload.wikimedia.org/wikipedia/commons/thumb/0/09/YouTube_full-color_icon_%282017%29.svg/3840px-YouTube_full-color_icon_%282017%29.svg.png"
+    iconUrl = "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/Youtube/Youtube_logo.png"
 
     isCrossPlatform = false
 }
