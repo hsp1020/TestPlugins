@@ -553,11 +553,7 @@ class SettingsBottomFragment(
             layoutHistorySyncUrl.visibility = if (isChecked) View.VISIBLE else View.GONE
         }
 
-        etHistorySyncUrl.setOnFocusChangeListener { _, hasFocus ->
-            if (!hasFocus) {
-                sharedPref.edit { putString(SettingsRepository.PREF_KEY_HISTORY_SYNC_URL, etHistorySyncUrl.text.toString().trim()) }
-            }
-        }
+        
 
         setupToggle(view, "switchCineStream", SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, isCineStreamInstalled(), "CineStream")
         setupToggle(view, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
@@ -577,7 +573,7 @@ class SettingsBottomFragment(
         etCustomPosterUrl.setText(sharedPref.getString(SettingsRepository.PREF_KEY_CUSTOM_POSTER_URL, ""))
 
         switchCustomPoster.setOnCheckedChangeListener { _, isChecked ->
-            sharedPref.edit { putBoolean(SettingsRepository.PREF_KEY_CUSTOM_POSTER_ENABLED, isChecked) }
+            // 🚨 실시간 자동 저장(edit) 라인 제거
             layoutCustomPosterUrl.visibility = if (isChecked) View.VISIBLE else View.GONE
         }
 
@@ -585,11 +581,7 @@ class SettingsBottomFragment(
             showLanguageSelectDialog()
         }
 
-        etCustomPosterUrl.setOnFocusChangeListener { _, hasFocus ->
-            if (!hasFocus) {
-                sharedPref.edit { putString(SettingsRepository.PREF_KEY_CUSTOM_POSTER_URL, etCustomPosterUrl.text.toString().trim()) }
-            }
-        }
+        // 🚨 etCustomPosterUrl.setOnFocusChangeListener 리스너 전체 삭제
 
         val etTmdbApiKey: EditText = try { view.findView("etTmdbApiKey") } catch (e: Throwable) { throw Exception("etTmdbApiKey EditText not found", e) }
         val switchMdbList: Switch = try { view.findView("switchMdbList") } catch (e: Throwable) { throw Exception("switchMdbList Switch not found", e) }
@@ -597,11 +589,7 @@ class SettingsBottomFragment(
         val etMdbListApiKey: EditText = try { view.findView("etMdbListApiKey") } catch (e: Throwable) { throw Exception("etMdbListApiKey EditText not found", e) }
 
         etTmdbApiKey.setText(sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_API_KEY, ""))
-        etTmdbApiKey.setOnFocusChangeListener { _, hasFocus ->
-            if (!hasFocus) {
-                sharedPref.edit { putString(SettingsRepository.PREF_KEY_TMDB_API_KEY, etTmdbApiKey.text.toString().trim()) }
-            }
-        }
+        // 🚨 etTmdbApiKey.setOnFocusChangeListener 리스너 전체 삭제
 
         val isMdbListEnabled = sharedPref.getBoolean(SettingsRepository.PREF_KEY_MDBLIST_ENABLED, false)
         switchMdbList.isChecked = isMdbListEnabled
@@ -609,15 +597,11 @@ class SettingsBottomFragment(
         etMdbListApiKey.setText(sharedPref.getString(SettingsRepository.PREF_KEY_MDBLIST_API_KEY, ""))
 
         switchMdbList.setOnCheckedChangeListener { _, isChecked ->
-            sharedPref.edit { putBoolean(SettingsRepository.PREF_KEY_MDBLIST_ENABLED, isChecked) }
+            // 🚨 실시간 자동 저장(edit) 라인 제거
             layoutMdbList.visibility = if (isChecked) View.VISIBLE else View.GONE
         }
 
-        etMdbListApiKey.setOnFocusChangeListener { _, hasFocus ->
-            if (!hasFocus) {
-                sharedPref.edit { putString(SettingsRepository.PREF_KEY_MDBLIST_API_KEY, etMdbListApiKey.text.toString().trim()) }
-            }
-        }
+        // 🚨 etMdbListApiKey.setOnFocusChangeListener 리스너 전체 삭제
 
         addlinks.setOnClickListener {
             showLinkEditorDialog(false, null, -1, null)
@@ -739,12 +723,28 @@ class SettingsBottomFragment(
                 return@setOnClickListener
             }
 
+            // 통합(CineStream 등)용 스위치 뷰 인스턴스 획득
+            val switchCineStream = view.findView<Switch>("switchCineStream")
+            val switchStreamPlay = view.findView<Switch>("switchStreamPlay")
+            val switchVixSrc = view.findView<Switch>("switchVixSrc")
+
+            // 🚨 저장 버튼을 누르는 유일한 순간에만 모든 입력 정보와 토글 정보가 취합되어 디스크에 플러시됩니다.
             sharedPref.edit {
                 putString(SettingsRepository.PREF_KEY_TMDB_API_KEY, tmdbApiKeyVal)
                 putString(SettingsRepository.PREF_KEY_MDBLIST_API_KEY, etMdbListApiKey.text.toString().trim())
                 putString(SettingsRepository.PREF_KEY_HISTORY_SYNC_URL, etHistorySyncUrl.text.toString().trim())
                 putString(SettingsRepository.PREF_KEY_CUSTOM_POSTER_URL, etCustomPosterUrl.text.toString().trim())
+                
+                putBoolean(SettingsRepository.PREF_KEY_HISTORY_SYNC_ENABLED, switchHistorySync.isChecked)
+                putBoolean(SettingsRepository.PREF_KEY_CUSTOM_POSTER_ENABLED, switchCustomPoster.isChecked)
+                putBoolean(SettingsRepository.PREF_KEY_MDBLIST_ENABLED, switchMdbList.isChecked)
+                
+                putBoolean(SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, switchCineStream.isChecked)
+                putBoolean(SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, switchStreamPlay.isChecked)
+                putBoolean(SettingsRepository.PREF_KEY_VIXSRC_ENABLED, switchVixSrc.isChecked)
             }
+            // ... 다이얼로그 호출 및 리스타트 핸들링 ...
+
 
             val cancelBtn = Button(context).apply {
                 text = "No"
@@ -1440,7 +1440,7 @@ class SettingsBottomFragment(
                 switchView.isChecked = SettingsRepository.isIntegrationEnabled(sharedPref, prefKey)
             }
             switchView.setOnCheckedChangeListener { _, isChecked ->
-                SettingsRepository.setIntegrationEnabled(sharedPref, prefKey, isChecked)
+                // 🚨 실시간 자동 저장(setIntegrationEnabled) 라인 제거
                 showToast("$displayName Integration " + if (isChecked) "Enabled" else "Disabled")
             }
         } catch (e: Throwable) { e.printStackTrace() }
