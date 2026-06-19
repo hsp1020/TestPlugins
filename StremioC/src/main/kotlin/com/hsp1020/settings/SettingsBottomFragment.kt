@@ -1,4 +1,3 @@
-// 파일명: hsp1020/settings/SettingsBottomFragment.kt
 package com.hsp1020
 
 import android.annotation.SuppressLint
@@ -136,8 +135,8 @@ class SettingsBottomFragment(
 
     private data class ConfigFlatTab(val key: String, val displayName: String, val isGenre: Boolean, val catalogKey: String)
 
-    private var activeSubDialog: AlertDialog? = null // 🔥 [누수 방지] 클래스 전역 수동 소멸 감시 필드 선언
-    private var searchJob: Job? = null // 🔥 [속도 최적화] 언어 검색 실시간 렉 제거용 코루틴 Job 홀더
+    private var activeSubDialog: AlertDialog? = null 
+    private var searchJob: Job? = null 
 
     private fun getDarkThemeBg() = GradientDrawable().apply { setColor(Color.parseColor("#000000")); cornerRadius = 25f }
     private fun getCardBg() = GradientDrawable().apply { setColor(Color.parseColor("#0C0C0C")); setStroke(2, Color.parseColor("#1A1A1A")); cornerRadius = 18f }
@@ -252,11 +251,50 @@ class SettingsBottomFragment(
                StremioC.loadProviderDynamically("phisher", "com.phisher98.StreamPlay") != null
     }
 
+    private fun showSavedPopup(ctx: Context, title: String, message: String, onConfirm: () -> Unit = {}) {
+        val container = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(40, 40, 40, 40)
+            background = getDarkThemeBg()
+            addView(TextView(ctx).apply {
+                text = title
+                textSize = 18f
+                setTextColor(Color.WHITE)
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+                setPadding(0, 0, 0, 20)
+                gravity = Gravity.CENTER
+            })
+            addView(TextView(ctx).apply {
+                text = message
+                setTextColor(Color.LTGRAY)
+                textSize = 14f
+                setPadding(0, 0, 0, 30)
+            })
+        }
+        val okBtn = Button(ctx).apply {
+            text = "OK"
+            setTextColor(Color.WHITE)
+            isAllCaps = false
+            background = getButtonBg()
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        }
+        container.addView(okBtn)
+
+        val dlg = AlertDialog.Builder(ctx).setView(container).create()
+        setupCustomDialog(dlg, container)
+        okBtn.setOnClickListener {
+            dlg.dismiss()
+            onConfirm()
+        }
+        dlg.show()
+    }
+
     @SuppressLint("DiscouragedApi")
     override fun onCreateView(
         inflater: LayoutInflater, container: ViewGroup?,
         savedInstanceState: Bundle?
     ): View {
+        isCancelable = false // 🚨 [기능 추가] 설정창 밖 터치로 꺼지는 문제 해결
         val view = getLayout("bottom_sheet_layout", inflater, container)
 
         val addlinks: ImageView = try { view.findView("addlinks") } catch (e: Throwable) { throw Exception("addlinks ImageView not found", e) }
@@ -324,7 +362,7 @@ class SettingsBottomFragment(
 
                     val dlg = AlertDialog.Builder(ctx).setView(container).create()
                     setupCustomDialog(dlg, container)
-                    okBtn.setOnClickListener { dlg.dismiss() } // ◀️ [버그 픽스] NullPointerException 전면 해결
+                    okBtn.setOnClickListener { dlg.dismiss() } 
                     dlg.show()
                 } catch (e: Exception) {
                     e.printStackTrace()
@@ -778,13 +816,13 @@ class SettingsBottomFragment(
         etName?.background = getButtonBg()
         etName?.setTextColor(Color.WHITE)
         etName?.setHintTextColor(Color.GRAY)
-        etName?.setPadding(25, 0, 25, 0) // 🔥 [UI 보완] 수직 오프셋 정규화로 글자 짤림 방지
+        etName?.setPadding(25, 0, 25, 0) 
         if (isEdit) etName?.setText(itemToEdit?.name)
         
         etLink?.background = getButtonBg()
         etLink?.setTextColor(Color.WHITE)
         etLink?.setHintTextColor(Color.GRAY)
-        etLink?.setPadding(25, 0, 25, 0) // 🔥 [UI 보완] 수직 오프셋 정규화로 글자 짤림 방지
+        etLink?.setPadding(25, 0, 25, 0) 
         if (isEdit) etLink?.setText(itemToEdit?.link)
 
         val footer = LinearLayout(ctx).apply {
@@ -942,7 +980,7 @@ class SettingsBottomFragment(
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
                 searchJob?.cancel()
                 searchJob = viewLifecycleOwner.lifecycleScope.launch {
-                    delay(150) // 🔥 [속도 최적화] Debounce 스로틀링으로 TV 렌더링 렉 완화
+                    delay(150) 
                     val query = s.toString().trim().lowercase()
                     adapter.filteredList = if (query.isEmpty()) languages else languages.filter { it.first.lowercase().contains(query) }
                     adapter.notifyDataSetChanged()
@@ -1130,7 +1168,6 @@ class SettingsBottomFragment(
                     if (tab.isGenre) prefs.getBoolean("genres_enabled_${uniqueId}_${tab.catalogKey}", true) else true
                 }.toMutableList()
                 
-                // 🚨 리사이클러뷰 레이아웃 계산 중 업데이트 충돌 방지 안전 펜스
                 if (rv.isComputingLayout) {
                     rv.post { notifyDataSetChanged() }
                 } else {
@@ -1140,7 +1177,6 @@ class SettingsBottomFragment(
 
             inner class VH(val view: LinearLayout, val checkbox: CheckBox, val etOrder: EditText, val genreSwitch: Switch, val dragHandle: ImageView) : RecyclerView.ViewHolder(view)
 
-            
             override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
                 val layout = LinearLayout(context).apply {
                     orientation = LinearLayout.HORIZONTAL
@@ -1226,7 +1262,7 @@ class SettingsBottomFragment(
                 holder.etOrder.setText((position + 1).toString())
                 
                 holder.etOrder.setOnFocusChangeListener { _, hasFocus ->
-                    val curPos = holder.adapterPosition // 🚨 캡처될 하드코딩 position 변수 대신 실시간 어댑터 포지션 확보
+                    val curPos = holder.adapterPosition 
                     if (curPos == RecyclerView.NO_POSITION) return@setOnFocusChangeListener
 
                     if (hasFocus) {
@@ -1236,9 +1272,9 @@ class SettingsBottomFragment(
                     } else {
                         val inputVal = holder.etOrder.text.toString().toIntOrNull()
                         if (inputVal != null) {
-                            shiftItemInRecyclerView(curPos, inputVal) // 🚨 실시간 획득한 curPos 전달하여 크래시 및 정렬 오작동 원천 차단
+                            shiftItemInRecyclerView(curPos, inputVal) 
                         } else {
-                            holder.etOrder.setText((curPos + 1).toString()) // 🚨 실시간 포지션으로 표시 갱신
+                            holder.etOrder.setText((curPos + 1).toString()) 
                         }
                     }
                 }
@@ -1329,7 +1365,6 @@ class SettingsBottomFragment(
 
             override fun clearView(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder) {
                 super.clearView(recyclerView, viewHolder)
-                // 🚨 드래그가 완전히 끝나고 사용자가 손을 뗐을 때 순서 텍스트를 일괄 갱신합니다.
                 adapter.notifyDataSetChanged()
             }
 
@@ -1371,8 +1406,10 @@ class SettingsBottomFragment(
             val keysToSave = JSONArray()
             masterTabs.forEach { keysToSave.put(it.key) }
             prefs.edit().putString(orderKey, keysToSave.toString()).apply()
-            Toast.makeText(context, "Catalog settings saved. Reload to apply.", Toast.LENGTH_SHORT).show()
+            
+            // 🚨 [기능 수정] 토스트 메시지 대신 팝업 경고 다이얼로그 호출
             dialog.dismiss()
+            showSavedPopup(context, "Catalog Settings", "Catalog settings saved. Reload to apply.")
         }
 
         cancelBtn.setOnClickListener {
