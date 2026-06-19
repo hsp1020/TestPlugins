@@ -944,7 +944,7 @@ class SettingsBottomFragment(
             override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
                 val rowLayout = LinearLayout(context).apply {
                     orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
+                    gravity = android.view.Gravity.CENTER_VERTICAL
                     setPadding(10, 20, 10, 20)
                     isClickable = true
                     focusable = View.FOCUSABLE
