@@ -698,7 +698,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 
                 holder.cb.setOnCheckedChangeListener(null)
                 holder.cb.isChecked = data.isChecked
-                
+
                 holder.cb.setOnCheckedChangeListener { _, isChecked ->
                     if (data.isChecked == isChecked) return@setOnCheckedChangeListener
                     data.isChecked = isChecked
@@ -723,8 +723,15 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     for (i in allCatalogList.indices) {
                         allCatalogList[i].orderIndex = i + 1
                     }
-                    notifyDataSetChanged() 
+                    
+                    // 🚨 코드 A에 설계되어 있던 레이아웃 연산 상태 방어막 적용
+                    if (rvCatalogs.isComputingLayout) {
+                        rvCatalogs.post { notifyDataSetChanged() }
+                    } else {
+                        notifyDataSetChanged()
+                    }
                 }
+
                 
                 holder.etOrder.setOnFocusChangeListener(null)
                 holder.etOrder.setText((position + 1).toString())
@@ -750,7 +757,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 }
             }
             override fun getItemCount() = visibleTabs.size
-            
+
             fun shiftItemInRecyclerView(oldPos: Int, newOrder: Int) {
                 if (oldPos !in visibleTabs.indices) return
                 val item = visibleTabs[oldPos]
@@ -785,12 +792,18 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         allCatalogList[i].orderIndex = i + 1
                     }
                     
-                    notifyItemMoved(oldPos, newPos)
-                    notifyItemRangeChanged(minOf(oldPos, newPos), maxOf(oldPos, newPos) + 1)
+                    // 🚨 RecyclerView가 레이아웃 연산 중일 때 즉시 notify가 호출되지 않도록 대기열(post)에 작업을 예약합니다.
+                    rvCatalogs.post {
+                        notifyItemMoved(oldPos, newPos)
+                        notifyItemRangeChanged(minOf(oldPos, newPos), maxOf(oldPos, newPos) + 1)
+                    }
                 } else {
-                    notifyItemChanged(oldPos)
+                    // 🚨 단순 포커스 아웃에 의한 노티도 마찬가지로 안전하게 대기열(post) 처리합니다.
+                    rvCatalogs.post {
+                        notifyItemChanged(oldPos)
+                    }
                 }
-            }
+            }                    
         }
         val catalogAdapter = CatalogAdapter()
         rvCatalogs.adapter = catalogAdapter
@@ -871,19 +884,26 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 holder.swAutoAdd.setOnCheckedChangeListener(null)
                 holder.swAutoAdd.isChecked = data.isAutoAdd
                 holder.swAutoAdd.isEnabled = data.isActive 
-                
+
                 holder.swActive.setOnCheckedChangeListener { _, isChecked -> 
                     if (data.isActive == isChecked) return@setOnCheckedChangeListener
                     data.isActive = isChecked
                     tempActiveSettings[data.pName] = isChecked
                     holder.swAutoAdd.isEnabled = isChecked
                     
-                    // 🔥 [정렬 제약 적용] Active ON 된 프로바이더가 실시간으로 맨 위로 정렬되도록 버블 정렬 가동
+                    // [정렬 제약 적용] Active ON 된 프로바이더가 실시간으로 맨 위로 정렬되도록 버블 정렬 가동
                     sortProviderList()
-                    notifyDataSetChanged()
+                    
+                    // 🚨 코드 A에 설계되어 있던 레이아웃 연산 상태 방어막 적용
+                    if (rvProviders.isComputingLayout) {
+                        rvProviders.post { notifyDataSetChanged() }
+                    } else {
+                        notifyDataSetChanged()
+                    }
                     
                     updateVisibleCatalogs() 
                 }
+                
                 
                 holder.swAutoAdd.setOnCheckedChangeListener { _, isChecked -> 
                     data.isAutoAdd = isChecked
