@@ -512,7 +512,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     editor.putString("evo_name_$targetId", item.name)
                     editor.putBoolean("evo_visibility_enabled_$targetId", item.visibility)
                     editor.putBoolean("evo_search_enabled_$targetId", item.search)
-                    
+
                     if (item.originalId != targetId) {
                         val srcId = item.originalId
                         editor.putString("evo_active_cats_json_$targetId", prefs.getString("evo_active_cats_json_$srcId", ""))
@@ -522,7 +522,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                                 key.startsWith("cat_rename_${srcId}_") || 
                                 key.startsWith("cat_order_${srcId}_") || 
                                 key.startsWith("auto_add_${srcId}_") ||
-                                key.startsWith("ext_toggle_${srcId}_")) {
+                                key.startsWith("ext_toggle_${srcId}_") ||
+                                key.startsWith("provider_enabled_${srcId}_")) { // 🚨 [수정] 복사 대상에 추가
                                 
                                 val newKey = key.replaceFirst("_${srcId}_", "_${targetId}_")
                                 when (val value = prefs.all[key]) {
@@ -532,9 +533,9 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                                 }
                             }
                         }
-                    }
+                    }                    
                 }
-                
+
                 val maxIdToCheck = maxOf(oldCount, maxIdGen)
                 for (i in (newCount + 1)..maxIdToCheck) {
                     editor.remove("evo_name_$i")
@@ -547,11 +548,13 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                             key.startsWith("cat_rename_${i}_") || 
                             key.startsWith("cat_order_${i}_") || 
                             key.startsWith("auto_add_${i}_") ||
-                            key.startsWith("ext_toggle_${i}_")) {
+                            key.startsWith("ext_toggle_${i}_") ||
+                            key.startsWith("provider_enabled_${i}_")) { // 🚨 [수정] 삭제 대상에 추가
                             editor.remove(key)
                         }
                     }
                 }
+                
                 
                 editor.apply()
                 APIHolder.allProviders.forEach { p -> if (p is UltimaEvoProvider) p.invalidateCache() }
