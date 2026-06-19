@@ -908,23 +908,38 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 
                 if (from == RecyclerView.NO_POSITION || to == RecyclerView.NO_POSITION) return false
                 
-                Collections.swap(catalogList, from, to)
+                // 존재하지 않는 catalogList 대신, 실제 노출 중인 visibleCatalogList를 스왑합니다.
+                Collections.swap(visibleCatalogList, from, to)
                 catalogAdapter.notifyItemMoved(from, to) // 단순 이동만 시켜서 스크롤 연산 방해 차단
                 return true
             }
 
             override fun clearView(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder) {
                 super.clearView(recyclerView, viewHolder)
-                // 🚨 드래그앤드롭이 완전히 끝나서 손을 뗐을 때, 순서 번호를 정렬하고 화면을 일괄 새로고침합니다.
-                for (i in catalogList.indices) {
-                    catalogList[i].orderIndex = i + 1
+                // 드래그가 완벽히 끝나서 손을 뗐을 때, 순서 인덱스를 재정렬합니다.
+                for (i in visibleCatalogList.indices) {
+                    visibleCatalogList[i].orderIndex = i + 1
                 }
+
+                // [중요] 저장 시 순서가 어긋나지 않도록 마스터 리스트(allCatalogList)의 순서도 함께 재정렬합니다.
+                val inactiveCatalogs = allCatalogList.filter { it !in visibleCatalogList }
+                allCatalogList.clear()
+                allCatalogList.addAll(visibleCatalogList)
+                allCatalogList.addAll(inactiveCatalogs)
+
+                // 전체 리스트 기준으로 최종 순서(orderIndex)를 순차적으로 다시 매깁니다.
+                for (i in allCatalogList.indices) {
+                    allCatalogList[i].orderIndex = i + 1
+                }
+
                 catalogAdapter.notifyDataSetChanged()
             }
 
             override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {}
         })
 
+        
+        
         touchHelper.attachToRecyclerView(rvCatalogs)
         mainContainer.addView(rvCatalogs)
 
