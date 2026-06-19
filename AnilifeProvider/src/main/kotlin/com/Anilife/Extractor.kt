@@ -143,10 +143,6 @@ class AnilifeProxyExtractor : ExtractorApi() {
             return true
 
         } catch (e: Exception) {
-            // [진단 로그 실행] Extractor 비디오 파싱/로딩 중 에러가 나면 원인을 진단합니다.
-            CoroutineScope(Dispatchers.Default).launch {
-                AnilifeDiagnostic.diagnose(playerUrl, e, cleanHeaders)
-            }
             return false
         }
     }
