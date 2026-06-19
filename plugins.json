@@ -20,6 +20,7 @@
         "name": "AnilifeProvider"
     },
     {
+        "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/CUTVProvider/biglogo.png",
         "fileHash": "sha256-dbffd2f96f555a290d38030934b253aea86fcf6971747f8f0e6bc4b25e937acc",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
@@ -58,7 +59,7 @@
         "name": "DaddyLive"
     },
     {
-        "iconUrl": "https://m135.kotbc2.com/img/ktblogo.gif",
+        "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/KotbcProvider/ktblogo.png",
         "fileHash": "sha256-0e5f5f3c16584f3d3929afc94cb911f0820a63ee9b7863d0996ac92cc2686c5c",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
@@ -81,7 +82,7 @@
         "name": "KotbcProvider"
     },
     {
-        "iconUrl": "https://i.namu.wiki/i/4NbnTney9AChyoNRvChxbZQE806zcx9Z_wIjM32htHGOcp7ZOQWFvBCSyQfTu3NloC8WRcRE4hnGq2FNxOFdxjvYm82uiRnwMhu95ehEDONK8OSiIVctKBYVWmU7FjOItqs5Hf0OEZRbAbL9yE5a8w.webp",
+        "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/LinkkfProvider/linktv.png",
         "fileHash": "sha256-be448d6c4e4ee70b535a9e12c7268d7bb90b041cdb908664ec396d05ad542c7d",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
