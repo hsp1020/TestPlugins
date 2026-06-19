@@ -276,11 +276,11 @@
         "name": "TVWikiProvider"
     },
     {
-        "iconUrl": "https://raw.githubusercontent.com/phisher98/TVVVV/refs/heads/main/Icons/UltimaBeta.png",
-        "fileHash": "sha256-737e0ca711721740b9126b7d4f598f6834bb62382d3e1d2bf7c2064e1c80b289",
+        "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/Ultima%20Evo/UltimaBeta.jpg",
+        "fileHash": "sha256-f7ebe1745104214d28b50c747432421b963999c73c8d4f12c1fd788eb5e4403c",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 61773,
+        "fileSize": 61805,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -292,10 +292,10 @@
             "Other"
         ],
         "version": 1,
-        "internalName": "Ultimaevo",
+        "internalName": "Ultima Evo",
         "description": "All in one Catalogs",
-        "url": "https://raw.githubusercontent.com/hsp1020/TestPlugins/builds/Ultimaevo.cs3",
-        "name": "Ultimaevo"
+        "url": "https://raw.githubusercontent.com/hsp1020/TestPlugins/builds/Ultima Evo.cs3",
+        "name": "Ultima Evo"
     },
     {
         "iconUrl": "https://upload.wikimedia.org/wikipedia/commons/thumb/0/09/YouTube_full-color_icon_%282017%29.svg/3840px-YouTube_full-color_icon_%282017%29.svg.png",
