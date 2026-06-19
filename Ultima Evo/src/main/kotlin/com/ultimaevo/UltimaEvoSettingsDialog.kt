@@ -1,3 +1,4 @@
+// hsp1020/ultimaevo/UltimaEvoSettingsDialog.kt
 package com.ultimaevo
 
 import android.app.AlertDialog
@@ -85,7 +86,46 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         editor.apply()
     }
 
+    private fun showSavedPopup(ctx: Context, title: String, message: String, onConfirm: () -> Unit = {}) {
+        val container = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(40, 40, 40, 40)
+            background = getDarkThemeBg()
+            addView(TextView(ctx).apply {
+                text = title
+                textSize = 18f
+                setTextColor(Color.WHITE)
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+                setPadding(0, 0, 0, 20)
+                gravity = Gravity.CENTER
+            })
+            addView(TextView(ctx).apply {
+                text = message
+                setTextColor(Color.LTGRAY)
+                textSize = 14f
+                setPadding(0, 0, 0, 30)
+            })
+        }
+        val okBtn = Button(ctx).apply {
+            text = "OK"
+            setTextColor(Color.WHITE)
+            isAllCaps = false
+            background = getButtonBg()
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        }
+        container.addView(okBtn)
+
+        val dlg = AlertDialog.Builder(ctx).setView(container).create()
+        setupCustomDialog(dlg, container)
+        okBtn.setOnClickListener {
+            dlg.dismiss()
+            onConfirm()
+        }
+        dlg.show()
+    }
+
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
+        isCancelable = false // 🚨 [기능 추가] 설정창 밖 터치로 꺼지는 문제 해결
         val ctx = requireContext()
         val prefs = ctx.getSharedPreferences(UltimaEvoPlugin.PREFS_NAME, Context.MODE_PRIVATE)
 
@@ -559,7 +599,9 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     editor.commit()
                     APIHolder.allProviders.forEach { p -> if (p is UltimaEvoProvider) p.invalidateCache() }
                     withContext(Dispatchers.Main) {
-                        dismiss()
+                        showSavedPopup(ctx, "Catalog Settings", "Catalog settings saved. Reload to apply.") {
+                            dismiss()
+                        }
                     }
                 }
             }
@@ -1000,7 +1042,10 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
                 APIHolder.allProviders.forEach { p -> if (p is UltimaEvoProvider) p.invalidateCache() }
                 
-                withContext(Dispatchers.Main) { dialog.dismiss() }
+                withContext(Dispatchers.Main) { 
+                    dialog.dismiss() 
+                    showSavedPopup(ctx, "Catalog Settings", "Catalog settings saved. Reload to apply.")
+                }
             }
         }
 
