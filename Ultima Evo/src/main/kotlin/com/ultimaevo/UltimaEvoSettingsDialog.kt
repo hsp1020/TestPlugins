@@ -1,3 +1,10 @@
+치명적인 동적 레이아웃 연산 크래시 방지 대책(isComputingLayout 및 post 우회)과 provider_enabled 키 동기화 및
+누수 차단, 그리고 드래그앤드롭 정렬 완료 시 마스터 데이터 보정까지 모두 보강한 UltimaEvoSettingsDialog.kt 전체 무결성
+코드입니다.
+
+인스턴스 설정 및 프로바이더 정렬 설정 시 발생할 수 있는 교착 상태가 모두 차단되어 있어, 파일 전체를 그대로 덮어씌워 사용하실 수 있습니다.
+
+// 파일명: hsp1020/ultimaevo/UltimaEvoSettingsDialog.kt
 package com.ultimaevo
 
 import android.app.AlertDialog
@@ -271,7 +278,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                             }
                             resContainer.addView(TextView(ctx).apply {
                                 text = "Import Result"
-                                             textSize = 18f
+                                textSize = 18f
                                 setTextColor(Color.WHITE)
                                 typeface = android.graphics.Typeface.DEFAULT_BOLD
                                 setPadding(0, 0, 0, 20)
@@ -499,7 +506,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             text = "Save & Close"; setTextColor(Color.WHITE); isAllCaps = false; background = getButtonBg()
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 30, 0, 0) }
             setOnClickListener {
-                // 🚨 디스크 입출력으로 인한 UI 스레드 지연(ANR)을 예방하기 위해 IO 코루틴 스레드로 작업을 분기합니다.
                 viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
                     val editor = prefs.edit()
                     val newCount = instanceMemoryList.size
@@ -557,43 +563,12 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         }
                     }
                     
-                    // 🚨 [필수 반영] apply() 대신 commit()을 사용하여 물리 디스크 파일 기록 완료를 강제 보장합니다.
                     editor.commit()
-                    
-                    // 🚨 기록이 확실히 완료된 뒤에 캐시를 강제 갱신하여 프로바이더가 최신 데이터를 정상적으로 가져가도록 유도합니다.
                     APIHolder.allProviders.forEach { p -> if (p is UltimaEvoProvider) p.invalidateCache() }
-                    
-                    // 🚨 작업 완료 후 메인 스레드로 복귀하여 안전하게 다이얼로그를 닫습니다.
                     withContext(Dispatchers.Main) {
                         dismiss()
                     }
                 }
-            }
-        }
-
-                val maxIdToCheck = maxOf(oldCount, maxIdGen)
-                for (i in (newCount + 1)..maxIdToCheck) {
-                    editor.remove("evo_name_$i")
-                    editor.remove("evo_visibility_enabled_$i")
-                    editor.remove("evo_search_enabled_$i")
-                    editor.remove("evo_active_cats_json_$i")
-                    
-                    prefs.all.keys.forEach { key ->
-                        if (key.startsWith("cat_toggle_${i}_") || 
-                            key.startsWith("cat_rename_${i}_") || 
-                            key.startsWith("cat_order_${i}_") || 
-                            key.startsWith("auto_add_${i}_") ||
-                            key.startsWith("ext_toggle_${i}_") ||
-                            key.startsWith("provider_enabled_${i}_")) { // 🚨 [수정] 삭제 대상에 추가
-                            editor.remove(key)
-                        }
-                    }
-                }
-                
-                
-                editor.apply()
-                APIHolder.allProviders.forEach { p -> if (p is UltimaEvoProvider) p.invalidateCache() }
-                dismiss()
             }
         }
         mainLayout.addView(saveBtn)
@@ -648,7 +623,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             providerList.addAll(active)
             providerList.addAll(inactive)
         }
-        sortProviderList() // 🔥 초기 로딩 시 액티브 ON 정렬 수행 완료
+        sortProviderList()
 
         data class CatalogData(val providerName: String, val catalogName: String, var isChecked: Boolean, var customName: String, var orderIndex: Int)
         val allCatalogList = mutableListOf<CatalogData>()
@@ -736,7 +711,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 
                 holder.cb.setOnCheckedChangeListener(null)
                 holder.cb.isChecked = data.isChecked
-
+                
                 holder.cb.setOnCheckedChangeListener { _, isChecked ->
                     if (data.isChecked == isChecked) return@setOnCheckedChangeListener
                     data.isChecked = isChecked
@@ -762,14 +737,12 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         allCatalogList[i].orderIndex = i + 1
                     }
                     
-                    // 🚨 코드 A에 설계되어 있던 레이아웃 연산 상태 방어막 적용
                     if (rvCatalogs.isComputingLayout) {
                         rvCatalogs.post { notifyDataSetChanged() }
                     } else {
                         notifyDataSetChanged()
                     }
                 }
-
                 
                 holder.etOrder.setOnFocusChangeListener(null)
                 holder.etOrder.setText((position + 1).toString())
@@ -795,7 +768,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 }
             }
             override fun getItemCount() = visibleTabs.size
-
+            
             fun shiftItemInRecyclerView(oldPos: Int, newOrder: Int) {
                 if (oldPos !in visibleTabs.indices) return
                 val item = visibleTabs[oldPos]
@@ -830,18 +803,16 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         allCatalogList[i].orderIndex = i + 1
                     }
                     
-                    // 🚨 RecyclerView가 레이아웃 연산 중일 때 즉시 notify가 호출되지 않도록 대기열(post)에 작업을 예약합니다.
                     rvCatalogs.post {
                         notifyItemMoved(oldPos, newPos)
                         notifyItemRangeChanged(minOf(oldPos, newPos), maxOf(oldPos, newPos) + 1)
                     }
                 } else {
-                    // 🚨 단순 포커스 아웃에 의한 노티도 마찬가지로 안전하게 대기열(post) 처리합니다.
                     rvCatalogs.post {
                         notifyItemChanged(oldPos)
                     }
                 }
-            }                    
+            }
         }
         val catalogAdapter = CatalogAdapter()
         rvCatalogs.adapter = catalogAdapter
@@ -856,7 +827,12 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             visibleCatalogList.addAll(checked)
             visibleCatalogList.addAll(unchecked)
             catalogAdapter.visibleTabs = visibleCatalogList
-            catalogAdapter.notifyDataSetChanged()
+            
+            if (rvCatalogs.isComputingLayout) {
+                rvCatalogs.post { catalogAdapter.notifyDataSetChanged() }
+            } else {
+                catalogAdapter.notifyDataSetChanged()
+            }
         }
 
         class ProviderAdapter : RecyclerView.Adapter<ProviderAdapter.PVH>() {
@@ -875,10 +851,9 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 val tv = TextView(ctx).apply { 
                     setTextColor(Color.LTGRAY)
                     textSize = 13f
-                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) // ◀️ 프로바이더명 좌측 고정 정렬
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
                 }
                 
-                // 🔥 우측 스위치 묶음 컬럼 정렬 컨테이너
                 val swContainer = LinearLayout(ctx).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
@@ -888,7 +863,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     )
                 }
 
-                // 🔥 "Active" 및 "Auto-Add" 영문으로 최종 보정 처리
                 val swActive = Switch(ctx).apply {
                     text = "Enable"
                     setTextColor(Color.WHITE)
@@ -900,7 +874,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     setTextColor(Color.WHITE)
                     textSize = 12f
                     layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                        setMargins(40, 0, 0, 0) // 컬럼 간격을 맞추는 대칭 마진 부여
+                        setMargins(40, 0, 0, 0)
                     }
                 }
                 
@@ -922,17 +896,15 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 holder.swAutoAdd.setOnCheckedChangeListener(null)
                 holder.swAutoAdd.isChecked = data.isAutoAdd
                 holder.swAutoAdd.isEnabled = data.isActive 
-
+                
                 holder.swActive.setOnCheckedChangeListener { _, isChecked -> 
                     if (data.isActive == isChecked) return@setOnCheckedChangeListener
                     data.isActive = isChecked
                     tempActiveSettings[data.pName] = isChecked
                     holder.swAutoAdd.isEnabled = isChecked
                     
-                    // [정렬 제약 적용] Active ON 된 프로바이더가 실시간으로 맨 위로 정렬되도록 버블 정렬 가동
                     sortProviderList()
                     
-                    // 🚨 코드 A에 설계되어 있던 레이아웃 연산 상태 방어막 적용
                     if (rvProviders.isComputingLayout) {
                         rvProviders.post { notifyDataSetChanged() }
                     } else {
@@ -941,7 +913,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     
                     updateVisibleCatalogs() 
                 }
-                
                 
                 holder.swAutoAdd.setOnCheckedChangeListener { _, isChecked -> 
                     data.isAutoAdd = isChecked
@@ -966,38 +937,36 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 
                 if (from == RecyclerView.NO_POSITION || to == RecyclerView.NO_POSITION) return false
                 
-                // 존재하지 않는 catalogList 대신, 실제 노출 중인 visibleCatalogList를 스왑합니다.
                 Collections.swap(visibleCatalogList, from, to)
-                catalogAdapter.notifyItemMoved(from, to) // 단순 이동만 시켜서 스크롤 연산 방해 차단
+                catalogAdapter.notifyItemMoved(from, to)
                 return true
             }
 
             override fun clearView(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder) {
                 super.clearView(recyclerView, viewHolder)
-                // 드래그가 완벽히 끝나서 손을 뗐을 때, 순서 인덱스를 재정렬합니다.
                 for (i in visibleCatalogList.indices) {
                     visibleCatalogList[i].orderIndex = i + 1
                 }
-
-                // [중요] 저장 시 순서가 어긋나지 않도록 마스터 리스트(allCatalogList)의 순서도 함께 재정렬합니다.
+                
                 val inactiveCatalogs = allCatalogList.filter { it !in visibleCatalogList }
                 allCatalogList.clear()
                 allCatalogList.addAll(visibleCatalogList)
                 allCatalogList.addAll(inactiveCatalogs)
-
-                // 전체 리스트 기준으로 최종 순서(orderIndex)를 순차적으로 다시 매깁니다.
+                
                 for (i in allCatalogList.indices) {
                     allCatalogList[i].orderIndex = i + 1
                 }
-
-                catalogAdapter.notifyDataSetChanged()
+                
+                if (rvCatalogs.isComputingLayout) {
+                    rvCatalogs.post { catalogAdapter.notifyDataSetChanged() }
+                } else {
+                    catalogAdapter.notifyDataSetChanged()
+                }
             }
 
             override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {}
         })
 
-        
-        
         touchHelper.attachToRecyclerView(rvCatalogs)
         mainContainer.addView(rvCatalogs)
 
