@@ -19,8 +19,6 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.sync.Semaphore         // ⭐ 세마포어 적용 임포트
-import kotlinx.coroutines.sync.withPermit       // ⭐ 세마포어 적용 임포트
 import org.jsoup.nodes.Element
 import java.net.URLDecoder
 import java.net.URLEncoder
@@ -58,9 +56,6 @@ class TvchakProvider : MainAPI() {
         "3" to "예능",
         "4" to "애니"
     )
-
-    // ⭐ 카탈로그 동시 요청을 최대 2개로 제어하는 세마포어 추가
-    private val mainPageSemaphore = Semaphore(2)
 
     // =========================================================================
     // [Cloudflare 우회용 변수 및 함수 추가 시작]
@@ -210,6 +205,7 @@ class TvchakProvider : MainAPI() {
         }
     }
 
+    // 통신을 안전하게 감싸는 공통 함수 (Cloudflare 감지 시 자동 우회 후 재요청)
     private suspend fun safeGet(url: String, referer: String? = null): NiceResponse {
         println("TVCHAK_DEBUG: [SafeGet] 📡 GET 요청: $url")
         var res = app.get(url, headers = getHeaders(referer))
@@ -217,7 +213,10 @@ class TvchakProvider : MainAPI() {
         if (isCloudflareChallenge(res.text)) {
             println("TVCHAK_DEBUG: [SafeGet] 🧱 Cloudflare 막힘 감지. 우회 대기열 진입 -> $url")
             
+            // ⭐ 여러 카테고리가 동시에 진입하는 것을 막고 한 줄 서기로 만듭니다.
             cfMutex.withLock {
+                // 1. 대기하는 동안 혹시 앞선 탭(카테고리)이 이미 쿠키를 뚫어왔을 수 있으므로 
+                // 새로 갱신된 헤더로 한번 더 요청해봅니다.
                 res = app.get(url, headers = getHeaders(referer))
                 
                 if (!isCloudflareChallenge(res.text)) {
@@ -225,13 +224,14 @@ class TvchakProvider : MainAPI() {
                     return res
                 }
 
+                // 2. 내가 1빠라면 직접 총대를 메고 우회 웹뷰를 띄웁니다.
                 println("TVCHAK_DEBUG: [SafeGet] 🔒 [대표 지정] 내가 직접 CF 우회 시작...")
                 val bypass = solveCloudflare(mainUrl)
                 if (bypass != null) {
                     cfCookies = bypass.first
                     cfUserAgent = bypass.second
                     println("TVCHAK_DEBUG: [SafeGet] 🔓 우회 성공! 새로운 쿠키로 재요청: $url")
-                    res = app.get(url, headers = getHeaders(referer)) 
+                    res = app.get(url, headers = getHeaders(referer)) // 새 헤더로 재요청
                 } else {
                     println("TVCHAK_DEBUG: [SafeGet] ❌ 우회 실패. 데이터가 정상적으로 표시되지 않을 수 있습니다.")
                 }
@@ -241,6 +241,7 @@ class TvchakProvider : MainAPI() {
         }
         return res
     }
+
 
     // =========================================================================
     // [Cloudflare 우회용 변수 및 함수 추가 끝]
@@ -266,9 +267,11 @@ class TvchakProvider : MainAPI() {
             val testPath = "/index.php/vod/show/id/1/page/1.html"
 
             try {
+                // 기존 테스트에서도 getHeaders를 넣어줍니다.
                 val res = app.get("$currentMainUrl$testPath", headers = getHeaders(), timeout = 3L)
                 val finalUrl = res.url.substringBefore("/index.php").trimEnd('/')
                 
+                // Cloudflare 챌린지가 떴거나 정상 페이지면 이 도메인이 살아있다고 판단.
                 if (res.isSuccessful && res.text.contains("movie-list-item") || isCloudflareChallenge(res.text)) {
                     if (currentMainUrl != finalUrl && finalUrl.startsWith("http")) {
                         println("TVCHAK_DEBUG: [DomainCheck] 🔄 리다이렉트 감지됨: $currentMainUrl -> $finalUrl")
@@ -300,6 +303,7 @@ class TvchakProvider : MainAPI() {
                             try {
                                 val res = app.get(testUrl, headers = getHeaders(), timeout = 3L)
                                 val extractedFinalUrl = res.url.substringBefore("/index.php").trimEnd('/')
+                                // 정상 접속되거나, Cloudflare 챌린지가 뜬다면 도메인은 살아있는 것!
                                 if (res.isSuccessful && res.text.contains("movie-list-item")) {
                                     println("TVCHAK_DEBUG: [DomainCheck] 🎯 브루트포스 정상 도메인 발견: $extractedFinalUrl")
                                     return@async extractedFinalUrl
@@ -334,32 +338,29 @@ class TvchakProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         checkAndUpdateDomain()
-        
-        // ⭐ 메인 페이지 호출에만 정밀하게 세마포어 적용 (이전 오리지널 try-catch 그대로 복구)
-        return mainPageSemaphore.withPermit {
-            try {
-                val url = "$mainUrl/index.php/vod/show/id/${request.data}/page/$page.html"
-                println("TVCHAK_DEBUG: [getMainPage] 요청 페이지 = $page, URL = $url")
-                
-                val document = safeGet(url).document
+        return try {
+            val url = "$mainUrl/index.php/vod/show/id/${request.data}/page/$page.html"
+            println("TVCHAK_DEBUG: [getMainPage] 요청 페이지 = $page, URL = $url")
+            
+            // 기존 app.get 대신 CF Bypass가 탑재된 safeGet 사용
+            val document = safeGet(url).document
 
-                val items = document.select(".movie-list-body .movie-list-item").mapNotNull { element ->
-                    parseItem(element, request.data == "1")
-                }
-
-                if (items.isEmpty()) {
-                    println("TVCHAK_DEBUG: [getMainPage] ⚠️ 경고: 아이템이 0개입니다. CF를 통과했지만 HTML 구조가 바뀌었을 수 있습니다.")
-                } else {
-                    println("TVCHAK_DEBUG: [getMainPage] 페이지 $page 파싱 성공 - 아이템 수: ${items.size}")
-                }
-                
-                newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
-            } catch (e: Exception) {
-                println("TVCHAK_DEBUG: [getMainPage] 에러 발생: ${e.message}")
-                e.printStackTrace()
-                if (e is CancellationException) throw e
-                newHomePageResponse(request.name, emptyList(), hasNext = false)
+            val items = document.select(".movie-list-body .movie-list-item").mapNotNull { element ->
+                parseItem(element, request.data == "1")
             }
+
+            if (items.isEmpty()) {
+                println("TVCHAK_DEBUG: [getMainPage] ⚠️ 경고: 아이템이 0개입니다. CF를 통과했지만 HTML 구조가 바뀌었을 수 있습니다.")
+            } else {
+                println("TVCHAK_DEBUG: [getMainPage] 페이지 $page 파싱 성공 - 아이템 수: ${items.size}")
+            }
+            
+            newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
+        } catch (e: Exception) {
+            println("TVCHAK_DEBUG: [getMainPage] 에러 발생: ${e.message}")
+            e.printStackTrace()
+            if (e is CancellationException) throw e
+            newHomePageResponse(request.name, emptyList(), hasNext = false)
         }
     }
 
@@ -381,6 +382,7 @@ class TvchakProvider : MainAPI() {
             val url = "$mainUrl/index.php/vod/search.html?wd=$query"
             println("TVCHAK_DEBUG: [search] 검색어 = $query, URL = $url")
             
+            // CF Bypass 적용
             val document = safeGet(url).document
 
             val items = document.select(".vod-search-list .box").mapNotNull { element ->
@@ -414,6 +416,7 @@ class TvchakProvider : MainAPI() {
             URLDecoder.decode(encodedPoster, "UTF-8")
         } else null
 
+        // CF Bypass 적용
         val document = safeGet(realUrl).document
         
         val title = document.selectFirst("h1.movie-title")?.text()?.trim() ?: ""
@@ -448,6 +451,7 @@ class TvchakProvider : MainAPI() {
         checkAndUpdateDomain()
         println("TVCHAK_DEBUG: [loadLinks] 영상 링크 추출 시작: $data")
         
+        // CF Bypass 적용
         val document = safeGet(data).document
         
         val scriptContent = document.select("script").find { it.data().contains("player_aaaa") }?.data()
@@ -490,6 +494,7 @@ class TvchakProvider : MainAPI() {
                 url = videoUrl,
                 type = type
             ) {
+                // 비디오 플레이어 요청 시에도 우회된 헤더(User-Agent 등)를 넘겨주면 안정성이 올라갑니다.
                 this.referer = mainUrl
                 this.headers = getHeaders(mainUrl)
                 this.quality = Qualities.P1080.value
