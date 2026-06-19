@@ -14,7 +14,7 @@ import android.os.SystemClock
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
-import android.util.Base64 // ◀️ [추가] 누락되었던 Base64 임포트 패키지 기입
+import android.util.Base64
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
@@ -38,7 +38,7 @@ import java.io.ByteArrayOutputStream
 import java.util.Collections
 import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
-import kotlin.text.Charsets // ◀️ [추가] Charsets 명시적 임포트
+import kotlin.text.Charsets
 
 class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
@@ -133,7 +133,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     try {
                         val backupStr = withContext(Dispatchers.IO) {
                             val json = JSONObject()
-                            // ◀️ [컴파일러 에러 해결] 타입 추론 버그 방지를 위해 구조분해 일반 for 루프로 우회
                             for ((key, value) in prefs.all) {
                                 json.put(key, value)
                             }
@@ -273,7 +272,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                             }
                             resContainer.addView(TextView(ctx).apply {
                                 text = "Import Result"
-                                textSize = 18f
+                                             textSize = 18f
                                 setTextColor(Color.WHITE)
                                 typeface = android.graphics.Typeface.DEFAULT_BOLD
                                 setPadding(0, 0, 0, 20)
@@ -592,14 +591,27 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val tempActiveSettings = mutableMapOf<String, Boolean>()
         val tempAutoAddSettings = mutableMapOf<String, Boolean>()
 
+        data class ProviderData(val pName: String, var isActive: Boolean, var isAutoAdd: Boolean)
+        val providerList = mutableListOf<ProviderData>()
+
         for (provider in allProviders) {
             val pName = provider.name
             val isActive = prefs.getBoolean("provider_enabled_${instanceId}_$pName", true)
             val isAutoAdd = prefs.getBoolean("auto_add_${instanceId}_$pName", false)
             
+            providerList.add(ProviderData(pName, isActive, isAutoAdd))
             tempActiveSettings[pName] = isActive
             tempAutoAddSettings[pName] = isAutoAdd
         }
+
+        fun sortProviderList() {
+            val active = providerList.filter { it.isActive }.sortedBy { it.pName.lowercase() }
+            val inactive = providerList.filter { !it.isActive }.sortedBy { it.pName.lowercase() }
+            providerList.clear()
+            providerList.addAll(active)
+            providerList.addAll(inactive)
+        }
+        sortProviderList() // 🔥 초기 로딩 시 액티브 ON 정렬 수행 완료
 
         data class CatalogData(val providerName: String, val catalogName: String, var isChecked: Boolean, var customName: String, var orderIndex: Int)
         val allCatalogList = mutableListOf<CatalogData>()
@@ -805,58 +817,81 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
                     setPadding(0, 15, 0, 15) 
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, 
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    )
                 }
                 val tv = TextView(ctx).apply { 
                     setTextColor(Color.LTGRAY)
                     textSize = 13f
-                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) 
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) // ◀️ 프로바이더명 좌측 고정 정렬
                 }
+                
+                // 🔥 우측 스위치 묶음 컬럼 정렬 컨테이너
+                val swContainer = LinearLayout(ctx).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT, 
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    )
+                }
+
+                // 🔥 "Active" 및 "Auto-Add" 영문으로 최종 보정 처리
                 val swActive = Switch(ctx).apply {
-                    text = "활성화"
+                    text = "Enable"
                     setTextColor(Color.WHITE)
                     textSize = 12f
                     layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
                 }
                 val swAutoAdd = Switch(ctx).apply {
-                    text = "오토 애드"
+                    text = "Auto-Add"
                     setTextColor(Color.WHITE)
                     textSize = 12f
                     layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                        setMargins(40, 0, 0, 0) 
+                        setMargins(40, 0, 0, 0) // 컬럼 간격을 맞추는 대칭 마진 부여
                     }
                 }
                 
+                swContainer.addView(swActive)
+                swContainer.addView(swAutoAdd)
+                
                 row.addView(tv)
-                row.addView(swActive)
-                row.addView(swAutoAdd)
+                row.addView(swContainer)
                 return PVH(row, tv, swActive, swAutoAdd)
             }
             
             override fun onBindViewHolder(holder: PVH, position: Int) {
-                val pName = allProviders[position].name
-                holder.tvName.text = pName
-                
-                val isActive = tempActiveSettings[pName] ?: true
-                val isAutoAdd = tempAutoAddSettings[pName] ?: false
+                val data = providerList[position]
+                holder.tvName.text = data.pName
                 
                 holder.swActive.setOnCheckedChangeListener(null)
-                holder.swActive.isChecked = isActive
+                holder.swActive.isChecked = data.isActive
                 
                 holder.swAutoAdd.setOnCheckedChangeListener(null)
-                holder.swAutoAdd.isChecked = isAutoAdd
-                holder.swAutoAdd.isEnabled = isActive 
+                holder.swAutoAdd.isChecked = data.isAutoAdd
+                holder.swAutoAdd.isEnabled = data.isActive 
                 
                 holder.swActive.setOnCheckedChangeListener { _, isChecked -> 
-                    tempActiveSettings[pName] = isChecked
+                    if (data.isActive == isChecked) return@setOnCheckedChangeListener
+                    data.isActive = isChecked
+                    tempActiveSettings[data.pName] = isChecked
                     holder.swAutoAdd.isEnabled = isChecked
+                    
+                    // 🔥 [정렬 제약 적용] Active ON 된 프로바이더가 실시간으로 맨 위로 정렬되도록 버블 정렬 가동
+                    sortProviderList()
+                    notifyDataSetChanged()
+                    
                     updateVisibleCatalogs() 
                 }
                 
                 holder.swAutoAdd.setOnCheckedChangeListener { _, isChecked -> 
-                    tempAutoAddSettings[pName] = isChecked 
+                    data.isAutoAdd = isChecked
+                    tempAutoAddSettings[data.pName] = isChecked 
                 }
             }
-            override fun getItemCount() = allProviders.size
+            override fun getItemCount() = providerList.size
         }
         rvProviders.adapter = ProviderAdapter()
         providerSettingsCard.addView(rvProviders)
