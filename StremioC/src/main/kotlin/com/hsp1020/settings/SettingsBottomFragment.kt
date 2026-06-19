@@ -467,44 +467,11 @@ class SettingsBottomFragment(
                                 is Int -> editor.putInt(key, value)
                             }
                         }
-                        editor.apply()
+                        // 🚨 [수정] 즉시 물리 디스크에 플러시하고 팝업창 우회하여 바로 재부팅 실행
+                        editor.commit()
                         dlg.dismiss()
-
-                        val okBtn2 = Button(ctx).apply {
-                            text = "OK"
-                            setTextColor(Color.WHITE)
-                            isAllCaps = false
-                            background = getButtonBg()
-                            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-                        }
-
-                        val resContainer = LinearLayout(ctx).apply {
-                            orientation = LinearLayout.VERTICAL
-                            setPadding(40, 40, 40, 40)
-                            background = getDarkThemeBg()
-                            addView(TextView(ctx).apply {
-                                text = "Import Result"
-                                textSize = 18f
-                                setTextColor(Color.WHITE)
-                                typeface = android.graphics.Typeface.DEFAULT_BOLD
-                                setPadding(0, 0, 0, 20)
-                                gravity = android.view.Gravity.CENTER
-                            })
-                            addView(TextView(ctx).apply {
-                                text = "Restore completed successfully!\nPlease restart the app."
-                                setTextColor(Color.LTGRAY)
-                                textSize = 14f
-                                setPadding(0, 0, 0, 30)
-                            })
-                            addView(okBtn2)
-                        }
-                        val resultDlg = AlertDialog.Builder(ctx).setView(resContainer).create()
-                        setupCustomDialog(resultDlg, resContainer)
-                        okBtn2.setOnClickListener {
-                            resultDlg.dismiss()
-                            dismiss()
-                        }
-                        resultDlg.show()
+                        dismiss()
+                        restartApp()
                     }
                     dlg.show()
 
