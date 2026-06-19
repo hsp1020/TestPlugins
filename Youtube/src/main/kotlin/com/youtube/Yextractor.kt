@@ -92,9 +92,18 @@ open class YoutubeExtractor : ExtractorApi() {
         private val WEB_API_KEY_REGEX = Regex(""""INNERTUBE_API_KEY":"([^"]+)"""")
         private val CHUNK_ID_REGEX = Regex("id=([^&]+)")
         private val FMT_REPLACE_REGEX = Regex("&fmt=[^&]+")
+
+        // PipePipe Safari 위장 상수
+        private const val SAFARI_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15,gzip(gfe)"
+        private const val SAFARI_CLIENT_VERSION = "2.20260114.08.00"
             
         init {
             println("[YT_DEBUG_INIT] 유튜브 DASH 추출기 최적화 가상서버 초기화 완료")
+        }
+
+        private fun generateCpn(): String {
+            val allowedChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+            return (1..16).map { allowedChars.random() }.joinToString("")
         }
 
         private fun openInExternalApp(packageName: String, targetUrl: String) {
@@ -331,7 +340,6 @@ open class YoutubeExtractor : ExtractorApi() {
         val visitorData = VISITOR_DATA_REGEX.find(html)?.groupValues?.get(1) ?: ""
         val sts = STS_REGEX.find(html)?.groupValues?.get(1)?.toIntOrNull() ?: 0
 
-        // ✅ 수정된 부분: 앱의 빈 설정이 아닌, YoutubeProvider(플러그인)가 등록하며 넘긴 올바른 설정 파일을 획득
         val context = com.lagradost.cloudstream3.AcraApplication.context
         val provider = com.lagradost.cloudstream3.APIHolder.allProviders.find { it.name == "YouTube" }
         val prefs = (provider as? com.lagradost.cloudstream3.ar.youtube.YoutubeProvider)?.appPrefs 
@@ -340,69 +348,93 @@ open class YoutubeExtractor : ExtractorApi() {
         val langCode = prefs?.getString("youtube_language", "ko") ?: "ko"
         
         val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(prefs, langCode, visitorData, false)
-        
-        println("[TRACK] =========================================")
-        println("[TRACK] 1. Auth Headers Check (Fixed Plugin Prefs)")
-        println("[TRACK] -> Extracted Cookies length: ${cookies.length}")
-        println("[TRACK] -> SAPISID Extracted: ${!sapisidVal.isNullOrBlank()}")
-
-        val authHeaders = mutableMapOf(
-            "User-Agent" to YoutubeUtils.ANDROID_VR_USER_AGENT,
-            "X-YouTube-Client-Name" to "28",
-            "X-YouTube-Client-Version" to "1.65.10",
-            "Content-Type" to "application/json"
-        )
-        if (cookies.isNotBlank()) {
-            authHeaders["Cookie"] = cookies
-        }
-        if (!sapisidVal.isNullOrBlank()) {
-            authHeaders["Authorization"] = YoutubeUtils.getSapisidHash(sapisidVal, "https://www.youtube.com")
-            authHeaders["X-Origin"] = "https://www.youtube.com"
-            println("[TRACK] -> Authorization Header Attached")
-        }
-        println("[TRACK] =========================================")
+        val isLoggedIn = !sapisidVal.isNullOrBlank()
 
         val androidApiKey = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
         val apiUrl = "https://www.youtube.com/youtubei/v1/player?key=$androidApiKey"
 
-        val vrPayload = mapOf(
-            "videoId" to videoId,
-            "context" to mapOf(
-                "client" to mapOf(
-                    "clientName" to "ANDROID_VR",
-                    "clientVersion" to "1.65.10",
-                    "androidSdkVersion" to 32,
-                    "osName" to "Android",
-                    "osVersion" to "12L",
-                    "deviceMake" to "Oculus",
-                    "deviceModel" to "Quest 3",
-                    "hl" to langCode,
-                    "gl" to if (langCode == "ko") "KR" else "US",
-                    "visitorData" to visitorData
-                )
-            ),
-            "playbackContext" to mapOf(
-                "contentPlaybackContext" to mapOf(
-                    "signatureTimestamp" to sts
+        val headers = mutableMapOf<String, String>()
+        val payload: Map<String, Any>
+
+        // ✅ PipePipe 핵심 로직 완벽 반영: 로그인 여부에 따라 요청 클라이언트를 아예 분기함
+        if (isLoggedIn) {
+            println("[YT_DEBUG] 🟢 로그인 상태 확인됨. SAFARI 클라이언트로 요청합니다.")
+            
+            headers["Content-Type"] = "application/json"
+            headers["User-Agent"] = SAFARI_USER_AGENT
+            headers["X-YouTube-Client-Name"] = "1" // WEB
+            headers["X-Youtube-Client-Version"] = SAFARI_CLIENT_VERSION
+            headers["Origin"] = "https://www.youtube.com"
+            headers["Referer"] = "https://www.youtube.com"
+            headers["Cookie"] = cookies
+            headers["Authorization"] = YoutubeUtils.getSapisidHash(sapisidVal!!, "https://www.youtube.com")
+
+            payload = mapOf(
+                "context" to mapOf(
+                    "client" to mapOf(
+                        "utcOffsetMinutes" to 0,
+                        "timeZone" to "UTC",
+                        "hl" to langCode,
+                        "gl" to if (langCode == "ko") "KR" else "US",
+                        "userAgent" to SAFARI_USER_AGENT,
+                        "clientName" to "WEB",
+                        "clientVersion" to SAFARI_CLIENT_VERSION
+                    )
+                ),
+                "playbackContext" to mapOf(
+                    "contentPlaybackContext" to mapOf(
+                        "html5Preference" to "HTML5_PREF_WANTS",
+                        "signatureTimestamp" to sts
+                    )
+                ),
+                "cpn" to generateCpn(),
+                "videoId" to videoId,
+                "contentCheckOk" to true,
+                "racyCheckOk" to true
+            )
+        } else {
+            println("[YT_DEBUG] 🔴 비로그인 상태 확인됨. ANDROID_VR 클라이언트로 요청합니다.")
+            
+            headers["Content-Type"] = "application/json"
+            headers["User-Agent"] = YoutubeUtils.ANDROID_VR_USER_AGENT
+            headers["X-Goog-Api-Format-Version"] = "2"
+            
+            payload = mapOf(
+                "videoId" to videoId,
+                "context" to mapOf(
+                    "client" to mapOf(
+                        "clientName" to "ANDROID_VR",
+                        "clientVersion" to "1.65.10",
+                        "androidSdkVersion" to 32,
+                        "osName" to "Android",
+                        "osVersion" to "12L",
+                        "deviceMake" to "Oculus",
+                        "deviceModel" to "Quest 3",
+                        "hl" to langCode,
+                        "gl" to if (langCode == "ko") "KR" else "US",
+                        "visitorData" to visitorData
+                    )
+                ),
+                "playbackContext" to mapOf(
+                    "contentPlaybackContext" to mapOf(
+                        "signatureTimestamp" to sts
+                    )
                 )
             )
-        )
+        }
 
         try {
-            println("[TRACK] 2. Sending ANDROID_VR API Request...")
-            val vrRes = app.post(apiUrl, json = vrPayload, headers = authHeaders).text
-            val vrJson = JSONObject(vrRes)
-            val status = vrJson.optJSONObject("playabilityStatus")?.optString("status")
+            val res = app.post(apiUrl, json = payload, headers = headers).text
+            val json = JSONObject(res)
+            val status = json.optJSONObject("playabilityStatus")?.optString("status")
+            val lengthSeconds = json.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
             
-            val lengthSeconds = vrJson.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
+            println("[YT_DEBUG] API 응답 상태: $status")
             
-            println("[TRACK] -> ANDROID_VR API Response Status: $status")
-            
-            if (status == "OK" || vrJson.has("streamingData")) {
-                println("[TRACK] -> ANDROID_VR Response successful (streamingData present).")
-                return Pair(vrJson, lengthSeconds)
+            if (status == "OK" || json.has("streamingData")) {
+                return Pair(json, lengthSeconds)
             } else if (status == "UNPLAYABLE" || status == "LOGIN_REQUIRED") {
-                println("[TRACK] -> ANDROID_VR Blocked. Falling back to TV_EMBEDDED...")
+                println("[YT_DEBUG] 재생 불가/연령 제한 차단됨. TV_EMBEDDED로 우회 시도...")
                 val webApiKey = WEB_API_KEY_REGEX.find(html)?.groupValues?.get(1)
                 
                 if (!webApiKey.isNullOrEmpty()) {
@@ -426,7 +458,7 @@ open class YoutubeExtractor : ExtractorApi() {
                         )
                     )
                     
-                    val tvHeaders = authHeaders.toMutableMap()
+                    val tvHeaders = headers.toMutableMap()
                     tvHeaders["User-Agent"] = YoutubeUtils.CHROME_USER_AGENT
                     tvHeaders["X-YouTube-Client-Name"] = "TVHTML5_SIMPLY_EMBEDDED_PLAYER"
                     tvHeaders["X-YouTube-Client-Version"] = "2.0"
@@ -434,12 +466,11 @@ open class YoutubeExtractor : ExtractorApi() {
                     val tvRes = app.post(tvApiUrl, json = tvPayload, headers = tvHeaders).text
                     val tvJson = JSONObject(tvRes)
                     val tvLengthSeconds = tvJson.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
-                    println("[TRACK] -> TV_EMBEDDED Response Status: ${tvJson.optJSONObject("playabilityStatus")?.optString("status")}")
                     return Pair(tvJson, tvLengthSeconds)
                 }
             }
         } catch (e: Exception) { 
-            println("[TRACK] -> Exception during API Request: ${e.message}") 
+            println("[YT_DEBUG] API 요청 예외: ${e.message}") 
         }
 
         return Pair(null, 3600L)
@@ -454,7 +485,6 @@ open class YoutubeExtractor : ExtractorApi() {
         val cleanedUrl = url.replace(schemaStripRegex, "")
         val videoId = YoutubeUtils.extractYoutubeId(cleanedUrl) ?: cleanedUrl
 
-        // ✅ 수정된 부분: 여기서도 플러그인의 올바른 설정 파일 획득
         val context = com.lagradost.cloudstream3.AcraApplication.context
         val provider = com.lagradost.cloudstream3.APIHolder.allProviders.find { it.name == "YouTube" }
         val sharedPref = (provider as? com.lagradost.cloudstream3.ar.youtube.YoutubeProvider)?.appPrefs 
@@ -476,13 +506,13 @@ open class YoutubeExtractor : ExtractorApi() {
                 val (playerResponse, durationSeconds) = fetchPlayerResponse(videoId)
 
                 if (playerResponse == null) {
-                    println("[TRACK] 🚨 Failed to get playerResponse.")
+                    println("[YT_DEBUG] 🚨 Failed to get playerResponse.")
                     return@withContext
                 }
 
                 val streamingData = playerResponse.optJSONObject("streamingData")
                 if (streamingData == null) {
-                    println("[TRACK] 🚨 streamingData object is missing in response.")
+                    println("[YT_DEBUG] 🚨 streamingData object is missing in response.")
                     return@withContext
                 }
 
@@ -503,8 +533,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
 
                 val adaptiveFormats = streamingData.optJSONArray("adaptiveFormats") ?: JSONArray()
-                println("[TRACK] 3. Parsing adaptiveFormats")
-                println("[TRACK] -> Total items in adaptiveFormats: ${adaptiveFormats.length()}")
                 
                 val videoOnlyList = ArrayList<StreamInfo>(adaptiveFormats.length())
                 val audioInfoList = ArrayList<AudioInfo>(adaptiveFormats.length())
@@ -566,8 +594,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         var trackDisplayName = format.optString("language", "")
                         
                         val audioTrack = format.optJSONObject("audioTrack")
-                        
-                        println("[TRACK] -> Found Audio Stream (itag: ${format.optString("itag")})")
 
                         if (audioTrack != null) {
                             audioTrackId = audioTrack.optString("id", audioTrackId)
@@ -581,28 +607,16 @@ open class YoutubeExtractor : ExtractorApi() {
                             language = "Original" 
                         }
                         
-                        println("[TRACK]    -> Final assigned -> Lang: $language | TrackID: $audioTrackId | DisplayName: $trackDisplayName")
-                        
                         audioInfoList.add(AudioInfo(streamUrl, cleanMimeType, codec, bitrate, initR, indexR, language, audioTrackId, trackDisplayName))
                     }
                 }
 
-                println("[TRACK] 4. Filtering & Grouping Audio Tracks")
-                println("[TRACK] -> Total Extracted Audio streams: ${audioInfoList.size}")
-
                 val groupedAudio = audioInfoList.groupBy { it.language ?: it.audioTrackId ?: "Original" }
-                println("[TRACK] -> Grouped Languages (Keys): ${groupedAudio.keys}")
-                
                 val bestAudioList = groupedAudio.mapNotNull { (_, tracks) ->
                     tracks.maxByOrNull { 
                         val bonus = if (it.mimeType.contains("webm")) 1000000 else 0
                         it.bitrate + bonus 
                     }
-                }
-
-                println("[TRACK] -> Selected Best Tracks per Language (${bestAudioList.size}):")
-                bestAudioList.forEach { 
-                    println("[TRACK]    Lang: ${it.language}, MimeType: ${it.mimeType}, Bitrate: ${it.bitrate}") 
                 }
 
                 if (videoOnlyList.isNotEmpty() && bestAudioList.isNotEmpty()) {
@@ -645,7 +659,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
 
             } catch (e: Exception) { 
-                println("[TRACK] 🚨 Exception in getUrl: ${e.message}")
                 logError(e) 
             }
         }
@@ -711,7 +724,6 @@ open class YoutubeExtractor : ExtractorApi() {
             </AdaptationSet>
         """.trimIndent())
 
-        println("[TRACK] 5. Writing DASH Manifest")
         audioList.forEachIndexed { index, audio ->
             val audioIdChunk = "a_${streamCounter.getAndIncrement()}"
             streamUrlCache[audioIdChunk] = audio.url
@@ -723,7 +735,6 @@ open class YoutubeExtractor : ExtractorApi() {
             } else ""
 
             val langAttribute = if (!audio.language.isNullOrBlank()) """ lang="${audio.language}"""" else ""
-            println("[TRACK] -> Writing XML for Audio: lang=${audio.language}, langAttribute=$langAttribute")
 
             sb.append("""
                 <AdaptationSet mimeType="${audio.mimeType}"$langAttribute subsegmentAlignment="true" subsegmentStartsWithSAP="1">
