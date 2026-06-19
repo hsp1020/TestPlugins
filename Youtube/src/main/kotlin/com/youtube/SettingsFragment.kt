@@ -1,901 +1,809 @@
 package com.youtube
 
-import android.app.Dialog
-import android.content.Context
-import android.content.DialogInterface
-import android.content.SharedPreferences
-import android.graphics.Color
-import android.graphics.Typeface
-import android.os.Bundle
-import android.view.*
-import android.webkit.CookieManager
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import android.widget.*
-import androidx.appcompat.app.AlertDialog
-import androidx.fragment.app.DialogFragment
-import androidx.fragment.app.FragmentContainerView
-import androidx.fragment.app.FragmentManager
-import androidx.preference.*
-import com.fasterxml.jackson.annotation.JsonProperty
-import com.google.android.material.bottomsheet.BottomSheetBehavior
-import com.google.android.material.bottomsheet.BottomSheetDialog
-import com.google.android.material.bottomsheet.BottomSheetDialogFragment
-import androidx.preference.Preference.SummaryProvider
-import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
-import com.fasterxml.jackson.module.kotlin.readValue
-import com.lagradost.cloudstream3.ar.youtube.YoutubeProvider
-import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
-import com.lagradost.cloudstream3.plugins.Plugin
-import androidx.recyclerview.widget.RecyclerView
-import androidx.recyclerview.widget.ItemTouchHelper
-import androidx.recyclerview.widget.LinearLayoutManager
-import androidx.core.graphics.PathParser
-import android.graphics.drawable.ShapeDrawable
-import android.graphics.drawable.shapes.PathShape
-import androidx.appcompat.widget.SwitchCompat
-import com.google.android.material.dialog.MaterialAlertDialogBuilder
-import kotlinx.coroutines.*
+import com.lagradost.cloudstream3.AcraApplication
+import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
-import org.jsoup.Jsoup
+import com.lagradost.cloudstream3.mvvm.logError
+import com.lagradost.cloudstream3.utils.ExtractorApi
+import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.INFER_TYPE
+import com.lagradost.cloudstream3.utils.newExtractorLink
+import com.lagradost.cloudstream3.utils.schemaStripRegex
+import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.ar.youtube.YoutubeUtils
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.io.PrintWriter
+import java.net.ServerSocket
+import java.net.Socket
+import java.net.InetAddress
+import java.util.Collections
+import java.util.LinkedHashMap
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadFactory
+import java.util.concurrent.atomic.AtomicLong
+import kotlin.concurrent.thread
 
-data class CustomSection(
-    @JsonProperty("name") var name: String = "",
-    @JsonProperty("url") var url: String = "",
-    @JsonProperty("isEnabled") var isEnabled: Boolean = true
-)
-
-
-class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : BottomSheetDialogFragment() {
-
-    override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
-        val dialog = super.onCreateDialog(savedInstanceState) as BottomSheetDialog
-        dialog.setOnShowListener {
-            val bottomSheet = dialog.findViewById<View>(com.google.android.material.R.id.design_bottom_sheet)
-            bottomSheet?.let { sheet ->
-                val behavior = BottomSheetBehavior.from(sheet)
-                behavior.state = BottomSheetBehavior.STATE_EXPANDED
-                behavior.skipCollapsed = true
-            }
-        }
-        return dialog
-    }
-
-    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
-        return FragmentContainerView(requireContext()).apply {
-            id = View.generateViewId()
-            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-        }
-    }
-
-    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
-        childFragmentManager.beginTransaction()
-            .replace(view.id, PrefsFragment(sharedPref))
-            .commit()
-    }
+open class YoutubeExtractor : ExtractorApi() {
+    override val mainUrl = "https://www.youtube.com"
+    override val requiresReferer = false
+    override val name = "YouTube"
 
     companion object {
-        fun show(fm: FragmentManager, sp: SharedPreferences) {
-            YoutubeSettingsBottomSheet(sp).show(fm, "yt_settings")
+        @Volatile
+        private var activeServer: ServerSocket? = null
+        private var serverPort: Int = 0
+        private val serverLock = Any()
+
+        private val streamCounter = AtomicLong(0)
+
+        private val manifestMap: MutableMap<String, String> = Collections.synchronizedMap(
+            object : LinkedHashMap<String, String>(128, 0.75f, true) {
+                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
+                    return size > 1000
+                }
+            }
+        )
+
+        private val streamUrlCache: MutableMap<String, String> = Collections.synchronizedMap(
+            object : LinkedHashMap<String, String>(128, 0.75f, true) {
+                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
+                    return size > 1000
+                }
+            }
+        )
+
+        private val recentTriggers: MutableMap<String, Long> = Collections.synchronizedMap(
+            object : LinkedHashMap<String, Long>(16, 0.75f, true) {
+                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>?): Boolean {
+                    return size > 100
+                }
+            }
+        )
+
+        private val serverExecutor = ThreadPoolExecutor(
+            4, 
+            16, 
+            30L, 
+            TimeUnit.SECONDS,
+            LinkedBlockingQueue(128),
+            ThreadFactory { r -> Thread(r, "YT-DASH-Server-Worker") },
+            ThreadPoolExecutor.CallerRunsPolicy()
+        )
+
+        private val proxyHttpClient = okhttp3.OkHttpClient.Builder()
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .retryOnConnectionFailure(true)
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(30, TimeUnit.SECONDS)
+            .build()
+
+        private val VISITOR_DATA_REGEX = Regex(""""VISITOR_DATA":"([^"]+)"""")
+        private val STS_REGEX = Regex(""""signatureTimestamp":\s*(\d+)"""")
+        private val WEB_API_KEY_REGEX = Regex(""""INNERTUBE_API_KEY":"([^"]+)"""")
+        private val CHUNK_ID_REGEX = Regex("id=([^&]+)")
+        private val FMT_REPLACE_REGEX = Regex("&fmt=[^&]+")
+
+        // PipePipe Safari 위장 상수
+        private const val SAFARI_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15,gzip(gfe)"
+        private const val SAFARI_CLIENT_VERSION = "2.20260114.08.00"
+            
+        init {
+            println("[YT_DEBUG_INIT] 유튜브 DASH 추출기 최적화 가상서버 초기화 완료")
+        }
+
+        private fun generateCpn(): String {
+            val allowedChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+            return (1..16).map { allowedChars.random() }.joinToString("")
+        }
+
+        private fun openInExternalApp(packageName: String, targetUrl: String) {
+            val context = AcraApplication.context ?: return
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                try {
+                    val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(android.content.Intent.EXTRA_TEXT, targetUrl)
+                        setPackage(packageName)
+                        addCategory(android.content.Intent.CATEGORY_DEFAULT)
+                        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    context.startActivity(intent)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                    try {
+                        val appName = when (packageName) {
+                            "com.junkfood.seal" -> "Seal"
+                            "com.maheshtechnicals.sealplus" -> "Seal Plus"
+                            "com.deniscerri.ytdl" -> "YTDLnis"
+                            else -> "The downloader"
+                        }
+                        android.widget.Toast.makeText(
+                            context,
+                            "$appName is not installed. Please install the app and try again.",
+                            android.widget.Toast.LENGTH_LONG
+                        ).show()
+                    } catch (_: Exception) {}
+                }
+            }
+        }
+
+        private fun handleClient(client: Socket) {
+            try {
+                client.use { socket ->
+                    val inputStream = socket.getInputStream()
+                    val reader = BufferedReader(InputStreamReader(inputStream, java.nio.charset.StandardCharsets.UTF_8))
+                    val output = socket.getOutputStream()
+                    val outWriter = PrintWriter(output, true)
+
+                    val requestLine = reader.readLine() ?: return
+                    val parts = requestLine.split(" ")
+                    if (parts.size < 2) return
+
+                    val fullPath = parts[1]
+                    
+                    val clientHeaders = LinkedHashMap<String, String>()
+                    var headerLines = 0
+                    while (headerLines++ < 100) {
+                        val line = reader.readLine()
+                        if (line.isNullOrBlank()) break
+                        val colonIndex = line.indexOf(':')
+                        if (colonIndex != -1) {
+                            clientHeaders[line.substring(0, colonIndex).trim().lowercase()] = line.substring(colonIndex + 1).trim()
+                        }
+                    }
+
+                    val cleanPath = fullPath.substringBefore("?")
+                    val queryParams = fullPath.substringAfter("?", "")
+
+                    if (cleanPath.startsWith("/open_app")) {
+                        var pkg: String? = null
+                        var targetUrl: String? = null
+                        
+                        val pairs = queryParams.split("&")
+                        for (pair in pairs) {
+                            val idx = pair.indexOf("=")
+                            if (idx != -1) {
+                                val key = pair.substring(0, idx)
+                                val value = pair.substring(idx + 1)
+                                if (key == "package") {
+                                    pkg = java.net.URLDecoder.decode(value, "UTF-8")
+                                } else if (key == "url") {
+                                    targetUrl = java.net.URLDecoder.decode(value, "UTF-8")
+                                }
+                            }
+                        }
+                        
+                        if (targetUrl != null && pkg != null) {
+                            val triggerKey = "$pkg|$targetUrl"
+                            val now = System.currentTimeMillis()
+                            val lastTrigger = recentTriggers[triggerKey] ?: 0L
+                            
+                            if (now - lastTrigger > 3000L) {
+                                recentTriggers[triggerKey] = now
+                                openInExternalApp(pkg, targetUrl)
+                            } else {
+                                println("[YT_PROXY_DEBUG] 중복된 앱 실행 요청 감지되어 인텐트 발송 차단: $triggerKey")
+                            }
+                        }
+                        
+                        outWriter.print("HTTP/1.1 204 No Content\r\n")
+                        outWriter.print("Connection: close\r\n")
+                        outWriter.print("Access-Control-Allow-Origin: *\r\n")
+                        outWriter.print("\r\n")
+                        outWriter.flush()
+                    }
+                    else if (cleanPath.startsWith("/chunk")) {
+                        val idMatch = CHUNK_ID_REGEX.find(queryParams)
+                        val chunkId = idMatch?.groupValues?.get(1)
+                        val targetYoutubeUrl = if (chunkId != null) streamUrlCache[chunkId] else null
+
+                        if (targetYoutubeUrl != null) {
+                            proxyChunkToYouTube(client, targetYoutubeUrl, clientHeaders)
+                        } else {
+                            outWriter.print("HTTP/1.1 404 Not Found\r\n\r\n")
+                            outWriter.flush()
+                        }
+                    } 
+                    else if (cleanPath.endsWith(".mpd", ignoreCase = true)) {
+                        val path = cleanPath.substringBeforeLast(".mpd").removePrefix("/")
+                        val content = manifestMap[path]
+                        if (content != null) {
+                            outWriter.print("HTTP/1.1 200 OK\r\n")
+                            outWriter.print("Content-Type: application/dash+xml\r\n")
+                            outWriter.print("Connection: close\r\n")
+                            outWriter.print("Access-Control-Allow-Origin: *\r\n")
+                            outWriter.print("\r\n")
+                            outWriter.print(content)
+                            outWriter.flush()
+                        } else {
+                            outWriter.print("HTTP/1.1 404 Not Found\r\n\r\n")
+                            outWriter.flush()
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                println("[YT_PROXY_DEBUG] handleClient 예외: ${e.message}")
+            }
+        }
+
+        private fun proxyChunkToYouTube(socket: Socket, targetUrl: String, clientHeaders: Map<String, String>) {
+            try {
+                val requestBuilder = okhttp3.Request.Builder()
+                    .url(targetUrl)
+                    .header("User-Agent", YoutubeUtils.ANDROID_VR_USER_AGENT)
+                    .header("Accept", "*/*")
+                    .header("Connection", "keep-alive")
+
+                clientHeaders.forEach { (key, value) ->
+                    val lowerKey = key.lowercase()
+                    if (lowerKey != "host" && lowerKey != "user-agent" && lowerKey != "origin" && lowerKey != "referer" && lowerKey != "accept-encoding") {
+                        requestBuilder.header(key, value)
+                    }
+                }
+
+                val request = requestBuilder.build()
+                val response = proxyHttpClient.newCall(request).execute()
+                
+                try {
+                    if (response.code == 403 || response.code == 400) {
+                        println("[YT_PROXY_DEBUG] 🚨 유튜브 CDN 에러 발생: ${response.code}")
+                        val output = socket.getOutputStream()
+                        val rawOutWriter = java.io.PrintWriter(output, false)
+                        rawOutWriter.print("HTTP/1.1 ${response.code} ${response.message}\r\n\r\n")
+                        rawOutWriter.flush()
+                        return
+                    }
+
+                    val output = socket.getOutputStream()
+                    val rawOutWriter = java.io.PrintWriter(output, false)
+
+                    rawOutWriter.print("HTTP/1.1 ${response.code} ${response.message}\r\n")
+                    response.header("Content-Type")?.let { rawOutWriter.print("Content-Type: $it\r\n") }
+                    response.header("Content-Length")?.let { rawOutWriter.print("Content-Length: $it\r\n") }
+                    response.header("Content-Range")?.let { rawOutWriter.print("Content-Range: $it\r\n") }
+                    response.header("Accept-Ranges")?.let { rawOutWriter.print("Accept-Ranges: $it\r\n") }
+                    rawOutWriter.print("Connection: close\r\n")
+                    rawOutWriter.print("\r\n")
+                    rawOutWriter.flush()
+
+                    val body = response.body
+                    if (body != null) {
+                        body.byteStream().use { input ->
+                            input.copyTo(output, bufferSize = 65536)
+                        }
+                    }
+                    output.flush()
+                } finally {
+                    response.close()
+                }
+            } catch (e: Exception) {
+                println("[YT_PROXY_DEBUG] 프록시 릴레이 중 예외 발생: ${e.message}")
+            }
         }
     }
 
+    override fun getExtractorUrl(id: String): String {
+        return "$mainUrl/watch?v=$id"
+    }
 
+    data class StreamInfo(
+        val url: String,
+        val mimeType: String,
+        val codec: String,
+        val height: Int,
+        val label: String,
+        val initRange: String?,
+        val indexRange: String?
+    )
 
-    class PrefsFragment(private val sharedPref: SharedPreferences) : PreferenceFragmentCompat() {
+    data class AudioInfo(
+        val url: String,
+        val mimeType: String,
+        val codec: String,
+        val bitrate: Int,
+        val initRange: String?,
+        val indexRange: String?,
+        val language: String? = null,
+        val audioTrackId: String? = null,
+        val displayName: String? = null
+    )
 
-        private val KEY_VISITOR = "VISITOR_INFO1_LIVE"
-        private val KEY_PAGES = "channel_pages_limit"
-        private val KEY_PLAYLIST_TAG = "playlist_search_tag"
-        private val KEY_LANGUAGE = "youtube_language"
-        
-        private val KEY_DOWNLOADER_TYPE = "downloader_app_type"
-        private val KEY_CUSTOM_PKG = "downloader_custom_package"
-
-        private lateinit var languagePref: ListPreference
-        private lateinit var authCategory: PreferenceCategory
-        private lateinit var customCategory: PreferenceCategory
-        private lateinit var capturePref: Preference
-        private lateinit var loginStatusPref: Preference
-        private lateinit var visitorPref: EditTextPreference
-        private lateinit var clearPref: Preference
-        private lateinit var pagesPref: SeekBarPreference
-        private lateinit var playlistTagPref: EditTextPreference
-        private lateinit var homeCategory: PreferenceCategory
-        private lateinit var manageChannelsPref: Preference
-        
-        private lateinit var downloaderCategory: PreferenceCategory
-        private lateinit var downloaderPref: ListPreference
-        private lateinit var customPackagePref: EditTextPreference
-
-        override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
-            val ctx = requireContext()
-            preferenceManager.preferenceDataStore = null
-            preferenceScreen = preferenceManager.createPreferenceScreen(ctx)
-
-            homeCategory = PreferenceCategory(ctx)
-            preferenceScreen.addPreference(homeCategory)
-
-            manageChannelsPref = Preference(ctx).apply {
-                key = "manage_custom_channels"
-                setIcon(android.R.drawable.ic_menu_sort_by_size)
-                setOnPreferenceClickListener {
-                    val dialog = CustomSectionsDialog(sharedPref)
-                    dialog.setStyle(DialogFragment.STYLE_NORMAL, android.R.style.Theme_Black_NoTitleBar_Fullscreen)
-                    dialog.show(parentFragmentManager, "custom_sections_dialog")
-                    true
-                }
-            }
-            homeCategory.addPreference(manageChannelsPref)
-
-            languagePref = ListPreference(ctx).apply {
-                key = KEY_LANGUAGE
-                entryValues = Loc.availableLanguages.map { it.first }.toTypedArray()
-                entries = Loc.availableLanguages.map { "${it.third} (${it.second})" }.toTypedArray()
-                if (value == null) setValue("ar")
-                summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
-                setOnPreferenceChangeListener { _, newValue ->
-                    sharedPref.edit().putString(KEY_LANGUAGE, newValue as String).apply()
-                    view?.post { updateTexts() }
-                    true
-                }
-            }
-            preferenceScreen.addPreference(languagePref)
-
-            authCategory = PreferenceCategory(ctx)
-            preferenceScreen.addPreference(authCategory)
-
-            capturePref = Preference(ctx).apply {
-                key = "capture_webview_btn"
-                setOnPreferenceClickListener {
-                    val webDialog = WebViewCaptureDialog(sharedPref) { success ->
-                        if (success) {
-                            visitorPref.text = sharedPref.getString(KEY_VISITOR, "")
-                            Toast.makeText(ctx, Loc.getString(sharedPref, "saved_msg"), Toast.LENGTH_SHORT).show()
-                            updateTexts()
-                        }
-                    }
-                    webDialog.setStyle(DialogFragment.STYLE_NO_TITLE, android.R.style.Theme_Material_Light_NoActionBar_Fullscreen)
-                    webDialog.show(parentFragmentManager, "webview_fullscreen")
-                    true
-                }
-            }
-            authCategory.addPreference(capturePref)
-
-            loginStatusPref = Preference(ctx).apply { isEnabled = false }
-            authCategory.addPreference(loginStatusPref)
-
-            visitorPref = EditTextPreference(ctx).apply {
-                key = KEY_VISITOR
-                setOnBindEditTextListener { it.setText(sharedPref.getString(KEY_VISITOR, "")) }
-                summaryProvider = EditTextPreference.SimpleSummaryProvider.getInstance()
-                setOnPreferenceChangeListener { _, newVal ->
-                    sharedPref.edit().putString(KEY_VISITOR, newVal as String).apply()
-                    true
-                }
-            }
-            authCategory.addPreference(visitorPref)
-
-            clearPref = Preference(ctx).apply {
-                setOnPreferenceClickListener {
-                    MaterialAlertDialogBuilder(ctx)
-                        .setTitle(Loc.getString(sharedPref, "logout_confirm_title"))
-                        .setMessage(Loc.getString(sharedPref, "logout_confirm_msg"))
-                        .setPositiveButton(Loc.getString(sharedPref, "delete")) { _, _ ->
-                            sharedPref.edit().apply {
-                                remove(KEY_VISITOR); remove("SID"); remove("HSID")
-                                remove("SSID"); remove("APISID"); remove("SAPISID")
-                            }.apply()
-                            Toast.makeText(ctx, Loc.getString(sharedPref, "cleared_msg"), Toast.LENGTH_SHORT).show()
-                            visitorPref.text = ""
-                            updateTexts()
-                        }
-                        .setNegativeButton(Loc.getString(sharedPref, "cancel"), null)
-                        .show()
-                    true
-                }
-            }
-            authCategory.addPreference(clearPref)
-
-            customCategory = PreferenceCategory(ctx)
-            preferenceScreen.addPreference(customCategory)
-
-            pagesPref = SeekBarPreference(ctx).apply {
-                key = KEY_PAGES
-                min = 1; max = 100
-                setDefaultValue(6)
-                showSeekBarValue = true
-                setOnPreferenceChangeListener { _, newVal ->
-                    sharedPref.edit().putInt(KEY_PAGES, newVal as Int).apply()
-                    true
-                }
-            }
-            pagesPref.value = sharedPref.getInt(KEY_PAGES, 6)
-            customCategory.addPreference(pagesPref)
-
-            playlistTagPref = EditTextPreference(ctx).apply {
-                key = KEY_PLAYLIST_TAG
-                setOnBindEditTextListener { it.setText(sharedPref.getString(KEY_PLAYLIST_TAG, "{p}")) }
-                summaryProvider = SummaryProvider<EditTextPreference> { pref ->
-                    val value = pref.text
-                    val currentTxt = Loc.getString(sharedPref, "current")
-                    if (value.isNullOrBlank()) "{p}" else "$currentTxt$value"
-                }
-                setOnPreferenceChangeListener { _, newVal ->
-                    val v = (newVal as String).trim()
-                    sharedPref.edit().putString(KEY_PLAYLIST_TAG, v.ifEmpty { "{p}" }).apply()
-                    true
-                }
-            }
-            if (!sharedPref.contains(KEY_PLAYLIST_TAG)) sharedPref.edit().putString(KEY_PLAYLIST_TAG, "{p}").apply()
-            playlistTagPref.text = sharedPref.getString(KEY_PLAYLIST_TAG, "{p}")
-            customCategory.addPreference(playlistTagPref)
-
-            downloaderCategory = PreferenceCategory(ctx)
-            preferenceScreen.addPreference(downloaderCategory)
-
-            downloaderPref = ListPreference(ctx).apply {
-                key = KEY_DOWNLOADER_TYPE
-                entryValues = arrayOf("none", "ytdlnis", "seal", "seal_plus", "custom")
-                if (value == null) setValue("none")
-                setOnPreferenceChangeListener { _, newValue ->
-                    val selectedValue = newValue as String
-                    
-                    if (selectedValue == "custom") {
-                        sharedPref.edit().putString(KEY_DOWNLOADER_TYPE, selectedValue).apply()
-                        customPackagePref.isVisible = true
-                        return@setOnPreferenceChangeListener true
-                    }
-                    
-                    if (selectedValue == "none") {
-                        sharedPref.edit().putString(KEY_DOWNLOADER_TYPE, selectedValue).apply()
-                        customPackagePref.isVisible = false
-                        return@setOnPreferenceChangeListener true
-                    }
-                    
-                    val (packageName, githubUrl, appName) = when (selectedValue) {
-                        "ytdlnis" -> Triple("com.deniscerri.ytdl", "https://github.com/deniscerri/ytdlnis", "YTDLnis")
-                        "seal" -> Triple("com.junkfood.seal", "https://github.com/JunkFood02/Seal", "Seal")
-                        "seal_plus" -> Triple("com.maheshtechnicals.sealplus", "https://github.com/MaheshTechnicals/Sealplus", "Seal Plus")
-                        else -> Triple("", "", "")
-                    }
-
-                    if (isAppInstalled(ctx, packageName)) {
-                        // 패키지가 기기에 실제로 존재하는 것이 확인된 경우에만 최종 저장 및 승인
-                        sharedPref.edit().putString(KEY_DOWNLOADER_TYPE, selectedValue).apply()
-                        customPackagePref.isVisible = false
-                        true
-                    } else {
-                        // 미설치 상태라면 일단 저장을 완전히 차단(false 반환)하고 팝업을 노출시킵니다.
-                        showInstallDialogAndHandle(ctx, selectedValue, appName, githubUrl, this)
-                        false
-                    }
-                }
-            }
-            downloaderCategory.addPreference(downloaderPref)
-
-            customPackagePref = EditTextPreference(ctx).apply {
-                key = KEY_CUSTOM_PKG
-                setOnBindEditTextListener { it.setText(sharedPref.getString(KEY_CUSTOM_PKG, "")) }
-                setOnPreferenceChangeListener { _, newVal ->
-                    val pkg = (newVal as String).trim()
-                    sharedPref.edit().putString(KEY_CUSTOM_PKG, pkg).apply()
-                    
-                    if (pkg.isNotEmpty() && !isAppInstalled(ctx, pkg)) {
-                        val langCode = sharedPref.getString("youtube_language", "ar") ?: "ar"
-                        val title = if (langCode == "ko") "패키지 미설치" else "Package Not Installed"
-                        val msg = if (langCode == "ko") {
-                            "입력하신 패키지명($pkg)에 해당하는 앱이 기기에 설치되어 있지 않습니다. 패키지명을 다시 확인해 주세요."
-                        } else {
-                            "The app with package name ($pkg) is not installed on this device. Please check the package name again."
-                        }
-                        MaterialAlertDialogBuilder(ctx)
-                            .setTitle(title)
-                            .setMessage(msg)
-                            .setPositiveButton(if (langCode == "ko") "확인" else "OK", null)
-                            .show()
-                    }
-                    true
-                }
-            }
-            downloaderCategory.addPreference(customPackagePref)
-
-            updateTexts()
-        }
-
-        private fun isAppInstalled(context: Context, packageName: String): Boolean {
-            return try {
-                context.packageManager.getPackageInfo(packageName, 0)
-                true
-            } catch (e: android.content.pm.PackageManager.NameNotFoundException) {
-                false
+    private fun getAppRedirectUrl(packageName: String, targetUrl: String): String? {
+        startServerIfNeeded()
+        return if (serverPort != 0) {
+            try {
+                val encodedPkg = java.net.URLEncoder.encode(packageName, "UTF-8")
+                val encodedUrl = java.net.URLEncoder.encode(targetUrl, "UTF-8")
+                "http://127.0.0.1:$serverPort/open_app?package=$encodedPkg&url=$encodedUrl"
             } catch (e: Exception) {
-                false
+                null
             }
+        } else {
+            null
         }
+    }
 
-        private fun showInstallDialogAndHandle(
-            context: Context, 
-            selectedValue: String, 
-            appName: String, 
-            githubUrl: String,
-            downloaderPref: ListPreference
-        ) {
-            val langCode = sharedPref.getString("youtube_language", "ar") ?: "ar"
-            val title = if (langCode == "ko") "다운로더 미설치" else "Downloader Not Installed"
-            val message = if (langCode == "ko") {
-                "$appName 앱이 기기에 설치되어 있지 않습니다.\nGitHub에서 다운로드하시겠습니까?"
-            } else {
-                "$appName is not installed on your device.\nWould you like to download it from GitHub?"
-            }
-            val btnDownload = if (langCode == "ko") "다운로드" else "Download"
-            val btnCancel = if (langCode == "ko") "취소" else "Cancel"
+    private suspend fun fetchPlayerResponse(videoId: String): Pair<JSONObject?, Long> {
+        val watchUrl = "https://www.youtube.com/watch?v=$videoId"
+        
+        val html = app.get(watchUrl, headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)).text
+        val visitorData = VISITOR_DATA_REGEX.find(html)?.groupValues?.get(1) ?: ""
+        val sts = STS_REGEX.find(html)?.groupValues?.get(1)?.toIntOrNull() ?: 0
 
-            MaterialAlertDialogBuilder(context)
-                .setTitle(title)
-                .setMessage(message)
-                .setPositiveButton(btnDownload) { _, _ ->
-                    // 실제 설치 완료 전에는 저장을 하지 않고 브라우저 가이드 릴레이만 제공합니다.
-                    val toastMsg = if (langCode == "ko") {
-                        "다운로드 및 설치 완료 후 설정에서 다시 선택해 주세요."
-                    } else {
-                        "Please select again after downloading and installing the app."
-                    }
-                    Toast.makeText(context, toastMsg, Toast.LENGTH_LONG).show()
+        val androidApiKey = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
+        val webApiKey = WEB_API_KEY_REGEX.find(html)?.groupValues?.get(1)
 
-                    try {
-                        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(githubUrl)).apply {
-                            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                        }
-                        context.startActivity(intent)
-                    } catch (e: Exception) {
-                        Toast.makeText(context, "Error opening browser", Toast.LENGTH_SHORT).show()
-                    }
+        val context = com.lagradost.cloudstream3.AcraApplication.context
+        val provider = com.lagradost.cloudstream3.APIHolder.allProviders.find { it.name == "YouTube" }
+        val prefs = (provider as? com.lagradost.cloudstream3.ar.youtube.YoutubeProvider)?.appPrefs 
+            ?: context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
+        
+        val langCode = prefs?.getString("youtube_language", "ko") ?: "ko"
+        val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(prefs, langCode, visitorData, false)
+        val isLoggedIn = !sapisidVal.isNullOrBlank()
 
-                    // 저장이 완전히 취소되었으므로 UI 라디오 선택 항목도 정상 저장되어 있던 이전 상태로 복구시킵니다.
-                    downloaderPref.value = sharedPref.getString(KEY_DOWNLOADER_TYPE, "none")
-                }
-                .setNegativeButton(btnCancel) { _, _ ->
-                    downloaderPref.value = sharedPref.getString(KEY_DOWNLOADER_TYPE, "none")
-                }
-                .setOnCancelListener {
-                    downloaderPref.value = sharedPref.getString(KEY_DOWNLOADER_TYPE, "none")
-                }
-                .show()
-        }
+        println("[TRACK] =========================================")
+        println("[TRACK] 1. Auth Headers Check (Fixed Plugin Prefs)")
+        println("[TRACK] -> Extracted Cookies length: ${cookies.length}")
+        println("[TRACK] -> SAPISID Extracted: $isLoggedIn")
+        println("[TRACK] -> Extracted WEB API Key: ${if(webApiKey.isNullOrEmpty()) "NONE" else "OK"}")
+        println("[TRACK] =========================================")
 
-        private fun updateTexts() {
-            homeCategory.title = Loc.getString(sharedPref, "home_section")
-            manageChannelsPref.title = Loc.getString(sharedPref, "manage_channels")
-            manageChannelsPref.summary = Loc.getString(sharedPref, "manage_channels_sum")
+        var finalJson: JSONObject? = null
+        var lengthSeconds = 3600L
 
-            languagePref.title = Loc.getString(sharedPref, "lang_title")
-            authCategory.title = Loc.getString(sharedPref, "account_section")
-            customCategory.title = Loc.getString(sharedPref, "browsing_section")
-
-            capturePref.title = Loc.getString(sharedPref, "login_btn")
-            capturePref.summary = Loc.getString(sharedPref, "login_sum")
-
-            val hasSid = sharedPref.getString("SID", null) != null
-            loginStatusPref.title = Loc.getString(sharedPref, "status_title")
-            loginStatusPref.summary = if (hasSid) Loc.getString(sharedPref, "status_logged_in") else Loc.getString(sharedPref, "status_logged_out")
-
-            visitorPref.title = Loc.getString(sharedPref, "visitor_id")
-            visitorPref.dialogTitle = Loc.getString(sharedPref, "edit_manual")
-            visitorPref.setPositiveButtonText(Loc.getString(sharedPref, "ok"))
-            visitorPref.setNegativeButtonText(Loc.getString(sharedPref, "cancel"))
-
-            clearPref.title = Loc.getString(sharedPref, "logout_btn")
-
-            pagesPref.title = Loc.getString(sharedPref, "pages_limit")
-            pagesPref.summary = Loc.getString(sharedPref, "pages_sum")
-
-            playlistTagPref.title = Loc.getString(sharedPref, "playlist_tag")
-            playlistTagPref.dialogTitle = Loc.getString(sharedPref, "tag_hint")
-            playlistTagPref.setPositiveButtonText(Loc.getString(sharedPref, "ok"))
-            playlistTagPref.setNegativeButtonText(Loc.getString(sharedPref, "cancel"))
-
-            downloaderCategory.title = Loc.getString(sharedPref, "downloader_section")
-            downloaderPref.title = Loc.getString(sharedPref, "downloader_title")
-            downloaderPref.summary = Loc.getString(sharedPref, "downloader_sum")
-
-            downloaderPref.entries = arrayOf(
-                Loc.getString(sharedPref, "downloader_none"),
-                "YTDLnis",
-                "Seal",
-                "Seal Plus",
-                Loc.getString(sharedPref, "edit_manual")
+        // 1순위: 로그인되어 있고 웹 API 키가 있다면 SAFARI 위장 요청 (다국어 포함)
+        if (isLoggedIn && !webApiKey.isNullOrEmpty()) {
+            println("[TRACK] 2. Sending SAFARI API Request with WEB_API_KEY...")
+            val safariApiUrl = "https://www.youtube.com/youtubei/v1/player?key=$webApiKey"
+            
+            val safariHeaders = mutableMapOf(
+                "Content-Type" to "application/json",
+                "User-Agent" to SAFARI_USER_AGENT,
+                "X-YouTube-Client-Name" to "1",
+                "X-Youtube-Client-Version" to SAFARI_CLIENT_VERSION,
+                "Origin" to "https://www.youtube.com",
+                "Referer" to "https://www.youtube.com",
+                "Cookie" to cookies,
+                "Authorization" to YoutubeUtils.getSapisidHash(sapisidVal!!, "https://www.youtube.com")
             )
 
-            customPackagePref.title = Loc.getString(sharedPref, "downloader_custom_title")
-            customPackagePref.summary = Loc.getString(sharedPref, "downloader_custom_sum")
-            customPackagePref.dialogTitle = Loc.getString(sharedPref, "downloader_custom_title")
-            customPackagePref.setPositiveButtonText(Loc.getString(sharedPref, "ok"))
-            customPackagePref.setNegativeButtonText(Loc.getString(sharedPref, "cancel"))
+            val safariPayload = mapOf(
+                "context" to mapOf(
+                    "client" to mapOf(
+                        "utcOffsetMinutes" to 0,
+                        "timeZone" to "UTC",
+                        "hl" to langCode,
+                        "gl" to if (langCode == "ko") "KR" else "US",
+                        "userAgent" to SAFARI_USER_AGENT,
+                        "clientName" to "WEB",
+                        "clientVersion" to SAFARI_CLIENT_VERSION
+                    )
+                ),
+                "playbackContext" to mapOf(
+                    "contentPlaybackContext" to mapOf(
+                        "html5Preference" to "HTML5_PREF_WANTS",
+                        "signatureTimestamp" to sts
+                    )
+                ),
+                "cpn" to generateCpn(),
+                "videoId" to videoId,
+                "contentCheckOk" to true,
+                "racyCheckOk" to true
+            )
 
-            val currentType = sharedPref.getString(KEY_DOWNLOADER_TYPE, "none") ?: "none"
-            customPackagePref.isVisible = (currentType == "custom")
-        }
-    }
-
-
-
-    class CustomSectionsDialog(private val sharedPref: SharedPreferences) : DialogFragment() {
-
-        private val mapper = jacksonObjectMapper()
-        private lateinit var recyclerView: RecyclerView
-        private lateinit var adapter: CustomSectionsAdapter
-        private var sectionsList = mutableListOf<CustomSection>()
-
-        override fun onCreateView(
-            inflater: LayoutInflater,
-            container: ViewGroup?,
-            savedInstanceState: Bundle?
-        ): View {
-            val ctx = requireContext()
-            loadSections()
-
-            val root = LinearLayout(ctx).apply {
-                orientation = LinearLayout.VERTICAL
-                setBackgroundColor(Color.parseColor("#121212"))
-                layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-            }
-
-            val toolbar = LinearLayout(ctx).apply {
-                orientation = LinearLayout.HORIZONTAL
-                setBackgroundColor(Color.parseColor("#1E1E1E"))
-                setPadding(30, 30, 30, 30)
-                gravity = Gravity.CENTER_VERTICAL
-            }
-
-            val backBtn = ImageView(ctx).apply {
-                setImageDrawable(createSvgIcon("M20,11H7.83l5.59,-5.59L12,4l-8,8 8,8 1.41,-1.41L7.83,13H20v-2z", "#FFFFFF"))
-                val outValue = android.util.TypedValue()
-                ctx.theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, outValue, true)
-                setBackgroundResource(outValue.resourceId)
-                setPadding(15, 15, 15, 15)
-                layoutParams = LinearLayout.LayoutParams(90, 90).apply {
-                    setMargins(0, 0, 30, 0)
+            try {
+                val res = app.post(safariApiUrl, json = safariPayload, headers = safariHeaders).text
+                val json = JSONObject(res)
+                val status = json.optJSONObject("playabilityStatus")?.optString("status")
+                
+                println("[TRACK] -> SAFARI API Response Status: $status")
+                
+                if (status == "OK" || json.has("streamingData")) {
+                    println("[TRACK] -> SAFARI Response successful (streamingData present).")
+                    finalJson = json
+                    lengthSeconds = json.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
+                } else {
+                    println("[TRACK] 🚨 SAFARI Request blocked/failed (Status: $status). Falling back to ANDROID_VR...")
                 }
-                setOnClickListener { dismiss() }
-            }
-
-            val titleView = TextView(ctx).apply {
-                text = Loc.getString(sharedPref, "manage_channels")
-                textSize = 18f
-                setTextColor(Color.WHITE)
-                setTypeface(null, Typeface.BOLD)
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f)
-            }
-
-            toolbar.addView(backBtn)
-            toolbar.addView(titleView)
-
-            val addBtn = Button(ctx).apply {
-                text = Loc.getString(sharedPref, "add_channel_btn")
-                setTextColor(Color.WHITE)
-                setBackgroundColor(Color.parseColor("#E53935"))
-                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                    setMargins(30, 30, 30, 15)
-                }
-                setOnClickListener { showAddEditDialog(null, -1) }
-            }
-
-            recyclerView = RecyclerView(ctx).apply {
-                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1.0f)
-                layoutManager = LinearLayoutManager(ctx)
-            }
-
-            adapter = CustomSectionsAdapter()
-            recyclerView.adapter = adapter
-
-            val itemTouchHelper = ItemTouchHelper(object : ItemTouchHelper.SimpleCallback(ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0) {
-                override fun onMove(rv: RecyclerView, source: RecyclerView.ViewHolder, target: RecyclerView.ViewHolder): Boolean {
-                    val fromPosition = source.adapterPosition
-                    val toPosition = target.adapterPosition
-                    java.util.Collections.swap(sectionsList, fromPosition, toPosition)
-                    adapter.notifyItemMoved(fromPosition, toPosition)
-                    return true
-                }
-                override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {}
-                override fun clearView(rv: RecyclerView, viewHolder: RecyclerView.ViewHolder) {
-                    super.clearView(rv, viewHolder)
-                    saveSections()
-                }
-            })
-            itemTouchHelper.attachToRecyclerView(recyclerView)
-
-            root.addView(toolbar)
-            root.addView(addBtn)
-            root.addView(recyclerView)
-
-            return root
-        }
-
-        private fun loadSections() {
-            val json = sharedPref.getString("custom_homepages_v3", "[]") ?: "[]"
-            sectionsList = try {
-                mapper.readValue(json)
-            } catch (e: Exception) {
-                mutableListOf()
+            } catch (e: Exception) { 
+                println("[TRACK] 🚨 SAFARI Request Exception: ${e.message}") 
             }
         }
 
-        private fun saveSections() {
-            val json = mapper.writeValueAsString(sectionsList)
-            sharedPref.edit().putString("custom_homepages_v3", json).apply()
-        }
+        // 2순위: 비로그인이거나 SAFARI가 모종의 이유로 차단되었을 때 
+        // -> 인증 없는 ANDROID_VR 클라이언트로 폴백하여 기본 스트림이라도 무조건 살려냄
+        if (finalJson == null) {
+            println("[TRACK] 3. Sending ANDROID_VR API Request (No Auth fallback)...")
+            val vrApiUrl = "https://www.youtube.com/youtubei/v1/player?key=$androidApiKey"
 
-        private fun createSvgIcon(pathData: String, colorHex: String): android.graphics.drawable.Drawable {
-            val path = PathParser.createPathFromPathData(pathData)
-            val shape = PathShape(path, 24f, 24f)
-            return ShapeDrawable(shape).apply {
-                paint.color = Color.parseColor(colorHex)
-                paint.style = android.graphics.Paint.Style.FILL
-                intrinsicWidth = 70
-                intrinsicHeight = 70
-            }
-        }
+            // VR 클라이언트는 쿠키(SAPISID)를 받으면 400 에러를 뱉으므로 헤더에 쿠키를 넣지 않음
+            val vrHeaders = mapOf(
+                "Content-Type" to "application/json",
+                "User-Agent" to YoutubeUtils.ANDROID_VR_USER_AGENT,
+                "X-Goog-Api-Format-Version" to "2"
+            )
 
-        private fun showAddEditDialog(existingItem: CustomSection?, index: Int) {
-            val ctx = requireContext()
-            val layout = LinearLayout(ctx).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(40, 40, 40, 40)
-            }
+            val vrPayload = mapOf(
+                "videoId" to videoId,
+                "context" to mapOf(
+                    "client" to mapOf(
+                        "clientName" to "ANDROID_VR",
+                        "clientVersion" to "1.65.10",
+                        "androidSdkVersion" to 32,
+                        "osName" to "Android",
+                        "osVersion" to "12L",
+                        "deviceMake" to "Oculus",
+                        "deviceModel" to "Quest 3",
+                        "hl" to langCode,
+                        "gl" to if (langCode == "ko") "KR" else "US",
+                        "visitorData" to visitorData
+                    )
+                ),
+                "playbackContext" to mapOf(
+                    "contentPlaybackContext" to mapOf(
+                        "signatureTimestamp" to sts
+                    )
+                )
+            )
 
-            fun createInput(hintText: String, prefill: String): EditText {
-                return EditText(ctx).apply {
-                    hint = hintText
-                    setText(prefill)
-                    setTextColor(Color.WHITE)
-                    setHintTextColor(Color.GRAY)
-                    layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                        setMargins(0, 0, 0, 20)
+            try {
+                val res = app.post(vrApiUrl, json = vrPayload, headers = vrHeaders).text
+                val json = JSONObject(res)
+                val status = json.optJSONObject("playabilityStatus")?.optString("status")
+                
+                println("[TRACK] -> ANDROID_VR API Response Status: $status")
+
+                if (status == "OK" || json.has("streamingData")) {
+                    println("[TRACK] -> ANDROID_VR Response successful.")
+                    finalJson = json
+                    lengthSeconds = json.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
+                } else if (status == "UNPLAYABLE" || status == "LOGIN_REQUIRED") {
+                    println("[TRACK] -> ANDROID_VR Blocked. Falling back to TV_EMBEDDED...")
+                    if (!webApiKey.isNullOrEmpty()) {
+                        val tvApiUrl = "https://www.youtube.com/youtubei/v1/player?key=$webApiKey"
+                        val tvPayload = mapOf(
+                            "videoId" to videoId,
+                            "context" to mapOf(
+                                "client" to mapOf(
+                                    "clientName" to "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
+                                    "clientVersion" to "2.0",
+                                    "hl" to langCode,
+                                    "gl" to if (langCode == "ko") "KR" else "US",
+                                    "visitorData" to visitorData
+                                ),
+                                "thirdParty" to mapOf("embedUrl" to "https://www.youtube.com")
+                            ),
+                            "playbackContext" to mapOf(
+                                "contentPlaybackContext" to mapOf(
+                                    "signatureTimestamp" to sts
+                                )
+                            )
+                        )
+                        
+                        val tvHeaders = mapOf(
+                            "Content-Type" to "application/json",
+                            "User-Agent" to YoutubeUtils.CHROME_USER_AGENT,
+                            "X-YouTube-Client-Name" to "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
+                            "X-YouTube-Client-Version" to "2.0"
+                        )
+                        
+                        val tvRes = app.post(tvApiUrl, json = tvPayload, headers = tvHeaders).text
+                        val tvJson = JSONObject(tvRes)
+                        println("[TRACK] -> TV_EMBEDDED Response Status: ${tvJson.optJSONObject("playabilityStatus")?.optString("status")}")
+                        finalJson = tvJson
+                        lengthSeconds = tvJson.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
                     }
                 }
+            } catch (e: Exception) { 
+                println("[TRACK] -> Exception during ANDROID_VR Request: ${e.message}") 
             }
+        }
 
-            val nameWrapper = FrameLayout(ctx)
-            val inputName = createInput(Loc.getString(sharedPref, "section_name"), existingItem?.name ?: "")
+        return Pair(finalJson, lengthSeconds)
+    }
 
-            val loadingIndicator = ProgressBar(ctx, null, android.R.attr.progressBarStyleSmall).apply {
-                visibility = View.GONE
-                layoutParams = FrameLayout.LayoutParams(80, 80).apply {
-                    gravity = Gravity.CENTER_VERTICAL or Gravity.END
-                    marginEnd = 20
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val cleanedUrl = url.replace(schemaStripRegex, "")
+        val videoId = YoutubeUtils.extractYoutubeId(cleanedUrl) ?: cleanedUrl
+
+        val context = com.lagradost.cloudstream3.AcraApplication.context
+        val provider = com.lagradost.cloudstream3.APIHolder.allProviders.find { it.name == "YouTube" }
+        val sharedPref = (provider as? com.lagradost.cloudstream3.ar.youtube.YoutubeProvider)?.appPrefs 
+            ?: context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
+            
+        val downloaderType = sharedPref?.getString("downloader_app_type", "none") ?: "none"
+        val customPkg = sharedPref?.getString("downloader_custom_package", "") ?: ""
+
+        val (pkgName, appName) = when (downloaderType) {
+            "ytdlnis" -> Pair("com.deniscerri.ytdl", "YTDLnis")
+            "seal" -> Pair("com.junkfood.seal", "Seal")
+            "seal_plus" -> Pair("com.maheshtechnicals.sealplus", "Seal Plus")
+            "custom" -> Pair(customPkg, "Custom Downloader")
+            else -> Pair("", "")
+        }
+
+        withContext(Dispatchers.IO) {
+            try {
+                val (playerResponse, durationSeconds) = fetchPlayerResponse(videoId)
+
+                if (playerResponse == null) {
+                    println("[TRACK] 🚨 Failed to get playerResponse.")
+                    return@withContext
                 }
-            }
-            nameWrapper.addView(inputName)
-            nameWrapper.addView(loadingIndicator)
 
-            val inputUrl = createInput(Loc.getString(sharedPref, "url_hint"), existingItem?.url ?: "")
+                val streamingData = playerResponse.optJSONObject("streamingData")
+                if (streamingData == null) {
+                    println("[TRACK] 🚨 streamingData object is missing in response.")
+                    return@withContext
+                }
 
-            var fetchJob: kotlinx.coroutines.Job? = null
-            inputUrl.addTextChangedListener(object : android.text.TextWatcher {
-                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
-                override fun afterTextChanged(s: android.text.Editable?) {
-                    val url = s.toString().trim()
-                    fetchJob?.cancel()
+                val hlsUrl = streamingData.optString("hlsManifestUrl")
+                if (!hlsUrl.isNullOrBlank()) {
+                    callback(
+                        newExtractorLink(
+                            this@YoutubeExtractor.name,
+                            "YouTube Live",
+                            hlsUrl,
+                            type = ExtractorLinkType.M3U8
+                        ) {
+                            this.referer = mainUrl
+                            this.quality = Qualities.Unknown.value
+                        }
+                    )
+                    return@withContext
+                }
 
-                    if (url.startsWith("http") && url.contains("youtube") && inputName.text.isBlank()) {
-                        loadingIndicator.visibility = View.VISIBLE
-                        fetchJob = kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                            try {
-                                val response = com.lagradost.cloudstream3.app.get(url).text
-                                val doc = org.jsoup.Jsoup.parse(response)
-                                var title = doc.selectFirst("meta[property=og:title]")?.attr("content")
-                                    ?.replace(" - YouTube", "")
-                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                                    if (!title.isNullOrBlank()) {
-                                        inputName.setText(title)
-                                    }
-                                    loadingIndicator.visibility = View.GONE
+                val adaptiveFormats = streamingData.optJSONArray("adaptiveFormats") ?: JSONArray()
+                println("[TRACK] 4. Parsing adaptiveFormats")
+                println("[TRACK] -> Total items in adaptiveFormats: ${adaptiveFormats.length()}")
+                
+                val videoOnlyList = ArrayList<StreamInfo>(adaptiveFormats.length())
+                val audioInfoList = ArrayList<AudioInfo>(adaptiveFormats.length())
+
+                for (i in 0 until adaptiveFormats.length()) {
+                    val format = adaptiveFormats.getJSONObject(i)
+                    val streamUrl = format.optString("url")
+                    
+                    if (streamUrl.isNullOrEmpty()) continue
+
+                    val rawMimeType = format.optString("mimeType", "")
+                    var cleanMimeType = rawMimeType
+                    var codec = ""
+                    
+                    val semicolonIndex = rawMimeType.indexOf(";")
+                    if (semicolonIndex != -1) {
+                        cleanMimeType = rawMimeType.substring(0, semicolonIndex).trim()
+                        val rawCodecs = rawMimeType.substring(semicolonIndex + 1)
+                        val codecStart = rawCodecs.indexOf("codecs=")
+                        if (codecStart != -1) {
+                            val afterCodecs = rawCodecs.substring(codecStart + 7).trim()
+                            val firstQuote = afterCodecs.indexOf("\"")
+                            if (firstQuote != -1) {
+                                val secondQuote = afterCodecs.indexOf("\"", firstQuote + 1)
+                                codec = if (secondQuote != -1) {
+                                    afterCodecs.substring(firstQuote + 1, secondQuote)
+                                } else {
+                                    afterCodecs.substring(firstQuote + 1)
                                 }
-                            } catch (e: Exception) {
-                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                                    loadingIndicator.visibility = View.GONE
-                                }
+                            } else {
+                                codec = afterCodecs
                             }
                         }
                     }
-                }
-            })
 
-            layout.addView(nameWrapper)
-            layout.addView(inputUrl)
+                    val initRange = format.optJSONObject("initRange")
+                    val indexRange = format.optJSONObject("indexRange")
 
-            val dialogTitle = if (existingItem == null) Loc.getString(sharedPref, "add_new") else Loc.getString(sharedPref, "edit_item")
+                    val initStart = initRange?.optString("start")
+                    val initEnd = initRange?.optString("end")
+                    val idxStart = indexRange?.optString("start")
+                    val idxEnd = indexRange?.optString("end")
 
-            MaterialAlertDialogBuilder(ctx)
-                .setTitle(dialogTitle)
-                .setView(layout)
-                .setPositiveButton(Loc.getString(sharedPref, "save")) { _, _ ->
-                    val newUrl = inputUrl.text.toString().trim()
-                    if (newUrl.isEmpty()) {
-                        Toast.makeText(ctx, Loc.getString(sharedPref, "url_empty"), Toast.LENGTH_SHORT).show()
-                        return@setPositiveButton
-                    }
+                    val initR = if (initStart != null && initEnd != null) "$initStart-$initEnd" else null
+                    val indexR = if (idxStart != null && idxEnd != null) "$idxStart-$idxEnd" else null
 
-                    val finalName = inputName.text.toString().trim().ifEmpty { Loc.getString(sharedPref, "unnamed_section") }
+                    if (cleanMimeType.startsWith("video/")) {
+                        val height = format.optInt("height", 0)
+                        val label = if (height > 0) "${height}p" else "video"
+                        if (codec.isEmpty()) codec = if (cleanMimeType.contains("webm")) "vp9" else "avc1.4d401f"
+                        
+                        videoOnlyList.add(StreamInfo(streamUrl, cleanMimeType, codec, height, label, initR, indexR))
+                    } else if (cleanMimeType.startsWith("audio/")) {
+                        val bitrate = format.optInt("bitrate", 128000)
+                        if (codec.isEmpty()) codec = if (cleanMimeType.contains("webm")) "opus" else "mp4a.40.2"
+                        
+                        var language = format.optString("language", "").ifEmpty { null }
+                        var audioTrackId = format.optString("audioTrackId", "").ifEmpty { null }
+                        var trackDisplayName = format.optString("language", "")
+                        
+                        val audioTrack = format.optJSONObject("audioTrack")
 
-                    val newItem = CustomSection(
-                        name = finalName,
-                        url = newUrl,
-                        isEnabled = existingItem?.isEnabled ?: true
-                    )
+                        println("[TRACK] -> Found Audio Stream (itag: ${format.optString("itag")})")
 
-                    if (index >= 0) sectionsList[index] = newItem else sectionsList.add(newItem)
-
-                    saveSections()
-                    adapter.notifyDataSetChanged()
-                }
-                .setNegativeButton(Loc.getString(sharedPref, "cancel"), null)
-                .show()
-        }
-
-        inner class CustomSectionsAdapter : RecyclerView.Adapter<CustomSectionsAdapter.ViewHolder>() {
-
-            inner class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
-                val dragHandle: TextView = view.findViewWithTag("dragHandle")
-                val nameTxt: TextView = view.findViewWithTag("nameTxt")
-                val urlTxt: TextView = view.findViewWithTag("urlTxt")
-                val enableSwitch: SwitchCompat = view.findViewWithTag("enableSwitch")
-                val editBtn: ImageView = view.findViewWithTag("editBtn")
-                val deleteBtn: ImageView = view.findViewWithTag("deleteBtn")
-            }
-
-            override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
-                val ctx = parent.context
-                val card = LinearLayout(ctx).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                    layoutParams = RecyclerView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                        setMargins(20, 15, 20, 15)
-                    }
-                    background = android.graphics.drawable.GradientDrawable().apply {
-                        setColor(Color.parseColor("#1E1E1E"))
-                        cornerRadius = 16f
-                    }
-                    setPadding(20, 30, 20, 30)
-                }
-
-                val dragHandle = TextView(ctx).apply {
-                    text = "☰"
-                    tag = "dragHandle"
-                    textSize = 26f
-                    setTextColor(Color.GRAY)
-                    setPadding(10, 10, 30, 10)
-                }
-
-                val textLayout = LinearLayout(ctx).apply {
-                    orientation = LinearLayout.VERTICAL
-                    layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f)
-                }
-
-                val nameTxt = TextView(ctx).apply {
-                    tag = "nameTxt"
-                    setTextColor(Color.WHITE)
-                    textSize = 16f
-                    setTypeface(null, Typeface.BOLD)
-                }
-
-                val urlTxt = TextView(ctx).apply {
-                    tag = "urlTxt"
-                    setTextColor(Color.parseColor("#90CAF9"))
-                    textSize = 12f
-                    maxLines = 1
-                    ellipsize = android.text.TextUtils.TruncateAt.END
-                }
-
-                textLayout.addView(nameTxt)
-                textLayout.addView(urlTxt)
-
-                val actionsLayout = LinearLayout(ctx).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = Gravity.CENTER_VERTICAL
-                }
-
-                val enableSwitch = SwitchCompat(ctx).apply {
-                    tag = "enableSwitch"
-                    layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                        setMargins(10, 0, 20, 0)
-                    }
-                }
-
-                val editBtn = ImageView(ctx).apply {
-                    tag = "editBtn"
-                    setImageDrawable(createSvgIcon("M3,17.25V21h3.75L17.81,9.94l-3.75,-3.75L3,17.25zM20.71,7.04c0.39,-0.39 0.39,-1.02 0,-1.41l-2.34,-2.34c-0.39,-0.39 -1.02,-0.39 -1.41,0l-1.83,1.83 3.75,3.75 1.83,-1.83z", "#0078FF"))
-                    setPadding(15, 15, 15, 15)
-                    layoutParams = LinearLayout.LayoutParams(130, 130)
-                }
-
-                val deleteBtn = ImageView(ctx).apply {
-                    tag = "deleteBtn"
-                    setImageDrawable(createSvgIcon("M6,19c0,1.1 0.9,2 2,2h8c1.1,0 2,-0.9 2,-2V7H6V19zM19,4h-3.5l-1,-1h-5l-1,1H5v2h14V4z", "#0078FF"))
-                    setPadding(15, 15, 10, 15)
-                    layoutParams = LinearLayout.LayoutParams(130, 130)
-                }
-
-                actionsLayout.addView(enableSwitch)
-                actionsLayout.addView(editBtn)
-                actionsLayout.addView(deleteBtn)
-
-                card.addView(dragHandle)
-                card.addView(textLayout)
-                card.addView(actionsLayout)
-
-                return ViewHolder(card)
-            }
-
-            override fun onBindViewHolder(holder: ViewHolder, position: Int) {
-                val section = sectionsList[position]
-
-                val displayName = section.name.ifBlank { Loc.getString(sharedPref, "unnamed_section") }
-                holder.nameTxt.text = displayName
-                holder.urlTxt.text = section.url
-
-                holder.enableSwitch.setOnCheckedChangeListener(null)
-                holder.enableSwitch.isChecked = section.isEnabled
-
-                if (section.isEnabled) holder.nameTxt.setTextColor(Color.WHITE) else holder.nameTxt.setTextColor(Color.GRAY)
-
-                holder.enableSwitch.setOnCheckedChangeListener { _, isChecked ->
-                    section.isEnabled = isChecked
-                    saveSections()
-                    if (isChecked) holder.nameTxt.setTextColor(Color.WHITE) else holder.nameTxt.setTextColor(Color.GRAY)
-                }
-
-                val isSystem = section.url == "Home" || section.url.startsWith("chip_name_")
-                if (isSystem) {
-                    holder.editBtn.visibility = View.GONE
-                    holder.deleteBtn.visibility = View.GONE
-                    holder.urlTxt.setTextColor(Color.parseColor("#4CAF50"))
-                } else {
-                    holder.editBtn.visibility = View.VISIBLE
-                    holder.deleteBtn.visibility = View.VISIBLE
-                    holder.urlTxt.setTextColor(Color.parseColor("#90CAF9"))
-                }
-
-                holder.editBtn.setOnClickListener {
-                    showAddEditDialog(section, holder.adapterPosition)
-                }
-
-                holder.deleteBtn.setOnClickListener {
-                    val pos = holder.adapterPosition
-                    if (pos != RecyclerView.NO_POSITION) {
-                        MaterialAlertDialogBuilder(holder.itemView.context)
-                            .setTitle(Loc.getString(sharedPref, "confirm_delete_title"))
-                            .setMessage(Loc.getString(sharedPref, "confirm_delete_msg"))
-                            .setPositiveButton(Loc.getString(sharedPref, "delete")) { _, _ ->
-                                sectionsList.removeAt(pos)
-                                saveSections()
-                                notifyItemRemoved(pos)
+                        if (audioTrack != null) {
+                            audioTrackId = audioTrack.optString("id", audioTrackId)
+                            trackDisplayName = audioTrack.optString("displayName", trackDisplayName)
+                            if (language == null && trackDisplayName.isNotBlank()) {
+                                language = trackDisplayName 
                             }
-                            .setNegativeButton(Loc.getString(sharedPref, "cancel"), null)
-                            .show()
+                        }
+                        
+                        if (language == null && trackDisplayName.isBlank()) {
+                            language = "Original" 
+                        }
+                        
+                        println("[TRACK]    -> Final assigned -> Lang: $language | TrackID: $audioTrackId | DisplayName: $trackDisplayName")
+                        
+                        audioInfoList.add(AudioInfo(streamUrl, cleanMimeType, codec, bitrate, initR, indexR, language, audioTrackId, trackDisplayName))
                     }
                 }
-            }
 
-            override fun getItemCount(): Int = sectionsList.size
+                println("[TRACK] 5. Filtering & Grouping Audio Tracks")
+                println("[TRACK] -> Total Extracted Audio streams: ${audioInfoList.size}")
+
+                val groupedAudio = audioInfoList.groupBy { it.language ?: it.audioTrackId ?: "Original" }
+                println("[TRACK] -> Grouped Languages (Keys): ${groupedAudio.keys}")
+                
+                val bestAudioList = groupedAudio.mapNotNull { (_, tracks) ->
+                    tracks.maxByOrNull { 
+                        val bonus = if (it.mimeType.contains("webm")) 1000000 else 0
+                        it.bitrate + bonus 
+                    }
+                }
+
+                println("[TRACK] -> Selected Best Tracks per Language (${bestAudioList.size}):")
+                bestAudioList.forEach { 
+                    println("[TRACK]    Lang: ${it.language}, MimeType: ${it.mimeType}, Bitrate: ${it.bitrate}") 
+                }
+
+                if (videoOnlyList.isNotEmpty() && bestAudioList.isNotEmpty()) {
+                    startServerIfNeeded()
+
+                    for (video in videoOnlyList.distinctBy { it.height }) {
+                        val dashXml = buildDashManifestXml(video, bestAudioList, durationSeconds)
+                        val localLink = registerManifestAndGetUrl(dashXml)
+
+                        if (localLink != null) {
+                            val finalName = "YouTube ${video.label}"
+                            val sourceName = "YouTube"
+                            
+                            callback(
+                                newExtractorLink(
+                                    sourceName, finalName, localLink, type = ExtractorLinkType.DASH
+                                ) {
+                                    this.referer = mainUrl
+                                    this.quality = video.height
+                                    this.headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
+                                }
+                            )
+                        }
+                    }
+                }
+
+                val originalUrl = "https://www.youtube.com/watch?v=$videoId"
+
+                if (pkgName.isNotEmpty()) {
+                    val redirectUrl = getAppRedirectUrl(pkgName, originalUrl) ?: originalUrl
+                    callback(newExtractorLink(
+                        source = "YouTube Downloader", 
+                        name = "$appName Download", 
+                        url = redirectUrl, 
+                        type = if (redirectUrl.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE
+                    ) { 
+                        this.quality = 2160 
+                        this.referer = mainUrl 
+                    })
+                }
+
+            } catch (e: Exception) { 
+                println("[TRACK] 🚨 Exception in getUrl: ${e.message}")
+                logError(e) 
+            }
         }
     }
 
-
-
-    class WebViewCaptureDialog(
-        private val sharedPref: SharedPreferences,
-        private val onFinish: (Boolean) -> Unit
-    ) : DialogFragment() {
-
-        private lateinit var webView: WebView
-        private val targetCookies = listOf("VISITOR_INFO1_LIVE", "SID", "HSID", "SSID", "APISID", "SAPISID")
-
-        override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
-            val ctx = requireContext()
-
-            val root = LinearLayout(ctx).apply {
-                orientation = LinearLayout.VERTICAL
-                layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-                setBackgroundColor(Color.WHITE)
-            }
-
-            val toolbar = LinearLayout(ctx).apply {
-                orientation = LinearLayout.HORIZONTAL
-                setPadding(16, 16, 16, 16)
-                setBackgroundColor(Color.parseColor("#EEEEEE"))
-                gravity = Gravity.CENTER_VERTICAL
-            }
-
-            val closeBtn = Button(ctx).apply {
-                text = Loc.getString(sharedPref, "close")
-                setOnClickListener { dismiss() }
-            }
-
-            val titleView = TextView(ctx).apply {
-                text = Loc.getString(sharedPref, "browse_youtube")
-                textSize = 18f
-                gravity = Gravity.CENTER
-                setTextColor(Color.BLACK)
-                layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f)
-            }
-
-            val saveBtn = Button(ctx).apply {
-                text = Loc.getString(sharedPref, "save")
-                setTextColor(Color.WHITE)
-                setBackgroundColor(Color.parseColor("#FF0000"))
-                setOnClickListener { captureAndClose() }
-            }
-
-            toolbar.addView(closeBtn)
-            toolbar.addView(titleView)
-            toolbar.addView(saveBtn)
-
-            val webContainer = FrameLayout(ctx).apply {
-                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1.0f)
-            }
-
-            webView = WebView(ctx).apply {
-                layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                settings.userAgentString = "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36"
-                webViewClient = object : WebViewClient() {
-                    override fun shouldOverrideUrlLoading(view: WebView?, request: android.webkit.WebResourceRequest?) = false
-                }
-            }
-            CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
-            webView.loadUrl("https://www.youtube.com")
-
-            webContainer.addView(webView)
-            root.addView(toolbar)
-            root.addView(webContainer)
-
-            return root
-        }
-
-        override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
-            val dialog = super.onCreateDialog(savedInstanceState)
-            dialog.setOnKeyListener { _, keyCode, event ->
-                if (keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP && ::webView.isInitialized && webView.canGoBack()) {
-                    webView.goBack()
-                    true
-                } else false
-            }
-            return dialog
-        }
-
-        private fun captureAndClose() {
+    private fun startServerIfNeeded() {
+        synchronized(serverLock) {
+            val server = activeServer
+            if (server != null && !server.isClosed) return
             try {
-                CookieManager.getInstance().flush()
-                val cookieStr = CookieManager.getInstance().getCookie(webView.url ?: "https://www.youtube.com") ?: ""
-                val editor = sharedPref.edit()
-                var found = 0
-
-                cookieStr.split(";").forEach {
-                    val parts = it.split("=", limit = 2)
-                    if (parts.size == 2 && targetCookies.contains(parts[0].trim())) {
-                        editor.putString(parts[0].trim(), parts[1].trim())
-                        found++
+                val newServer = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
+                activeServer = newServer
+                serverPort = newServer.localPort
+                
+                thread(name = "YT-DASH-Server-Acceptor") {
+                    try {
+                        while (true) {
+                            val active = activeServer ?: break
+                            if (active.isClosed) break
+                            val client = active.accept()
+                            client.soTimeout = 15000 
+                            serverExecutor.execute { handleClient(client) }
+                        }
+                    } catch (e: Exception) {
                     }
                 }
-                editor.apply()
-
-                if (found > 0) {
-                    onFinish(true)
-                    dismiss()
-                } else {
-                    context?.let {
-                        Toast.makeText(it, Loc.getString(sharedPref, "no_data"), Toast.LENGTH_SHORT).show()
-                    }
-                }
-            } catch (e: Exception) {
-                context?.let {
-                    Toast.makeText(it, "Error", Toast.LENGTH_SHORT).show()
-                }
-            }
+            } catch (e: Exception) { logError(e) }
         }
+    }
+
+    private fun registerManifestAndGetUrl(xmlContent: String): String? {
+        if (serverPort == 0) return null
+        val id = "m_${streamCounter.getAndIncrement()}"
+        manifestMap[id] = xmlContent
+        return "http://127.0.0.1:$serverPort/$id.mpd"
+    }
+
+    private fun buildDashManifestXml(
+        video: StreamInfo,
+        audioList: List<AudioInfo>,
+        durationSec: Long
+    ): String {
+        val videoChunkId = "v_${streamCounter.getAndIncrement()}"
+        streamUrlCache[videoChunkId] = video.url
+        val proxyVideoUrl = "http://127.0.0.1:$serverPort/chunk?id=$videoChunkId"
+        
+        val durationString = "PT${durationSec}S"
+
+        val sb = java.lang.StringBuilder(2048)
+        sb.append("""<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011" type="static" minBufferTime="PT5.0S" mediaPresentationDuration="$durationString">""")
+        sb.append("<Period>")
+
+        val vSegmentBase = if (video.initRange != null && video.indexRange != null) {
+            """<SegmentBase indexRange="${video.indexRange}"><Initialization range="${video.initRange}" /></SegmentBase>"""
+        } else ""
+
+        sb.append("""
+            <AdaptationSet mimeType="${video.mimeType}" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
+              <Representation id="video" bandwidth="4000000" width="0" height="${video.height}" codecs="${video.codec}">
+                <BaseURL>$proxyVideoUrl</BaseURL>
+                $vSegmentBase
+              </Representation>
+            </AdaptationSet>
+        """.trimIndent())
+
+        println("[TRACK] 6. Writing DASH Manifest")
+        audioList.forEachIndexed { index, audio ->
+            val audioIdChunk = "a_${streamCounter.getAndIncrement()}"
+            streamUrlCache[audioIdChunk] = audio.url
+            val proxyAudioUrl = "http://127.0.0.1:$serverPort/chunk?id=$audioIdChunk"
+
+            val audioId = "audio_$index"
+            val aSegmentBase = if (audio.initRange != null && audio.indexRange != null) {
+                """<SegmentBase indexRange="${audio.indexRange}"><Initialization range="${audio.initRange}" /></SegmentBase>"""
+            } else ""
+
+            val langAttribute = if (!audio.language.isNullOrBlank()) """ lang="${audio.language}"""" else ""
+            println("[TRACK] -> Writing XML for Audio: lang=${audio.language}, langAttribute=$langAttribute")
+
+            sb.append("""
+                <AdaptationSet mimeType="${audio.mimeType}"$langAttribute subsegmentAlignment="true" subsegmentStartsWithSAP="1">
+                  <Representation id="$audioId" bandwidth="${if(audio.bitrate>0) audio.bitrate else 128000}" codecs="${audio.codec}">
+                    <BaseURL>$proxyAudioUrl</BaseURL>
+                    $aSegmentBase
+                  </Representation>
+                </AdaptationSet>
+            """.trimIndent())
+        }
+
+        sb.append("</Period>")
+        sb.append("</MPD>")
+        return sb.toString()
     }
 }
