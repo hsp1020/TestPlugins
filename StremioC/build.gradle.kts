@@ -54,5 +54,5 @@ cloudstream {
         "Movie",
     )
     requiresResources = true
-    iconUrl = "https://raw.githubusercontent.com/hexated/cloudstream-extensions-hexated/master/StremioC/icon.png"
+    iconUrl = "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/StremioC/icon.png"
 }
