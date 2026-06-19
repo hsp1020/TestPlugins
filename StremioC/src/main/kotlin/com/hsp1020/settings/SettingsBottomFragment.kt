@@ -133,7 +133,14 @@ class SettingsBottomFragment(
         }
     }
 
-    private data class ConfigFlatTab(val key: String, val displayName: String, val isGenre: Boolean, val catalogKey: String)
+    private data class ConfigFlatTab(
+        val key: String, 
+        val displayName: String, 
+        val isGenre: Boolean, 
+        val catalogKey: String,
+        var isChecked: Boolean = true,       // 🚨 [수정] 임시 체크 상태 보관용 필드 추가
+        var isGenresEnabled: Boolean = true  // 🚨 [수정] 임시 장르 스위치 보관용 필드 추가
+    )
 
     private var activeSubDialog: AlertDialog? = null 
     private var searchJob: Job? = null 
@@ -549,7 +556,7 @@ class SettingsBottomFragment(
         etHistorySyncUrl.setText(sharedPref.getString(SettingsRepository.PREF_KEY_HISTORY_SYNC_URL, ""))
 
         switchHistorySync.setOnCheckedChangeListener { _, isChecked ->
-            sharedPref.edit { putBoolean(SettingsRepository.PREF_KEY_HISTORY_SYNC_ENABLED, isChecked) }
+            // 🚨 즉시 물리 저장소에 기록하는 sharedPref.edit 구문 제거
             layoutHistorySyncUrl.visibility = if (isChecked) View.VISIBLE else View.GONE
         }
 
@@ -1030,6 +1037,7 @@ class SettingsBottomFragment(
 
     private fun showCatalogConfigDialog(item: LinkItem) {
         val context = requireContext()
+        val uniqueId = item.link.toUniqueKeyLocal() // 🚨 [추가] 고유 설정키 생성
         
         val progressContainer = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -1084,7 +1092,15 @@ class SettingsBottomFragment(
                             found
                         } ?: false
 
-                        flatTabs.add(ConfigFlatTab("${id}_${type}_default", "$name - $displayType", false, "${id}_${type}"))
+                        // 🚨 [수정] 탭 활성화 여부 및 장르 활성화 여부를 SharedPreferences에서 최초 1회만 로드하여 임시 필드에 주입
+                        flatTabs.add(ConfigFlatTab(
+                            key = "${id}_${type}_default", 
+                            displayName = "$name - $displayType", 
+                            isGenre = false, 
+                            catalogKey = "${id}_${type}",
+                            isChecked = prefs.getBoolean("tab_enabled_${uniqueId}_${id}_${type}_default", true),
+                            isGenresEnabled = prefs.getBoolean("genres_enabled_${uniqueId}_${id}_${type}", true)
+                        ))
 
                         val genres = mutableListOf<String>()
                         cat.get("genres")?.takeIf { it.isJsonArray }?.asJsonArray?.let { gArr ->
@@ -1105,7 +1121,14 @@ class SettingsBottomFragment(
 
                         genres.forEach { genre ->
                             val capitalizedGenre = genre.capitalizeFirstLocal()
-                            flatTabs.add(ConfigFlatTab("${id}_${type}_genre_$genre", "$name : $capitalizedGenre  - $displayType", true, "${id}_${type}"))
+                            // 🚨 [수정] 탭 활성화 여부를 SharedPreferences에서 로드하여 임시 필드에 주입
+                            flatTabs.add(ConfigFlatTab(
+                                key = "${id}_${type}_genre_$genre", 
+                                displayName = "$name : $capitalizedGenre  - $displayType", 
+                                isGenre = true, 
+                                catalogKey = "${id}_${type}",
+                                isChecked = prefs.getBoolean("tab_enabled_${uniqueId}_${id}_${type}_genre_$genre", true)
+                            ))
                         }
                     }
                 }
@@ -1170,7 +1193,11 @@ class SettingsBottomFragment(
             
             fun updateVisibleTabs() {
                 visibleTabs = masterTabs.filter { tab ->
-                    if (tab.isGenre) prefs.getBoolean("genres_enabled_${uniqueId}_${tab.catalogKey}", true) else true
+                    // 🚨 디스크의 이전 값을 실시간 호출하지 않고, 변경 중인 상태인 tab.isGenresEnabled 값을 참고하도록 변경
+                    if (tab.isGenre) {
+                        val parentTab = masterTabs.find { !it.isGenre && it.catalogKey == tab.catalogKey }
+                        parentTab?.isGenresEnabled ?: true
+                    } else true
                 }.toMutableList()
                 
                 if (rv.isComputingLayout) {
@@ -1179,6 +1206,8 @@ class SettingsBottomFragment(
                     notifyDataSetChanged()
                 }
             }
+            
+        
 
             inner class VH(val view: LinearLayout, val checkbox: CheckBox, val etOrder: EditText, val genreSwitch: Switch, val dragHandle: ImageView) : RecyclerView.ViewHolder(view)
 
@@ -1235,15 +1264,15 @@ class SettingsBottomFragment(
 
             override fun onBindViewHolder(holder: VH, position: Int) {
                 val tab = visibleTabs[position]
-                val enabledKey = "tab_enabled_${uniqueId}_${tab.key}"
                 
                 holder.checkbox.setOnCheckedChangeListener(null)
-                holder.checkbox.isChecked = prefs.getBoolean(enabledKey, true)
+                holder.checkbox.isChecked = tab.isChecked // 🚨 임시 인메모리 플래그 참조
                 holder.checkbox.text = tab.displayName
                 holder.checkbox.setOnCheckedChangeListener { _, isChecked ->
-                    prefs.edit().putBoolean(enabledKey, isChecked).apply()
-                    val checkedTabs = masterTabs.filter { prefs.getBoolean("tab_enabled_${uniqueId}_${it.key}", true) }
-                    val uncheckedTabs = masterTabs.filter { !prefs.getBoolean("tab_enabled_${uniqueId}_${it.key}", true) }
+                    tab.isChecked = isChecked // 🚨 디스크에 즉시 저장하지 않고 인메모리 값만 갱신
+                    
+                    val checkedTabs = masterTabs.filter { it.isChecked }
+                    val uncheckedTabs = masterTabs.filter { !it.isChecked }
                     masterTabs.clear()
                     masterTabs.addAll(checkedTabs)
                     masterTabs.addAll(uncheckedTabs)
@@ -1252,11 +1281,10 @@ class SettingsBottomFragment(
 
                 if (!tab.isGenre && masterTabs.any { it.isGenre && it.catalogKey == tab.catalogKey }) {
                     holder.genreSwitch.visibility = View.VISIBLE
-                    val genresEnabledKey = "genres_enabled_${uniqueId}_${tab.catalogKey}"
                     holder.genreSwitch.setOnCheckedChangeListener(null)
-                    holder.genreSwitch.isChecked = prefs.getBoolean(genresEnabledKey, true)
+                    holder.genreSwitch.isChecked = tab.isGenresEnabled // 🚨 임시 인메모리 플래그 참조
                     holder.genreSwitch.setOnCheckedChangeListener { _, isChecked ->
-                        prefs.edit().putBoolean(genresEnabledKey, isChecked).apply()
+                        tab.isGenresEnabled = isChecked // 🚨 디스크에 즉시 저장하지 않고 인메모리 값만 갱신
                         updateVisibleTabs()
                     }
                 } else {
@@ -1302,8 +1330,8 @@ class SettingsBottomFragment(
                     if (oldPos !in visibleTabs.indices) return@post
                     val item = visibleTabs[oldPos]
                     
-                    val isEnabled = prefs.getBoolean("tab_enabled_${uniqueId}_${item.key}", true)
-                    val checkedCount = visibleTabs.count { prefs.getBoolean("tab_enabled_${uniqueId}_${it.key}", true) }
+                    val isEnabled = item.isChecked // 🚨 임시 인메모리 플래그 참조
+                    val checkedCount = visibleTabs.count { it.isChecked } // 🚨 임시 인메모리 플래그 참조
                     
                     val groupMin = if (isEnabled) 1 else checkedCount + 1
                     val groupMax = if (isEnabled) checkedCount else visibleTabs.size
@@ -1408,11 +1436,22 @@ class SettingsBottomFragment(
         setupCustomDialog(dialog, dialogContainer)
 
         saveBtn.setOnClickListener {
+            val editor = prefs.edit()
             val keysToSave = JSONArray()
-            masterTabs.forEach { keysToSave.put(it.key) }
-            prefs.edit().putString(orderKey, keysToSave.toString()).apply()
             
-            // 🚨 [기능 수정] 토스트 메시지 대신 팝업 경고 다이얼로그 호출
+            // 🚨 그동안 모아두었던 체크박스 및 장르 토글 임시 상태값들을 이 시점에 비로소 최종 보관 처리합니다.
+            masterTabs.forEach { 
+                keysToSave.put(it.key)
+                editor.putBoolean("tab_enabled_${uniqueId}_${it.key}", it.isChecked)
+                if (!it.isGenre) {
+                    editor.putBoolean("genres_enabled_${uniqueId}_${it.catalogKey}", it.isGenresEnabled)
+                }
+            }
+            editor.putString(orderKey, keysToSave.toString())
+            
+            // 데이터 동합성을 위해 commit()으로 물리 디스크에 즉각 플러시합니다.
+            editor.commit()
+            
             dialog.dismiss()
             showSavedPopup(context, "Catalog Settings", "Catalog settings saved. Reload to apply.")
         }
