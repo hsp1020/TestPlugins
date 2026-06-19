@@ -297,13 +297,17 @@ open class YoutubeExtractor : ExtractorApi() {
         val indexRange: String?
     )
 
+    // 추가된 부분: 다국어 오디오 메타데이터를 저장하기 위해 필드 확장
     data class AudioInfo(
         val url: String,
         val mimeType: String,
         val codec: String,
         val bitrate: Int,
         val initRange: String?,
-        val indexRange: String?
+        val indexRange: String?,
+        val language: String? = null,
+        val audioTrackId: String? = null,
+        val displayName: String? = null
     )
 
     private fun getAppRedirectUrl(packageName: String, targetUrl: String): String? {
@@ -328,6 +332,28 @@ open class YoutubeExtractor : ExtractorApi() {
         val visitorData = VISITOR_DATA_REGEX.find(html)?.groupValues?.get(1) ?: ""
         val sts = STS_REGEX.find(html)?.groupValues?.get(1)?.toIntOrNull() ?: 0
 
+        // --- 추가된 부분: 쿠키 및 인증(SAPISID) 헤더 생성 (다국어 오디오 트랙 응답 유도용) ---
+        val context = com.lagradost.cloudstream3.AcraApplication.context
+        val prefs = context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
+        val langCode = prefs?.getString("youtube_language", "ko") ?: "ko"
+        
+        val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(prefs, langCode, visitorData, false)
+        
+        val authHeaders = mutableMapOf(
+            "User-Agent" to YoutubeUtils.ANDROID_VR_USER_AGENT,
+            "X-YouTube-Client-Name" to "28",
+            "X-YouTube-Client-Version" to "1.65.10",
+            "Content-Type" to "application/json"
+        )
+        if (cookies.isNotBlank()) {
+            authHeaders["Cookie"] = cookies
+        }
+        if (!sapisidVal.isNullOrBlank()) {
+            authHeaders["Authorization"] = YoutubeUtils.getSapisidHash(sapisidVal, "https://www.youtube.com")
+            authHeaders["X-Origin"] = "https://www.youtube.com"
+        }
+        // ---------------------------------------------------------------------------------
+
         val androidApiKey = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
         val apiUrl = "https://www.youtube.com/youtubei/v1/player?key=$androidApiKey"
 
@@ -342,8 +368,8 @@ open class YoutubeExtractor : ExtractorApi() {
                     "osVersion" to "12L",
                     "deviceMake" to "Oculus",
                     "deviceModel" to "Quest 3",
-                    "hl" to "en",
-                    "gl" to "US",
+                    "hl" to langCode,
+                    "gl" to if (langCode == "ko") "KR" else "US",
                     "visitorData" to visitorData
                 )
             ),
@@ -353,17 +379,11 @@ open class YoutubeExtractor : ExtractorApi() {
                 )
             )
         )
-        
-        val vrHeaders = mapOf(
-            "User-Agent" to YoutubeUtils.ANDROID_VR_USER_AGENT,
-            "X-YouTube-Client-Name" to "28",
-            "X-YouTube-Client-Version" to "1.65.10",
-            "Content-Type" to "application/json"
-        )
 
         try {
             println("[YT_DEBUG_EXTRACTOR] ANDROID_VR API 직접 호출 중... (sts: $sts)")
-            val vrRes = app.post(apiUrl, json = vrPayload, headers = vrHeaders).text
+            // 기존 vrHeaders 대신 다국어 인증 정보가 담긴 authHeaders 사용
+            val vrRes = app.post(apiUrl, json = vrPayload, headers = authHeaders).text
             val vrJson = JSONObject(vrRes)
             val status = vrJson.optJSONObject("playabilityStatus")?.optString("status")
             
@@ -386,8 +406,8 @@ open class YoutubeExtractor : ExtractorApi() {
                             "client" to mapOf(
                                 "clientName" to "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
                                 "clientVersion" to "2.0",
-                                "hl" to "en",
-                                "gl" to "US",
+                                "hl" to langCode,
+                                "gl" to if (langCode == "ko") "KR" else "US",
                                 "visitorData" to visitorData
                             ),
                             "thirdParty" to mapOf("embedUrl" to "https://www.youtube.com")
@@ -398,7 +418,13 @@ open class YoutubeExtractor : ExtractorApi() {
                             )
                         )
                     )
-                    val tvRes = app.post(tvApiUrl, json = tvPayload).text
+                    
+                    val tvHeaders = authHeaders.toMutableMap()
+                    tvHeaders["User-Agent"] = YoutubeUtils.CHROME_USER_AGENT
+                    tvHeaders["X-YouTube-Client-Name"] = "TVHTML5_SIMPLY_EMBEDDED_PLAYER"
+                    tvHeaders["X-YouTube-Client-Version"] = "2.0"
+                    
+                    val tvRes = app.post(tvApiUrl, json = tvPayload, headers = tvHeaders).text
                     val tvJson = JSONObject(tvRes)
                     val tvLengthSeconds = tvJson.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
                     println("[YT_DEBUG_EXTRACTOR] TV API 응답 상태: ${tvJson.optJSONObject("playabilityStatus")?.optString("status")}")
@@ -541,7 +567,26 @@ open class YoutubeExtractor : ExtractorApi() {
                         val bitrate = format.optInt("bitrate", 128000)
                         if (codec.isEmpty()) codec = if (cleanMimeType.contains("webm")) "opus" else "mp4a.40.2"
                         
-                        audioInfoList.add(AudioInfo(streamUrl, cleanMimeType, codec, bitrate, initR, indexR))
+                        // --- 추가된 부분: Audio Track 메타데이터 파싱 (다국어 식별용) ---
+                        var language = format.optString("language", "").ifEmpty { null }
+                        var audioTrackId = format.optString("audioTrackId", "").ifEmpty { null }
+                        var trackDisplayName = format.optString("language", "") // fallback
+                        
+                        val audioTrack = format.optJSONObject("audioTrack")
+                        if (audioTrack != null) {
+                            audioTrackId = audioTrack.optString("id", audioTrackId)
+                            trackDisplayName = audioTrack.optString("displayName", trackDisplayName)
+                            if (language == null && trackDisplayName.isNotBlank()) {
+                                language = trackDisplayName 
+                            }
+                        }
+                        
+                        if (language == null && trackDisplayName.isBlank()) {
+                            language = "Original" // 메타데이터가 아예 없으면 기본 원본으로 간주
+                        }
+                        // ----------------------------------------------------------------
+                        
+                        audioInfoList.add(AudioInfo(streamUrl, cleanMimeType, codec, bitrate, initR, indexR, language, audioTrackId, trackDisplayName))
                     }
                 }
 
@@ -592,15 +637,20 @@ open class YoutubeExtractor : ExtractorApi() {
                 if (videoOnlyList.isNotEmpty() && audioInfoList.isNotEmpty()) {
                     startServerIfNeeded()
 
-                    for (video in videoOnlyList.distinctBy { it.height }) {
-                        val bestAudio = if (video.mimeType.contains("webm")) {
-                            audioInfoList.maxByOrNull { if (it.mimeType.contains("webm")) it.bitrate + 1000000 else it.bitrate }
-                        } else {
-                            audioInfoList.maxByOrNull { if (it.mimeType.contains("mp4")) it.bitrate + 1000000 else it.bitrate }
+                    // --- 수정된 부분: 단일 오디오가 아닌 언어(트랙)별로 최상위 오디오들을 리스트로 묶음 ---
+                    val groupedAudio = audioInfoList.groupBy { it.language ?: it.audioTrackId ?: "Original" }
+                    val bestAudioList = groupedAudio.mapNotNull { (_, tracks) ->
+                        tracks.maxByOrNull { 
+                            val bonus = if (it.mimeType.contains("webm")) 1000000 else 0
+                            it.bitrate + bonus 
                         }
+                    }
+                    // ----------------------------------------------------------------------------------
 
-                        if (bestAudio != null) {
-                            val dashXml = buildDashManifestXml(video, listOf(bestAudio), durationSeconds)
+                    for (video in videoOnlyList.distinctBy { it.height }) {
+                        if (bestAudioList.isNotEmpty()) {
+                            // 다국어 오디오 리스트를 모두 DASH 생성기로 전달
+                            val dashXml = buildDashManifestXml(video, bestAudioList, durationSeconds)
                             val localLink = registerManifestAndGetUrl(dashXml)
 
                             if (localLink != null) {
@@ -716,8 +766,11 @@ open class YoutubeExtractor : ExtractorApi() {
                 """<SegmentBase indexRange="${audio.indexRange}"><Initialization range="${audio.initRange}" /></SegmentBase>"""
             } else ""
 
+            // --- 추가된 부분: lang 속성을 삽입하여 플레이어(ExoPlayer)에 다국어 오디오 메뉴 활성화 ---
+            val langAttribute = if (!audio.language.isNullOrBlank()) """ lang="${audio.language}"""" else ""
+
             sb.append("""
-                <AdaptationSet mimeType="${audio.mimeType}" subsegmentAlignment="true" subsegmentStartsWithSAP="1">
+                <AdaptationSet mimeType="${audio.mimeType}"$langAttribute subsegmentAlignment="true" subsegmentStartsWithSAP="1">
                   <Representation id="$audioId" bandwidth="${if(audio.bitrate>0) audio.bitrate else 128000}" codecs="${audio.codec}">
                     <BaseURL>$proxyAudioUrl</BaseURL>
                     $aSegmentBase
