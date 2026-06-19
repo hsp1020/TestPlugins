@@ -19,8 +19,8 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.sync.Semaphore         // ⭐ 세마포어 적용을 위해 추가됨
-import kotlinx.coroutines.sync.withPermit       // ⭐ 세마포어 적용을 위해 추가
+import kotlinx.coroutines.sync.Semaphore         // ⭐ 세마포어 적용 임포트
+import kotlinx.coroutines.sync.withPermit       // ⭐ 세마포어 적용 임포트
 import org.jsoup.nodes.Element
 import java.net.URLDecoder
 import java.net.URLEncoder
@@ -32,7 +32,17 @@ class TvchakProvider : MainAPI() {
         var isDomainChecked = false
         private val domainMutex = Mutex()
         private val cfMutex = Mutex() // ⭐ CF 동시 다발적 우회를 막기 위한 자물쇠 추가
+        private const val PREFS_NAME = "TvChak_Domain_Cache"
+        private const val PREF_KEY = "current_domain"
+
+        fun saveDomain(newDomain: String) {
+            currentMainUrl = newDomain
+            AcraApplication.context?.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                ?.edit()?.putString(PREF_KEY, newDomain)?.apply()
+            println("TVCHAK_DEBUG: [Tvchak DBG] 💾 영구 도메인 저장 완료: $newDomain")
+        }
     }
+
 
     override var mainUrl = currentMainUrl
     override var name = "TVChak"
@@ -49,7 +59,7 @@ class TvchakProvider : MainAPI() {
         "4" to "애니"
     )
 
-    // ⭐ 카탈로그 동시 요청을 최대 2개로 제한하는 세마포어 추가
+    // ⭐ 카탈로그 동시 요청을 최대 2개로 제어하는 세마포어 추가
     private val mainPageSemaphore = Semaphore(2)
 
     // =========================================================================
@@ -236,7 +246,6 @@ class TvchakProvider : MainAPI() {
     // [Cloudflare 우회용 변수 및 함수 추가 끝]
     // =========================================================================
 
-    // ⭐ 기존 오리지널 로직 그대로 100% 원상 복구 (빌드 오류 완벽 해소)
     private suspend fun checkAndUpdateDomain() {
         if (isDomainChecked) return
 
@@ -326,7 +335,7 @@ class TvchakProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         checkAndUpdateDomain()
         
-        // ⭐ 세마포어로 동시 요청 개수만 2개로 제한 (로직 수정 없음)
+        // ⭐ 메인 페이지 호출에만 정밀하게 세마포어 적용 (이전 오리지널 try-catch 그대로 복구)
         return mainPageSemaphore.withPermit {
             try {
                 val url = "$mainUrl/index.php/vod/show/id/${request.data}/page/$page.html"
