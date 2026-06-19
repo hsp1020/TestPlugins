@@ -1,4 +1,3 @@
-// 파일명: hsp1020/testplugins/TestPlugins-d1a26fae88cb55c8f1d621560cf4e45bd7fd78f6/AnilifeProvider/src/main/kotlin/com/Anilife/Extractor.kt
 package com.anilife
 
 import android.util.Base64
@@ -144,6 +143,10 @@ class AnilifeProxyExtractor : ExtractorApi() {
             return true
 
         } catch (e: Exception) {
+            // [진단 로그 실행] Extractor 비디오 파싱/로딩 중 에러가 나면 원인을 진단합니다.
+            CoroutineScope(Dispatchers.Default).launch {
+                AnilifeDiagnostic.diagnose(playerUrl, e, cleanHeaders)
+            }
             return false
         }
     }
@@ -174,7 +177,6 @@ class AnilifeProxyExtractor : ExtractorApi() {
                     while (isRunning && serverSocket != null && !serverSocket!!.isClosed) { 
                         try { 
                             val socket = serverSocket!!.accept()
-                            // [수정: 블로킹 I/O 코루틴 스레드 풀 할당]
                             launch(Dispatchers.IO) { handleClient(socket) } 
                         } catch (e: Exception) {
                             delay(100L)
@@ -189,7 +191,6 @@ class AnilifeProxyExtractor : ExtractorApi() {
             try { serverSocket?.close(); serverSocket = null } catch (e: Exception) {} 
         }
 
-        // [수정: 명시적 I/O 분리 컨텍스트 적용]
         private suspend fun handleClient(socket: Socket) = withContext(Dispatchers.IO) {
             try {
                 socket.soTimeout = 5000
