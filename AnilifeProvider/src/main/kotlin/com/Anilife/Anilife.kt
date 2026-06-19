@@ -20,8 +20,7 @@ class Anilife : MainAPI() {
 
     // 이미지 403 방지를 위한 전용 헤더 (슬래시 조정을 통한 핫링크 우회 테스트)
     private val posterHeadersMap = mapOf(
-        "User-Agent" to pcUserAgent,
-        "Referer" to "https://anilife.live" 
+        "User-Agent" to pcUserAgent
     )
 
     private val commonHeaders = mapOf(
