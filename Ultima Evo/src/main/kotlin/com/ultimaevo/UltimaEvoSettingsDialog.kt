@@ -579,9 +579,12 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                             }
                         }
                     }
-                    
+
                     editor.commit()
-                    APIHolder.allProviders.forEach { p -> if (p is UltimaEvoProvider) p.invalidateCache() }
+                    
+                    withContext(Dispatchers.Main) {
+                        // 🚨 [수정] 캐시 무효화 작업을 메인 UI 스레드로 격리하여 홈 화면 갱신 스레드와 겹치는 현상 차단
+                        APIHolder.allProviders.forEach { p -> if (p is UltimaEvoProvider) p.invalidateCache() }
                     
                     // 🚨 [수정] SettingsBottomFragment와 완벽하게 대칭되는 Save & Reload (No/Yes) 커스텀 팝업 구현
                     withContext(Dispatchers.Main) {
@@ -1081,9 +1084,10 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 editor.putString("evo_active_cats_json_$instanceId", jsonStr)
                 editor.commit()
 
-                APIHolder.allProviders.forEach { p -> if (p is UltimaEvoProvider) p.invalidateCache() }
-                
                 withContext(Dispatchers.Main) { 
+                    // 🚨 [수정] 캐시 무효화 작업을 메인 UI 스레드로 격리하여 데이터 정합성 보장
+                    APIHolder.allProviders.forEach { p -> if (p is UltimaEvoProvider) p.invalidateCache() }
+                    
                     dialog.dismiss() 
                     showSavedPopup(ctx, "Catalog Settings", "Catalog settings saved. Reload to apply.")
                 }
