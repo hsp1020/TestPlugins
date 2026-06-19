@@ -586,8 +586,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         // 🚨 [수정] 캐시 무효화 작업을 메인 UI 스레드로 격리하여 홈 화면 갱신 스레드와 겹치는 현상 차단
                         APIHolder.allProviders.forEach { p -> if (p is UltimaEvoProvider) p.invalidateCache() }
                     
-                    // 🚨 [수정] SettingsBottomFragment와 완벽하게 대칭되는 Save & Reload (No/Yes) 커스텀 팝업 구현
-                    withContext(Dispatchers.Main) {
+                        // 🚨 [수정] 괄호 짝을 깨뜨리던 중복 withContext 블록 제거 및 통합 완료
                         val cancelBtn = Button(ctx).apply {
                             text = "No"
                             setTextColor(Color.WHITE)
