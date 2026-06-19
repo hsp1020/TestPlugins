@@ -99,13 +99,24 @@ class CUTVProvider(private val sharedPref: SharedPreferences) : MainAPI() {
         } catch (e: Exception) { null }
     }
 
+    // 진짜 Cloudflare 우회가 풀렸을 때만 호출 (쿠키 즉시 파기 및 우회 요구)
     private fun getCookieErrorResponse(requestName: String): HomePageResponse {
-        // [핵심 변경점] 에러 판단 시 저장된 수명이 다한 쿠키를 즉시 파기합니다.
         sharedPref.edit().remove("cf_cookies").remove("cf_user_agent").apply()
         cfCookies = null
         cfUserAgent = null
 
         val errorItem = newLiveSearchResponse(name = "쿠키를 최신화해주세요", url = mainUrl) {
+            this.posterUrl = "" 
+        }
+        return newHomePageResponse(
+            list = listOf(HomePageList(requestName, listOf(errorItem), isHorizontalImages = true)),
+            hasNext = false
+        )
+    }
+
+    // [신규] 우회는 성공했으나 단순히 중계 중인 경기가 없을 때 호출 (쿠키는 건드리지 않고 보존)
+    private fun getNoMatchesResponse(requestName: String): HomePageResponse {
+        val errorItem = newLiveSearchResponse(name = "중계 중인 경기가 없습니다", url = mainUrl) {
             this.posterUrl = "" 
         }
         return newHomePageResponse(
@@ -180,6 +191,7 @@ class CUTVProvider(private val sharedPref: SharedPreferences) : MainAPI() {
 
             var doc = app.get(url, headers = defaultHeaders).document
 
+            // 1. Cloudflare 챌린지 감지 단계
             if (isCloudflareChallenge(doc.html())) {
                 cfCookies = null
                 cfUserAgent = null
@@ -191,19 +203,23 @@ class CUTVProvider(private val sharedPref: SharedPreferences) : MainAPI() {
                     
                     doc = app.get(url, headers = defaultHeaders).document
                     
+                    // 우회 성공했는데도 또 챌린지 화면이 호출되는 특수 케이스 -> 완전 만료로 판단하고 우회 요구
                     if (isCloudflareChallenge(doc.html())) {
                         return getCookieErrorResponse(request.name)
                     }
                 } else {
+                    // 우회 자동 해결 실패 시 우회 요구
                     return getCookieErrorResponse(request.name)
                 }
             }
 
+            // 2. 파싱 및 스크래핑 단계 (여기 진입했다는 것은 Cloudflare 우회는 정상인 상태)
             val iframeSrc = doc.select("iframe").mapNotNull { it.attr("src") }
                 .firstOrNull { it.contains("galaxy-stream") || it.contains("hudtv") || it.contains("cli") }
 
             if (iframeSrc.isNullOrBlank()) {
-                return getCookieErrorResponse(request.name)
+                // 우회는 성공했으나 iframe 주소가 비어있는 경우 -> 사이트 구조상 중계가 아예 없는 시점
+                return getNoMatchesResponse(request.name)
             }
 
             val iframeHtml = app.get(iframeSrc, headers = defaultHeaders, referer = url).text
@@ -291,11 +307,13 @@ class CUTVProvider(private val sharedPref: SharedPreferences) : MainAPI() {
             }
         } catch (e: Exception) {
             e.printStackTrace()
-            return getCookieErrorResponse(request.name)
+            // 일반 예외 발생 시(네트워크 일시 지연 등) 쿠키를 파기하지 않고 경기 없음 상태로 안전 반환
+            return getNoMatchesResponse(request.name)
         }
 
+        // 3. 우회는 성공했으나 실시간으로 스크래핑된 경기가 단 하나도 없을 때
         if (items.isEmpty()) {
-            return getCookieErrorResponse(request.name)
+            return getNoMatchesResponse(request.name)
         }
 
         return newHomePageResponse(
