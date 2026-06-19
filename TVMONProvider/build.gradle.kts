@@ -13,5 +13,5 @@ cloudstream {
         "Anime"
     )
     
-    iconUrl = "https://tvmon.site/img/111.png"
+    iconUrl = "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/TVMONProvider/111.png"
 }
