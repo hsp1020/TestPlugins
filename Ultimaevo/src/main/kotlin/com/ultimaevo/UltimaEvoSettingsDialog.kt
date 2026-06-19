@@ -14,6 +14,7 @@ import android.os.SystemClock
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
+import android.util.Base64 // ◀️ [추가] 누락되었던 Base64 임포트 패키지 기입
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
@@ -37,6 +38,7 @@ import java.io.ByteArrayOutputStream
 import java.util.Collections
 import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
+import kotlin.text.Charsets // ◀️ [추가] Charsets 명시적 임포트
 
 class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
@@ -131,7 +133,10 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     try {
                         val backupStr = withContext(Dispatchers.IO) {
                             val json = JSONObject()
-                            prefs.all.forEach { (key, value) -> json.put(key, value) }
+                            // ◀️ [컴파일러 에러 해결] 타입 추론 버그 방지를 위해 구조분해 일반 for 루프로 우회
+                            for ((key, value) in prefs.all) {
+                                json.put(key, value)
+                            }
                             val bos = ByteArrayOutputStream()
                             GZIPOutputStream(bos).use { it.write(json.toString().toByteArray(Charsets.UTF_8)) }
                             Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
@@ -572,7 +577,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val providerSettingsCard = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL; setPadding(25, 25, 25, 25); background = getCardBg(); layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, 20) } }
         val headerRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         
-        // 🔥 "Provider Settings"로 헤더 명칭 변경 완료
         headerRow.addView(TextView(ctx).apply { text = "Provider Settings"; setTextColor(Color.WHITE); textSize = 14f; typeface = android.graphics.Typeface.DEFAULT_BOLD; layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) })
         val toggleArrow = TextView(ctx).apply { text = "▼"; setTextColor(Color.WHITE); textSize = 14f; setPadding(15, 10, 15, 10) }
         headerRow.addView(toggleArrow); providerSettingsCard.addView(headerRow)
@@ -585,7 +589,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             setFadingEdgeLength(120)
         }
 
-        // 임시 변경 상태를 보존하기 위한 Map 버퍼 구성
         val tempActiveSettings = mutableMapOf<String, Boolean>()
         val tempAutoAddSettings = mutableMapOf<String, Boolean>()
 
@@ -781,7 +784,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val catalogAdapter = CatalogAdapter()
         rvCatalogs.adapter = catalogAdapter
 
-        // 🔥 활성화 여부에 기반한 하단 카탈로그 목록 유동적 정밀 필터링(숨김/노출) 및 매칭 함수 정의
         fun updateVisibleCatalogs() {
             visibleCatalogList.clear()
             val filtered = allCatalogList.filter { item ->
@@ -809,7 +811,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     textSize = 13f
                     layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) 
                 }
-                // 🔥 "활성화" 및 "오토 애드" 이중 토글 컨트롤 분할 설계
                 val swActive = Switch(ctx).apply {
                     text = "활성화"
                     setTextColor(Color.WHITE)
@@ -821,7 +822,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     setTextColor(Color.WHITE)
                     textSize = 12f
                     layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                        setMargins(40, 0, 0, 0) // 조작 편리성을 보장하는 여백 확보
+                        setMargins(40, 0, 0, 0) 
                     }
                 }
                 
@@ -843,12 +844,12 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 
                 holder.swAutoAdd.setOnCheckedChangeListener(null)
                 holder.swAutoAdd.isChecked = isAutoAdd
-                holder.swAutoAdd.isEnabled = isActive // "활성화" 꺼짐 시 "오토 애드" 자동 조작 차단(비활성화)
+                holder.swAutoAdd.isEnabled = isActive 
                 
                 holder.swActive.setOnCheckedChangeListener { _, isChecked -> 
                     tempActiveSettings[pName] = isChecked
                     holder.swAutoAdd.isEnabled = isChecked
-                    updateVisibleCatalogs() // 프로바이더 설정 변화를 카탈로그 리스트에 즉각 실시간 동기화
+                    updateVisibleCatalogs() 
                 }
                 
                 holder.swAutoAdd.setOnCheckedChangeListener { _, isChecked -> 
@@ -897,7 +898,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         touchHelper.attachToRecyclerView(rvCatalogs)
         mainContainer.addView(rvCatalogs)
 
-        // 초기 실행 시 목록 필터링 상태 적용
         updateVisibleCatalogs()
 
         val footer = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, 30, 0, 0) }
@@ -922,7 +922,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     editor.putString("cat_rename_${instanceId}_${item.providerName}_${item.catalogName}", item.customName)
                     editor.putString("cat_order_${instanceId}_${item.providerName}_${item.catalogName}", finalOrder.toString())
                     
-                    // 활성화된 프로바이더 소속이면서 체크 완료된 카탈로그들만 실제 제공 데이터 리스트에 기입
                     val isProviderActive = tempActiveSettings[item.providerName] ?: true
                     if (isProviderActive && item.isChecked) {
                         val origData = APIHolder.allProviders.find { it.name == item.providerName }?.mainPage?.find { it.name == item.catalogName }?.data ?: ""
