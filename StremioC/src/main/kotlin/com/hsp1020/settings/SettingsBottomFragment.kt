@@ -262,7 +262,7 @@ class SettingsBottomFragment(
                 setTextColor(Color.WHITE)
                 typeface = android.graphics.Typeface.DEFAULT_BOLD
                 setPadding(0, 0, 0, 20)
-                gravity = Gravity.CENTER
+                gravity = android.view.Gravity.CENTER // 🚨 올바른 참조 경로로 변경
             })
             addView(TextView(ctx).apply {
                 text = message
@@ -288,6 +288,8 @@ class SettingsBottomFragment(
         }
         dlg.show()
     }
+
+
 
     @SuppressLint("DiscouragedApi")
     override fun onCreateView(
