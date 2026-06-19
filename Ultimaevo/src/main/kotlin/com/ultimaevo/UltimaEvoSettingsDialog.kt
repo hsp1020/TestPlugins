@@ -14,7 +14,6 @@ import android.os.SystemClock
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
-import android.util.Base64
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
@@ -42,7 +41,7 @@ import java.util.zip.GZIPOutputStream
 class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
     private var lastClickTime: Long = 0
-    private var activeAlertDialog: AlertDialog? = null // 🔥 [누수 방지] 클래스 전역 수동 소멸 감시 필드 선언
+    private var activeAlertDialog: AlertDialog? = null
 
     data class InstanceData(var originalId: Int, var name: String, var visibility: Boolean, var search: Boolean)
     private var maxIdGen = 1
@@ -198,8 +197,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         val parsedJson = withContext(Dispatchers.IO) {
                             val decodedBytes = Base64.decode(clipboardText, Base64.NO_WRAP)
                             val jsonString = try {
-                                val bais = java.io.ByteArrayInputStream(decodedBytes)
-                                java.util.zip.GZIPInputStream(bais).bufferedReader(Charsets.UTF_8).readText()
+                                val bais = ByteArrayInputStream(decodedBytes)
+                                GZIPInputStream(bais).bufferedReader(Charsets.UTF_8).readText()
                             } catch (e: Exception) { String(decodedBytes, Charsets.UTF_8) }
                             JSONObject(jsonString)
                         }
@@ -299,7 +298,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                             resultDlg.show()
                         }
                         dlg.show()
-
                     } catch (e: Exception) {
                         e.printStackTrace()
                         val errContainer = LinearLayout(ctx).apply {
@@ -466,9 +464,9 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             override fun onBindViewHolder(holder: VH, position: Int) {
                 val data = instanceMemoryList[position]
                 
-                holder.targetData = null // 🔥 [메모리 최적화] 스크롤 시 불필요 객체 생성 방지를 위해 참조 클리어
+                holder.targetData = null 
                 holder.nameInput.setText(data.name)
-                holder.targetData = data // 새로운 데이터 주소 바인딩
+                holder.targetData = data 
                 
                 holder.visSwitch.setOnCheckedChangeListener(null)
                 holder.visSwitch.isChecked = data.visibility
@@ -573,7 +571,9 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         
         val providerSettingsCard = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL; setPadding(25, 25, 25, 25); background = getCardBg(); layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, 20) } }
         val headerRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        headerRow.addView(TextView(ctx).apply { text = "Provider Auto-Add Settings"; setTextColor(Color.WHITE); textSize = 14f; typeface = android.graphics.Typeface.DEFAULT_BOLD; layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) })
+        
+        // 🔥 "Provider Settings"로 헤더 명칭 변경 완료
+        headerRow.addView(TextView(ctx).apply { text = "Provider Settings"; setTextColor(Color.WHITE); textSize = 14f; typeface = android.graphics.Typeface.DEFAULT_BOLD; layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) })
         val toggleArrow = TextView(ctx).apply { text = "▼"; setTextColor(Color.WHITE); textSize = 14f; setPadding(15, 10, 15, 10) }
         headerRow.addView(toggleArrow); providerSettingsCard.addView(headerRow)
 
@@ -585,82 +585,22 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             setFadingEdgeLength(120)
         }
 
-        data class ProviderData(val pName: String, var isChecked: Boolean)
-        val providerList = mutableListOf<ProviderData>()
+        // 임시 변경 상태를 보존하기 위한 Map 버퍼 구성
+        val tempActiveSettings = mutableMapOf<String, Boolean>()
         val tempAutoAddSettings = mutableMapOf<String, Boolean>()
 
         for (provider in allProviders) {
             val pName = provider.name
-            val isChecked = prefs.getBoolean("auto_add_${instanceId}_$pName", false)
-            providerList.add(ProviderData(pName, isChecked))
-            tempAutoAddSettings[pName] = isChecked
-        }
-
-        val initProvChecked = providerList.filter { it.isChecked }
-        val initProvUnchecked = providerList.filter { !it.isChecked }
-        providerList.clear()
-        providerList.addAll(initProvChecked)
-        providerList.addAll(initProvUnchecked)
-
-        class ProviderAdapter : RecyclerView.Adapter<ProviderAdapter.PVH>() {
-            inner class PVH(val view: LinearLayout, val tvName: TextView, val switch: Switch) : RecyclerView.ViewHolder(view)
+            val isActive = prefs.getBoolean("provider_enabled_${instanceId}_$pName", true)
+            val isAutoAdd = prefs.getBoolean("auto_add_${instanceId}_$pName", false)
             
-            override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): PVH {
-                val row = LinearLayout(ctx).apply { 
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = android.view.Gravity.CENTER_VERTICAL
-                    setPadding(0, 15, 0, 15) 
-                }
-                val tv = TextView(ctx).apply { 
-                    setTextColor(Color.LTGRAY)
-                    textSize = 13f
-                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) 
-                }
-                val sw = Switch(ctx) 
-                
-                row.addView(tv); row.addView(sw)
-                return PVH(row, tv, sw)
-            }
-            
-            override fun onBindViewHolder(holder: PVH, position: Int) {
-                val data = providerList[position]
-                holder.tvName.text = data.pName
-                
-                holder.switch.setOnCheckedChangeListener(null)
-                holder.switch.isChecked = data.isChecked
-
-                holder.switch.setOnCheckedChangeListener { _, isChecked -> 
-                    if (data.isChecked == isChecked) return@setOnCheckedChangeListener
-                    data.isChecked = isChecked
-                    tempAutoAddSettings[data.pName] = isChecked 
-                    
-                    val checkedItems = providerList.filter { it.isChecked }
-                    val uncheckedItems = providerList.filter { !it.isChecked }
-                    providerList.clear()
-                    providerList.addAll(checkedItems)
-                    providerList.addAll(uncheckedItems)
-                    
-                    // 🚨 레이아웃을 다시 그리는 도중 데이터 변경 알림이 발생하는 타이밍 방어
-                    if (rvProviders.isComputingLayout) {
-                        rvProviders.post { notifyDataSetChanged() }
-                    } else {
-                        notifyDataSetChanged()
-                    }
-                }             
-            }
-            override fun getItemCount() = providerList.size
+            tempActiveSettings[pName] = isActive
+            tempAutoAddSettings[pName] = isAutoAdd
         }
-        rvProviders.adapter = ProviderAdapter()
-        providerSettingsCard.addView(rvProviders)
-
-        headerRow.setOnClickListener {
-            if (rvProviders.visibility == View.VISIBLE) { rvProviders.visibility = View.GONE; toggleArrow.text = "▼" } 
-            else { rvProviders.visibility = View.VISIBLE; toggleArrow.text = "▲" }
-        }
-        mainContainer.addView(providerSettingsCard)
 
         data class CatalogData(val providerName: String, val catalogName: String, var isChecked: Boolean, var customName: String, var orderIndex: Int)
-        val catalogList = mutableListOf<CatalogData>()
+        val allCatalogList = mutableListOf<CatalogData>()
+        val visibleCatalogList = mutableListOf<CatalogData>()
 
         for (provider in allProviders) {
             val staticCats = provider.mainPage.map { it.name }
@@ -672,15 +612,9 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 val isChecked = prefs.getBoolean("cat_toggle_${instanceId}_${provider.name}_$cName", isAutoAdd)
                 val customName = prefs.getString("cat_rename_${instanceId}_${provider.name}_$cName", cName) ?: cName
                 val orderIndex = prefs.getString("cat_order_${instanceId}_${provider.name}_$cName", "999")?.toIntOrNull() ?: 999
-                catalogList.add(CatalogData(provider.name, cName, isChecked, customName, orderIndex))
+                allCatalogList.add(CatalogData(provider.name, cName, isChecked, customName, orderIndex))
             }
         }
-
-        val initChecked = catalogList.filter { it.isChecked }.sortedBy { it.orderIndex }
-        val initUnchecked = catalogList.filter { !it.isChecked }.sortedBy { it.orderIndex }
-        catalogList.clear()
-        catalogList.addAll(initChecked)
-        catalogList.addAll(initUnchecked)
 
         val rvCatalogs = RecyclerView(ctx).apply { 
             layoutManager = LinearLayoutManager(ctx)
@@ -688,8 +622,10 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             isVerticalFadingEdgeEnabled = true
             setFadingEdgeLength(120)
         }
-        
+
         class CatalogAdapter : RecyclerView.Adapter<CatalogAdapter.CVH>() {
+            var visibleTabs = mutableListOf<CatalogData>()
+
             inner class CVH(val view: LinearLayout, val dragHandle: ImageView, val cb: CheckBox, val etOrder: EditText, val tvSource: TextView, val etRename: EditText) : RecyclerView.ViewHolder(view) {
                 var targetData: CatalogData? = null
                 init {
@@ -738,34 +674,42 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 return CVH(row, dragHandle, cb, etOrder, tvSource, etRename)
             }
             override fun onBindViewHolder(holder: CVH, position: Int) {
-                val data = catalogList[position]
+                val data = visibleTabs[position]
                 holder.tvSource.text = data.providerName
                 
-                holder.targetData = null // 🔥 [메모리 최적화] 스크롤 시 불필요 객체 생성 방지를 위해 참조 클리어
+                holder.targetData = null 
                 holder.etRename.setText(data.customName)
                 holder.etRename.isEnabled = data.isChecked
-                holder.targetData = data // 새로운 데이터 주소 바인딩
+                holder.targetData = data 
                 
                 holder.cb.setOnCheckedChangeListener(null)
                 holder.cb.isChecked = data.isChecked
-
+                
                 holder.cb.setOnCheckedChangeListener { _, isChecked ->
                     if (data.isChecked == isChecked) return@setOnCheckedChangeListener
                     data.isChecked = isChecked
                     holder.etRename.isEnabled = isChecked
                     
-                    val checkedItems = catalogList.filter { it.isChecked }
-                    val uncheckedItems = catalogList.filter { !it.isChecked }
-                    catalogList.clear()
-                    catalogList.addAll(checkedItems)
-                    catalogList.addAll(uncheckedItems)
-                    
-                    // 🚨 리사이클러뷰가 레이아웃 연산 중이면 한 프레임 뒤에 notify하도록 방어 처리
-                    if (rvCatalogs.isComputingLayout) {
-                        rvCatalogs.post { notifyDataSetChanged() }
-                    } else {
-                        notifyDataSetChanged()
+                    val checkedItems = visibleTabs.filter { it.isChecked }
+                    val uncheckedItems = visibleTabs.filter { !it.isChecked }
+                    visibleTabs.clear()
+                    visibleTabs.addAll(checkedItems)
+                    visibleTabs.addAll(uncheckedItems)
+
+                    val masterIndex = allCatalogList.indexOf(data)
+                    if (masterIndex != -1) {
+                        allCatalogList.removeAt(masterIndex)
+                        if (isChecked) {
+                            allCatalogList.add(checkedItems.size - 1, data)
+                        } else {
+                            allCatalogList.add(checkedItems.size + uncheckedItems.indexOf(data), data)
+                        }
                     }
+
+                    for (i in allCatalogList.indices) {
+                        allCatalogList[i].orderIndex = i + 1
+                    }
+                    notifyDataSetChanged() 
                 }
                 
                 holder.etOrder.setOnFocusChangeListener(null)
@@ -791,71 +735,170 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     } else false
                 }
             }
-            override fun getItemCount() = catalogList.size
+            override fun getItemCount() = visibleTabs.size
             
             fun shiftItemInRecyclerView(oldPos: Int, newOrder: Int) {
-                if (oldPos !in catalogList.indices) return
-                val item = catalogList[oldPos]
-                val checkedCount = catalogList.count { it.isChecked }
+                if (oldPos !in visibleTabs.indices) return
+                val item = visibleTabs[oldPos]
+                val checkedCount = visibleTabs.count { it.isChecked }
                 
                 val groupMin = if (item.isChecked) 1 else checkedCount + 1
-                val groupMax = if (item.isChecked) checkedCount else catalogList.size
+                val groupMax = if (item.isChecked) checkedCount else visibleTabs.size
                 
                 val clampedOrder = newOrder.coerceIn(groupMin, groupMax)
                 val newPos = clampedOrder - 1
                 
                 if (oldPos != newPos) {
-                    catalogList.removeAt(oldPos)
-                    catalogList.add(newPos, item)
+                    visibleTabs.removeAt(oldPos)
+                    visibleTabs.add(newPos, item)
                     
-                    for (i in catalogList.indices) {
-                        catalogList[i].orderIndex = i + 1
+                    val allFrom = allCatalogList.indexOf(item)
+                    if (allFrom != -1) {
+                        allCatalogList.removeAt(allFrom)
+                        val refTab = if (newPos + 1 in visibleTabs.indices) visibleTabs[newPos + 1] else if (newPos - 1 in visibleTabs.indices) visibleTabs[newPos - 1] else null
+                        var allTo = if (refTab != null) allCatalogList.indexOf(refTab) else -1
+                        if (allTo != -1) {
+                            if (refTab == visibleTabs.getOrNull(newPos - 1)) {
+                                allTo += 1
+                            }
+                            allCatalogList.add(allTo.coerceIn(0, allCatalogList.size), item)
+                        } else {
+                            allCatalogList.add(item)
+                        }
+                    }
+
+                    for (i in allCatalogList.indices) {
+                        allCatalogList[i].orderIndex = i + 1
                     }
                     
-                    // 🚨 포커스 해제 작업(startActivity 등)과 꼬이지 않도록 안전하게 대기열(Post)에 작업 예약
-                    rvCatalogs.post {
-                        notifyItemMoved(oldPos, newPos)
-                        notifyItemRangeChanged(minOf(oldPos, newPos), maxOf(oldPos, newPos) + 1)
-                    }
+                    notifyItemMoved(oldPos, newPos)
+                    notifyItemRangeChanged(minOf(oldPos, newPos), maxOf(oldPos, newPos) + 1)
                 } else {
-                    // 🚨 포커스 복구 연산 중 바로 동기 알림이 가는 것을 방어
-                    rvCatalogs.post {
-                        notifyItemChanged(oldPos)
-                    }
+                    notifyItemChanged(oldPos)
                 }
-            }                            
+            }
         }
         val catalogAdapter = CatalogAdapter()
         rvCatalogs.adapter = catalogAdapter
+
+        // 🔥 활성화 여부에 기반한 하단 카탈로그 목록 유동적 정밀 필터링(숨김/노출) 및 매칭 함수 정의
+        fun updateVisibleCatalogs() {
+            visibleCatalogList.clear()
+            val filtered = allCatalogList.filter { item ->
+                tempActiveSettings[item.providerName] ?: true
+            }
+            val checked = filtered.filter { it.isChecked }.sortedBy { it.orderIndex }
+            val unchecked = filtered.filter { !it.isChecked }.sortedBy { it.orderIndex }
+            visibleCatalogList.addAll(checked)
+            visibleCatalogList.addAll(unchecked)
+            catalogAdapter.visibleTabs = visibleCatalogList
+            catalogAdapter.notifyDataSetChanged()
+        }
+
+        class ProviderAdapter : RecyclerView.Adapter<ProviderAdapter.PVH>() {
+            inner class PVH(val view: LinearLayout, val tvName: TextView, val swActive: Switch, val swAutoAdd: Switch) : RecyclerView.ViewHolder(view)
+            
+            override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): PVH {
+                val row = LinearLayout(ctx).apply { 
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, 15, 0, 15) 
+                }
+                val tv = TextView(ctx).apply { 
+                    setTextColor(Color.LTGRAY)
+                    textSize = 13f
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) 
+                }
+                // 🔥 "활성화" 및 "오토 애드" 이중 토글 컨트롤 분할 설계
+                val swActive = Switch(ctx).apply {
+                    text = "활성화"
+                    setTextColor(Color.WHITE)
+                    textSize = 12f
+                    layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                }
+                val swAutoAdd = Switch(ctx).apply {
+                    text = "오토 애드"
+                    setTextColor(Color.WHITE)
+                    textSize = 12f
+                    layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                        setMargins(40, 0, 0, 0) // 조작 편리성을 보장하는 여백 확보
+                    }
+                }
+                
+                row.addView(tv)
+                row.addView(swActive)
+                row.addView(swAutoAdd)
+                return PVH(row, tv, swActive, swAutoAdd)
+            }
+            
+            override fun onBindViewHolder(holder: PVH, position: Int) {
+                val pName = allProviders[position].name
+                holder.tvName.text = pName
+                
+                val isActive = tempActiveSettings[pName] ?: true
+                val isAutoAdd = tempAutoAddSettings[pName] ?: false
+                
+                holder.swActive.setOnCheckedChangeListener(null)
+                holder.swActive.isChecked = isActive
+                
+                holder.swAutoAdd.setOnCheckedChangeListener(null)
+                holder.swAutoAdd.isChecked = isAutoAdd
+                holder.swAutoAdd.isEnabled = isActive // "활성화" 꺼짐 시 "오토 애드" 자동 조작 차단(비활성화)
+                
+                holder.swActive.setOnCheckedChangeListener { _, isChecked -> 
+                    tempActiveSettings[pName] = isChecked
+                    holder.swAutoAdd.isEnabled = isChecked
+                    updateVisibleCatalogs() // 프로바이더 설정 변화를 카탈로그 리스트에 즉각 실시간 동기화
+                }
+                
+                holder.swAutoAdd.setOnCheckedChangeListener { _, isChecked -> 
+                    tempAutoAddSettings[pName] = isChecked 
+                }
+            }
+            override fun getItemCount() = allProviders.size
+        }
+        rvProviders.adapter = ProviderAdapter()
+        providerSettingsCard.addView(rvProviders)
+
+        headerRow.setOnClickListener {
+            if (rvProviders.visibility == View.VISIBLE) { rvProviders.visibility = View.GONE; toggleArrow.text = "▼" } 
+            else { rvProviders.visibility = View.VISIBLE; toggleArrow.text = "▲" }
+        }
+        mainContainer.addView(providerSettingsCard)
 
         val touchHelper = ItemTouchHelper(object : ItemTouchHelper.SimpleCallback(ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0) {
             override fun onMove(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder, target: RecyclerView.ViewHolder): Boolean {
                 val from = viewHolder.adapterPosition
                 val to = target.adapterPosition
                 
-                if (from == RecyclerView.NO_POSITION || to == RecyclerView.NO_POSITION) return false
+                val movedTab = catalogAdapter.visibleTabs[from]
+                Collections.swap(catalogAdapter.visibleTabs, from, to)
                 
-                Collections.swap(catalogList, from, to)
-                catalogAdapter.notifyItemMoved(from, to) // 단순 이동만 시켜서 스크롤 연산 방해 차단
+                catalogAdapter.notifyItemMoved(from, to)
+                catalogAdapter.notifyItemChanged(from)
+                catalogAdapter.notifyItemChanged(to)
+
+                val masterFrom = allCatalogList.indexOf(movedTab)
+                val targetTab = catalogAdapter.visibleTabs[from]
+                val masterTo = allCatalogList.indexOf(targetTab)
+                
+                if (masterFrom != -1 && masterTo != -1) {
+                    allCatalogList.removeAt(masterFrom)
+                    allCatalogList.add(masterTo, movedTab)
+                }
+
+                for (i in allCatalogList.indices) {
+                    allCatalogList[i].orderIndex = i + 1
+                }
                 return true
             }
-
-            override fun clearView(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder) {
-                super.clearView(recyclerView, viewHolder)
-                // 🚨 드래그가 완벽히 끝나서 손을 뗐을 때, 순서 인덱스를 재정렬하고 화면을 일괄 새로고침합니다.
-                for (i in catalogList.indices) {
-                    catalogList[i].orderIndex = i + 1
-                }
-                catalogAdapter.notifyDataSetChanged()
-            }
-
             override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {}
         })
-        
-
-        
         touchHelper.attachToRecyclerView(rvCatalogs)
         mainContainer.addView(rvCatalogs)
+
+        // 초기 실행 시 목록 필터링 상태 적용
+        updateVisibleCatalogs()
 
         val footer = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, 30, 0, 0) }
         val cancelBtn = Button(ctx).apply { text = "Cancel"; setTextColor(Color.WHITE); isAllCaps = false; background = getButtonBg(); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0,0,15,0) } }
@@ -869,16 +912,19 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
                 val editor = prefs.edit()
                 
+                tempActiveSettings.forEach { (pName, isChecked) -> editor.putBoolean("provider_enabled_${instanceId}_$pName", isChecked) }
                 tempAutoAddSettings.forEach { (pName, isChecked) -> editor.putBoolean("auto_add_${instanceId}_$pName", isChecked) }
                 
                 val activeCatsForGson = mutableListOf<EvoCatalogConfig>()
-                for ((index, item) in catalogList.withIndex()) {
+                for ((index, item) in allCatalogList.withIndex()) {
                     val finalOrder = index + 1 
                     editor.putBoolean("cat_toggle_${instanceId}_${item.providerName}_${item.catalogName}", item.isChecked)
                     editor.putString("cat_rename_${instanceId}_${item.providerName}_${item.catalogName}", item.customName)
                     editor.putString("cat_order_${instanceId}_${item.providerName}_${item.catalogName}", finalOrder.toString())
                     
-                    if (item.isChecked) {
+                    // 활성화된 프로바이더 소속이면서 체크 완료된 카탈로그들만 실제 제공 데이터 리스트에 기입
+                    val isProviderActive = tempActiveSettings[item.providerName] ?: true
+                    if (isProviderActive && item.isChecked) {
                         val origData = APIHolder.allProviders.find { it.name == item.providerName }?.mainPage?.find { it.name == item.catalogName }?.data ?: ""
                         activeCatsForGson.add(EvoCatalogConfig(item.providerName, item.catalogName, item.customName, origData, finalOrder))
                     }
