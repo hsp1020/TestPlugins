@@ -13,5 +13,5 @@ cloudstream {
         "Anime"
     )
     
-    iconUrl = "https://m135.kotbc2.com/img/ktblogo.gif"
+    iconUrl = "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/KotbcProvider/ktblogo.png"
 }
