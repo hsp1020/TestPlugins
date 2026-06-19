@@ -1,10 +1,10 @@
 [
     {
         "iconUrl": "https://anilife.live/assets/img/animestream.png",
-        "fileHash": "sha256-8be1c99d78c1dc7f71287cee1f1702855742e47c8d0d671584135878ea0bac2f",
+        "fileHash": "sha256-0d3fbe64393a34812291f79a5ea8ccca14d1a6ee27f557aa5a7122b552c5e68b",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 26688,
+        "fileSize": 26051,
         "status": 1,
         "language": "ko",
         "authors": [
@@ -208,10 +208,10 @@
     },
     {
         "iconUrl": "https://tvchak200.com/template/xiaozhuti/img/logo.png",
-        "fileHash": "sha256-bab4025a148367a0342be04dd0af6b6ae72e3d4495afa5b40cf203349557b24a",
+        "fileHash": "sha256-d6b017762e518269dee40dc0e3cb73a6ea241959f18aeef661615ca598abae51",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 30379,
+        "fileSize": 29780,
         "status": 1,
         "language": "ko",
         "authors": [
