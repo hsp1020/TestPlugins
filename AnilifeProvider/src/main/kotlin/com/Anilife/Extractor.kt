@@ -22,7 +22,7 @@ class AnilifeProxyExtractor : ExtractorApi() {
     override val mainUrl = "https://api.gcdn.app"
     override val requiresReferer = false
 
-    private val DESKTOP_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36"
+    private val DESKTOP_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
 
     companion object {
         @Volatile private var currentProxyServer: ProxyWebServer? = null
