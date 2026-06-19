@@ -13,5 +13,5 @@ cloudstream {
         "Anime"
     )
     
-    iconUrl = "https://tvchak200.com/template/xiaozhuti/img/logo.png"
+    iconUrl = "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/TvchakProvider/logo.png"
 }
