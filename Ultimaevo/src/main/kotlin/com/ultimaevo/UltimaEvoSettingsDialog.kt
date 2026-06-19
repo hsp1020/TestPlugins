@@ -1,4 +1,3 @@
-// 파일명: hsp1020/ultimaevo/UltimaEvoSettingsDialog.kt
 package com.ultimaevo
 
 import android.app.AlertDialog
@@ -27,8 +26,6 @@ import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import com.google.android.material.bottomsheet.BottomSheetBehavior
-import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.lagradost.cloudstream3.APIHolder
 import kotlinx.coroutines.Dispatchers
@@ -40,17 +37,16 @@ import java.io.ByteArrayOutputStream
 import java.util.Collections
 import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
+import kotlin.text.Charsets
 
 class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
     private var lastClickTime: Long = 0
-    private var activeAlertDialog: AlertDialog? = null // 🔥 [누수 방지] 클래스 전역 수동 소멸 감시 필드 선언
+    private var activeAlertDialog: AlertDialog? = null
 
     data class InstanceData(var originalId: Int, var name: String, var visibility: Boolean, var search: Boolean)
     private var maxIdGen = 1
     private val instanceMemoryList = mutableListOf<InstanceData>()
-
-    private fun Int.dp(context: Context): Int = (this * context.resources.displayMetrics.density).toInt()
 
     private fun getDarkThemeBg() = GradientDrawable().apply { setColor(Color.parseColor("#000000")); cornerRadius = 25f }
     private fun getCardBg() = GradientDrawable().apply { setColor(Color.parseColor("#0C0C0C")); setStroke(2, Color.parseColor("#1A1A1A")); cornerRadius = 18f }
@@ -136,7 +132,9 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     try {
                         val backupStr = withContext(Dispatchers.IO) {
                             val json = JSONObject()
-                            prefs.all.forEach { (key, value) -> json.put(key, value) }
+                            for ((key, value) in prefs.all) {
+                                json.put(key, value)
+                            }
                             val bos = ByteArrayOutputStream()
                             GZIPOutputStream(bos).use { it.write(json.toString().toByteArray(Charsets.UTF_8)) }
                             Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
@@ -202,8 +200,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         val parsedJson = withContext(Dispatchers.IO) {
                             val decodedBytes = Base64.decode(clipboardText, Base64.NO_WRAP)
                             val jsonString = try {
-                                val bais = java.io.ByteArrayInputStream(decodedBytes)
-                                java.util.zip.GZIPInputStream(bais).bufferedReader(Charsets.UTF_8).readText()
+                                val bais = ByteArrayInputStream(decodedBytes)
+                                GZIPInputStream(bais).bufferedReader(Charsets.UTF_8).readText()
                             } catch (e: Exception) { String(decodedBytes, Charsets.UTF_8) }
                             JSONObject(jsonString)
                         }
@@ -273,7 +271,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                             }
                             resContainer.addView(TextView(ctx).apply {
                                 text = "Import Result"
-                                textSize = 18f
+                                             textSize = 18f
                                 setTextColor(Color.WHITE)
                                 typeface = android.graphics.Typeface.DEFAULT_BOLD
                                 setPadding(0, 0, 0, 20)
@@ -303,20 +301,32 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                             resultDlg.show()
                         }
                         dlg.show()
-
                     } catch (e: Exception) {
                         e.printStackTrace()
                         val errContainer = LinearLayout(ctx).apply {
-                            orientation = LinearLayout.VERTICAL; setPadding(40, 40, 40, 40); background = getDarkThemeBg()
+                            orientation = LinearLayout.VERTICAL
+                            setPadding(40, 40, 40, 40)
+                            background = getDarkThemeBg()
                         }
                         errContainer.addView(TextView(ctx).apply {
-                            text = "Invalid Backup Data"; textSize = 18f; setTextColor(Color.WHITE); typeface = android.graphics.Typeface.DEFAULT_BOLD; setPadding(0, 0, 0, 20); gravity = Gravity.CENTER
+                            text = "Invalid Backup Data"
+                            textSize = 18f
+                            setTextColor(Color.WHITE)
+                            typeface = android.graphics.Typeface.DEFAULT_BOLD
+                            setPadding(0, 0, 0, 20)
+                            gravity = android.view.Gravity.CENTER
                         })
                         errContainer.addView(TextView(ctx).apply {
-                            text = "No valid backup data found in your clipboard.\n\nPlease copy the exact backup text and try again."; setTextColor(Color.LTGRAY); textSize = 14f; setPadding(0, 0, 0, 30)
+                            text = "No valid backup data found in your clipboard.\n\nPlease copy the exact backup text and try again."
+                            setTextColor(Color.LTGRAY)
+                            textSize = 14f
+                            setPadding(0, 0, 0, 30)
                         })
                         val okBtn = Button(ctx).apply {
-                            text = "OK"; setTextColor(Color.WHITE); isAllCaps = false; background = getButtonBg()
+                            text = "OK"
+                            setTextColor(Color.WHITE)
+                            isAllCaps = false
+                            background = getButtonBg()
                             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
                         }
                         errContainer.addView(okBtn)
@@ -457,9 +467,9 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             override fun onBindViewHolder(holder: VH, position: Int) {
                 val data = instanceMemoryList[position]
                 
-                holder.targetData = null // 🔥 [메모리 최적화] 스크롤 시 불필요 객체 생성 방지를 위해 참조 클리어
+                holder.targetData = null 
                 holder.nameInput.setText(data.name)
-                holder.targetData = data // 새로운 데이터 주소 바인딩
+                holder.targetData = data 
                 
                 holder.visSwitch.setOnCheckedChangeListener(null)
                 holder.visSwitch.isChecked = data.visibility
@@ -475,15 +485,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     val pos = holder.adapterPosition
                     if (pos != RecyclerView.NO_POSITION) {
                         instanceMemoryList.removeAt(pos)
-                        if (rvInstances.isComputingLayout) {
-                            rvInstances.post {
-                                notifyItemRemoved(pos)
-                                instanceCountInput.setText(instanceMemoryList.size.toString())
-                            }
-                        } else {
-                            notifyItemRemoved(pos)
-                            instanceCountInput.setText(instanceMemoryList.size.toString())
-                        }
+                        notifyItemRemoved(pos)
+                        instanceCountInput.setText(instanceMemoryList.size.toString())
                     }
                 }
             }
@@ -571,7 +574,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         
         val providerSettingsCard = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL; setPadding(25, 25, 25, 25); background = getCardBg(); layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, 20) } }
         val headerRow = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        headerRow.addView(TextView(ctx).apply { text = "Provider Auto-Add Settings"; setTextColor(Color.WHITE); textSize = 14f; typeface = android.graphics.Typeface.DEFAULT_BOLD; layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) })
+        
+        headerRow.addView(TextView(ctx).apply { text = "Provider Settings"; setTextColor(Color.WHITE); textSize = 14f; typeface = android.graphics.Typeface.DEFAULT_BOLD; layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) })
         val toggleArrow = TextView(ctx).apply { text = "▼"; setTextColor(Color.WHITE); textSize = 14f; setPadding(15, 10, 15, 10) }
         headerRow.addView(toggleArrow); providerSettingsCard.addView(headerRow)
 
@@ -583,81 +587,34 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             setFadingEdgeLength(120)
         }
 
-        data class ProviderData(val pName: String, var isChecked: Boolean)
-        val providerList = mutableListOf<ProviderData>()
+        val tempActiveSettings = mutableMapOf<String, Boolean>()
         val tempAutoAddSettings = mutableMapOf<String, Boolean>()
+
+        data class ProviderData(val pName: String, var isActive: Boolean, var isAutoAdd: Boolean)
+        val providerList = mutableListOf<ProviderData>()
 
         for (provider in allProviders) {
             val pName = provider.name
-            val isChecked = prefs.getBoolean("auto_add_${instanceId}_$pName", false)
-            providerList.add(ProviderData(pName, isChecked))
-            tempAutoAddSettings[pName] = isChecked
-        }
-
-        val initProvChecked = providerList.filter { it.isChecked }
-        val initProvUnchecked = providerList.filter { !it.isChecked }
-        providerList.clear()
-        providerList.addAll(initProvChecked)
-        providerList.addAll(initProvUnchecked)
-
-        class ProviderAdapter : RecyclerView.Adapter<ProviderAdapter.PVH>() {
-            inner class PVH(val view: LinearLayout, val tvName: TextView, val switch: Switch) : RecyclerView.ViewHolder(view)
+            val isActive = prefs.getBoolean("provider_enabled_${instanceId}_$pName", true)
+            val isAutoAdd = prefs.getBoolean("auto_add_${instanceId}_$pName", false)
             
-            override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): PVH {
-                val row = LinearLayout(ctx).apply { 
-                    orientation = LinearLayout.HORIZONTAL
-                    gravity = android.view.Gravity.CENTER_VERTICAL
-                    setPadding(0, 15, 0, 15) 
-                }
-                val tv = TextView(ctx).apply { 
-                    setTextColor(Color.LTGRAY)
-                    textSize = 13f
-                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) 
-                }
-                val sw = Switch(ctx) 
-                
-                row.addView(tv); row.addView(sw)
-                return PVH(row, tv, sw)
-            }
-            
-            override fun onBindViewHolder(holder: PVH, position: Int) {
-                val data = providerList[position]
-                holder.tvName.text = data.pName
-                
-                holder.switch.setOnCheckedChangeListener(null)
-                holder.switch.isChecked = data.isChecked
-                
-                holder.switch.setOnCheckedChangeListener { _, isChecked -> 
-                    if (data.isChecked == isChecked) return@setOnCheckedChangeListener
-                    data.isChecked = isChecked
-                    tempAutoAddSettings[data.pName] = isChecked 
-                    
-                    val checkedItems = providerList.filter { it.isChecked }
-                    val uncheckedItems = providerList.filter { !it.isChecked }
-                    providerList.clear()
-                    providerList.addAll(checkedItems)
-                    providerList.addAll(uncheckedItems)
-                    
-                    if (rvProviders.isComputingLayout) {
-                        rvProviders.post { notifyDataSetChanged() }
-                    } else {
-                        notifyDataSetChanged()
-                    }
-                }
-            }
-            override fun getItemCount() = providerList.size
+            providerList.add(ProviderData(pName, isActive, isAutoAdd))
+            tempActiveSettings[pName] = isActive
+            tempAutoAddSettings[pName] = isAutoAdd
         }
-        rvProviders.adapter = ProviderAdapter()
-        providerSettingsCard.addView(rvProviders)
 
-        headerRow.setOnClickListener {
-            if (rvProviders.visibility == View.VISIBLE) { rvProviders.visibility = View.GONE; toggleArrow.text = "▼" } 
-            else { rvProviders.visibility = View.VISIBLE; toggleArrow.text = "▲" }
+        fun sortProviderList() {
+            val active = providerList.filter { it.isActive }.sortedBy { it.pName.lowercase() }
+            val inactive = providerList.filter { !it.isActive }.sortedBy { it.pName.lowercase() }
+            providerList.clear()
+            providerList.addAll(active)
+            providerList.addAll(inactive)
         }
-        mainContainer.addView(providerSettingsCard)
+        sortProviderList() // 🔥 초기 로딩 시 액티브 ON 정렬 수행 완료
 
         data class CatalogData(val providerName: String, val catalogName: String, var isChecked: Boolean, var customName: String, var orderIndex: Int)
-        val catalogList = mutableListOf<CatalogData>()
+        val allCatalogList = mutableListOf<CatalogData>()
+        val visibleCatalogList = mutableListOf<CatalogData>()
 
         for (provider in allProviders) {
             val staticCats = provider.mainPage.map { it.name }
@@ -669,15 +626,9 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 val isChecked = prefs.getBoolean("cat_toggle_${instanceId}_${provider.name}_$cName", isAutoAdd)
                 val customName = prefs.getString("cat_rename_${instanceId}_${provider.name}_$cName", cName) ?: cName
                 val orderIndex = prefs.getString("cat_order_${instanceId}_${provider.name}_$cName", "999")?.toIntOrNull() ?: 999
-                catalogList.add(CatalogData(provider.name, cName, isChecked, customName, orderIndex))
+                allCatalogList.add(CatalogData(provider.name, cName, isChecked, customName, orderIndex))
             }
         }
-
-        val initChecked = catalogList.filter { it.isChecked }.sortedBy { it.orderIndex }
-        val initUnchecked = catalogList.filter { !it.isChecked }.sortedBy { it.orderIndex }
-        catalogList.clear()
-        catalogList.addAll(initChecked)
-        catalogList.addAll(initUnchecked)
 
         val rvCatalogs = RecyclerView(ctx).apply { 
             layoutManager = LinearLayoutManager(ctx)
@@ -685,8 +636,10 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             isVerticalFadingEdgeEnabled = true
             setFadingEdgeLength(120)
         }
-        
+
         class CatalogAdapter : RecyclerView.Adapter<CatalogAdapter.CVH>() {
+            var visibleTabs = mutableListOf<CatalogData>()
+
             inner class CVH(val view: LinearLayout, val dragHandle: ImageView, val cb: CheckBox, val etOrder: EditText, val tvSource: TextView, val etRename: EditText) : RecyclerView.ViewHolder(view) {
                 var targetData: CatalogData? = null
                 init {
@@ -735,13 +688,13 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 return CVH(row, dragHandle, cb, etOrder, tvSource, etRename)
             }
             override fun onBindViewHolder(holder: CVH, position: Int) {
-                val data = catalogList[position]
+                val data = visibleTabs[position]
                 holder.tvSource.text = data.providerName
                 
-                holder.targetData = null // 🔥 [메모리 최적화] 스크롤 시 불필요 객체 생성 방지를 위해 참조 클리어
+                holder.targetData = null 
                 holder.etRename.setText(data.customName)
                 holder.etRename.isEnabled = data.isChecked
-                holder.targetData = data // 새로운 데이터 주소 바인딩
+                holder.targetData = data 
                 
                 holder.cb.setOnCheckedChangeListener(null)
                 holder.cb.isChecked = data.isChecked
@@ -751,36 +704,38 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     data.isChecked = isChecked
                     holder.etRename.isEnabled = isChecked
                     
-                    val checkedItems = catalogList.filter { it.isChecked }
-                    val uncheckedItems = catalogList.filter { !it.isChecked }
-                    catalogList.clear()
-                    catalogList.addAll(checkedItems)
-                    catalogList.addAll(uncheckedItems)
-                    
-                    if (rvCatalogs.isComputingLayout) {
-                        rvCatalogs.post { notifyDataSetChanged() }
-                    } else {
-                        notifyDataSetChanged()
+                    val checkedItems = visibleTabs.filter { it.isChecked }
+                    val uncheckedItems = visibleTabs.filter { !it.isChecked }
+                    visibleTabs.clear()
+                    visibleTabs.addAll(checkedItems)
+                    visibleTabs.addAll(uncheckedItems)
+
+                    val masterIndex = allCatalogList.indexOf(data)
+                    if (masterIndex != -1) {
+                        allCatalogList.removeAt(masterIndex)
+                        if (isChecked) {
+                            allCatalogList.add(checkedItems.size - 1, data)
+                        } else {
+                            allCatalogList.add(checkedItems.size + uncheckedItems.indexOf(data), data)
+                        }
                     }
+
+                    for (i in allCatalogList.indices) {
+                        allCatalogList[i].orderIndex = i + 1
+                    }
+                    notifyDataSetChanged() 
                 }
                 
                 holder.etOrder.setOnFocusChangeListener(null)
                 holder.etOrder.setText((position + 1).toString())
                 
                 holder.etOrder.setOnFocusChangeListener { _, hasFocus ->
-                    val curPos = holder.adapterPosition
-                    if (curPos == RecyclerView.NO_POSITION) return@setOnFocusChangeListener
-                    
-                    if (hasFocus) {
-                        rv.postDelayed({
-                            rv.smoothScrollToPosition(curPos)
-                        }, 150)
-                    } else {
+                    if (!hasFocus) {
                         val inputVal = holder.etOrder.text.toString().toIntOrNull()
                         if (inputVal != null) {
-                            shiftItemInRecyclerView(curPos, inputVal)
+                            shiftItemInRecyclerView(position, inputVal)
                         } else {
-                            holder.etOrder.setText((curPos + 1).toString())
+                            holder.etOrder.setText((position + 1).toString())
                         }
                     }
                 }
@@ -788,46 +743,163 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 holder.etOrder.setOnEditorActionListener { _, actionId, _ ->
                     if (actionId == EditorInfo.IME_ACTION_DONE || actionId == EditorInfo.IME_ACTION_NEXT) {
                         holder.etOrder.clearFocus()
-                        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                        val imm = ctx.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
                         imm.hideSoftInputFromWindow(holder.etOrder.windowToken, 0)
                         true
                     } else false
                 }
             }
-            override fun getItemCount() = catalogList.size
+            override fun getItemCount() = visibleTabs.size
             
             fun shiftItemInRecyclerView(oldPos: Int, newOrder: Int) {
-                if (oldPos !in catalogList.indices) return
-                val item = catalogList[oldPos]
-                val checkedCount = catalogList.count { it.isChecked }
+                if (oldPos !in visibleTabs.indices) return
+                val item = visibleTabs[oldPos]
+                val checkedCount = visibleTabs.count { it.isChecked }
                 
                 val groupMin = if (item.isChecked) 1 else checkedCount + 1
-                val groupMax = if (item.isChecked) checkedCount else catalogList.size
+                val groupMax = if (item.isChecked) checkedCount else visibleTabs.size
                 
                 val clampedOrder = newOrder.coerceIn(groupMin, groupMax)
                 val newPos = clampedOrder - 1
                 
                 if (oldPos != newPos) {
-                    catalogList.removeAt(oldPos)
-                    catalogList.add(newPos, item)
+                    visibleTabs.removeAt(oldPos)
+                    visibleTabs.add(newPos, item)
                     
-                    for (i in catalogList.indices) {
-                        catalogList[i].orderIndex = i + 1
+                    val allFrom = allCatalogList.indexOf(item)
+                    if (allFrom != -1) {
+                        allCatalogList.removeAt(allFrom)
+                        val refTab = if (newPos + 1 in visibleTabs.indices) visibleTabs[newPos + 1] else if (newPos - 1 in visibleTabs.indices) visibleTabs[newPos - 1] else null
+                        var allTo = if (refTab != null) allCatalogList.indexOf(refTab) else -1
+                        if (allTo != -1) {
+                            if (refTab == visibleTabs.getOrNull(newPos - 1)) {
+                                allTo += 1
+                            }
+                            allCatalogList.add(allTo.coerceIn(0, allCatalogList.size), item)
+                        } else {
+                            allCatalogList.add(item)
+                        }
+                    }
+
+                    for (i in allCatalogList.indices) {
+                        allCatalogList[i].orderIndex = i + 1
                     }
                     
-                    rvCatalogs.post {
-                        notifyItemMoved(oldPos, newPos)
-                        notifyItemRangeChanged(minOf(oldPos, newPos), maxOf(oldPos, newPos) + 1)
-                    }
+                    notifyItemMoved(oldPos, newPos)
+                    notifyItemRangeChanged(minOf(oldPos, newPos), maxOf(oldPos, newPos) + 1)
                 } else {
-                    rvCatalogs.post {
-                        notifyItemChanged(oldPos)
-                    }
+                    notifyItemChanged(oldPos)
                 }
             }
         }
         val catalogAdapter = CatalogAdapter()
         rvCatalogs.adapter = catalogAdapter
+
+        fun updateVisibleCatalogs() {
+            visibleCatalogList.clear()
+            val filtered = allCatalogList.filter { item ->
+                tempActiveSettings[item.providerName] ?: true
+            }
+            val checked = filtered.filter { it.isChecked }.sortedBy { it.orderIndex }
+            val unchecked = filtered.filter { !it.isChecked }.sortedBy { it.orderIndex }
+            visibleCatalogList.addAll(checked)
+            visibleCatalogList.addAll(unchecked)
+            catalogAdapter.visibleTabs = visibleCatalogList
+            catalogAdapter.notifyDataSetChanged()
+        }
+
+        class ProviderAdapter : RecyclerView.Adapter<ProviderAdapter.PVH>() {
+            inner class PVH(val view: LinearLayout, val tvName: TextView, val swActive: Switch, val swAutoAdd: Switch) : RecyclerView.ViewHolder(view)
+            
+            override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): PVH {
+                val row = LinearLayout(ctx).apply { 
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, 15, 0, 15) 
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT, 
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    )
+                }
+                val tv = TextView(ctx).apply { 
+                    setTextColor(Color.LTGRAY)
+                    textSize = 13f
+                    layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) // ◀️ 프로바이더명 좌측 고정 정렬
+                }
+                
+                // 🔥 우측 스위치 묶음 컬럼 정렬 컨테이너
+                val swContainer = LinearLayout(ctx).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    layoutParams = LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT, 
+                        LinearLayout.LayoutParams.WRAP_CONTENT
+                    )
+                }
+
+                // 🔥 "Active" 및 "Auto-Add" 영문으로 최종 보정 처리
+                val swActive = Switch(ctx).apply {
+                    text = "Enable"
+                    setTextColor(Color.WHITE)
+                    textSize = 12f
+                    layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+                }
+                val swAutoAdd = Switch(ctx).apply {
+                    text = "Auto-Add"
+                    setTextColor(Color.WHITE)
+                    textSize = 12f
+                    layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
+                        setMargins(40, 0, 0, 0) // 컬럼 간격을 맞추는 대칭 마진 부여
+                    }
+                }
+                
+                swContainer.addView(swActive)
+                swContainer.addView(swAutoAdd)
+                
+                row.addView(tv)
+                row.addView(swContainer)
+                return PVH(row, tv, swActive, swAutoAdd)
+            }
+            
+            override fun onBindViewHolder(holder: PVH, position: Int) {
+                val data = providerList[position]
+                holder.tvName.text = data.pName
+                
+                holder.swActive.setOnCheckedChangeListener(null)
+                holder.swActive.isChecked = data.isActive
+                
+                holder.swAutoAdd.setOnCheckedChangeListener(null)
+                holder.swAutoAdd.isChecked = data.isAutoAdd
+                holder.swAutoAdd.isEnabled = data.isActive 
+                
+                holder.swActive.setOnCheckedChangeListener { _, isChecked -> 
+                    if (data.isActive == isChecked) return@setOnCheckedChangeListener
+                    data.isActive = isChecked
+                    tempActiveSettings[data.pName] = isChecked
+                    holder.swAutoAdd.isEnabled = isChecked
+                    
+                    // 🔥 [정렬 제약 적용] Active ON 된 프로바이더가 실시간으로 맨 위로 정렬되도록 버블 정렬 가동
+                    sortProviderList()
+                    notifyDataSetChanged()
+                    
+                    updateVisibleCatalogs() 
+                }
+                
+                holder.swAutoAdd.setOnCheckedChangeListener { _, isChecked -> 
+                    data.isAutoAdd = isChecked
+                    tempAutoAddSettings[data.pName] = isChecked 
+                }
+            }
+            override fun getItemCount() = providerList.size
+        }
+        rvProviders.adapter = ProviderAdapter()
+        providerSettingsCard.addView(rvProviders)
+
+        headerRow.setOnClickListener {
+            if (rvProviders.visibility == View.VISIBLE) { rvProviders.visibility = View.GONE; toggleArrow.text = "▼" } 
+            else { rvProviders.visibility = View.VISIBLE; toggleArrow.text = "▲" }
+        }
+        mainContainer.addView(providerSettingsCard)
 
         val touchHelper = ItemTouchHelper(object : ItemTouchHelper.SimpleCallback(ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0) {
             override fun onMove(recyclerView: RecyclerView, viewHolder: RecyclerView.ViewHolder, target: RecyclerView.ViewHolder): Boolean {
@@ -852,8 +924,11 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
             override fun onSwiped(viewHolder: RecyclerView.ViewHolder, direction: Int) {}
         })
+
         touchHelper.attachToRecyclerView(rvCatalogs)
         mainContainer.addView(rvCatalogs)
+
+        updateVisibleCatalogs()
 
         val footer = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, 30, 0, 0) }
         val cancelBtn = Button(ctx).apply { text = "Cancel"; setTextColor(Color.WHITE); isAllCaps = false; background = getButtonBg(); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0,0,15,0) } }
@@ -867,16 +942,18 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
                 val editor = prefs.edit()
                 
+                tempActiveSettings.forEach { (pName, isChecked) -> editor.putBoolean("provider_enabled_${instanceId}_$pName", isChecked) }
                 tempAutoAddSettings.forEach { (pName, isChecked) -> editor.putBoolean("auto_add_${instanceId}_$pName", isChecked) }
                 
                 val activeCatsForGson = mutableListOf<EvoCatalogConfig>()
-                for ((index, item) in catalogList.withIndex()) {
+                for ((index, item) in allCatalogList.withIndex()) {
                     val finalOrder = index + 1 
                     editor.putBoolean("cat_toggle_${instanceId}_${item.providerName}_${item.catalogName}", item.isChecked)
                     editor.putString("cat_rename_${instanceId}_${item.providerName}_${item.catalogName}", item.customName)
                     editor.putString("cat_order_${instanceId}_${item.providerName}_${item.catalogName}", finalOrder.toString())
                     
-                    if (item.isChecked) {
+                    val isProviderActive = tempActiveSettings[item.providerName] ?: true
+                    if (isProviderActive && item.isChecked) {
                         val origData = APIHolder.allProviders.find { it.name == item.providerName }?.mainPage?.find { it.name == item.catalogName }?.data ?: ""
                         activeCatsForGson.add(EvoCatalogConfig(item.providerName, item.catalogName, item.customName, origData, finalOrder))
                     }
