@@ -5,6 +5,8 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Document
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 
 class Anilife : MainAPI() {
     override var mainUrl = "https://anilife.live"
@@ -15,6 +17,9 @@ class Anilife : MainAPI() {
 
     private val TAG = "[Anilife]"
     private val pcUserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
+
+    // 카탈로그 동시 요청 개수를 최대 2개로 제한하는 세마포어 선언
+    private val mainPageSemaphore = Semaphore(2)
 
     private val posterHeadersMap = mapOf(
         "Referer" to "https://anilife.live/",
@@ -49,15 +54,18 @@ class Anilife : MainAPI() {
         val url = if (request.name.contains("TOP 20")) "$mainUrl${request.data}" 
                   else "$mainUrl${request.data.substringBeforeLast("/")}/$page"
         
-        return try {
-            val doc = app.get(url, headers = commonHeaders).document
-            val items = parseCommonList(doc)
-            val hasNextPage = if (request.name.contains("TOP 20")) false else items.isNotEmpty()
-            
-            newHomePageResponse(request.name, items, hasNext = hasNextPage)
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            newHomePageResponse(request.name, emptyList(), hasNext = false)
+        // 6개 카테고리가 병렬로 들어오더라도 최대 2개만 허용하며 나머지는 대기 상태로 순차 처리
+        return mainPageSemaphore.withPermit {
+            try {
+                val doc = app.get(url, headers = commonHeaders).document
+                val items = parseCommonList(doc)
+                val hasNextPage = if (request.name.contains("TOP 20")) false else items.isNotEmpty()
+                
+                newHomePageResponse(request.name, items, hasNext = hasNextPage)
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                newHomePageResponse(request.name, emptyList(), hasNext = false)
+            }
         }
     }
 
