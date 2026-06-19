@@ -1,3 +1,4 @@
+// hsp1020/settings/SettingsBottomFragment.kt
 package com.hsp1020
 
 import android.annotation.SuppressLint
@@ -133,13 +134,14 @@ class SettingsBottomFragment(
         }
     }
 
+    // 🚨 [인메모리 매핑 보완] 임시 탭 활성화 여부(isChecked)와 장르 활성화 여부(isGenresEnabled) 속성 도입
     private data class ConfigFlatTab(
         val key: String, 
         val displayName: String, 
         val isGenre: Boolean, 
         val catalogKey: String,
-        var isChecked: Boolean = true,       // 🚨 [수정] 임시 체크 상태 보관용 필드 추가
-        var isGenresEnabled: Boolean = true  // 🚨 [수정] 임시 장르 스위치 보관용 필드 추가
+        var isChecked: Boolean = true,
+        var isGenresEnabled: Boolean = true
     )
 
     private var activeSubDialog: AlertDialog? = null 
@@ -151,7 +153,7 @@ class SettingsBottomFragment(
 
     private fun setupCustomDialog(dialog: AlertDialog, contentView: View) {
         activeSubDialog = dialog
-        dialog.setCanceledOnTouchOutside(false) // 🚨 [기능 수정] 모든 부속 팝업/부속창 밖 터치 시 종료 차단 (뒤로가기는 정상 동작)
+        dialog.setCanceledOnTouchOutside(false) // 🚨 [수정] 팝업창 바깥 터치 시 강제 꺼짐 방지
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         dialog.setOnShowListener {
             dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
@@ -270,7 +272,7 @@ class SettingsBottomFragment(
                 setTextColor(Color.WHITE)
                 typeface = android.graphics.Typeface.DEFAULT_BOLD
                 setPadding(0, 0, 0, 20)
-                gravity = android.view.Gravity.CENTER // 🚨 올바른 참조 경로로 변경
+                gravity = android.view.Gravity.CENTER
             })
             addView(TextView(ctx).apply {
                 text = message
@@ -297,17 +299,15 @@ class SettingsBottomFragment(
         dlg.show()
     }
 
-
-
     @SuppressLint("DiscouragedApi")
     override fun onCreateView(
         inflater: LayoutInflater, container: ViewGroup?,
         savedInstanceState: Bundle?
     ): View {
-        isCancelable = true // 🚨 [기능 수정] 뒤로가기 허용
-        dialog?.setCanceledOnTouchOutside(false) // 🚨 [기능 수정] 메인 설정창 밖 터치 시 종료만 차단
-        val view = getLayout("bottom_sheet_layout", inflater, container)
+        isCancelable = true // 🚨 [수정] 설정메인창 뒤로가기 버튼 허용
+        dialog?.setCanceledOnTouchOutside(false) // 🚨 [수정] 설정메인창 바깥 터치 꺼짐 방지
         
+        val view = getLayout("bottom_sheet_layout", inflater, container)
 
         val addlinks: ImageView = try { view.findView("addlinks") } catch (e: Throwable) { throw Exception("addlinks ImageView not found", e) }
         val showlinks: ImageView = try { view.findView("showlinks") } catch (e: Throwable) { throw Exception("showlinks ImageView not found", e) }
@@ -556,11 +556,11 @@ class SettingsBottomFragment(
         etHistorySyncUrl.setText(sharedPref.getString(SettingsRepository.PREF_KEY_HISTORY_SYNC_URL, ""))
 
         switchHistorySync.setOnCheckedChangeListener { _, isChecked ->
-            // 🚨 즉시 물리 저장소에 기록하는 sharedPref.edit 구문 제거
+            // 🚨 [동기화 누수 수정] 뒤로가기 시 무시하도록 setOnCheckedChangeListener의 실시간 SharedPreferences 저장을 전면 제거
             layoutHistorySyncUrl.visibility = if (isChecked) View.VISIBLE else View.GONE
         }
 
-        
+        // 🚨 [동기화 누수 수정] 포커스를 잃었을 때 강제 실시간 저장되던 etHistorySyncUrl 리스너 원천 제거
 
         setupToggle(view, "switchCineStream", SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, isCineStreamInstalled(), "CineStream")
         setupToggle(view, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
@@ -580,7 +580,7 @@ class SettingsBottomFragment(
         etCustomPosterUrl.setText(sharedPref.getString(SettingsRepository.PREF_KEY_CUSTOM_POSTER_URL, ""))
 
         switchCustomPoster.setOnCheckedChangeListener { _, isChecked ->
-            // 🚨 실시간 자동 저장(edit) 라인 제거
+            // 🚨 [동기화 누수 수정] 뒤로가기 시 무시하도록 setOnCheckedChangeListener의 실시간 저장을 전면 제거
             layoutCustomPosterUrl.visibility = if (isChecked) View.VISIBLE else View.GONE
         }
 
@@ -588,7 +588,7 @@ class SettingsBottomFragment(
             showLanguageSelectDialog()
         }
 
-        // 🚨 etCustomPosterUrl.setOnFocusChangeListener 리스너 전체 삭제
+        // 🚨 [동기화 누수 수정] 포커스를 잃었을 때 강제 실시간 저장되던 etCustomPosterUrl 리스너 원천 제거
 
         val etTmdbApiKey: EditText = try { view.findView("etTmdbApiKey") } catch (e: Throwable) { throw Exception("etTmdbApiKey EditText not found", e) }
         val switchMdbList: Switch = try { view.findView("switchMdbList") } catch (e: Throwable) { throw Exception("switchMdbList Switch not found", e) }
@@ -596,7 +596,7 @@ class SettingsBottomFragment(
         val etMdbListApiKey: EditText = try { view.findView("etMdbListApiKey") } catch (e: Throwable) { throw Exception("etMdbListApiKey EditText not found", e) }
 
         etTmdbApiKey.setText(sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_API_KEY, ""))
-        // 🚨 etTmdbApiKey.setOnFocusChangeListener 리스너 전체 삭제
+        // 🚨 [동기화 누수 수정] 포커스를 잃었을 때 강제 실시간 저장되던 etTmdbApiKey 리스너 원천 제거
 
         val isMdbListEnabled = sharedPref.getBoolean(SettingsRepository.PREF_KEY_MDBLIST_ENABLED, false)
         switchMdbList.isChecked = isMdbListEnabled
@@ -604,11 +604,11 @@ class SettingsBottomFragment(
         etMdbListApiKey.setText(sharedPref.getString(SettingsRepository.PREF_KEY_MDBLIST_API_KEY, ""))
 
         switchMdbList.setOnCheckedChangeListener { _, isChecked ->
-            // 🚨 실시간 자동 저장(edit) 라인 제거
+            // 🚨 [동기화 누수 수정] 뒤로가기 시 무시하도록 setOnCheckedChangeListener의 실시간 저장을 전면 제거
             layoutMdbList.visibility = if (isChecked) View.VISIBLE else View.GONE
         }
 
-        // 🚨 etMdbListApiKey.setOnFocusChangeListener 리스너 전체 삭제
+        // 🚨 [동기화 누수 수정] 포커스를 잃었을 때 강제 실시간 저장되던 etMdbListApiKey 리스너 원천 제거
 
         addlinks.setOnClickListener {
             showLinkEditorDialog(false, null, -1, null)
@@ -730,13 +730,13 @@ class SettingsBottomFragment(
                 return@setOnClickListener
             }
 
-            // 통합(CineStream 등)용 스위치 뷰 인스턴스 획득
+            // 🚨 [동기화 누수 수정] 사용하지 않던 통합 스위치 리소스를 찾아 일괄 취합
             val switchCineStream = view.findView<Switch>("switchCineStream")
             val switchStreamPlay = view.findView<Switch>("switchStreamPlay")
             val switchVixSrc = view.findView<Switch>("switchVixSrc")
 
-            // 🚨 저장 버튼을 누르는 유일한 순간에만 모든 입력 정보와 토글 정보가 취합되어 디스크에 플러시됩니다.
-            sharedPref.edit {
+            // 🚨 [동기화 누수 수정] 저장 버튼을 누르는 물리적 시점에만 전체 상태를 수집하여 디스크 동기 쓰기(commit=true) 처리
+            sharedPref.edit(commit = true) {
                 putString(SettingsRepository.PREF_KEY_TMDB_API_KEY, tmdbApiKeyVal)
                 putString(SettingsRepository.PREF_KEY_MDBLIST_API_KEY, etMdbListApiKey.text.toString().trim())
                 putString(SettingsRepository.PREF_KEY_HISTORY_SYNC_URL, etHistorySyncUrl.text.toString().trim())
@@ -750,8 +750,6 @@ class SettingsBottomFragment(
                 putBoolean(SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, switchStreamPlay.isChecked)
                 putBoolean(SettingsRepository.PREF_KEY_VIXSRC_ENABLED, switchVixSrc.isChecked)
             }
-            // ... 다이얼로그 호출 및 리스타트 핸들링 ...
-
 
             val cancelBtn = Button(context).apply {
                 text = "No"
@@ -946,7 +944,7 @@ class SettingsBottomFragment(
             override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
                 val rowLayout = LinearLayout(context).apply {
                     orientation = LinearLayout.HORIZONTAL
-                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    gravity = Gravity.CENTER_VERTICAL
                     setPadding(10, 20, 10, 20)
                     isClickable = true
                     focusable = View.FOCUSABLE
@@ -1037,7 +1035,7 @@ class SettingsBottomFragment(
 
     private fun showCatalogConfigDialog(item: LinkItem) {
         val context = requireContext()
-        val uniqueId = item.link.toUniqueKeyLocal() // 🚨 [추가] 고유 설정키 생성
+        val uniqueId = item.link.toUniqueKeyLocal() // 🚨 [수정] 고유 해시키 획득
         
         val progressContainer = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -1092,14 +1090,14 @@ class SettingsBottomFragment(
                             found
                         } ?: false
 
-                        // 🚨 [수정] 탭 활성화 여부 및 장르 활성화 여부를 SharedPreferences에서 최초 1회만 로드하여 임시 필드에 주입
+                        // 🚨 [동기화 누수 수정] 초기 생성 시 SharedPreferences의 값을 모델 필드로 끌고 옴
                         flatTabs.add(ConfigFlatTab(
                             key = "${id}_${type}_default", 
                             displayName = "$name - $displayType", 
                             isGenre = false, 
                             catalogKey = "${id}_${type}",
-                            isChecked = prefs.getBoolean("tab_enabled_${uniqueId}_${id}_${type}_default", true),
-                            isGenresEnabled = prefs.getBoolean("genres_enabled_${uniqueId}_${id}_${type}", true)
+                            isChecked = sharedPref.getBoolean("tab_enabled_${uniqueId}_${id}_${type}_default", true),
+                            isGenresEnabled = sharedPref.getBoolean("genres_enabled_${uniqueId}_${id}_${type}", true)
                         ))
 
                         val genres = mutableListOf<String>()
@@ -1121,13 +1119,13 @@ class SettingsBottomFragment(
 
                         genres.forEach { genre ->
                             val capitalizedGenre = genre.capitalizeFirstLocal()
-                            // 🚨 [수정] 탭 활성화 여부를 SharedPreferences에서 로드하여 임시 필드에 주입
+                            // 🚨 [동기화 누수 수정] 초기 생성 시 SharedPreferences의 값을 모델 필드로 끌고 옴
                             flatTabs.add(ConfigFlatTab(
                                 key = "${id}_${type}_genre_$genre", 
                                 displayName = "$name : $capitalizedGenre  - $displayType", 
                                 isGenre = true, 
                                 catalogKey = "${id}_${type}",
-                                isChecked = prefs.getBoolean("tab_enabled_${uniqueId}_${id}_${type}_genre_$genre", true)
+                                isChecked = sharedPref.getBoolean("tab_enabled_${uniqueId}_${id}_${type}_genre_$genre", true)
                             ))
                         }
                     }
@@ -1158,8 +1156,8 @@ class SettingsBottomFragment(
             val idx = orderedKeys.indexOf(tab.key)
             if (idx != -1) idx else Int.MAX_VALUE
         }
-        val checkedInit = sortedTabs.filter { prefs.getBoolean("tab_enabled_${uniqueId}_${it.key}", true) }
-        val uncheckedInit = sortedTabs.filter { !prefs.getBoolean("tab_enabled_${uniqueId}_${it.key}", true) }
+        val checkedInit = sortedTabs.filter { it.isChecked }
+        val uncheckedInit = sortedTabs.filter { !it.isChecked }
         val masterTabs = (checkedInit + uncheckedInit).toMutableList()
 
         val dialogContainer = LinearLayout(context).apply {
@@ -1193,7 +1191,7 @@ class SettingsBottomFragment(
             
             fun updateVisibleTabs() {
                 visibleTabs = masterTabs.filter { tab ->
-                    // 🚨 디스크의 이전 값을 실시간 호출하지 않고, 변경 중인 상태인 tab.isGenresEnabled 값을 참고하도록 변경
+                    // 🚨 [동기화 누수 수정] 인메모리 필드(isGenresEnabled) 상태에 의존하여 토글 분기
                     if (tab.isGenre) {
                         val parentTab = masterTabs.find { !it.isGenre && it.catalogKey == tab.catalogKey }
                         parentTab?.isGenresEnabled ?: true
@@ -1206,8 +1204,6 @@ class SettingsBottomFragment(
                     notifyDataSetChanged()
                 }
             }
-            
-        
 
             inner class VH(val view: LinearLayout, val checkbox: CheckBox, val etOrder: EditText, val genreSwitch: Switch, val dragHandle: ImageView) : RecyclerView.ViewHolder(view)
 
@@ -1266,10 +1262,10 @@ class SettingsBottomFragment(
                 val tab = visibleTabs[position]
                 
                 holder.checkbox.setOnCheckedChangeListener(null)
-                holder.checkbox.isChecked = tab.isChecked // 🚨 임시 인메모리 플래그 참조
+                holder.checkbox.isChecked = tab.isChecked // 🚨 [동기화 누수 수정] 인메모리 필드 바인딩
                 holder.checkbox.text = tab.displayName
                 holder.checkbox.setOnCheckedChangeListener { _, isChecked ->
-                    tab.isChecked = isChecked // 🚨 디스크에 즉시 저장하지 않고 인메모리 값만 갱신
+                    tab.isChecked = isChecked // 🚨 [동기화 누수 수정] 즉시 디스크 저장을 제거하고 임시 필드만 업데이트
                     
                     val checkedTabs = masterTabs.filter { it.isChecked }
                     val uncheckedTabs = masterTabs.filter { !it.isChecked }
@@ -1282,9 +1278,9 @@ class SettingsBottomFragment(
                 if (!tab.isGenre && masterTabs.any { it.isGenre && it.catalogKey == tab.catalogKey }) {
                     holder.genreSwitch.visibility = View.VISIBLE
                     holder.genreSwitch.setOnCheckedChangeListener(null)
-                    holder.genreSwitch.isChecked = tab.isGenresEnabled // 🚨 임시 인메모리 플래그 참조
+                    holder.genreSwitch.isChecked = tab.isGenresEnabled // 🚨 [동기화 누수 수정] 인메모리 필드 바인딩
                     holder.genreSwitch.setOnCheckedChangeListener { _, isChecked ->
-                        tab.isGenresEnabled = isChecked // 🚨 디스크에 즉시 저장하지 않고 인메모리 값만 갱신
+                        tab.isGenresEnabled = isChecked // 🚨 [동기화 누수 수정] 즉시 디스크 저장을 제거하고 임시 필드만 업데이트
                         updateVisibleTabs()
                     }
                 } else {
@@ -1330,8 +1326,8 @@ class SettingsBottomFragment(
                     if (oldPos !in visibleTabs.indices) return@post
                     val item = visibleTabs[oldPos]
                     
-                    val isEnabled = item.isChecked // 🚨 임시 인메모리 플래그 참조
-                    val checkedCount = visibleTabs.count { it.isChecked } // 🚨 임시 인메모리 플래그 참조
+                    val isEnabled = item.isChecked // 🚨 [동기화 누수 수정] 인메모리 플래그 참조
+                    val checkedCount = visibleTabs.count { it.isChecked } // 🚨 [동기화 누수 수정] 인메모리 플래그 참조
                     
                     val groupMin = if (isEnabled) 1 else checkedCount + 1
                     val groupMax = if (isEnabled) checkedCount else visibleTabs.size
@@ -1439,18 +1435,16 @@ class SettingsBottomFragment(
             val editor = prefs.edit()
             val keysToSave = JSONArray()
             
-            // 🚨 그동안 모아두었던 체크박스 및 장르 토글 임시 상태값들을 이 시점에 비로소 최종 보관 처리합니다.
+            // 🚨 [동기화 누수 수정] 오직 세이브 버튼을 누를 때만 보관해두었던 인메모리 임시값들을 SharedPreferences에 최종 일괄 기록
             masterTabs.forEach { 
-                keysToSave.put(it.key)
+                keysToSave.put(it.key) 
                 editor.putBoolean("tab_enabled_${uniqueId}_${it.key}", it.isChecked)
                 if (!it.isGenre) {
                     editor.putBoolean("genres_enabled_${uniqueId}_${it.catalogKey}", it.isGenresEnabled)
                 }
             }
             editor.putString(orderKey, keysToSave.toString())
-            
-            // 데이터 동합성을 위해 commit()으로 물리 디스크에 즉각 플러시합니다.
-            editor.commit()
+            editor.commit() // 🚨 동기 디스크 플러시 강제
             
             dialog.dismiss()
             showSavedPopup(context, "Catalog Settings", "Catalog settings saved. Reload to apply.")
@@ -1479,7 +1473,7 @@ class SettingsBottomFragment(
                 switchView.isChecked = SettingsRepository.isIntegrationEnabled(sharedPref, prefKey)
             }
             switchView.setOnCheckedChangeListener { _, isChecked ->
-                // 🚨 실시간 자동 저장(setIntegrationEnabled) 라인 제거
+                // 🚨 [동기화 누수 수정] 뒤로가기 누출 방지를 위해 체크 체인지 리스너 안의 실시간 SharedPreferences 물리 저장 코드(setIntegrationEnabled) 삭제
                 showToast("$displayName Integration " + if (isChecked) "Enabled" else "Disabled")
             }
         } catch (e: Throwable) { e.printStackTrace() }
