@@ -144,6 +144,7 @@ class SettingsBottomFragment(
 
     private fun setupCustomDialog(dialog: AlertDialog, contentView: View) {
         activeSubDialog = dialog
+        dialog.setCanceledOnTouchOutside(false) // 🚨 [기능 수정] 모든 부속 팝업/부속창 밖 터치 시 종료 차단 (뒤로가기는 정상 동작)
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         dialog.setOnShowListener {
             dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
@@ -296,8 +297,10 @@ class SettingsBottomFragment(
         inflater: LayoutInflater, container: ViewGroup?,
         savedInstanceState: Bundle?
     ): View {
-        isCancelable = false // 🚨 [기능 추가] 설정창 밖 터치로 꺼지는 문제 해결
+        isCancelable = true // 🚨 [기능 수정] 뒤로가기 허용
+        dialog?.setCanceledOnTouchOutside(false) // 🚨 [기능 수정] 메인 설정창 밖 터치 시 종료만 차단
         val view = getLayout("bottom_sheet_layout", inflater, container)
+        
 
         val addlinks: ImageView = try { view.findView("addlinks") } catch (e: Throwable) { throw Exception("addlinks ImageView not found", e) }
         val showlinks: ImageView = try { view.findView("showlinks") } catch (e: Throwable) { throw Exception("showlinks ImageView not found", e) }
