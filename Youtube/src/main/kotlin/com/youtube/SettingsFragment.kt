@@ -24,7 +24,7 @@ import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import androidx.preference.Preference.SummaryProvider
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
-import com.lagradost.cloudstream3.ar.youtube.YoutubeProvider
+import com.lagradost.cloudstream3.youtube.YoutubeProvider
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
 import androidx.recyclerview.widget.RecyclerView
