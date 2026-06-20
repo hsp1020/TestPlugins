@@ -46,7 +46,6 @@ open class YoutubeExtractor : ExtractorApi() {
     override val name = "YouTube"
 
     companion object {
-        // 코루틴 수명주기 및 경량 실행 컨텍스트 관리용 스코프
         private val serverScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
         @Volatile
@@ -56,16 +55,15 @@ open class YoutubeExtractor : ExtractorApi() {
 
         private val streamCounter = AtomicLong(0)
 
-        // ---------------- [ 재생 속도 지연 극복을 위한 전역 가속 캐시 계층 ] ----------------
+        // ---------------- [ 재생 시작 속도 가속화 전용 전역 캐시 계층 ] ----------------
         @Volatile
         private var cachedSts: Int = 20002
         @Volatile
         private var cachedPlayerId: String = ""
         @Volatile
         private var lastCacheTime: Long = 0L
-        private const val CACHE_TTL = 6 * 60 * 60 * 1000L // 최신 플레이어 메타데이터 유지 (6시간)
+        private const val CACHE_TTL = 6 * 60 * 60 * 1000L // 6시간 유효
 
-        // 중복 시그니처 해독 비용을 상쇄하여 로그인 대기 시간을 축소하는 메모리 맵
         private val decodedSigCache: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(128, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
@@ -118,12 +116,15 @@ open class YoutubeExtractor : ExtractorApi() {
         private val VISITOR_DATA_REGEX = Regex(""""VISITOR_DATA":"([^"]+)"""")
         private val CHUNK_ID_REGEX = Regex("id=([^&]+)")
 
+        // HTML 내부 오디오 트랙 배열 스캔용 정규식
+        private val AUDIO_TRACKS_REGEX = Regex("\"audioTracks\":\\s*\\[(.*?)\\]")
+
         private const val SAFARI_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15,gzip(gfe)"
         private const val SAFARI_CLIENT_VERSION = "2.20260114.08.00"
         private const val VR_API_KEY = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
             
         init {
-            println("[YT_DEBUG_INIT] 유튜브 DASH 코루틴 기반 병렬 파싱 엔진 최적화 완료")
+            println("[YT_DEBUG_INIT] 유튜브 다국어 4K 병합 라우팅 엔진 가동 완료")
         }
 
         private fun generateCpn(): String {
@@ -144,7 +145,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                     context.startActivity(intent)
                 } catch (e: Exception) {
-                    println("[YT_PROXY_DEBUG] 외부 앱 연동 실패: ${e.message}")
+                    println("[YT_PROXY_DEBUG] 앱 연동 차단 해제: ${e.message}")
                 }
             }
         }
@@ -206,7 +207,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
             } catch (e: Exception) {
-                println("[YT_PROXY_DEBUG] 가상 프록시 통신 실패: ${e.message}")
+                println("[YT_PROXY_DEBUG] 가상 소켓 프록시 단선: ${e.message}")
             }
         }
 
@@ -238,11 +239,11 @@ open class YoutubeExtractor : ExtractorApi() {
                         recentTriggers[triggerKey] = now
                         openInExternalApp(pkg, targetUrl)
                     } else {
-                        println("[YT_PROXY_DEBUG] 중복된 실행 요청 무시: $triggerKey")
+                        println("[YT_PROXY_DEBUG] 연속 호출 해제 지연: $triggerKey")
                     }
                 }
             } catch (e: Exception) {
-                println("[YT_PROXY_DEBUG] 앱 연동 데이터 파싱 오류: ${e.message}")
+                println("[YT_PROXY_DEBUG] 외부 앱 인텐트 명령 파싱 실패: ${e.message}")
             } finally {
                 outWriter.print("HTTP/1.1 204 No Content\r\n")
                 outWriter.print("Connection: close\r\n")
@@ -297,11 +298,10 @@ open class YoutubeExtractor : ExtractorApi() {
                     output.flush()
                 }
             } catch (e: Exception) {
-                println("[YT_PROXY_DEBUG] 미디어 버퍼 릴레이 오류: ${e.message}")
+                println("[YT_PROXY_DEBUG] 미디어 포워딩 단선: ${e.message}")
             }
         }
 
-        // 복호화 이중 캐시 필터를 내장한 고속 디코더 요청기
         private fun decodeBatch(playerId: String, sigs: List<String>, ns: List<String>): Pair<Map<String, String>, Map<String, String>> {
             val sigResults = mutableMapOf<String, String>()
             val nResults = mutableMapOf<String, String>()
@@ -310,7 +310,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 return Pair(sigResults, nResults)
             }
 
-            // 1) 보관된 해독값은 원격 호출 대상에서 사전 제거
             val missingSigs = sigs.filter { 
                 val cached = decodedSigCache[it]
                 if (cached != null) sigResults[it] = cached
@@ -322,7 +321,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 cached == null
             }
 
-            // 모든 정보가 이미 캐시되어 있을 경우 API 호출을 완전히 생략하고 반환 (가속 핵심 지점)
             if (missingSigs.isEmpty() && missingNs.isEmpty()) {
                 return Pair(sigResults, nResults)
             }
@@ -367,7 +365,7 @@ open class YoutubeExtractor : ExtractorApi() {
                                     val decodedValue = nData.optString(nParam)
                                     if (decodedValue.isNotEmpty()) {
                                         nResults[nParam] = decodedValue
-                                        decodedNCache[nParam] = decodedValue // 로컬 캐싱
+                                        decodedNCache[nParam] = decodedValue
                                     }
                                 }
                             }
@@ -383,7 +381,7 @@ open class YoutubeExtractor : ExtractorApi() {
                                     val decodedValue = sigData.optString(sig)
                                     if (decodedValue.isNotEmpty()) {
                                         sigResults[sig] = decodedValue
-                                        decodedSigCache[sig] = decodedValue // 로컬 캐싱
+                                        decodedSigCache[sig] = decodedValue
                                     }
                                 }
                             }
@@ -391,7 +389,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
             } catch (e: Exception) {
-                println("[TRACK] 🚨 decodeBatch API 통신 오류: ${e.message}")
+                println("[TRACK] 🚨 decodeBatch API 통신 실패: ${e.message}")
             }
 
             return Pair(sigResults, nResults)
@@ -412,7 +410,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
             } catch (e: Exception) {
-                println("[TRACK] 🚨 deobfuscateManifestUrl 처리 예외: ${e.message}")
+                println("[TRACK] 🚨 deobfuscateManifestUrl 예외: ${e.message}")
             }
             return manifestUrl
         }
@@ -439,7 +437,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
             } catch (e: Exception) {
-                println("[TRACK] 🚨 HLS xtags 분석 오류: ${e.message}")
+                println("[TRACK] 🚨 HLS xtags 분석 에러: ${e.message}")
             }
             return null
         }
@@ -502,11 +500,11 @@ open class YoutubeExtractor : ExtractorApi() {
         }
     }
 
-    // 전역 비동기 구조 및 전역 메타데이터 TTL 캐시를 내장한 수집부
+    // [지능형 가속화 라우터 & 오리지널 직접 더빙 스캐너 통합부]
     private suspend fun fetchPlayerResponse(videoId: String): Triple<JSONObject?, Long, String> = withContext(Dispatchers.IO) {
         val watchUrl = "https://www.youtube.com/watch?v=$videoId"
         
-        println("[TRACK] 1. Parallel HTML Fetch & Memory-Cached Config Retrieval")
+        println("[TRACK] 1. Initial HTML Fetch & Memory-Cached Config Retrieval")
         
         val watchHtmlDeferred = async {
             try {
@@ -517,7 +515,7 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         }
 
-        // 캐시 히트 시 네트워크 소거
+        // 플레이어 메타데이터 6시간 전역 캐시
         val pipePlayerDeferred = async {
             val now = System.currentTimeMillis()
             if (cachedPlayerId.isNotEmpty() && (now - lastCacheTime < CACHE_TTL)) {
@@ -542,13 +540,32 @@ open class YoutubeExtractor : ExtractorApi() {
                     } else null
                 }
             } catch (e: Exception) {
-                println("[TRACK] 🚨 디코더 환경조회 오류: ${e.message}")
+                println("[TRACK] 🚨 플레이어 고유 버전 수집 에러: ${e.message}")
                 null
             }
         }
 
         val html = watchHtmlDeferred.await()
         val visitorData = VISITOR_DATA_REGEX.find(html)?.groupValues?.get(1) ?: ""
+
+        // ---------------- [ 직접 더빙 vs 자동 더빙 / 더빙 없음 검사부 ] ----------------
+        var isDirectDubbed = false
+        try {
+            val audioTrackCount = html.split("\"audioTrack\"").size - 1
+            // 💡 사용자 요구사항 반영: 판단 기준 트랙 한계점을 정확히 'audioTrackCount > 2' 로 재조정
+            if (audioTrackCount > 2) {
+                // 구글 자체 AI 번역 자동 더빙 유무 확인 ("isAutoDubbed": true 공식 규격)
+                val hasAutoDub = html.contains("\"isAutoDubbed\"\\s*:\\s*true".toRegex())
+                
+                // 다국어 트랙이 풍부하게 존재하며 기계식 자동 더빙이 아닌 경우 -> 성우 직접 더빙
+                if (!hasAutoDub) {
+                    isDirectDubbed = true
+                }
+            }
+        } catch (e: Exception) {
+            println("[TRACK] 🚨 다국어 프리 스캔 예외: ${e.message}")
+        }
+        // -----------------------------------------------------------------------------
 
         val context = com.lagradost.cloudstream3.AcraApplication.context
         val provider = com.lagradost.cloudstream3.APIHolder.allProviders.find { it.name == "YouTube" }
@@ -570,8 +587,11 @@ open class YoutubeExtractor : ExtractorApi() {
         var finalJson: JSONObject? = null
         var lengthSeconds = 3600L
 
-        if (isLoggedIn) {
-            println("[TRACK] 2. SAFARI API Request 처리 중 (4초 타임아웃 초고속 전환 규칙 탑재)")
+        // 직접 업로드된 다국어 더빙이면서 정상적으로 로그인이 된 채널만 사파리(WEB) 호출
+        val useSafariClient = isLoggedIn && isDirectDubbed
+
+        if (useSafariClient) {
+            println("[TRACK] 2. SAFARI API Request 처리 중 (성우 직접 더빙 확인 -> 음성 트랙 분석 돌입)")
             val safariApiUrl = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
             val safariPayload = JSONObject(mapOf(
                 "context" to mapOf(
@@ -612,7 +632,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 .build()
 
             try {
-                // 로그인 환경 최대 타임아웃 4초 임계점 적용 (정체될 시 대기하지 않고 고속 우회)
                 val fastSafariClient = proxyHttpClient.newBuilder()
                     .connectTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
                     .readTimeout(4, java.util.concurrent.TimeUnit.SECONDS)
@@ -632,12 +651,87 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
             } catch (e: Exception) { 
-                println("[TRACK] ⚠️ SAFARI 요청 대기 한계 돌파. 로그인 세션 상태를 가속 폴백 모드로 긴급 우회합니다.") 
+                println("[TRACK] ⚠️ SAFARI 응답 딜레이 감지. 지연 회피 가속 폴백을 활성화합니다.") 
             }
         }
 
+        // [4K 화질 및 초고속 재생 병합 처리 구조 설계]
+        // 💡 [해결책 적용]: 다국어 직접 더빙 상황(`useSafariClient`)이라 하더라도, Safari 클라이언트는 최대 1080p 포맷 제한이 걸려있으므로
+        // 이와 무관하게 4K(2160p) 초고화질 스트림을 온전히 추가 확보하기 위해 ANDROID_VR 클라이언트 요청을 비동기(Parallel)로 병행하여 수행합니다.
+        if (useSafariClient) {
+            println("[TRACK] 2-1. Parallel ANDROID_VR Client Call (4K 고해상도 비디오 포맷 보완 확보)")
+            val vrApiUrl = "https://youtubei.googleapis.com/youtubei/v1/player?prettyPrint=false&key=$VR_API_KEY"
+            val vrHeaders = mapOf(
+                "Content-Type" to "application/json",
+                "User-Agent" to YoutubeUtils.ANDROID_VR_USER_AGENT,
+                "X-Goog-Api-Format-Version" to "2"
+            )
+            val vrPayload = mapOf(
+                "videoId" to videoId,
+                "context" to mapOf(
+                    "client" to mapOf(
+                        "clientName" to "ANDROID_VR",
+                        "clientVersion" to "1.65.10",
+                        "androidSdkVersion" to 32,
+                        "osName" to "Android",
+                        "osVersion" to "12L",
+                        "deviceMake" to "Oculus",
+                        "deviceModel" to "Quest 3",
+                        "hl" to langCode,
+                        "gl" to if (langCode == "ko") "KR" else "US",
+                        "visitorData" to visitorData
+                    )
+                ),
+                "playbackContext" to mapOf(
+                    "contentPlaybackContext" to mapOf(
+                        "signatureTimestamp" to sts
+                    )
+                )
+            )
+
+            try {
+                val res = app.post(vrApiUrl, json = vrPayload, headers = vrHeaders).text
+                val vrJson = JSONObject(res)
+                val status = vrJson.optJSONObject("playabilityStatus")?.optString("status")
+
+                if (status == "OK" || vrJson.has("streamingData")) {
+                    val vrStreamingData = vrJson.optJSONObject("streamingData")
+                    val safariStreamingData = finalJson?.optJSONObject("streamingData")
+
+                    if (vrStreamingData != null && safariStreamingData != null) {
+                        val vrFormats = vrStreamingData.optJSONArray("adaptiveFormats") ?: JSONArray()
+                        val safariFormats = safariStreamingData.optJSONArray("adaptiveFormats") ?: JSONArray()
+
+                        // Safari 포맷 목록에 존재하지 않는 고화질 비디오 포맷(4K 등)들을 ANDROID_VR 결과물에서 안전하게 병합하여 최종 전달
+                        val mergedFormats = JSONArray()
+                        val addedItags = mutableSetOf<String>()
+
+                        // 1) Safari 원본 트랙 및 더빙 오디오 트랙 우선 주입
+                        for (i in 0 until safariFormats.length()) {
+                            val format = safariFormats.getJSONObject(i)
+                            mergedFormats.put(format)
+                            addedItags.add(format.optString("itag"))
+                        }
+
+                        // 2) VR에서 획득한 고화질 비디오(1440p, 2160p 4K 등) 스트림 추가 병합
+                        for (i in 0 until vrFormats.length()) {
+                            val format = vrFormats.getJSONObject(i)
+                            val itag = format.optString("itag")
+                            if (!addedItags.contains(itag)) {
+                                mergedFormats.put(format)
+                            }
+                        }
+                        safariStreamingData.put("adaptiveFormats", mergedFormats)
+                    }
+                }
+            } catch (e: Exception) {
+                println("[TRACK] 🚨 4K 병합용 VR API 수집부 에러: ${e.message}")
+            }
+        }
+
+        // 일반 영상, 기계어로 번역된 자동 더빙 영상, 혹은 비로그인 상태일 때는 딜레이 없이 3초 가속 모드 구동
         if (finalJson == null) {
-            println("[TRACK] 3. ANDROID_VR API Request (고속 추출 모드 실행)")
+            println("[TRACK] 3. ANDROID_VR API Request (고속 추출 및 자동 더빙 회피 모드 가동)")
             val vrApiUrl = "https://youtubei.googleapis.com/youtubei/v1/player?prettyPrint=false&key=$VR_API_KEY"
             val vrHeaders = mapOf(
                 "Content-Type" to "application/json",
@@ -677,14 +771,13 @@ open class YoutubeExtractor : ExtractorApi() {
                     lengthSeconds = json.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
                 }
             } catch (e: Exception) { 
-                println("[TRACK] 🚨 ANDROID_VR API 데이터 펫칭 실패: ${e.message}") 
+                println("[TRACK] 🚨 ANDROID_VR API 고속 수집 실패: ${e.message}") 
             }
         }
 
         Triple(finalJson, lengthSeconds, playerId)
     }
 
-    // 구조화된 동수 실행을 보장받는 독립 HLS 파싱 모듈
     private suspend fun parseHlsManifest(
         hlsUrl: String,
         playerId: String,
@@ -805,7 +898,6 @@ open class YoutubeExtractor : ExtractorApi() {
         }
     }
 
-    // 독립 어댑티브(DASH) 파싱 및 복호화 필터 모듈
     private suspend fun parseAdaptiveFormats(
         streamingData: JSONObject,
         playerId: String,
@@ -978,7 +1070,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     val finalName = "YouTube ${video.label}"
                     callback(
                         newExtractorLink(
-                            this@YoutubeExtractor.name, finalName, localLink, type = ExtractorLinkType.DASH
+                            this@YoutubeExtractor.name, finalName, localLink, type = ExtExtractorLinkType.DASH
                         ) {
                             this.referer = mainUrl
                             this.quality = video.height
@@ -1036,7 +1128,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
                 println("[TRACK] 4. Executing Pure Coroutine Parallel Parsing")
 
-                // [최적화 지점] HLS 파싱 코루틴과 어댑티브 파싱 코루틴을 병렬 실행하여 IO 지연 상쇄
+                // HLS 매니페스트 파싱과 어댑티브 파싱 코루틴을 병렬 실행하여 동시 처리
                 val hlsJob = launch {
                     if (hlsUrl.isNotBlank()) {
                         parseHlsManifest(hlsUrl, playerId, langCode, callback)
@@ -1047,7 +1139,6 @@ open class YoutubeExtractor : ExtractorApi() {
                     parseAdaptiveFormats(streamingData, playerId, durationSeconds, langCode, callback)
                 }
 
-                // 백업용 통짜 DASH 방출은 대기 없이 바로 수행
                 if (dashUrl.isNotBlank()) {
                     val finalDashUrl = if (playerId.isNotBlank()) deobfuscateManifestUrl(dashUrl, playerId) else dashUrl
                     callback(
@@ -1064,7 +1155,6 @@ open class YoutubeExtractor : ExtractorApi() {
                     )
                 }
 
-                // 비동기 파싱 태스크들이 완결될 때까지 대기하여 누수 방지
                 hlsJob.join()
                 adaptiveJob.join()
 
@@ -1084,13 +1174,12 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
 
             } catch (e: Exception) { 
-                println("[TRACK] 🚨 getUrl 전역 루프 에러: ${e.message}")
+                println("[TRACK] 🚨 getUrl 처리 전역 예외: ${e.message}")
                 logError(e) 
             }
         }
     }
 
-    // 소켓 서버를 안전한 구조적 코루틴으로 가동
     private fun startServerIfNeeded() {
         synchronized(serverLock) {
             val server = activeServer
@@ -1105,10 +1194,9 @@ open class YoutubeExtractor : ExtractorApi() {
                         while (isActive && !newServer.isClosed) {
                             val client = newServer.accept()
                             client.soTimeout = 15000 
-                            launch { handleClient(client) } // 개별 요청 경량화 코루틴화
+                            launch { handleClient(client) }
                         }
                     } catch (e: Exception) {
-                        // 정상 클로즈 상황
                     }
                 }
             } catch (e: Exception) { 
