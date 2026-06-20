@@ -791,8 +791,7 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
     ) : DialogFragment() {
 
         private lateinit var webView: WebView
-        private val targetCookies = listOf("VISITOR_INFO1_LIVE", "SID", "HSID", "SSID", "APISID", "SAPISID")
-
+        private val targetCookies = listOf("VISITOR_INFO1_LIVE", "SID", "HSID", "SSID", "APISID", "SAPISID", "__Secure-1PSID", "__Secure-3PAPISID")
         override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
             val ctx = requireContext()
 
