@@ -12,7 +12,7 @@ class YoutubeTokenPlugin: Plugin() {
 
         val sharedPref = context.getSharedPreferences("YouTube", Context.MODE_PRIVATE)
 
-        registerMainAPI(com.lagradost.cloudstream3.youtube.YoutubeProvider(sharedPref))
+        registerMainAPI(com.hsp1020.youtube.YoutubeProvider(sharedPref))
 
         openSettings = { ctx ->
 
