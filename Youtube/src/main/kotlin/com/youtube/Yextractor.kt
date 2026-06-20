@@ -792,7 +792,7 @@ open class YoutubeExtractor : ExtractorApi() {
                         this@YoutubeExtractor.name,
                         stream.labelName,
                         stream.url,
-                        type = ExtExtractorLinkType.M3U8
+                        type = ExtractorLinkType.M3U8
                     ) {
                         this.referer = mainUrl
                         this.quality = stream.height
