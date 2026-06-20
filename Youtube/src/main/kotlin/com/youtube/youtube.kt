@@ -716,9 +716,10 @@ class YoutubeProvider(
         return ""
     }
 
-    private fun extractLockupMetadata(lockup: Map<*, *>) : Pair<String, String> {
+    private fun extractLockupMetadata(lockup: Map<*, *>) : Triple<String, String, String> {
         var channel = ""
         var views = ""
+        var date = ""
 
         try {
             val rows = lockup.getMapKey("metadata")
@@ -728,25 +729,54 @@ class YoutubeProvider(
                 ?.getListKey("metadataRows")
 
             if (rows != null && rows.isNotEmpty()) {
-                val firstRow = rows.getOrNull(0)
-                if (firstRow != null) {
-                    val parts = firstRow.getListKey("metadataParts")
-                        ?: YoutubeUtils.getListKeyFromAny(firstRow, "metadataParts") as? List<*>
-                    val firstPart = parts?.getOrNull(0) as? Map<*, *>
-                    if (firstPart != null) {
-                        channel = getText(firstPart.getMapKey("text") ?: firstPart["text"])
+                if (rows.size == 1) {
+                    // 채널 전용 카탈로그: 행이 1개뿐이므로 [조회수]와 [업로드시간]이 나란히 위치함
+                    val singleRow = rows.getOrNull(0)
+                    if (singleRow != null) {
+                        val parts = singleRow.getListKey("metadataParts")
+                            ?: YoutubeUtils.getListKeyFromAny(singleRow, "metadataParts") as? List<*>
+                        
+                        val firstPart = parts?.getOrNull(0) as? Map<*, *>
+                        if (firstPart != null) {
+                            val rawViews = getText(firstPart.getMapKey("text") ?: firstPart["text"])
+                            if (rawViews.isNotBlank()) {
+                                views = formatViews(rawViews)
+                            }
+                        }
+                        
+                        val secondPart = parts?.getOrNull(1) as? Map<*, *>
+                        if (secondPart != null) {
+                            date = getText(secondPart.getMapKey("text") ?: secondPart["text"])
+                        }
                     }
-                }
+                } else {
+                    // 홈 화면/검색 결과: 행이 2개 이상이므로 Row 0은 채널명, Row 1은 조회수와 업로드시간이 위치함
+                    val firstRow = rows.getOrNull(0)
+                    if (firstRow != null) {
+                        val parts = firstRow.getListKey("metadataParts")
+                            ?: YoutubeUtils.getListKeyFromAny(firstRow, "metadataParts") as? List<*>
+                        val firstPart = parts?.getOrNull(0) as? Map<*, *>
+                        if (firstPart != null) {
+                            channel = getText(firstPart.getMapKey("text") ?: firstPart["text"])
+                        }
+                    }
 
-                val secondRow = rows.getOrNull(1)
-                if (secondRow != null) {
-                    val parts = secondRow.getListKey("metadataParts")
-                        ?: YoutubeUtils.getListKeyFromAny(secondRow, "metadataParts") as? List<*>
-                    val firstPart = parts?.getOrNull(0) as? Map<*, *>
-                    if (firstPart != null) {
-                        val rawViews = getText(firstPart.getMapKey("text") ?: firstPart["text"])
-                        if (rawViews.isNotBlank()) {
-                            views = formatViews(rawViews)
+                    val secondRow = rows.getOrNull(1)
+                    if (secondRow != null) {
+                        val parts = secondRow.getListKey("metadataParts")
+                            ?: YoutubeUtils.getListKeyFromAny(secondRow, "metadataParts") as? List<*>
+                        
+                        val firstPart = parts?.getOrNull(0) as? Map<*, *>
+                        if (firstPart != null) {
+                            val rawViews = getText(firstPart.getMapKey("text") ?: firstPart["text"])
+                            if (rawViews.isNotBlank()) {
+                                views = formatViews(rawViews)
+                            }
+                        }
+                        
+                        val secondPart = parts?.getOrNull(1) as? Map<*, *>
+                        if (secondPart != null) {
+                            date = getText(secondPart.getMapKey("text") ?: secondPart["text"])
                         }
                     }
                 }
@@ -762,7 +792,7 @@ class YoutubeProvider(
             if (direct.isNotBlank()) views = formatViews(direct)
         }
 
-        return Pair(channel, views)
+        return Triple(channel, views, date)
     }
 
     private fun collectFromRenderer(
@@ -788,6 +818,7 @@ class YoutubeProvider(
                 val title = getText(videoData.getMapKey("title")) ?: "Video"
                 val viewText = getText(videoData.getMapKey("viewCountText"))
                     ?: getText(videoData.getMapKey("shortViewCountText"))
+                val dateText = getText(videoData.getMapKey("publishedTimeText"))
                 
                 val channel = getText(videoData.getMapKey("ownerText"))
                     .ifBlank { getText(videoData.getMapKey("shortBylineText")) }
@@ -795,9 +826,11 @@ class YoutubeProvider(
 
                 val views = formatViews(viewText)
                 
+                // 채널명이 존재하면 {채널명 | 조회수}, 존재하지 않는 전용관이라면 {조회수 | 업로드시간} 으로 표현
                 val finalTitle = when {
                     channel.isNotBlank() && views.isNotBlank() && views != "N/A" -> "{$channel | $views} $title"
                     channel.isNotBlank() -> "{$channel} $title"
+                    views.isNotBlank() && views != "N/A" && dateText.isNotBlank() -> "{$views | $dateText} $title"
                     views.isNotBlank() && views != "N/A" -> "{$views} $title"
                     else -> title
                 }
@@ -934,6 +967,91 @@ class YoutubeProvider(
                 }
             }
 
+            val videoId = lockup.getString("contentId")
+                ?: lockup.getMapKey("content")?.getString("videoId")
+                ?: (lockup.getMapKey("content")?.getMapKey("videoRenderer")?.getString("videoId"))
+
+            if (!videoId.isNullOrBlank() && seenIds.add(videoId)) {
+                val title = getText(
+                    lockup.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")
+                        ?.getMapKey("title")
+                )
+                if (title.isBlank()) {
+                    return null
+                }
+                var (channel, views, date) = extractLockupMetadata(lockup)     
+                if (channel.isBlank()) {
+                    val label = lockup.getMapKey("accessibility")?.getMapKey("accessibilityData")
+                        ?.getString("label") ?: ""
+                    val match = BY_CHANNEL_REGEX.find(label)
+                    if (match != null) channel = match.groupValues[1].replace("Shorts", "").trim()
+                }
+                val isShorts = lockup.getMapKey("content")
+                    ?.containsKey("shortsLockupViewModel") == true || lockup.toString()
+                    .contains("reelWatchEndpoint")
+                val finalTitle: String
+                val poster: String
+
+                val metaString = getEpisodeMetaString(lockup.getMapKey("content") ?: lockup)
+                if (metaString.isNotBlank()) epMetaMapCache[videoId] = metaString
+
+                if (isShorts) {
+                    val currentList = if (isSearchContext) searchShorts else homeShorts
+                    val episodeNum = synchronized(currentList) { currentList.size } + 1
+                    val contextTag = if (isSearchContext) "&ctx=search" else "&ctx=home"
+                    val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
+                    
+                    poster = YoutubeUtils.getShortsSearchPoster(videoId)
+                    
+                    val descText = buildString {
+                        if (channel.isNotBlank()) append("Channel: $channel")
+                        if (views.isNotBlank()) {
+                            if (isNotEmpty()) append(" • ")
+                            append("$views")
+                        }
+                    }
+                    
+                    val newShortEp2 = newEpisode(finalUrl) {
+                        this.name = title
+                        this.posterUrl = YoutubeUtils.getShortsEpisodeThumbnail(videoId)
+                        this.episode = episodeNum
+                        this.description = descText
+                    }
+                    addToShortsList(currentList, newShortEp2)
+
+                    finalTitle = "#$episodeNum [Shorts] {Short | $views} $title"
+                    return newMovieSearchResponse(
+                        finalTitle,
+                        finalUrl,
+                        TvType.Movie
+                    ) { this.posterUrl = poster }
+                } else {
+                    // 채널명이 존재하면 {채널명 | 조회수}, 존재하지 않는 전용관이라면 {조회수 | 업로드시간} 으로 표현
+                    finalTitle = when {
+                        channel.isNotBlank() && views.isNotBlank() -> "{$channel | $views} $title"
+                        channel.isNotBlank() -> "{$channel} $title"
+                        views.isNotBlank() && date.isNotBlank() -> "{$views | $date} $title"
+                        views.isNotBlank() -> "{$views} $title"
+                        else -> title
+                    }
+                    poster = YoutubeUtils.getBestThumbnail(
+                        lockup.getMapKey("contentImage")?.getMapKey("image")?.getListKey("sources")
+                    ) ?: "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
+                    return newMovieSearchResponse(
+                        finalTitle,
+                        "$mainUrl/watch?v=$videoId",
+                        TvType.Movie
+                    ) {
+                        this.posterUrl = if (isSearchContext) {
+                            YoutubeUtils.getProxiedPosterBottom(poster)
+                        } else {
+                            YoutubeUtils.getProxiedPosterNormal(poster)
+                        }
+                    }
+                }
+            }
+        }
+        
             val videoId = lockup.getString("contentId")
                 ?: lockup.getMapKey("content")?.getString("videoId")
                 ?: (lockup.getMapKey("content")?.getMapKey("videoRenderer")?.getString("videoId"))
