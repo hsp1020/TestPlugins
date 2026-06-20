@@ -1240,7 +1240,7 @@ class YoutubeProvider(
             return list
         }
 
-    private fun getCustomHomepages(): List<CustomSection> {
+private fun getCustomHomepages(): List<CustomSection> {
         val json = appPrefs?.getString("custom_homepages_v3", "[]") ?: "[]"
         val currentList = try {
             mapper.readValue<List<CustomSection>>(json).toMutableList()
@@ -1250,35 +1250,25 @@ class YoutubeProvider(
 
         var modified = false
 
-        if (currentList.none { section -> section.url == "Home" }) {
-            currentList.add(0, CustomSection(name = "Home", url = "Home", isEnabled = true))
+        // 1. 설정 관리 레이아웃에 기본 '홈(Home)' 팩터 영구 보장
+        if (currentList.none { it.url == "Home" }) {
+            val homeTitle = when(lang) {
+                "ko" -> "홈"
+                "ar" -> "الرئيسية"
+                else -> "Home"
+            }
+            currentList.add(0, CustomSection(name = homeTitle, url = "Home", isEnabled = true))
             modified = true
         }
 
+        // 2. 홈화면 기동 시 캐싱되었던 "개별" 칩 필터 항목들(요리, 농구, 뉴스 등)을 설정 목록에 등록
         val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
         try {
             val cachedChips = mapper.readValue<List<CachedChip>>(cachedChipsJson)
-            
-            // [해결책 1] 캐시에 현재 들어있지 않더라도 기존에 설정되어 정렬된 칩 카테고리를 custom_homepages_v3 설정에서 제거하지 않습니다.
-            // 이를 통해 사용자가 설정한 순서와 숨김 여부가 새로고침 시 초기화되던 현상을 해결합니다.
-            /* 
-            val cachedNames = cachedChips.map { it.name }.toSet()
-            val iterator = currentList.iterator()
-            while (iterator.hasNext()) {
-                val sec = iterator.next()
-                if (sec.url.startsWith("chip_name_")) {
-                    val name = sec.url.removePrefix("chip_name_")
-                    if (!cachedNames.contains(name)) {
-                        iterator.remove()
-                        modified = true
-                    }
-                }
-            }
-            */
-
             cachedChips.forEach { chip ->
                 val stableUrl = "chip_name_${chip.name}"
-                if (currentList.none { section -> section.url == stableUrl }) {
+                // 이미 존재한다면 중복 등록하지 않고 보존하며, 사라진 칩을 강제로 remove하는 일체의 로직이 부재합니다.
+                if (currentList.none { it.url == stableUrl }) {
                     currentList.add(CustomSection(name = chip.name, url = stableUrl, isEnabled = true))
                     modified = true
                 }
@@ -1295,7 +1285,7 @@ class YoutubeProvider(
                 logError(e)
             }
         }
-        
+
         return currentList
     }
 
@@ -1330,14 +1320,14 @@ class YoutubeProvider(
 
         try {
             if (page == 1) {
-                // 1. [새로고침 클리어] 기존 1페이지 연속 갱신 시 과거 세션 토큰을 완전히 비웁니다.
+                // [실동작 코드] 새로고침 시 이 카테고리의 기존 페이지네이션 단일 캐시를 깨끗하게 비웁니다.
                 saveContinuationToken(requestData, null)
 
                 if (isChip) {
                     val oldToken = requestData.removePrefix("chip_")
                     var tokenToUse = oldToken
 
-                    // 2. [역방향 칩 이름 조회] 현재 칩의 구형 토큰을 통해 기존 저장되어 있던 칩 이름(예: "요리")을 찾아냅니다.
+                    // [실동작 코드] 현재 탭의 토큰으로 역추적하여 칩 이름(예: "요리", "뉴스")을 캐시에서 알아냅니다.
                     val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
                     val cachedChips = try {
                         mapper.readValue<List<CachedChip>>(cachedChipsJson)
@@ -1346,7 +1336,7 @@ class YoutubeProvider(
                     }
                     val chipName = cachedChips.find { it.token == oldToken }?.name
 
-                    // 3. [실시간 칩 토큰 갱신] 식별에 성공했다면, 무캐시로 메인 페이지를 새로 긁어와 최신 토큰 정보를 매핑합니다.
+                    // [실동작 코드] 알아낸 칩 이름을 바탕으로 메인 페이지를 호출해 실시간 신상 토큰을 새로 받아옵니다.
                     if (!chipName.isNullOrBlank()) {
                         try {
                             val html = app.get(mainUrl, interceptor = ytInterceptor, headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")).text
@@ -1385,7 +1375,7 @@ class YoutubeProvider(
                                     }
                                     appPrefs?.edit()?.putString("yt_cached_chips", jsonArray.toString())?.apply()
 
-                                    // 4. 새로 수집된 무캐시 칩 데이터 풀에서 해당 카테고리명으로 발급된 가장 신선한 칩 토큰을 기입합니다.
+                                    // 신규 발급된 칩 정보에서 같은 이름의 신상 토큰으로 갱신해 요청을 보냅니다.
                                     val freshToken = cachedChipsMap[chipName]?.token
                                     if (!freshToken.isNullOrBlank()) {
                                         tokenToUse = freshToken
@@ -1415,7 +1405,7 @@ class YoutubeProvider(
                             "continuation" to tokenToUse
                         )
                         
-                        // 서버의 물리적 갱신 결과를 확보하기 위해 무캐시 헤더를 전달합니다.
+                        // [실동작 코드] 무캐시 헤더 주입으로 프록시나 가속기 캐시 간섭을 완전 차단합니다.
                         val headers = mapOf(
                             "Origin" to mainUrl, 
                             "Referer" to mainUrl,
@@ -1434,7 +1424,7 @@ class YoutubeProvider(
                         }
                     }
                 } else {
-                    // 홈화면 또는 수동 채널의 경우 서버 캐시가 개입되지 않도록 네트워크 상에서 생짜 데이터 로드를 보장합니다.
+                    // [실동작 코드] 일반 홈 화면 및 채널 새로고침 무캐시 보장
                     val targetUrl = if(requestData == "Home") mainUrl else requestData
                     val html = app.get(targetUrl, interceptor = ytInterceptor, headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")).text
                     
@@ -1482,7 +1472,7 @@ class YoutubeProvider(
                     }
                 }
             } else {
-                // page > 1 논리는 구버전 코드 사양을 일체 건드리지 않고 그대로 상속합니다.
+                // page > 1 (구버전 사양 100% 보존 - 페이지네이션 부작용 차단)
                 var tokenToUse = getSavedContinuationToken(requestData)
                 
                 if (tokenToUse.isNullOrBlank() && page == 2) { 
@@ -1580,6 +1570,7 @@ class YoutubeProvider(
         }
 
         saveContinuationToken(requestData, nextContinuation)
+
         
 
         if (requestData.contains("history", ignoreCase = true)) {
