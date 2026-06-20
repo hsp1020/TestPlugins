@@ -552,8 +552,8 @@ open class YoutubeExtractor : ExtractorApi() {
         var isDirectDubbed = false
         try {
             val audioTrackCount = html.split("\"audioTrack\"").size - 1
-            // 💡 사용자 요구사항 반영: 판단 기준 트랙 한계점을 정확히 'audioTrackCount > 2' 로 재조정
-            if (audioTrackCount > 2) {
+            // 💡 사용자 요구사항 반영: 판단 기준 트랙 한계점을 정확히 'audioTrackCount > 3' 로 재조정
+            if (audioTrackCount > 3) {
                 // 구글 자체 AI 번역 자동 더빙 유무 확인 ("isAutoDubbed": true 공식 규격)
                 val hasAutoDub = html.contains("\"isAutoDubbed\"\\s*:\\s*true".toRegex())
                 
