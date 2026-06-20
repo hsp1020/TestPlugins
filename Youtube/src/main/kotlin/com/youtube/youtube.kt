@@ -78,7 +78,7 @@ object YoutubeUtils {
 
         var sapisidVal: String? = null
         if (!isSearch) {
-            val authKeys = listOf("SID", "HSID", "SSID", "APISID", "SAPISID")
+            val authKeys = listOf("SID", "HSID", "SSID", "APISID", "SAPISID", "__Secure-1PSID", "__Secure-3PAPISID")
             authKeys.forEach { key ->
                 val value = prefs?.getString(key, null)
                 if (!value.isNullOrBlank()) {
