@@ -1323,7 +1323,10 @@ class YoutubeProvider(
             return newHomePageResponse(request, emptyList(), hasNext = false)
         }
 
-        val userLang = getLanguageOverride() // 교차 쉐어드 추적 적용
+        // 💡 [지능형 가속 인라인 수식]: getLanguageOverride 참조 없이 양대 저장소를 교차 추적
+        val userLang = (sharedPref?.getString("youtube_language", null as String?)
+            ?: AcraApplication.context?.let { PreferenceManager.getDefaultSharedPreferences(it).getString("youtube_language", null as String?) }
+            ?: "en")
 
         return withContext(Dispatchers.IO) {
             val englishDeferred = async {
@@ -1339,7 +1342,6 @@ class YoutubeProvider(
             val (englishResults, englishToken) = englishDeferred.await()
             val localizedPair = localizedDeferred?.await()
 
-            // 수집 완료된 상수의 안전 병합 진행
             val finalResults = if (localizedPair != null) {
                 val (localizedResults, _) = localizedPair
                 val localizedMap = localizedResults.associateBy { it.url }
@@ -1360,7 +1362,7 @@ class YoutubeProvider(
 
             newHomePageResponse(request, finalResults, hasNext = !englishToken.isNullOrBlank())
         }
-    }
+    }   
 
     private suspend fun fetchMainPageData(
         page: Int,
@@ -1642,7 +1644,10 @@ class YoutubeProvider(
             return newSearchResponseList(emptyList(), false)
         }
 
-        val userLang = getLanguageOverride() // 교차 쉐어드 추적 적용
+        // 💡 [지능형 가속 인라인 수식]: getLanguageOverride 참조 없이 양대 저장소를 교차 추적
+        val userLang = (sharedPref?.getString("youtube_language", null as String?)
+            ?: AcraApplication.context?.let { PreferenceManager.getDefaultSharedPreferences(it).getString("youtube_language", null as String?) }
+            ?: "en")
 
         return withContext(Dispatchers.IO) {
             val englishDeferred = async {
@@ -1658,7 +1663,6 @@ class YoutubeProvider(
             val englishResponse = englishDeferred.await()
             val localizedResponse = localizedDeferred?.await()
 
-            // 💡 [재할당 빌드 버그 수정 완료]: 데이터 클래스 copy 기능을 호출하여 안전한 우회 병합 적용
             val englishResults = englishResponse?.items?.toMutableList() ?: mutableListOf()
             val finalResults = if (englishResults.isNotEmpty() && localizedResponse != null) {
                 val localizedMap = localizedResponse.items.associateBy { it.url }
