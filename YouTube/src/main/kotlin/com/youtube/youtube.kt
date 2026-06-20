@@ -2547,8 +2547,11 @@ class YoutubeProvider(
                             val curl = safeGet(owner, "navigationEndpoint", "commandMetadata", "webCommandMetadata", "url") as? String
                             if (!curl.isNullOrBlank()) channelId = curl.substringAfterLast("/")
                         }
+                        // 💡 단일 동영상 소유 채널의 다국어화된 구독자 수 정보를 획득합니다.
+                        subscriberCount = getText(owner.get("subscriberCountText"))
                     }
 
+                                
                     val descObj = secondary["attributedDescription"] as? Map<*, *>
                         ?: secondary["description"] as? Map<*, *>
 
@@ -2658,14 +2661,15 @@ class YoutubeProvider(
             }
         }
 
+        
+        val metaTags = mutableListOf<String>()
+        if (channelName.isNotBlank()) metaTags.add(channelName)
+        if (subscriberCount.isNotBlank()) metaTags.add(subscriberCount)
+
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
             this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
             this.plot = plot
-
-            if (channelName.isNotBlank()) {
-                this.tags = listOf(channelName)
-            }
-
+            this.tags = metaTags
             this.recommendations = filteredRecs 
         }
     }
