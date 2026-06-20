@@ -14,6 +14,8 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.ar.youtube.YoutubeUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -283,8 +285,6 @@ open class YoutubeExtractor : ExtractorApi() {
         
         val html = app.get(watchUrl, headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)).text
         val visitorData = VISITOR_DATA_REGEX.find(html)?.groupValues?.get(1) ?: ""
-        
-        // ✅ 봇 탐지 에러를 막기 위해 sts(서명)가 0이면 현재 유효한 유튜브 기본값(20002)으로 강제 폴백
         val sts = STS_REGEX.find(html)?.groupValues?.get(1)?.toIntOrNull() ?: 20002
 
         val context = com.lagradost.cloudstream3.AcraApplication.context
@@ -334,8 +334,8 @@ open class YoutubeExtractor : ExtractorApi() {
                 "racyCheckOk" to true
             )).toString()
 
-            // ✅ Cloudstream의 봇 탐지 유발 인터셉터를 완벽히 피하기 위해, proxyHttpClient(순수 OkHttp)로 직접 요청 조립
-            val requestBody = okhttp3.RequestBody.create(okhttp3.MediaType.parse("application/json"), safariPayload)
+            // ✅ 컴파일 에러 해결: 구버전 `MediaType.parse()` 대신 코틀린 최신 확장 함수 `toMediaTypeOrNull()`과 `toRequestBody()` 사용
+            val requestBody = safariPayload.toRequestBody("application/json".toMediaTypeOrNull())
             val request = okhttp3.Request.Builder()
                 .url(safariApiUrl)
                 .post(requestBody)
