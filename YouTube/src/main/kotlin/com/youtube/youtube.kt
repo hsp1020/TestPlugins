@@ -2338,7 +2338,7 @@ class YoutubeProvider(
 
                 return newTvSeriesLoadResponse(title, url, TvType.TvSeries, allEpisodes) {
                     this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
-                    this.plot = metaParts.joinToString("\n")
+                    this.plot = metaParts.joinToString("•")
                     this.tags = metaParts
                 }
                 
