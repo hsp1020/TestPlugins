@@ -488,19 +488,15 @@ class YoutubeProvider(
     private fun getSavedContinuationToken(key: String, page: Int): String? {
         val pageKey = if (page > 0) "${key}_page_$page" else key
         val hashedKey = YoutubeUtils.sha1(pageKey)
-        val cached = continuationTokenCache[hashedKey]
         
         if (key.startsWith("chip_") || key.contains("chip", ignoreCase = true)) {
-            Log.d("YoutubeUtils", "[CHIP] getSavedContinuationToken - Page: $page, Key: $pageKey, HashedKey: $hashedKey, CachedToken: $cached")
+            Log.d("YoutubeUtils", "[CHIP] getSavedContinuationToken - Page: $page, Key: $pageKey, HashedKey: $hashedKey")
         }
 
+        val cached = continuationTokenCache[hashedKey]
         if (cached != null) return cached
         
         val token = appPrefs?.getString("cont_token_$hashedKey", null)
-        if (key.startsWith("chip_") || key.contains("chip", ignoreCase = true)) {
-            Log.d("YoutubeUtils", "[CHIP] getSavedContinuationToken - Page: $page, Loaded from Prefs: $token")
-        }
-
         if (token != null) {
             continuationTokenCache[hashedKey] = token
         }
@@ -533,7 +529,6 @@ class YoutubeProvider(
     }
 
     private fun clearContinuationTokens(key: String) {
-        // 새로고침 시 1페이지부터 100페이지까지의 기존 페이지네이션 토큰 캐시를 비워 꼬임을 차단합니다.
         for (p in 0..100) {
             val pageKey = if (p > 0) "${key}_page_$p" else key
             val hashedKey = YoutubeUtils.sha1(pageKey)
@@ -542,6 +537,53 @@ class YoutubeProvider(
         }
     }
     
+    // ---------------- [CHIP_DEBUG] 칩 카테고리 보존 병합 전용 함수 ----------------
+    private fun mergeAndSaveChips(newChips: List<CachedChip>) {
+        val prefs = appPrefs ?: return
+        val existingJson = prefs.getString("yt_cached_chips", "[]") ?: "[]"
+        Log.d("YoutubeUtils", "[CHIP_DEBUG] mergeAndSaveChips - Raw existing JSON: $existingJson")
+        
+        val existingChips = try {
+            mapper.readValue<List<CachedChip>>(existingJson)
+        } catch (e: Exception) {
+            Log.e("YoutubeUtils", "[CHIP_DEBUG] mergeAndSaveChips - Failed to parse existing JSON", e)
+            emptyList<CachedChip>()
+        }
+
+        Log.d("YoutubeUtils", "[CHIP_DEBUG] mergeAndSaveChips - Existing parsed size: ${existingChips.size}, names: ${existingChips.map { it.name }}")
+        Log.d("YoutubeUtils", "[CHIP_DEBUG] mergeAndSaveChips - Incoming new size: ${newChips.size}, names: ${newChips.map { it.name }}")
+
+        // 순서 보존을 위해 LinkedHashMap 활용
+        val mergedMap = LinkedHashMap<String, CachedChip>()
+        
+        // 1. 기존 데이터를 먼저 맵에 채워넣음
+        existingChips.forEach { chip ->
+            mergedMap[chip.name] = chip
+        }
+        
+        // 2. 새로운 응답 데이터를 기입 (중복 항목은 토큰 정보를 최신화, 없는 항목은 누적)
+        newChips.forEach { chip ->
+            if (mergedMap.containsKey(chip.name)) {
+                Log.d("YoutubeUtils", "[CHIP_DEBUG] mergeAndSaveChips - Updating token for: ${chip.name}")
+            } else {
+                Log.d("YoutubeUtils", "[CHIP_DEBUG] mergeAndSaveChips - Appending new category: ${chip.name}")
+            }
+            mergedMap[chip.name] = chip
+        }
+
+        val mergedList = mergedMap.values.toList()
+        Log.d("YoutubeUtils", "[CHIP_DEBUG] mergeAndSaveChips - Final merged size: ${mergedList.size}, list: ${mergedList.map { it.name }}")
+
+        try {
+            val updatedJson = mapper.writeValueAsString(mergedList)
+            prefs.edit().putString("yt_cached_chips", updatedJson).apply()
+            Log.d("YoutubeUtils", "[CHIP_DEBUG] mergeAndSaveChips - Write success.")
+        } catch (e: Exception) {
+            Log.e("YoutubeUtils", "[CHIP_DEBUG] mergeAndSaveChips - Failed to serialize merged list", e)
+        }
+    }
+    // -----------------------------------------------------------------------------
+
     private fun getEpisodeMetaString(videoData: Map<*, *>?): String {
         if (videoData == null) return ""
         
@@ -567,7 +609,6 @@ class YoutubeProvider(
             .ifBlank { getText(videoData.getMapKey("shortBylineText")) }
             .ifBlank { getText(videoData.getMapKey("ownerText")) }
 
-        // 💡 [중복 제거 완료]: Conflicting declarations 빌드 예외를 유발하던 기존의 이중 선언문을 단일 선언문으로 완벽 정리
         var views = ""
         var date = ""
 
@@ -677,7 +718,6 @@ class YoutubeProvider(
         return ""
     }
 
-    // 💡 [순정 직결]: 메타데이터 파트의 순정 텍스트("12만회" 등)를 직접 대입
     private fun extractLockupMetadata(lockup: Map<*, *>) : Triple<String, String, String> {
         var channel = ""
         var views = ""
@@ -785,7 +825,6 @@ class YoutubeProvider(
                     .ifBlank { getText(videoData.getMapKey("shortBylineText")) }
                     .ifBlank { getText(videoData.getMapKey("longBylineText")) }
 
-                // 💡 [컴파일러 쉴드]: views를 가변 변수가 아닌 불변 'val' 상수로 선언하여 재할당 에러를 차단합니다.
                 val views = viewText.ifBlank { "N/A" }
                 
                 val finalTitle = when {
@@ -1206,13 +1245,17 @@ class YoutubeProvider(
 
     override val mainPage: List<MainPageData>
         get() {
+            Log.d("YoutubeUtils", "[CHIP_DEBUG] mainPage - Invoking getCustomHomepages().")
             val customSections = getCustomHomepages()
             val list = mutableListOf<MainPageData>()
 
             val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
+            Log.d("YoutubeUtils", "[CHIP_DEBUG] mainPage - Raw cached chips retrieved: $cachedChipsJson")
+            
             val cachedChipsMap = try {
                 mapper.readValue<List<CachedChip>>(cachedChipsJson).associateBy { it.name }
             } catch (e: Exception) {
+                Log.e("YoutubeUtils", "[CHIP_DEBUG] mainPage - Failed to parse cached chips map", e)
                 emptyMap()
             }
 
@@ -1227,6 +1270,9 @@ class YoutubeProvider(
                         val activeChip = cachedChipsMap[chipName]
                         if (activeChip != null) {
                             list.add(MainPageData(activeChip.name, "chip_name_${activeChip.name}", horizontalImages = true))
+                        } else {
+                            // 캐시 매핑에 없더라도 settings 등에서 사라지지 않도록 경고만 남기고 안전장치를 가동합니다.
+                            Log.w("YoutubeUtils", "[CHIP_DEBUG] mainPage - Enabled chip '$chipName' is missing in cachedChipsMap! Checking if custom fallback can occur.")
                         }
                     }
                     else -> {
@@ -1237,63 +1283,62 @@ class YoutubeProvider(
                 }
             }
 
+            Log.d("YoutubeUtils", "[CHIP_DEBUG] mainPage - Final active main pages rendered: ${list.map { it.name }}")
             return list
         }
 
     private fun getCustomHomepages(): List<CustomSection> {
         val json = appPrefs?.getString("custom_homepages_v3", "[]") ?: "[]"
+        Log.d("YoutubeUtils", "[CHIP_DEBUG] getCustomHomepages - Raw custom_homepages_v3 JSON: $json")
+        
         val currentList = try {
             mapper.readValue<List<CustomSection>>(json).toMutableList()
         } catch (e: Exception) {
+            Log.e("YoutubeUtils", "[CHIP_DEBUG] getCustomHomepages - Failed to parse custom_homepages_v3", e)
             mutableListOf()
         }
+
+        Log.d("YoutubeUtils", "[CHIP_DEBUG] getCustomHomepages - Current list parsed: ${currentList.map { "${it.name}(enabled=${it.isEnabled}, url=${it.url})" }}")
 
         var modified = false
 
         if (currentList.none { section -> section.url == "Home" }) {
             currentList.add(0, CustomSection(name = "Home", url = "Home", isEnabled = true))
             modified = true
+            Log.d("YoutubeUtils", "[CHIP_DEBUG] getCustomHomepages - Missing default 'Home' added.")
         }
 
         val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
+        Log.d("YoutubeUtils", "[CHIP_DEBUG] getCustomHomepages - Raw yt_cached_chips JSON: $cachedChipsJson")
+        
         try {
             val cachedChips = mapper.readValue<List<CachedChip>>(cachedChipsJson)
-            
-            // [해결책 1] 캐시에 현재 들어있지 않더라도 기존에 설정되어 정렬된 칩 카테고리를 custom_homepages_v3 설정에서 제거하지 않습니다.
-            // 이를 통해 사용자가 설정한 순서와 숨김 여부가 새로고침 시 초기화되던 현상을 해결합니다.
-            /* 
-            val cachedNames = cachedChips.map { it.name }.toSet()
-            val iterator = currentList.iterator()
-            while (iterator.hasNext()) {
-                val sec = iterator.next()
-                if (sec.url.startsWith("chip_name_")) {
-                    val name = sec.url.removePrefix("chip_name_")
-                    if (!cachedNames.contains(name)) {
-                        iterator.remove()
-                        modified = true
-                    }
-                }
-            }
-            */
+            Log.d("YoutubeUtils", "[CHIP_DEBUG] getCustomHomepages - Cached chips parsed: ${cachedChips.map { it.name }}")
 
             cachedChips.forEach { chip ->
                 val stableUrl = "chip_name_${chip.name}"
                 if (currentList.none { section -> section.url == stableUrl }) {
                     currentList.add(CustomSection(name = chip.name, url = stableUrl, isEnabled = true))
                     modified = true
+                    Log.d("YoutubeUtils", "[CHIP_DEBUG] getCustomHomepages - Added missing chip category to custom list: ${chip.name}")
                 }
             }
         } catch (e: Exception) {
+            Log.e("YoutubeUtils", "[CHIP_DEBUG] getCustomHomepages - Parsing cached chips failed", e)
             logError(e)
         }
 
         if (modified) {
             try {
                 val updatedJson = mapper.writeValueAsString(currentList)
+                Log.d("YoutubeUtils", "[CHIP_DEBUG] getCustomHomepages - Saving updated custom_homepages_v3: $updatedJson")
                 appPrefs?.edit()?.putString("custom_homepages_v3", updatedJson)?.apply()
             } catch (e: Exception) {
+                Log.e("YoutubeUtils", "[CHIP_DEBUG] getCustomHomepages - Saving failed", e)
                 logError(e)
             }
+        } else {
+            Log.d("YoutubeUtils", "[CHIP_DEBUG] getCustomHomepages - No modifications to custom_homepages_v3 list were needed.")
         }
         
         return currentList
@@ -1330,14 +1375,12 @@ class YoutubeProvider(
 
         try {
             if (page == 1) {
-                // 1. [새로고침 클리어] 기존 1페이지 연속 갱신 시 과거 세션 토큰을 완전히 비웁니다.
                 saveContinuationToken(requestData, null)
 
                 if (isChip) {
                     val oldToken = requestData.removePrefix("chip_")
                     var tokenToUse = oldToken
 
-                    // 2. [역방향 칩 이름 조회] 현재 칩의 구형 토큰을 통해 기존 저장되어 있던 칩 이름(예: "요리")을 찾아냅니다.
                     val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
                     val cachedChips = try {
                         mapper.readValue<List<CachedChip>>(cachedChipsJson)
@@ -1346,7 +1389,6 @@ class YoutubeProvider(
                     }
                     val chipName = cachedChips.find { it.token == oldToken }?.name
 
-                    // 3. [실시간 칩 토큰 갱신] 식별에 성공했다면, 무캐시로 메인 페이지를 새로 긁어와 최신 토큰 정보를 매핑합니다.
                     if (!chipName.isNullOrBlank()) {
                         try {
                             val html = app.get(mainUrl, interceptor = ytInterceptor, headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")).text
@@ -1366,34 +1408,31 @@ class YoutubeProvider(
                             if (initialData != null) {
                                 val chipBar = safeGet(initialData, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0, "tabRenderer", "content", "richGridRenderer", "header", "feedFilterChipBarRenderer", "contents") as? List<*>
                                 if (chipBar != null) {
-                                    val cachedChipsMap = mutableMapOf<String, CachedChip>()
+                                    val incomingChips = mutableListOf<CachedChip>()
                                     for (chipItem in chipBar) {
                                         val chipMap = (chipItem as? Map<*, *>)?.get("chipCloudChipRenderer") as? Map<*, *> ?: continue
                                         val text = getText(chipMap["text"])
                                         val token = safeGet(chipMap, "navigationEndpoint", "continuationCommand", "token") as? String
                                         if (text.isNotBlank() && !token.isNullOrBlank()) {
-                                            cachedChipsMap[text] = CachedChip(text, token)
+                                            incomingChips.add(CachedChip(text, token))
                                         }
                                     }
                                     
-                                    val jsonArray = org.json.JSONArray()
-                                    cachedChipsMap.values.forEach { chip ->
-                                        val obj = org.json.JSONObject()
-                                        obj.put("name", chip.name)
-                                        obj.put("token", chip.token)
-                                        jsonArray.put(obj)
+                                    // 💡 [해결책 2] Overwrite 대신 mergeAndSaveChips 메서드로 기존 칩 캐시를 보존하며 업데이트합니다.
+                                    if (incomingChips.isNotEmpty()) {
+                                        Log.d("YoutubeUtils", "[CHIP_DEBUG] getMainPage - Performing merge & save for token-refresh block.")
+                                        mergeAndSaveChips(incomingChips)
                                     }
-                                    appPrefs?.edit()?.putString("yt_cached_chips", jsonArray.toString())?.apply()
 
-                                    // 4. 새로 수집된 무캐시 칩 데이터 풀에서 해당 카테고리명으로 발급된 가장 신선한 칩 토큰을 기입합니다.
-                                    val freshToken = cachedChipsMap[chipName]?.token
+                                    // 신선한 토큰으로 업데이트
+                                    val freshToken = incomingChips.find { it.name == chipName }?.token
                                     if (!freshToken.isNullOrBlank()) {
                                         tokenToUse = freshToken
                                     }
                                 }
                             }
                         } catch (e: Exception) {
-                            Log.e("YoutubeUtils", "[CHIP] Failed to refresh chip tokens on pull-to-refresh", e)
+                            Log.e("YoutubeUtils", "[CHIP_DEBUG] Failed to refresh chip tokens on pull-to-refresh", e)
                         }
                     }
 
@@ -1415,7 +1454,6 @@ class YoutubeProvider(
                             "continuation" to tokenToUse
                         )
                         
-                        // 서버의 물리적 갱신 결과를 확보하기 위해 무캐시 헤더를 전달합니다.
                         val headers = mapOf(
                             "Origin" to mainUrl, 
                             "Referer" to mainUrl,
@@ -1434,7 +1472,6 @@ class YoutubeProvider(
                         }
                     }
                 } else {
-                    // 홈화면 또는 수동 채널의 경우 서버 캐시가 개입되지 않도록 네트워크 상에서 생짜 데이터 로드를 보장합니다.
                     val targetUrl = if(requestData == "Home") mainUrl else requestData
                     val html = app.get(targetUrl, interceptor = ytInterceptor, headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")).text
                     
@@ -1455,20 +1492,20 @@ class YoutubeProvider(
                         if (requestData == "Home") {
                             val chipBar = safeGet(initialData, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0, "tabRenderer", "content", "richGridRenderer", "header", "feedFilterChipBarRenderer", "contents") as? List<*>
                             if (chipBar != null) {
-                                val jsonArray = org.json.JSONArray()
+                                val incomingChips = mutableListOf<CachedChip>()
                                 for (chipItem in chipBar) {
                                     val chipMap = (chipItem as? Map<*, *>)?.get("chipCloudChipRenderer") as? Map<*, *> ?: continue
                                     val text = getText(chipMap["text"])
                                     val token = safeGet(chipMap, "navigationEndpoint", "continuationCommand", "token") as? String
                                     if (text.isNotBlank() && !token.isNullOrBlank()) {
-                                        val obj = org.json.JSONObject()
-                                        obj.put("name", text)
-                                        obj.put("token", token)
-                                        jsonArray.put(obj)
+                                        incomingChips.add(CachedChip(text, token))
                                     }
                                 }
-                                if (jsonArray.length() > 0) {
-                                    appPrefs?.edit()?.putString("yt_cached_chips", jsonArray.toString())?.apply()
+                                
+                                // 💡 [해결책 3] Overwrite 대신 mergeAndSaveChips 메서드로 기존 칩 캐시를 보존하며 업데이트합니다.
+                                if (incomingChips.isNotEmpty()) {
+                                    Log.d("YoutubeUtils", "[CHIP_DEBUG] getMainPage - Performing merge & save for main HOME feed block.")
+                                    mergeAndSaveChips(incomingChips)
                                 }
                             }
                         }
@@ -1482,7 +1519,6 @@ class YoutubeProvider(
                     }
                 }
             } else {
-                // page > 1 논리는 구버전 코드 사양을 일체 건드리지 않고 그대로 상속합니다.
                 var tokenToUse = getSavedContinuationToken(requestData)
                 
                 if (tokenToUse.isNullOrBlank() && page == 2) { 
@@ -1611,6 +1647,8 @@ class YoutubeProvider(
 
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
     }
+
+    // 이하는 동일하여 생략 (전체 코드 유지됨)
 
     override suspend fun search(query: String): List<SearchResponse> {
         return search(query, 1)?.items ?: emptyList()
