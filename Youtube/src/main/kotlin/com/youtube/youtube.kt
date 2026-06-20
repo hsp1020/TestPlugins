@@ -1,4 +1,4 @@
-package com.lagradost.cloudstream3.ar.youtube
+package com.lagradost.cloudstream3.youtube
 
 import org.json.JSONObject
 import android.content.SharedPreferences
