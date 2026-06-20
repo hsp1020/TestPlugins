@@ -79,6 +79,7 @@ open class YoutubeExtractor : ExtractorApi() {
             ThreadPoolExecutor.CallerRunsPolicy()
         )
 
+        // ✅ Cloudstream 엔진을 우회하고 PipePipe와 동일하게 통신할 순수 OkHttp 클라이언트
         private val proxyHttpClient = okhttp3.OkHttpClient.Builder()
             .followRedirects(true)
             .followSslRedirects(true)
@@ -282,7 +283,9 @@ open class YoutubeExtractor : ExtractorApi() {
         
         val html = app.get(watchUrl, headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)).text
         val visitorData = VISITOR_DATA_REGEX.find(html)?.groupValues?.get(1) ?: ""
-        val sts = STS_REGEX.find(html)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+        
+        // ✅ 봇 탐지 에러를 막기 위해 sts(서명)가 0이면 현재 유효한 유튜브 기본값(20002)으로 강제 폴백
+        val sts = STS_REGEX.find(html)?.groupValues?.get(1)?.toIntOrNull() ?: 20002
 
         val context = com.lagradost.cloudstream3.AcraApplication.context
         val provider = com.lagradost.cloudstream3.APIHolder.allProviders.find { it.name == "YouTube" }
@@ -294,30 +297,20 @@ open class YoutubeExtractor : ExtractorApi() {
         val isLoggedIn = !sapisidVal.isNullOrBlank()
 
         println("[TRACK] =========================================")
-        println("[TRACK] 1. Auth Headers Check (Safari Client Debug Mode)")
+        println("[TRACK] 1. Auth Headers Check (PURE OKHTTP MODE)")
         println("[TRACK] -> Extracted Cookies length: ${cookies.length}")
         println("[TRACK] -> SAPISID Extracted: $isLoggedIn")
+        println("[TRACK] -> Signature Timestamp (sts): $sts")
 
         var finalJson: JSONObject? = null
         var lengthSeconds = 3600L
 
         if (isLoggedIn) {
-            println("[TRACK] 2. Sending SAFARI API Request (1:1 PipePipe Headers)...")
+            println("[TRACK] 2. Sending SAFARI API Request via Pure OkHttp (Bypassing Cloudstream Interceptors)...")
             
             val safariApiUrl = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
             
-            val safariHeaders = mutableMapOf(
-                "Content-Type" to "application/json",
-                "User-Agent" to SAFARI_USER_AGENT,
-                "X-YouTube-Client-Name" to "1",
-                "X-Youtube-Client-Version" to SAFARI_CLIENT_VERSION,
-                "Cookie" to cookies,
-                "Authorization" to YoutubeUtils.getSapisidHash(sapisidVal!!, "https://www.youtube.com"),
-                "X-Origin" to "https://www.youtube.com",
-                "DNT" to "1"
-            )
-
-            val safariPayload = mapOf(
+            val safariPayload = JSONObject(mapOf(
                 "context" to mapOf(
                     "client" to mapOf(
                         "utcOffsetMinutes" to 0,
@@ -339,13 +332,28 @@ open class YoutubeExtractor : ExtractorApi() {
                 "videoId" to videoId,
                 "contentCheckOk" to true,
                 "racyCheckOk" to true
-            )
+            )).toString()
+
+            // ✅ Cloudstream의 봇 탐지 유발 인터셉터를 완벽히 피하기 위해, proxyHttpClient(순수 OkHttp)로 직접 요청 조립
+            val requestBody = okhttp3.RequestBody.create(okhttp3.MediaType.parse("application/json"), safariPayload)
+            val request = okhttp3.Request.Builder()
+                .url(safariApiUrl)
+                .post(requestBody)
+                .addHeader("Content-Type", "application/json")
+                .addHeader("User-Agent", SAFARI_USER_AGENT)
+                .addHeader("X-YouTube-Client-Name", "1")
+                .addHeader("X-Youtube-Client-Version", SAFARI_CLIENT_VERSION)
+                .addHeader("Cookie", cookies)
+                .addHeader("Authorization", YoutubeUtils.getSapisidHash(sapisidVal!!, "https://www.youtube.com"))
+                .addHeader("X-Origin", "https://www.youtube.com")
+                .addHeader("DNT", "1")
+                .build()
 
             try {
-                val res = app.post(safariApiUrl, json = safariPayload, headers = safariHeaders).text
-                
-                // ✅ 디버깅용: 유튜브가 뱉어낸 JSON 원본 텍스트를 무조건 로그캣에 통째로 출력합니다.
-                println("[TRACK] -> SAFARI RAW JSON RESPONSE: $res")
+                // 순수 OkHttp 실행
+                val response = proxyHttpClient.newCall(request).execute()
+                val res = response.body?.string() ?: ""
+                response.close()
                 
                 val json = JSONObject(res)
                 val playabilityStatus = json.optJSONObject("playabilityStatus")
@@ -353,6 +361,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 
                 val reason = playabilityStatus?.optString("reason")?.ifEmpty { null }
                     ?: playabilityStatus?.optJSONArray("messages")?.optString(0)?.ifEmpty { null }
+                    ?: playabilityStatus?.optJSONObject("errorScreen")?.optJSONObject("playerErrorMessageRenderer")?.optJSONObject("subreason")?.optString("simpleText")?.ifEmpty { null }
                     ?: "No reason provided"
 
                 println("[TRACK] -> SAFARI API Response Status: $status | Reason: $reason")
@@ -369,7 +378,7 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         }
 
-        // 로그인 안 되어있거나, Safari가 UNPLAYABLE 등으로 막혔을 때 ANDROID_VR로 폴백
+        // 로그인 안 되어있거나 Safari가 막혔을 때 ANDROID_VR로 폴백
         if (finalJson == null) {
             println("[TRACK] 3. Sending ANDROID_VR API Request (No Auth fallback)...")
             val androidApiKey = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
