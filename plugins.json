@@ -254,7 +254,7 @@
         "name": "TVMONProvider"
     },
     {
-        "iconUrl": "https://tvwiki5.net/img/logo.png",
+        "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/TVWikiProvider/logo.png",
         "fileHash": "sha256-73cd80893882b38f199a8be66106931f9b9e30c086476d4e509e2368062026ff",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
