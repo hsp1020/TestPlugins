@@ -1076,7 +1076,8 @@ class YoutubeProvider(
                 val finalTitle: String
                 val poster: String
 
-                val metaString = getEpisodeMetaString(lockup.getMapKey("content") ?: lockup)
+                // 💡 content가 아닌 lockup 전체를 전달하여 재생시간(overlays)과 채널명(metadata)을 한 번에 정렬 수집합니다.
+                val metaString = getEpisodeMetaString(lockup)
                 if (metaString.isNotBlank()) epMetaMapCache[videoId] = metaString
 
                 if (isShorts) {
@@ -2621,22 +2622,23 @@ class YoutubeProvider(
             val m = item as? Map<*, *>
             val primary = m?.getMapKey("videoPrimaryInfoRenderer")
             if (primary != null) {
-                val viewCountRenderer = primary.getMapKey("videoViewCountRenderer")
+                val viewCountMap = primary.getMapKey("viewCount")
+                // 💡 primary["viewCount"]["videoViewCountRenderer"]의 올바른 뎁스 경로로 진입하여 다국어 뷰카운터를 확보합니다.
+                val viewCountRenderer = viewCountMap?.getMapKey("videoViewCountRenderer") ?: primary.getMapKey("videoViewCountRenderer")
                 val vCount = if (viewCountRenderer != null) {
-                    // 💡 정수가 아닌 라벨이 포함된 단축 조회수(shortViewCount) 데이터를 최우선적으로 가로챕니다.
                     getText(viewCountRenderer.getMapKey("shortViewCount")
                         ?: viewCountRenderer.getMapKey("extraShortViewCount")
                         ?: viewCountRenderer.getMapKey("viewCount"))
                 } else {
-                    getText(primary.getMapKey("viewCount"))
+                    getText(viewCountMap)
                 }
-
+                
                 if (vCount.isNotBlank()) ep1Views = vCount
-                // 💡 절대 날짜 대신 relativeDateText를 우선 수집하여 에피소드 1도 상대 시간("6년 전")으로 일치시킵니다.
                 val dText = getText(primary.getMapKey("relativeDateText") ?: primary.getMapKey("dateText"))
                 if (dText.isNotBlank()) ep1Date = dText
             }
         }
+                
 
         // 💡 요구사항에 맞춰 채널명(channelName)을 메타데이터 리스트의 맨 마지막에 위치하도록 재배치합니다.
         val mainDescParts = listOf(ep1Dur, ep1Views, ep1Date, channelName).filter { it.isNotBlank() && it != "N/A" }
