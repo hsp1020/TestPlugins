@@ -752,7 +752,7 @@ open class YoutubeExtractor : ExtractorApi() {
                                 when (langCode.lowercase()) {
                                     "ko" -> "더빙"
                                     "ar" -> "دبلجة"
-                                    else -> "Dubbed"
+                                    else -> "Dub"
                                 }
                             }
 
@@ -1066,7 +1066,7 @@ open class YoutubeExtractor : ExtractorApi() {
         val durationString = "PT${durationSec}S"
 
         val sb = java.lang.StringBuilder(2048)
-        sb.append("""<MPD xmlns="urn:mpeg:dash:schema:pd:2011" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011" type="static" minBufferTime="PT5.0S" mediaPresentationDuration="$durationString">""")
+        sb.append("""<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011" type="static" minBufferTime="PT5.0S" mediaPresentationDuration="$durationString">""")
         sb.append("<Period>")
 
         val vSegmentBase = if (video.initRange != null && video.indexRange != null) {
