@@ -1313,14 +1313,12 @@ class YoutubeProvider(
         savedContinuationToken = null
     }
 
-    // 💡 [단일 전형화]: 중복적인 영문 이중 병렬 호출(en)을 전면 제거하고 오직 설정한 로컬 언어로 단 1회만 고속 동수 수집
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         isSearchContext = false
         val rawRequestData = request.data
         val requestData = YoutubeUtils.urlDecode(rawRequestData)
         val maxPages = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
-        val isChip = requestData.startsWith("chip_name_")
-
         if (page > maxPages) {
             return newHomePageResponse(request, emptyList(), hasNext = false)
         }
@@ -1328,61 +1326,28 @@ class YoutubeProvider(
         val results = mutableListOf<SearchResponse>()
         val seenIds = mutableSetOf<String>()
         var nextContinuation: String? = null
+        val isChip = requestData.startsWith("chip_")
 
         try {
             if (page == 1) {
-                // [해결책 2] 새로고침 시 이전에 캐싱된 하위 페이지들의 토큰을 전부 비워 갱신이 꼬이는 문제를 차단합니다.
-                clearContinuationTokens(requestData)
+                // 1. [새로고침 클리어] 기존 1페이지 연속 갱신 시 과거 세션 토큰을 완전히 비웁니다.
+                saveContinuationToken(requestData, null)
 
                 if (isChip) {
-                    // [해결책 2] 칩 카테고리 새로고침 시, 먼저 메인 홈을 무캐시로 접근하여 실시간으로 갱신된 칩 토큰을 미리 긁어옵니다.
-                    try {
-                        val html = app.get(mainUrl, interceptor = ytInterceptor, headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")).text
-                        savedApiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY") ?: savedApiKey
-                        savedVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA") ?: savedVisitorData
-                        savedClientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: savedClientVersion ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
-                        
-                        if (!savedApiKey.isNullOrBlank()) {
-                            appPrefs?.edit()
-                                ?.putString("yt_api_key", savedApiKey)
-                                ?.putString("yt_visitor_data", savedVisitorData)
-                                ?.putString("yt_client_version", savedClientVersion)
-                                ?.apply()
-                        }
+                    val oldToken = requestData.removePrefix("chip_")
+                    var tokenToUse = oldToken
 
-                        val initialData = extractYtInitialData(html)
-                        if (initialData != null) {
-                            val chipBar = safeGet(initialData, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0, "tabRenderer", "content", "richGridRenderer", "header", "feedFilterChipBarRenderer", "contents") as? List<*>
-                            if (chipBar != null) {
-                                val cachedChipsMap = mutableMapOf<String, CachedChip>()
-                                for (chipItem in chipBar) {
-                                    val chipMap = (chipItem as? Map<*, *>)?.get("chipCloudChipRenderer") as? Map<*, *> ?: continue
-                                    val text = getText(chipMap["text"])
-                                    val token = safeGet(chipMap, "navigationEndpoint", "continuationCommand", "token") as? String
-                                    if (text.isNotBlank() && !token.isNullOrBlank()) {
-                                        cachedChipsMap[text] = CachedChip(text, token)
-                                    }
-                                }
-                                
-                                val jsonArray = org.json.JSONArray()
-                                cachedChipsMap.values.forEach { chip ->
-                                    val obj = org.json.JSONObject()
-                                    obj.put("name", chip.name)
-                                    obj.put("token", chip.token)
-                                    jsonArray.put(obj)
-                                }
-                                appPrefs?.edit()?.putString("yt_cached_chips", jsonArray.toString())?.apply()
-                            }
-                        }
+                    // 2. [역방향 칩 이름 조회] 현재 칩의 구형 토큰을 통해 기존 저장되어 있던 칩 이름(예: "요리")을 찾아냅니다.
+                    val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
+                    val cachedChips = try {
+                        mapper.readValue<List<CachedChip>>(cachedChipsJson)
                     } catch (e: Exception) {
-                        Log.e("YoutubeUtils", "[CHIP] Failed to refresh chip tokens from mainUrl", e)
+                        emptyList<CachedChip>()
                     }
+                    val chipName = cachedChips.find { it.token == oldToken }?.name
 
-                    savedApiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
-                    savedVisitorData = savedVisitorData ?: appPrefs?.getString("yt_visitor_data", null)
-                    savedClientVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION)
-
-                    if (savedApiKey.isNullOrBlank()) {
+                    // 3. [실시간 칩 토큰 갱신] 식별에 성공했다면, 무캐시로 메인 페이지를 새로 긁어와 최신 토큰 정보를 매핑합니다.
+                    if (!chipName.isNullOrBlank()) {
                         try {
                             val html = app.get(mainUrl, interceptor = ytInterceptor, headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")).text
                             savedApiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY") ?: savedApiKey
@@ -1396,22 +1361,47 @@ class YoutubeProvider(
                                     ?.putString("yt_client_version", savedClientVersion)
                                     ?.apply()
                             }
+
+                            val initialData = extractYtInitialData(html)
+                            if (initialData != null) {
+                                val chipBar = safeGet(initialData, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0, "tabRenderer", "content", "richGridRenderer", "header", "feedFilterChipBarRenderer", "contents") as? List<*>
+                                if (chipBar != null) {
+                                    val cachedChipsMap = mutableMapOf<String, CachedChip>()
+                                    for (chipItem in chipBar) {
+                                        val chipMap = (chipItem as? Map<*, *>)?.get("chipCloudChipRenderer") as? Map<*, *> ?: continue
+                                        val text = getText(chipMap["text"])
+                                        val token = safeGet(chipMap, "navigationEndpoint", "continuationCommand", "token") as? String
+                                        if (text.isNotBlank() && !token.isNullOrBlank()) {
+                                            cachedChipsMap[text] = CachedChip(text, token)
+                                        }
+                                    }
+                                    
+                                    val jsonArray = org.json.JSONArray()
+                                    cachedChipsMap.values.forEach { chip ->
+                                        val obj = org.json.JSONObject()
+                                        obj.put("name", chip.name)
+                                        obj.put("token", chip.token)
+                                        jsonArray.put(obj)
+                                    }
+                                    appPrefs?.edit()?.putString("yt_cached_chips", jsonArray.toString())?.apply()
+
+                                    // 4. 새로 수집된 무캐시 칩 데이터 풀에서 해당 카테고리명으로 발급된 가장 신선한 칩 토큰을 기입합니다.
+                                    val freshToken = cachedChipsMap[chipName]?.token
+                                    if (!freshToken.isNullOrBlank()) {
+                                        tokenToUse = freshToken
+                                    }
+                                }
+                            }
                         } catch (e: Exception) {
-                            Log.e("YoutubeUtils", "[CHIP] Failed to fetch mainUrl for configs", e)
+                            Log.e("YoutubeUtils", "[CHIP] Failed to refresh chip tokens on pull-to-refresh", e)
                         }
                     }
 
-                    val chipCategoryName = requestData.removePrefix("chip_name_")
-                    val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
-                    val cachedChips = try {
-                        mapper.readValue<List<CachedChip>>(cachedChipsJson)
-                    } catch (e: Exception) {
-                        emptyList<CachedChip>()
-                    }
-                    val activeChip = cachedChips.find { it.name == chipCategoryName }
-                    val tokenToUse = activeChip?.token
+                    savedApiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
+                    savedVisitorData = savedVisitorData ?: appPrefs?.getString("yt_visitor_data", null)
+                    savedClientVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION)
 
-                    if (!tokenToUse.isNullOrBlank() && !savedApiKey.isNullOrBlank()) {
+                    if (!savedApiKey.isNullOrBlank()) {
                         val apiUrl = "$mainUrl/youtubei/v1/browse?key=$savedApiKey"
                         val payload = mapOf(
                             "context" to mapOf(
@@ -1425,14 +1415,14 @@ class YoutubeProvider(
                             "continuation" to tokenToUse
                         )
                         
-                        // [해결책 2] 헤더에 Cache-Control을 주입하여 캐시 데이터가 아닌 신선한 응답을 강제합니다.
-                        val reqHeaders = mapOf(
+                        // 서버의 물리적 갱신 결과를 확보하기 위해 무캐시 헤더를 전달합니다.
+                        val headers = mapOf(
                             "Origin" to mainUrl, 
                             "Referer" to mainUrl,
                             "Cache-Control" to "no-cache",
                             "Pragma" to "no-cache"
                         )
-                        val response = app.post(apiUrl, json = payload, headers = reqHeaders, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                        val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                         
                         if (response != null) {
                             val actions = response["onResponseReceivedActions"] 
@@ -1444,7 +1434,7 @@ class YoutubeProvider(
                         }
                     }
                 } else {
-                    // [해결책 2] 일반 홈 및 채널 데이터를 무캐시 헤더와 함께 호출합니다.
+                    // 홈화면 또는 수동 채널의 경우 서버 캐시가 개입되지 않도록 네트워크 상에서 생짜 데이터 로드를 보장합니다.
                     val targetUrl = if(requestData == "Home") mainUrl else requestData
                     val html = app.get(targetUrl, interceptor = ytInterceptor, headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")).text
                     
@@ -1465,24 +1455,21 @@ class YoutubeProvider(
                         if (requestData == "Home") {
                             val chipBar = safeGet(initialData, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0, "tabRenderer", "content", "richGridRenderer", "header", "feedFilterChipBarRenderer", "contents") as? List<*>
                             if (chipBar != null) {
-                                val cachedChipsMap = mutableMapOf<String, CachedChip>()
+                                val jsonArray = org.json.JSONArray()
                                 for (chipItem in chipBar) {
                                     val chipMap = (chipItem as? Map<*, *>)?.get("chipCloudChipRenderer") as? Map<*, *> ?: continue
                                     val text = getText(chipMap["text"])
                                     val token = safeGet(chipMap, "navigationEndpoint", "continuationCommand", "token") as? String
                                     if (text.isNotBlank() && !token.isNullOrBlank()) {
-                                        cachedChipsMap[text] = CachedChip(text, token)
+                                        val obj = org.json.JSONObject()
+                                        obj.put("name", text)
+                                        obj.put("token", token)
+                                        jsonArray.put(obj)
                                     }
                                 }
-                                
-                                val jsonArray = org.json.JSONArray()
-                                cachedChipsMap.values.forEach { chip ->
-                                    val obj = org.json.JSONObject()
-                                    obj.put("name", chip.name)
-                                    obj.put("token", chip.token)
-                                    jsonArray.put(obj)
+                                if (jsonArray.length() > 0) {
+                                    appPrefs?.edit()?.putString("yt_cached_chips", jsonArray.toString())?.apply()
                                 }
-                                appPrefs?.edit()?.putString("yt_cached_chips", jsonArray.toString())?.apply()
                             }
                         }
 
@@ -1495,80 +1482,60 @@ class YoutubeProvider(
                     }
                 }
             } else {
-                // page > 1 (기존 코드 유지)
-                var tokenToUse = getSavedContinuationToken(requestData, page)
-
-                if (isChip && tokenToUse.isNullOrBlank() && page >= 2) {
-                    var rCount = 0
-                    while (tokenToUse.isNullOrBlank() && rCount < 15) {
-                        kotlinx.coroutines.delay(300L)
-                        tokenToUse = getSavedContinuationToken(requestData, page)
-                        rCount++
-                    }
-                }
+                // page > 1 논리는 구버전 코드 사양을 일체 건드리지 않고 그대로 상속합니다.
+                var tokenToUse = getSavedContinuationToken(requestData)
                 
                 if (tokenToUse.isNullOrBlank() && page == 2) { 
                     val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
                     val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION) ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
 
                     if (isChip && !apiKey.isNullOrBlank()) {
-                        val chipCategoryName = requestData.removePrefix("chip_name_")
-                        val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
-                        val cachedChips = try {
-                            mapper.readValue<List<CachedChip>>(cachedChipsJson)
-                        } catch (e: Exception) {
-                            emptyList<CachedChip>()
-                        }
-                        val activeChip = cachedChips.find { it.name == chipCategoryName }
-                        val rawToken = activeChip?.token
-
-                        if (!rawToken.isNullOrBlank()) {
-                            val apiUrl = "$mainUrl/youtubei/v1/browse?key=$savedApiKey"
-                            val payload = mapOf(
-                                "context" to mapOf(
-                                    "client" to mapOf(
-                                        "clientName" to "WEB", 
-                                        "clientVersion" to cVersion, 
-                                        "hl" to lang,
-                                        "platform" to "DESKTOP"
-                                    )
-                                ),
-                                "continuation" to rawToken
-                            )
-                            val reqHeaders = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
-                            val response = app.post(apiUrl, json = payload, headers = reqHeaders, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
-                            if (response != null) {
-                                tokenToUse = findTokenRecursive(response)
-                                if (!tokenToUse.isNullOrBlank()) {
-                                    saveContinuationToken(requestData, page, tokenToUse)
+                        val rawToken = requestData.removePrefix("chip_")
+                        val apiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
+                        val payload = mapOf(
+                            "context" to mapOf(
+                                "client" to mapOf(
+                                    "clientName" to "WEB", 
+                                    "clientVersion" to cVersion, 
+                                    "hl" to lang,
+                                    "platform" to "DESKTOP"
+                                )
+                            ),
+                            "continuation" to rawToken
+                        )
+                        val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
+                        val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                        if (response != null) {
+                            tokenToUse = findTokenRecursive(response)
+                            if (!tokenToUse.isNullOrBlank()) {
+                                saveContinuationToken(requestData, tokenToUse)
+                                
+                                val innerApiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
+                                val innerPayload = mapOf(
+                                    "context" to mapOf(
+                                        "client" to mapOf(
+                                            "clientName" to "WEB", 
+                                            "clientVersion" to cVersion, 
+                                            "hl" to lang,
+                                            "platform" to "DESKTOP"
+                                        )
+                                    ),
+                                    "continuation" to tokenToUse
+                                )
+                                val innerResponse = app.post(innerApiUrl, json = innerPayload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                                if (innerResponse != null) {
+                                    val actions = innerResponse["onResponseReceivedActions"] 
+                                        ?: innerResponse["onResponseReceivedEndpoints"]
+                                        ?: innerResponse["onResponseReceivedCommands"] 
+                                        ?: innerResponse["continuationContents"] 
+                                        ?: innerResponse
                                     
-                                    val innerApiUrl = "$mainUrl/youtubei/v1/browse?key=$savedApiKey"
-                                    val innerPayload = mapOf(
-                                        "context" to mapOf(
-                                            "client" to mapOf(
-                                                "clientName" to "WEB", 
-                                                "clientVersion" to cVersion, 
-                                                "hl" to lang,
-                                                "platform" to "DESKTOP"
-                                            )
-                                        ),
-                                        "continuation" to tokenToUse
-                                    )
-                                    val innerResponse = app.post(innerApiUrl, json = innerPayload, headers = reqHeaders, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
-                                    if (innerResponse != null) {
-                                        val actions = innerResponse["onResponseReceivedActions"] 
-                                            ?: innerResponse["onResponseReceivedEndpoints"]
-                                            ?: innerResponse["onResponseReceivedCommands"] 
-                                            ?: innerResponse["continuationContents"] 
-                                            ?: innerResponse
-                                        
-                                        val playlistId = if (requestData.contains("list=")) {
-                                            requestData.substringAfter("list=", "").substringBefore("&")
-                                        } else null
+                                    val playlistId = if (requestData.contains("list=")) {
+                                        requestData.substringAfter("list=", "").substringBefore("&")
+                                    } else null
 
-                                        processRecursive(actions, results, seenIds, playlistMode = false, playlistId = playlistId)
-                                        nextContinuation = findTokenRecursive(innerResponse)
-                                    }
+                                    processRecursive(actions, results, seenIds, playlistMode = false, playlistId = playlistId)
+                                    nextContinuation = findTokenRecursive(innerResponse)
                                 }
                             }
                         }
@@ -1590,8 +1557,8 @@ class YoutubeProvider(
                         ),
                         "continuation" to tokenToUse
                     )
-                    val reqHeaders = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
-                    val response = app.post(apiUrl, json = payload, headers = reqHeaders, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                    val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
+                    val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                     if (response != null) {
                         val actions = response["onResponseReceivedActions"] 
                             ?: response["onResponseReceivedEndpoints"]
@@ -1612,7 +1579,8 @@ class YoutubeProvider(
             logError(e) 
         }
 
-        saveContinuationToken(requestData, page + 1, nextContinuation)
+        saveContinuationToken(requestData, nextContinuation)
+        
 
         if (requestData.contains("history", ignoreCase = true)) {
             val sorted = mutableListOf<SearchResponse>()
