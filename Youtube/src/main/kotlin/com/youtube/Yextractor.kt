@@ -90,7 +90,6 @@ open class YoutubeExtractor : ExtractorApi() {
             .build()
 
         private val VISITOR_DATA_REGEX = Regex(""""VISITOR_DATA":"([^"]+)"""")
-        private val STS_REGEX = Regex(""""signatureTimestamp":\s*(\d+)"""")
         private val CHUNK_ID_REGEX = Regex("id=([^&]+)")
         private val FMT_REPLACE_REGEX = Regex("&fmt=[^&]+")
 
@@ -270,12 +269,9 @@ open class YoutubeExtractor : ExtractorApi() {
                 val responseBody = response.body?.string() ?: ""
                 response.close()
 
-                println("[TRACK] -> decodeBatch HTTP Code: ${response.code}")
-
                 val jsonResponse = JSONObject(responseBody)
-                val type = jsonResponse.optString("type")
-                if (type != "result") {
-                    println("[TRACK] 🚨 decodeBatch API returned unexpected type: $type. Body: $responseBody")
+                if (jsonResponse.optString("type") != "result") {
+                    println("[TRACK] 🚨 decodeBatch API returned unexpected type: ${jsonResponse.optString("type")}")
                     return Pair(sigResults, nResults)
                 }
 
@@ -291,13 +287,9 @@ open class YoutubeExtractor : ExtractorApi() {
                                 val decodedValue = nData.optString(nParam)
                                 if (decodedValue.isNotEmpty()) {
                                     nResults[nParam] = decodedValue
-                                } else {
-                                    println("[TRACK] ⚠️ Empty decoded value for N param: $nParam")
                                 }
                             }
                         }
-                    } else {
-                        println("[TRACK] 🚨 N parameter response failed. Dump: ${nResponse?.toString()}")
                     }
                 }
 
@@ -310,16 +302,11 @@ open class YoutubeExtractor : ExtractorApi() {
                                 val decodedValue = sigData.optString(sig)
                                 if (decodedValue.isNotEmpty()) {
                                     sigResults[sig] = decodedValue
-                                } else {
-                                    println("[TRACK] ⚠️ Empty decoded value for Sig param: $sig")
                                 }
                             }
                         }
-                    } else {
-                        println("[TRACK] 🚨 Sig parameter response failed. Dump: ${sigResponse?.toString()}")
                     }
                 }
-
                 println("[TRACK] ✅ Batch Decode API Success: Decoded ${sigResults.size} Sigs, ${nResults.size} N params")
             } catch (e: Exception) {
                 println("[TRACK] 🚨 Exception in decodeBatch: ${e.message}")
@@ -331,30 +318,46 @@ open class YoutubeExtractor : ExtractorApi() {
         fun deobfuscateManifestUrl(manifestUrl: String, playerId: String): String {
             println("[TRACK] -> Attempting to deobfuscate manifest URL. Has PlayerID? ${playerId.isNotBlank()}")
             if (manifestUrl.isBlank() || playerId.isBlank()) {
-                println("[TRACK] ⚠️ Skipping deobfuscateManifestUrl: manifestUrl or playerId is blank.")
                 return manifestUrl
             }
             try {
                 val match = Regex("""/n/([^/&?]+)""").find(manifestUrl)
                 if (match != null) {
                     val n = match.groupValues[1]
-                    println("[TRACK] -> Found /n/ param in manifest: $n. Decoding...")
                     val decodedNs = decodeBatch(playerId, emptyList(), listOf(n)).second
                     val decodedN = decodedNs[n]
                     if (!decodedN.isNullOrBlank()) {
                         println("[TRACK] ✅ Successfully decoded /n/ param for manifest.")
                         return manifestUrl.replace("/n/$n", "/n/$decodedN")
-                    } else {
-                        println("[TRACK] 🚨 Failed to decode /n/ param. Decoder returned empty.")
                     }
-                } else {
-                    println("[TRACK] -> No /n/ param found in manifest URL.")
                 }
             } catch (e: Exception) {
                 println("[TRACK] 🚨 Exception in deobfuscateManifestUrl: ${e.message}")
             }
             return manifestUrl
         }
+
+        // HLS 속성 추출용 정규식 함수 (PipePipe의 extractHlsStringAttribute 완벽 이식)
+        private fun extractHlsStringAttribute(line: String, attribute: String): String? {
+            var match = Regex("""$attribute="([^"]+)"""").find(line)
+            if (match != null) return match.groupValues[1]
+            match = Regex("""$attribute=([^,\s]+)""").find(line)
+            if (match != null) return match.groupValues[1]
+            return null
+        }
+
+        // 언어 코드 한글 변환 맵
+        private val langMap = mapOf(
+            "ko" to "한국어",
+            "en" to "영어",
+            "es" to "스페인어",
+            "ja" to "일본어",
+            "zh" to "중국어",
+            "fr" to "프랑스어",
+            "de" to "독일어",
+            "pt" to "포르투갈어",
+            "vi" to "베트남어"
+        )
     }
 
     override fun getExtractorUrl(id: String): String {
@@ -374,7 +377,6 @@ open class YoutubeExtractor : ExtractorApi() {
         val n: String?
     )
 
-    // ✅ 컴파일 에러 해결: 생성자에 맞게 audioTrackId 파라미터 복구
     data class AudioInfo(
         var url: String, 
         val mimeType: String,
@@ -525,7 +527,6 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         }
 
-        // 로그인 안 되어있거나, Safari가 막혔을 때 ANDROID_VR로 폴백
         if (finalJson == null) {
             println("[TRACK] 3. Sending ANDROID_VR API Request (No Auth fallback)...")
             val androidApiKey = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
@@ -633,28 +634,81 @@ open class YoutubeExtractor : ExtractorApi() {
                     if (dashUrl.isNotBlank()) {
                         dashUrl = deobfuscateManifestUrl(dashUrl, playerId)
                     }
-                } else {
-                    println("[TRACK] ⚠️ PlayerID is blank, skipping manifest deobfuscation.")
                 }
 
+                // ✅ [핵심 해결책] 유튜브의 SABR 방식 VOD 대처 로직 추가 (PipePipe extractHlsStreams 이식)
+                val hlsStreamsParsed = mutableListOf<ExtractorLink>()
                 if (hlsUrl.isNotBlank()) {
-                    println("[TRACK] -> Emitting HLS Manifest Link")
-                    callback(
-                        newExtractorLink(
-                            this@YoutubeExtractor.name,
-                            "YouTube Auto (HLS)",
-                            hlsUrl,
-                            type = ExtractorLinkType.M3U8
-                        ) {
-                            this.referer = mainUrl
-                            this.quality = Qualities.Unknown.value
-                            this.headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
+                    println("[TRACK] -> PipePipe 로직: M3U8 플레이리스트 내부 스트림 파싱 시작")
+                    try {
+                        val m3u8Response = proxyHttpClient.newCall(
+                            okhttp3.Request.Builder().url(hlsUrl).header("User-Agent", SAFARI_USER_AGENT).build()
+                        ).execute()
+                        val m3u8Body = m3u8Response.body?.string() ?: ""
+                        m3u8Response.close()
+
+                        val lines = m3u8Body.split("\n")
+                        println("[TRACK] -> M3U8 Body Length: ${m3u8Body.length}, Total Lines: ${lines.size}")
+
+                        for (i in lines.indices) {
+                            val line = lines[i].trim()
+                            if (!line.startsWith("#EXT-X-STREAM-INF:")) continue
+                            if (i + 1 >= lines.size) break
+                            val streamUrl = lines[i + 1].trim()
+                            if (streamUrl.isEmpty() || streamUrl.startsWith("#")) continue
+
+                            val resolution = extractHlsStringAttribute(line, "RESOLUTION") ?: ""
+                            val audioContentId = extractHlsStringAttribute(line, "YT-EXT-AUDIO-CONTENT-ID") ?: ""
+
+                            val height = if (resolution.contains("x")) {
+                                resolution.split("x").getOrNull(1)?.toIntOrNull() ?: 0
+                            } else 0
+
+                            var locale = "und"
+                            var displayName = "Original"
+
+                            if (audioContentId.isNotEmpty()) {
+                                val langPart = audioContentId.split(".")[0]
+                                locale = langPart.split("-")[0]
+                                displayName = langMap[locale] ?: langPart.uppercase()
+                                // 주 언어 외에는 '더빙' 표시 추가
+                                if (displayName != "영어" && displayName != "English") {
+                                    displayName = "$displayName (더빙)"
+                                }
+                            }
+
+                            if (height > 0) {
+                                val labelName = if (locale != "und") "YouTube ${height}p [$displayName]" else "YouTube ${height}p"
+                                println("[TRACK] -> Extracted HLS Variant: $labelName. URL: ${streamUrl.take(30)}...")
+
+                                hlsStreamsParsed.add(
+                                    newExtractorLink(
+                                        this@YoutubeExtractor.name,
+                                        labelName,
+                                        streamUrl,
+                                        type = ExtractorLinkType.M3U8
+                                    ) {
+                                        this.referer = mainUrl
+                                        this.quality = height
+                                        this.headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
+                                    }
+                                )
+                            }
                         }
-                    )
+                    } catch (e: Exception) {
+                        println("[TRACK] 🚨 Failed to parse HLS master playlist: ${e.message}")
+                    }
                 }
 
+                // 파싱된 HLS 다국어 링크가 있다면 사용자에게 리턴
+                if (hlsStreamsParsed.isNotEmpty()) {
+                    println("[TRACK] -> Emitting ${hlsStreamsParsed.size} Decoded HLS Multilingual Links!")
+                    hlsStreamsParsed.forEach { callback(it) }
+                }
+
+                // 백업용 통짜 DASH 스트림 제공
                 if (dashUrl.isNotBlank()) {
-                    println("[TRACK] -> Emitting DASH Manifest Link")
+                    println("[TRACK] -> Emitting DASH Manifest Link as backup")
                     callback(
                         newExtractorLink(
                             this@YoutubeExtractor.name,
@@ -669,6 +723,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     )
                 }
 
+                // 일반 영상(SABR 아님)의 개별 트랙 파싱 로직 실행
                 val adaptiveFormats = streamingData.optJSONArray("adaptiveFormats") ?: JSONArray()
                 println("[TRACK] 5. Parsing adaptiveFormats")
                 println("[TRACK] -> Total items in adaptiveFormats: ${adaptiveFormats.length()}")
@@ -694,17 +749,13 @@ open class YoutubeExtractor : ExtractorApi() {
                             streamUrl = params["url"] ?: ""
                             s = params["s"]
                             sp = params["sp"] ?: "sig"
-                            println("[TRACK] -> Extracted cipher for itag $itag. URL found: ${streamUrl.isNotEmpty()}, s: ${s?.take(10)}..., sp: $sp")
                         } else {
                             println("[TRACK] ⚠️ Skipped track (itag: $itag) - No url and no cipher found.")
                             continue
                         }
                     }
 
-                    if (streamUrl.isNullOrEmpty()) {
-                        println("[TRACK] ⚠️ Skipped track (itag: $itag) - streamUrl is still empty after cipher parse.")
-                        continue
-                    }
+                    if (streamUrl.isNullOrEmpty()) continue
 
                     var n: String? = null
                     val nMatch = Regex("""[?&]n=([^&]+)""").find(streamUrl)
@@ -782,8 +833,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         }
                         
                         println("[TRACK] -> Added Audio Stream (itag: $itag) | Locale: $locale | DisplayName: $displayName")
-                        
-                        // ✅ 컴파일 에러가 나지 않도록 12개 인자 완벽 매칭
                         audioInfoList.add(AudioInfo(streamUrl, cleanMimeType, codec, bitrate, initR, indexR, locale, audioTrackId, displayName, s, sp, n))
                     }
                 }
@@ -797,11 +846,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         val bonus = if (it.mimeType.contains("webm")) 1000000 else 0
                         it.bitrate + bonus 
                     }
-                }
-
-                println("[TRACK] -> Selected Best Tracks per Language (${bestAudioList.size}):")
-                bestAudioList.forEach { 
-                    println("[TRACK]    Locale: ${it.locale}, DisplayName: ${it.displayName}, Bitrate: ${it.bitrate}") 
                 }
 
                 if (videoOnlyList.isNotEmpty() && bestAudioList.isNotEmpty()) {
@@ -844,8 +888,6 @@ open class YoutubeExtractor : ExtractorApi() {
                             }
                             video.url = newUrl
                         }
-                    } else {
-                        println("[TRACK] -> No signatures or N params to decode, or PlayerID is blank.")
                     }
 
                     println("[TRACK] 8. Generating Local Proxy DASH Manifests")
@@ -868,8 +910,6 @@ open class YoutubeExtractor : ExtractorApi() {
                             )
                         }
                     }
-                } else {
-                    println("[TRACK] 🚨 Cannot generate DASH: VideoOnlyList size=${videoOnlyList.size}, BestAudioList size=${bestAudioList.size}")
                 }
 
                 val originalUrl = "https://www.youtube.com/watch?v=$videoId"
