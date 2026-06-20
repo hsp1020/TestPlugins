@@ -803,7 +803,7 @@ open class YoutubeExtractor : ExtractorApi() {
                         this@YoutubeExtractor.name,
                         stream.labelName,
                         stream.url,
-                        type = ExtExtractorLinkType.M3U8
+                        type = ExtractorLinkType.M3U8
                     ) {
                         this.referer = mainUrl
                         this.quality = stream.height
@@ -988,7 +988,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     val finalName = "YouTube ${video.label}"
                     callback(
                         newExtractorLink(
-                            this@YoutubeExtractor.name, finalName, localLink, type = ExtExtractorLinkType.DASH
+                            this@YoutubeExtractor.name, finalName, localLink, type = ExtractorLinkType.DASH
                         ) {
                             this.referer = mainUrl
                             this.quality = video.height
