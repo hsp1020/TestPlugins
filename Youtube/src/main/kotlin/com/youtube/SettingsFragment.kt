@@ -190,6 +190,8 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                                 remove("SSID")
                                 remove("APISID")
                                 remove("SAPISID")
+                                remove("__Secure-1PSID") 
+                                remove("__Secure-3PAPISID")
                                 remove("yt_cached_chips") // 칩 프리퍼런스 파괴
                             }.apply()
 
