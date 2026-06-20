@@ -24,6 +24,7 @@ import java.io.PrintWriter
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.InetAddress
+import java.net.URI
 import java.util.Collections
 import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
@@ -63,26 +64,6 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         )
 
-        // ✅ 실수로 누락했던 다운로더 트리거 복구
-        private val recentTriggers: MutableMap<String, Long> = Collections.synchronizedMap(
-            object : LinkedHashMap<String, Long>(16, 0.75f, true) {
-                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>?): Boolean {
-                    return size > 100
-                }
-            }
-        )
-
-        // ✅ 실수로 누락했던 로컬 서버 쓰레드 실행기 복구 (빌드 에러 원인)
-        private val serverExecutor = ThreadPoolExecutor(
-            4, 
-            16, 
-            30L, 
-            TimeUnit.SECONDS,
-            LinkedBlockingQueue(128),
-            ThreadFactory { r -> Thread(r, "YT-DASH-Server-Worker") },
-            ThreadPoolExecutor.CallerRunsPolicy()
-        )
-
         private val proxyHttpClient = okhttp3.OkHttpClient.Builder()
             .followRedirects(true)
             .followSslRedirects(true)
@@ -92,14 +73,14 @@ open class YoutubeExtractor : ExtractorApi() {
             .build()
 
         private val VISITOR_DATA_REGEX = Regex(""""VISITOR_DATA":"([^"]+)"""")
+        private val STS_REGEX = Regex(""""signatureTimestamp":\s*(\d+)"""")
         private val CHUNK_ID_REGEX = Regex("id=([^&]+)")
-        private val FMT_REPLACE_REGEX = Regex("&fmt=[^&]+")
 
         private const val SAFARI_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15,gzip(gfe)"
         private const val SAFARI_CLIENT_VERSION = "2.20260114.08.00"
             
         init {
-            println("[YT_DEBUG_INIT] 유튜브 DASH 추출기 최적화 가상서버 초기화 완료")
+            println("[YT_DEBUG_INIT] 유튜브 DASH/HLS 추출기 최적화 가상서버 초기화 완료")
         }
 
         private fun generateCpn(): String {
@@ -107,29 +88,10 @@ open class YoutubeExtractor : ExtractorApi() {
             return (1..16).map { allowedChars.random() }.joinToString("")
         }
 
-        private fun openInExternalApp(packageName: String, targetUrl: String) {
-            val context = AcraApplication.context ?: return
-            android.os.Handler(android.os.Looper.getMainLooper()).post {
-                try {
-                    val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
-                        type = "text/plain"
-                        putExtra(android.content.Intent.EXTRA_TEXT, targetUrl)
-                        setPackage(packageName)
-                        addCategory(android.content.Intent.CATEGORY_DEFAULT)
-                        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                    }
-                    context.startActivity(intent)
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-            }
-        }
-
         private fun handleClient(client: Socket) {
             try {
                 client.use { socket ->
-                    val inputStream = socket.getInputStream()
-                    val reader = BufferedReader(InputStreamReader(inputStream, java.nio.charset.StandardCharsets.UTF_8))
+                    val reader = BufferedReader(InputStreamReader(socket.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))
                     val output = socket.getOutputStream()
                     val outWriter = PrintWriter(output, true)
 
@@ -153,55 +115,29 @@ open class YoutubeExtractor : ExtractorApi() {
                     val cleanPath = fullPath.substringBefore("?")
                     val queryParams = fullPath.substringAfter("?", "")
 
-                    if (cleanPath.startsWith("/open_app")) {
-                        // ✅ 실수로 누락했던 외부 다운로더 연동 로직 복구
-                        var pkg: String? = null
-                        var targetUrl: String? = null
-                        
-                        val pairs = queryParams.split("&")
-                        for (pair in pairs) {
-                            val idx = pair.indexOf("=")
-                            if (idx != -1) {
-                                val key = pair.substring(0, idx)
-                                val value = pair.substring(idx + 1)
-                                if (key == "package") {
-                                    pkg = java.net.URLDecoder.decode(value, "UTF-8")
-                                } else if (key == "url") {
-                                    targetUrl = java.net.URLDecoder.decode(value, "UTF-8")
-                                }
-                            }
-                        }
-                        
-                        if (targetUrl != null && pkg != null) {
-                            val triggerKey = "$pkg|$targetUrl"
-                            val now = System.currentTimeMillis()
-                            val lastTrigger = recentTriggers[triggerKey] ?: 0L
-                            
-                            if (now - lastTrigger > 3000L) {
-                                recentTriggers[triggerKey] = now
-                                openInExternalApp(pkg, targetUrl)
-                            }
-                        }
-                        outWriter.print("HTTP/1.1 204 No Content\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n")
-                        outWriter.flush()
-                    }
-                    else if (cleanPath.startsWith("/chunk")) {
+                    if (cleanPath.startsWith("/chunk")) {
                         val idMatch = CHUNK_ID_REGEX.find(queryParams)
                         val chunkId = idMatch?.groupValues?.get(1)
                         val targetYoutubeUrl = if (chunkId != null) streamUrlCache[chunkId] else null
 
                         if (targetYoutubeUrl != null) {
-                            proxyChunkToYouTube(client, targetYoutubeUrl, clientHeaders)
+                            proxyChunkToYouTube(socket, targetYoutubeUrl, clientHeaders)
                         } else {
                             outWriter.print("HTTP/1.1 404 Not Found\r\n\r\n")
                             outWriter.flush()
                         }
                     } 
-                    else if (cleanPath.endsWith(".mpd", ignoreCase = true)) {
-                        val path = cleanPath.substringBeforeLast(".mpd").removePrefix("/")
+                    else if (cleanPath.endsWith(".mpd") || cleanPath.endsWith(".m3u8")) {
+                        val isHls = cleanPath.endsWith(".m3u8")
+                        var path = cleanPath.substringBeforeLast(".")
+                        if (path.startsWith("/")) path = path.substring(1)
+                        
                         val content = manifestMap[path]
                         if (content != null) {
-                            outWriter.print("HTTP/1.1 200 OK\r\nContent-Type: application/dash+xml\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n$content")
+                            outWriter.print("HTTP/1.1 200 OK\r\n")
+                            if (isHls) outWriter.print("Content-Type: application/vnd.apple.mpegurl\r\n")
+                            else outWriter.print("Content-Type: application/dash+xml\r\n")
+                            outWriter.print("Connection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n$content")
                             outWriter.flush()
                         } else {
                             outWriter.print("HTTP/1.1 404 Not Found\r\n\r\n")
@@ -325,7 +261,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         }
                     }
                 }
-                println("[TRACK] -> Batch Decode API Success: Decoded ${sigResults.size} Sigs, ${nResults.size} N params")
             } catch (e: Exception) {
                 println("[TRACK] 🚨 Failed to call batch decode API: ${e.message}")
             }
@@ -352,6 +287,13 @@ open class YoutubeExtractor : ExtractorApi() {
 
         fun escapeXml(url: String): String {
             return url.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        }
+
+        fun resolveUrl(base: String, ref: String): String {
+            if (ref.startsWith("http")) return ref
+            return try {
+                URI(base).resolve(ref).toString()
+            } catch (e: Exception) { ref }
         }
     }
 
@@ -387,20 +329,8 @@ open class YoutubeExtractor : ExtractorApi() {
         val n: String?
     )
 
-    private fun getAppRedirectUrl(packageName: String, targetUrl: String): String? {
-        startServerIfNeeded()
-        return if (serverPort != 0) {
-            try {
-                val encodedPkg = java.net.URLEncoder.encode(packageName, "UTF-8")
-                val encodedUrl = java.net.URLEncoder.encode(targetUrl, "UTF-8")
-                "http://127.0.0.1:$serverPort/open_app?package=$encodedPkg&url=$encodedUrl"
-            } catch (e: Exception) {
-                null
-            }
-        } else {
-            null
-        }
-    }
+    data class HlsAudio(val name: String, val groupId: String, val uri: String)
+    data class HlsVideo(val resolution: String?, val bandwidth: String?, val codecs: String?, val audioGroup: String?, val uri: String)
 
     private suspend fun fetchPlayerResponse(videoId: String): Triple<JSONObject?, Long, String> {
         val watchUrl = "https://www.youtube.com/watch?v=$videoId"
@@ -430,22 +360,14 @@ open class YoutubeExtractor : ExtractorApi() {
             val json = JSONObject(pipeBody)
             sts = json.optInt("signatureTimestamp", sts)
             playerId = json.optString("player", "")
-        } catch (e: Exception) {
-            println("[TRACK] 🚨 PipePipe API failed: ${e.message}")
-        }
-
-        println("[TRACK] =========================================")
-        println("[TRACK] 1. Auth Headers Check")
-        println("[TRACK] -> SAPISID Extracted: $isLoggedIn")
-        println("[TRACK] -> Player ID: $playerId | STS: $sts")
+        } catch (e: Exception) {}
 
         var finalJson: JSONObject? = null
         var lengthSeconds = 3600L
 
         if (isLoggedIn) {
-            println("[TRACK] 2. Sending SAFARI API Request...")
-            
             val safariApiUrl = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
+            
             val safariPayload = JSONObject(mapOf(
                 "context" to mapOf(
                     "client" to mapOf(
@@ -494,19 +416,13 @@ open class YoutubeExtractor : ExtractorApi() {
                 val status = playabilityStatus?.optString("status")
                 
                 if (status == "OK" || json.has("streamingData")) {
-                    println("[TRACK] -> SAFARI Response successful.")
                     finalJson = json
                     lengthSeconds = json.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
-                } else {
-                    println("[TRACK] 🚨 SAFARI Request blocked. Status: $status")
                 }
-            } catch (e: Exception) { 
-                println("[TRACK] 🚨 SAFARI Exception: ${e.message}") 
-            }
+            } catch (e: Exception) {}
         }
 
         if (finalJson == null) {
-            println("[TRACK] 3. Sending ANDROID_VR API Request (Fallback)...")
             val androidApiKey = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
             val vrApiUrl = "https://youtubei.googleapis.com/youtubei/v1/player?prettyPrint=false&key=$androidApiKey"
 
@@ -542,14 +458,13 @@ open class YoutubeExtractor : ExtractorApi() {
             try {
                 val res = app.post(vrApiUrl, json = vrPayload, headers = vrHeaders).text
                 val json = JSONObject(res)
-                if (json.optJSONObject("playabilityStatus")?.optString("status") == "OK" || json.has("streamingData")) {
-                    println("[TRACK] -> ANDROID_VR Response successful.")
+                val status = json.optJSONObject("playabilityStatus")?.optString("status")
+                
+                if (status == "OK" || json.has("streamingData")) {
                     finalJson = json
                     lengthSeconds = json.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
                 }
-            } catch (e: Exception) { 
-                println("[TRACK] 🚨 ANDROID_VR Exception: ${e.message}") 
-            }
+            } catch (e: Exception) {}
         }
 
         return Triple(finalJson, lengthSeconds, playerId)
@@ -563,22 +478,6 @@ open class YoutubeExtractor : ExtractorApi() {
     ) {
         val cleanedUrl = url.replace(schemaStripRegex, "")
         val videoId = YoutubeUtils.extractYoutubeId(cleanedUrl) ?: cleanedUrl
-
-        val context = com.lagradost.cloudstream3.AcraApplication.context
-        val provider = com.lagradost.cloudstream3.APIHolder.allProviders.find { it.name == "YouTube" }
-        val sharedPref = (provider as? com.lagradost.cloudstream3.ar.youtube.YoutubeProvider)?.appPrefs 
-            ?: context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
-            
-        val downloaderType = sharedPref?.getString("downloader_app_type", "none") ?: "none"
-        val customPkg = sharedPref?.getString("downloader_custom_package", "") ?: ""
-
-        val (pkgName, appName) = when (downloaderType) {
-            "ytdlnis" -> Pair("com.deniscerri.ytdl", "YTDLnis")
-            "seal" -> Pair("com.junkfood.seal", "Seal")
-            "seal_plus" -> Pair("com.maheshtechnicals.sealplus", "Seal Plus")
-            "custom" -> Pair(customPkg, "Custom Downloader")
-            else -> Pair("", "")
-        }
 
         withContext(Dispatchers.IO) {
             try {
@@ -596,47 +495,103 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
 
                 var hlsUrl = streamingData.optString("hlsManifestUrl")
-                var dashUrl = streamingData.optString("dashManifestUrl")
-
-                if (playerId.isNotBlank()) {
-                    if (hlsUrl.isNotBlank()) hlsUrl = deobfuscateManifestUrl(hlsUrl, playerId)
-                    if (dashUrl.isNotBlank()) dashUrl = deobfuscateManifestUrl(dashUrl, playerId)
-                }
-
-                if (hlsUrl.isNotBlank()) {
-                    println("[TRACK] -> Emitting HLS link.")
-                    callback(
-                        newExtractorLink(
-                            source = this@YoutubeExtractor.name,
-                            name = "Auto (HLS)",
-                            url = hlsUrl,
-                            type = ExtractorLinkType.M3U8
-                        ) {
-                            this.referer = mainUrl
-                            this.quality = Qualities.Unknown.value
-                            this.headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
-                        }
-                    )
-                }
                 
-                if (dashUrl.isNotBlank()) {
-                    println("[TRACK] -> Emitting DASH link.")
-                    callback(
-                        newExtractorLink(
-                            source = this@YoutubeExtractor.name,
-                            name = "Auto (DASH)",
-                            url = dashUrl,
-                            type = ExtractorLinkType.DASH
-                        ) {
-                            this.referer = mainUrl
-                            this.quality = Qualities.Unknown.value
-                            this.headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
+                // ✅ 1. HLS 매니페스트 디코딩 및 다국어 쪼개기 파싱 (SABR 완벽 대응)
+                if (hlsUrl.isNotBlank()) {
+                    if (playerId.isNotBlank()) {
+                        hlsUrl = deobfuscateManifestUrl(hlsUrl, playerId)
+                    }
+
+                    println("[TRACK] 4. Fetching HLS Manifest to parse languages...")
+                    val hlsRes = app.get(hlsUrl, headers = mapOf("User-Agent" to SAFARI_USER_AGENT)).text
+                    
+                    if (hlsRes.isNotBlank()) {
+                        val audioTracks = mutableListOf<HlsAudio>()
+                        val videoTracks = mutableListOf<HlsVideo>()
+                        val lines = hlsRes.lines()
+                        var i = 0
+
+                        println("[TRACK] -> Parsing HLS content...")
+                        while (i < lines.size) {
+                            val line = lines[i].trim()
+                            if (line.startsWith("#EXT-X-MEDIA:TYPE=AUDIO")) {
+                                val uri = Regex("""URI="([^"]+)"""").find(line)?.groupValues?.get(1)
+                                val name = Regex("""NAME="([^"]+)"""").find(line)?.groupValues?.get(1) ?: "Original"
+                                val groupId = Regex("""GROUP-ID="([^"]+)"""").find(line)?.groupValues?.get(1) ?: "audio"
+                                if (uri != null) {
+                                    audioTracks.add(HlsAudio(name, groupId, resolveUrl(hlsUrl, uri)))
+                                    println("[TRACK]    -> Found HLS Audio Track: $name")
+                                }
+                            } else if (line.startsWith("#EXT-X-STREAM-INF")) {
+                                val resolution = Regex("""RESOLUTION=([^,]+)""").find(line)?.groupValues?.get(1)
+                                val bandwidth = Regex("""BANDWIDTH=([^,]+)""").find(line)?.groupValues?.get(1)
+                                val codecs = Regex("""CODECS="([^"]+)"""").find(line)?.groupValues?.get(1)
+                                val audioGroup = Regex("""AUDIO="([^"]+)"""").find(line)?.groupValues?.get(1)
+                                
+                                val uri = lines.getOrNull(i+1)?.trim()
+                                if (uri != null && !uri.startsWith("#")) {
+                                    videoTracks.add(HlsVideo(resolution, bandwidth, codecs, audioGroup, resolveUrl(hlsUrl, uri)))
+                                    println("[TRACK]    -> Found HLS Video Track: $resolution")
+                                }
+                            }
+                            i++
                         }
-                    )
+
+                        val audiosByLanguage = audioTracks.groupBy { it.name }
+                        println("[TRACK] -> Extracted HLS Languages: ${audiosByLanguage.keys}")
+
+                        if (videoTracks.isNotEmpty() && audiosByLanguage.isNotEmpty()) {
+                            println("[TRACK] 5. Emitting SPLIT Custom HLS links for each Language & Resolution")
+                            startServerIfNeeded()
+
+                            // 해상도 중복 방지
+                            for (video in videoTracks.distinctBy { it.resolution }) {
+                                val height = video.resolution?.split("x")?.lastOrNull()?.toIntOrNull() ?: continue
+                                
+                                for ((lang, audios) in audiosByLanguage) {
+                                    val audio = audios.find { it.groupId == video.audioGroup } ?: audios.firstOrNull()
+                                    if (audio != null) {
+                                        // 언어와 화질이 1:1로 매칭되는 커스텀 M3U8 파일 강제 생성
+                                        val m3u8 = """
+                                            #EXTM3U
+                                            #EXT-X-VERSION:6
+                                            #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="$lang",DEFAULT=YES,AUTOSELECT=YES,URI="${audio.uri}"
+                                            #EXT-X-STREAM-INF:BANDWIDTH=${video.bandwidth ?: 4000000},RESOLUTION=${video.resolution},CODECS="${video.codecs ?: ""}",AUDIO="audio"
+                                            ${video.uri}
+                                        """.trimIndent()
+                                        
+                                        val localLink = registerManifestAndGetUrl(m3u8, isHls = true)
+                                        if (localLink != null) {
+                                            val displayName = lang // UI 목록에 언어 이름 출력!
+                                            println("[TRACK]    -> Emitting Custom HLS Link: $displayName ${height}p")
+                                            
+                                            callback(newExtractorLink(
+                                                source = this@YoutubeExtractor.name,
+                                                name = displayName,
+                                                url = localLink,
+                                                referer = mainUrl,
+                                                quality = height,
+                                                type = ExtractorLinkType.M3U8
+                                            ) {
+                                                this.headers = mapOf("User-Agent" to SAFARI_USER_AGENT)
+                                            })
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // HLS 파싱이 성공적으로 끝났으므로 adaptiveFormats 파싱은 스킵합니다.
+                            println("[TRACK] ✅ HLS Splitting successful. Skipping adaptiveFormats.")
+                            return@withContext
+                        } else {
+                            println("[TRACK] 🚨 HLS parsing yielded empty tracks. Falling back to adaptiveFormats...")
+                        }
+                    }
                 }
 
+                // ✅ 2. HLS가 없거나 파싱에 실패했을 때만 기존 DASH(adaptiveFormats) 방식으로 폴백
                 val adaptiveFormats = streamingData.optJSONArray("adaptiveFormats") ?: JSONArray()
-                println("[TRACK] 4. Parsing adaptiveFormats. Found: ${adaptiveFormats.length()}")
+                println("[TRACK] -> Total items in adaptiveFormats: ${adaptiveFormats.length()}")
                 
                 val videoOnlyList = ArrayList<StreamInfo>()
                 val audioInfoList = ArrayList<AudioInfo>()
@@ -718,51 +673,58 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
 
-                println("[TRACK] 5. Grouping Audio Tracks")
+                println("[TRACK] 5. Grouping Audio Tracks by Language")
                 val audiosByLanguage = audioInfoList.groupBy { it.displayName ?: it.language ?: "Original" }
-                println("[TRACK] -> Grouped Languages: ${audiosByLanguage.keys}")
+                println("[TRACK] -> Final Grouped Languages: ${audiosByLanguage.keys}")
 
                 if (videoOnlyList.isNotEmpty() && audiosByLanguage.isNotEmpty()) {
+                    println("[TRACK] 6. Starting Local Server & Generating Custom Manifests")
                     startServerIfNeeded()
 
-                    val allSigs = mutableSetOf<String>()
-                    val allNs = mutableSetOf<String>()
+                    if (playerId.isNotBlank()) {
+                        val allSigs = mutableSetOf<String>()
+                        val allNs = mutableSetOf<String>()
 
-                    audioInfoList.forEach { 
-                        if (!it.s.isNullOrBlank()) allSigs.add(it.s)
-                        if (!it.n.isNullOrBlank()) allNs.add(it.n)
-                    }
-                    videoOnlyList.forEach { 
-                        if (!it.s.isNullOrBlank()) allSigs.add(it.s)
-                        if (!it.n.isNullOrBlank()) allNs.add(it.n)
-                    }
-
-                    if (playerId.isNotBlank() && (allSigs.isNotEmpty() || allNs.isNotEmpty())) {
-                        val (decodedSigs, decodedNs) = decodeBatch(playerId, allSigs.toList(), allNs.toList())
-                        audioInfoList.forEach { audio ->
-                            var newUrl = audio.url
-                            if (!audio.s.isNullOrBlank() && decodedSigs.containsKey(audio.s)) {
-                                newUrl += "&${audio.sp}=${decodedSigs[audio.s]}"
-                            }
-                            if (!audio.n.isNullOrBlank() && decodedNs.containsKey(audio.n)) {
-                                newUrl = newUrl.replace("n=${audio.n}", "n=${decodedNs[audio.n]}")
-                            }
-                            audio.url = newUrl
+                        audioInfoList.forEach { 
+                            if (!it.s.isNullOrBlank()) allSigs.add(it.s!!)
+                            if (!it.n.isNullOrBlank()) allNs.add(it.n!!)
                         }
-                        videoOnlyList.forEach { video ->
-                            var newUrl = video.url
-                            if (!video.s.isNullOrBlank() && decodedSigs.containsKey(video.s)) {
-                                newUrl += "&${video.sp}=${decodedSigs[video.s]}"
+                        videoOnlyList.forEach { 
+                            if (!it.s.isNullOrBlank()) allSigs.add(it.s!!)
+                            if (!it.n.isNullOrBlank()) allNs.add(it.n!!)
+                        }
+
+                        if (allSigs.isNotEmpty() || allNs.isNotEmpty()) {
+                            println("[TRACK] -> Decoding Signatures & N params via PipePipe API...")
+                            val (decodedSigs, decodedNs) = decodeBatch(playerId, allSigs.toList(), allNs.toList())
+
+                            audioInfoList.forEach { audio ->
+                                var newUrl = audio.url
+                                if (!audio.s.isNullOrBlank() && decodedSigs.containsKey(audio.s)) {
+                                    newUrl += "&${audio.sp}=${decodedSigs[audio.s]}"
+                                }
+                                if (!audio.n.isNullOrBlank() && decodedNs.containsKey(audio.n)) {
+                                    newUrl = newUrl.replace("n=${audio.n}", "n=${decodedNs[audio.n]}")
+                                }
+                                audio.url = newUrl
                             }
-                            if (!video.n.isNullOrBlank() && decodedNs.containsKey(video.n)) {
-                                newUrl = newUrl.replace("n=${video.n}", "n=${decodedNs[video.n]}")
+                            videoOnlyList.forEach { video ->
+                                var newUrl = video.url
+                                if (!video.s.isNullOrBlank() && decodedSigs.containsKey(video.s)) {
+                                    newUrl += "&${video.sp}=${decodedSigs[video.s]}"
+                                }
+                                if (!video.n.isNullOrBlank() && decodedNs.containsKey(video.n)) {
+                                    newUrl = newUrl.replace("n=${video.n}", "n=${decodedNs[video.n]}")
+                                }
+                                video.url = newUrl
                             }
-                            video.url = newUrl
                         }
                     }
 
+                    // ✅ 언어별로 독립된 ExtractorLink 방출 (Cloudstream UI 이름 분리)
                     for (video in videoOnlyList.distinctBy { it.height }) {
                         for ((lang, audios) in audiosByLanguage) {
+                            
                             val bestAudioForLang = if (video.mimeType.contains("webm")) {
                                 audios.maxByOrNull { if (it.mimeType.contains("webm")) it.bitrate + 1000000 else it.bitrate }
                             } else {
@@ -772,41 +734,26 @@ open class YoutubeExtractor : ExtractorApi() {
                             if (bestAudioForLang != null) {
                                 val singleAudioList = listOf(bestAudioForLang)
                                 val dashXml = buildDashManifestXml(video, singleAudioList, durationSeconds)
-                                val localLink = registerManifestAndGetUrl(dashXml)
+                                val localLink = registerManifestAndGetUrl(dashXml, isHls = false)
 
                                 if (localLink != null) {
-                                    val displayName = "$lang ${video.height}p"
+                                    val displayName = lang
+                                    println("[TRACK] -> Emitting Custom DASH Link: $displayName ${video.height}p")
                                     callback(
-                                        newExtractorLink(
-                                            name = displayName,
+                                        ExtractorLink(
                                             source = this@YoutubeExtractor.name,
+                                            name = displayName,
                                             url = localLink,
-                                            type = ExtractorLinkType.DASH
-                                        ) {
-                                            this.referer = mainUrl
-                                            this.quality = video.height
-                                            this.headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
-                                        }
+                                            referer = mainUrl,
+                                            quality = video.height,
+                                            type = ExtractorLinkType.DASH,
+                                            headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
+                                        )
                                     )
                                 }
                             }
                         }
                     }
-                }
-
-                val originalUrl = "https://www.youtube.com/watch?v=$videoId"
-
-                if (pkgName.isNotEmpty()) {
-                    val redirectUrl = getAppRedirectUrl(pkgName, originalUrl) ?: originalUrl
-                    callback(newExtractorLink(
-                        source = "YouTube Downloader", 
-                        name = "$appName Download", 
-                        url = redirectUrl, 
-                        type = if (redirectUrl.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE
-                    ) { 
-                        this.quality = 2160 
-                        this.referer = mainUrl 
-                    })
                 }
 
             } catch (e: Exception) { 
@@ -839,11 +786,12 @@ open class YoutubeExtractor : ExtractorApi() {
         }
     }
 
-    private fun registerManifestAndGetUrl(xmlContent: String): String? {
+    private fun registerManifestAndGetUrl(content: String, isHls: Boolean): String? {
         if (serverPort == 0) return null
         val id = "m_${streamCounter.getAndIncrement()}"
-        manifestMap[id] = xmlContent
-        return "http://127.0.0.1:$serverPort/$id.mpd"
+        manifestMap[id] = content
+        val ext = if (isHls) ".m3u8" else ".mpd"
+        return "http://127.0.0.1:$serverPort/$id$ext"
     }
 
     private fun buildDashManifestXml(
