@@ -1254,7 +1254,6 @@ private fun getCustomHomepages(): List<CustomSection> {
         if (currentList.none { it.url == "Home" }) {
             val homeTitle = when(lang) {
                 "ko" -> "홈"
-                "ar" -> "الرئيسية"
                 else -> "Home"
             }
             currentList.add(0, CustomSection(name = homeTitle, url = "Home", isEnabled = true))
