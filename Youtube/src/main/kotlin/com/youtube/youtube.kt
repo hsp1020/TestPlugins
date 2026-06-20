@@ -288,9 +288,8 @@ class YoutubeProvider(
     override var name = "YouTube"
     override val hasMainPage = true
     
-    // 앱 설정과 관계없이 무조건 표준 영문 응답만 취득하도록 고정
     override var lang: String
-        get() = "en"
+        get() = appPrefs?.getString("youtube_language", "en") ?: "en"
         set(value) {}
         
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Live)
@@ -372,7 +371,11 @@ class YoutubeProvider(
             val urlStr = request.url.toString()
             val isSearchRequest = urlStr.contains("/results") || urlStr.contains("/v1/search")
 
+            val overrideLang = request.header("X-Override-Language")
+            val targetLang = overrideLang ?: provider.lang
+
             val requestBuilder = request.newBuilder()
+                .removeHeader("X-Override-Language")
                 .header("User-Agent", YoutubeUtils.CHROME_USER_AGENT)
 
             val origReferer = request.header("Referer")
@@ -381,9 +384,9 @@ class YoutubeProvider(
             }
 
             if (!isSearchRequest) {
-                val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(prefs, provider.lang, "_Mk3UVhY40g", isSearch = false)
+                val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(prefs, targetLang, "_Mk3UVhY40g", isSearch = false)
                 requestBuilder.addHeader("Cookie", cookies)
-                requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
+                requestBuilder.addHeader("Accept-Language", "$targetLang,en-US;q=0.9,en;q=0.8")
 
                 if (!sapisidVal.isNullOrBlank()) {
                     try {
@@ -396,9 +399,9 @@ class YoutubeProvider(
                     }
                 }
             } else {
-                val (cookies, _) = YoutubeUtils.buildCookiesAndExtractSapisid(prefs, provider.lang, "_Mk3UVhY40g", isSearch = true)
+                val (cookies, _) = YoutubeUtils.buildCookiesAndExtractSapisid(prefs, targetLang, "_Mk3UVhY40g", isSearch = true)
                 requestBuilder.addHeader("Cookie", cookies)
-                requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
+                requestBuilder.addHeader("Accept-Language", "$targetLang,en-US;q=0.9,en;q=0.8")
             }
 
             return chain.proceed(requestBuilder.build())
@@ -448,20 +451,14 @@ class YoutubeProvider(
     }
 
     private suspend fun triggerPlaybackTracking(playbackTracking: PlaybackTracking?, videoId: String, isShort: Boolean = false) {
-        println("[YTSYNC_DEBUG] === 트래킹 시작: VideoID=$videoId, isShort=$isShort ===")
         val playbackBaseUrl = playbackTracking?.videostatsPlaybackUrl?.baseUrl
         val watchtimeBaseUrl = playbackTracking?.videostatsWatchtimeUrl?.baseUrl
 
         if (playbackBaseUrl.isNullOrBlank() || watchtimeBaseUrl.isNullOrBlank()) {
-            println("[YTSYNC_DEBUG] 🚨 트래킹 URL 누락됨! (playbackUrl 혹은 watchtimeUrl이 없습니다)")
             return
         }
 
-        println("[YTSYNC_DEBUG] 원본 Playback URL: $playbackBaseUrl")
-        println("[YTSYNC_DEBUG] 원본 Watchtime URL: $watchtimeBaseUrl")
-
         val cpn = generateCpn()
-        println("[YTSYNC_DEBUG] 생성된 CPN: $cpn")
 
         try {
             var playbackUrl = buildTrackingUrl(playbackBaseUrl, cpn, cmt = "0.000", state = null, realTime = "0")
@@ -480,28 +477,16 @@ class YoutubeProvider(
                 if (!watchtimeUrl.contains("el=shortspage")) watchtimeUrl = "$watchtimeUrl&el=shortspage"
             }
 
-            println("[YTSYNC_DEBUG] 최종 Playback 전송 URL: $playbackUrl")
-            println("[YTSYNC_DEBUG] 최종 Watchtime 전송 URL: $watchtimeUrl")
-
             kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
                 try {
-                    println("[YTSYNC_DEBUG] [1/2] Playback 핑 전송 시도 중...")
                     val pRes = app.get(playbackUrl, interceptor = ytInterceptor)
-                    println("[YTSYNC_DEBUG] [1/2] Playback 핑 응답 코드: ${pRes.code} (204가 정상)")
-                    
                     kotlinx.coroutines.delay(2500L)
-                    
-                    println("[YTSYNC_DEBUG] [2/2] Watchtime 핑 전송 시도 중...")
                     val wRes = app.get(watchtimeUrl, interceptor = ytInterceptor)
-                    println("[YTSYNC_DEBUG] [2/2] Watchtime 핑 응답 코드: ${wRes.code} (204가 정상)")
-                    println("[YTSYNC_DEBUG] === 트래킹 완료 (시청 기록 연동 성공 예상) ===")
                 } catch (e: Exception) {
-                    println("[YTSYNC_DEBUG] 🚨 트래킹 핑 전송 중 예외 발생: ${e.message}")
                     logError(e)
                 }
             }
         } catch (e: Exception) {
-            println("[YTSYNC_DEBUG] 🚨 URL 빌드 중 예외 발생: ${e.message}")
             logError(e)
         }
     }
@@ -730,7 +715,6 @@ class YoutubeProvider(
 
             if (rows != null && rows.isNotEmpty()) {
                 if (rows.size == 1) {
-                    // 채널 전용 카탈로그: 행이 1개뿐이므로 [조회수]와 [업로드시간]이 나란히 위치함
                     val singleRow = rows.getOrNull(0)
                     if (singleRow != null) {
                         val parts = singleRow.getListKey("metadataParts")
@@ -750,7 +734,6 @@ class YoutubeProvider(
                         }
                     }
                 } else {
-                    // 홈 화면/검색 결과: 행이 2개 이상이므로 Row 0은 채널명, Row 1은 조회수와 업로드시간이 위치함
                     val firstRow = rows.getOrNull(0)
                     if (firstRow != null) {
                         val parts = firstRow.getListKey("metadataParts")
@@ -794,7 +777,6 @@ class YoutubeProvider(
 
         return Triple(channel, views, date)
     }
-
 
     private fun collectFromRenderer(
         renderer: Map<*, *>?,
@@ -1111,7 +1093,7 @@ class YoutubeProvider(
             }
         } else if (data is List<*>) {
             for (item in data) {
-                processRecursive(item, outList, seenIds, playlistMode, depth + 1, playlistId)
+                processRecursive(item, depth + 1)
             }
         }
     }
@@ -1203,7 +1185,6 @@ class YoutubeProvider(
                         ?: (endpoint["command"] as? Map<*, *>)?.get("token") as? String
                         ?: endpoint["token"] as? String
                     if (!token.isNullOrBlank()) {
-                        Log.d("YoutubeUtils", "[CHIP] findTokenRecursive - Found token in [continuationItemRenderer]: $token")
                         return token
                     }
                 }
@@ -1217,7 +1198,6 @@ class YoutubeProvider(
                 val token = nextData["continuation"] as? String
                     ?: nextData["token"] as? String
                 if (!token.isNullOrBlank()) {
-                    Log.d("YoutubeUtils", "[CHIP] findTokenRecursive - Found token in [nextContinuationData]: $token")
                     return token
                 }
             }
@@ -1231,7 +1211,6 @@ class YoutubeProvider(
                     keyStr == "chipCloudChipRenderer" ||
                     keyStr == "chipViewModel" ||
                     keyStr == "chipCloud") {
-                    Log.d("YoutubeUtils", "[CHIP] findTokenRecursive - Skipping key to prevent false extraction: $keyStr")
                     continue
                 }
                 val t = findTokenRecursive(v)
@@ -1258,7 +1237,7 @@ class YoutubeProvider(
                 emptyMap()
             }
 
-            customSections.filter { it.isEnabled }.forEach { section ->
+            customSections.filter { section -> section.isEnabled }.forEach { section ->
                 val url = section.url
                 when {
                     url == "Home" -> {
@@ -1292,7 +1271,7 @@ class YoutubeProvider(
 
         var modified = false
 
-        if (currentList.none { it.url == "Home" }) {
+        if (currentList.none { section -> section.url == "Home" }) {
             currentList.add(0, CustomSection(name = "Home", url = "Home", isEnabled = true))
             modified = true
         }
@@ -1302,7 +1281,7 @@ class YoutubeProvider(
             val cachedChips = mapper.readValue<List<CachedChip>>(cachedChipsJson)
             cachedChips.forEach { chip ->
                 val stableUrl = "chip_name_${chip.name}"
-                if (currentList.none { it.url == stableUrl }) {
+                if (currentList.none { section -> section.url == stableUrl }) {
                     currentList.add(CustomSection(name = chip.name, url = stableUrl, isEnabled = true))
                     modified = true
                 }
@@ -1342,22 +1321,55 @@ class YoutubeProvider(
         val rawRequestData = request.data
         val requestData = YoutubeUtils.urlDecode(rawRequestData)
         val maxPages = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
-        
         val isChip = requestData.startsWith("chip_name_")
-        if (isChip) {
-            Log.d("YoutubeUtils", "[CHIP] getMainPage ENTRY - Page: $page, requestData: $requestData")
-        }
 
         if (page > maxPages) {
-            if (isChip) {
-                Log.d("YoutubeUtils", "[CHIP] getMainPage - Paging limit reached ($page > $maxPages)")
-            }
             return newHomePageResponse(request, emptyList(), hasNext = false)
         }
 
+        val userLang = appPrefs?.getString("youtube_language", "en") ?: "en"
+
+        return withContext(Dispatchers.IO) {
+            val englishDeferred = async {
+                fetchMainPageData(page, request, requestData, isChip, "en")
+            }
+
+            val localizedDeferred = if (userLang != "en") {
+                async {
+                    fetchMainPageData(page, request, requestData, isChip, userLang)
+                }
+            } else null
+
+            val englishResponse = englishDeferred.await()
+            val localizedResponse = localizedDeferred?.await()
+
+            val englishResults = englishResponse.results.toMutableList()
+            if (localizedResponse != null) {
+                val localizedMap = localizedResponse.results.associateBy { it.url }
+                englishResults.forEach { engItem ->
+                    val locItem = localizedMap[engItem.url]
+                    if (locItem != null) {
+                        engItem.name = YoutubeUtils.mergeLocalizedTitle(engItem.name, locItem.name)
+                    }
+                }
+            }
+
+            newHomePageResponse(request, englishResults, hasNext = englishResponse.hasNext)
+        }
+    }
+
+    private suspend fun fetchMainPageData(
+        page: Int,
+        request: MainPageRequest,
+        requestData: String,
+        isChip: Boolean,
+        targetLang: String
+    ): HomePageResponse {
         val results = mutableListOf<SearchResponse>()
         val seenIds = mutableSetOf<String>()
         var nextContinuation: String? = null
+
+        val headers = mapOf("X-Override-Language" to targetLang)
 
         try {
             if (page == 1) {
@@ -1367,9 +1379,8 @@ class YoutubeProvider(
                     savedClientVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION)
 
                     if (savedApiKey.isNullOrBlank()) {
-                        Log.w("YoutubeUtils", "[CHIP] API Key is missing on Page 1. Synchronously fetching mainUrl to retrieve configs...")
                         try {
-                            val html = app.get(mainUrl, interceptor = ytInterceptor).text
+                            val html = app.get(mainUrl, headers = headers, interceptor = ytInterceptor).text
                             savedApiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY") ?: savedApiKey
                             savedVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA") ?: savedVisitorData
                             savedClientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: savedClientVersion ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
@@ -1380,10 +1391,8 @@ class YoutubeProvider(
                                     ?.putString("yt_visitor_data", savedVisitorData)
                                     ?.putString("yt_client_version", savedClientVersion)
                                     ?.apply()
-                                Log.d("YoutubeUtils", "[CHIP] Configs retrieved successfully. Key: $savedApiKey")
                             }
                         } catch (e: Exception) {
-                            Log.e("YoutubeUtils", "[CHIP] Failed to fetch mainUrl for configs", e)
                         }
                     }
 
@@ -1397,8 +1406,6 @@ class YoutubeProvider(
                     val activeChip = cachedChips.find { it.name == chipCategoryName }
                     val tokenToUse = activeChip?.token
 
-                    Log.d("YoutubeUtils", "[CHIP] Page 1 for category [$chipCategoryName] - Resolved Token: $tokenToUse")
-
                     if (!tokenToUse.isNullOrBlank() && !savedApiKey.isNullOrBlank()) {
                         val apiUrl = "$mainUrl/youtubei/v1/browse?key=$savedApiKey"
                         val payload = mapOf(
@@ -1407,14 +1414,14 @@ class YoutubeProvider(
                                     "clientName" to "WEB",
                                     "clientVersion" to (savedClientVersion ?: YoutubeUtils.DEFAULT_CLIENT_VERSION),
                                     "platform" to "DESKTOP",
-                                    "hl" to lang
+                                    "hl" to targetLang
                                 )
                             ),
                             "continuation" to tokenToUse
                         )
                         
-                        val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
-                        val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                        val reqHeaders = mapOf("X-Override-Language" to targetLang, "Origin" to mainUrl, "Referer" to mainUrl)
+                        val response = app.post(apiUrl, json = payload, headers = reqHeaders, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                         
                         if (response != null) {
                             val actions = response["onResponseReceivedActions"] 
@@ -1423,12 +1430,11 @@ class YoutubeProvider(
                                 ?: response
                             processRecursive(actions, results, seenIds, playlistMode = false)
                             nextContinuation = findTokenRecursive(response)
-                            Log.d("YoutubeUtils", "[CHIP] Page 1 for category [$chipCategoryName] - Extracted nextContinuation: $nextContinuation")
                         }
                     }
                 } else {
                     val targetUrl = if(requestData == "Home") mainUrl else requestData
-                    val html = app.get(targetUrl, interceptor = ytInterceptor).text
+                    val html = app.get(targetUrl, headers = headers, interceptor = ytInterceptor).text
                     
                     savedApiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY") ?: savedApiKey
                     savedVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA") ?: savedVisitorData
@@ -1478,7 +1484,6 @@ class YoutubeProvider(
                                         jsonArray.put(obj)
                                     }
                                     appPrefs?.edit()?.putString("yt_cached_chips", jsonArray.toString())?.apply()
-                                    Log.d("YoutubeUtils", "[CHIP] Merged and preserved yt_cached_chips. Total unique chips cached: ${cachedChipsMap.size}")
                                 }
                             }
                         }
@@ -1492,20 +1497,15 @@ class YoutubeProvider(
                     }
                 }
             } else {
-                if (isChip) {
-                    Log.d("YoutubeUtils", "[CHIP] Page $page - Loading continuation tokens...")
-                }
                 var tokenToUse = getSavedContinuationToken(requestData, page)
 
                 if (isChip && tokenToUse.isNullOrBlank() && page >= 2) {
-                    Log.w("YoutubeUtils", "[CHIP] Page $page token is empty. Suspending coroutine thread and waiting for previous page to write the token...")
                     var retries = 0
                     while (tokenToUse.isNullOrBlank() && retries < 15) {
                         kotlinx.coroutines.delay(300L)
                         tokenToUse = getSavedContinuationToken(requestData, page)
                         retries++
                     }
-                    Log.d("YoutubeUtils", "[CHIP] Page $page wait finished. Retrieved tokenToUse: $tokenToUse")
                 }
                 
                 if (tokenToUse.isNullOrBlank() && page == 2) { 
@@ -1523,8 +1523,6 @@ class YoutubeProvider(
                         val activeChip = cachedChips.find { it.name == chipCategoryName }
                         val rawToken = activeChip?.token
 
-                        Log.w("YoutubeUtils", "[CHIP] Page 2 - tokenToUse was empty! Triggering double-call recovery fallback for category [$chipCategoryName] using rawToken: $rawToken")
-                        
                         if (!rawToken.isNullOrBlank()) {
                             val apiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
                             val payload = mapOf(
@@ -1532,17 +1530,16 @@ class YoutubeProvider(
                                     "client" to mapOf(
                                         "clientName" to "WEB", 
                                         "clientVersion" to cVersion, 
-                                        "hl" to lang,
+                                        "hl" to targetLang,
                                         "platform" to "DESKTOP"
                                     )
                                 ),
                                 "continuation" to rawToken
                             )
-                            val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
-                            val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                            val reqHeaders = mapOf("X-Override-Language" to targetLang, "Origin" to mainUrl, "Referer" to mainUrl)
+                            val response = app.post(apiUrl, json = payload, headers = reqHeaders, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                             if (response != null) {
                                 tokenToUse = findTokenRecursive(response)
-                                Log.d("YoutubeUtils", "[CHIP] Page 2 - Fallback outer call succeeded. Found nested tokenToUse: $tokenToUse")
                                 if (!tokenToUse.isNullOrBlank()) {
                                     saveContinuationToken(requestData, page, tokenToUse)
                                     
@@ -1552,13 +1549,13 @@ class YoutubeProvider(
                                             "client" to mapOf(
                                                 "clientName" to "WEB", 
                                                 "clientVersion" to cVersion, 
-                                                "hl" to lang,
+                                                "hl" to targetLang,
                                                 "platform" to "DESKTOP"
                                             )
                                         ),
                                         "continuation" to tokenToUse
                                     )
-                                    val innerResponse = app.post(innerApiUrl, json = innerPayload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                                    val innerResponse = app.post(innerApiUrl, json = innerPayload, headers = reqHeaders, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                                     if (innerResponse != null) {
                                         val actions = innerResponse["onResponseReceivedActions"] 
                                             ?: innerResponse["onResponseReceivedEndpoints"]
@@ -1572,7 +1569,6 @@ class YoutubeProvider(
 
                                         processRecursive(actions, results, seenIds, playlistMode = false, playlistId = playlistId)
                                         nextContinuation = findTokenRecursive(innerResponse)
-                                        Log.d("YoutubeUtils", "[CHIP] Page 2 - Fallback nested nextContinuation: $nextContinuation")
                                     }
                                 }
                             }
@@ -1589,17 +1585,14 @@ class YoutubeProvider(
                             "client" to mapOf(
                                 "clientName" to "WEB", 
                                 "clientVersion" to cVersion, 
-                                "hl" to lang,
+                                "hl" to targetLang,
                                 "platform" to "DESKTOP"
                             )
                         ),
                         "continuation" to tokenToUse
                     )
-                    val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
-                    if (isChip) {
-                        Log.d("YoutubeUtils", "[CHIP] Page $page - Sending HTTP Request to $apiUrl using tokenToUse: $tokenToUse")
-                    }
-                    val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                    val reqHeaders = mapOf("X-Override-Language" to targetLang, "Origin" to mainUrl, "Referer" to mainUrl)
+                    val response = app.post(apiUrl, json = payload, headers = reqHeaders, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                     if (response != null) {
                         val actions = response["onResponseReceivedActions"] 
                             ?: response["onResponseReceivedEndpoints"]
@@ -1613,22 +1606,13 @@ class YoutubeProvider(
 
                         processRecursive(actions, results, seenIds, playlistMode = false, playlistId = playlistId)
                         nextContinuation = findTokenRecursive(response)
-                        if (isChip) {
-                            Log.d("YoutubeUtils", "[CHIP] Page $page - Extracted nextContinuation: $nextContinuation")
-                        }
                     }
                 }
             }
         } catch (e: Exception) { 
-            if (isChip) {
-                Log.e("YoutubeUtils", "[CHIP] Exception occurred inside getMainPage parsing pipeline: ${e.message}", e)
-            }
             logError(e) 
         }
 
-        if (isChip) {
-            Log.d("YoutubeUtils", "[CHIP] getMainPage EXIT - Saving nextContinuation for requestData: $requestData -> $nextContinuation (intended for page: ${page + 1})")
-        }
         saveContinuationToken(requestData, page + 1, nextContinuation)
 
         if (requestData.contains("history", ignoreCase = true)) {
@@ -1658,7 +1642,7 @@ class YoutubeProvider(
             results.addAll(sorted)
         }
 
-        return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
+        return HomePageResponse(results, !nextContinuation.isNullOrBlank())
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -1671,12 +1655,44 @@ class YoutubeProvider(
             return newSearchResponseList(emptyList(), false)
         }
 
+        val userLang = appPrefs?.getString("youtube_language", "en") ?: "en"
+
+        return withContext(Dispatchers.IO) {
+            val englishDeferred = async {
+                fetchSearchData(query, page, "en")
+            }
+
+            val localizedDeferred = if (userLang != "en") {
+                async {
+                    fetchSearchData(query, page, userLang)
+                }
+            } else null
+
+            val englishResponse = englishDeferred.await()
+            val localizedResponse = localizedDeferred?.await()
+
+            val englishResults = englishResponse?.items?.toMutableList() ?: mutableListOf()
+            if (englishResults.isNotEmpty() && localizedResponse != null) {
+                val localizedMap = localizedResponse.items.associateBy { it.url }
+                englishResults.forEach { engItem ->
+                    val locItem = localizedMap[engItem.url]
+                    if (locItem != null) {
+                        engItem.name = YoutubeUtils.mergeLocalizedTitle(engItem.name, locItem.name)
+                    }
+                }
+            }
+
+            newSearchResponseList(englishResults, englishResponse?.hasNext ?: false)
+        }
+    }
+
+    private suspend fun fetchSearchData(
+        query: String,
+        page: Int,
+        targetLang: String
+    ): SearchResponseList? {
         val results = mutableListOf<SearchResponse>()
         isSearchContext = true
-        if (page == 1) {
-            searchShorts.clear()
-        }
-
         val seenIds = mutableSetOf<String>()
         var actualQuery = query
         var playlistMode = false
@@ -1689,12 +1705,14 @@ class YoutubeProvider(
             spParam = "&sp=EgIQAw%3D%3D"
         }
 
+        val headers = mapOf("X-Override-Language" to targetLang)
+
         try {
             if (page == 1) {
-                saveContinuationToken("search_token", null)
+                saveContinuationToken("search_token_$targetLang", null)
                 val encoded = URLEncoder.encode(actualQuery, "utf-8")
                 val url = "$mainUrl/results?search_query=$encoded$spParam"
-                val html = app.get(url, interceptor = ytInterceptor).text
+                val html = app.get(url, headers = headers, interceptor = ytInterceptor).text
 
                 savedApiKey = API_KEY_EXTRACT_REGEX.find(html)?.groupValues?.get(1)
                 savedVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA")
@@ -1703,10 +1721,10 @@ class YoutubeProvider(
                 if (initialData != null) {
                     processRecursive(initialData, results, seenIds, playlistMode)
                     savedContinuationToken = findTokenRecursive(initialData)
-                    saveContinuationToken("search_token", savedContinuationToken)
+                    saveContinuationToken("search_token_$targetLang", savedContinuationToken)
                 }
             } else {
-                val tokenToUse = getSavedContinuationToken("search_token")
+                val tokenToUse = getSavedContinuationToken("search_token_$targetLang")
                 if (!tokenToUse.isNullOrBlank()) {
                     val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
                     val vData = savedVisitorData ?: appPrefs?.getString("yt_visitor_data", null) ?: ""
@@ -1716,15 +1734,15 @@ class YoutubeProvider(
                             "client" to mapOf(
                                 "clientName" to "WEB",
                                 "clientVersion" to "2.20240101.00",
-                                "hl" to lang,
+                                "hl" to targetLang,
                                 "gl" to "US",
                                 "visitorData" to vData
                             )
                         ),
                         "continuation" to tokenToUse
                     )
-                    val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl) 
-                    val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor)
+                    val reqHeaders = mapOf("X-Override-Language" to targetLang, "Origin" to mainUrl, "Referer" to mainUrl) 
+                    val response = app.post(apiUrl, json = payload, headers = reqHeaders, interceptor = ytInterceptor)
                         .parsedSafe<Map<String, Any>>()
                     if (response != null) {
                         val actions = response["onResponseReceivedActions"]
@@ -1733,13 +1751,13 @@ class YoutubeProvider(
                             ?: response
                         processRecursive(actions, results, seenIds, playlistMode)
                         savedContinuationToken = findTokenRecursive(response)
-                        saveContinuationToken("search_token", savedContinuationToken)
+                        saveContinuationToken("search_token_$targetLang", savedContinuationToken)
                     }
                 }
             }
-            return newSearchResponseList(results, !getSavedContinuationToken("search_token").isNullOrBlank())
+            return SearchResponseList(results, !getSavedContinuationToken("search_token_$targetLang").isNullOrBlank())
         } catch (e: Exception) {
-            return newSearchResponseList(emptyList(), false)
+            return SearchResponseList(emptyList(), false)
         }
     }
 
@@ -2167,7 +2185,7 @@ class YoutubeProvider(
                             }
                             is List<*> -> {
                                 for (item in obj) {
-                                    findAllRenderers(item, results, depth + 1)
+                                    findAllRenderers(item, depth + 1)
                                 }
                             }
                         }
@@ -2569,12 +2587,9 @@ class YoutubeProvider(
         val fullUrl = "https://www.youtube.com/watch?v=$videoId"
         val isShort = data.contains("/shorts/")
 
-        println("[YTSYNC_DEBUG] >>> loadLinks 진입: $videoId (isShort=$isShort)")
-
         var playerResponseJson: String? = null
         try {
             val htmlUrl = if (isShort) "$mainUrl/shorts/$videoId" else fullUrl
-            println("[YTSYNC_DEBUG] HTML 페이지 요청 중: $htmlUrl")
             val htmlResponse = app.get(htmlUrl, interceptor = ytInterceptor).text
             
             val marker1 = "ytInitialPlayerResponse = "
@@ -2591,12 +2606,9 @@ class YoutubeProvider(
                 }
             }
             
-            println("[YTSYNC_DEBUG] HTML에서 ytInitialPlayerResponse 추출 성공 여부: ${playerResponseJson != null}")
-            
             if (playerResponseJson == null) {
-                println("[YTSYNC_DEBUG] 🚨 HTML 추출 실패. ANDROID_VR 폴백 요청 진행...")
                 val androidApiKey = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
-                val apiUrl = "https://www.youtube.com/youtubei/v1/player?key=$androidApiKey"
+                val apiUrl = "https://www.youtube.com/player?key=$androidApiKey"
                 val payload = mapOf(
                     "videoId" to videoId,
                     "context" to mapOf(
@@ -2610,10 +2622,8 @@ class YoutubeProvider(
                     "Origin" to "https://www.youtube.com"
                 )
                 playerResponseJson = app.post(apiUrl, json = payload, headers = vrHeaders).text
-                println("[YTSYNC_DEBUG] ANDROID_VR 폴백 응답 확보 완료 (길이: ${playerResponseJson.length})")
             }
         } catch (e: Exception) {
-            println("[YTSYNC_DEBUG] 🚨 playerResponse 획득 중 예외 발생: ${e.message}")
             logError(e)
         }
 
@@ -2627,22 +2637,14 @@ class YoutubeProvider(
                 }
                 val playerResponse = mapper.readValue<PlayerResponse>(targetJson)
                 
-                println("[YTSYNC_DEBUG] JSON 매핑 성공. playbackTracking 존재 여부: ${playerResponse.playbackTracking != null}")
-                
                 triggerPlaybackTracking(playerResponse.playbackTracking, videoId, isShort)
             } catch (e: Exception) {
-                println("[YTSYNC_DEBUG] 🚨 JSON 파싱 중 예외 발생: ${e.message}")
                 logError(e)
             }
-        } else {
-            println("[YTSYNC_DEBUG] 🚨 playerResponseJson이 비어 있어 트래킹을 생략합니다.")
         }
 
-        // com.youtube.YoutubeExtractor 패키지가 컴파일되지 않는 환경일 경우, 
-        // 프로젝트에 구현된 알맞은 Extractor 객체로 교체해 주시기 바랍니다.
         com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback, callback)
 
         return true
     }
 }
-    
