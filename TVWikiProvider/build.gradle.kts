@@ -13,5 +13,5 @@ cloudstream {
         "Anime"
     )
     
-    iconUrl = "https://tvwiki5.net/img/logo.png"
+    iconUrl = "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/TVWikiProvider/logo.png"
 }
