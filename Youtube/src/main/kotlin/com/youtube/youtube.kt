@@ -1302,6 +1302,7 @@ class YoutubeProvider(
     }
 
     // 💡 [컴파일러 빌드 밴 해제]: SearchResponse를 새로 가 복제(copy)하여 name 상수의 컴파일 제한 우회 완료
+    // 💡 [클래스 캐스팅 버그 패치 완료]: data class copy 패턴을 활용해 val name 재할당 우회 빌드 성공
     private fun copySearchResponseWithNewName(item: SearchResponse, newName: String): SearchResponse {
         return when (item) {
             is MovieSearchResponse -> item.copy(name = newName)
@@ -1322,7 +1323,7 @@ class YoutubeProvider(
             return newHomePageResponse(request, emptyList(), hasNext = false)
         }
 
-        val userLang = appPrefs?.getString("youtube_language", "en") ?: "en"
+        val userLang = getLanguageOverride() // 교차 쉐어드 추적 적용
 
         return withContext(Dispatchers.IO) {
             val englishDeferred = async {
@@ -1338,7 +1339,7 @@ class YoutubeProvider(
             val (englishResults, englishToken) = englishDeferred.await()
             val localizedPair = localizedDeferred?.await()
 
-            // 💡 [재할당 빌드 버그 수정 완료]: 데이터 클래스 copy 기능을 호출하여 안전한 우회 병합 적용
+            // 수집 완료된 상수의 안전 병합 진행
             val finalResults = if (localizedPair != null) {
                 val (localizedResults, _) = localizedPair
                 val localizedMap = localizedResults.associateBy { it.url }
@@ -1641,7 +1642,7 @@ class YoutubeProvider(
             return newSearchResponseList(emptyList(), false)
         }
 
-        val userLang = appPrefs?.getString("youtube_language", "en") ?: "en"
+        val userLang = getLanguageOverride() // 교차 쉐어드 추적 적용
 
         return withContext(Dispatchers.IO) {
             val englishDeferred = async {
@@ -1758,6 +1759,7 @@ class YoutubeProvider(
             return newSearchResponseList(emptyList(), false)
         }
     }
+
 
     private val collectedShorts = mutableListOf<Episode>()
 
