@@ -2517,6 +2517,7 @@ class YoutubeProvider(
         var channelName = ""
         var channelId = ""
         var channelAvatar = ""
+        var subscriberCount = ""
 
         val recommendations = mutableListOf<SearchResponse>()
         val seenRecIds = mutableSetOf<String>()
