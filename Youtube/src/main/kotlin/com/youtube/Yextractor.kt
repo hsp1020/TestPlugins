@@ -92,7 +92,7 @@ open class YoutubeExtractor : ExtractorApi() {
         private val CHUNK_ID_REGEX = Regex("id=([^&]+)")
         private val FMT_REPLACE_REGEX = Regex("&fmt=[^&]+")
 
-        // PipePipe Safari 위장 상수
+        // PipePipe의 Safari 위장 상수 100% 동일 적용
         private const val SAFARI_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15,gzip(gfe)"
         private const val SAFARI_CLIENT_VERSION = "2.20260114.08.00"
             
@@ -100,6 +100,7 @@ open class YoutubeExtractor : ExtractorApi() {
             println("[YT_DEBUG_INIT] 유튜브 DASH 추출기 최적화 가상서버 초기화 완료")
         }
 
+        // PipePipe의 generateContentPlaybackNonce() 와 동일
         private fun generateCpn(): String {
             val allowedChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
             return (1..16).map { allowedChars.random() }.joinToString("")
@@ -294,19 +295,22 @@ open class YoutubeExtractor : ExtractorApi() {
         val isLoggedIn = !sapisidVal.isNullOrBlank()
 
         println("[TRACK] =========================================")
-        println("[TRACK] 1. Auth Headers Check (Fixed Plugin Prefs - NO HALLUCINATIONS)")
+        println("[TRACK] 1. Auth Headers Check (Safari Client)")
         println("[TRACK] -> Extracted Cookies length: ${cookies.length}")
         println("[TRACK] -> SAPISID Extracted: $isLoggedIn")
+        println("[TRACK] -> Target Cookies Check: __Secure-1PSID included? ${cookies.contains("__Secure-1PSID")}")
 
         var finalJson: JSONObject? = null
         var lengthSeconds = 3600L
 
+        // PipePipe의 YoutubeStreamExtractor.java 로직: 토큰이 있으면 SAFARI, 없으면 ANDROID_VR
         if (isLoggedIn) {
             println("[TRACK] 2. Sending SAFARI API Request (1:1 PipePipe Headers)...")
             
+            // PipePipe와 완벽히 동일한 Endpoint (API Key 없음, 파라미터만 있음)
             val safariApiUrl = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
             
-            // ✅ 환각(SOCS 조작, Origin/Referer 추가) 제거하고 PipePipe와 완벽히 동일하게 작성
+            // PipePipe의 getSafariPostResponseAsync 내부 헤더와 100% 동일
             val safariHeaders = mutableMapOf(
                 "Content-Type" to "application/json",
                 "User-Agent" to SAFARI_USER_AGENT,
@@ -314,10 +318,11 @@ open class YoutubeExtractor : ExtractorApi() {
                 "X-Youtube-Client-Version" to SAFARI_CLIENT_VERSION,
                 "Cookie" to cookies,
                 "Authorization" to YoutubeUtils.getSapisidHash(sapisidVal!!, "https://www.youtube.com"),
-                "X-Origin" to "https://www.youtube.com", // ⬅️ 이거 빼먹어서 막혔던 것
+                "X-Origin" to "https://www.youtube.com",
                 "DNT" to "1"
             )
 
+            // PipePipe의 createSafariPlayerBody 내부 JSON과 100% 동일
             val safariPayload = mapOf(
                 "context" to mapOf(
                     "client" to mapOf(
@@ -367,11 +372,11 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         }
 
-        // 로그인 안 되어있거나, Safari가 UNPLAYABLE 등으로 막혔을 때 ANDROID_VR로 폴백
+        // 로그인 안 되어있거나, Safari가 UNPLAYABLE (쿠키 누락 등)으로 막혔을 때 ANDROID_VR로 폴백
         if (finalJson == null) {
             println("[TRACK] 3. Sending ANDROID_VR API Request (No Auth fallback)...")
             val androidApiKey = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
-            val vrApiUrl = "https://youtubei.googleapis.com/youtubei/v1/player?prettyPrint=false"
+            val vrApiUrl = "https://youtubei.googleapis.com/youtubei/v1/player?prettyPrint=false&key=$androidApiKey"
 
             val vrHeaders = mapOf(
                 "Content-Type" to "application/json",
