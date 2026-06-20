@@ -736,17 +736,13 @@ class YoutubeProvider(
                             ?: YoutubeUtils.getListKeyFromAny(singleRow, "metadataParts") as? List<*>
                         
                         val firstPart = parts?.getOrNull(0) as? Map<*, *>
-                        if (firstPart != null) {
-                            val rawViews = getText(firstPart.getMapKey("text") ?: firstPart["text"])
-                            if (rawViews.isNotBlank()) {
-                                views = formatViews(rawViews)
-                            }
+                        val rawViews = getText(firstPart?.getMapKey("text") ?: firstPart?.get("text"))
+                        if (rawViews.isNotBlank()) {
+                            views = formatViews(rawViews)
                         }
                         
                         val secondPart = parts?.getOrNull(1) as? Map<*, *>
-                        if (secondPart != null) {
-                            date = getText(secondPart.getMapKey("text") ?: secondPart["text"])
-                        }
+                        date = getText(secondPart?.getMapKey("text") ?: secondPart?.get("text"))
                     }
                 } else {
                     val firstRow = rows.getOrNull(0)
@@ -754,9 +750,7 @@ class YoutubeProvider(
                         val parts = firstRow.getListKey("metadataParts")
                             ?: YoutubeUtils.getListKeyFromAny(firstRow, "metadataParts") as? List<*>
                         val firstPart = parts?.getOrNull(0) as? Map<*, *>
-                        if (firstPart != null) {
-                            channel = getText(firstPart.getMapKey("text") ?: firstPart["text"])
-                        }
+                        channel = getText(firstPart?.getMapKey("text") ?: firstPart?.get("text"))
                     }
 
                     val secondRow = rows.getOrNull(1)
@@ -765,17 +759,13 @@ class YoutubeProvider(
                             ?: YoutubeUtils.getListKeyFromAny(secondRow, "metadataParts") as? List<*>
                         
                         val firstPart = parts?.getOrNull(0) as? Map<*, *>
-                        if (firstPart != null) {
-                            val rawViews = getText(firstPart.getMapKey("text") ?: firstPart["text"])
-                            if (rawViews.isNotBlank()) {
-                                views = formatViews(rawViews)
-                            }
+                        val rawViews = getText(firstPart?.getMapKey("text") ?: firstPart?.get("text"))
+                        if (rawViews.isNotBlank()) {
+                            views = formatViews(rawViews)
                         }
                         
                         val secondPart = parts?.getOrNull(1) as? Map<*, *>
-                        if (secondPart != null) {
-                            date = getText(secondPart.getMapKey("text") ?: secondPart["text"])
-                        }
+                        date = getText(secondPart?.getMapKey("text") ?: secondPart?.get("text"))
                     }
                 }
             }
@@ -792,7 +782,7 @@ class YoutubeProvider(
 
         return Triple(channel, views, date)
     }
-
+    
     private fun collectFromRenderer(
         renderer: Map<*, *>?,
         seenIds: MutableSet<String>,
