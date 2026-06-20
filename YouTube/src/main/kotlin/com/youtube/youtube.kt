@@ -536,47 +536,62 @@ class YoutubeProvider(
             appPrefs?.edit()?.remove("cont_token_$hashedKey")?.apply()
         }
     }
-
-    // 💡 멀티스레드 동기화 제어를 위한 고유 락 객체 선언
-    private val chipLock = Any()
-
+    
+    // ---------------- [CHIP_DEBUG] 칩 카테고리 보존 병합 전용 함수 ----------------
     private fun mergeAndSaveChips(newChips: List<CachedChip>) {
-        synchronized(chipLock) {
-            val prefs = appPrefs ?: return
-            val threadName = Thread.currentThread().name
-            val existingJson = prefs.getString("yt_cached_chips", "[]") ?: "[]"
-            
-            val existingChips = try {
-                mapper.readValue<List<CachedChip>>(existingJson)
-            } catch (e: Exception) {
-                emptyList<CachedChip>()
-            }
-
-            Log.d("YoutubeUtils", "[CHIP_DEBUG] [$threadName] mergeAndSaveChips STARTED - Existing size: ${existingChips.size}, Incoming size: ${newChips.size}")
-
-            val mergedMap = LinkedHashMap<String, CachedChip>()
-            
-            // 기존 캐시 복원
-            existingChips.forEach { chip ->
-                mergedMap[chip.name] = chip
-            }
-            
-            // 신규 캐시 병합
-            newChips.forEach { chip ->
-                mergedMap[chip.name] = chip
-            }
-
-            val mergedList = mergedMap.values.toList()
-            try {
-                val updatedJson = mapper.writeValueAsString(mergedList)
-                prefs.edit().putString("yt_cached_chips", updatedJson).apply()
-                Log.d("YoutubeUtils", "[CHIP_DEBUG] [$threadName] mergeAndSaveChips SUCCESS - Saved list size: ${mergedList.size}, items: ${mergedList.map { it.name }}")
-            } catch (e: Exception) {
-                logError(e)
-            }
+        val prefs = appPrefs ?: return
+        val existingJson = prefs.getString("yt_cached_chips", "[]") ?: "[]"
+        
+        val existingChips = try {
+            mapper.readValue<List<CachedChip>>(existingJson)
+        } catch (e: Exception) {
+            emptyList<CachedChip>()
         }
-    }
 
+        val mergedMap = LinkedHashMap<String, CachedChip>()
+        existingChips.forEach { chip ->
+            mergedMap[chip.name] = chip
+        }
+        newChips.forEach { chip ->
+            mergedMap[chip.name] = chip
+        }
+
+        val mergedList = mergedMap.values.toList()
+        try {
+            val updatedJson = mapper.writeValueAsString(mergedList)
+            prefs.edit().putString("yt_cached_chips", updatedJson).apply()
+            Log.d("YoutubeUtils", "[CHIP_DEBUG] mergeAndSaveChips - Cached chips synchronized successfully. Size: ${mergedList.size}")
+        } catch (e: Exception) {
+            logError(e)
+        }
+
+        // 💡 [실시간 동기화 추가] 설정 프래그먼트가 참조하는 custom_homepages_v3 캐시에도 수집된 즉시 추가합니다.
+        try {
+            val customJson = prefs.getString("custom_homepages_v3", "[]") ?: "[]"
+            val currentList = try {
+                mapper.readValue<List<CustomSection>>(customJson).toMutableList()
+            } catch (e: Exception) {
+                mutableListOf()
+            }
+
+            var modified = false
+            newChips.forEach { chip ->
+                val stableUrl = "chip_name_${chip.name}"
+                if (currentList.none { section -> section.url == stableUrl }) {
+                    currentList.add(CustomSection(name = chip.name, url = stableUrl, isEnabled = true))
+                    modified = true
+                    Log.d("YoutubeUtils", "[CHIP_DEBUG] mergeAndSaveChips - Instantly mirrored missing chip to custom_homepages_v3: ${chip.name}")
+                }
+            }
+
+            if (modified) {
+                val updatedCustomJson = mapper.writeValueAsString(currentList)
+                prefs.edit().putString("custom_homepages_v3", updatedCustomJson).apply()
+            }
+        } catch (e: Exception) {
+            logError(e)
+        }
+    }        
     // -----------------------------------------------------------------------------
 
     private fun getEpisodeMetaString(videoData: Map<*, *>?): String {
@@ -1280,51 +1295,48 @@ class YoutubeProvider(
         }
 
     private fun getCustomHomepages(): List<CustomSection> {
-        synchronized(chipLock) {
-            val json = appPrefs?.getString("custom_homepages_v3", "[]") ?: "[]"
-            val threadName = Thread.currentThread().name
-            Log.d("YoutubeUtils", "[CHIP_DEBUG] [$threadName] getCustomHomepages - Raw custom_homepages_v3 loaded: $json")
+        val json = appPrefs?.getString("custom_homepages_v3", "[]") ?: "[]"
+        Log.d("YoutubeUtils", "[CHIP_DEBUG] getCustomHomepages - Raw custom_homepages_v3 JSON: $json")
+        
+        val currentList = try {
+            mapper.readValue<List<CustomSection>>(json).toMutableList()
+        } catch (e: Exception) {
+            mutableListOf()
+        }
+
+        var modified = false
+
+        if (currentList.none { section -> section.url == "Home" }) {
+            currentList.add(0, CustomSection(name = "Home", url = "Home", isEnabled = true))
+            modified = true
+        }
+
+        val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
+        try {
+            val cachedChips = mapper.readValue<List<CachedChip>>(cachedChipsJson)
             
-            val currentList = try {
-                mapper.readValue<List<CustomSection>>(json).toMutableList()
-            } catch (e: Exception) {
-                mutableListOf()
-            }
-
-            var modified = false
-
-            if (currentList.none { section -> section.url == "Home" }) {
-                currentList.add(0, CustomSection(name = "Home", url = "Home", isEnabled = true))
-                modified = true
-            }
-
-            val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
-            try {
-                val cachedChips = mapper.readValue<List<CachedChip>>(cachedChipsJson)
-                cachedChips.forEach { chip ->
-                    val stableUrl = "chip_name_${chip.name}"
-                    if (currentList.none { section -> section.url == stableUrl }) {
-                        currentList.add(CustomSection(name = chip.name, url = stableUrl, isEnabled = true))
-                        modified = true
-                        Log.d("YoutubeUtils", "[CHIP_DEBUG] [$threadName] getCustomHomepages - Appending newly discovered category to custom_homepages_v3: ${chip.name}")
-                    }
+            cachedChips.forEach { chip ->
+                val stableUrl = "chip_name_${chip.name}"
+                if (currentList.none { section -> section.url == stableUrl }) {
+                    currentList.add(CustomSection(name = chip.name, url = stableUrl, isEnabled = true))
+                    modified = true
+                    Log.d("YoutubeUtils", "[CHIP_DEBUG] getCustomHomepages - Added missing chip category to custom list: ${chip.name}")
                 }
+            }
+        } catch (e: Exception) {
+            logError(e)
+        }
+
+        if (modified) {
+            try {
+                val updatedJson = mapper.writeValueAsString(currentList)
+                appPrefs?.edit()?.putString("custom_homepages_v3", updatedJson)?.apply()
             } catch (e: Exception) {
                 logError(e)
             }
-
-            if (modified) {
-                try {
-                    val updatedJson = mapper.writeValueAsString(currentList)
-                    appPrefs?.edit()?.putString("custom_homepages_v3", updatedJson)?.apply()
-                    Log.d("YoutubeUtils", "[CHIP_DEBUG] [$threadName] getCustomHomepages - custom_homepages_v3 updated and saved successfully.")
-                } catch (e: Exception) {
-                    logError(e)
-                }
-            }
-            
-            return currentList
         }
+        
+        return currentList
     }
 
     private fun extractNameFromUrl(url: String): String {
