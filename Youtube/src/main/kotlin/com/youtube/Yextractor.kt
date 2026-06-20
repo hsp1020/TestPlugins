@@ -81,6 +81,7 @@ open class YoutubeExtractor : ExtractorApi() {
             ThreadPoolExecutor.CallerRunsPolicy()
         )
 
+        // ✅ Cloudstream 엔진을 우회하고 PipePipe와 동일하게 통신할 순수 OkHttp 클라이언트
         private val proxyHttpClient = okhttp3.OkHttpClient.Builder()
             .followRedirects(true)
             .followSslRedirects(true)
@@ -90,9 +91,11 @@ open class YoutubeExtractor : ExtractorApi() {
             .build()
 
         private val VISITOR_DATA_REGEX = Regex(""""VISITOR_DATA":"([^"]+)"""")
+        private val STS_REGEX = Regex(""""signatureTimestamp":\s*(\d+)"""")
         private val CHUNK_ID_REGEX = Regex("id=([^&]+)")
         private val FMT_REPLACE_REGEX = Regex("&fmt=[^&]+")
 
+        // PipePipe Safari 위장 상수
         private const val SAFARI_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15,gzip(gfe)"
         private const val SAFARI_CLIENT_VERSION = "2.20260114.08.00"
             
@@ -389,6 +392,7 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         }
 
+        // 로그인 안 되어있거나 Safari가 막혔을 때 ANDROID_VR로 폴백
         if (finalJson == null) {
             println("[TRACK] 3. Sending ANDROID_VR API Request (No Auth fallback)...")
             val androidApiKey = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
@@ -484,7 +488,11 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
 
                 val hlsUrl = streamingData.optString("hlsManifestUrl")
-                if (!hlsUrl.isNullOrBlank()) {
+                // ✅ 수정된 부분: 진짜 라이브 방송일 때만 Live 처리하고, 일반 영상(VOD)이면 무시하고 DASH(다국어) 파싱으로 넘김
+                val isLive = playerResponse.optJSONObject("videoDetails")?.optBoolean("isLiveContent", false) ?: false
+
+                if (isLive && !hlsUrl.isNullOrBlank()) {
+                    println("[TRACK] -> Live stream detected, returning HLS link.")
                     callback(
                         newExtractorLink(
                             this@YoutubeExtractor.name,
@@ -497,6 +505,8 @@ open class YoutubeExtractor : ExtractorApi() {
                         }
                     )
                     return@withContext
+                } else if (!hlsUrl.isNullOrBlank()) {
+                    println("[TRACK] -> VOD has HLS Manifest, skipping early return to process adaptiveFormats.")
                 }
 
                 val adaptiveFormats = streamingData.optJSONArray("adaptiveFormats") ?: JSONArray()
