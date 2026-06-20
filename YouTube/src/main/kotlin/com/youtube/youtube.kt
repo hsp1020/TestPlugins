@@ -532,16 +532,16 @@ class YoutubeProvider(
         }
     }
 
-    private fun clearContinuationTokensForRequest(key: String) {
-        // 새로고침 시 이전에 캐싱되었던 2페이지 이후의 불필요한 고정 토큰들을 일괄 삭제합니다.
-        for (p in 2..100) {
-            val pageKey = "${key}_page_$p"
+    private fun clearContinuationTokens(key: String) {
+        // 새로고침 시 1페이지부터 100페이지까지의 기존 페이지네이션 토큰 캐시를 비워 꼬임을 차단합니다.
+        for (p in 0..100) {
+            val pageKey = if (p > 0) "${key}_page_$p" else key
             val hashedKey = YoutubeUtils.sha1(pageKey)
             continuationTokenCache.remove(hashedKey)
             appPrefs?.edit()?.remove("cont_token_$hashedKey")?.apply()
         }
     }
-
+    
     private fun getEpisodeMetaString(videoData: Map<*, *>?): String {
         if (videoData == null) return ""
         
@@ -567,6 +567,7 @@ class YoutubeProvider(
             .ifBlank { getText(videoData.getMapKey("shortBylineText")) }
             .ifBlank { getText(videoData.getMapKey("ownerText")) }
 
+        // 💡 [중복 제거 완료]: Conflicting declarations 빌드 예외를 유발하던 기존의 이중 선언문을 단일 선언문으로 완벽 정리
         var views = ""
         var date = ""
 
@@ -676,6 +677,7 @@ class YoutubeProvider(
         return ""
     }
 
+    // 💡 [순정 직결]: 메타데이터 파트의 순정 텍스트("12만회" 등)를 직접 대입
     private fun extractLockupMetadata(lockup: Map<*, *>) : Triple<String, String, String> {
         var channel = ""
         var views = ""
@@ -783,6 +785,7 @@ class YoutubeProvider(
                     .ifBlank { getText(videoData.getMapKey("shortBylineText")) }
                     .ifBlank { getText(videoData.getMapKey("longBylineText")) }
 
+                // 💡 [컴파일러 쉴드]: views를 가변 변수가 아닌 불변 'val' 상수로 선언하여 재할당 에러를 차단합니다.
                 val views = viewText.ifBlank { "N/A" }
                 
                 val finalTitle = when {
@@ -1237,7 +1240,7 @@ class YoutubeProvider(
             return list
         }
 
-    private fun getCustomHomepages(): List<CustomSection> {
+private fun getCustomHomepages(): List<CustomSection> {
         val json = appPrefs?.getString("custom_homepages_v3", "[]") ?: "[]"
         val currentList = try {
             mapper.readValue<List<CustomSection>>(json).toMutableList()
@@ -1255,9 +1258,24 @@ class YoutubeProvider(
         val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
         try {
             val cachedChips = mapper.readValue<List<CachedChip>>(cachedChipsJson)
+            
+            // [해결책 1] 캐시에 현재 들어있지 않더라도 기존에 설정되어 정렬된 칩 카테고리를 custom_homepages_v3 설정에서 제거하지 않습니다.
+            // 이를 통해 사용자가 설정한 순서와 숨김 여부가 새로고침 시 초기화되던 현상을 해결합니다.
+            /* 
+            val cachedNames = cachedChips.map { it.name }.toSet()
+            val iterator = currentList.iterator()
+            while (iterator.hasNext()) {
+                val sec = iterator.next()
+                if (sec.url.startsWith("chip_name_")) {
+                    val name = sec.url.removePrefix("chip_name_")
+                    if (!cachedNames.contains(name)) {
+                        iterator.remove()
+                        modified = true
+                    }
+                }
+            }
+            */
 
-            // 💡 [수정 완료]: cachedNames 비교를 통해 기존 칩 설정을 강제 Pruning(삭제)하는 로직을 완전 제거합니다.
-            // 이를 통해 YouTube 서버에서 특정 칩이 일시적 누락되더라도 사용자가 커스텀해 둔 정렬 순서 및 비활성 상태가 소실되지 않습니다.
             cachedChips.forEach { chip ->
                 val stableUrl = "chip_name_${chip.name}"
                 if (currentList.none { section -> section.url == stableUrl }) {
@@ -1295,6 +1313,7 @@ class YoutubeProvider(
         savedContinuationToken = null
     }
 
+    // 💡 [단일 전형화]: 중복적인 영문 이중 병렬 호출(en)을 전면 제거하고 오직 설정한 로컬 언어로 단 1회만 고속 동수 수집
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         isSearchContext = false
         val rawRequestData = request.data
@@ -1312,14 +1331,13 @@ class YoutubeProvider(
 
         try {
             if (page == 1) {
-                // 💡 [수정 완료]: 1페이지 로드(새로고침) 시 이전 세션에 캐싱된 다음 페이지용 잔여 고정 토큰들을 완전 정화합니다.
-                clearContinuationTokensForRequest(requestData)
+                // [해결책 2] 새로고침 시 이전에 캐싱된 하위 페이지들의 토큰을 전부 비워 갱신이 꼬이는 문제를 차단합니다.
+                clearContinuationTokens(requestData)
 
                 if (isChip) {
-                    // 💡 [수정 완료]: 칩 카테고리의 실시간 새로고침 반영을 위해 메인 홈페이지 HTML을 캐시를 우회(`cacheTime = 0`)하여 실시간 갱신합니다.
-                    // 이를 통해 YouTube 홈에서 내려준 가장 따끈따끈한 최신 continuation 칩 토큰을 dynamic 획득하여 POST 요청을 전개합니다.
+                    // [해결책 2] 칩 카테고리 새로고침 시, 먼저 메인 홈을 무캐시로 접근하여 실시간으로 갱신된 칩 토큰을 미리 긁어옵니다.
                     try {
-                        val html = app.get(mainUrl, interceptor = ytInterceptor, cacheTime = 0).text
+                        val html = app.get(mainUrl, interceptor = ytInterceptor, headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")).text
                         savedApiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY") ?: savedApiKey
                         savedVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA") ?: savedVisitorData
                         savedClientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: savedClientVersion ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
@@ -1357,13 +1375,31 @@ class YoutubeProvider(
                             }
                         }
                     } catch (e: Exception) {
-                        Log.e("YoutubeUtils", "[CHIP] Failed to force refresh mainUrl for fresh tokens", e)
+                        Log.e("YoutubeUtils", "[CHIP] Failed to refresh chip tokens from mainUrl", e)
                     }
 
-                    // 최신화된 설정 값 재로드
                     savedApiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
                     savedVisitorData = savedVisitorData ?: appPrefs?.getString("yt_visitor_data", null)
                     savedClientVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION)
+
+                    if (savedApiKey.isNullOrBlank()) {
+                        try {
+                            val html = app.get(mainUrl, interceptor = ytInterceptor, headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")).text
+                            savedApiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY") ?: savedApiKey
+                            savedVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA") ?: savedVisitorData
+                            savedClientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: savedClientVersion ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
+                            
+                            if (!savedApiKey.isNullOrBlank()) {
+                                appPrefs?.edit()
+                                    ?.putString("yt_api_key", savedApiKey)
+                                    ?.putString("yt_visitor_data", savedVisitorData)
+                                    ?.putString("yt_client_version", savedClientVersion)
+                                    ?.apply()
+                            }
+                        } catch (e: Exception) {
+                            Log.e("YoutubeUtils", "[CHIP] Failed to fetch mainUrl for configs", e)
+                        }
+                    }
 
                     val chipCategoryName = requestData.removePrefix("chip_name_")
                     val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
@@ -1389,7 +1425,13 @@ class YoutubeProvider(
                             "continuation" to tokenToUse
                         )
                         
-                        val reqHeaders = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
+                        // [해결책 2] 헤더에 Cache-Control을 주입하여 캐시 데이터가 아닌 신선한 응답을 강제합니다.
+                        val reqHeaders = mapOf(
+                            "Origin" to mainUrl, 
+                            "Referer" to mainUrl,
+                            "Cache-Control" to "no-cache",
+                            "Pragma" to "no-cache"
+                        )
                         val response = app.post(apiUrl, json = payload, headers = reqHeaders, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                         
                         if (response != null) {
@@ -1402,9 +1444,9 @@ class YoutubeProvider(
                         }
                     }
                 } else {
+                    // [해결책 2] 일반 홈 및 채널 데이터를 무캐시 헤더와 함께 호출합니다.
                     val targetUrl = if(requestData == "Home") mainUrl else requestData
-                    // 💡 [수정 완료]: 일반 홈 로딩 시에도 OkHttp의 HTTP 캐시를 즉시 무력화(`cacheTime = 0`)하여 최신 피드를 바로 뿌려주게 만듭니다.
-                    val html = app.get(targetUrl, interceptor = ytInterceptor, cacheTime = 0).text
+                    val html = app.get(targetUrl, interceptor = ytInterceptor, headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")).text
                     
                     savedApiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY") ?: savedApiKey
                     savedVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA") ?: savedVisitorData
@@ -1453,6 +1495,7 @@ class YoutubeProvider(
                     }
                 }
             } else {
+                // page > 1 (기존 코드 유지)
                 var tokenToUse = getSavedContinuationToken(requestData, page)
 
                 if (isChip && tokenToUse.isNullOrBlank() && page >= 2) {
@@ -1605,6 +1648,7 @@ class YoutubeProvider(
         return search(query, 1)?.items ?: emptyList()
     }
 
+    // 💡 [단일 전형화]: 영문 병렬 수집 로직(en)을 완전히 폐기하고 오직 설정한 로컬 언어로 단 1회만 고속 동수 수집
     override suspend fun search(query: String, page: Int): SearchResponseList? {
         val maxPages = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
         if (page > maxPages) {
@@ -1615,12 +1659,11 @@ class YoutubeProvider(
         isSearchContext = true
         if (page == 1) {
             searchShorts.clear()
-            // 💡 [수정 완료]: 검색 1페이지 새로고침 시에도 이전 캐시 Continuation을 완전 정화합니다.
-            clearContinuationTokensForRequest("search_token_$lang")
         }
 
         val seenIds = mutableSetOf<String>()
         
+        // 💡 [컴파일러 쉴드]: 기존의 'val actualQuery' 상수를 'var actualQuery' 변수로 교정하여 플레이리스트 분기 시 재할당 에러 소거
         var actualQuery = query
         var playlistMode = false
         var spParam = ""
@@ -1634,11 +1677,11 @@ class YoutubeProvider(
         
         try {
             if (page == 1) {
+                // 토큰 캐시 targetLang별 완벽 격리 설계 유지
                 saveContinuationToken("search_token_$lang", null)
                 val encoded = URLEncoder.encode(actualQuery, "utf-8")
                 val url = "$mainUrl/results?search_query=$encoded$spParam"
-                // 💡 [수정 완료]: 검색 결과 실시간 갱신을 위해 캐시를 무효화(`cacheTime = 0`)하여 요청을 송신합니다.
-                val html = app.get(url, interceptor = ytInterceptor, cacheTime = 0).text
+                val html = app.get(url, interceptor = ytInterceptor).text
 
                 val localApiKey = API_KEY_EXTRACT_REGEX.find(html)?.groupValues?.get(1)
                 val localVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA")
@@ -2478,6 +2521,7 @@ class YoutubeProvider(
                     getText(primary.getMapKey("viewCount"))
                 }
                 
+                // 💡 [순정 직결]: extraShortViewCount 또는 순정 뷰카운트 값을 그대로 직접 매핑
                 if (vCount.isNotBlank()) ep1Views = vCount
                 val dText = getText(primary.getMapKey("dateText"))
                 if (dText.isNotBlank()) ep1Date = dText
