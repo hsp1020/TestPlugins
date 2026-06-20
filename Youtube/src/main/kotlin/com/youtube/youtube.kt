@@ -25,8 +25,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 
-
-
 object YoutubeUtils {
     const val CHROME_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
     const val SAFARI_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
@@ -39,7 +37,6 @@ object YoutubeUtils {
     }
 
     val YT_ID_REGEX = Regex("""(?:v=|\/videos\/|embed\/|youtu\.be\/|shorts\/)([A-Za-z0-9_-]{11})""")
-    val MIX_TITLE_REPLACE_KO = Regex("""\s*\(믹스\s*재생목록\)""", RegexOption.IGNORE_CASE)
     val MIX_TITLE_REPLACE_EN = Regex("""\s*\(Mix\s*Playlist\)""", RegexOption.IGNORE_CASE)
 
     private val regexCache = ConcurrentHashMap<String, Regex>()
@@ -91,7 +88,6 @@ object YoutubeUtils {
         return Pair(cookieBuilder.toString(), sapisidVal)
     }
 
-    // 일반영상 검색 결과 및 계속 시청 전용 하단 크롭 정렬 추가 프록시 필터 (a=bottom)
     fun getProxiedPoster(poster: String?): String? {
         if (poster.isNullOrBlank()) return null
         return try {
@@ -101,7 +97,6 @@ object YoutubeUtils {
         }
     }
 
-    // 검색 결과 화면 전용 하단 크롭 정렬 추가 프록시 필터 (a=bottom)
     fun getProxiedPosterBottom(poster: String?): String? {
         if (poster.isNullOrBlank()) return null
         return try {
@@ -111,7 +106,6 @@ object YoutubeUtils {
         }
     }
 
-    // 홈 화면 및 추천목록 전용 일반 가로형 프록시 필터 (a=bottom 없음)
     fun getProxiedPosterNormal(poster: String?): String? {
         if (poster.isNullOrBlank()) return null
         return try {
@@ -121,7 +115,6 @@ object YoutubeUtils {
         }
     }
 
-    // 검색 결과창 노출용 세로 규격 쇼츠 전용 커스텀 썸네일 변환기 (600x900)
     fun getShortsSearchPoster(videoId: String): String {
         return try {
             val targetUrl = "https://i.ytimg.com/vi/$videoId/oardefault.jpg?sqp=-oaymwEoCJUDENAFSFqQAgHyq4qpAxcIARUAAIhC2AEB4gEKCBgQAhgGOAFAAQ==&rs=AOn4CLDWlHo9hImueeIb7JfDzDGNRuQ5tg&usqp=CCk"
@@ -132,7 +125,6 @@ object YoutubeUtils {
         }
     }
 
-    // 에피소드 플레이리스트 노출용 가로 규격 쇼츠 전용 커스텀 썸네일 변환기 (1280x720, 우측 정렬 크롭)
     fun getShortsEpisodeThumbnail(videoId: String): String {
         return try {
             val targetUrl = "https://i.ytimg.com/vi/$videoId/oardefault.jpg?sqp=-oaymwEoCJUDENAFSFqQAgHyq4qpAxcIARUAAIhC2AEB4gEKCBgQAhgGOAFAAQ==&rs=AOn4CLDWlHo9hImueeIb7JfDzDGNRuQ5tg&usqp=CCk"
@@ -187,8 +179,8 @@ object YoutubeUtils {
     }
 
     fun cleanMixTitle(title: String): String {
-        if (!title.contains("mix", ignoreCase = true) && !title.contains("믹스")) return title
-        return MIX_TITLE_REPLACE_EN.replace(MIX_TITLE_REPLACE_KO.replace(title, ""), "").trim()
+        if (!title.contains("mix", ignoreCase = true)) return title
+        return MIX_TITLE_REPLACE_EN.replace(title, "").trim()
     }
 
     fun urlDecode(input: String): String {
@@ -296,18 +288,17 @@ class YoutubeProvider(
     override var name = "YouTube"
     override val hasMainPage = true
     
+    // 앱 설정과 관계없이 무조건 표준 영문 응답만 취득하도록 고정
     override var lang: String
-        get() = appPrefs?.getString("youtube_language", "en") ?: "en"
+        get() = "en"
         set(value) {}
         
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Live)
 
     companion object {
-        // 비동기 CME를 방지하기 위해 마련된 전역 보존 동적 리스트
         private val homeShorts = Collections.synchronizedList(mutableListOf<Episode>())
         private val searchShorts = Collections.synchronizedList(mutableListOf<Episode>())
 
-        // 메모리 파열 방지용 LRU 캐시 세그먼트
         private val continuationTokenCache: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(128, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
@@ -324,7 +315,6 @@ class YoutubeProvider(
             }
         )
 
-        // API Key 및 인증 파라미터 메모리 가시성(Memory Visibility) 보장을 위한 Volatile 동반 변수들
         @Volatile
         private var savedVisitorData: String? = null
         @Volatile
@@ -332,17 +322,17 @@ class YoutubeProvider(
         @Volatile
         private var savedClientVersion: String? = null
 
-        private val VIEW_REPLACE_REGEX = Regex("조회수|views|مشاهدة|시청 중|시청중|watching|명|시청자")
-        private val VIEW_FORMAT_REGEX = Regex(".*[천만억KMBkmb].*")
-        private val METADATA_VIEW_REGEX = Regex(".*(\\d+[KMBkmb]|views|조회수|회|시청|watching|مشاهدة|명|시청자|مشاهد).*")
-        private val METADATA_SKIP_REGEX = Regex(".*(\\d+:\\d+|ago|قبل|전|시간|분|일|주|개월|년|시청|watching).*")
-        private val SUBSCRIBER_REGEX = Regex(".*(구독자|subscribers|명|K|M|B|sub).*\\s*", RegexOption.IGNORE_CASE)
-        private val SUBSCRIBER_REPLACE_REGEX = Regex("(구독자|subscribers?)\\s*", RegexOption.IGNORE_CASE)
+        private val VIEW_REPLACE_REGEX = Regex("views|watching", RegexOption.IGNORE_CASE)
+        private val VIEW_FORMAT_REGEX = Regex(".*[KMBkmb].*", RegexOption.IGNORE_CASE)
+        private val METADATA_VIEW_REGEX = Regex(".*(\\d+(?:\\.\\d+)?[KMBkmb]|views|watching).*", RegexOption.IGNORE_CASE)
+        private val METADATA_SKIP_REGEX = Regex(".*(\\d+:\\d+|ago|watching).*")
+        private val SUBSCRIBER_REGEX = Regex(".*(subscribers|K|M|B|sub).*\\s*", RegexOption.IGNORE_CASE)
+        private val SUBSCRIBER_REPLACE_REGEX = Regex("(subscribers?)\\s*", RegexOption.IGNORE_CASE)
         private val API_KEY_EXTRACT_REGEX = Regex(""""INNERTUBE_API_KEY":"([^"]+)"""")
         
         private val DURATION_REGEX = Regex("""(\d{1,2}:)?\d{1,2}:\d{2}""")
-        private val VIEWS_REGEX = Regex("""(\d+[KMBkmb천만억]?\s*회?)""")
-        private val BY_CHANNEL_REGEX = Regex("(?:by|من|ع버|قناة)\\s+(.*?)\\s+(?:\\d|view|مشاهدة)")
+        private val VIEWS_REGEX = Regex("""(\d+(?:\.\d+)?[KMBkmb]?\s*)""")
+        private val BY_CHANNEL_REGEX = Regex("(?:by)\\s+(.*?)\\s+(?:\\d|view)", RegexOption.IGNORE_CASE)
         private val LENGTH_SECONDS_REGEX = Regex(""""lengthSeconds"\s*:\s*"?(\d+)"""")
         private val VIEW_COUNT_REGEX = Regex(""""viewCount"\s*:\s*"?(\d+)"""")
         private val PUBLISH_DATE_REGEX = Regex(""""publishDate"\s*:\s*"?([^"]+)"""")
@@ -475,10 +465,8 @@ class YoutubeProvider(
 
         try {
             var playbackUrl = buildTrackingUrl(playbackBaseUrl, cpn, cmt = "0.000", state = null, realTime = "0")
-            // 유튜브 백엔드에 확실히 시청으로 인정받기 위해 Watchtime cmt를 10초(10.000) 단위로 설정
             var watchtimeUrl = buildTrackingUrl(watchtimeBaseUrl, cpn, cmt = "10.000", state = "playing", realTime = "10")
 
-            // BaseURL이 만약 모바일 클라이언트에서 생성되었다면 WEB으로 안전하게 덮어쓰기
             playbackUrl = playbackUrl.replace(Regex("([&?])c=[^&]+"), "$1c=WEB")
                 .replace(Regex("([&?])cver=[^&]+"), "$1cver=2.20240101.00")
             watchtimeUrl = watchtimeUrl.replace(Regex("([&?])c=[^&]+"), "$1c=WEB")
@@ -495,14 +483,12 @@ class YoutubeProvider(
             println("[YTSYNC_DEBUG] 최종 Playback 전송 URL: $playbackUrl")
             println("[YTSYNC_DEBUG] 최종 Watchtime 전송 URL: $watchtimeUrl")
 
-            // UI 및 영상 재생 지연 방지를 위해 백그라운드 코루틴 발사
             kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
                 try {
                     println("[YTSYNC_DEBUG] [1/2] Playback 핑 전송 시도 중...")
                     val pRes = app.get(playbackUrl, interceptor = ytInterceptor)
                     println("[YTSYNC_DEBUG] [1/2] Playback 핑 응답 코드: ${pRes.code} (204가 정상)")
                     
-                    // 첫 핑 전송 후 백엔드 DB 안착을 위해 2.5초 대기
                     kotlinx.coroutines.delay(2500L)
                     
                     println("[YTSYNC_DEBUG] [2/2] Watchtime 핑 전송 시도 중...")
@@ -520,13 +506,10 @@ class YoutubeProvider(
         }
     }
 
-
-    // 기존 검색(search) 및 1인자 호출 호환용 오버로딩
     private fun getSavedContinuationToken(key: String): String? {
         return getSavedContinuationToken(key, 0)
     }
 
-    // 칩 페이지네이션을 위한 페이지 번호(page) 지정 버전
     private fun getSavedContinuationToken(key: String, page: Int): String? {
         val pageKey = if (page > 0) "${key}_page_$page" else key
         val hashedKey = YoutubeUtils.sha1(pageKey)
@@ -549,12 +532,10 @@ class YoutubeProvider(
         return token
     }
 
-    // 기존 검색(search) 및 2인자 호출 호환용 오버로딩 (Null 수용 가능)
     private fun saveContinuationToken(key: String, token: String?) {
         saveContinuationToken(key, 0, token)
     }
 
-    // 칩 페이지네이션을 위한 페이지 번호(page) 지정 버전
     private fun saveContinuationToken(key: String, page: Int, token: String?) {
         val pageKey = if (page > 0) "${key}_page_$page" else key
         val hashedKey = YoutubeUtils.sha1(pageKey)
@@ -576,10 +557,30 @@ class YoutubeProvider(
         }
     }
 
-    
-    
+    private fun formatViews(viewText: String?): String {
+        if (viewText.isNullOrBlank()) return "N/A"
+        var text = viewText.trim()
+        val isLive = text.contains("watching", ignoreCase = true)
+        text = text.replace(Regex("views", RegexOption.IGNORE_CASE), "").trim()
 
-
+        val rawDigits = text.replace(",", "").trim()
+        val v = rawDigits.toLongOrNull()
+        if (v != null) {
+            val suffix = if (isLive) " watching" else ""
+            return when {
+                v < 1000 -> "$v$suffix"
+                v < 1_000_000 -> String.format(java.util.Locale.US, "%.1fK$suffix", v / 1000.0).replace(".0K", "K")
+                v < 1_000_000_000 -> String.format(java.util.Locale.US, "%.1fM$suffix", v / 1_000_000.0).replace(".0M", "M")
+                else -> String.format(java.util.Locale.US, "%.1fB$suffix", v / 1_000_000_000.0).replace(".0B", "B")
+            }
+        }
+        
+        return if (isLive && !text.contains("watching", ignoreCase = true)) {
+            "$text watching"
+        } else {
+            text
+        }
+    }
 
     private fun getEpisodeMetaString(videoData: Map<*, *>?): String {
         if (videoData == null) return ""
@@ -603,8 +604,8 @@ class YoutubeProvider(
         }
 
         var channel = getText(videoData.getMapKey("longBylineText"))
-        if (channel.isBlank()) channel = getText(videoData.getMapKey("shortBylineText"))
-        if (channel.isBlank()) channel = getText(videoData.getMapKey("ownerText"))
+            .ifBlank { getText(videoData.getMapKey("shortBylineText")) }
+            .ifBlank { getText(videoData.getMapKey("ownerText")) }
 
         var views = ""
         var date = ""
@@ -630,16 +631,20 @@ class YoutubeProvider(
 
         if (views.isBlank() || date.isBlank()) {
             val rows = videoData.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")?.getMapKey("metadata")?.getMapKey("contentMetadataViewModel")?.getListKey("metadataRows")
-            rows?.forEach { row ->
+            rows?.forEachIndexed { index, row ->
                 val parts = row.getListKey("metadataParts") ?: YoutubeUtils.getListKeyFromAny(row, "metadataParts") as? List<*>
-                parts?.forEach { part ->
+                parts?.forEachIndexed { pIndex, part ->
                     if (part is Map<*, *>) {
                         val t = getText(part.getMapKey("text"))
                         if (t.isNotBlank() && t != duration && t != channel) {
-                            if (METADATA_VIEW_REGEX.matches(t)) {
-                                views = formatViews(t)
-                            } else if (date.isBlank()) {
-                                date = t
+                            if (index == 0) {
+                                channel = t
+                            } else if (index == 1) {
+                                if (pIndex == 0) {
+                                    views = formatViews(t)
+                                } else {
+                                    date = t
+                                }
                             }
                         }
                     }
@@ -711,28 +716,6 @@ class YoutubeProvider(
         return ""
     }
 
-    private fun extractPartsFromMetadataRows(rows: List<*>?): List<String> {
-        if (rows == null) return emptyList()
-        val collected = java.util.ArrayList<String>()
-        rows.forEach { row ->
-            val rowMap = row as? Map<*, *> ?: return@forEach
-            val parts = rowMap.getListKey("metadataParts")
-                ?: (rowMap.entries.firstOrNull { (it.key as? String) == "metadataParts" }?.value as? List<*>)
-            parts?.forEach { part ->
-                val partMap = part as? Map<*, *> ?: return@forEach
-                val text = getText(partMap.getMapKey("text") ?: partMap["text"])
-                if (text.isNotBlank()) {
-                    if (METADATA_VIEW_REGEX.matches(text)) {
-                        collected.add(formatViews(text))
-                    } else {
-                        collected.add(text)
-                    }
-                }
-            }
-        }
-        return collected
-    }
-
     private fun extractLockupMetadata(lockup: Map<*, *>) : Pair<String, String> {
         var channel = ""
         var views = ""
@@ -744,14 +727,28 @@ class YoutubeProvider(
                 ?.getMapKey("contentMetadataViewModel")
                 ?.getListKey("metadataRows")
 
-            val rawParts = extractPartsFromMetadataRows(rows)
-            rawParts.forEach { text ->
-                if (text.contains("회") || text.contains("시청") || text.contains("조회") || 
-                    text.contains("views") || text.contains("watching") || 
-                    text.contains("명") || text.contains("시청자") || text.contains("مشاهد")) {
-                    views = text
-                } else if (!METADATA_SKIP_REGEX.matches(text) && text.length > 1 && !text.contains("•")) {
-                    channel = text
+            if (rows != null && rows.isNotEmpty()) {
+                val firstRow = rows.getOrNull(0)
+                if (firstRow != null) {
+                    val parts = firstRow.getListKey("metadataParts")
+                        ?: YoutubeUtils.getListKeyFromAny(firstRow, "metadataParts") as? List<*>
+                    val firstPart = parts?.getOrNull(0) as? Map<*, *>
+                    if (firstPart != null) {
+                        channel = getText(firstPart.getMapKey("text") ?: firstPart["text"])
+                    }
+                }
+
+                val secondRow = rows.getOrNull(1)
+                if (secondRow != null) {
+                    val parts = secondRow.getListKey("metadataParts")
+                        ?: YoutubeUtils.getListKeyFromAny(secondRow, "metadataParts") as? List<*>
+                    val firstPart = parts?.getOrNull(0) as? Map<*, *>
+                    if (firstPart != null) {
+                        val rawViews = getText(firstPart.getMapKey("text") ?: firstPart["text"])
+                        if (rawViews.isNotBlank()) {
+                            views = formatViews(rawViews)
+                        }
+                    }
                 }
             }
         } catch (_: Exception) {
@@ -766,58 +763,6 @@ class YoutubeProvider(
         }
 
         return Pair(channel, views)
-    }
-
-    private fun formatViews(viewText: String?): String {
-        if (viewText.isNullOrBlank()) return "N/A"
-        var text = viewText.trim()
-        
-        val isLive = text.contains("명") || text.contains("시청자") || text.contains("watching") || text.contains("시청 중")
-
-        text = VIEW_REPLACE_REGEX.replace(text, "").trim()
-
-        if (VIEW_FORMAT_REGEX.matches(text) && text.length < 15) {
-            return if (isLive) {
-                if (lang == "ko" && !text.contains("명")) "${text}명" 
-                else if (lang != "ko" && !text.contains("watching")) "${text} watching"
-                else text
-            } else {
-                if (lang == "ko" && !text.contains("회")) "${text}회" 
-                else text
-            }
-        }
-        
-        val sb = java.lang.StringBuilder(text.length)
-        for (i in 0 until text.length) {
-            val c = text[i]
-            if (c in '0'..'9') sb.append(c)
-        }
-        val digits = sb.toString()
-        if (digits.isBlank()) return text
-        
-        return try {
-            val v = digits.toLong()
-            if (lang == "ko") {
-                val suffix = if (isLive) { "명" } else { "회" }
-                when {
-                    v < 1000 -> "$v$suffix"
-                    v < 10000 -> String.format("%.1f천$suffix", v / 1000.0).replace(".0천", "천")
-                    v < 100000 -> String.format("%.1f만$suffix", v / 10000.0).replace(".0만", "만")
-                    v < 100000000 -> "${v / 10000}만$suffix"
-                    else -> String.format("%.1f억$suffix", v / 100000000.0).replace(".0억", "억")
-                }
-            } else {
-                val suffix = if (isLive) " watching" else ""
-                when {
-                    v < 1000 -> "$v$suffix"
-                    v < 1_000_000 -> String.format("%.1fK$suffix", v / 1000.0).replace(".0K", "K")
-                    v < 1_000_000_000 -> String.format("%.1fM$suffix", v / 1_000_000.0).replace(".0M", "M")
-                    else -> String.format("%.1fB$suffix", v / 1_000_000_000.0).replace(".0B", "B")
-                }
-            }
-        } catch (e: Exception) {
-            text
-        }
     }
 
     private fun collectFromRenderer(
@@ -844,25 +789,22 @@ class YoutubeProvider(
                 val viewText = getText(videoData.getMapKey("viewCountText"))
                     ?: getText(videoData.getMapKey("shortViewCountText"))
                 
-                // .ifBlank 체인을 통해 엘비스 연산자 우회 및 수동 플레이리스트의 shortBylineText 채널명 정상 룩업 보장
                 val channel = getText(videoData.getMapKey("ownerText"))
                     .ifBlank { getText(videoData.getMapKey("shortBylineText")) }
                     .ifBlank { getText(videoData.getMapKey("longBylineText")) }
 
                 val views = formatViews(viewText)
                 
-                // N/A 노출 분기를 전면 제거하여 가독성 강화
                 val finalTitle = when {
-                    channel.isNotBlank() && views != "N/A" -> "{$channel | $views} $title"
+                    channel.isNotBlank() && views.isNotBlank() && views != "N/A" -> "{$channel | $views} $title"
                     channel.isNotBlank() -> "{$channel} $title"
-                    views != "N/A" -> "{$views} $title"
+                    views.isNotBlank() && views != "N/A" -> "{$views} $title"
                     else -> title
                 }
 
                 var poster = YoutubeUtils.getBestThumbnail(videoData.getMapKey("thumbnail"))
                 if (poster.isNullOrBlank()) poster = YoutubeUtils.buildThumbnailFromId(videoId)
                 
-                // 수동 플레이리스트 행일 경우 재생 주소 끝에 &list= 고유 아이디 결속 수행
                 val watchUrl = if (!playlistId.isNullOrBlank()) {
                     "$mainUrl/watch?v=$videoId&list=$playlistId"
                 } else {
@@ -874,7 +816,6 @@ class YoutubeProvider(
                     watchUrl,
                     TvType.Movie
                 ) {
-                    // 검색 결과 화면(isSearchContext = true)인 경우에만 wsrv.nl 프록시(&a=bottom 포함)를 적용하고, 홈 화면은 원본 이미지 적용
                     this.posterUrl = if (isSearchContext) YoutubeUtils.getProxiedPoster(poster) else poster
                 }
             }
@@ -914,7 +855,6 @@ class YoutubeProvider(
                 }
                 val views = formatViews(viewRaw)
 
-                // 세로 규격 전용 쇼츠 커스텀 썸네일(600x900) 장착
                 val poster = YoutubeUtils.getShortsSearchPoster(videoId)
 
                 val currentList = if (isSearchContext) searchShorts else homeShorts
@@ -922,11 +862,10 @@ class YoutubeProvider(
                 val contextTag = if (isSearchContext) "&ctx=search" else "&ctx=home"
                 val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
 
-                val descText = if (views.isNotBlank()) "조회수: $views" else ""
+                val descText = if (views.isNotBlank()) "$views" else ""
                 
                 val newShortEp = newEpisode(finalUrl) {
                     this.name = title
-                    // 에피소드 노출 가로 규격(1280x720, 우측정렬) 쇼츠 커스텀 썸네일 장착
                     this.posterUrl = YoutubeUtils.getShortsEpisodeThumbnail(videoId)
                     this.episode = episodeNum
                     this.description = descText
@@ -986,7 +925,6 @@ class YoutubeProvider(
                         "$mainUrl/$targetPath",
                         TvType.TvSeries
                     ) {
-                        // 검색 결과 화면(isSearchContext = true)인 경우에만 &a=bottom 프록시 적용, 홈 화면 및 추천목록은 일반 가로형 프록시(a=bottom 없음) 적용
                         this.posterUrl = if (isSearchContext) {
                             YoutubeUtils.getProxiedPosterBottom(poster)
                         } else {
@@ -1030,14 +968,13 @@ class YoutubeProvider(
                     val contextTag = if (isSearchContext) "&ctx=search" else "&ctx=home"
                     val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
                     
-                    // 쇼츠 전용 커스텀 가로/세로 썸네일 규격 각각 대응
                     poster = YoutubeUtils.getShortsSearchPoster(videoId)
                     
                     val descText = buildString {
-                        if (channel.isNotBlank()) append("채널: $channel")
+                        if (channel.isNotBlank()) append("Channel: $channel")
                         if (views.isNotBlank()) {
                             if (isNotEmpty()) append(" • ")
-                            append("조회수: $views")
+                            append("$views")
                         }
                     }
                     
@@ -1066,7 +1003,6 @@ class YoutubeProvider(
                         "$mainUrl/watch?v=$videoId",
                         TvType.Movie
                     ) {
-                        // 검색 결과 화면(isSearchContext = true)인 경우에만 &a=bottom 프록시 적용, 홈 화면 및 추천목록은 일반 가로형 프록시(a=bottom 없음) 적용
                         this.posterUrl = if (isSearchContext) {
                             YoutubeUtils.getProxiedPosterBottom(poster)
                         } else {
@@ -1090,7 +1026,6 @@ class YoutubeProvider(
                     "$mainUrl/channel/$id",
                     TvType.Live
                 ) {
-                    // 검색 결과 화면(isSearchContext = true)인 경우에만 &a=bottom 프록시 적용, 홈 화면 및 추천목록은 일반 가로형 프록시(a=bottom 없음) 적용
                     this.posterUrl = if (isSearchContext) {
                         YoutubeUtils.getProxiedPosterBottom(poster)
                     } else {
@@ -1218,7 +1153,6 @@ class YoutubeProvider(
         return null
     }
 
-
     private fun findTokenRecursive(data: Any?): String? {
         if (data is Map<*, *>) {
             val renderer = data["continuationItemRenderer"] as? Map<*, *>
@@ -1252,7 +1186,6 @@ class YoutubeProvider(
 
             for ((k, v) in data) {
                 val keyStr = k as? String ?: continue
-                // 가설 검증: 불필요한 상단 헤더 및 최신 칩 관련 규격(chipViewModel, chipCloud)을 필터링 스킵하는 시점 기록
                 if (keyStr == "header" ||
                     keyStr == "feedFilterChipBarRenderer" || 
                     keyStr == "chipCloudRenderer" || 
@@ -1275,7 +1208,6 @@ class YoutubeProvider(
         return null
     }
 
-
     override val mainPage: List<MainPageData>
         get() {
             val customSections = getCustomHomepages()
@@ -1292,18 +1224,12 @@ class YoutubeProvider(
                 val url = section.url
                 when {
                     url == "Home" -> {
-                        val homeTitle = when(lang) {
-                            "ko" -> "홈"
-                            "ar" -> "الرئيسية"
-                            else -> "Home"
-                        }
-                        list.add(MainPageData(homeTitle, "Home", horizontalImages = true))
+                        list.add(MainPageData("Home", "Home", horizontalImages = true))
                     }
                     url.startsWith("chip_name_") -> {
                         val chipName = url.removePrefix("chip_name_")
                         val activeChip = cachedChipsMap[chipName]
                         if (activeChip != null) {
-                            // 토큰이 아닌 영구적이고 안정적인 이름을 고유 데이터 ID로 주입합니다.
                             list.add(MainPageData(activeChip.name, "chip_name_${activeChip.name}", horizontalImages = true))
                         }
                     }
@@ -1318,10 +1244,6 @@ class YoutubeProvider(
             return list
         }
 
-        
-
-
-
     private fun getCustomHomepages(): List<CustomSection> {
         val json = appPrefs?.getString("custom_homepages_v3", "[]") ?: "[]"
         val currentList = try {
@@ -1332,18 +1254,11 @@ class YoutubeProvider(
 
         var modified = false
 
-        // 1. 설정 관리 레이아웃에 기본 '홈(Home)' 팩터 영구 보장
         if (currentList.none { it.url == "Home" }) {
-            val homeTitle = when(lang) {
-                "ko" -> "홈"
-                "ar" -> "الرئيسية"
-                else -> "Home"
-            }
-            currentList.add(0, CustomSection(name = homeTitle, url = "Home", isEnabled = true))
+            currentList.add(0, CustomSection(name = "Home", url = "Home", isEnabled = true))
             modified = true
         }
 
-        // 2. 홈화면 기동 시 캐싱되었던 "개별" 칩 필터 항목들(요리, 농구 등)을 독립된 채널 레이아웃 구성 요소로 등록 및 동기화
         val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
         try {
             val cachedChips = mapper.readValue<List<CachedChip>>(cachedChipsJson)
@@ -1360,17 +1275,15 @@ class YoutubeProvider(
 
         if (modified) {
             try {
-                val updatedJson = mapper.writeValueAsString(currentList) // 리플렉션 비용 제거
+                val updatedJson = mapper.writeValueAsString(currentList)
                 appPrefs?.edit()?.putString("custom_homepages_v3", updatedJson)?.apply()
             } catch (e: Exception) {
                 logError(e)
             }
         }
         
-
         return currentList
     }
-
 
     private fun extractNameFromUrl(url: String): String {
         return when {
@@ -1386,15 +1299,12 @@ class YoutubeProvider(
         savedContinuationToken = null
     }
 
-
-
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         isSearchContext = false
         val rawRequestData = request.data
         val requestData = YoutubeUtils.urlDecode(rawRequestData)
         val maxPages = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
         
-        // 고유 이름 기반의 칩 주소 패턴 식별 (chip_name_카테고리명 형태)
         val isChip = requestData.startsWith("chip_name_")
         if (isChip) {
             Log.d("YoutubeUtils", "[CHIP] getMainPage ENTRY - Page: $page, requestData: $requestData")
@@ -1418,7 +1328,6 @@ class YoutubeProvider(
                     savedVisitorData = savedVisitorData ?: appPrefs?.getString("yt_visitor_data", null)
                     savedClientVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION)
 
-                    // 보완책: 메인 홈 비동기 응답 지연 시, 칩 1페이지에서 직접 API Key를 동기 획득하여 병렬 로딩 실패 방지
                     if (savedApiKey.isNullOrBlank()) {
                         Log.w("YoutubeUtils", "[CHIP] API Key is missing on Page 1. Synchronously fetching mainUrl to retrieve configs...")
                         try {
@@ -1440,7 +1349,6 @@ class YoutubeProvider(
                         }
                     }
 
-                    // 안정적인 칩 이름(예: 요리, 축구)으로부터 현재 세션의 활성 토큰 실시간 검색
                     val chipCategoryName = requestData.removePrefix("chip_name_")
                     val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
                     val cachedChips = try {
@@ -1501,7 +1409,6 @@ class YoutubeProvider(
                         if (requestData == "Home") {
                             val chipBar = safeGet(initialData, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0, "tabRenderer", "content", "richGridRenderer", "header", "feedFilterChipBarRenderer", "contents") as? List<*>
                             if (chipBar != null) {
-                                // 기존에 저장되어 있던 모든 칩 목록을 영구 보존을 위해 먼저 불러와 맵으로 매핑합니다.
                                 val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
                                 val cachedChipsMap = try {
                                     mapper.readValue<List<CachedChip>>(cachedChipsJson).associateBy { it.name }.toMutableMap()
@@ -1516,7 +1423,6 @@ class YoutubeProvider(
                                     val token = safeGet(chipMap, "navigationEndpoint", "continuationCommand", "token") as? String
                                     if (text.isNotBlank() && !token.isNullOrBlank()) {
                                         val oldChip = cachedChipsMap[text]
-                                        // 칩 토큰이 새로 갱신되었거나 신규 칩인 경우에만 맵에 갱신/추가합니다. (다른 칩 삭제 방지)
                                         if (oldChip?.token != token) {
                                             cachedChipsMap[text] = CachedChip(text, token)
                                             modifiedChips = true
@@ -1524,7 +1430,6 @@ class YoutubeProvider(
                                     }
                                 }
                                 
-                                // 변경사항이 있거나 전체 개수가 늘어난 경우에만 SharedPreference 파일에 영구 기록합니다.
                                 val originalSize = try { mapper.readValue<List<CachedChip>>(cachedChipsJson).size } catch(e: Exception) { 0 }
                                 if (modifiedChips || cachedChipsMap.size > originalSize) {
                                     val jsonArray = org.json.JSONArray()
@@ -1554,7 +1459,6 @@ class YoutubeProvider(
                 }
                 var tokenToUse = getSavedContinuationToken(requestData, page)
 
-                // 보완책: page >= 2 로 조건을 넓혀 2페이지 또한 1페이지가 완전히 끝나서 저장할 때까지 안전하게 대기하도록 제어합니다.
                 if (isChip && tokenToUse.isNullOrBlank() && page >= 2) {
                     Log.w("YoutubeUtils", "[CHIP] Page $page token is empty. Suspending coroutine thread and waiting for previous page to write the token...")
                     var retries = 0
@@ -1571,7 +1475,6 @@ class YoutubeProvider(
                     val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION) ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
 
                     if (isChip && !apiKey.isNullOrBlank()) {
-                        // 요리/축구 등의 이름을 실시간 조회하여 Fallback 기동용 최신 원본 토큰 확보
                         val chipCategoryName = requestData.removePrefix("chip_name_")
                         val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
                         val cachedChips = try {
@@ -1688,11 +1591,9 @@ class YoutubeProvider(
         if (isChip) {
             Log.d("YoutubeUtils", "[CHIP] getMainPage EXIT - Saving nextContinuation for requestData: $requestData -> $nextContinuation (intended for page: ${page + 1})")
         }
-        // 다음 페이지 호출을 위해 전용 page + 1 슬롯 키로 분리하여 세이브 처리 진행
         saveContinuationToken(requestData, page + 1, nextContinuation)
 
-        // 시청기록(History) 행 그룹 스왑 정렬 처리
-        if (requestData.contains("history", ignoreCase = true) || requestData.contains("기록")) {
+        if (requestData.contains("history", ignoreCase = true)) {
             val sorted = mutableListOf<SearchResponse>()
             val tempShorts = mutableListOf<SearchResponse>()
             val tempVods = mutableListOf<SearchResponse>()
@@ -1721,8 +1622,6 @@ class YoutubeProvider(
 
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
     }
-
-    
 
     override suspend fun search(query: String): List<SearchResponse> {
         return search(query, 1)?.items ?: emptyList()
@@ -1780,7 +1679,7 @@ class YoutubeProvider(
                                 "clientName" to "WEB",
                                 "clientVersion" to "2.20240101.00",
                                 "hl" to lang,
-                                "gl" to if (lang == "ko") "KR" else "US",
+                                "gl" to "US",
                                 "visitorData" to vData
                             )
                         ),
@@ -2020,17 +1919,14 @@ class YoutubeProvider(
             val currentEp = targetEpisodes.find { YoutubeUtils.extractYoutubeId(it.data) == videoId }
 
             var shortTitle = currentEp?.name ?: "Shorts Video"
-            // 쇼츠 세로 규격 커스텀 포스터 변환기(600x900) 장착
             val poster = YoutubeUtils.getShortsSearchPoster(videoId)
             var shortPlot = currentEp?.description ?: ""
 
-            // 계속 시청 진입 등으로 메모리 소실 시 player 및 next API를 통한 타이틀/에피소드 복구 파이프라인
             if (currentEp == null || targetEpisodes.size <= 1) {
                 try {
                     val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
                     val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION) ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
                     
-                    // 1. 플레이어 API 직접 호출로 실제 제목 및 채널 정보 실시간 역추적
                     val playerUrl = "https://www.youtube.com/youtubei/v1/player?key=$apiKey"
                     val playerPayload = mapOf(
                         "context" to mapOf("client" to mapOf("clientName" to "WEB", "clientVersion" to cVersion, "hl" to lang)),
@@ -2043,11 +1939,10 @@ class YoutubeProvider(
                         val channelName = details?.getString("author")
                         if (!fetchedTitle.isNullOrBlank()) {
                             shortTitle = fetchedTitle
-                            shortPlot = if (!channelName.isNullOrBlank()) "채널: $channelName" else ""
+                            shortPlot = if (!channelName.isNullOrBlank()) "Channel: $channelName" else ""
                         }
                     }
 
-                    // 2. 추천 API(/v1/next) 연쇄 호출하여 추천 쇼츠/비디오 목록 복원
                     val nextUrl = "https://www.youtube.com/youtubei/v1/next?key=$apiKey"
                     val nextPayload = mapOf(
                         "context" to mapOf("client" to mapOf("clientName" to "WEB", "clientVersion" to cVersion, "hl" to lang)),
@@ -2056,7 +1951,6 @@ class YoutubeProvider(
                     val nResponse = app.post(nextUrl, json = nextPayload, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                     val recEpisodes = mutableListOf<Episode>()
                     
-                    // 현재 계속 시청하는 쇼츠를 인덱스 1번에 배치 (에피소드 가로 썸네일 규격 적용)
                     recEpisodes.add(newEpisode(url) {
                         this.name = shortTitle
                         this.posterUrl = YoutubeUtils.getShortsEpisodeThumbnail(videoId)
@@ -2091,7 +1985,6 @@ class YoutubeProvider(
                     logError(e)
                 }
             } else {
-                // 캐시 보존 시 기존 에피소드들의 포스터 주소를 에피소드 가로 썸네일(1280x720) 규격으로 교정
                 targetEpisodes.forEach { ep ->
                     val epVidId = YoutubeUtils.extractYoutubeId(ep.data)
                     if (epVidId != null) {
@@ -2360,7 +2253,7 @@ class YoutubeProvider(
                                     "clientName" to "WEB",
                                     "clientVersion" to clientVersion,
                                     "hl" to lang,
-                                    "gl" to if (lang == "ko") "KR" else "US",
+                                    "gl" to "US",
                                     "visitorData" to (visitorData ?: ""),
                                     "platform" to "DESKTOP"
                                 )
@@ -2378,7 +2271,6 @@ class YoutubeProvider(
                 }
 
                 return newTvSeriesLoadResponse(title, url, TvType.TvSeries, allEpisodes) {
-                    // 계속 시청 썸네일도 wsrv.nl 적용 버전으로 수정
                     this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
                     this.plot = "Channel: $title\nSubscribers: ${subscriberCount}\nVideos Fetched: ${allEpisodes.size}"
                     this.tags = listOf(title, "Channel")
@@ -2418,12 +2310,8 @@ class YoutubeProvider(
                 if (isMix) {
                     val firstChannel = episodes.firstOrNull()?.description?.split("•")?.getOrNull(1)?.trim()
                     if (!firstChannel.isNullOrBlank()) {
-                        title = if (lang == "ko") {
-                            "믹스 - $firstChannel"
-                        } else {
-                            "Mix - $firstChannel"
-                        }
-                    } else if (title.contains("YouTube Mix") || title.contains("믹스")) {
+                        title = "Mix - $firstChannel"
+                    } else if (title.contains("YouTube Mix") || title.contains("Mix")) {
                         title = "YouTube Mix"
                     }
                 }
@@ -2451,7 +2339,6 @@ class YoutubeProvider(
                 }
 
                 return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                    // 계속 시청 썸네일도 wsrv.nl 적용 버전으로 수정
                     this.posterUrl = YoutubeUtils.getProxiedPoster(playlistPoster)
                     
                     val finalDescription = buildString {
@@ -2600,7 +2487,7 @@ class YoutubeProvider(
             this.name = title
             this.posterUrl = poster
             this.episode = 1
-            this.description = mainDescStr.ifBlank { channelName.ifBlank { "재생 중" } }
+            this.description = mainDescStr.ifBlank { channelName.ifBlank { "Playing" } }
         })
 
         var epCount = 2
@@ -2623,7 +2510,6 @@ class YoutubeProvider(
         }
 
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-            // 계속 시청 썸네일도 wsrv.nl 적용 버전으로 수정
             this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
             this.plot = plot
 
@@ -2649,12 +2535,10 @@ class YoutubeProvider(
 
         var playerResponseJson: String? = null
         try {
-            // 1. 영상 웹페이지(HTML) 요청 (ytInterceptor가 로그인 세션을 자동으로 주입하여 완벽한 로그인 상태로 접근)
             val htmlUrl = if (isShort) "$mainUrl/shorts/$videoId" else fullUrl
             println("[YTSYNC_DEBUG] HTML 페이지 요청 중: $htmlUrl")
             val htmlResponse = app.get(htmlUrl, interceptor = ytInterceptor).text
             
-            // 2. HTML 내부에 숨겨진 ytInitialPlayerResponse 추출 (완벽한 WEB 로그인 세션 기반 데이터)
             val marker1 = "ytInitialPlayerResponse = "
             var startIdx = htmlResponse.indexOf(marker1)
             if (startIdx != -1) {
@@ -2671,7 +2555,6 @@ class YoutubeProvider(
             
             println("[YTSYNC_DEBUG] HTML에서 ytInitialPlayerResponse 추출 성공 여부: ${playerResponseJson != null}")
             
-            // 3. 만약 연령제한 등으로 HTML 추출에 실패했다면, ANDROID_VR로 최후의 폴백 시도
             if (playerResponseJson == null) {
                 println("[YTSYNC_DEBUG] 🚨 HTML 추출 실패. ANDROID_VR 폴백 요청 진행...")
                 val androidApiKey = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
@@ -2708,7 +2591,6 @@ class YoutubeProvider(
                 
                 println("[YTSYNC_DEBUG] JSON 매핑 성공. playbackTracking 존재 여부: ${playerResponse.playbackTracking != null}")
                 
-                // 시청 기록 연동 코루틴 트리거 시작
                 triggerPlaybackTracking(playerResponse.playbackTracking, videoId, isShort)
             } catch (e: Exception) {
                 println("[YTSYNC_DEBUG] 🚨 JSON 파싱 중 예외 발생: ${e.message}")
@@ -2718,7 +2600,6 @@ class YoutubeProvider(
             println("[YTSYNC_DEBUG] 🚨 playerResponseJson이 비어 있어 트래킹을 생략합니다.")
         }
 
-        // 기존 비디오 해상도 추출기는 독립적으로 구동되도록 위임 (사이드 이펙트 분리)
         com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback, callback)
 
         return true
