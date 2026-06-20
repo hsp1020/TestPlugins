@@ -672,7 +672,7 @@ class YoutubeProvider(
         }
         return ""
     }
-    
+
 
     private fun getEpisodeMetaString(videoData: Map<*, *>?): String {
         if (videoData == null) return ""
@@ -683,63 +683,64 @@ class YoutubeProvider(
             duration = DURATION_REGEX.find(lengthText)?.value ?: ""
         }
 
-        // 💡 루트 레벨에서 탐색 실패 시 신형 계층 구조의 썸네일 오버레이 내부를 재귀 스캔합니다.
+        // 썸네일 오버레이 내부를 깊숙이 탐색하여 신형 락업 컴포넌트의 재생시간을 획득합니다.
         if (duration.isBlank()) {
             duration = extractDurationFromOverlays(videoData)
         }
 
-        var channel = getText(videoData.getMapKey("longBylineText"))
+        val channel = getText(videoData.getMapKey("longBylineText"))
             .ifBlank { getText(videoData.getMapKey("shortBylineText")) }
             .ifBlank { getText(videoData.getMapKey("ownerText")) }
 
-        var views = ""
-        var date = ""
+        val collectedMeta = mutableListOf<String>()
 
         val shortViewCountText = getText(videoData.getMapKey("shortViewCountText"))
         val viewCountText = getText(videoData.getMapKey("viewCountText"))
         val publishedTimeText = getText(videoData.getMapKey("publishedTimeText"))
         val videoInfo = getText(videoData.getMapKey("videoInfo"))
 
-        var rawViews = shortViewCountText.ifBlank { viewCountText }
-        date = publishedTimeText
+        if (shortViewCountText.isNotBlank()) collectedMeta.add(shortViewCountText)
+        else if (viewCountText.isNotBlank()) collectedMeta.add(viewCountText)
 
-        if (rawViews.isBlank() && videoInfo.isNotBlank()) {
+        if (publishedTimeText.isNotBlank()) collectedMeta.add(publishedTimeText)
+
+        if (collectedMeta.isEmpty() && videoInfo.isNotBlank()) {
             val parts = videoInfo.split("•", "·").map { it.trim() }
-            if (parts.isNotEmpty()) rawViews = parts[0]
-            if (parts.size > 1 && date.isBlank()) date = parts[1]
+            parts.forEach { part ->
+                if (part.isNotBlank() && part != "N/A") {
+                    collectedMeta.add(part)
+                }
+            }
         }
 
-        if (rawViews.isNotBlank()) {
-            views = rawViews
-        }
-
-        if (views.isBlank() || date.isBlank()) {
-            val rows = videoData.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")?.getMapKey("metadata")?.getMapKey("contentMetadataViewModel")?.getListKey("metadataRows")
-            rows?.forEachIndexed { index, row ->
-                val parts = row.getListKey("metadataParts") ?: YoutubeUtils.getListKeyFromAny(row, "metadataParts") as? List<*>
-                parts?.forEachIndexed { pIndex, part ->
-                    if (part is Map<*, *>) {
-                        val t = getText(part.getMapKey("text"))
-                        if (t.isNotBlank() && t != duration && t != channel) {
-                            if (index == 0) {
-                                channel = t
-                            } else if (index == 1) {
-                                if (pIndex == 0) {
-                                    views = t
-                                } else {
-                                    date = t
-                                }
-                            }
-                        }
+        val rows = videoData.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")?.getMapKey("metadata")?.getMapKey("contentMetadataViewModel")?.getListKey("metadataRows")
+        rows?.forEach { row ->
+            val parts = row.getListKey("metadataParts") ?: YoutubeUtils.getListKeyFromAny(row, "metadataParts") as? List<*>
+            parts?.forEach { part ->
+                if (part is Map<*, *>) {
+                    val t = getText(part.getMapKey("text"))
+                    if (t.isNotBlank() && t != duration && t != channel && !collectedMeta.contains(t)) {
+                        collectedMeta.add(t)
                     }
                 }
             }
         }
 
-        val partsList = listOf(duration, channel, views, date).filter { it.isNotBlank() && it != "N/A" }
-        return partsList.joinToString(" • ")
+        val partsList = mutableListOf<String>()
+        if (duration.isNotBlank()) partsList.add(duration)
+        
+        // 조회수와 업로드 일자를 먼저 추가합니다.
+        collectedMeta.forEach { meta ->
+            if (meta != "N/A" && !partsList.contains(meta) && meta != channel) {
+                partsList.add(meta)
+            }
+        }
+        
+        // 요구사항에 맞춰 채널명을 메타데이터 맨 뒤로 밀어 넣습니다.
+        if (channel.isNotBlank()) partsList.add(channel)
+
+        return partsList.filter { it.isNotBlank() }.joinToString(" • ")
     }
-    
 
     private fun Map<*, *>.getMapKey(key: String): Map<*, *>? {
         val direct = this[key]
@@ -2614,7 +2615,7 @@ class YoutubeProvider(
         if (dateMatch != null) {
             ep1Date = dateMatch.groupValues[1]
         }
-        
+
         val resultsContents = safeGet(data, "contents", "twoColumnWatchNextResults", "results", "results", "contents") as? List<*>
         resultsContents?.forEach { item ->
             val m = item as? Map<*, *>
@@ -2622,18 +2623,23 @@ class YoutubeProvider(
             if (primary != null) {
                 val viewCountRenderer = primary.getMapKey("videoViewCountRenderer")
                 val vCount = if (viewCountRenderer != null) {
-                    getText(viewCountRenderer.getMapKey("extraShortViewCount") ?: viewCountRenderer.getMapKey("viewCount"))
+                    // 💡 정수가 아닌 라벨이 포함된 단축 조회수(shortViewCount) 데이터를 최우선적으로 가로챕니다.
+                    getText(viewCountRenderer.getMapKey("shortViewCount")
+                        ?: viewCountRenderer.getMapKey("extraShortViewCount")
+                        ?: viewCountRenderer.getMapKey("viewCount"))
                 } else {
                     getText(primary.getMapKey("viewCount"))
                 }
-                
+
                 if (vCount.isNotBlank()) ep1Views = vCount
-                val dText = getText(primary.getMapKey("dateText"))
+                // 💡 절대 날짜 대신 relativeDateText를 우선 수집하여 에피소드 1도 상대 시간("6년 전")으로 일치시킵니다.
+                val dText = getText(primary.getMapKey("relativeDateText") ?: primary.getMapKey("dateText"))
                 if (dText.isNotBlank()) ep1Date = dText
             }
         }
 
-        val mainDescParts = listOf(ep1Dur, channelName, ep1Views, ep1Date).filter { it.isNotBlank() && it != "N/A" }
+        // 💡 요구사항에 맞춰 채널명(channelName)을 메타데이터 리스트의 맨 마지막에 위치하도록 재배치합니다.
+        val mainDescParts = listOf(ep1Dur, ep1Views, ep1Date, channelName).filter { it.isNotBlank() && it != "N/A" }
         val mainDescStr = mainDescParts.joinToString(" • ")
 
         episodes.add(newEpisode(url) {
