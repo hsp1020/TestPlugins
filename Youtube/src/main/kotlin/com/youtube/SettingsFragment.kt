@@ -132,15 +132,22 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 key = KEY_LANGUAGE
                 entryValues = Loc.availableLanguages.map { it.first }.toTypedArray()
                 entries = Loc.availableLanguages.map { "${it.third} (${it.second})" }.toTypedArray()
-                if (value == null) setValue("ar")
+                
+                // 💡 [초기화 수명 주기 누수 교정]: ar 강제 대입을 안전하게 폐기하고 양대 저장소 중 기록이 있는 언어를 로드하도록 개정
+                val currentLang = if (sharedPref.contains(KEY_LANGUAGE)) sharedPref.getString(KEY_LANGUAGE, null) else defaultPrefs.getString(KEY_LANGUAGE, null)
+                setValue(currentLang ?: "en")
+                
                 summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
                 setOnPreferenceChangeListener { _, newValue ->
-                    sharedPref.edit().putString(KEY_LANGUAGE, newValue as String).apply()
+                    val langVal = newValue as String
+                    sharedPref.edit().putString(KEY_LANGUAGE, langVal).apply()
+                    defaultPrefs.edit().putString(KEY_LANGUAGE, langVal).apply() // 양대 저장소에 동시 복사
                     view?.post { updateTexts() }
                     true
                 }
             }
             preferenceScreen.addPreference(languagePref)
+            
 
             authCategory = PreferenceCategory(ctx)
             preferenceScreen.addPreference(authCategory)
