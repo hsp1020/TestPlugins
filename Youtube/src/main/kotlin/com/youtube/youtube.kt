@@ -297,7 +297,7 @@ class YoutubeProvider(
     override val hasMainPage = true
     
     override var lang: String
-        get() = appPrefs?.getString("youtube_language", "ko") ?: "ko"
+        get() = appPrefs?.getString("youtube_language", "en") ?: "en"
         set(value) {}
         
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Live)
