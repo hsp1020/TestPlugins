@@ -158,7 +158,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
 
                     val cleanPath = fullPath.substringBefore("?")
-                    val queryParams = fullPath.substringAfter("?", "")
+                                        val queryParams = fullPath.substringAfter("?", "")
 
                     // ✅ 외부 다운로더 연동(인텐트 전송) 기능 최초 순정본과 동일하게 복구 완료
                     if (cleanPath.startsWith("/open_app")) {
@@ -386,6 +386,26 @@ open class YoutubeExtractor : ExtractorApi() {
             if (match != null) return match.groupValues[1]
             match = Regex("""$attribute=([^,\s]+)""").find(line)
             if (match != null) return match.groupValues[1]
+            return null
+        }
+
+        // ✅ PipePipe의 xtags(acont) 속성 추출 파서 (중요)
+        private fun extractHlsXtagsValue(url: String, key: String): String? {
+            try {
+                val decoded = java.net.URLDecoder.decode(url, "UTF-8")
+                val match = Regex("""xtags=([^/&?]+)""").find(decoded)
+                if (match != null) {
+                    val xtags = match.groupValues[1]
+                    for (part in xtags.split(":")) {
+                        val kv = part.split("=", limit = 2)
+                        if (kv.size == 2 && kv[0] == key) {
+                            return kv[1]
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                println("[TRACK] 🚨 Failed to extract HLS xtags value: ${e.message}")
+            }
             return null
         }
 
@@ -691,19 +711,21 @@ open class YoutubeExtractor : ExtractorApi() {
 
                         // 💡 [중복 제거 및 원본 감지 핵심]: 플레이어 응답이 아닌 M3U8 내부 스트림 URL의 xtags(acont)에서 진짜 원본을 역추적 (이러면 ko로 오독하지 않고 진짜 en을 찾아냄!)
                         var defaultHlsLang = ""
-                        val adaptiveFormats = playerResponse.optJSONObject("streamingData")?.optJSONArray("adaptiveFormats")
-                        if (adaptiveFormats != null) {
-                            for (i in 0 until adaptiveFormats.length()) {
-                                val format = adaptiveFormats.getJSONObject(i)
-                                val audioTrack = format.optJSONObject("audioTrack")
-                                if (audioTrack != null && audioTrack.optBoolean("audioIsDefault", false)) {
-                                    val audioTrackId = audioTrack.optString("id", "")
-                                    if (audioTrackId.isNotEmpty()) {
-                                        defaultHlsLang = audioTrackId.split(".")[0].split("-")[0].lowercase()
-                                        println("[TRACK] -> Default Language Verified from playerResponse: $defaultHlsLang")
-                                        break
-                                    }
-                                }
+                        for (i in lines.indices) {
+                            val line = lines[i].trim()
+                            if (!line.startsWith("#EXT-X-STREAM-INF:")) continue
+                            if (i + 1 >= lines.size) break
+                            val streamUrl = lines[i + 1].trim()
+                            val audioContentId = extractHlsStringAttribute(line, "YT-EXT-AUDIO-CONTENT-ID") ?: ""
+
+                            val acont = extractHlsXtagsValue(streamUrl, "acont")
+                            println("[TRACK] -> Pre-scan variant line $i: audioContentId=$audioContentId, acont=$acont")
+                            
+                            // acont 가 "original" 로 선언된 스트림이 바로 이 영상의 "진짜 오리지널(Original)" 언어입니다.
+                            if (acont == "original" && audioContentId.isNotEmpty()) {
+                                defaultHlsLang = audioContentId.split(".")[0].split("-")[0].lowercase()
+                                println("[TRACK] -> True Original HLS Language Verified via acont: $defaultHlsLang")
+                                break
                             }
                         }
 
@@ -758,18 +780,21 @@ open class YoutubeExtractor : ExtractorApi() {
 
                             // 💡 설정의 언어값(langCode)에 맞추어 안드로이드 시스템 로컬라이저가 다국어 자동 번역
                             val langLabel = if (locale != "und") getLanguageLabel(locale, langCode) else ""
-                            
-                            // 💡 요청하신 대로 (원본) 표기를 (Original)로 완벽 고침
+
                             val suffix = if (isOriginal) {
-                                "Original"
+                                when (langCode.lowercase()) {
+                                    "ko" -> "원본"
+                                    "ar" -> "الأصلي"
+                                    else -> "OG"
+                                }
                             } else {
                                 when (langCode.lowercase()) {
                                     "ko" -> "더빙"
                                     "ar" -> "دبلجة"
-                                    else -> "Dubbed"
+                                    else -> "Dub"
                                 }
                             }
-
+                            
                             val displayName = if (langLabel.isNotEmpty()) "$langLabel($suffix)" else ""
                             val labelName = if (displayName.isNotEmpty()) "YouTube ${height}p [$displayName]" else "YouTube ${height}p"
 
