@@ -90,7 +90,6 @@ object YoutubeUtils {
         return Pair(cookieBuilder.toString(), sapisidVal)
     }
 
-    // 💡 [지능형 결합기]: 영어로 계산된 지표 블록만 잘라내어 한글 한정 제목에 완벽히 오버레이 접합시킵니다.
     fun mergeLocalizedTitle(englishName: String, localizedName: String): String {
         val prefixRegex = Regex("^(\\{.*?\\}|#\\d+\\s*\\{.*?\\})\\s*(.*)$")
         val match = prefixRegex.find(englishName)
@@ -550,7 +549,6 @@ class YoutubeProvider(
         }
     }
 
-    // 💡 [원천 최적화]: 이너튜브에서 이미 연산 완료된 콤팩트 텍스트(shortViewCountText 등)를 우회 매핑
     private fun formatViews(viewText: String?): String {
         if (viewText.isNullOrBlank()) return "N/A"
         return viewText.replace(" views", "").trim()
@@ -689,7 +687,6 @@ class YoutubeProvider(
         return ""
     }
 
-    // 💡 [고유 키값 매칭]: metadataParts의 순수 접두사 제거 지표 바로 수집
     private fun extractLockupMetadata(lockup: Map<*, *>) : Triple<String, String, String> {
         var channel = ""
         var views = ""
@@ -1304,7 +1301,16 @@ class YoutubeProvider(
         savedContinuationToken = null
     }
 
-    // 💡 [컴파일 에러 완전 쉴드]: Pair 구조체 튜플 기반 비동기 병렬 병합 아키텍처로 안전 패치 완료
+    // 💡 [컴파일러 빌드 밴 해제]: SearchResponse를 새로 가 복제(copy)하여 name 상수의 컴파일 제한 우회 완료
+    private fun copySearchResponseWithNewName(item: SearchResponse, newName: String): SearchResponse {
+        return when (item) {
+            is MovieSearchResponse -> item.copy(name = newName)
+            is TvSeriesSearchResponse -> item.copy(name = newName)
+            is LiveSearchResponse -> item.copy(name = newName)
+            else -> item
+        }
+    }
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         isSearchContext = false
         val rawRequestData = request.data
@@ -1319,12 +1325,10 @@ class YoutubeProvider(
         val userLang = appPrefs?.getString("youtube_language", "en") ?: "en"
 
         return withContext(Dispatchers.IO) {
-            // 영어 결과 수집 (고정밀 영문 지표 콤팩트용)
             val englishDeferred = async {
                 fetchMainPageResults(page, request, requestData, isChip, "en")
             }
 
-            // 로컬 설정 언어 결과 수집 (다국어 타이틀 번역용)
             val localizedDeferred = if (userLang != "en") {
                 async {
                     fetchMainPageResults(page, request, requestData, isChip, userLang)
@@ -1334,22 +1338,26 @@ class YoutubeProvider(
             val (englishResults, englishToken) = englishDeferred.await()
             val localizedPair = localizedDeferred?.await()
 
-            if (localizedPair != null) {
+            // 💡 [재할당 빌드 버그 수정 완료]: 데이터 클래스 copy 기능을 호출하여 안전한 우회 병합 적용
+            val finalResults = if (localizedPair != null) {
                 val (localizedResults, _) = localizedPair
                 val localizedMap = localizedResults.associateBy { it.url }
-                englishResults.forEach { engItem ->
+                englishResults.map { engItem ->
                     val locItem = localizedMap[engItem.url]
                     if (locItem != null) {
-                        engItem.name = YoutubeUtils.mergeLocalizedTitle(engItem.name, locItem.name)
+                        val mergedName = YoutubeUtils.mergeLocalizedTitle(engItem.name, locItem.name)
+                        copySearchResponseWithNewName(engItem, mergedName)
+                    } else {
+                        engItem
                     }
-                }
+                }.toMutableList()
+            } else {
+                englishResults
             }
 
-            // SharedPreferences 페이징 토큰 갱신
             saveContinuationToken(requestData, page + 1, englishToken)
 
-            // 💡 [도우미 변환]: deprecated된 수동 생성자 대신 CloudStream3 표준 API인 newHomePageResponse 사용
-            newHomePageResponse(request, englishResults, hasNext = !englishToken.isNullOrBlank())
+            newHomePageResponse(request, finalResults, hasNext = !englishToken.isNullOrBlank())
         }
     }
 
@@ -1364,7 +1372,6 @@ class YoutubeProvider(
         return newHomePageResponse(request, results, hasNext = !token.isNullOrBlank())
     }
 
-    // 💡 [병합 수집 최적화]: 비동기 코루틴 컴파일 타입 검증용 페어 반환 비즈니스 로직
     private suspend fun fetchMainPageResults(
         page: Int,
         request: MainPageRequest,
@@ -1532,7 +1539,7 @@ class YoutubeProvider(
                         val rawToken = activeChip?.token
 
                         if (!rawToken.isNullOrBlank()) {
-                            val apiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
+                            val apiUrl = "$mainUrl/youtubei/v1/browse?key=$savedApiKey"
                             val payload = mapOf(
                                 "context" to mapOf(
                                     "client" to mapOf(
@@ -1551,7 +1558,7 @@ class YoutubeProvider(
                                 if (!tokenToUse.isNullOrBlank()) {
                                     saveContinuationToken(requestData, page, tokenToUse)
                                     
-                                    val innerApiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
+                                    val innerApiUrl = "$mainUrl/youtubei/v1/browse?key=$savedApiKey"
                                     val innerPayload = mapOf(
                                         "context" to mapOf(
                                             "client" to mapOf(
@@ -1650,18 +1657,24 @@ class YoutubeProvider(
             val englishResponse = englishDeferred.await()
             val localizedResponse = localizedDeferred?.await()
 
+            // 💡 [재할당 빌드 버그 수정 완료]: 데이터 클래스 copy 기능을 호출하여 안전한 우회 병합 적용
             val englishResults = englishResponse?.items?.toMutableList() ?: mutableListOf()
-            if (englishResults.isNotEmpty() && localizedResponse != null) {
+            val finalResults = if (englishResults.isNotEmpty() && localizedResponse != null) {
                 val localizedMap = localizedResponse.items.associateBy { it.url }
-                englishResults.forEach { engItem ->
+                englishResults.map { engItem ->
                     val locItem = localizedMap[engItem.url]
                     if (locItem != null) {
-                        engItem.name = YoutubeUtils.mergeLocalizedTitle(engItem.name, locItem.name)
+                        val mergedName = YoutubeUtils.mergeLocalizedTitle(engItem.name, locItem.name)
+                        copySearchResponseWithNewName(engItem, mergedName)
+                    } else {
+                        engItem
                     }
-                }
+                }.toMutableList()
+            } else {
+                englishResults
             }
 
-            newSearchResponseList(englishResults, englishResponse?.hasNext ?: false)
+            newSearchResponseList(finalResults, englishResponse?.hasNext ?: false)
         }
     }
 
@@ -1688,14 +1701,18 @@ class YoutubeProvider(
 
         try {
             if (page == 1) {
-                // 토큰 캐시 targetLang별 완벽 격리 설계 유지
+                // 토큰 캐시 targetLang별 격리 설계 유지
                 saveContinuationToken("search_token_$targetLang", null)
                 val encoded = URLEncoder.encode(actualQuery, "utf-8")
                 val url = "$mainUrl/results?search_query=$encoded$spParam"
                 val html = app.get(url, headers = headers, interceptor = ytInterceptor).text
 
-                savedApiKey = API_KEY_EXTRACT_REGEX.find(html)?.groupValues?.get(1)
-                savedVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA")
+                val localApiKey = API_KEY_EXTRACT_REGEX.find(html)?.groupValues?.get(1)
+                val localVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA")
+                if (!localApiKey.isNullOrBlank()) {
+                    savedApiKey = localApiKey
+                    savedVisitorData = localVisitorData
+                }
 
                 val initialData = extractYtInitialData(html)
                 if (initialData != null) {
