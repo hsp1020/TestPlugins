@@ -11,7 +11,7 @@ import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.schemaStripRegex
 import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.ar.youtube.YoutubeUtils
+import com.hsp1020.youtube.YoutubeUtils
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
