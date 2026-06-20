@@ -769,12 +769,12 @@ class YoutubeProvider(
                 val title = getText(videoData.getMapKey("title")) ?: "Video"
                 val viewText = getText(videoData.getMapKey("shortViewCountText") ?: videoData.getMapKey("viewCountText"))
                 val dateText = getText(videoData.getMapKey("publishedTimeText"))
-                
+
                 val channel = getText(videoData.getMapKey("ownerText"))
                     .ifBlank { getText(videoData.getMapKey("shortBylineText")) }
                     .ifBlank { getText(videoData.getMapKey("longBylineText")) }
 
-                // 💡 [순정 직결]: 이너튜브 텍스트 직접 대입
+                // 💡 [컴파일러 쉴드]: views를 가변 변수가 아닌 불변 'val' 상수로 선언하여 재할당 에러를 차단합니다.
                 val views = viewText.ifBlank { "N/A" }
                 
                 val finalTitle = when {
@@ -784,7 +784,7 @@ class YoutubeProvider(
                     views.isNotBlank() && views != "N/A" -> "{$views} $title"
                     else -> title
                 }
-
+                
                 var poster = YoutubeUtils.getBestThumbnail(videoData.getMapKey("thumbnail"))
                 if (poster.isNullOrBlank()) poster = YoutubeUtils.buildThumbnailFromId(videoId)
                 
@@ -1595,6 +1595,8 @@ class YoutubeProvider(
         }
 
         val seenIds = mutableSetOf<String>()
+        
+        // 💡 [컴파일러 쉴드]: 기존의 'val actualQuery' 상수를 'var actualQuery' 변수로 교정하여 플레이리스트 분기 시 재할당 에러 소거
         var actualQuery = query
         var playlistMode = false
         var spParam = ""
@@ -1605,7 +1607,7 @@ class YoutubeProvider(
             playlistMode = true
             spParam = "&sp=EgIQAw%3D%3D"
         }
-
+        
         try {
             if (page == 1) {
                 // 토큰 캐시 targetLang별 완벽 격리 설계 유지
