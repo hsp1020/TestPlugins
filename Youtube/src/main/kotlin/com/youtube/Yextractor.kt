@@ -746,18 +746,21 @@ open class YoutubeExtractor : ExtractorApi() {
 
                             // 💡 설정의 언어값(langCode)에 맞추어 안드로이드 시스템 로컬라이저가 다국어 자동 번역
                             val langLabel = if (locale != "und") getLanguageLabel(locale, langCode) else ""
-                            
-                            // 💡 요청하신 대로 (원본) 표기를 (Original)로 완벽 고침
+
                             val suffix = if (isOriginal) {
-                                "Original"
+                                when (langCode.lowercase()) {
+                                    "ko" -> "원본"
+                                    "ar" -> "الأصلي"
+                                    else -> "OG"
+                                }
                             } else {
                                 when (langCode.lowercase()) {
                                     "ko" -> "더빙"
                                     "ar" -> "دبلجة"
-                                    else -> "Dubbed"
+                                    else -> "Dub"
                                 }
                             }
-
+                            
                             val displayName = if (langLabel.isNotEmpty()) "$langLabel($suffix)" else ""
                             val labelName = if (displayName.isNotEmpty()) "YouTube ${height}p [$displayName]" else "YouTube ${height}p"
 
