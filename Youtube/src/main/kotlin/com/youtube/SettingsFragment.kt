@@ -182,10 +182,32 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                         .setTitle(Loc.getString(sharedPref, "logout_confirm_title"))
                         .setMessage(Loc.getString(sharedPref, "logout_confirm_msg"))
                         .setPositiveButton(Loc.getString(sharedPref, "delete")) { _, _ ->
+                            // 1. 모든 개인 계정 데이터 및 캐시 데이터 제거
                             sharedPref.edit().apply {
-                                remove(KEY_VISITOR); remove("SID"); remove("HSID")
-                                remove("SSID"); remove("APISID"); remove("SAPISID")
+                                remove(KEY_VISITOR)
+                                remove("SID")
+                                remove("HSID")
+                                remove("SSID")
+                                remove("APISID")
+                                remove("SAPISID")
+                                remove("yt_cached_chips") // 칩 프리퍼런스 파괴
                             }.apply()
+
+                            // 2. custom_homepages_v3 내부에서 개인화된 'Home' 및 모든 'chip_name_' 카테고리 일괄 제거
+                            val json = sharedPref.getString("custom_homepages_v3", "[]") ?: "[]"
+                            try {
+                                val mapper = jacksonObjectMapper()
+                                val currentList = mapper.readValue<List<CustomSection>>(json)
+                                
+                                // 'Home'과 'chip_name_'으로 시작하는 개인화 항목들을 목록에서 모두 필터링하여 지웁니다.
+                                val filteredList = currentList.filterNot { 
+                                    it.url == "Home" || it.url.startsWith("chip_name_") 
+                                }
+                                sharedPref.edit().putString("custom_homepages_v3", mapper.writeValueAsString(filteredList)).apply()
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                            }
+
                             Toast.makeText(ctx, Loc.getString(sharedPref, "cleared_msg"), Toast.LENGTH_SHORT).show()
                             visitorPref.text = ""
                             updateTexts()
@@ -195,6 +217,7 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                     true
                 }
             }
+
             authCategory.addPreference(clearPref)
 
             customCategory = PreferenceCategory(ctx)
