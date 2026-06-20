@@ -22,7 +22,6 @@ import com.lagradost.cloudstream3.AcraApplication
 import androidx.preference.PreferenceManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -88,18 +87,6 @@ object YoutubeUtils {
         }
         cookieBuilder.append("PREF=f6=40000000&hl=$lang; CONSENT=YES+fx.456722336;")
         return Pair(cookieBuilder.toString(), sapisidVal)
-    }
-
-    fun mergeLocalizedTitle(englishName: String, localizedName: String): String {
-        val prefixRegex = Regex("^(\\{.*?\\}|#\\d+\\s*\\{.*?\\})\\s*(.*)$")
-        val match = prefixRegex.find(englishName)
-        return if (match != null) {
-            val prefix = match.groupValues[1]
-            val cleanLocalizedTitle = prefixRegex.find(localizedName)?.groupValues?.get(2) ?: localizedName
-            "$prefix $cleanLocalizedTitle"
-        } else {
-            localizedName
-        }
     }
 
     fun getProxiedPoster(poster: String?): String? {
@@ -378,11 +365,7 @@ class YoutubeProvider(
             val urlStr = request.url.toString()
             val isSearchRequest = urlStr.contains("/results") || urlStr.contains("/v1/search")
 
-            val overrideLang = request.header("X-Override-Language")
-            val targetLang = overrideLang ?: provider.lang
-
             val requestBuilder = request.newBuilder()
-                .removeHeader("X-Override-Language")
                 .header("User-Agent", YoutubeUtils.CHROME_USER_AGENT)
 
             val origReferer = request.header("Referer")
@@ -391,9 +374,9 @@ class YoutubeProvider(
             }
 
             if (!isSearchRequest) {
-                val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(prefs, targetLang, "_Mk3UVhY40g", isSearch = false)
+                val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(prefs, provider.lang, "_Mk3UVhY40g", isSearch = false)
                 requestBuilder.addHeader("Cookie", cookies)
-                requestBuilder.addHeader("Accept-Language", "$targetLang,en-US;q=0.9,en;q=0.8")
+                requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
 
                 if (!sapisidVal.isNullOrBlank()) {
                     try {
@@ -406,9 +389,9 @@ class YoutubeProvider(
                     }
                 }
             } else {
-                val (cookies, _) = YoutubeUtils.buildCookiesAndExtractSapisid(prefs, targetLang, "_Mk3UVhY40g", isSearch = true)
+                val (cookies, _) = YoutubeUtils.buildCookiesAndExtractSapisid(prefs, provider.lang, "_Mk3UVhY40g", isSearch = true)
                 requestBuilder.addHeader("Cookie", cookies)
-                requestBuilder.addHeader("Accept-Language", "$targetLang,en-US;q=0.9,en;q=0.8")
+                requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
             }
 
             return chain.proceed(requestBuilder.build())
@@ -549,11 +532,6 @@ class YoutubeProvider(
         }
     }
 
-    private fun formatViews(viewText: String?): String {
-        if (viewText.isNullOrBlank()) return "N/A"
-        return viewText.replace(" views", "").trim()
-    }
-
     private fun getEpisodeMetaString(videoData: Map<*, *>?): String {
         if (videoData == null) return ""
         
@@ -587,7 +565,8 @@ class YoutubeProvider(
         val publishedTimeText = getText(videoData.getMapKey("publishedTimeText"))
         val videoInfo = getText(videoData.getMapKey("videoInfo"))
 
-        var rawViews = shortViewCountText.ifBlank { viewCountText }
+        // 💡 [순정 직결]: 이너튜브 가공 텍스트 직접 할당
+        val rawViews = shortViewCountText.ifBlank { viewCountText }
         date = publishedTimeText
 
         if (rawViews.isBlank() && videoInfo.isNotBlank()) {
@@ -597,7 +576,7 @@ class YoutubeProvider(
         }
 
         if (rawViews.isNotBlank()) {
-            views = formatViews(rawViews)
+            views = rawViews
         }
 
         if (views.isBlank() || date.isBlank()) {
@@ -612,7 +591,7 @@ class YoutubeProvider(
                                 channel = t
                             } else if (index == 1) {
                                 if (pIndex == 0) {
-                                    views = formatViews(t)
+                                    views = t
                                 } else {
                                     date = t
                                 }
@@ -687,6 +666,7 @@ class YoutubeProvider(
         return ""
     }
 
+    // 💡 [순정 직결]: 메타데이터 파트의 순정 텍스트("12만회" 등)를 직접 대입
     private fun extractLockupMetadata(lockup: Map<*, *>) : Triple<String, String, String> {
         var channel = ""
         var views = ""
@@ -710,7 +690,7 @@ class YoutubeProvider(
                         if (firstPart != null) {
                             val rawViews = getText(firstPart.getMapKey("text") ?: firstPart["text"])
                             if (rawViews.isNotBlank()) {
-                                views = formatViews(rawViews)
+                                views = rawViews
                             }
                         }
                         
@@ -739,7 +719,7 @@ class YoutubeProvider(
                         if (firstPart != null) {
                             val rawViews = getText(firstPart.getMapKey("text") ?: firstPart["text"])
                             if (rawViews.isNotBlank()) {
-                                views = formatViews(rawViews)
+                                views = rawViews
                             }
                         }
                         
@@ -758,7 +738,9 @@ class YoutubeProvider(
                 lockup.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")
                     ?.getMapKey("viewCount")
             )
-            if (direct.isNotBlank()) views = formatViews(direct)
+            if (direct.isNotBlank()) {
+                views = direct
+            }
         }
 
         return Triple(channel, views, date)
@@ -792,7 +774,8 @@ class YoutubeProvider(
                     .ifBlank { getText(videoData.getMapKey("shortBylineText")) }
                     .ifBlank { getText(videoData.getMapKey("longBylineText")) }
 
-                val views = formatViews(viewText)
+                // 💡 [순정 직결]: 이너튜브 텍스트 직접 대입
+                val views = viewText.ifBlank { "N/A" }
                 
                 val finalTitle = when {
                     channel.isNotBlank() && views.isNotBlank() && views != "N/A" -> "{$channel | $views} $title"
@@ -853,7 +836,7 @@ class YoutubeProvider(
                     val match = Regex(",\\s*(.*?)\\s*-").find(accessibilityText)
                     if (match != null) viewRaw = match.groupValues[1].trim()
                 }
-                val views = formatViews(viewRaw)
+                val views = viewRaw.ifBlank { "N/A" }
 
                 val poster = YoutubeUtils.getShortsSearchPoster(videoId)
 
@@ -1264,6 +1247,21 @@ class YoutubeProvider(
         val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
         try {
             val cachedChips = mapper.readValue<List<CachedChip>>(cachedChipsJson)
+            val cachedNames = cachedChips.map { it.name }.toSet()
+
+            // 💡 [자가 치유]: 수집된 설정 언어 칩 캐시에 없는 기존 이종 오염 영어 칩 섹션이 custom_homepages_v3에 존재할 시 실시간 검출하여 자동 삭제합니다.
+            val iterator = currentList.iterator()
+            while (iterator.hasNext()) {
+                val sec = iterator.next()
+                if (sec.url.startsWith("chip_name_")) {
+                    val name = sec.url.removePrefix("chip_name_")
+                    if (!cachedNames.contains(name)) {
+                        iterator.remove()
+                        modified = true
+                    }
+                }
+            }
+
             cachedChips.forEach { chip ->
                 val stableUrl = "chip_name_${chip.name}"
                 if (currentList.none { section -> section.url == stableUrl }) {
@@ -1301,17 +1299,7 @@ class YoutubeProvider(
         savedContinuationToken = null
     }
 
-    // 💡 [컴파일러 빌드 밴 해제]: SearchResponse를 새로 가 복제(copy)하여 name 상수의 컴파일 제한 우회 완료
-    // 💡 [클래스 캐스팅 버그 패치 완료]: data class copy 패턴을 활용해 val name 재할당 우회 빌드 성공
-    private fun copySearchResponseWithNewName(item: SearchResponse, newName: String): SearchResponse {
-        return when (item) {
-            is MovieSearchResponse -> item.copy(name = newName)
-            is TvSeriesSearchResponse -> item.copy(name = newName)
-            is LiveSearchResponse -> item.copy(name = newName)
-            else -> item
-        }
-    }
-
+    // 💡 [단일 전형화]: 중복적인 영문 이중 병렬 호출(en)을 전면 제거하고 오직 설정한 로컬 언어로 단 1회만 고속 동수 수집
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         isSearchContext = false
         val rawRequestData = request.data
@@ -1323,70 +1311,9 @@ class YoutubeProvider(
             return newHomePageResponse(request, emptyList(), hasNext = false)
         }
 
-        // 💡 [지능형 가속 인라인 수식]: getLanguageOverride 참조 없이 양대 저장소를 교차 추적
-        val userLang = (sharedPref?.getString("youtube_language", null as String?)
-            ?: AcraApplication.context?.let { PreferenceManager.getDefaultSharedPreferences(it).getString("youtube_language", null as String?) }
-            ?: "en")
-
-        return withContext(Dispatchers.IO) {
-            val englishDeferred = async {
-                fetchMainPageResults(page, request, requestData, isChip, "en")
-            }
-
-            val localizedDeferred = if (userLang != "en") {
-                async {
-                    fetchMainPageResults(page, request, requestData, isChip, userLang)
-                }
-            } else null
-
-            val (englishResults, englishToken) = englishDeferred.await()
-            val localizedPair = localizedDeferred?.await()
-
-            val finalResults = if (localizedPair != null) {
-                val (localizedResults, _) = localizedPair
-                val localizedMap = localizedResults.associateBy { it.url }
-                englishResults.map { engItem ->
-                    val locItem = localizedMap[engItem.url]
-                    if (locItem != null) {
-                        val mergedName = YoutubeUtils.mergeLocalizedTitle(engItem.name, locItem.name)
-                        copySearchResponseWithNewName(engItem, mergedName)
-                    } else {
-                        engItem
-                    }
-                }.toMutableList()
-            } else {
-                englishResults
-            }
-
-            saveContinuationToken(requestData, page + 1, englishToken)
-
-            newHomePageResponse(request, finalResults, hasNext = !englishToken.isNullOrBlank())
-        }
-    }   
-
-    private suspend fun fetchMainPageData(
-        page: Int,
-        request: MainPageRequest,
-        requestData: String,
-        isChip: Boolean,
-        targetLang: String
-    ): HomePageResponse {
-        val (results, token) = fetchMainPageResults(page, request, requestData, isChip, targetLang)
-        return newHomePageResponse(request, results, hasNext = !token.isNullOrBlank())
-    }
-
-    private suspend fun fetchMainPageResults(
-        page: Int,
-        request: MainPageRequest,
-        requestData: String,
-        isChip: Boolean,
-        targetLang: String
-    ): Pair<MutableList<SearchResponse>, String?> {
         val results = mutableListOf<SearchResponse>()
         val seenIds = mutableSetOf<String>()
         var nextContinuation: String? = null
-
-        val headers = mapOf("X-Override-Language" to targetLang)
 
         try {
             if (page == 1) {
@@ -1397,7 +1324,7 @@ class YoutubeProvider(
 
                     if (savedApiKey.isNullOrBlank()) {
                         try {
-                            val html = app.get(mainUrl, headers = headers, interceptor = ytInterceptor).text
+                            val html = app.get(mainUrl, interceptor = ytInterceptor).text
                             savedApiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY") ?: savedApiKey
                             savedVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA") ?: savedVisitorData
                             savedClientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: savedClientVersion ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
@@ -1432,13 +1359,13 @@ class YoutubeProvider(
                                     "clientName" to "WEB",
                                     "clientVersion" to (savedClientVersion ?: YoutubeUtils.DEFAULT_CLIENT_VERSION),
                                     "platform" to "DESKTOP",
-                                    "hl" to targetLang
+                                    "hl" to lang
                                 )
                             ),
                             "continuation" to tokenToUse
                         )
                         
-                        val reqHeaders = mapOf("X-Override-Language" to targetLang, "Origin" to mainUrl, "Referer" to mainUrl)
+                        val reqHeaders = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
                         val response = app.post(apiUrl, json = payload, headers = reqHeaders, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                         
                         if (response != null) {
@@ -1452,7 +1379,7 @@ class YoutubeProvider(
                     }
                 } else {
                     val targetUrl = if(requestData == "Home") mainUrl else requestData
-                    val html = app.get(targetUrl, headers = headers, interceptor = ytInterceptor).text
+                    val html = app.get(targetUrl, interceptor = ytInterceptor).text
                     
                     savedApiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY") ?: savedApiKey
                     savedVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA") ?: savedVisitorData
@@ -1471,38 +1398,25 @@ class YoutubeProvider(
                         if (requestData == "Home") {
                             val chipBar = safeGet(initialData, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0, "tabRenderer", "content", "richGridRenderer", "header", "feedFilterChipBarRenderer", "contents") as? List<*>
                             if (chipBar != null) {
-                                val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
-                                val cachedChipsMap = try {
-                                    mapper.readValue<List<CachedChip>>(cachedChipsJson).associateBy { it.name }.toMutableMap()
-                                } catch (e: Exception) {
-                                    mutableMapOf<String, CachedChip>()
-                                }
-
-                                var modifiedChips = false
+                                // 💡 [오버라이트 자가치유]: 단 1번의 설정 언어 한글 스레드로만 칩을 분석하고 이종 오염된 예전 영어 칩은 완전히 오버라이트 정화합니다.
+                                val cachedChipsMap = mutableMapOf<String, CachedChip>()
                                 for (chipItem in chipBar) {
                                     val chipMap = (chipItem as? Map<*, *>)?.get("chipCloudChipRenderer") as? Map<*, *> ?: continue
                                     val text = getText(chipMap["text"])
                                     val token = safeGet(chipMap, "navigationEndpoint", "continuationCommand", "token") as? String
                                     if (text.isNotBlank() && !token.isNullOrBlank()) {
-                                        val oldChip = cachedChipsMap[text]
-                                        if (oldChip?.token != token) {
-                                            cachedChipsMap[text] = CachedChip(text, token)
-                                            modifiedChips = true
-                                        }
+                                        cachedChipsMap[text] = CachedChip(text, token)
                                     }
                                 }
                                 
-                                val originalSize = try { mapper.readValue<List<CachedChip>>(cachedChipsJson).size } catch(e: Exception) { 0 }
-                                if (modifiedChips || cachedChipsMap.size > originalSize) {
-                                    val jsonArray = org.json.JSONArray()
-                                    cachedChipsMap.values.forEach { chip ->
-                                        val obj = org.json.JSONObject()
-                                        obj.put("name", chip.name)
-                                        obj.put("token", chip.token)
-                                        jsonArray.put(obj)
-                                    }
-                                    appPrefs?.edit()?.putString("yt_cached_chips", jsonArray.toString())?.apply()
+                                val jsonArray = org.json.JSONArray()
+                                cachedChipsMap.values.forEach { chip ->
+                                    val obj = org.json.JSONObject()
+                                    obj.put("name", chip.name)
+                                    obj.put("token", chip.token)
+                                    jsonArray.put(obj)
                                 }
+                                appPrefs?.edit()?.putString("yt_cached_chips", jsonArray.toString())?.apply()
                             }
                         }
 
@@ -1518,11 +1432,11 @@ class YoutubeProvider(
                 var tokenToUse = getSavedContinuationToken(requestData, page)
 
                 if (isChip && tokenToUse.isNullOrBlank() && page >= 2) {
-                    var retries = 0
-                    while (tokenToUse.isNullOrBlank() && retries < 15) {
+                    var rCount = 0
+                    while (tokenToUse.isNullOrBlank() && rCount < 15) {
                         kotlinx.coroutines.delay(300L)
                         tokenToUse = getSavedContinuationToken(requestData, page)
-                        retries++
+                        rCount++
                     }
                 }
                 
@@ -1548,13 +1462,13 @@ class YoutubeProvider(
                                     "client" to mapOf(
                                         "clientName" to "WEB", 
                                         "clientVersion" to cVersion, 
-                                        "hl" to targetLang,
+                                        "hl" to lang,
                                         "platform" to "DESKTOP"
                                     )
                                 ),
                                 "continuation" to rawToken
                             )
-                            val reqHeaders = mapOf("X-Override-Language" to targetLang, "Origin" to mainUrl, "Referer" to mainUrl)
+                            val reqHeaders = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
                             val response = app.post(apiUrl, json = payload, headers = reqHeaders, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                             if (response != null) {
                                 tokenToUse = findTokenRecursive(response)
@@ -1567,7 +1481,7 @@ class YoutubeProvider(
                                             "client" to mapOf(
                                                 "clientName" to "WEB", 
                                                 "clientVersion" to cVersion, 
-                                                "hl" to targetLang,
+                                                "hl" to lang,
                                                 "platform" to "DESKTOP"
                                             )
                                         ),
@@ -1603,13 +1517,13 @@ class YoutubeProvider(
                             "client" to mapOf(
                                 "clientName" to "WEB", 
                                 "clientVersion" to cVersion, 
-                                "hl" to targetLang,
+                                "hl" to lang,
                                 "platform" to "DESKTOP"
                             )
                         ),
                         "continuation" to tokenToUse
                     )
-                    val reqHeaders = mapOf("X-Override-Language" to targetLang, "Origin" to mainUrl, "Referer" to mainUrl)
+                    val reqHeaders = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
                     val response = app.post(apiUrl, json = payload, headers = reqHeaders, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                     if (response != null) {
                         val actions = response["onResponseReceivedActions"] 
@@ -1631,65 +1545,55 @@ class YoutubeProvider(
             logError(e) 
         }
 
-        return Pair(results, nextContinuation)
+        saveContinuationToken(requestData, page + 1, nextContinuation)
+
+        if (requestData.contains("history", ignoreCase = true)) {
+            val sorted = mutableListOf<SearchResponse>()
+            val tempShorts = mutableListOf<SearchResponse>()
+            val tempVods = mutableListOf<SearchResponse>()
+            
+            for (item in results) {
+                val isShort = item.url.contains("/shorts/")
+                if (isShort) {
+                    if (tempVods.isNotEmpty()) {
+                        sorted.addAll(tempVods)
+                        tempVods.clear()
+                        sorted.addAll(tempShorts)
+                        tempShorts.clear()
+                    }
+                    tempShorts.add(item)
+                } else {
+                    tempVods.add(item)
+                }
+            }
+            if (tempVods.isNotEmpty() || tempShorts.isNotEmpty()) {
+                sorted.addAll(tempVods)
+                sorted.addAll(tempShorts)
+            }
+            results.clear()
+            results.addAll(sorted)
+        }
+
+        return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
         return search(query, 1)?.items ?: emptyList()
     }
 
+    // 💡 [단일 전형화]: 영문 병렬 수집 로직(en)을 완전히 폐기하고 오직 설정한 로컬 언어로 단 1회만 고속 동수 수집
     override suspend fun search(query: String, page: Int): SearchResponseList? {
         val maxPages = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
         if (page > maxPages) {
             return newSearchResponseList(emptyList(), false)
         }
 
-        // 💡 [지능형 가속 인라인 수식]: getLanguageOverride 참조 없이 양대 저장소를 교차 추적
-        val userLang = (sharedPref?.getString("youtube_language", null as String?)
-            ?: AcraApplication.context?.let { PreferenceManager.getDefaultSharedPreferences(it).getString("youtube_language", null as String?) }
-            ?: "en")
-
-        return withContext(Dispatchers.IO) {
-            val englishDeferred = async {
-                fetchSearchData(query, page, "en")
-            }
-
-            val localizedDeferred = if (userLang != "en") {
-                async {
-                    fetchSearchData(query, page, userLang)
-                }
-            } else null
-
-            val englishResponse = englishDeferred.await()
-            val localizedResponse = localizedDeferred?.await()
-
-            val englishResults = englishResponse?.items?.toMutableList() ?: mutableListOf()
-            val finalResults = if (englishResults.isNotEmpty() && localizedResponse != null) {
-                val localizedMap = localizedResponse.items.associateBy { it.url }
-                englishResults.map { engItem ->
-                    val locItem = localizedMap[engItem.url]
-                    if (locItem != null) {
-                        val mergedName = YoutubeUtils.mergeLocalizedTitle(engItem.name, locItem.name)
-                        copySearchResponseWithNewName(engItem, mergedName)
-                    } else {
-                        engItem
-                    }
-                }.toMutableList()
-            } else {
-                englishResults
-            }
-
-            newSearchResponseList(finalResults, englishResponse?.hasNext ?: false)
-        }
-    }
-
-    private suspend fun fetchSearchData(
-        query: String,
-        page: Int,
-        targetLang: String
-    ): SearchResponseList? {
         val results = mutableListOf<SearchResponse>()
         isSearchContext = true
+        if (page == 1) {
+            searchShorts.clear()
+        }
+
         val seenIds = mutableSetOf<String>()
         var actualQuery = query
         var playlistMode = false
@@ -1702,15 +1606,13 @@ class YoutubeProvider(
             spParam = "&sp=EgIQAw%3D%3D"
         }
 
-        val headers = mapOf("X-Override-Language" to targetLang)
-
         try {
             if (page == 1) {
-                // 토큰 캐시 targetLang별 격리 설계 유지
-                saveContinuationToken("search_token_$targetLang", null)
+                // 토큰 캐시 targetLang별 완벽 격리 설계 유지
+                saveContinuationToken("search_token_$lang", null)
                 val encoded = URLEncoder.encode(actualQuery, "utf-8")
                 val url = "$mainUrl/results?search_query=$encoded$spParam"
-                val html = app.get(url, headers = headers, interceptor = ytInterceptor).text
+                val html = app.get(url, interceptor = ytInterceptor).text
 
                 val localApiKey = API_KEY_EXTRACT_REGEX.find(html)?.groupValues?.get(1)
                 val localVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA")
@@ -1723,10 +1625,10 @@ class YoutubeProvider(
                 if (initialData != null) {
                     processRecursive(initialData, results, seenIds, playlistMode)
                     val localContToken = findTokenRecursive(initialData)
-                    saveContinuationToken("search_token_$targetLang", localContToken)
+                    saveContinuationToken("search_token_$lang", localContToken)
                 }
             } else {
-                val tokenToUse = getSavedContinuationToken("search_token_$targetLang")
+                val tokenToUse = getSavedContinuationToken("search_token_$lang")
                 if (!tokenToUse.isNullOrBlank()) {
                     val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
                     val vData = savedVisitorData ?: appPrefs?.getString("yt_visitor_data", null) ?: ""
@@ -1736,14 +1638,14 @@ class YoutubeProvider(
                             "client" to mapOf(
                                 "clientName" to "WEB",
                                 "clientVersion" to "2.20240101.00",
-                                "hl" to targetLang,
+                                "hl" to lang,
                                 "gl" to "US",
                                 "visitorData" to vData
                             )
                         ),
                         "continuation" to tokenToUse
                     )
-                    val reqHeaders = mapOf("X-Override-Language" to targetLang, "Origin" to mainUrl, "Referer" to mainUrl) 
+                    val reqHeaders = mapOf("Origin" to mainUrl, "Referer" to mainUrl) 
                     val response = app.post(apiUrl, json = payload, headers = reqHeaders, interceptor = ytInterceptor)
                         .parsedSafe<Map<String, Any>>()
                     if (response != null) {
@@ -1753,17 +1655,15 @@ class YoutubeProvider(
                             ?: response
                         processRecursive(actions, results, seenIds, playlistMode)
                         val localContToken = findTokenRecursive(response)
-                        saveContinuationToken("search_token_$targetLang", localContToken)
+                        saveContinuationToken("search_token_$lang", localContToken)
                     }
                 }
             }
-            // 💡 [빌드 에러 완벽 쉴드]: deprecated된 생성자 대신 공식 newSearchResponseList 도우미 사용
-            return newSearchResponseList(results, !getSavedContinuationToken("search_token_$targetLang").isNullOrBlank())
+            return newSearchResponseList(results, !getSavedContinuationToken("search_token_$lang").isNullOrBlank())
         } catch (e: Exception) {
             return newSearchResponseList(emptyList(), false)
         }
     }
-
 
     private val collectedShorts = mutableListOf<Episode>()
 
@@ -1989,7 +1889,13 @@ class YoutubeProvider(
                     
                     val playerUrl = "https://www.youtube.com/youtubei/v1/player?key=$apiKey"
                     val playerPayload = mapOf(
-                        "context" to mapOf("client" to mapOf("clientName" to "WEB", "clientVersion" to cVersion, "hl" to lang)),
+                        "context" to mapOf(
+                            "client" to mapOf(
+                                "clientName" to "WEB", 
+                                "clientVersion" to cVersion, 
+                                "hl" to lang
+                            )
+                        ),
                         "videoId" to videoId
                     )
                     val pResponse = app.post(playerUrl, json = playerPayload, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
@@ -2005,7 +1911,13 @@ class YoutubeProvider(
 
                     val nextUrl = "https://www.youtube.com/youtubei/v1/next?key=$apiKey"
                     val nextPayload = mapOf(
-                        "context" to mapOf("client" to mapOf("clientName" to "WEB", "clientVersion" to cVersion, "hl" to lang)),
+                        "context" to mapOf(
+                            "client" to mapOf(
+                                "clientName" to "WEB", 
+                                "clientVersion" to cVersion, 
+                                "hl" to lang
+                            )
+                        ),
                         "videoId" to videoId
                     )
                     val nResponse = app.post(nextUrl, json = nextPayload, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
@@ -2519,7 +2431,7 @@ class YoutubeProvider(
         var ep1Views = ""
         val viewMatch = VIEW_COUNT_REGEX.find(html)
         if (viewMatch != null) {
-            ep1Views = formatViews(viewMatch.groupValues[1])
+            ep1Views = viewMatch.groupValues[1]
         }
         
         var ep1Date = ""
@@ -2533,8 +2445,15 @@ class YoutubeProvider(
             val m = item as? Map<*, *>
             val primary = m?.getMapKey("videoPrimaryInfoRenderer")
             if (primary != null) {
-                val vCount = getText(primary.getMapKey("videoViewCountRenderer")?.getMapKey("viewCount") ?: primary.getMapKey("viewCount"))
-                if (vCount.isNotBlank()) ep1Views = formatViews(vCount)
+                val viewCountRenderer = primary.getMapKey("videoViewCountRenderer")
+                val vCount = if (viewCountRenderer != null) {
+                    getText(viewCountRenderer.getMapKey("extraShortViewCount") ?: viewCountRenderer.getMapKey("viewCount"))
+                } else {
+                    getText(primary.getMapKey("viewCount"))
+                }
+                
+                // 💡 [순정 직결]: extraShortViewCount 또는 순정 뷰카운트 값을 그대로 직접 매핑
+                if (vCount.isNotBlank()) ep1Views = vCount
                 val dText = getText(primary.getMapKey("dateText"))
                 if (dText.isNotBlank()) ep1Date = dText
             }
