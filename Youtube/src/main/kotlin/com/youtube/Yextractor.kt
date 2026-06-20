@@ -355,7 +355,7 @@ open class YoutubeExtractor : ExtractorApi() {
             return null
         }
 
-        // ✅ PipePipe의 xtags(acont) 속성 추출을 위한 파서 이식 (중요)
+        // ✅ PipePipe의 xtags(acont) 속성 추출 파서 (중요)
         private fun extractHlsXtagsValue(url: String, key: String): String? {
             try {
                 val decoded = java.net.URLDecoder.decode(url, "UTF-8")
@@ -384,7 +384,7 @@ open class YoutubeExtractor : ExtractorApi() {
             } catch (e: Exception) {
                 locale.uppercase()
             }
-        }        
+        }
     }
 
     override fun getExtractorUrl(id: String): String {
@@ -675,21 +675,23 @@ open class YoutubeExtractor : ExtractorApi() {
 
                         val lines = m3u8Body.split("\n")
 
-                        // 💡 [이슈 완벽 해결책]: 오리지널 언어를 playerResponse의 adaptiveFormats 내부에서 역추적하여 100% 오차 없는 언어로 지정
+                        // 💡 [중복 제거 및 원본 감지 핵심]: 플레이어 응답이 아닌 M3U8 내부 스트림 URL의 xtags(acont)에서 진짜 원본을 역추적 (이러면 ko로 오독하지 않고 진짜 en을 찾아냄!)
                         var defaultHlsLang = ""
-                        val adaptiveFormats = playerResponse.optJSONObject("streamingData")?.optJSONArray("adaptiveFormats")
-                        if (adaptiveFormats != null) {
-                            for (i in 0 until adaptiveFormats.length()) {
-                                val format = adaptiveFormats.getJSONObject(i)
-                                val audioTrack = format.optJSONObject("audioTrack")
-                                if (audioTrack != null && audioTrack.optBoolean("audioIsDefault", false)) {
-                                    val audioTrackId = audioTrack.optString("id", "")
-                                    if (audioTrackId.isNotEmpty()) {
-                                        defaultHlsLang = audioTrackId.split(".")[0].split("-")[0].lowercase()
-                                        println("[TRACK] -> True Original HLS Language Verified via acont: $defaultHlsLang")
-                                        break
-                                    }
-                                }
+                        for (i in lines.indices) {
+                            val line = lines[i].trim()
+                            if (!line.startsWith("#EXT-X-STREAM-INF:")) continue
+                            if (i + 1 >= lines.size) break
+                            val streamUrl = lines[i + 1].trim()
+                            val audioContentId = extractHlsStringAttribute(line, "YT-EXT-AUDIO-CONTENT-ID") ?: ""
+
+                            val acont = extractHlsXtagsValue(streamUrl, "acont")
+                            println("[TRACK] -> Pre-scan variant line $i: audioContentId=$audioContentId, acont=$acont")
+                            
+                            // acont 가 "original" 로 선언된 스트림이 바로 이 영상의 "진짜 오리지널(Original)" 언어입니다.
+                            if (acont == "original" && audioContentId.isNotEmpty()) {
+                                defaultHlsLang = audioContentId.split(".")[0].split("-")[0].lowercase()
+                                println("[TRACK] -> True Original HLS Language Verified via acont: $defaultHlsLang")
+                                break
                             }
                         }
 
@@ -745,14 +747,14 @@ open class YoutubeExtractor : ExtractorApi() {
                             // 💡 설정의 언어값(langCode)에 맞추어 안드로이드 시스템 로컬라이저가 다국어 자동 번역
                             val langLabel = if (locale != "und") getLanguageLabel(locale, langCode) else ""
                             
-                            // 💡 (원본) 표기를 요청하신대로 (Original)로 완벽 고침
+                            // 💡 요청하신 대로 (원본) 표기를 (Original)로 완벽 고침
                             val suffix = if (isOriginal) {
                                 "Original"
                             } else {
                                 when (langCode.lowercase()) {
                                     "ko" -> "더빙"
                                     "ar" -> "دبلجة"
-                                    else -> "Dub"
+                                    else -> "Dubbed"
                                 }
                             }
 
@@ -832,7 +834,6 @@ open class YoutubeExtractor : ExtractorApi() {
                             streamUrl = params["url"] ?: ""
                             s = params["s"]
                             sp = params["sp"] ?: "sig"
-                            println("[TRACK] -> Extracted cipher for itag $itag. URL found: ${streamUrl.isNotEmpty()}, s: ${s?.take(10)}..., sp: $sp")
                         } else {
                             println("[TRACK] ⚠️ Skipped track (itag: $itag) - No url and no cipher found.")
                             continue
@@ -996,8 +997,6 @@ open class YoutubeExtractor : ExtractorApi() {
                             )
                         }
                     }
-                } else {
-                    println("[TRACK] 🚨 Cannot generate DASH: VideoOnlyList size=${videoOnlyList.size}, BestAudioList size=${bestAudioList.size}")
                 }
 
                 val originalUrl = "https://www.youtube.com/watch?v=$videoId"
