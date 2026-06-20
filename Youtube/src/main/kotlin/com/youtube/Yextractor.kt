@@ -244,7 +244,6 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         }
 
-        // YoutubeApiDecoder.java 완벽 이식
         private fun decodeBatch(playerId: String, sigs: List<String>, ns: List<String>): Pair<Map<String, String>, Map<String, String>> {
             val sigResults = mutableMapOf<String, String>()
             val nResults = mutableMapOf<String, String>()
@@ -355,7 +354,7 @@ open class YoutubeExtractor : ExtractorApi() {
             return null
         }
 
-        // 안드로이드 내장 시스템 Locale 번역기 연동 로직
+        // 안드로이드 내장 시스템 Locale 번역기 연동 로직 (하드코딩 맵 100% 영구 삭제됨)
         fun getLanguageLabel(locale: String, targetLang: String): String {
             return try {
                 val sysLocale = java.util.Locale(locale)
@@ -365,34 +364,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 locale.uppercase()
             }
         }
-
-        // 언어 코드 동적 번역용 다국어 맵
-        private val langMapKo = mapOf(
-            "ko" to "한국어", "en" to "영어", "es" to "스페인어", "ja" to "일본어", "zh" to "중국어",
-            "fr" to "프랑스어", "de" to "독일어", "pt" to "포르투갈어", "vi" to "베트남어", "id" to "인도네시아어",
-            "ru" to "러시아어", "th" to "태국어", "it" to "이탈리아어", "tr" to "터키어", "hi" to "힌디어",
-            "ar" to "아랍어", "pl" to "폴란드어", "nl" to "네덜란드어", "sv" to "스웨덴어", "no" to "노르웨이어",
-            "da" to "덴마크어", "fi" to "핀란드어", "ro" to "루마니아어", "hu" to "헝가리어", "cs" to "체코어",
-            "sk" to "슬로바키아어", "el" to "그리스어", "he" to "히브리어", "fa" to "페르시아어", "uk" to "우크라이나어"
-        )
-
-        private val langMapEn = mapOf(
-            "ko" to "Korean", "en" to "English", "es" to "Spanish", "ja" to "Japanese", "zh" to "Chinese",
-            "fr" to "French", "de" to "German", "pt" to "Portuguese", "vi" to "Vietnamese", "id" to "Indonesian",
-            "ru" to "Russian", "th" to "Thai", "it" to "Italian", "tr" to "Turkish", "hi" to "Hindi",
-            "ar" to "Arabic", "pl" to "Polish", "nl" to "Dutch", "sv" to "Swedish", "no" to "Norwegian",
-            "da" to "Danish", "fi" to "Finnish", "ro" to "Romanian", "hu" to "Hungarian", "cs" to "Czech",
-            "sk" to "Slovak", "el" to "Greek", "he" to "Hebrew", "fa" to "Persian", "uk" to "Ukrainian"
-        )
-
-        private val langMapAr = mapOf(
-            "ko" to "الكورية", "en" to "الإنجليزية", "es" to "الإسبانية", "ja" to "اليابانية", "zh" to "الصينية",
-            "fr" to "الفرنسية", "de" to "الألمانية", "pt" to "البرتغالية", "vi" to "الفيتنامية", "id" to "الإندونيسية",
-            "ru" to "الروسية", "th" to "التايلاندية", "it" to "الإيطالية", "tr" to "التركية", "hi" to "الهندية",
-            "ar" to "العربية", "pl" to "البولندية", "nl" to "الهولندية", "sv" to "السويدية", "no" to "النرويجية",
-            "da" to "الدانمركية", "fi" to "الفنلندية", "ro" to "الرومانية", "hu" to "المجرية", "cs" to "التشيكية",
-            "sk" to "السلوفاكية", "el" to "اليونانية", "he" to "العبرية", "fa" to "الفارسية", "uk" to "الأوكرانية"
-        )
     }
 
     override fun getExtractorUrl(id: String): String {
@@ -670,7 +641,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
 
-                // HLS 복구 및 1:1 파싱 시작
+                // M3U8 정밀 파싱 및 원본/중복제거 로직 탑재 (PipePipe 1:1 완벽 이식)
                 val hlsStreamsParsedLocal = mutableListOf<HlsParsedStream>()
                 if (hlsUrl.isNotBlank()) {
                     println("[TRACK] -> PipePipe HLS Parser: parsing stream-inf tags.")
@@ -750,17 +721,17 @@ open class YoutubeExtractor : ExtractorApi() {
                                 locale = defaultHlsLang.ifEmpty { "und" }
                             }
 
-                            // 💡 안드로이드 시스템 로컬라이저 호출
+                            // 💡 설정의 언어값(langCode)에 맞추어 안드로이드 시스템 로컬라이저가 다국어 자동 번역
                             val langLabel = if (locale != "und") getLanguageLabel(locale, langCode) else ""
                             
-                            // 💡 (원본) 표기를 요청하신대로 (Original)로 고침
+                            // 💡 (원본) 표기를 요청하신대로 (Original)로 완벽 고침
                             val suffix = if (isOriginal) {
                                 "Original"
                             } else {
                                 when (langCode.lowercase()) {
                                     "ko" -> "더빙"
                                     "ar" -> "دبلجة"
-                                    else -> "Dubbed"
+                                    else -> "Dub"
                                 }
                             }
 
@@ -1003,8 +974,6 @@ open class YoutubeExtractor : ExtractorApi() {
                             )
                         }
                     }
-                } else {
-                    println("[TRACK] 🚨 Cannot generate DASH: VideoOnlyList size=${videoOnlyList.size}, BestAudioList size=${bestAudioList.size}")
                 }
 
                 val originalUrl = "https://www.youtube.com/watch?v=$videoId"
