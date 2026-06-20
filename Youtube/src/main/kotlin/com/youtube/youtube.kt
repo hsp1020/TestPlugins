@@ -565,8 +565,17 @@ class YoutubeProvider(
         val publishedTimeText = getText(videoData.getMapKey("publishedTimeText"))
         val videoInfo = getText(videoData.getMapKey("videoInfo"))
 
-        // 💡 [순정 직결]: 이너튜브 가공 텍스트 직접 할당
-        val rawViews = shortViewCountText.ifBlank { viewCountText }
+
+        var views = ""
+        var date = ""
+
+        val shortViewCountText = getText(videoData.getMapKey("shortViewCountText"))
+        val viewCountText = getText(videoData.getMapKey("viewCountText"))
+        val publishedTimeText = getText(videoData.getMapKey("publishedTimeText"))
+        val videoInfo = getText(videoData.getMapKey("videoInfo"))
+
+        // 💡 [컴파일러 쉴드]: rawViews를 상수가 아닌 가변 변수인 'var'로 수정하여 하단의 parts 대입 재할당 오류를 완전 해결합니다.
+        var rawViews = shortViewCountText.ifBlank { viewCountText }
         date = publishedTimeText
 
         if (rawViews.isBlank() && videoInfo.isNotBlank()) {
