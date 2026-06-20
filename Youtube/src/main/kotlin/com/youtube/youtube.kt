@@ -795,6 +795,7 @@ class YoutubeProvider(
         return Triple(channel, views, date)
     }
 
+
     private fun collectFromRenderer(
         renderer: Map<*, *>?,
         seenIds: MutableSet<String>,
@@ -826,7 +827,6 @@ class YoutubeProvider(
 
                 val views = formatViews(viewText)
                 
-                // 채널명이 존재하면 {채널명 | 조회수}, 존재하지 않는 전용관이라면 {조회수 | 업로드시간} 으로 표현
                 val finalTitle = when {
                     channel.isNotBlank() && views.isNotBlank() && views != "N/A" -> "{$channel | $views} $title"
                     channel.isNotBlank() -> "{$channel} $title"
@@ -1026,7 +1026,6 @@ class YoutubeProvider(
                         TvType.Movie
                     ) { this.posterUrl = poster }
                 } else {
-                    // 채널명이 존재하면 {채널명 | 조회수}, 존재하지 않는 전용관이라면 {조회수 | 업로드시간} 으로 표현
                     finalTitle = when {
                         channel.isNotBlank() && views.isNotBlank() -> "{$channel | $views} $title"
                         channel.isNotBlank() -> "{$channel} $title"
@@ -1034,85 +1033,6 @@ class YoutubeProvider(
                         views.isNotBlank() -> "{$views} $title"
                         else -> title
                     }
-                    poster = YoutubeUtils.getBestThumbnail(
-                        lockup.getMapKey("contentImage")?.getMapKey("image")?.getListKey("sources")
-                    ) ?: "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
-                    return newMovieSearchResponse(
-                        finalTitle,
-                        "$mainUrl/watch?v=$videoId",
-                        TvType.Movie
-                    ) {
-                        this.posterUrl = if (isSearchContext) {
-                            YoutubeUtils.getProxiedPosterBottom(poster)
-                        } else {
-                            YoutubeUtils.getProxiedPosterNormal(poster)
-                        }
-                    }
-                }
-            }
-        }
-        
-            val videoId = lockup.getString("contentId")
-                ?: lockup.getMapKey("content")?.getString("videoId")
-                ?: (lockup.getMapKey("content")?.getMapKey("videoRenderer")?.getString("videoId"))
-
-            if (!videoId.isNullOrBlank() && seenIds.add(videoId)) {
-                val title = getText(
-                    lockup.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")
-                        ?.getMapKey("title")
-                )
-                if (title.isBlank()) {
-                    return null
-                }
-                var (channel, views) = extractLockupMetadata(lockup)     
-                if (channel.isBlank()) {
-                    val label = lockup.getMapKey("accessibility")?.getMapKey("accessibilityData")
-                        ?.getString("label") ?: ""
-                    val match = BY_CHANNEL_REGEX.find(label)
-                    if (match != null) channel = match.groupValues[1].replace("Shorts", "").trim()
-                }
-                val isShorts = lockup.getMapKey("content")
-                    ?.containsKey("shortsLockupViewModel") == true || lockup.toString()
-                    .contains("reelWatchEndpoint")
-                val finalTitle: String
-                val poster: String
-
-                val metaString = getEpisodeMetaString(lockup.getMapKey("content") ?: lockup)
-                if (metaString.isNotBlank()) epMetaMapCache[videoId] = metaString
-
-                if (isShorts) {
-                    val currentList = if (isSearchContext) searchShorts else homeShorts
-                    val episodeNum = synchronized(currentList) { currentList.size } + 1
-                    val contextTag = if (isSearchContext) "&ctx=search" else "&ctx=home"
-                    val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
-                    
-                    poster = YoutubeUtils.getShortsSearchPoster(videoId)
-                    
-                    val descText = buildString {
-                        if (channel.isNotBlank()) append("Channel: $channel")
-                        if (views.isNotBlank()) {
-                            if (isNotEmpty()) append(" • ")
-                            append("$views")
-                        }
-                    }
-                    
-                    val newShortEp2 = newEpisode(finalUrl) {
-                        this.name = title
-                        this.posterUrl = YoutubeUtils.getShortsEpisodeThumbnail(videoId)
-                        this.episode = episodeNum
-                        this.description = descText
-                    }
-                    addToShortsList(currentList, newShortEp2)
-
-                    finalTitle = "#$episodeNum [Shorts] {Short | $views} $title"
-                    return newMovieSearchResponse(
-                        finalTitle,
-                        finalUrl,
-                        TvType.Movie
-                    ) { this.posterUrl = poster }
-                } else {
-                    finalTitle =
-                        if (channel.isNotBlank()) "{$channel | $views} $title" else "{$views} $title"
                     poster = YoutubeUtils.getBestThumbnail(
                         lockup.getMapKey("contentImage")?.getMapKey("image")?.getListKey("sources")
                     ) ?: "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
@@ -2718,8 +2638,11 @@ class YoutubeProvider(
             println("[YTSYNC_DEBUG] 🚨 playerResponseJson이 비어 있어 트래킹을 생략합니다.")
         }
 
+        // com.youtube.YoutubeExtractor 패키지가 컴파일되지 않는 환경일 경우, 
+        // 프로젝트에 구현된 알맞은 Extractor 객체로 교체해 주시기 바랍니다.
         com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback, callback)
 
         return true
     }
 }
+    
