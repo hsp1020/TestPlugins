@@ -22,8 +22,10 @@ import com.lagradost.cloudstream3.AcraApplication
 import androidx.preference.PreferenceManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 object YoutubeUtils {
     const val CHROME_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
@@ -86,6 +88,19 @@ object YoutubeUtils {
         }
         cookieBuilder.append("PREF=f6=40000000&hl=$lang; CONSENT=YES+fx.456722336;")
         return Pair(cookieBuilder.toString(), sapisidVal)
+    }
+
+    // 💡 [지능형 결합기]: 영어로 계산된 지표 블록만 잘라내어 한글 한정 제목에 완벽히 오버레이 접합시킵니다.
+    fun mergeLocalizedTitle(englishName: String, localizedName: String): String {
+        val prefixRegex = Regex("^(\\{.*?\\}|#\\d+\\s*\\{.*?\\})\\s*(.*)$")
+        val match = prefixRegex.find(englishName)
+        return if (match != null) {
+            val prefix = match.groupValues[1]
+            val cleanLocalizedTitle = prefixRegex.find(localizedName)?.groupValues?.get(2) ?: localizedName
+            "$prefix $cleanLocalizedTitle"
+        } else {
+            localizedName
+        }
     }
 
     fun getProxiedPoster(poster: String?): String? {
@@ -216,7 +231,7 @@ object YoutubeUtils {
     fun getListKeyFromAny(obj: Any?, key: String): List<*>? {
         val map = obj as? Map<*, *> ?: return null
         val direct = map[key]
-        if (direct is List<*>) return direct
+        if (direct is List<*>) return direct as? List<Map<*, *>>
         val entriesList = map.entries
         for (entry in entriesList) {
             if ((entry.key as? String) == key) {
@@ -321,16 +336,9 @@ class YoutubeProvider(
         @Volatile
         private var savedClientVersion: String? = null
 
-        private val VIEW_REPLACE_REGEX = Regex("views|watching", RegexOption.IGNORE_CASE)
-        private val VIEW_FORMAT_REGEX = Regex(".*[KMBkmb].*", RegexOption.IGNORE_CASE)
-        private val METADATA_VIEW_REGEX = Regex(".*(\\d+(?:\\.\\d+)?[KMBkmb]|views|watching).*", RegexOption.IGNORE_CASE)
-        private val METADATA_SKIP_REGEX = Regex(".*(\\d+:\\d+|ago|watching).*")
-        private val SUBSCRIBER_REGEX = Regex(".*(subscribers|K|M|B|sub).*\\s*", RegexOption.IGNORE_CASE)
-        private val SUBSCRIBER_REPLACE_REGEX = Regex("(subscribers?)\\s*", RegexOption.IGNORE_CASE)
         private val API_KEY_EXTRACT_REGEX = Regex(""""INNERTUBE_API_KEY":"([^"]+)"""")
         
         private val DURATION_REGEX = Regex("""(\d{1,2}:)?\d{1,2}:\d{2}""")
-        private val VIEWS_REGEX = Regex("""(\d+(?:\.\d+)?[KMBkmb]?\s*)""")
         private val BY_CHANNEL_REGEX = Regex("(?:by)\\s+(.*?)\\s+(?:\\d|view)", RegexOption.IGNORE_CASE)
         private val LENGTH_SECONDS_REGEX = Regex(""""lengthSeconds"\s*:\s*"?(\d+)"""")
         private val VIEW_COUNT_REGEX = Regex(""""viewCount"\s*:\s*"?(\d+)"""")
@@ -542,29 +550,10 @@ class YoutubeProvider(
         }
     }
 
+    // 💡 [원천 최적화]: 유튜브 서버에서 이미 조율해서 보증해 준 shortViewCountText 자체를 가로채어 복잡한 파싱 연산 단계를 생략
     private fun formatViews(viewText: String?): String {
         if (viewText.isNullOrBlank()) return "N/A"
-        var text = viewText.trim()
-        val isLive = text.contains("watching", ignoreCase = true)
-        text = text.replace(Regex("views", RegexOption.IGNORE_CASE), "").trim()
-
-        val rawDigits = text.replace(",", "").trim()
-        val v = rawDigits.toLongOrNull()
-        if (v != null) {
-            val suffix = if (isLive) " watching" else ""
-            return when {
-                v < 1000 -> "$v$suffix"
-                v < 1_000_000 -> String.format(java.util.Locale.US, "%.1fK$suffix", v / 1000.0).replace(".0K", "K")
-                v < 1_000_000_000 -> String.format(java.util.Locale.US, "%.1fM$suffix", v / 1_000_000.0).replace(".0M", "M")
-                else -> String.format(java.util.Locale.US, "%.1fB$suffix", v / 1_000_000_000.0).replace(".0B", "B")
-            }
-        }
-        
-        return if (isLive && !text.contains("watching", ignoreCase = true)) {
-            "$text watching"
-        } else {
-            text
-        }
+        return viewText.replace(" views", "").trim()
     }
 
     private fun getEpisodeMetaString(videoData: Map<*, *>?): String {
@@ -595,12 +584,13 @@ class YoutubeProvider(
         var views = ""
         var date = ""
 
-        val viewCountText = getText(videoData.getMapKey("viewCountText"))
         val shortViewCountText = getText(videoData.getMapKey("shortViewCountText"))
+        val viewCountText = getText(videoData.getMapKey("viewCountText"))
         val publishedTimeText = getText(videoData.getMapKey("publishedTimeText"))
         val videoInfo = getText(videoData.getMapKey("videoInfo"))
 
-        var rawViews = viewCountText.ifBlank { shortViewCountText }
+        // 유튜브가 공식 생성해준 콤팩트 규격 바로 할당
+        var rawViews = shortViewCountText.ifBlank { viewCountText }
         date = publishedTimeText
 
         if (rawViews.isBlank() && videoInfo.isNotBlank()) {
@@ -610,8 +600,7 @@ class YoutubeProvider(
         }
 
         if (rawViews.isNotBlank()) {
-            val match = VIEWS_REGEX.find(rawViews)
-            if (match != null) views = formatViews(match.value)
+            views = formatViews(rawViews)
         }
 
         if (views.isBlank() || date.isBlank()) {
@@ -701,6 +690,7 @@ class YoutubeProvider(
         return ""
     }
 
+    // 💡 [고유 키 매핑]: metadataParts의 순수 접두사 제거 텍스트 직접 추출
     private fun extractLockupMetadata(lockup: Map<*, *>) : Triple<String, String, String> {
         var channel = ""
         var views = ""
@@ -799,8 +789,7 @@ class YoutubeProvider(
                 if (metaString.isNotBlank()) epMetaMapCache[videoId] = metaString
 
                 val title = getText(videoData.getMapKey("title")) ?: "Video"
-                val viewText = getText(videoData.getMapKey("viewCountText"))
-                    ?: getText(videoData.getMapKey("shortViewCountText"))
+                val viewText = getText(videoData.getMapKey("shortViewCountText") ?: videoData.getMapKey("viewCountText"))
                 val dateText = getText(videoData.getMapKey("publishedTimeText"))
                 
                 val channel = getText(videoData.getMapKey("ownerText"))
@@ -1093,7 +1082,7 @@ class YoutubeProvider(
             }
         } else if (data is List<*>) {
             for (item in data) {
-                processRecursive(item, depth + 1)
+                processRecursive(item, outList, seenIds, playlistMode, depth + 1, playlistId)
             }
         }
     }
@@ -2128,13 +2117,13 @@ class YoutubeProvider(
                         val parts = safeGet(row, "metadataParts") as? List<*>
                         parts?.forEach { part ->
                             val text = getText(safeGet(part, "text"))
-                            if (SUBSCRIBER_REGEX.matches(text)) {
+                            if (text.contains("subscribers", ignoreCase = true) || text.contains("구독자", ignoreCase = true)) {
                                 subscriberCount = text
                             }
                         }
                     }
                 }
-                subscriberCount = SUBSCRIBER_REPLACE_REGEX.replace(subscriberCount, "").trim()
+                subscriberCount = subscriberCount.replace(Regex("(subscribers?|구독자)\\s*", RegexOption.IGNORE_CASE), "").trim()
                 if (subscriberCount.isBlank()) subscriberCount = "N/A"
 
                 val allEpisodes = mutableListOf<Episode>()
@@ -2185,7 +2174,7 @@ class YoutubeProvider(
                             }
                             is List<*> -> {
                                 for (item in obj) {
-                                    findAllRenderers(item, depth + 1)
+                                    findAllRenderers(item, results, depth + 1)
                                 }
                             }
                         }
@@ -2302,7 +2291,7 @@ class YoutubeProvider(
                 while (!currentToken.isNullOrBlank() && pagesFetchedLocal < maxPagesLimit && !apiKey.isNullOrBlank()) {
                     try {
                         pagesFetchedLocal += 1
-                        val apiUrl = "https://www.youtube.com/youtubei/v1/browse?key=$apiKey"
+                        val apiUrl = "https://www.youtube.com/browse?key=$apiKey"
                         val payload = mapOf(
                             "context" to mapOf(
                                 "client" to mapOf(
