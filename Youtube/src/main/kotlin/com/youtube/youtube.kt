@@ -288,8 +288,9 @@ class YoutubeProvider(
     override var name = "YouTube"
     override val hasMainPage = true
     
+    // 앱 설정과 관계없이 무조건 표준 영문 응답만 취득하도록 고정
     override var lang: String
-        get() = appPrefs?.getString("youtube_language", "en") ?: "en"
+        get() = "en"
         set(value) {}
         
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Live)
@@ -379,11 +380,10 @@ class YoutubeProvider(
                 requestBuilder.header("Referer", "https://www.youtube.com/")
             }
 
-            // 앱 설정 언어 설정값과 무관하게, 유튜브 API 원본 렌더링 응답을 강제로 영어("en")로 지정 취득
             if (!isSearchRequest) {
-                val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(prefs, "en", "_Mk3UVhY40g", isSearch = false)
+                val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(prefs, provider.lang, "_Mk3UVhY40g", isSearch = false)
                 requestBuilder.addHeader("Cookie", cookies)
-                requestBuilder.addHeader("Accept-Language", "en-US,en;q=0.9,en;q=0.8")
+                requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
 
                 if (!sapisidVal.isNullOrBlank()) {
                     try {
@@ -396,9 +396,9 @@ class YoutubeProvider(
                     }
                 }
             } else {
-                val (cookies, _) = YoutubeUtils.buildCookiesAndExtractSapisid(prefs, "en", "_Mk3UVhY40g", isSearch = true)
+                val (cookies, _) = YoutubeUtils.buildCookiesAndExtractSapisid(prefs, provider.lang, "_Mk3UVhY40g", isSearch = true)
                 requestBuilder.addHeader("Cookie", cookies)
-                requestBuilder.addHeader("Accept-Language", "en-US,en;q=0.9,en;q=0.8")
+                requestBuilder.addHeader("Accept-Language", "${provider.lang},en-US;q=0.9,en;q=0.8")
             }
 
             return chain.proceed(requestBuilder.build())
@@ -716,10 +716,9 @@ class YoutubeProvider(
         return ""
     }
 
-    private fun extractLockupMetadata(lockup: Map<*, *>) : Triple<String, String, String> {
+    private fun extractLockupMetadata(lockup: Map<*, *>) : Pair<String, String> {
         var channel = ""
         var views = ""
-        var date = ""
 
         try {
             val rows = lockup.getMapKey("metadata")
@@ -729,43 +728,26 @@ class YoutubeProvider(
                 ?.getListKey("metadataRows")
 
             if (rows != null && rows.isNotEmpty()) {
-                if (rows.size == 1) {
-                    val singleRow = rows.getOrNull(0)
-                    if (singleRow != null) {
-                        val parts = singleRow.getListKey("metadataParts")
-                            ?: YoutubeUtils.getListKeyFromAny(singleRow, "metadataParts") as? List<*>
-                        
-                        val firstPart = parts?.getOrNull(0) as? Map<*, *>
-                        val rawViews = getText(firstPart?.getMapKey("text") ?: firstPart?.get("text"))
-                        if (rawViews.isNotBlank()) {
-                            views = formatViews(rawViews)
-                        }
-                        
-                        val secondPart = parts?.getOrNull(1) as? Map<*, *>
-                        date = getText(secondPart?.getMapKey("text") ?: secondPart?.get("text"))
+                val firstRow = rows.getOrNull(0)
+                if (firstRow != null) {
+                    val parts = firstRow.getListKey("metadataParts")
+                        ?: YoutubeUtils.getListKeyFromAny(firstRow, "metadataParts") as? List<*>
+                    val firstPart = parts?.getOrNull(0) as? Map<*, *>
+                    if (firstPart != null) {
+                        channel = getText(firstPart.getMapKey("text") ?: firstPart["text"])
                     }
-                } else {
-                    val firstRow = rows.getOrNull(0)
-                    if (firstRow != null) {
-                        val parts = firstRow.getListKey("metadataParts")
-                            ?: YoutubeUtils.getListKeyFromAny(firstRow, "metadataParts") as? List<*>
-                        val firstPart = parts?.getOrNull(0) as? Map<*, *>
-                        channel = getText(firstPart?.getMapKey("text") ?: firstPart?.get("text"))
-                    }
+                }
 
-                    val secondRow = rows.getOrNull(1)
-                    if (secondRow != null) {
-                        val parts = secondRow.getListKey("metadataParts")
-                            ?: YoutubeUtils.getListKeyFromAny(secondRow, "metadataParts") as? List<*>
-                        
-                        val firstPart = parts?.getOrNull(0) as? Map<*, *>
-                        val rawViews = getText(firstPart?.getMapKey("text") ?: firstPart?.get("text"))
+                val secondRow = rows.getOrNull(1)
+                if (secondRow != null) {
+                    val parts = secondRow.getListKey("metadataParts")
+                        ?: YoutubeUtils.getListKeyFromAny(secondRow, "metadataParts") as? List<*>
+                    val firstPart = parts?.getOrNull(0) as? Map<*, *>
+                    if (firstPart != null) {
+                        val rawViews = getText(firstPart.getMapKey("text") ?: firstPart["text"])
                         if (rawViews.isNotBlank()) {
                             views = formatViews(rawViews)
                         }
-                        
-                        val secondPart = parts?.getOrNull(1) as? Map<*, *>
-                        date = getText(secondPart?.getMapKey("text") ?: secondPart?.get("text"))
                     }
                 }
             }
@@ -780,9 +762,9 @@ class YoutubeProvider(
             if (direct.isNotBlank()) views = formatViews(direct)
         }
 
-        return Triple(channel, views, date)
+        return Pair(channel, views)
     }
-    
+
     private fun collectFromRenderer(
         renderer: Map<*, *>?,
         seenIds: MutableSet<String>,
@@ -806,7 +788,6 @@ class YoutubeProvider(
                 val title = getText(videoData.getMapKey("title")) ?: "Video"
                 val viewText = getText(videoData.getMapKey("viewCountText"))
                     ?: getText(videoData.getMapKey("shortViewCountText"))
-                val dateText = getText(videoData.getMapKey("publishedTimeText"))
                 
                 val channel = getText(videoData.getMapKey("ownerText"))
                     .ifBlank { getText(videoData.getMapKey("shortBylineText")) }
@@ -817,7 +798,6 @@ class YoutubeProvider(
                 val finalTitle = when {
                     channel.isNotBlank() && views.isNotBlank() && views != "N/A" -> "{$channel | $views} $title"
                     channel.isNotBlank() -> "{$channel} $title"
-                    views.isNotBlank() && views != "N/A" && dateText.isNotBlank() -> "{$views | $dateText} $title"
                     views.isNotBlank() && views != "N/A" -> "{$views} $title"
                     else -> title
                 }
@@ -954,91 +934,6 @@ class YoutubeProvider(
                 }
             }
 
-            val videoId = lockup.getString("contentId")
-                ?: lockup.getMapKey("content")?.getString("videoId")
-                ?: (lockup.getMapKey("content")?.getMapKey("videoRenderer")?.getString("videoId"))
-
-            if (!videoId.isNullOrBlank() && seenIds.add(videoId)) {
-                val title = getText(
-                    lockup.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")
-                        ?.getMapKey("title")
-                )
-                if (title.isBlank()) {
-                    return null
-                }
-                var (channel, views, date) = extractLockupMetadata(lockup)     
-                if (channel.isBlank()) {
-                    val label = lockup.getMapKey("accessibility")?.getMapKey("accessibilityData")
-                        ?.getString("label") ?: ""
-                    val match = BY_CHANNEL_REGEX.find(label)
-                    if (match != null) channel = match.groupValues[1].replace("Shorts", "").trim()
-                }
-                val isShorts = lockup.getMapKey("content")
-                    ?.containsKey("shortsLockupViewModel") == true || lockup.toString()
-                    .contains("reelWatchEndpoint")
-                val finalTitle: String
-                val poster: String
-
-                val metaString = getEpisodeMetaString(lockup.getMapKey("content") ?: lockup)
-                if (metaString.isNotBlank()) epMetaMapCache[videoId] = metaString
-
-                if (isShorts) {
-                    val currentList = if (isSearchContext) searchShorts else homeShorts
-                    val episodeNum = synchronized(currentList) { currentList.size } + 1
-                    val contextTag = if (isSearchContext) "&ctx=search" else "&ctx=home"
-                    val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
-                    
-                    poster = YoutubeUtils.getShortsSearchPoster(videoId)
-                    
-                    val descText = buildString {
-                        if (channel.isNotBlank()) append("Channel: $channel")
-                        if (views.isNotBlank()) {
-                            if (isNotEmpty()) append(" • ")
-                            append("$views")
-                        }
-                    }
-                    
-                    val newShortEp2 = newEpisode(finalUrl) {
-                        this.name = title
-                        this.posterUrl = YoutubeUtils.getShortsEpisodeThumbnail(videoId)
-                        this.episode = episodeNum
-                        this.description = descText
-                    }
-                    addToShortsList(currentList, newShortEp2)
-
-                    finalTitle = "#$episodeNum [Shorts] {Short | $views} $title"
-                    return newMovieSearchResponse(
-                        finalTitle,
-                        finalUrl,
-                        TvType.Movie
-                    ) { this.posterUrl = poster }
-                } else {
-                    finalTitle = when {
-                        channel.isNotBlank() && views.isNotBlank() -> "{$channel | $views} $title"
-                        channel.isNotBlank() -> "{$channel} $title"
-                        views.isNotBlank() && date.isNotBlank() -> "{$views | $date} $title"
-                        views.isNotBlank() -> "{$views} $title"
-                        else -> title
-                    }
-                    poster = YoutubeUtils.getBestThumbnail(
-                        lockup.getMapKey("contentImage")?.getMapKey("image")?.getListKey("sources")
-                    ) ?: "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
-                    return newMovieSearchResponse(
-                        finalTitle,
-                        "$mainUrl/watch?v=$videoId",
-                        TvType.Movie
-                    ) {
-                        this.posterUrl = if (isSearchContext) {
-                            YoutubeUtils.getProxiedPosterBottom(poster)
-                        } else {
-                            YoutubeUtils.getProxiedPosterNormal(poster)
-                        }
-                    }
-                }
-            }
-        }
-
-                
             val videoId = lockup.getString("contentId")
                 ?: lockup.getMapKey("content")?.getString("videoId")
                 ?: (lockup.getMapKey("content")?.getMapKey("videoRenderer")?.getString("videoId"))
@@ -1447,6 +1342,7 @@ class YoutubeProvider(
                                     ?.putString("yt_visitor_data", savedVisitorData)
                                     ?.putString("yt_client_version", savedClientVersion)
                                     ?.apply()
+                                Log.d("YoutubeUtils", "[CHIP] Configs retrieved successfully. Key: $savedApiKey")
                             }
                         } catch (e: Exception) {
                             Log.e("YoutubeUtils", "[CHIP] Failed to fetch mainUrl for configs", e)
@@ -1473,7 +1369,7 @@ class YoutubeProvider(
                                     "clientName" to "WEB",
                                     "clientVersion" to (savedClientVersion ?: YoutubeUtils.DEFAULT_CLIENT_VERSION),
                                     "platform" to "DESKTOP",
-                                    "hl" to "en"
+                                    "hl" to lang
                                 )
                             ),
                             "continuation" to tokenToUse
@@ -1598,7 +1494,7 @@ class YoutubeProvider(
                                     "client" to mapOf(
                                         "clientName" to "WEB", 
                                         "clientVersion" to cVersion, 
-                                        "hl" to "en",
+                                        "hl" to lang,
                                         "platform" to "DESKTOP"
                                     )
                                 ),
@@ -1618,7 +1514,7 @@ class YoutubeProvider(
                                             "client" to mapOf(
                                                 "clientName" to "WEB", 
                                                 "clientVersion" to cVersion, 
-                                                "hl" to "en",
+                                                "hl" to lang,
                                                 "platform" to "DESKTOP"
                                             )
                                         ),
@@ -1655,7 +1551,7 @@ class YoutubeProvider(
                             "client" to mapOf(
                                 "clientName" to "WEB", 
                                 "clientVersion" to cVersion, 
-                                "hl" to "en",
+                                "hl" to lang,
                                 "platform" to "DESKTOP"
                             )
                         ),
@@ -1782,7 +1678,7 @@ class YoutubeProvider(
                             "client" to mapOf(
                                 "clientName" to "WEB",
                                 "clientVersion" to "2.20240101.00",
-                                "hl" to "en",
+                                "hl" to lang,
                                 "gl" to "US",
                                 "visitorData" to vData
                             )
