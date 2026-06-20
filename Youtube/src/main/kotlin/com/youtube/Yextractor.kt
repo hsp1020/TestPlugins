@@ -8,6 +8,7 @@ import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.INFER_TYPE
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.schemaStripRegex
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.ar.youtube.YoutubeUtils
@@ -62,6 +63,26 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         )
 
+        // ✅ 실수로 누락했던 다운로더 트리거 복구
+        private val recentTriggers: MutableMap<String, Long> = Collections.synchronizedMap(
+            object : LinkedHashMap<String, Long>(16, 0.75f, true) {
+                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>?): Boolean {
+                    return size > 100
+                }
+            }
+        )
+
+        // ✅ 실수로 누락했던 로컬 서버 쓰레드 실행기 복구 (빌드 에러 원인)
+        private val serverExecutor = ThreadPoolExecutor(
+            4, 
+            16, 
+            30L, 
+            TimeUnit.SECONDS,
+            LinkedBlockingQueue(128),
+            ThreadFactory { r -> Thread(r, "YT-DASH-Server-Worker") },
+            ThreadPoolExecutor.CallerRunsPolicy()
+        )
+
         private val proxyHttpClient = okhttp3.OkHttpClient.Builder()
             .followRedirects(true)
             .followSslRedirects(true)
@@ -72,6 +93,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
         private val VISITOR_DATA_REGEX = Regex(""""VISITOR_DATA":"([^"]+)"""")
         private val CHUNK_ID_REGEX = Regex("id=([^&]+)")
+        private val FMT_REPLACE_REGEX = Regex("&fmt=[^&]+")
 
         private const val SAFARI_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15,gzip(gfe)"
         private const val SAFARI_CLIENT_VERSION = "2.20260114.08.00"
@@ -83,6 +105,24 @@ open class YoutubeExtractor : ExtractorApi() {
         private fun generateCpn(): String {
             val allowedChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
             return (1..16).map { allowedChars.random() }.joinToString("")
+        }
+
+        private fun openInExternalApp(packageName: String, targetUrl: String) {
+            val context = AcraApplication.context ?: return
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                try {
+                    val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(android.content.Intent.EXTRA_TEXT, targetUrl)
+                        setPackage(packageName)
+                        addCategory(android.content.Intent.CATEGORY_DEFAULT)
+                        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    context.startActivity(intent)
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
         }
 
         private fun handleClient(client: Socket) {
@@ -114,6 +154,34 @@ open class YoutubeExtractor : ExtractorApi() {
                     val queryParams = fullPath.substringAfter("?", "")
 
                     if (cleanPath.startsWith("/open_app")) {
+                        // ✅ 실수로 누락했던 외부 다운로더 연동 로직 복구
+                        var pkg: String? = null
+                        var targetUrl: String? = null
+                        
+                        val pairs = queryParams.split("&")
+                        for (pair in pairs) {
+                            val idx = pair.indexOf("=")
+                            if (idx != -1) {
+                                val key = pair.substring(0, idx)
+                                val value = pair.substring(idx + 1)
+                                if (key == "package") {
+                                    pkg = java.net.URLDecoder.decode(value, "UTF-8")
+                                } else if (key == "url") {
+                                    targetUrl = java.net.URLDecoder.decode(value, "UTF-8")
+                                }
+                            }
+                        }
+                        
+                        if (targetUrl != null && pkg != null) {
+                            val triggerKey = "$pkg|$targetUrl"
+                            val now = System.currentTimeMillis()
+                            val lastTrigger = recentTriggers[triggerKey] ?: 0L
+                            
+                            if (now - lastTrigger > 3000L) {
+                                recentTriggers[triggerKey] = now
+                                openInExternalApp(pkg, targetUrl)
+                            }
+                        }
                         outWriter.print("HTTP/1.1 204 No Content\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n")
                         outWriter.flush()
                     }
@@ -282,7 +350,6 @@ open class YoutubeExtractor : ExtractorApi() {
             return manifestUrl
         }
 
-        // XML 이스케이프 함수
         fun escapeXml(url: String): String {
             return url.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         }
@@ -319,6 +386,21 @@ open class YoutubeExtractor : ExtractorApi() {
         val sp: String?,
         val n: String?
     )
+
+    private fun getAppRedirectUrl(packageName: String, targetUrl: String): String? {
+        startServerIfNeeded()
+        return if (serverPort != 0) {
+            try {
+                val encodedPkg = java.net.URLEncoder.encode(packageName, "UTF-8")
+                val encodedUrl = java.net.URLEncoder.encode(targetUrl, "UTF-8")
+                "http://127.0.0.1:$serverPort/open_app?package=$encodedPkg&url=$encodedUrl"
+            } catch (e: Exception) {
+                null
+            }
+        } else {
+            null
+        }
+    }
 
     private suspend fun fetchPlayerResponse(videoId: String): Triple<JSONObject?, Long, String> {
         val watchUrl = "https://www.youtube.com/watch?v=$videoId"
@@ -482,6 +564,22 @@ open class YoutubeExtractor : ExtractorApi() {
         val cleanedUrl = url.replace(schemaStripRegex, "")
         val videoId = YoutubeUtils.extractYoutubeId(cleanedUrl) ?: cleanedUrl
 
+        val context = com.lagradost.cloudstream3.AcraApplication.context
+        val provider = com.lagradost.cloudstream3.APIHolder.allProviders.find { it.name == "YouTube" }
+        val sharedPref = (provider as? com.lagradost.cloudstream3.ar.youtube.YoutubeProvider)?.appPrefs 
+            ?: context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
+            
+        val downloaderType = sharedPref?.getString("downloader_app_type", "none") ?: "none"
+        val customPkg = sharedPref?.getString("downloader_custom_package", "") ?: ""
+
+        val (pkgName, appName) = when (downloaderType) {
+            "ytdlnis" -> Pair("com.deniscerri.ytdl", "YTDLnis")
+            "seal" -> Pair("com.junkfood.seal", "Seal")
+            "seal_plus" -> Pair("com.maheshtechnicals.sealplus", "Seal Plus")
+            "custom" -> Pair(customPkg, "Custom Downloader")
+            else -> Pair("", "")
+        }
+
         withContext(Dispatchers.IO) {
             try {
                 val (playerResponse, durationSeconds, playerId) = fetchPlayerResponse(videoId)
@@ -493,7 +591,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
                 val streamingData = playerResponse.optJSONObject("streamingData")
                 if (streamingData == null) {
-                    println("[TRACK] 🚨 streamingData missing.")
+                    println("[TRACK] 🚨 streamingData object is missing in response.")
                     return@withContext
                 }
 
@@ -508,30 +606,32 @@ open class YoutubeExtractor : ExtractorApi() {
                 if (hlsUrl.isNotBlank()) {
                     println("[TRACK] -> Emitting HLS link.")
                     callback(
-                        ExtractorLink(
+                        newExtractorLink(
                             source = this@YoutubeExtractor.name,
                             name = "Auto (HLS)",
                             url = hlsUrl,
-                            referer = mainUrl,
-                            quality = Qualities.Unknown.value,
-                            type = ExtractorLinkType.M3U8,
-                            headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
-                        )
+                            type = ExtractorLinkType.M3U8
+                        ) {
+                            this.referer = mainUrl
+                            this.quality = Qualities.Unknown.value
+                            this.headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
+                        }
                     )
                 }
                 
                 if (dashUrl.isNotBlank()) {
                     println("[TRACK] -> Emitting DASH link.")
                     callback(
-                        ExtractorLink(
+                        newExtractorLink(
                             source = this@YoutubeExtractor.name,
                             name = "Auto (DASH)",
                             url = dashUrl,
-                            referer = mainUrl,
-                            quality = Qualities.Unknown.value,
-                            type = ExtractorLinkType.DASH,
-                            headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
-                        )
+                            type = ExtractorLinkType.DASH
+                        ) {
+                            this.referer = mainUrl
+                            this.quality = Qualities.Unknown.value
+                            this.headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
+                        }
                     )
                 }
 
@@ -558,15 +658,11 @@ open class YoutubeExtractor : ExtractorApi() {
                             s = params["s"]
                             sp = params["sp"] ?: "sig"
                         } else {
-                            println("[TRACK] ⚠️ Format $i skipped: No URL and no Cipher. Dump: $format")
                             continue
                         }
                     }
 
-                    if (streamUrl.isNullOrEmpty()) {
-                        println("[TRACK] ⚠️ Format $i skipped: streamUrl empty after cipher parse.")
-                        continue
-                    }
+                    if (streamUrl.isNullOrEmpty()) continue
 
                     var n: String? = null
                     val nMatch = Regex("""[?&]n=([^&]+)""").find(streamUrl)
@@ -627,16 +723,8 @@ open class YoutubeExtractor : ExtractorApi() {
                 println("[TRACK] -> Grouped Languages: ${audiosByLanguage.keys}")
 
                 if (videoOnlyList.isNotEmpty() && audiosByLanguage.isNotEmpty()) {
-                    println("[TRACK] 6. Starting Local Server & Generating DASH Links")
                     startServerIfNeeded()
-                    
-                    if (serverPort == 0) {
-                        println("[TRACK] 🚨 FATAL: Local Server Port is 0. Failed to bind socket.")
-                    } else {
-                        println("[TRACK] -> Local Server bound to port: $serverPort")
-                    }
 
-                    // 디코딩 일괄 수행
                     val allSigs = mutableSetOf<String>()
                     val allNs = mutableSetOf<String>()
 
@@ -673,10 +761,8 @@ open class YoutubeExtractor : ExtractorApi() {
                         }
                     }
 
-                    // ✅ 언어별로 독립된 ExtractorLink 방출 (Cloudstream UI 이름 분리)
                     for (video in videoOnlyList.distinctBy { it.height }) {
                         for ((lang, audios) in audiosByLanguage) {
-                            
                             val bestAudioForLang = if (video.mimeType.contains("webm")) {
                                 audios.maxByOrNull { if (it.mimeType.contains("webm")) it.bitrate + 1000000 else it.bitrate }
                             } else {
@@ -690,24 +776,37 @@ open class YoutubeExtractor : ExtractorApi() {
 
                                 if (localLink != null) {
                                     val displayName = "$lang ${video.height}p"
-                                    println("[TRACK] -> Emitting DASH link for: $displayName")
                                     callback(
-                                        ExtractorLink(
-                                            source = this@YoutubeExtractor.name,
+                                        newExtractorLink(
                                             name = displayName,
+                                            source = this@YoutubeExtractor.name,
                                             url = localLink,
-                                            referer = mainUrl,
-                                            quality = video.height,
-                                            type = ExtractorLinkType.DASH,
-                                            headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
-                                        )
+                                            type = ExtractorLinkType.DASH
+                                        ) {
+                                            this.referer = mainUrl
+                                            this.quality = video.height
+                                            this.headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
+                                        }
                                     )
                                 }
                             }
                         }
                     }
-                } else {
-                    println("[TRACK] 🚨 Cannot generate DASH: VideoList Size=${videoOnlyList.size}, AudioGroups Size=${audiosByLanguage.size}")
+                }
+
+                val originalUrl = "https://www.youtube.com/watch?v=$videoId"
+
+                if (pkgName.isNotEmpty()) {
+                    val redirectUrl = getAppRedirectUrl(pkgName, originalUrl) ?: originalUrl
+                    callback(newExtractorLink(
+                        source = "YouTube Downloader", 
+                        name = "$appName Download", 
+                        url = redirectUrl, 
+                        type = if (redirectUrl.startsWith("http://127.0.0.1")) ExtractorLinkType.M3U8 else INFER_TYPE
+                    ) { 
+                        this.quality = 2160 
+                        this.referer = mainUrl 
+                    })
                 }
 
             } catch (e: Exception) { 
@@ -721,7 +820,6 @@ open class YoutubeExtractor : ExtractorApi() {
     private fun startServerIfNeeded() {
         if (activeServer != null && !activeServer!!.isClosed) return
         try {
-            // 다른 개발자 로직과 동일하게 안드로이드 호환성 높은 ServerSocket(0) 사용
             activeServer = ServerSocket(0)
             serverPort = activeServer!!.localPort
             
@@ -786,7 +884,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 """<SegmentBase indexRange="${audio.indexRange}"><Initialization range="${audio.initRange}" /></SegmentBase>"""
             } else ""
 
-            // xml에 언어가 굳이 명시되지 않아도, Cloudstream 외부 링크 이름(name)으로 언어를 구별하므로 기능상 문제없음
             val langAttribute = if (!audio.language.isNullOrBlank()) """ lang="${audio.language}"""" else ""
 
             sb.append("""
