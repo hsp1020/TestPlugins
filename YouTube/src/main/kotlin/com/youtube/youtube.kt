@@ -536,51 +536,47 @@ class YoutubeProvider(
             appPrefs?.edit()?.remove("cont_token_$hashedKey")?.apply()
         }
     }
-    
-    // ---------------- [CHIP_DEBUG] 칩 카테고리 보존 병합 전용 함수 ----------------
+
+    // 💡 멀티스레드 동기화 제어를 위한 고유 락 객체 선언
+    private val chipLock = Any()
+
     private fun mergeAndSaveChips(newChips: List<CachedChip>) {
-        val prefs = appPrefs ?: return
-        val existingJson = prefs.getString("yt_cached_chips", "[]") ?: "[]"
-        Log.d("YoutubeUtils", "[CHIP_DEBUG] mergeAndSaveChips - Raw existing JSON: $existingJson")
-        
-        val existingChips = try {
-            mapper.readValue<List<CachedChip>>(existingJson)
-        } catch (e: Exception) {
-            Log.e("YoutubeUtils", "[CHIP_DEBUG] mergeAndSaveChips - Failed to parse existing JSON", e)
-            emptyList<CachedChip>()
-        }
-
-        Log.d("YoutubeUtils", "[CHIP_DEBUG] mergeAndSaveChips - Existing parsed size: ${existingChips.size}, names: ${existingChips.map { it.name }}")
-        Log.d("YoutubeUtils", "[CHIP_DEBUG] mergeAndSaveChips - Incoming new size: ${newChips.size}, names: ${newChips.map { it.name }}")
-
-        val mergedMap = LinkedHashMap<String, CachedChip>()
-        
-        // 1. 기존 캐시 복원
-        existingChips.forEach { chip ->
-            mergedMap[chip.name] = chip
-        }
-        
-        // 2. 신규 유효 칩 병합 및 토큰 최신화
-        newChips.forEach { chip ->
-            if (mergedMap.containsKey(chip.name)) {
-                Log.d("YoutubeUtils", "[CHIP_DEBUG] mergeAndSaveChips - Updating token for: ${chip.name}")
-            } else {
-                Log.d("YoutubeUtils", "[CHIP_DEBUG] mergeAndSaveChips - Appending new category: ${chip.name}")
+        synchronized(chipLock) {
+            val prefs = appPrefs ?: return
+            val threadName = Thread.currentThread().name
+            val existingJson = prefs.getString("yt_cached_chips", "[]") ?: "[]"
+            
+            val existingChips = try {
+                mapper.readValue<List<CachedChip>>(existingJson)
+            } catch (e: Exception) {
+                emptyList<CachedChip>()
             }
-            mergedMap[chip.name] = chip
-        }
 
-        val mergedList = mergedMap.values.toList()
-        Log.d("YoutubeUtils", "[CHIP_DEBUG] mergeAndSaveChips - Final merged size: ${mergedList.size}, list: ${mergedList.map { it.name }}")
+            Log.d("YoutubeUtils", "[CHIP_DEBUG] [$threadName] mergeAndSaveChips STARTED - Existing size: ${existingChips.size}, Incoming size: ${newChips.size}")
 
-        try {
-            val updatedJson = mapper.writeValueAsString(mergedList)
-            prefs.edit().putString("yt_cached_chips", updatedJson).apply()
-            Log.d("YoutubeUtils", "[CHIP_DEBUG] mergeAndSaveChips - Write success.")
-        } catch (e: Exception) {
-            Log.e("YoutubeUtils", "[CHIP_DEBUG] mergeAndSaveChips - Failed to serialize merged list", e)
+            val mergedMap = LinkedHashMap<String, CachedChip>()
+            
+            // 기존 캐시 복원
+            existingChips.forEach { chip ->
+                mergedMap[chip.name] = chip
+            }
+            
+            // 신규 캐시 병합
+            newChips.forEach { chip ->
+                mergedMap[chip.name] = chip
+            }
+
+            val mergedList = mergedMap.values.toList()
+            try {
+                val updatedJson = mapper.writeValueAsString(mergedList)
+                prefs.edit().putString("yt_cached_chips", updatedJson).apply()
+                Log.d("YoutubeUtils", "[CHIP_DEBUG] [$threadName] mergeAndSaveChips SUCCESS - Saved list size: ${mergedList.size}, items: ${mergedList.map { it.name }}")
+            } catch (e: Exception) {
+                logError(e)
+            }
         }
     }
+
     // -----------------------------------------------------------------------------
 
     private fun getEpisodeMetaString(videoData: Map<*, *>?): String {
@@ -1284,48 +1280,51 @@ class YoutubeProvider(
         }
 
     private fun getCustomHomepages(): List<CustomSection> {
-        val json = appPrefs?.getString("custom_homepages_v3", "[]") ?: "[]"
-        Log.d("YoutubeUtils", "[CHIP_DEBUG] getCustomHomepages - Raw custom_homepages_v3 JSON: $json")
-        
-        val currentList = try {
-            mapper.readValue<List<CustomSection>>(json).toMutableList()
-        } catch (e: Exception) {
-            mutableListOf()
-        }
-
-        var modified = false
-
-        if (currentList.none { section -> section.url == "Home" }) {
-            currentList.add(0, CustomSection(name = "Home", url = "Home", isEnabled = true))
-            modified = true
-        }
-
-        val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
-        try {
-            val cachedChips = mapper.readValue<List<CachedChip>>(cachedChipsJson)
+        synchronized(chipLock) {
+            val json = appPrefs?.getString("custom_homepages_v3", "[]") ?: "[]"
+            val threadName = Thread.currentThread().name
+            Log.d("YoutubeUtils", "[CHIP_DEBUG] [$threadName] getCustomHomepages - Raw custom_homepages_v3 loaded: $json")
             
-            cachedChips.forEach { chip ->
-                val stableUrl = "chip_name_${chip.name}"
-                if (currentList.none { section -> section.url == stableUrl }) {
-                    currentList.add(CustomSection(name = chip.name, url = stableUrl, isEnabled = true))
-                    modified = true
-                    Log.d("YoutubeUtils", "[CHIP_DEBUG] getCustomHomepages - Added missing chip category to custom list: ${chip.name}")
-                }
+            val currentList = try {
+                mapper.readValue<List<CustomSection>>(json).toMutableList()
+            } catch (e: Exception) {
+                mutableListOf()
             }
-        } catch (e: Exception) {
-            logError(e)
-        }
 
-        if (modified) {
+            var modified = false
+
+            if (currentList.none { section -> section.url == "Home" }) {
+                currentList.add(0, CustomSection(name = "Home", url = "Home", isEnabled = true))
+                modified = true
+            }
+
+            val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
             try {
-                val updatedJson = mapper.writeValueAsString(currentList)
-                appPrefs?.edit()?.putString("custom_homepages_v3", updatedJson)?.apply()
+                val cachedChips = mapper.readValue<List<CachedChip>>(cachedChipsJson)
+                cachedChips.forEach { chip ->
+                    val stableUrl = "chip_name_${chip.name}"
+                    if (currentList.none { section -> section.url == stableUrl }) {
+                        currentList.add(CustomSection(name = chip.name, url = stableUrl, isEnabled = true))
+                        modified = true
+                        Log.d("YoutubeUtils", "[CHIP_DEBUG] [$threadName] getCustomHomepages - Appending newly discovered category to custom_homepages_v3: ${chip.name}")
+                    }
+                }
             } catch (e: Exception) {
                 logError(e)
             }
+
+            if (modified) {
+                try {
+                    val updatedJson = mapper.writeValueAsString(currentList)
+                    appPrefs?.edit()?.putString("custom_homepages_v3", updatedJson)?.apply()
+                    Log.d("YoutubeUtils", "[CHIP_DEBUG] [$threadName] getCustomHomepages - custom_homepages_v3 updated and saved successfully.")
+                } catch (e: Exception) {
+                    logError(e)
+                }
+            }
+            
+            return currentList
         }
-        
-        return currentList
     }
 
     private fun extractNameFromUrl(url: String): String {
