@@ -33,7 +33,6 @@ import java.util.Collections
 import java.util.LinkedHashMap
 import java.util.concurrent.atomic.AtomicLong
 
-// 정렬 및 중복 방지를 위한 데이터 클래스
 data class HlsParsedStream(
     val labelName: String,
     val url: String,
@@ -47,7 +46,6 @@ open class YoutubeExtractor : ExtractorApi() {
     override val name = "YouTube"
 
     companion object {
-        // 코루틴 생명주기 관리용 스코프 정의 (Thread Leak 방지)
         private val serverScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
         @Volatile
@@ -57,7 +55,33 @@ open class YoutubeExtractor : ExtractorApi() {
 
         private val streamCounter = AtomicLong(0)
 
-        // 메모리 사용 최소화를 위해 캐시 제한 축소 (1000 -> 150/300)
+        // ---------------- [ 구성 정보 및 복호화 캐시 가속 엔진 ] ----------------
+        @Volatile
+        private var cachedSts: Int = 20002
+        @Volatile
+        private var cachedPlayerId: String = ""
+        @Volatile
+        private var lastCacheTime: Long = 0L
+        private const val CACHE_TTL = 6 * 60 * 60 * 1000L // 6시간 TTL
+
+        // 이미 복호화된 서명 값을 담아두는 중복 필터 캐시
+        private val decodedSigCache: MutableMap<String, String> = Collections.synchronizedMap(
+            object : LinkedHashMap<String, String>(128, 0.75f, true) {
+                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
+                    return size > 1000
+                }
+            }
+        )
+
+        private val decodedNCache: MutableMap<String, String> = Collections.synchronizedMap(
+            object : LinkedHashMap<String, String>(128, 0.75f, true) {
+                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
+                    return size > 1000
+                }
+            }
+        )
+        // ----------------------------------------------------------------------
+
         private val manifestMap: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(64, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
@@ -93,7 +117,6 @@ open class YoutubeExtractor : ExtractorApi() {
         private val VISITOR_DATA_REGEX = Regex(""""VISITOR_DATA":"([^"]+)"""")
         private val CHUNK_ID_REGEX = Regex("id=([^&]+)")
 
-        // PipePipe 및 Safari 위장 상수 모음
         private const val SAFARI_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15,gzip(gfe)"
         private const val SAFARI_CLIENT_VERSION = "2.20260114.08.00"
         private const val VR_API_KEY = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
@@ -120,12 +143,11 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                     context.startActivity(intent)
                 } catch (e: Exception) {
-                    println("[YT_PROXY_DEBUG] 외부 앱 인텐트 전송 오류: ${e.message}")
+                    println("[YT_PROXY_DEBUG] 외부 앱 연동 실패: ${e.message}")
                 }
             }
         }
 
-        // 가상 프록시 서버 요청 처리부 모듈화
         private suspend fun handleClient(client: Socket) = withContext(Dispatchers.IO) {
             try {
                 client.use { socket ->
@@ -183,7 +205,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
             } catch (e: Exception) {
-                println("[YT_PROXY_DEBUG] 클라이언트 처리 소켓 예외: ${e.message}")
+                println("[YT_PROXY_DEBUG] 프록시 연결 처리 예외: ${e.message}")
             }
         }
 
@@ -215,11 +237,11 @@ open class YoutubeExtractor : ExtractorApi() {
                         recentTriggers[triggerKey] = now
                         openInExternalApp(pkg, targetUrl)
                     } else {
-                        println("[YT_PROXY_DEBUG] 중복된 앱 실행 요청 감지되어 인텐트 발송 차단: $triggerKey")
+                        println("[YT_PROXY_DEBUG] 중복 외부 앱 요청 차단: $triggerKey")
                     }
                 }
             } catch (e: Exception) {
-                println("[YT_PROXY_DEBUG] open_app 파싱 오류: ${e.message}")
+                println("[YT_PROXY_DEBUG] open_app 파싱 예외: ${e.message}")
             } finally {
                 outWriter.print("HTTP/1.1 204 No Content\r\n")
                 outWriter.print("Connection: close\r\n")
@@ -274,11 +296,11 @@ open class YoutubeExtractor : ExtractorApi() {
                     output.flush()
                 }
             } catch (e: Exception) {
-                println("[YT_PROXY_DEBUG] 유튜브 청크 포워딩 중단: ${e.message}")
+                println("[YT_PROXY_DEBUG] 프록시 데이터 전송 실패: ${e.message}")
             }
         }
 
-        // 디코딩 원격 호출 로직
+        // 복호화 캐시를 통해 중복된 키 값은 필터링하여 디코더 서버 통신 횟수를 단축하는 최적화
         private fun decodeBatch(playerId: String, sigs: List<String>, ns: List<String>): Pair<Map<String, String>, Map<String, String>> {
             val sigResults = mutableMapOf<String, String>()
             val nResults = mutableMapOf<String, String>()
@@ -287,18 +309,37 @@ open class YoutubeExtractor : ExtractorApi() {
                 return Pair(sigResults, nResults)
             }
 
+            // 1) 이미 해독 완료된 토큰은 캐시 맵에서 결과 즉각 확인
+            val missingSigs = sigs.filter { 
+                val cached = decodedSigCache[it]
+                if (cached != null) sigResults[it] = cached
+                cached == null
+            }
+            val missingNs = ns.filter { 
+                val cached = decodedNCache[it]
+                if (cached != null) nResults[it] = cached
+                cached == null
+            }
+
+            // 만약 새로 해독할 시그니처가 없다면 원격 API 호출을 완전히 무시 (0ms 즉시 반환)
+            if (missingSigs.isEmpty() && missingNs.isEmpty()) {
+                return Pair(sigResults, nResults)
+            }
+
+            println("[TRACK] -> decodeBatch API 요청 진행. 미보유 항목 수: s(${missingSigs.size}), n(${missingNs.size})")
+
             try {
                 val urlBuilder = StringBuilder("https://api.pipepipe.dev/decoder/decode")
                 urlBuilder.append("?player=").append(playerId)
 
-                if (ns.isNotEmpty()) {
+                if (missingNs.isNotEmpty()) {
                     urlBuilder.append("&n=")
-                    urlBuilder.append(ns.joinToString(",") { java.net.URLEncoder.encode(it, "UTF-8") })
+                    urlBuilder.append(missingNs.joinToString(",") { java.net.URLEncoder.encode(it, "UTF-8") })
                 }
 
-                if (sigs.isNotEmpty()) {
+                if (missingSigs.isNotEmpty()) {
                     urlBuilder.append("&sig=")
-                    urlBuilder.append(sigs.joinToString(",") { java.net.URLEncoder.encode(it, "UTF-8") })
+                    urlBuilder.append(missingSigs.joinToString(",") { java.net.URLEncoder.encode(it, "UTF-8") })
                 }
 
                 val request = okhttp3.Request.Builder()
@@ -316,30 +357,32 @@ open class YoutubeExtractor : ExtractorApi() {
                     val responses = jsonResponse.optJSONArray("responses") ?: JSONArray()
                     var responseIndex = 0
 
-                    if (ns.isNotEmpty()) {
+                    if (missingNs.isNotEmpty()) {
                         val nResponse = responses.optJSONObject(responseIndex++)
                         if (nResponse != null && nResponse.optString("type") == "result") {
                             val nData = nResponse.optJSONObject("data")
                             if (nData != null) {
-                                for (nParam in ns) {
+                                for (nParam in missingNs) {
                                     val decodedValue = nData.optString(nParam)
                                     if (decodedValue.isNotEmpty()) {
                                         nResults[nParam] = decodedValue
+                                        decodedNCache[nParam] = decodedValue
                                     }
                                 }
                             }
                         }
                     }
 
-                    if (sigs.isNotEmpty()) {
+                    if (missingSigs.isNotEmpty()) {
                         val sigResponse = responses.optJSONObject(responseIndex)
                         if (sigResponse != null && sigResponse.optString("type") == "result") {
                             val sigData = sigResponse.optJSONObject("data")
                             if (sigData != null) {
-                                for (sig in sigs) {
+                                for (sig in missingSigs) {
                                     val decodedValue = sigData.optString(sig)
                                     if (decodedValue.isNotEmpty()) {
                                         sigResults[sig] = decodedValue
+                                        decodedSigCache[sig] = decodedValue
                                     }
                                 }
                             }
@@ -368,7 +411,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
             } catch (e: Exception) {
-                println("[TRACK] 🚨 deobfuscateManifestUrl 예외: ${e.message}")
+                println("[TRACK] 🚨 deobfuscateManifestUrl 실패: ${e.message}")
             }
             return manifestUrl
         }
@@ -395,7 +438,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
             } catch (e: Exception) {
-                println("[TRACK] 🚨 HLS xtags 파싱 오류: ${e.message}")
+                println("[TRACK] 🚨 xtags 파싱 예외: ${e.message}")
             }
             return null
         }
@@ -458,23 +501,30 @@ open class YoutubeExtractor : ExtractorApi() {
         }
     }
 
-    // 1) HTML 파싱과 PipePipe 최신 플레이어 정보 병렬 요청 처리 최적화
+    // 전역 구성 정보 캐시를 적용하여 매번 발생하는 1.2초의 latest-player 조회를 제거한 고속 추출기
     private suspend fun fetchPlayerResponse(videoId: String): Triple<JSONObject?, Long, String> = withContext(Dispatchers.IO) {
         val watchUrl = "https://www.youtube.com/watch?v=$videoId"
         
         println("[TRACK] 1. Parallel HTML Fetch & Player Config Retrieval")
         
-        // 병렬 수집 기법 도입 (async)
         val watchHtmlDeferred = async {
             try {
                 app.get(watchUrl, headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)).text
             } catch (e: Exception) {
-                println("[TRACK] 🚨 watch HTML 펫칭 실패: ${e.message}")
+                println("[TRACK] 🚨 watch HTML 다운로드 실패: ${e.message}")
                 ""
             }
         }
 
         val pipePlayerDeferred = async {
+            val now = System.currentTimeMillis()
+            // 캐시 유효 시간(6시간) 이내라면 원격 통신을 건너뛰고 기존 sts 정보 즉각 활용 (속도 극대화)
+            if (cachedPlayerId.isNotEmpty() && (now - lastCacheTime < CACHE_TTL)) {
+                return@async JSONObject().apply {
+                    put("signatureTimestamp", cachedSts)
+                    put("player", cachedPlayerId)
+                }
+            }
             try {
                 val pipeReq = okhttp3.Request.Builder()
                     .url("https://api.pipepipe.dev/decoder/latest-player")
@@ -483,7 +533,11 @@ open class YoutubeExtractor : ExtractorApi() {
                 proxyHttpClient.newCall(pipeReq).execute().use { response ->
                     if (response.isSuccessful) {
                         val body = response.body?.string() ?: ""
-                        JSONObject(body)
+                        val json = JSONObject(body)
+                        cachedSts = json.optInt("signatureTimestamp", 20002)
+                        cachedPlayerId = json.optString("player", "")
+                        lastCacheTime = now
+                        json
                     } else null
                 }
             } catch (e: Exception) {
@@ -515,6 +569,7 @@ open class YoutubeExtractor : ExtractorApi() {
         var finalJson: JSONObject? = null
         var lengthSeconds = 3600L
 
+        // 사용자 피드백에 따라 임시 가속 타임아웃을 폐기하고, 원래의 신뢰성 높은 로그인 통신으로 안정적 대기 진행
         if (isLoggedIn) {
             println("[TRACK] 2. SAFARI API Request 처리 중")
             val safariApiUrl = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
@@ -571,12 +626,12 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
             } catch (e: Exception) { 
-                println("[TRACK] 🚨 SAFARI API 예외: ${e.message}") 
+                println("[TRACK] 🚨 SAFARI API 호출 중 예외: ${e.message}") 
             }
         }
 
         if (finalJson == null) {
-            println("[TRACK] 3. ANDROID_VR API Request (비인증 폴백 진행)")
+            println("[TRACK] 3. ANDROID_VR API Request (순차 폴백 활성화)")
             val vrApiUrl = "https://youtubei.googleapis.com/youtubei/v1/player?prettyPrint=false&key=$VR_API_KEY"
             val vrHeaders = mapOf(
                 "Content-Type" to "application/json",
@@ -616,14 +671,13 @@ open class YoutubeExtractor : ExtractorApi() {
                     lengthSeconds = json.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
                 }
             } catch (e: Exception) { 
-                println("[TRACK] 🚨 ANDROID_VR API 예외: ${e.message}") 
+                println("[TRACK] 🚨 ANDROID_VR API 호출 실패: ${e.message}") 
             }
         }
 
         Triple(finalJson, lengthSeconds, playerId)
     }
 
-    // 2) M3U8 HLS 재생 매니페스트 수집 & 정밀 분석 로직 구조화
     private suspend fun parseHlsManifest(
         hlsUrl: String,
         playerId: String,
@@ -740,11 +794,10 @@ open class YoutubeExtractor : ExtractorApi() {
                 )
             }
         } catch (e: Exception) {
-            println("[TRACK] 🚨 HLS 마스터 플레이리스트 처리 실패: ${e.message}")
+            println("[TRACK] 🚨 HLS 파싱 실패: ${e.message}")
         }
     }
 
-    // 3) 어댑티브 비디오/오디오 스트림 파싱 및 동적 프록시 DASH 제작 분리
     private suspend fun parseAdaptiveFormats(
         streamingData: JSONObject,
         playerId: String,
@@ -960,7 +1013,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 val (playerResponse, durationSeconds, playerId) = fetchPlayerResponse(videoId)
 
                 if (playerResponse == null) {
-                    println("[TRACK] 🚨 FATAL: 유효한 playerResponse 획득 실패")
+                    println("[TRACK] 🚨 FATAL: playerResponse 처리 불가")
                     return@withContext
                 }
 
@@ -973,12 +1026,10 @@ open class YoutubeExtractor : ExtractorApi() {
                 val hlsUrl = streamingData.optString("hlsManifestUrl")
                 val dashUrl = streamingData.optString("dashManifestUrl")
 
-                // HLS 매니페스트 파싱
                 if (hlsUrl.isNotBlank()) {
                     parseHlsManifest(hlsUrl, playerId, langCode, callback)
                 }
 
-                // 백업용 원본 DASH 방출
                 if (dashUrl.isNotBlank()) {
                     val finalDashUrl = if (playerId.isNotBlank()) deobfuscateManifestUrl(dashUrl, playerId) else dashUrl
                     callback(
@@ -995,7 +1046,6 @@ open class YoutubeExtractor : ExtractorApi() {
                     )
                 }
 
-                // 어댑티브 비디오/오디오 및 내부 DASH 프록시 변환
                 parseAdaptiveFormats(streamingData, playerId, durationSeconds, langCode, callback)
 
                 val originalUrl = "https://www.youtube.com/watch?v=$videoId"
@@ -1014,13 +1064,12 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
 
             } catch (e: Exception) { 
-                println("[TRACK] 🚨 getUrl 처리 전역 예외: ${e.message}")
+                println("[TRACK] 🚨 getUrl 전역 루프 예외: ${e.message}")
                 logError(e) 
             }
         }
     }
 
-    // 소켓 수동 스레드 대신 코루틴 경량 채널로 프록시 서브 리스너 상시 실행 구조 최적화
     private fun startServerIfNeeded() {
         synchronized(serverLock) {
             val server = activeServer
@@ -1030,7 +1079,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 activeServer = newServer
                 serverPort = newServer.localPort
                 
-                // 경량 구조적 동시성(Structured Concurrency) 기반 가상 서버 러닝
                 serverScope.launch {
                     try {
                         while (isActive && !newServer.isClosed) {
@@ -1039,7 +1087,6 @@ open class YoutubeExtractor : ExtractorApi() {
                             launch { handleClient(client) }
                         }
                     } catch (e: Exception) {
-                        // 정상 서버 종료 처리
                     }
                 }
             } catch (e: Exception) { 
