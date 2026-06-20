@@ -145,15 +145,38 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 summaryProvider = ListPreference.SimpleSummaryProvider.getInstance()
                 setOnPreferenceChangeListener { _, newValue ->
                     val langVal = newValue as String
+                    
+                    // 1. 양대 SharedPreferences 저장소에 새로운 언어 설정값 보관
                     sharedPref.edit().putString(KEY_LANGUAGE, langVal).apply()
                     defaultPrefs.edit().putString(KEY_LANGUAGE, langVal).apply()
+
+                    // 2. [추가 반영]: 언어 변경 즉시 기존 언어로 캐싱된 양대 저장소의 칩 프리퍼런스 파괴
+                    sharedPref.edit().remove("yt_cached_chips").apply()
+                    defaultPrefs.edit().remove("yt_cached_chips").apply()
+
+                    // 3. [추가 반영]: 언어 변경 즉시 기존 언어로 캐싱된 'Home' 및 모든 'chip_name_' 카테고리 일괄 제거 (로그아웃 로직과 동일)
+                    val json = sharedPref.getString("custom_homepages_v3", "[]") ?: "[]"
+                    try {
+                        val mapper = jacksonObjectMapper()
+                        val currentList = mapper.readValue<List<CustomSection>>(json)
+                        
+                        val filteredList = currentList.filterNot { 
+                            it.url == "Home" || it.url.startsWith("chip_name_") 
+                        }
+                        val serialized = mapper.writeValueAsString(filteredList)
+                        sharedPref.edit().putString("custom_homepages_v3", serialized).apply()
+                        defaultPrefs.edit().putString("custom_homepages_v3", serialized).apply()
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+
                     view?.post { updateTexts() }
                     true
                 }
             }
             preferenceScreen.addPreference(languagePref)
-            
-            
+
+                        
             authCategory = PreferenceCategory(ctx)
             preferenceScreen.addPreference(authCategory)
 
