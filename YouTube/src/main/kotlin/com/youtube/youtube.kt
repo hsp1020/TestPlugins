@@ -553,15 +553,14 @@ class YoutubeProvider(
         Log.d("YoutubeUtils", "[CHIP_DEBUG] mergeAndSaveChips - Existing parsed size: ${existingChips.size}, names: ${existingChips.map { it.name }}")
         Log.d("YoutubeUtils", "[CHIP_DEBUG] mergeAndSaveChips - Incoming new size: ${newChips.size}, names: ${newChips.map { it.name }}")
 
-        // 순서 보존을 위해 LinkedHashMap 활용
         val mergedMap = LinkedHashMap<String, CachedChip>()
         
-        // 1. 기존 데이터를 먼저 맵에 채워넣음
+        // 1. 기존 캐시 복원
         existingChips.forEach { chip ->
             mergedMap[chip.name] = chip
         }
         
-        // 2. 새로운 응답 데이터를 기입 (중복 항목은 토큰 정보를 최신화, 없는 항목은 누적)
+        // 2. 신규 유효 칩 병합 및 토큰 최신화
         newChips.forEach { chip ->
             if (mergedMap.containsKey(chip.name)) {
                 Log.d("YoutubeUtils", "[CHIP_DEBUG] mergeAndSaveChips - Updating token for: ${chip.name}")
@@ -1245,19 +1244,18 @@ class YoutubeProvider(
 
     override val mainPage: List<MainPageData>
         get() {
-            Log.d("YoutubeUtils", "[CHIP_DEBUG] mainPage - Invoking getCustomHomepages().")
+            Log.d("YoutubeUtils", "[CHIP_DEBUG] mainPage - Invoked.")
             val customSections = getCustomHomepages()
             val list = mutableListOf<MainPageData>()
 
             val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
-            Log.d("YoutubeUtils", "[CHIP_DEBUG] mainPage - Raw cached chips retrieved: $cachedChipsJson")
-            
             val cachedChipsMap = try {
                 mapper.readValue<List<CachedChip>>(cachedChipsJson).associateBy { it.name }
             } catch (e: Exception) {
-                Log.e("YoutubeUtils", "[CHIP_DEBUG] mainPage - Failed to parse cached chips map", e)
                 emptyMap()
             }
+
+            Log.d("YoutubeUtils", "[CHIP_DEBUG] mainPage - Cached chips map keys: ${cachedChipsMap.keys}")
 
             customSections.filter { section -> section.isEnabled }.forEach { section ->
                 val url = section.url
@@ -1271,8 +1269,7 @@ class YoutubeProvider(
                         if (activeChip != null) {
                             list.add(MainPageData(activeChip.name, "chip_name_${activeChip.name}", horizontalImages = true))
                         } else {
-                            // 캐시 매핑에 없더라도 settings 등에서 사라지지 않도록 경고만 남기고 안전장치를 가동합니다.
-                            Log.w("YoutubeUtils", "[CHIP_DEBUG] mainPage - Enabled chip '$chipName' is missing in cachedChipsMap! Checking if custom fallback can occur.")
+                            Log.w("YoutubeUtils", "[CHIP_DEBUG] mainPage - Skipped enabled chip '$chipName' because it's missing from cachedChipsMap!")
                         }
                     }
                     else -> {
@@ -1283,7 +1280,6 @@ class YoutubeProvider(
                 }
             }
 
-            Log.d("YoutubeUtils", "[CHIP_DEBUG] mainPage - Final active main pages rendered: ${list.map { it.name }}")
             return list
         }
 
@@ -1294,27 +1290,20 @@ class YoutubeProvider(
         val currentList = try {
             mapper.readValue<List<CustomSection>>(json).toMutableList()
         } catch (e: Exception) {
-            Log.e("YoutubeUtils", "[CHIP_DEBUG] getCustomHomepages - Failed to parse custom_homepages_v3", e)
             mutableListOf()
         }
-
-        Log.d("YoutubeUtils", "[CHIP_DEBUG] getCustomHomepages - Current list parsed: ${currentList.map { "${it.name}(enabled=${it.isEnabled}, url=${it.url})" }}")
 
         var modified = false
 
         if (currentList.none { section -> section.url == "Home" }) {
             currentList.add(0, CustomSection(name = "Home", url = "Home", isEnabled = true))
             modified = true
-            Log.d("YoutubeUtils", "[CHIP_DEBUG] getCustomHomepages - Missing default 'Home' added.")
         }
 
         val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
-        Log.d("YoutubeUtils", "[CHIP_DEBUG] getCustomHomepages - Raw yt_cached_chips JSON: $cachedChipsJson")
-        
         try {
             val cachedChips = mapper.readValue<List<CachedChip>>(cachedChipsJson)
-            Log.d("YoutubeUtils", "[CHIP_DEBUG] getCustomHomepages - Cached chips parsed: ${cachedChips.map { it.name }}")
-
+            
             cachedChips.forEach { chip ->
                 val stableUrl = "chip_name_${chip.name}"
                 if (currentList.none { section -> section.url == stableUrl }) {
@@ -1324,21 +1313,16 @@ class YoutubeProvider(
                 }
             }
         } catch (e: Exception) {
-            Log.e("YoutubeUtils", "[CHIP_DEBUG] getCustomHomepages - Parsing cached chips failed", e)
             logError(e)
         }
 
         if (modified) {
             try {
                 val updatedJson = mapper.writeValueAsString(currentList)
-                Log.d("YoutubeUtils", "[CHIP_DEBUG] getCustomHomepages - Saving updated custom_homepages_v3: $updatedJson")
                 appPrefs?.edit()?.putString("custom_homepages_v3", updatedJson)?.apply()
             } catch (e: Exception) {
-                Log.e("YoutubeUtils", "[CHIP_DEBUG] getCustomHomepages - Saving failed", e)
                 logError(e)
             }
-        } else {
-            Log.d("YoutubeUtils", "[CHIP_DEBUG] getCustomHomepages - No modifications to custom_homepages_v3 list were needed.")
         }
         
         return currentList
@@ -1378,17 +1362,29 @@ class YoutubeProvider(
                 saveContinuationToken(requestData, null)
 
                 if (isChip) {
-                    val oldToken = requestData.removePrefix("chip_")
-                    var tokenToUse = oldToken
-
                     val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
                     val cachedChips = try {
                         mapper.readValue<List<CachedChip>>(cachedChipsJson)
                     } catch (e: Exception) {
                         emptyList<CachedChip>()
                     }
-                    val chipName = cachedChips.find { it.token == oldToken }?.name
 
+                    val chipName: String?
+                    var tokenToUse: String?
+
+                    // 💡 [해결책 1] 명칭 기반 칩 요청과 레거시 토큰 칩 요청 분기를 안전하게 처리하여Fallback 및 TokenToUse를 확보합니다.
+                    if (requestData.startsWith("chip_name_")) {
+                        chipName = requestData.removePrefix("chip_name_")
+                        tokenToUse = cachedChips.find { it.name == chipName }?.token
+                        Log.d("YoutubeUtils", "[CHIP_DEBUG] name-based chip request: name = $chipName, fallback tokenToUse = $tokenToUse")
+                    } else {
+                        val oldToken = requestData.removePrefix("chip_")
+                        tokenToUse = oldToken
+                        chipName = cachedChips.find { it.token == oldToken }?.name
+                        Log.d("YoutubeUtils", "[CHIP_DEBUG] token-based legacy chip request: oldToken = $oldToken, reverse-lookup name = $chipName")
+                    }
+
+                    // 3. [실시간 칩 토큰 갱신] 식별에 성공했다면, 무캐시로 메인 페이지를 새로 긁어와 최신 토큰 정보를 매핑합니다.
                     if (!chipName.isNullOrBlank()) {
                         try {
                             val html = app.get(mainUrl, interceptor = ytInterceptor, headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")).text
@@ -1418,21 +1414,20 @@ class YoutubeProvider(
                                         }
                                     }
                                     
-                                    // 💡 [해결책 2] Overwrite 대신 mergeAndSaveChips 메서드로 기존 칩 캐시를 보존하며 업데이트합니다.
+                                    // 💡 [해결책 2] 오버라이트 코드 전량 제거 -> mergeAndSaveChips 메서드로 기존 칩 캐시를 보존 병합합니다.
                                     if (incomingChips.isNotEmpty()) {
-                                        Log.d("YoutubeUtils", "[CHIP_DEBUG] getMainPage - Performing merge & save for token-refresh block.")
+                                        Log.d("YoutubeUtils", "[CHIP_DEBUG] merge and save chips on token-refresh block")
                                         mergeAndSaveChips(incomingChips)
-                                    }
-
-                                    // 신선한 토큰으로 업데이트
-                                    val freshToken = incomingChips.find { it.name == chipName }?.token
-                                    if (!freshToken.isNullOrBlank()) {
-                                        tokenToUse = freshToken
+                                        
+                                        val freshToken = incomingChips.find { it.name == chipName }?.token
+                                        if (!freshToken.isNullOrBlank()) {
+                                            tokenToUse = freshToken
+                                        }
                                     }
                                 }
                             }
                         } catch (e: Exception) {
-                            Log.e("YoutubeUtils", "[CHIP_DEBUG] Failed to refresh chip tokens on pull-to-refresh", e)
+                            Log.e("YoutubeUtils", "[CHIP] Failed to refresh chip tokens on pull-to-refresh", e)
                         }
                     }
 
@@ -1440,7 +1435,7 @@ class YoutubeProvider(
                     savedVisitorData = savedVisitorData ?: appPrefs?.getString("yt_visitor_data", null)
                     savedClientVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION)
 
-                    if (!savedApiKey.isNullOrBlank()) {
+                    if (!savedApiKey.isNullOrBlank() && !tokenToUse.isNullOrBlank()) {
                         val apiUrl = "$mainUrl/youtubei/v1/browse?key=$savedApiKey"
                         val payload = mapOf(
                             "context" to mapOf(
@@ -1502,9 +1497,9 @@ class YoutubeProvider(
                                     }
                                 }
                                 
-                                // 💡 [해결책 3] Overwrite 대신 mergeAndSaveChips 메서드로 기존 칩 캐시를 보존하며 업데이트합니다.
+                                // 💡 [해결책 3] 홈 새로고침 마스터 캐시 덮어쓰기 코드 전량 제거 -> mergeAndSaveChips로 안전하게 수렴합니다.
                                 if (incomingChips.isNotEmpty()) {
-                                    Log.d("YoutubeUtils", "[CHIP_DEBUG] getMainPage - Performing merge & save for main HOME feed block.")
+                                    Log.d("YoutubeUtils", "[CHIP_DEBUG] merge and save chips on main Home feed loading")
                                     mergeAndSaveChips(incomingChips)
                                 }
                             }
@@ -1526,52 +1521,70 @@ class YoutubeProvider(
                     val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION) ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
 
                     if (isChip && !apiKey.isNullOrBlank()) {
-                        val rawToken = requestData.removePrefix("chip_")
-                        val apiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
-                        val payload = mapOf(
-                            "context" to mapOf(
-                                "client" to mapOf(
-                                    "clientName" to "WEB", 
-                                    "clientVersion" to cVersion, 
-                                    "hl" to lang,
-                                    "platform" to "DESKTOP"
-                                )
-                            ),
-                            "continuation" to rawToken
-                        )
-                        val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
-                        val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
-                        if (response != null) {
-                            tokenToUse = findTokenRecursive(response)
-                            if (!tokenToUse.isNullOrBlank()) {
-                                saveContinuationToken(requestData, tokenToUse)
-                                
-                                val innerApiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
-                                val innerPayload = mapOf(
-                                    "context" to mapOf(
-                                        "client" to mapOf(
-                                            "clientName" to "WEB", 
-                                            "clientVersion" to cVersion, 
-                                            "hl" to lang,
-                                            "platform" to "DESKTOP"
-                                        )
-                                    ),
-                                    "continuation" to tokenToUse
-                                )
-                                val innerResponse = app.post(innerApiUrl, json = innerPayload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
-                                if (innerResponse != null) {
-                                    val actions = innerResponse["onResponseReceivedActions"] 
-                                        ?: innerResponse["onResponseReceivedEndpoints"]
-                                        ?: innerResponse["onResponseReceivedCommands"] 
-                                        ?: innerResponse["continuationContents"] 
-                                        ?: innerResponse
-                                    
-                                    val playlistId = if (requestData.contains("list=")) {
-                                        requestData.substringAfter("list=", "").substringBefore("&")
-                                    } else null
+                        val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
+                        val cachedChips = try {
+                            mapper.readValue<List<CachedChip>>(cachedChipsJson)
+                        } catch (e: Exception) {
+                            emptyList<CachedChip>()
+                        }
 
-                                    processRecursive(actions, results, seenIds, playlistMode = false, playlistId = playlistId)
-                                    nextContinuation = findTokenRecursive(innerResponse)
+                        // 💡 [해결책 4] 명칭 기반과 레거시 토큰 기반을 올바르게 판별하여 rawToken 정보를 정확하게 획득합니다.
+                        val rawToken = if (requestData.startsWith("chip_name_")) {
+                            val chipName = requestData.removePrefix("chip_name_")
+                            cachedChips.find { it.name == chipName }?.token
+                        } else {
+                            requestData.removePrefix("chip_")
+                        }
+
+                        Log.d("YoutubeUtils", "[CHIP_DEBUG] page == 2 fallback: rawToken resolved = $rawToken")
+
+                        if (!rawToken.isNullOrBlank()) {
+                            val apiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
+                            val payload = mapOf(
+                                "context" to mapOf(
+                                    "client" to mapOf(
+                                        "clientName" to "WEB", 
+                                        "clientVersion" to cVersion, 
+                                        "hl" to lang,
+                                        "platform" to "DESKTOP"
+                                    )
+                                ),
+                                "continuation" to rawToken
+                            )
+                            val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
+                            val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                            if (response != null) {
+                                tokenToUse = findTokenRecursive(response)
+                                if (!tokenToUse.isNullOrBlank()) {
+                                    saveContinuationToken(requestData, tokenToUse)
+                                    
+                                    val innerApiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
+                                    val innerPayload = mapOf(
+                                        "context" to mapOf(
+                                            "client" to mapOf(
+                                                "clientName" to "WEB", 
+                                                "clientVersion" to cVersion, 
+                                                "hl" to lang,
+                                                "platform" to "DESKTOP"
+                                            )
+                                        ),
+                                        "continuation" to tokenToUse
+                                    )
+                                    val innerResponse = app.post(innerApiUrl, json = innerPayload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                                    if (innerResponse != null) {
+                                        val actions = innerResponse["onResponseReceivedActions"] 
+                                            ?: innerResponse["onResponseReceivedEndpoints"]
+                                            ?: innerResponse["onResponseReceivedCommands"] 
+                                            ?: innerResponse["continuationContents"] 
+                                            ?: innerResponse
+                                        
+                                        val playlistId = if (requestData.contains("list=")) {
+                                            requestData.substringAfter("list=", "").substringBefore("&")
+                                        } else null
+
+                                        processRecursive(actions, results, seenIds, playlistMode = false, playlistId = playlistId)
+                                        nextContinuation = findTokenRecursive(innerResponse)
+                                    }
                                 }
                             }
                         }
@@ -1648,13 +1661,10 @@ class YoutubeProvider(
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
     }
 
-    // 이하는 동일하여 생략 (전체 코드 유지됨)
-
     override suspend fun search(query: String): List<SearchResponse> {
         return search(query, 1)?.items ?: emptyList()
     }
 
-    // 💡 [단일 전형화]: 영문 병렬 수집 로직(en)을 완전히 폐기하고 오직 설정한 로컬 언어로 단 1회만 고속 동수 수집
     override suspend fun search(query: String, page: Int): SearchResponseList? {
         val maxPages = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
         if (page > maxPages) {
@@ -1669,7 +1679,6 @@ class YoutubeProvider(
 
         val seenIds = mutableSetOf<String>()
         
-        // 💡 [컴파일러 쉴드]: 기존의 'val actualQuery' 상수를 'var actualQuery' 변수로 교정하여 플레이리스트 분기 시 재할당 에러 소거
         var actualQuery = query
         var playlistMode = false
         var spParam = ""
@@ -1683,7 +1692,6 @@ class YoutubeProvider(
         
         try {
             if (page == 1) {
-                // 토큰 캐시 targetLang별 완벽 격리 설계 유지
                 saveContinuationToken("search_token_$lang", null)
                 val encoded = URLEncoder.encode(actualQuery, "utf-8")
                 val url = "$mainUrl/results?search_query=$encoded$spParam"
@@ -1884,7 +1892,7 @@ class YoutubeProvider(
                 val a = getText(panel["shortBylineText"] ?: YoutubeUtils.getMapKeyFromAny(panel, "shortBylineText"))
                     .ifBlank { getText(panel["longBylineText"] ?: YoutubeUtils.getMapKeyFromAny(panel, "longBylineText")) }
                     .ifBlank { getText(panel["ownerName"] ?: YoutubeUtils.getMapKeyFromAny(panel, "ownerName")) }
-                if (a.isNotBlank()) {
+                if (a.isNotBlank() && metadata.author.isBlank()) {
                     metadata.author = a
                 }
             }
@@ -2171,7 +2179,7 @@ class YoutubeProvider(
                                     }
                                 }
                                 for (value in obj.values) {
-                                    findAllRenderers(value, results, depth + 1)
+                                    findAllRenderers(value, depth + 1)
                                 }
                             }
                             is List<*> -> {
@@ -2527,7 +2535,6 @@ class YoutubeProvider(
                     getText(primary.getMapKey("viewCount"))
                 }
                 
-                // 💡 [순정 직결]: extraShortViewCount 또는 순정 뷰카운트 값을 그대로 직접 매핑
                 if (vCount.isNotBlank()) ep1Views = vCount
                 val dText = getText(primary.getMapKey("dateText"))
                 if (dText.isNotBlank()) ep1Date = dText
