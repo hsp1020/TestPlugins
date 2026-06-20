@@ -1240,7 +1240,7 @@ class YoutubeProvider(
             return list
         }
 
-private fun getCustomHomepages(): List<CustomSection> {
+    private fun getCustomHomepages(): List<CustomSection> {
         val json = appPrefs?.getString("custom_homepages_v3", "[]") ?: "[]"
         val currentList = try {
             mapper.readValue<List<CustomSection>>(json).toMutableList()
