@@ -2228,26 +2228,30 @@ class YoutubeProvider(
                     ?: YoutubeUtils.getBestThumbnail(safeGet(header, "content", "pageHeaderViewModel", "image", "decoratedAvatarViewModel", "avatar", "avatarViewModel", "image"))
                     ?: response.document.selectFirst("meta[property=og:image]")?.attr("content")
 
-                var subscriberCount = getText(safeGet(header, "subscriberCountText"))
-                if (subscriberCount.isBlank()) {
-                    val rows = safeGet(header, "content", "pageHeaderViewModel", "metadata", "contentMetadataViewModel", "metadataRows") as? List<*>
-                        ?: safeGet(header, "metadata", "pageHeaderViewModel", "metadata", "contentMetadataViewModel", "metadataRows") as? List<*>
-                    
-                    rows?.forEach { row ->
-                        val parts = safeGet(row, "metadataParts") as? List<*>
-                        parts?.forEach { part ->
-                            val text = getText(safeGet(part, "text"))
-                            if (text.contains("subscribers", ignoreCase = true) || text.contains("구독자", ignoreCase = true)) {
-                                subscriberCount = text
-                            }
+                val metaParts = mutableListOf<String>()
+
+                val rows = safeGet(header, "content", "pageHeaderViewModel", "metadata", "contentMetadataViewModel", "metadataRows") as? List<*>
+                    ?: safeGet(header, "metadata", "pageHeaderViewModel", "metadata", "contentMetadataViewModel", "metadataRows") as? List<*>
+                
+                rows?.forEach { row ->
+                    val parts = safeGet(row, "metadataParts") as? List<*>
+                    parts?.forEach { part ->
+                        val text = getText(safeGet(part, "text"))
+                        if (text.isNotBlank()) {
+                            metaParts.add(text)
                         }
                     }
                 }
-                subscriberCount = subscriberCount.replace(Regex("(subscribers?|구독자)\\s*", RegexOption.IGNORE_CASE), "").trim()
-                if (subscriberCount.isBlank()) subscriberCount = "N/A"
+
+                if (metaParts.isEmpty()) {
+                    val subText = getText(safeGet(header, "subscriberCountText"))
+                    if (subText.isNotBlank()) metaParts.add(subText)
+                    
+                    val videoText = getText(safeGet(header, "videosCountText") ?: safeGet(header, "videoCountText"))
+                    if (videoText.isNotBlank()) metaParts.add(videoText)
+                }
 
                 val allEpisodes = mutableListOf<Episode>()
-
 
 
                 var initialItems: List<*>? = null
@@ -2308,7 +2312,7 @@ class YoutubeProvider(
                 while (!currentToken.isNullOrBlank() && pagesFetchedLocal < maxPagesLimit && !apiKey.isNullOrBlank()) {
                     try {
                         pagesFetchedLocal += 1
-                        val apiUrl = "https://www.youtube.com/browse?key=$apiKey"
+                        val apiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
                         val payload = mapOf(
                             "context" to mapOf(
                                 "client" to mapOf(
@@ -2334,10 +2338,10 @@ class YoutubeProvider(
 
                 return newTvSeriesLoadResponse(title, url, TvType.TvSeries, allEpisodes) {
                     this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
-                    this.plot = "Channel: $title\nSubscribers: ${subscriberCount}\nVideos Fetched: ${allEpisodes.size}"
-                    this.tags = listOf(title, "Channel")
+                    this.plot = metaParts.joinToString("\n")
+                    this.tags = metaParts
                 }
-
+                
             } catch (e: Exception) {
                 logError(e)
             }
@@ -2391,7 +2395,7 @@ class YoutubeProvider(
                     val cId = playlistMeta.channelId
                     val channelUrlFull = if (cId.startsWith("UC") || cId.startsWith("@")) "$mainUrl/channel/$cId" else "$mainUrl/$cId"
                     val channelCard = newMovieSearchResponse(
-                        "Channel: $author",
+                        author,
                         channelUrlFull,
                         TvType.Live
                     ) {
@@ -2399,12 +2403,13 @@ class YoutubeProvider(
                     }
                     recList.add(channelCard)
                 }
+                
 
                 return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
                     this.posterUrl = YoutubeUtils.getProxiedPoster(playlistPoster)
                     
                     val finalDescription = buildString {
-                        append("Channel: $author")
+                        append(author)
                         if (playlistMeta.subscriberCount.isNotBlank()) {
                             append(" (${playlistMeta.subscriberCount})")
                         }
@@ -2416,6 +2421,8 @@ class YoutubeProvider(
                     this.tags = listOf(author)
                     this.recommendations = recList
                 }
+                
+                
             } catch (e: Exception) {
                 logError(e)
             }
@@ -2495,7 +2502,7 @@ class YoutubeProvider(
             val channelUrlFull = if (channelId.startsWith("UC") || channelId.startsWith("@")) "$mainUrl/channel/$channelId" else "$mainUrl/$channelId"
 
             val channelCard = newMovieSearchResponse(
-                "Channel: $channelName",
+                channelName,
                 channelUrlFull,
                 TvType.Live
             ) {
@@ -2504,6 +2511,7 @@ class YoutubeProvider(
 
             recommendations.add(0, channelCard)
         }
+
 
         val filteredRecs = recommendations.filter { !it.url.contains("/shorts/") }
 
