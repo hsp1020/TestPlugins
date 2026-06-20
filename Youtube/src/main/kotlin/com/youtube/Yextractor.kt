@@ -119,19 +119,6 @@ open class YoutubeExtractor : ExtractorApi() {
                     context.startActivity(intent)
                 } catch (e: Exception) {
                     e.printStackTrace()
-                    try {
-                        val appName = when (packageName) {
-                            "com.junkfood.seal" -> "Seal"
-                            "com.maheshtechnicals.sealplus" -> "Seal Plus"
-                            "com.deniscerri.ytdl" -> "YTDLnis"
-                            else -> "The downloader"
-                        }
-                        android.widget.Toast.makeText(
-                            context,
-                            "$appName is not installed. Please install the app and try again.",
-                            android.widget.Toast.LENGTH_LONG
-                        ).show()
-                    } catch (_: Exception) {}
                 }
             }
         }
@@ -165,40 +152,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     val queryParams = fullPath.substringAfter("?", "")
 
                     if (cleanPath.startsWith("/open_app")) {
-                        var pkg: String? = null
-                        var targetUrl: String? = null
-                        
-                        val pairs = queryParams.split("&")
-                        for (pair in pairs) {
-                            val idx = pair.indexOf("=")
-                            if (idx != -1) {
-                                val key = pair.substring(0, idx)
-                                val value = pair.substring(idx + 1)
-                                if (key == "package") {
-                                    pkg = java.net.URLDecoder.decode(value, "UTF-8")
-                                } else if (key == "url") {
-                                    targetUrl = java.net.URLDecoder.decode(value, "UTF-8")
-                                }
-                            }
-                        }
-                        
-                        if (targetUrl != null && pkg != null) {
-                            val triggerKey = "$pkg|$targetUrl"
-                            val now = System.currentTimeMillis()
-                            val lastTrigger = recentTriggers[triggerKey] ?: 0L
-                            
-                            if (now - lastTrigger > 3000L) {
-                                recentTriggers[triggerKey] = now
-                                openInExternalApp(pkg, targetUrl)
-                            } else {
-                                println("[YT_PROXY_DEBUG] 중복된 앱 실행 요청 감지되어 인텐트 발송 차단: $triggerKey")
-                            }
-                        }
-                        
-                        outWriter.print("HTTP/1.1 204 No Content\r\n")
-                        outWriter.print("Connection: close\r\n")
-                        outWriter.print("Access-Control-Allow-Origin: *\r\n")
-                        outWriter.print("\r\n")
+                        outWriter.print("HTTP/1.1 204 No Content\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n")
                         outWriter.flush()
                     }
                     else if (cleanPath.startsWith("/chunk")) {
@@ -217,12 +171,7 @@ open class YoutubeExtractor : ExtractorApi() {
                         val path = cleanPath.substringBeforeLast(".mpd").removePrefix("/")
                         val content = manifestMap[path]
                         if (content != null) {
-                            outWriter.print("HTTP/1.1 200 OK\r\n")
-                            outWriter.print("Content-Type: application/dash+xml\r\n")
-                            outWriter.print("Connection: close\r\n")
-                            outWriter.print("Access-Control-Allow-Origin: *\r\n")
-                            outWriter.print("\r\n")
-                            outWriter.print(content)
+                            outWriter.print("HTTP/1.1 200 OK\r\nContent-Type: application/dash+xml\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n$content")
                             outWriter.flush()
                         } else {
                             outWriter.print("HTTP/1.1 404 Not Found\r\n\r\n")
@@ -231,7 +180,6 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
             } catch (e: Exception) {
-                println("[YT_PROXY_DEBUG] handleClient 예외: ${e.message}")
             }
         }
 
@@ -255,7 +203,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 
                 try {
                     if (response.code == 403 || response.code == 400) {
-                        println("[YT_PROXY_DEBUG] 🚨 유튜브 CDN 에러 발생: ${response.code}")
                         val output = socket.getOutputStream()
                         val rawOutWriter = java.io.PrintWriter(output, false)
                         rawOutWriter.print("HTTP/1.1 ${response.code} ${response.message}\r\n\r\n")
@@ -271,8 +218,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     response.header("Content-Length")?.let { rawOutWriter.print("Content-Length: $it\r\n") }
                     response.header("Content-Range")?.let { rawOutWriter.print("Content-Range: $it\r\n") }
                     response.header("Accept-Ranges")?.let { rawOutWriter.print("Accept-Ranges: $it\r\n") }
-                    rawOutWriter.print("Connection: close\r\n")
-                    rawOutWriter.print("\r\n")
+                    rawOutWriter.print("Connection: close\r\n\r\n")
                     rawOutWriter.flush()
 
                     val body = response.body
@@ -286,7 +232,6 @@ open class YoutubeExtractor : ExtractorApi() {
                     response.close()
                 }
             } catch (e: Exception) {
-                println("[YT_PROXY_DEBUG] 프록시 릴레이 중 예외 발생: ${e.message}")
             }
         }
     }
@@ -349,29 +294,27 @@ open class YoutubeExtractor : ExtractorApi() {
         val isLoggedIn = !sapisidVal.isNullOrBlank()
 
         println("[TRACK] =========================================")
-        println("[TRACK] 1. Auth Headers Check")
+        println("[TRACK] 1. Auth Headers Check (Fixed Plugin Prefs - NO HALLUCINATIONS)")
         println("[TRACK] -> Extracted Cookies length: ${cookies.length}")
         println("[TRACK] -> SAPISID Extracted: $isLoggedIn")
-        println("[TRACK] =========================================")
 
         var finalJson: JSONObject? = null
         var lengthSeconds = 3600L
 
         if (isLoggedIn) {
-            println("[TRACK] 2. Sending SAFARI API Request (WITHOUT URL API Key)...")
+            println("[TRACK] 2. Sending SAFARI API Request (1:1 PipePipe Headers)...")
             
-            // ✅ PipePipe와 동일하게 ?key= 없이 prettyPrint=false 만 붙여 요청
             val safariApiUrl = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
             
+            // ✅ 환각(SOCS 조작, Origin/Referer 추가) 제거하고 PipePipe와 완벽히 동일하게 작성
             val safariHeaders = mutableMapOf(
                 "Content-Type" to "application/json",
                 "User-Agent" to SAFARI_USER_AGENT,
                 "X-YouTube-Client-Name" to "1",
                 "X-Youtube-Client-Version" to SAFARI_CLIENT_VERSION,
-                "Origin" to "https://www.youtube.com",
-                "Referer" to "https://www.youtube.com",
                 "Cookie" to cookies,
                 "Authorization" to YoutubeUtils.getSapisidHash(sapisidVal!!, "https://www.youtube.com"),
+                "X-Origin" to "https://www.youtube.com", // ⬅️ 이거 빼먹어서 막혔던 것
                 "DNT" to "1"
             )
 
@@ -402,16 +345,22 @@ open class YoutubeExtractor : ExtractorApi() {
             try {
                 val res = app.post(safariApiUrl, json = safariPayload, headers = safariHeaders).text
                 val json = JSONObject(res)
-                val status = json.optJSONObject("playabilityStatus")?.optString("status")
                 
-                println("[TRACK] -> SAFARI API Response Status: $status")
+                val playabilityStatus = json.optJSONObject("playabilityStatus")
+                val status = playabilityStatus?.optString("status")
+                
+                val reason = playabilityStatus?.optString("reason")?.ifEmpty { null }
+                    ?: playabilityStatus?.optJSONArray("messages")?.optString(0)?.ifEmpty { null }
+                    ?: "No reason provided"
+
+                println("[TRACK] -> SAFARI API Response Status: $status | Reason: $reason")
                 
                 if (status == "OK" || json.has("streamingData")) {
                     println("[TRACK] -> SAFARI Response successful.")
                     finalJson = json
                     lengthSeconds = json.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
                 } else {
-                    println("[TRACK] 🚨 SAFARI Request blocked/failed (Status: $status). Falling back to ANDROID_VR...")
+                    println("[TRACK] 🚨 SAFARI Request blocked/failed. Falling back to ANDROID_VR...")
                 }
             } catch (e: Exception) { 
                 println("[TRACK] 🚨 SAFARI Request Exception: ${e.message}") 
@@ -422,7 +371,7 @@ open class YoutubeExtractor : ExtractorApi() {
         if (finalJson == null) {
             println("[TRACK] 3. Sending ANDROID_VR API Request (No Auth fallback)...")
             val androidApiKey = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
-            val vrApiUrl = "https://youtubei.googleapis.com/youtubei/v1/player?prettyPrint=false" // 모바일은 googleapis.com 사용
+            val vrApiUrl = "https://youtubei.googleapis.com/youtubei/v1/player?prettyPrint=false"
 
             val vrHeaders = mapOf(
                 "Content-Type" to "application/json",
@@ -739,6 +688,7 @@ open class YoutubeExtractor : ExtractorApi() {
             } else ""
 
             val langAttribute = if (!audio.language.isNullOrBlank()) """ lang="${audio.language}"""" else ""
+            println("[TRACK] -> Writing XML for Audio: lang=${audio.language}, langAttribute=$langAttribute")
 
             sb.append("""
                 <AdaptationSet mimeType="${audio.mimeType}"$langAttribute subsegmentAlignment="true" subsegmentStartsWithSAP="1">
