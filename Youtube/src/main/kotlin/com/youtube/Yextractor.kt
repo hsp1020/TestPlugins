@@ -235,17 +235,11 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         }
 
-        // ✅ 디버깅 완벽 적용된 디코더 로직
         private fun decodeBatch(playerId: String, sigs: List<String>, ns: List<String>): Pair<Map<String, String>, Map<String, String>> {
             val sigResults = mutableMapOf<String, String>()
             val nResults = mutableMapOf<String, String>()
 
-            if (sigs.isEmpty() && ns.isEmpty()) {
-                println("[TRACK] -> decodeBatch called but no sigs or ns provided. Skipping.")
-                return Pair(sigResults, nResults)
-            }
-
-            println("[TRACK] -> Executing decodeBatch. PlayerID: $playerId, Sigs count: ${sigs.size}, Ns count: ${ns.size}")
+            if (sigs.isEmpty() && ns.isEmpty()) return Pair(sigResults, nResults)
 
             try {
                 val urlBuilder = StringBuilder("https://api.pipepipe.dev/decoder/decode")
@@ -270,14 +264,8 @@ open class YoutubeExtractor : ExtractorApi() {
                 val responseBody = response.body?.string() ?: ""
                 response.close()
 
-                println("[TRACK] -> decodeBatch HTTP Code: ${response.code}")
-
                 val jsonResponse = JSONObject(responseBody)
-                val type = jsonResponse.optString("type")
-                if (type != "result") {
-                    println("[TRACK] 🚨 decodeBatch API returned unexpected type: $type. Body: $responseBody")
-                    return Pair(sigResults, nResults)
-                }
+                if (jsonResponse.optString("type") != "result") return Pair(sigResults, nResults)
 
                 val responses = jsonResponse.optJSONArray("responses") ?: JSONArray()
                 var responseIndex = 0
@@ -289,15 +277,9 @@ open class YoutubeExtractor : ExtractorApi() {
                         if (nData != null) {
                             for (nParam in ns) {
                                 val decodedValue = nData.optString(nParam)
-                                if (decodedValue.isNotEmpty()) {
-                                    nResults[nParam] = decodedValue
-                                } else {
-                                    println("[TRACK] ⚠️ Empty decoded value for N param: $nParam")
-                                }
+                                if (decodedValue.isNotEmpty()) nResults[nParam] = decodedValue
                             }
                         }
-                    } else {
-                        println("[TRACK] 🚨 N parameter response failed. Dump: ${nResponse?.toString()}")
                     }
                 }
 
@@ -308,53 +290,38 @@ open class YoutubeExtractor : ExtractorApi() {
                         if (sigData != null) {
                             for (sig in sigs) {
                                 val decodedValue = sigData.optString(sig)
-                                if (decodedValue.isNotEmpty()) {
-                                    sigResults[sig] = decodedValue
-                                } else {
-                                    println("[TRACK] ⚠️ Empty decoded value for Sig param: $sig")
-                                }
+                                if (decodedValue.isNotEmpty()) sigResults[sig] = decodedValue
                             }
                         }
-                    } else {
-                        println("[TRACK] 🚨 Sig parameter response failed. Dump: ${sigResponse?.toString()}")
                     }
                 }
-
-                println("[TRACK] ✅ Batch Decode API Success: Decoded ${sigResults.size} Sigs, ${nResults.size} N params")
             } catch (e: Exception) {
-                println("[TRACK] 🚨 Exception in decodeBatch: ${e.message}")
+                println("[TRACK] 🚨 Failed to call batch decode API: ${e.message}")
             }
 
             return Pair(sigResults, nResults)
         }
 
-        // HLS/DASH manifest URL 복호화
         fun deobfuscateManifestUrl(manifestUrl: String, playerId: String): String {
-            println("[TRACK] -> Attempting to deobfuscate manifest URL. Has PlayerID? ${playerId.isNotBlank()}")
-            if (manifestUrl.isBlank() || playerId.isBlank()) {
-                println("[TRACK] ⚠️ Skipping deobfuscateManifestUrl: manifestUrl or playerId is blank.")
-                return manifestUrl
-            }
+            if (manifestUrl.isBlank() || playerId.isBlank()) return manifestUrl
             try {
                 val match = Regex("""/n/([^/&?]+)""").find(manifestUrl)
                 if (match != null) {
                     val n = match.groupValues[1]
-                    println("[TRACK] -> Found /n/ param in manifest: $n. Decoding...")
                     val decodedNs = decodeBatch(playerId, emptyList(), listOf(n)).second
                     val decodedN = decodedNs[n]
                     if (!decodedN.isNullOrBlank()) {
-                        println("[TRACK] ✅ Successfully decoded /n/ param for manifest.")
                         return manifestUrl.replace("/n/$n", "/n/$decodedN")
-                    } else {
-                        println("[TRACK] 🚨 Failed to decode /n/ param. Decoder returned empty.")
                     }
-                } else {
-                    println("[TRACK] -> No /n/ param found in manifest URL.")
                 }
             } catch (e: Exception) {
-                println("[TRACK] 🚨 Exception in deobfuscateManifestUrl: ${e.message}")
             }
             return manifestUrl
+        }
+        
+        // XML 특수문자 오류 방지 함수 (다른 개발자 로직 이식)
+        fun escapeXml(url: String): String {
+            return url.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         }
     }
 
@@ -408,8 +375,6 @@ open class YoutubeExtractor : ExtractorApi() {
     private suspend fun fetchPlayerResponse(videoId: String): Triple<JSONObject?, Long, String> {
         val watchUrl = "https://www.youtube.com/watch?v=$videoId"
         
-        println("[TRACK] =========================================")
-        println("[TRACK] 1. Initial HTML Fetch & Cookie Extraction")
         val html = app.get(watchUrl, headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)).text
         val visitorData = VISITOR_DATA_REGEX.find(html)?.groupValues?.get(1) ?: ""
 
@@ -425,7 +390,6 @@ open class YoutubeExtractor : ExtractorApi() {
         var sts = 20002
         var playerId = ""
         try {
-            println("[TRACK] -> Fetching latest player info from api.pipepipe.dev")
             val pipeReq = okhttp3.Request.Builder()
                 .url("https://api.pipepipe.dev/decoder/latest-player")
                 .header("User-Agent", "PipePipe/4.9.0")
@@ -436,20 +400,13 @@ open class YoutubeExtractor : ExtractorApi() {
             val json = JSONObject(pipeBody)
             sts = json.optInt("signatureTimestamp", sts)
             playerId = json.optString("player", "")
-            println("[TRACK] ✅ PipePipe API Success -> PlayerID: $playerId, STS: $sts")
         } catch (e: Exception) {
-            println("[TRACK] 🚨 PipePipe API failed: ${e.message}")
         }
-
-        println("[TRACK] -> Extracted Cookies length: ${cookies.length}")
-        println("[TRACK] -> SAPISID Extracted: $isLoggedIn")
 
         var finalJson: JSONObject? = null
         var lengthSeconds = 3600L
 
         if (isLoggedIn) {
-            println("[TRACK] 2. Sending SAFARI API Request via Pure OkHttp...")
-            
             val safariApiUrl = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
             
             val safariPayload = JSONObject(mapOf(
@@ -493,41 +450,21 @@ open class YoutubeExtractor : ExtractorApi() {
             try {
                 val response = proxyHttpClient.newCall(request).execute()
                 val res = response.body?.string() ?: ""
-                val code = response.code
                 response.close()
                 
-                println("[TRACK] -> SAFARI API HTTP Code: $code, Response Length: ${res.length}")
+                val json = JSONObject(res)
+                val playabilityStatus = json.optJSONObject("playabilityStatus")
+                val status = playabilityStatus?.optString("status")
                 
-                if (res.isNotEmpty()) {
-                    val json = JSONObject(res)
-                    val playabilityStatus = json.optJSONObject("playabilityStatus")
-                    val status = playabilityStatus?.optString("status")
-                    
-                    val reason = playabilityStatus?.optString("reason")?.ifEmpty { null }
-                        ?: playabilityStatus?.optJSONArray("messages")?.optString(0)?.ifEmpty { null }
-                        ?: playabilityStatus?.optJSONObject("errorScreen")?.optJSONObject("playerErrorMessageRenderer")?.optJSONObject("subreason")?.optJSONObject("simpleText")?.optString("simpleText")?.ifEmpty { null }
-                        ?: "No reason provided"
-
-                    println("[TRACK] -> SAFARI API Response Status: $status | Reason: $reason")
-                    
-                    if (status == "OK" || json.has("streamingData")) {
-                        println("[TRACK] ✅ SAFARI Response successful.")
-                        finalJson = json
-                        lengthSeconds = json.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
-                    } else {
-                        println("[TRACK] 🚨 SAFARI Request blocked/failed. Final JSON will remain null.")
-                    }
-                } else {
-                    println("[TRACK] 🚨 SAFARI Request returned empty body.")
+                if (status == "OK" || json.has("streamingData")) {
+                    finalJson = json
+                    lengthSeconds = json.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
                 }
             } catch (e: Exception) { 
-                println("[TRACK] 🚨 SAFARI Request Exception: ${e.message}") 
             }
         }
 
-        // 로그인 안 되어있거나 Safari가 막혔을 때 ANDROID_VR로 폴백
         if (finalJson == null) {
-            println("[TRACK] 3. Sending ANDROID_VR API Request (No Auth fallback)...")
             val androidApiKey = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
             val vrApiUrl = "https://youtubei.googleapis.com/youtubei/v1/player?prettyPrint=false&key=$androidApiKey"
 
@@ -565,17 +502,11 @@ open class YoutubeExtractor : ExtractorApi() {
                 val json = JSONObject(res)
                 val status = json.optJSONObject("playabilityStatus")?.optString("status")
                 
-                println("[TRACK] -> ANDROID_VR API Response Status: $status")
-
                 if (status == "OK" || json.has("streamingData")) {
-                    println("[TRACK] ✅ ANDROID_VR Response successful.")
                     finalJson = json
                     lengthSeconds = json.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
-                } else {
-                    println("[TRACK] 🚨 ANDROID_VR Request also blocked/failed.")
                 }
             } catch (e: Exception) { 
-                println("[TRACK] 🚨 Exception during ANDROID_VR Request: ${e.message}") 
             }
         }
 
@@ -612,38 +543,29 @@ open class YoutubeExtractor : ExtractorApi() {
                 val (playerResponse, durationSeconds, playerId) = fetchPlayerResponse(videoId)
 
                 if (playerResponse == null) {
-                    println("[TRACK] 🚨 FATAL: Failed to get any valid playerResponse.")
+                    println("[TRACK] 🚨 Failed to get playerResponse.")
                     return@withContext
                 }
 
                 val streamingData = playerResponse.optJSONObject("streamingData")
                 if (streamingData == null) {
-                    println("[TRACK] 🚨 FATAL: streamingData object is missing in response.")
+                    println("[TRACK] 🚨 streamingData object is missing in response.")
                     return@withContext
                 }
 
-                println("[TRACK] 4. Extracting Native Manifests (SABR support)")
                 var hlsUrl = streamingData.optString("hlsManifestUrl")
                 var dashUrl = streamingData.optString("dashManifestUrl")
 
                 if (playerId.isNotBlank()) {
-                    if (hlsUrl.isNotBlank()) {
-                        hlsUrl = deobfuscateManifestUrl(hlsUrl, playerId)
-                    }
-                    if (dashUrl.isNotBlank()) {
-                        dashUrl = deobfuscateManifestUrl(dashUrl, playerId)
-                    }
-                } else {
-                    println("[TRACK] ⚠️ PlayerID is blank, skipping manifest deobfuscation.")
+                    if (hlsUrl.isNotBlank()) hlsUrl = deobfuscateManifestUrl(hlsUrl, playerId)
+                    if (dashUrl.isNotBlank()) dashUrl = deobfuscateManifestUrl(dashUrl, playerId)
                 }
 
-                // HLS와 DASH 링크는 자체적으로 다국어를 지원하므로 리스트에 바로 추가합니다.
                 if (hlsUrl.isNotBlank()) {
-                    println("[TRACK] -> Emitting HLS Manifest Link")
                     callback(
                         newExtractorLink(
                             this@YoutubeExtractor.name,
-                            "YouTube Auto (HLS)",
+                            "Auto (HLS)",
                             hlsUrl,
                             type = ExtractorLinkType.M3U8
                         ) {
@@ -655,11 +577,10 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
 
                 if (dashUrl.isNotBlank()) {
-                    println("[TRACK] -> Emitting DASH Manifest Link")
                     callback(
                         newExtractorLink(
                             this@YoutubeExtractor.name,
-                            "YouTube Auto (DASH)",
+                            "Auto (DASH)",
                             dashUrl,
                             type = ExtractorLinkType.DASH
                         ) {
@@ -671,15 +592,12 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
 
                 val adaptiveFormats = streamingData.optJSONArray("adaptiveFormats") ?: JSONArray()
-                println("[TRACK] 5. Parsing adaptiveFormats")
-                println("[TRACK] -> Total items in adaptiveFormats: ${adaptiveFormats.length()}")
                 
                 val videoOnlyList = ArrayList<StreamInfo>()
                 val audioInfoList = ArrayList<AudioInfo>()
 
                 for (i in 0 until adaptiveFormats.length()) {
                     val format = adaptiveFormats.getJSONObject(i)
-                    val itag = format.optString("itag")
                     
                     var streamUrl = format.optString("url")
                     var s: String? = null
@@ -695,23 +613,16 @@ open class YoutubeExtractor : ExtractorApi() {
                             streamUrl = params["url"] ?: ""
                             s = params["s"]
                             sp = params["sp"] ?: "sig"
-                            println("[TRACK] -> Extracted cipher for itag $itag. URL found: ${streamUrl.isNotEmpty()}, s: ${s?.take(10)}..., sp: $sp")
                         } else {
-                            println("[TRACK] ⚠️ Skipped track (itag: $itag) - No url and no cipher found.")
                             continue
                         }
                     }
 
-                    if (streamUrl.isNullOrEmpty()) {
-                        println("[TRACK] ⚠️ Skipped track (itag: $itag) - streamUrl is still empty after cipher parse.")
-                        continue
-                    }
+                    if (streamUrl.isNullOrEmpty()) continue
 
                     var n: String? = null
                     val nMatch = Regex("""[?&]n=([^&]+)""").find(streamUrl)
-                    if (nMatch != null) {
-                        n = nMatch.groupValues[1]
-                    }
+                    if (nMatch != null) n = nMatch.groupValues[1]
 
                     val rawMimeType = format.optString("mimeType", "")
                     var cleanMimeType = rawMimeType
@@ -767,58 +678,38 @@ open class YoutubeExtractor : ExtractorApi() {
                         if (audioTrack != null) {
                             audioTrackId = audioTrack.optString("id", audioTrackId)
                             trackDisplayName = audioTrack.optString("displayName", trackDisplayName)
-                            if (language == null && trackDisplayName.isNotBlank()) {
-                                language = trackDisplayName 
-                            }
+                            if (language == null && trackDisplayName.isNotBlank()) language = trackDisplayName 
                         }
                         
-                        if (language == null && trackDisplayName.isBlank()) {
-                            language = "Original" 
-                        }
+                        if (language == null && trackDisplayName.isBlank()) language = "Original" 
                         
-                        println("[TRACK] -> Added Audio Stream (itag: $itag) | Lang: $language | TrackID: $audioTrackId | DisplayName: $trackDisplayName")
                         audioInfoList.add(AudioInfo(streamUrl, cleanMimeType, codec, bitrate, initR, indexR, language, audioTrackId, trackDisplayName, s, sp, n))
                     }
                 }
 
-                println("[TRACK] 6. Filtering & Grouping Audio Tracks")
-                val groupedAudio = audioInfoList.groupBy { it.language ?: it.audioTrackId ?: "Original" }
-                println("[TRACK] -> Grouped Languages (Keys): ${groupedAudio.keys}")
-                
-                val bestAudioList = groupedAudio.mapNotNull { (_, tracks) ->
-                    tracks.maxByOrNull { 
-                        val bonus = if (it.mimeType.contains("webm")) 1000000 else 0
-                        it.bitrate + bonus 
-                    }
-                }
+                // ✅ 다른 개발자의 로직 이식: 언어별로 각각 독립된 ExtractorLink 생성
+                val audiosByLanguage = audioInfoList.groupBy { it.displayName ?: it.language ?: "Original" }
 
-                println("[TRACK] -> Selected Best Tracks per Language (${bestAudioList.size}):")
-                bestAudioList.forEach { 
-                    println("[TRACK]    Lang: ${it.language}, MimeType: ${it.mimeType}, Bitrate: ${it.bitrate}") 
-                }
-
-                if (videoOnlyList.isNotEmpty() && bestAudioList.isNotEmpty()) {
+                if (videoOnlyList.isNotEmpty() && audiosByLanguage.isNotEmpty()) {
                     startServerIfNeeded()
 
-                    // PipePipe Batch Decode API 호출
+                    // 배치 디코딩 일괄 수행
                     val allSigs = mutableSetOf<String>()
                     val allNs = mutableSetOf<String>()
 
-                    bestAudioList.forEach { 
-                        if (!it.s.isNullOrBlank()) allSigs.add(it.s!!)
-                        if (!it.n.isNullOrBlank()) allNs.add(it.n!!)
+                    audioInfoList.forEach { 
+                        if (!it.s.isNullOrBlank()) allSigs.add(it.s)
+                        if (!it.n.isNullOrBlank()) allNs.add(it.n)
                     }
                     videoOnlyList.forEach { 
-                        if (!it.s.isNullOrBlank()) allSigs.add(it.s!!)
-                        if (!it.n.isNullOrBlank()) allNs.add(it.n!!)
+                        if (!it.s.isNullOrBlank()) allSigs.add(it.s)
+                        if (!it.n.isNullOrBlank()) allNs.add(it.n)
                     }
 
                     if (playerId.isNotBlank() && (allSigs.isNotEmpty() || allNs.isNotEmpty())) {
-                        println("[TRACK] 7. Batch Decoding Signatures & N params via PipePipe API...")
                         val (decodedSigs, decodedNs) = decodeBatch(playerId, allSigs.toList(), allNs.toList())
 
-                        // 해독된 값을 URL에 완벽히 적용
-                        bestAudioList.forEach { audio ->
+                        audioInfoList.forEach { audio ->
                             var newUrl = audio.url
                             if (!audio.s.isNullOrBlank() && decodedSigs.containsKey(audio.s)) {
                                 newUrl += "&${audio.sp}=${decodedSigs[audio.s]}"
@@ -839,32 +730,40 @@ open class YoutubeExtractor : ExtractorApi() {
                             }
                             video.url = newUrl
                         }
-                    } else {
-                        println("[TRACK] -> No signatures or N params to decode, or PlayerID is blank.")
                     }
 
-                    println("[TRACK] 8. Generating Local Proxy DASH Manifests")
+                    // ✅ 각각의 비디오 해상도마다, 모든 언어의 링크를 각각 따로 생성하여 UI에 노출시킴
                     for (video in videoOnlyList.distinctBy { it.height }) {
-                        val dashXml = buildDashManifestXml(video, bestAudioList, durationSeconds)
-                        val localLink = registerManifestAndGetUrl(dashXml)
-
-                        if (localLink != null) {
-                            val finalName = "YouTube ${video.label}"
-                            val sourceName = "YouTube"
+                        for ((lang, audios) in audiosByLanguage) {
                             
-                            callback(
-                                newExtractorLink(
-                                    sourceName, finalName, localLink, type = ExtractorLinkType.DASH
-                                ) {
-                                    this.referer = mainUrl
-                                    this.quality = video.height
-                                    this.headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
+                            val bestAudioForLang = if (video.mimeType.contains("webm")) {
+                                audios.maxByOrNull { if (it.mimeType.contains("webm")) it.bitrate + 1000000 else it.bitrate }
+                            } else {
+                                audios.maxByOrNull { if (it.mimeType.contains("mp4")) it.bitrate + 1000000 else it.bitrate }
+                            }
+
+                            if (bestAudioForLang != null) {
+                                val singleAudioList = listOf(bestAudioForLang)
+                                val dashXml = buildDashManifestXml(video, singleAudioList, durationSeconds)
+                                val localLink = registerManifestAndGetUrl(dashXml)
+
+                                if (localLink != null) {
+                                    callback(
+                                        newExtractorLink(
+                                            name = lang, // ✅ UI 소스 목록에 "한국어 더빙", "영어 원본" 등 실제 언어 이름 노출
+                                            source = this@YoutubeExtractor.name,
+                                            url = localLink,
+                                            type = ExtractorLinkType.DASH
+                                        ) {
+                                            this.referer = mainUrl
+                                            this.quality = video.height // UI 우측에 해상도 "1080p" 표시
+                                            this.headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
+                                        }
+                                    )
                                 }
-                            )
+                            }
                         }
                     }
-                } else {
-                    println("[TRACK] 🚨 Cannot generate DASH: VideoOnlyList size=${videoOnlyList.size}, BestAudioList size=${bestAudioList.size}")
                 }
 
                 val originalUrl = "https://www.youtube.com/watch?v=$videoId"
@@ -883,7 +782,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
 
             } catch (e: Exception) { 
-                println("[TRACK] 🚨 Exception in getUrl: ${e.message}")
                 logError(e) 
             }
         }
@@ -928,7 +826,7 @@ open class YoutubeExtractor : ExtractorApi() {
     ): String {
         val videoChunkId = "v_${streamCounter.getAndIncrement()}"
         streamUrlCache[videoChunkId] = video.url
-        val proxyVideoUrl = "http://127.0.0.1:$serverPort/chunk?id=$videoChunkId"
+        val proxyVideoUrl = escapeXml("http://127.0.0.1:$serverPort/chunk?id=$videoChunkId")
         
         val durationString = "PT${durationSec}S"
 
@@ -952,7 +850,7 @@ open class YoutubeExtractor : ExtractorApi() {
         audioList.forEachIndexed { index, audio ->
             val audioIdChunk = "a_${streamCounter.getAndIncrement()}"
             streamUrlCache[audioIdChunk] = audio.url
-            val proxyAudioUrl = "http://127.0.0.1:$serverPort/chunk?id=$audioIdChunk"
+            val proxyAudioUrl = escapeXml("http://127.0.0.1:$serverPort/chunk?id=$audioIdChunk")
 
             val audioId = "audio_$index"
             val aSegmentBase = if (audio.initRange != null && audio.indexRange != null) {
