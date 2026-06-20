@@ -594,6 +594,86 @@ class YoutubeProvider(
     }        
     // -----------------------------------------------------------------------------
 
+    private fun extractDurationFromOverlays(obj: Any?): String {
+        if (obj == null) return ""
+        if (obj is Map<*, *>) {
+            val timeRenderer = obj.getMapKey("thumbnailOverlayTimeStatusRenderer")
+            if (timeRenderer != null) {
+                val text = getText(timeRenderer.getMapKey("text"))
+                val match = DURATION_REGEX.find(text)
+                if (match != null) return match.value
+            }
+
+            val badgeRenderer = obj.getMapKey("thumbnailBadgeViewModel")
+            if (badgeRenderer != null) {
+                val text = getText(badgeRenderer.getString("text"))
+                val match = DURATION_REGEX.find(text)
+                if (match != null) return match.value
+            }
+
+            val contentImage = obj.getMapKey("contentImage")
+            if (contentImage != null) {
+                val d = extractDurationFromOverlays(contentImage)
+                if (d.isNotBlank()) return d
+            }
+            
+            val collectionThumbnail = obj.getMapKey("collectionThumbnailViewModel")
+            if (collectionThumbnail != null) {
+                val d = extractDurationFromOverlays(collectionThumbnail)
+                if (d.isNotBlank()) return d
+            }
+
+            val primaryThumbnail = obj.getMapKey("primaryThumbnail")
+            if (primaryThumbnail != null) {
+                val d = extractDurationFromOverlays(primaryThumbnail)
+                if (d.isNotBlank()) return d
+            }
+
+            val thumbnailViewModel = obj.getMapKey("thumbnailViewModel")
+            if (thumbnailViewModel != null) {
+                val d = extractDurationFromOverlays(thumbnailViewModel)
+                if (d.isNotBlank()) return d
+            }
+
+            val overlays = obj.getListKey("overlays") ?: YoutubeUtils.getListKeyFromAny(obj, "overlays") as? List<*>
+            if (overlays != null) {
+                for (overlay in overlays) {
+                    val d = extractDurationFromOverlays(overlay)
+                    if (d.isNotBlank()) return d
+                }
+            }
+
+            val thumbnailOverlays = obj.getListKey("thumbnailOverlays") ?: YoutubeUtils.getListKeyFromAny(obj, "thumbnailOverlays") as? List<*>
+            if (thumbnailOverlays != null) {
+                for (overlay in thumbnailOverlays) {
+                    val d = extractDurationFromOverlays(overlay)
+                    if (d.isNotBlank()) return d
+                }
+            }
+            
+            val badges = obj.getListKey("badges") ?: YoutubeUtils.getListKeyFromAny(obj, "badges") as? List<*>
+            if (badges != null) {
+                for (badge in badges) {
+                    val d = extractDurationFromOverlays(badge)
+                    if (d.isNotBlank()) return d
+                }
+            }
+            
+            val thumbnailBottomOverlay = obj.getMapKey("thumbnailBottomOverlayViewModel")
+            if (thumbnailBottomOverlay != null) {
+                val d = extractDurationFromOverlays(thumbnailBottomOverlay)
+                if (d.isNotBlank()) return d
+            }
+        } else if (obj is List<*>) {
+            for (item in obj) {
+                val d = extractDurationFromOverlays(item)
+                if (d.isNotBlank()) return d
+            }
+        }
+        return ""
+    }
+    
+
     private fun getEpisodeMetaString(videoData: Map<*, *>?): String {
         if (videoData == null) return ""
         
@@ -601,18 +681,11 @@ class YoutubeProvider(
         val lengthText = getText(videoData.getMapKey("lengthText"))
         if (lengthText.isNotBlank()) {
             duration = DURATION_REGEX.find(lengthText)?.value ?: ""
-        } else {
-            val overlays = videoData.getListKey("thumbnailOverlays") ?: YoutubeUtils.getListKeyFromAny(videoData, "thumbnailOverlays") as? List<*>
-            overlays?.forEach { overlay ->
-                if (overlay is Map<*, *>) {
-                    val ts = overlay.getMapKey("thumbnailOverlayTimeStatusRenderer")
-                    if (ts != null) {
-                        val text = getText(ts.getMapKey("text"))
-                        val match = DURATION_REGEX.find(text)
-                        if (match != null) duration = match.value
-                    }
-                }
-            }
+        }
+
+        // 💡 루트 레벨에서 탐색 실패 시 신형 계층 구조의 썸네일 오버레이 내부를 재귀 스캔합니다.
+        if (duration.isBlank()) {
+            duration = extractDurationFromOverlays(videoData)
         }
 
         var channel = getText(videoData.getMapKey("longBylineText"))
