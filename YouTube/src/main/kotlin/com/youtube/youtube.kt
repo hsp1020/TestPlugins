@@ -1240,7 +1240,7 @@ class YoutubeProvider(
             return list
         }
 
-private fun getCustomHomepages(): List<CustomSection> {
+    private fun getCustomHomepages(): List<CustomSection> {
         val json = appPrefs?.getString("custom_homepages_v3", "[]") ?: "[]"
         val currentList = try {
             mapper.readValue<List<CustomSection>>(json).toMutableList()
@@ -1250,24 +1250,35 @@ private fun getCustomHomepages(): List<CustomSection> {
 
         var modified = false
 
-        // 1. 설정 관리 레이아웃에 기본 '홈(Home)' 팩터 영구 보장
-        if (currentList.none { it.url == "Home" }) {
-            val homeTitle = when(lang) {
-                "ko" -> "홈"
-                else -> "Home"
-            }
-            currentList.add(0, CustomSection(name = homeTitle, url = "Home", isEnabled = true))
+        if (currentList.none { section -> section.url == "Home" }) {
+            currentList.add(0, CustomSection(name = "Home", url = "Home", isEnabled = true))
             modified = true
         }
 
-        // 2. 홈화면 기동 시 캐싱되었던 "개별" 칩 필터 항목들(요리, 농구, 뉴스 등)을 설정 목록에 등록
         val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
         try {
             val cachedChips = mapper.readValue<List<CachedChip>>(cachedChipsJson)
+            
+            // [해결책 1] 캐시에 현재 들어있지 않더라도 기존에 설정되어 정렬된 칩 카테고리를 custom_homepages_v3 설정에서 제거하지 않습니다.
+            // 이를 통해 사용자가 설정한 순서와 숨김 여부가 새로고침 시 초기화되던 현상을 해결합니다.
+            /* 
+            val cachedNames = cachedChips.map { it.name }.toSet()
+            val iterator = currentList.iterator()
+            while (iterator.hasNext()) {
+                val sec = iterator.next()
+                if (sec.url.startsWith("chip_name_")) {
+                    val name = sec.url.removePrefix("chip_name_")
+                    if (!cachedNames.contains(name)) {
+                        iterator.remove()
+                        modified = true
+                    }
+                }
+            }
+            */
+
             cachedChips.forEach { chip ->
                 val stableUrl = "chip_name_${chip.name}"
-                // 이미 존재한다면 중복 등록하지 않고 보존하며, 사라진 칩을 강제로 지우는 일체의 로직이 부재합니다.
-                if (currentList.none { it.url == stableUrl }) {
+                if (currentList.none { section -> section.url == stableUrl }) {
                     currentList.add(CustomSection(name = chip.name, url = stableUrl, isEnabled = true))
                     modified = true
                 }
@@ -1284,7 +1295,7 @@ private fun getCustomHomepages(): List<CustomSection> {
                 logError(e)
             }
         }
-
+        
         return currentList
     }
 
@@ -1303,7 +1314,6 @@ private fun getCustomHomepages(): List<CustomSection> {
     }
 
 
-
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         isSearchContext = false
         val rawRequestData = request.data
@@ -1320,17 +1330,76 @@ private fun getCustomHomepages(): List<CustomSection> {
 
         try {
             if (page == 1) {
-                // [안전한 캐시 비우기] 새로고침 시 기존에 누적되어 있던 이전 세션의 단일 토큰만 가볍게 비워 꼬임을 차단합니다.
+                // 1. [새로고침 클리어] 기존 1페이지 연속 갱신 시 과거 세션 토큰을 완전히 비웁니다.
                 saveContinuationToken(requestData, null)
 
                 if (isChip) {
-                    // -------------------------------------------------------------
-                    // [구버전 원본 100% 원복] 검증된 구버전의 원본 로드 논리로 원복하여 먹통 현상을 원천 방지합니다.
-                    // -------------------------------------------------------------
+                    val oldToken = requestData.removePrefix("chip_")
+                    var tokenToUse = oldToken
+
+                    // 2. [역방향 칩 이름 조회] 현재 칩의 구형 토큰을 통해 기존 저장되어 있던 칩 이름(예: "요리")을 찾아냅니다.
+                    val cachedChipsJson = appPrefs?.getString("yt_cached_chips", "[]") ?: "[]"
+                    val cachedChips = try {
+                        mapper.readValue<List<CachedChip>>(cachedChipsJson)
+                    } catch (e: Exception) {
+                        emptyList<CachedChip>()
+                    }
+                    val chipName = cachedChips.find { it.token == oldToken }?.name
+
+                    // 3. [실시간 칩 토큰 갱신] 식별에 성공했다면, 무캐시로 메인 페이지를 새로 긁어와 최신 토큰 정보를 매핑합니다.
+                    if (!chipName.isNullOrBlank()) {
+                        try {
+                            val html = app.get(mainUrl, interceptor = ytInterceptor, headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")).text
+                            savedApiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY") ?: savedApiKey
+                            savedVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA") ?: savedVisitorData
+                            savedClientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: savedClientVersion ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
+                            
+                            if (!savedApiKey.isNullOrBlank()) {
+                                appPrefs?.edit()
+                                    ?.putString("yt_api_key", savedApiKey)
+                                    ?.putString("yt_visitor_data", savedVisitorData)
+                                    ?.putString("yt_client_version", savedClientVersion)
+                                    ?.apply()
+                            }
+
+                            val initialData = extractYtInitialData(html)
+                            if (initialData != null) {
+                                val chipBar = safeGet(initialData, "contents", "twoColumnBrowseResultsRenderer", "tabs", 0, "tabRenderer", "content", "richGridRenderer", "header", "feedFilterChipBarRenderer", "contents") as? List<*>
+                                if (chipBar != null) {
+                                    val cachedChipsMap = mutableMapOf<String, CachedChip>()
+                                    for (chipItem in chipBar) {
+                                        val chipMap = (chipItem as? Map<*, *>)?.get("chipCloudChipRenderer") as? Map<*, *> ?: continue
+                                        val text = getText(chipMap["text"])
+                                        val token = safeGet(chipMap, "navigationEndpoint", "continuationCommand", "token") as? String
+                                        if (text.isNotBlank() && !token.isNullOrBlank()) {
+                                            cachedChipsMap[text] = CachedChip(text, token)
+                                        }
+                                    }
+                                    
+                                    val jsonArray = org.json.JSONArray()
+                                    cachedChipsMap.values.forEach { chip ->
+                                        val obj = org.json.JSONObject()
+                                        obj.put("name", chip.name)
+                                        obj.put("token", chip.token)
+                                        jsonArray.put(obj)
+                                    }
+                                    appPrefs?.edit()?.putString("yt_cached_chips", jsonArray.toString())?.apply()
+
+                                    // 4. 새로 수집된 무캐시 칩 데이터 풀에서 해당 카테고리명으로 발급된 가장 신선한 칩 토큰을 기입합니다.
+                                    val freshToken = cachedChipsMap[chipName]?.token
+                                    if (!freshToken.isNullOrBlank()) {
+                                        tokenToUse = freshToken
+                                    }
+                                }
+                            }
+                        } catch (e: Exception) {
+                            Log.e("YoutubeUtils", "[CHIP] Failed to refresh chip tokens on pull-to-refresh", e)
+                        }
+                    }
+
                     savedApiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
                     savedVisitorData = savedVisitorData ?: appPrefs?.getString("yt_visitor_data", null)
                     savedClientVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION)
-                    val tokenToUse = requestData.removePrefix("chip_")
 
                     if (!savedApiKey.isNullOrBlank()) {
                         val apiUrl = "$mainUrl/youtubei/v1/browse?key=$savedApiKey"
@@ -1346,7 +1415,13 @@ private fun getCustomHomepages(): List<CustomSection> {
                             "continuation" to tokenToUse
                         )
                         
-                        val headers = mapOf("Origin" to mainUrl, "Referer" to mainUrl)
+                        // 서버의 물리적 갱신 결과를 확보하기 위해 무캐시 헤더를 전달합니다.
+                        val headers = mapOf(
+                            "Origin" to mainUrl, 
+                            "Referer" to mainUrl,
+                            "Cache-Control" to "no-cache",
+                            "Pragma" to "no-cache"
+                        )
                         val response = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
                         
                         if (response != null) {
@@ -1359,9 +1434,9 @@ private fun getCustomHomepages(): List<CustomSection> {
                         }
                     }
                 } else {
-                    // [구버전 원본 100% 원복] 일반 홈화면 및 수동 추가 채널 구동
+                    // 홈화면 또는 수동 채널의 경우 서버 캐시가 개입되지 않도록 네트워크 상에서 생짜 데이터 로드를 보장합니다.
                     val targetUrl = if(requestData == "Home") mainUrl else requestData
-                    val html = app.get(targetUrl, interceptor = ytInterceptor).text
+                    val html = app.get(targetUrl, interceptor = ytInterceptor, headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")).text
                     
                     savedApiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY") ?: savedApiKey
                     savedVisitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA") ?: savedVisitorData
@@ -1407,7 +1482,7 @@ private fun getCustomHomepages(): List<CustomSection> {
                     }
                 }
             } else {
-                // page > 1 (구버전 사양 100% 보존 - 페이지네이션 부작용 완전 차단)
+                // page > 1 논리는 구버전 코드 사양을 일체 건드리지 않고 그대로 상속합니다.
                 var tokenToUse = getSavedContinuationToken(requestData)
                 
                 if (tokenToUse.isNullOrBlank() && page == 2) { 
@@ -1505,8 +1580,6 @@ private fun getCustomHomepages(): List<CustomSection> {
         }
 
         saveContinuationToken(requestData, nextContinuation)
-        
-
         
 
         if (requestData.contains("history", ignoreCase = true)) {
