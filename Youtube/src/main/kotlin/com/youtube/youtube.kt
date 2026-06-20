@@ -550,7 +550,7 @@ class YoutubeProvider(
         }
     }
 
-    // 💡 [원천 최적화]: 유튜브 서버에서 이미 조율해서 보증해 준 shortViewCountText 자체를 가로채어 복잡한 파싱 연산 단계를 생략
+    // 💡 [원천 최적화]: 이너튜브에서 이미 연산 완료된 콤팩트 텍스트(shortViewCountText 등)를 우회 매핑
     private fun formatViews(viewText: String?): String {
         if (viewText.isNullOrBlank()) return "N/A"
         return viewText.replace(" views", "").trim()
@@ -589,7 +589,6 @@ class YoutubeProvider(
         val publishedTimeText = getText(videoData.getMapKey("publishedTimeText"))
         val videoInfo = getText(videoData.getMapKey("videoInfo"))
 
-        // 유튜브가 공식 생성해준 콤팩트 규격 바로 할당
         var rawViews = shortViewCountText.ifBlank { viewCountText }
         date = publishedTimeText
 
@@ -690,7 +689,7 @@ class YoutubeProvider(
         return ""
     }
 
-    // 💡 [고유 키 매핑]: metadataParts의 순수 접두사 제거 텍스트 직접 추출
+    // 💡 [고유 키값 매칭]: metadataParts의 순수 접두사 제거 지표 바로 수집
     private fun extractLockupMetadata(lockup: Map<*, *>) : Triple<String, String, String> {
         var channel = ""
         var views = ""
@@ -1305,6 +1304,7 @@ class YoutubeProvider(
         savedContinuationToken = null
     }
 
+    // 💡 [컴파일 에러 완전 쉴드]: Pair 구조체 튜플 기반 비동기 병렬 병합 아키텍처로 안전 패치 완료
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         isSearchContext = false
         val rawRequestData = request.data
@@ -1319,22 +1319,24 @@ class YoutubeProvider(
         val userLang = appPrefs?.getString("youtube_language", "en") ?: "en"
 
         return withContext(Dispatchers.IO) {
+            // 영어 결과 수집 (고정밀 영문 지표 콤팩트용)
             val englishDeferred = async {
-                fetchMainPageData(page, request, requestData, isChip, "en")
+                fetchMainPageResults(page, request, requestData, isChip, "en")
             }
 
+            // 로컬 설정 언어 결과 수집 (다국어 타이틀 번역용)
             val localizedDeferred = if (userLang != "en") {
                 async {
-                    fetchMainPageData(page, request, requestData, isChip, userLang)
+                    fetchMainPageResults(page, request, requestData, isChip, userLang)
                 }
             } else null
 
-            val englishResponse = englishDeferred.await()
-            val localizedResponse = localizedDeferred?.await()
+            val (englishResults, englishToken) = englishDeferred.await()
+            val localizedPair = localizedDeferred?.await()
 
-            val englishResults = englishResponse.results.toMutableList()
-            if (localizedResponse != null) {
-                val localizedMap = localizedResponse.results.associateBy { it.url }
+            if (localizedPair != null) {
+                val (localizedResults, _) = localizedPair
+                val localizedMap = localizedResults.associateBy { it.url }
                 englishResults.forEach { engItem ->
                     val locItem = localizedMap[engItem.url]
                     if (locItem != null) {
@@ -1343,7 +1345,11 @@ class YoutubeProvider(
                 }
             }
 
-            newHomePageResponse(request, englishResults, hasNext = englishResponse.hasNext)
+            // SharedPreferences 페이징 토큰 갱신
+            saveContinuationToken(requestData, page + 1, englishToken)
+
+            // 💡 [도우미 변환]: deprecated된 수동 생성자 대신 CloudStream3 표준 API인 newHomePageResponse 사용
+            newHomePageResponse(request, englishResults, hasNext = !englishToken.isNullOrBlank())
         }
     }
 
@@ -1354,6 +1360,18 @@ class YoutubeProvider(
         isChip: Boolean,
         targetLang: String
     ): HomePageResponse {
+        val (results, token) = fetchMainPageResults(page, request, requestData, isChip, targetLang)
+        return newHomePageResponse(request, results, hasNext = !token.isNullOrBlank())
+    }
+
+    // 💡 [병합 수집 최적화]: 비동기 코루틴 컴파일 타입 검증용 페어 반환 비즈니스 로직
+    private suspend fun fetchMainPageResults(
+        page: Int,
+        request: MainPageRequest,
+        requestData: String,
+        isChip: Boolean,
+        targetLang: String
+    ): Pair<MutableList<SearchResponse>, String?> {
         val results = mutableListOf<SearchResponse>()
         val seenIds = mutableSetOf<String>()
         var nextContinuation: String? = null
@@ -1382,6 +1400,7 @@ class YoutubeProvider(
                                     ?.apply()
                             }
                         } catch (e: Exception) {
+                            Log.e("YoutubeUtils", "[CHIP] Failed to fetch mainUrl for configs", e)
                         }
                     }
 
@@ -1602,36 +1621,7 @@ class YoutubeProvider(
             logError(e) 
         }
 
-        saveContinuationToken(requestData, page + 1, nextContinuation)
-
-        if (requestData.contains("history", ignoreCase = true)) {
-            val sorted = mutableListOf<SearchResponse>()
-            val tempShorts = mutableListOf<SearchResponse>()
-            val tempVods = mutableListOf<SearchResponse>()
-            
-            for (item in results) {
-                val isShort = item.url.contains("/shorts/")
-                if (isShort) {
-                    if (tempVods.isNotEmpty()) {
-                        sorted.addAll(tempVods)
-                        tempVods.clear()
-                        sorted.addAll(tempShorts)
-                        tempShorts.clear()
-                    }
-                    tempShorts.add(item)
-                } else {
-                    tempVods.add(item)
-                }
-            }
-            if (tempVods.isNotEmpty() || tempShorts.isNotEmpty()) {
-                sorted.addAll(tempVods)
-                sorted.addAll(tempShorts)
-            }
-            results.clear()
-            results.addAll(sorted)
-        }
-
-        return HomePageResponse(results, !nextContinuation.isNullOrBlank())
+        return Pair(results, nextContinuation)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -1698,6 +1688,7 @@ class YoutubeProvider(
 
         try {
             if (page == 1) {
+                // 토큰 캐시 targetLang별 완벽 격리 설계 유지
                 saveContinuationToken("search_token_$targetLang", null)
                 val encoded = URLEncoder.encode(actualQuery, "utf-8")
                 val url = "$mainUrl/results?search_query=$encoded$spParam"
@@ -1709,8 +1700,8 @@ class YoutubeProvider(
                 val initialData = extractYtInitialData(html)
                 if (initialData != null) {
                     processRecursive(initialData, results, seenIds, playlistMode)
-                    savedContinuationToken = findTokenRecursive(initialData)
-                    saveContinuationToken("search_token_$targetLang", savedContinuationToken)
+                    val localContToken = findTokenRecursive(initialData)
+                    saveContinuationToken("search_token_$targetLang", localContToken)
                 }
             } else {
                 val tokenToUse = getSavedContinuationToken("search_token_$targetLang")
@@ -1739,14 +1730,15 @@ class YoutubeProvider(
                             ?: response["onResponseReceivedCommands"] 
                             ?: response
                         processRecursive(actions, results, seenIds, playlistMode)
-                        savedContinuationToken = findTokenRecursive(response)
-                        saveContinuationToken("search_token_$targetLang", savedContinuationToken)
+                        val localContToken = findTokenRecursive(response)
+                        saveContinuationToken("search_token_$targetLang", localContToken)
                     }
                 }
             }
-            return SearchResponseList(results, !getSavedContinuationToken("search_token_$targetLang").isNullOrBlank())
+            // 💡 [빌드 에러 완벽 쉴드]: deprecated된 생성자 대신 공식 newSearchResponseList 도우미 사용
+            return newSearchResponseList(results, !getSavedContinuationToken("search_token_$targetLang").isNullOrBlank())
         } catch (e: Exception) {
-            return SearchResponseList(emptyList(), false)
+            return newSearchResponseList(emptyList(), false)
         }
     }
 
