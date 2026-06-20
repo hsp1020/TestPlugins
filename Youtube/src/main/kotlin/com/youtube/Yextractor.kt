@@ -115,16 +115,14 @@ open class YoutubeExtractor : ExtractorApi() {
 
         private val VISITOR_DATA_REGEX = Regex(""""VISITOR_DATA":"([^"]+)"""")
         private val CHUNK_ID_REGEX = Regex("id=([^&]+)")
-
-        // HTML 내부 오디오 트랙 배열 스캔용 정규식
-        private val AUDIO_TRACKS_REGEX = Regex("\"audioTracks\":\\s*\\[(.*?)\\]")
+        private val FMT_REPLACE_REGEX = Regex("&fmt=[^&]+")
 
         private const val SAFARI_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15,gzip(gfe)"
         private const val SAFARI_CLIENT_VERSION = "2.20260114.08.00"
         private const val VR_API_KEY = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
             
         init {
-            println("[YT_DEBUG_INIT] 유튜브 4K 지능형 가속 병합 라우팅 엔진 초기화 완료")
+            println("[YT_DEBUG_INIT] 유튜브 DASH 프록시 및 가속 엔진 로드 완료")
         }
 
         private fun generateCpn(): String {
@@ -145,7 +143,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                     context.startActivity(intent)
                 } catch (e: Exception) {
-                    println("[YT_PROXY_DEBUG] 앱 연동 실행 오류: ${e.message}")
+                    println("[YT_PROXY_DEBUG] 외부 앱 연동 명령 전달 에러: ${e.message}")
                 }
             }
         }
@@ -207,7 +205,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
             } catch (e: Exception) {
-                println("[YT_PROXY_DEBUG] 가상 소켓 스트리밍 예외: ${e.message}")
+                println("[YT_PROXY_DEBUG] 가상 프록시 오류: ${e.message}")
             }
         }
 
@@ -239,11 +237,11 @@ open class YoutubeExtractor : ExtractorApi() {
                         recentTriggers[triggerKey] = now
                         openInExternalApp(pkg, targetUrl)
                     } else {
-                        println("[YT_PROXY_DEBUG] 중복 방지 브레이킹: $triggerKey")
+                        println("[YT_PROXY_DEBUG] 단시간 중복 인텐트 무시: $triggerKey")
                     }
                 }
             } catch (e: Exception) {
-                println("[YT_PROXY_DEBUG] 오픈 리퀘스트 처리 예외: ${e.message}")
+                println("[YT_PROXY_DEBUG] 앱 연동 명령 파싱 예외: ${e.message}")
             } finally {
                 outWriter.print("HTTP/1.1 204 No Content\r\n")
                 outWriter.print("Connection: close\r\n")
@@ -298,7 +296,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     output.flush()
                 }
             } catch (e: Exception) {
-                println("[YT_PROXY_DEBUG] 가상 프록시 통과 중단: ${e.message}")
+                println("[YT_PROXY_DEBUG] 미디어 버퍼 릴레이 오류: ${e.message}")
             }
         }
 
@@ -389,7 +387,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
             } catch (e: Exception) {
-                println("[TRACK] 🚨 decodeBatch API 통신 에러: ${e.message}")
+                println("[TRACK] 🚨 decodeBatch API 통신 오류: ${e.message}")
             }
 
             return Pair(sigResults, nResults)
@@ -410,7 +408,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
             } catch (e: Exception) {
-                println("[TRACK] 🚨 deobfuscateManifestUrl 오류: ${e.message}")
+                println("[TRACK] 🚨 deobfuscateManifestUrl 예외: ${e.message}")
             }
             return manifestUrl
         }
@@ -500,11 +498,11 @@ open class YoutubeExtractor : ExtractorApi() {
         }
     }
 
-    // [최종 진화형 가속화 라우터 & 이중 병합 아키텍처 탑재]
+    // [Safari 단독 가동 구조 복원 및 폴백 흐름 최적화]
     private suspend fun fetchPlayerResponse(videoId: String): Triple<JSONObject?, Long, String> = withContext(Dispatchers.IO) {
         val watchUrl = "https://www.youtube.com/watch?v=$videoId"
         
-        println("[TRACK] 1. Initial HTML Fetch & Memory-Cached Config Retrieval")
+        println("[TRACK] 1. Initial HTML Fetch & Cached Metadata Config Retrieval")
         
         val watchHtmlDeferred = async {
             try {
@@ -515,7 +513,6 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         }
 
-        // 플레이어 메타데이터 캐싱 필터링 (6시간 전역 보관)
         val pipePlayerDeferred = async {
             val now = System.currentTimeMillis()
             if (cachedPlayerId.isNotEmpty() && (now - lastCacheTime < CACHE_TTL)) {
@@ -548,11 +545,10 @@ open class YoutubeExtractor : ExtractorApi() {
         val html = watchHtmlDeferred.await()
         val visitorData = VISITOR_DATA_REGEX.find(html)?.groupValues?.get(1) ?: ""
 
-        // ---------------- [ [검증 완료] 직접 더빙 vs 자동 더빙 / 더빙 없음 사전 식별 ] ----------------
+        // 다국어 프리 스캔
         var isDirectDubbed = false
         try {
             val audioTrackCount = html.split("\"audioTrack\"").size - 1
-            // 💡 [구글 검색 검증]: 단일 언어의 다중 비트레이트 오독(최대 3개 검출)을 완전히 방어하기 위해 임계치를 'audioTrackCount > 3'으로 정합 제어
             if (audioTrackCount > 3) {
                 val hasAutoDub = html.contains("\"isAutoDubbed\"\\s*:\\s*true".toRegex())
                 if (!hasAutoDub) {
@@ -562,7 +558,6 @@ open class YoutubeExtractor : ExtractorApi() {
         } catch (e: Exception) {
             println("[TRACK] 🚨 다국어 프리 스캔 예외: ${e.message}")
         }
-        // ------------------------------------------------------------------------------------------
 
         val context = com.lagradost.cloudstream3.AcraApplication.context
         val provider = com.lagradost.cloudstream3.APIHolder.allProviders.find { it.name == "YouTube" }
@@ -586,148 +581,75 @@ open class YoutubeExtractor : ExtractorApi() {
 
         val useSafariClient = isLoggedIn && isDirectDubbed
 
+        // 💡 [개정 완료]: 직접 더빙이 맞을 시, 처음부터 병렬로 수행되던 ANDROID_VR을 소거하고 오직 WEB_SAFARI 단독 호출만 전송
         if (useSafariClient) {
-            println("[TRACK] 2. Dual-Client Parallel Call (성우 수동 더빙 영상 분석 완료 -> WEB_SAFARI + ANDROID_VR 병렬 수집 가동)")
-
-            // 💡 [설계 최적화]: 중복적인 이중 요청을 완전히 소거하기 위해 Safari와 VR을 동시 병렬 async 실행합니다.
-            val safariDeferred = async {
-                try {
-                    val safariApiUrl = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
-                    val safariPayload = JSONObject(mapOf(
-                        "context" to mapOf(
-                            "client" to mapOf(
-                                "utcOffsetMinutes" to 0,
-                                "timeZone" to "UTC",
-                                "hl" to langCode,
-                                "gl" to if (langCode == "ko") "KR" else "US",
-                                "userAgent" to SAFARI_USER_AGENT,
-                                "clientName" to "WEB",
-                                "clientVersion" to SAFARI_CLIENT_VERSION
-                            )
-                        ),
-                        "playbackContext" to mapOf(
-                            "contentPlaybackContext" to mapOf(
-                                "html5Preference" to "HTML5_PREF_WANTS",
-                                "signatureTimestamp" to sts
-                            )
-                        ),
-                        "cpn" to generateCpn(),
-                        "videoId" to videoId,
-                        "contentCheckOk" to true,
-                        "racyCheckOk" to true
-                    )).toString()
-
-                    val requestBody = safariPayload.toRequestBody("application/json".toMediaTypeOrNull())
-                    val request = okhttp3.Request.Builder()
-                        .url(safariApiUrl)
-                        .post(requestBody)
-                        .addHeader("Content-Type", "application/json")
-                        .addHeader("User-Agent", SAFARI_USER_AGENT)
-                        .addHeader("X-YouTube-Client-Name", "1")
-                        .addHeader("X-Youtube-Client-Version", SAFARI_CLIENT_VERSION)
-                        .addHeader("Cookie", cookies)
-                        .addHeader("Authorization", YoutubeUtils.getSapisidHash(sapisidVal!!, "https://www.youtube.com"))
-                        .addHeader("X-Origin", "https://www.youtube.com")
-                        .addHeader("DNT", "1")
-                        .build()
-
-                    val fastSafariClient = proxyHttpClient.newBuilder()
-                        .connectTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
-                        .readTimeout(4, java.util.concurrent.TimeUnit.SECONDS)
-                        .build()
-
-                    fastSafariClient.newCall(request).execute().use { response ->
-                        val res = response.body?.string() ?: ""
-                        if (res.isNotEmpty()) JSONObject(res) else null
-                    }
-                } catch (e: Exception) {
-                    println("[TRACK] ⚠️ SAFARI 요청 제한 대기 도달 또는 세션 실패: ${e.message}")
-                    null
-                }
-            }
-
-            val vrDeferred = async {
-                try {
-                    val vrApiUrl = "https://youtubei.googleapis.com/youtubei/v1/player?prettyPrint=false&key=$VR_API_KEY"
-                    val vrHeaders = mapOf(
-                        "Content-Type" to "application/json",
-                        "User-Agent" to YoutubeUtils.ANDROID_VR_USER_AGENT,
-                        "X-Goog-Api-Format-Version" to "2"
+            println("[TRACK] 2. WEB_SAFARI 단독 호출 실행 (성우 수동 더빙 전용 추출)")
+            val safariApiUrl = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
+            val safariPayload = JSONObject(mapOf(
+                "context" to mapOf(
+                    "client" to mapOf(
+                        "utcOffsetMinutes" to 0,
+                        "timeZone" to "UTC",
+                        "hl" to langCode,
+                        "gl" to if (langCode == "ko") "KR" else "US",
+                        "userAgent" to SAFARI_USER_AGENT,
+                        "clientName" to "WEB",
+                        "clientVersion" to SAFARI_CLIENT_VERSION
                     )
-                    val vrPayload = mapOf(
-                        "videoId" to videoId,
-                        "context" to mapOf(
-                            "client" to mapOf(
-                                "clientName" to "ANDROID_VR",
-                                "clientVersion" to "1.65.10",
-                                "androidSdkVersion" to 32,
-                                "osName" to "Android",
-                                "osVersion" to "12L",
-                                "deviceMake" to "Oculus",
-                                "deviceModel" to "Quest 3",
-                                "hl" to langCode,
-                                "gl" to if (langCode == "ko") "KR" else "US",
-                                "visitorData" to visitorData
-                            )
-                        ),
-                        "playbackContext" to mapOf(
-                            "contentPlaybackContext" to mapOf(
-                                "signatureTimestamp" to sts
-                            )
-                        )
+                ),
+                "playbackContext" to mapOf(
+                    "contentPlaybackContext" to mapOf(
+                        "html5Preference" to "HTML5_PREF_WANTS",
+                        "signatureTimestamp" to sts
                     )
-                    val res = app.post(vrApiUrl, json = vrPayload, headers = vrHeaders).text
-                    JSONObject(res)
-                } catch (e: Exception) {
-                    println("[TRACK] 🚨 병렬 VR API 호출 오류: ${e.message}")
-                    null
-                }
-            }
+                ),
+                "cpn" to generateCpn(),
+                "videoId" to videoId,
+                "contentCheckOk" to true,
+                "racyCheckOk" to true
+            )).toString()
 
-            val safariJson = safariDeferred.await()
-            val vrJson = vrDeferred.await()
+            val requestBody = safariPayload.toRequestBody("application/json".toMediaTypeOrNull())
+            val request = okhttp3.Request.Builder()
+                .url(safariApiUrl)
+                .post(requestBody)
+                .addHeader("Content-Type", "application/json")
+                .addHeader("User-Agent", SAFARI_USER_AGENT)
+                .addHeader("X-YouTube-Client-Name", "1")
+                .addHeader("X-Youtube-Client-Version", SAFARI_CLIENT_VERSION)
+                .addHeader("Cookie", cookies)
+                .addHeader("Authorization", YoutubeUtils.getSapisidHash(sapisidVal!!, "https://www.youtube.com"))
+                .addHeader("X-Origin", "https://www.youtube.com")
+                .addHeader("DNT", "1")
+                .build()
 
-            if (safariJson != null && vrJson != null) {
-                // 두 채널 모두 무사 수집 완료 -> 4K 비디오와 고품질 오디오 병합 작업 개시
-                val vrStreamingData = vrJson.optJSONObject("streamingData")
-                val safariStreamingData = safariJson.optJSONObject("streamingData")
+            try {
+                val fastSafariClient = proxyHttpClient.newBuilder()
+                    .connectTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
+                    .readTimeout(4, java.util.concurrent.TimeUnit.SECONDS)
+                    .build()
 
-                if (vrStreamingData != null && safariStreamingData != null) {
-                    val vrFormats = vrStreamingData.optJSONArray("adaptiveFormats") ?: JSONArray()
-                    val safariFormats = safariStreamingData.optJSONArray("adaptiveFormats") ?: JSONArray()
-
-                    val mergedFormats = JSONArray()
-                    val addedItags = mutableSetOf<String>()
-
-                    for (i in 0 until safariFormats.length()) {
-                        val format = safariFormats.getJSONObject(i)
-                        mergedFormats.put(format)
-                        addedItags.add(format.optString("itag"))
-                    }
-
-                    for (i in 0 until vrFormats.length()) {
-                        val format = vrFormats.getJSONObject(i)
-                        val itag = format.optString("itag")
-                        if (!addedItags.contains(itag)) {
-                            mergedFormats.put(format)
+                fastSafariClient.newCall(request).execute().use { response ->
+                    val res = response.body?.string() ?: ""
+                    if (res.isNotEmpty()) {
+                        val json = JSONObject(res)
+                        val playabilityStatus = json.optJSONObject("playabilityStatus")
+                        val status = playabilityStatus?.optString("status")
+                        
+                        if (status == "OK" || json.has("streamingData")) {
+                            finalJson = json
+                            lengthSeconds = json.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
                         }
                     }
-                    safariStreamingData.put("adaptiveFormats", mergedFormats)
                 }
-                finalJson = safariJson
-                lengthSeconds = safariJson.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
-            } else if (vrJson != null) {
-                // 💡 [설계 개선]: Safari가 타임아웃이나 오류로 실패하더라도, 비상용 이중 중복 호출을 막고
-                // 이미 병렬로 완벽하게 내려받아 대기 중인 vrJson을 대기시간 0ms로 즉각 대입 구제합니다.
-                println("[TRACK] ⚠️ SAFARI 요청 지연으로 인해 기확보된 VR JSON으로 실시간 가속 복구 적용")
-                finalJson = vrJson
-                lengthSeconds = vrJson.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
+            } catch (e: Exception) { 
+                println("[TRACK] ⚠️ SAFARI 단독 호출 제한 대기 한계 돌파. ANDROID_VR 가속 우회 상태로 전환합니다. 에러: ${e.message}") 
             }
         }
 
-        // 일반 1개국어 오리지널 비디오(95%), 자동 번역 AI 더빙 비디오, 비로그인 상태는 즉시 초고속 단독 VR 패스를 적용하여 3초 이내 재생
+        // 💡 [폴백 흐름 구현]: Safari 요청 도중 실패 혹은 4초 대기 한계점 도달 시, 예외 캐치 블록을 거쳐 아래 조건식을 통해 ANDROID_VR로 폴백 전환
         if (finalJson == null) {
-            println("[TRACK] 3. ANDROID_VR API Request (단독 가속화 및 오리지널 음성 회수 모드 가동)")
+            println("[TRACK] 3. ANDROID_VR API Request (단독 가속화 및 자동 더빙 회피 모드 가동)")
             val vrApiUrl = "https://youtubei.googleapis.com/youtubei/v1/player?prettyPrint=false&key=$VR_API_KEY"
             val vrHeaders = mapOf(
                 "Content-Type" to "application/json",
@@ -881,7 +803,7 @@ open class YoutubeExtractor : ExtractorApi() {
                         this@YoutubeExtractor.name,
                         stream.labelName,
                         stream.url,
-                        type = ExtractorLinkType.M3U8
+                        type = ExtExtractorLinkType.M3U8
                     ) {
                         this.referer = mainUrl
                         this.quality = stream.height
@@ -890,7 +812,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 )
             }
         } catch (e: Exception) {
-            println("[TRACK] 🚨 HLS 파싱 실패: ${e.message}")
+            println("[TRACK] 🚨 HLS 분석 오류: ${e.message}")
         }
     }
 
@@ -1066,7 +988,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     val finalName = "YouTube ${video.label}"
                     callback(
                         newExtractorLink(
-                            this@YoutubeExtractor.name, finalName, localLink, type = ExtractorLinkType.DASH
+                            this@YoutubeExtractor.name, finalName, localLink, type = ExtExtractorLinkType.DASH
                         ) {
                             this.referer = mainUrl
                             this.quality = video.height
@@ -1113,6 +1035,49 @@ open class YoutubeExtractor : ExtractorApi() {
                     return@withContext
                 }
 
+                // 💡 [자막(Captions) 누락 현상 완벽 해결]: 구버전의 정교한 자막 추출 메커니즘 통합 완료
+                val captions = playerResponse.optJSONObject("captions")?.optJSONObject("playerCaptionsTracklistRenderer")?.optJSONArray("captionTracks")
+                if (captions != null) {
+                    for (i in 0 until captions.length()) {
+                        val track = captions.getJSONObject(i)
+                        var subUrl = track.optString("baseUrl")
+                        val lang = track.optString("languageCode")
+                        
+                        val kind = track.optString("kind", "")
+                        val vssId = track.optString("vssId", "")
+                        if (kind == "asr" || vssId.startsWith("a.")) {
+                            continue
+                        }
+
+                        val nameObj = track.optJSONObject("name")
+                        var displayName = nameObj?.optString("simpleText") ?: ""
+                        if (displayName.isBlank()) {
+                            val runs = nameObj?.optJSONArray("runs")
+                            if (runs != null && runs.length() > 0) {
+                                displayName = runs.optJSONObject(0)?.optString("text") ?: ""
+                            }
+                        }
+                        if (displayName.isBlank()) {
+                            displayName = lang.uppercase()
+                        }
+
+                        if (displayName.contains("auto-generated", ignoreCase = true) || 
+                            displayName.contains("자동 생성", ignoreCase = true)) {
+                            continue
+                        }
+
+                        if (subUrl.isNotEmpty() && lang.isNotEmpty()) {
+                            if (subUrl.startsWith("http")) {
+                                subUrl = subUrl.replace(FMT_REPLACE_REGEX, "")
+                                if (!subUrl.contains("fmt=srt")) {
+                                    subUrl = "$subUrl&fmt=srt"
+                                }
+                            }
+                            subtitleCallback(SubtitleFile(displayName, subUrl))
+                        }
+                    }
+                }
+
                 val streamingData = playerResponse.optJSONObject("streamingData")
                 if (streamingData == null) {
                     println("[TRACK] 🚨 FATAL: streamingData 누락")
@@ -1124,7 +1089,6 @@ open class YoutubeExtractor : ExtractorApi() {
 
                 println("[TRACK] 4. Executing Pure Coroutine Parallel Parsing")
 
-                // HLS 및 어댑티브 분석 코루틴을 완전히 동시에 병렬로 가동
                 val hlsJob = launch {
                     if (hlsUrl.isNotBlank()) {
                         parseHlsManifest(hlsUrl, playerId, langCode, callback)
