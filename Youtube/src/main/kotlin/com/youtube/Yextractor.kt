@@ -244,6 +244,7 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         }
 
+        // YoutubeApiDecoder.java 완벽 이식
         private fun decodeBatch(playerId: String, sigs: List<String>, ns: List<String>): Pair<Map<String, String>, Map<String, String>> {
             val sigResults = mutableMapOf<String, String>()
             val nResults = mutableMapOf<String, String>()
@@ -354,7 +355,7 @@ open class YoutubeExtractor : ExtractorApi() {
             return null
         }
 
-        // ✅ 안드로이드 시스템 내장 Locale 번역기를 사용한 100% 무결한 동적 다국어 변환 로직
+        // 안드로이드 내장 시스템 Locale 번역기 연동 로직
         fun getLanguageLabel(locale: String, targetLang: String): String {
             return try {
                 val sysLocale = java.util.Locale(locale)
@@ -364,6 +365,34 @@ open class YoutubeExtractor : ExtractorApi() {
                 locale.uppercase()
             }
         }
+
+        // 언어 코드 동적 번역용 다국어 맵
+        private val langMapKo = mapOf(
+            "ko" to "한국어", "en" to "영어", "es" to "스페인어", "ja" to "일본어", "zh" to "중국어",
+            "fr" to "프랑스어", "de" to "독일어", "pt" to "포르투갈어", "vi" to "베트남어", "id" to "인도네시아어",
+            "ru" to "러시아어", "th" to "태국어", "it" to "이탈리아어", "tr" to "터키어", "hi" to "힌디어",
+            "ar" to "아랍어", "pl" to "폴란드어", "nl" to "네덜란드어", "sv" to "스웨덴어", "no" to "노르웨이어",
+            "da" to "덴마크어", "fi" to "핀란드어", "ro" to "루마니아어", "hu" to "헝가리어", "cs" to "체코어",
+            "sk" to "슬로바키아어", "el" to "그리스어", "he" to "히브리어", "fa" to "페르시아어", "uk" to "우크라이나어"
+        )
+
+        private val langMapEn = mapOf(
+            "ko" to "Korean", "en" to "English", "es" to "Spanish", "ja" to "Japanese", "zh" to "Chinese",
+            "fr" to "French", "de" to "German", "pt" to "Portuguese", "vi" to "Vietnamese", "id" to "Indonesian",
+            "ru" to "Russian", "th" to "Thai", "it" to "Italian", "tr" to "Turkish", "hi" to "Hindi",
+            "ar" to "Arabic", "pl" to "Polish", "nl" to "Dutch", "sv" to "Swedish", "no" to "Norwegian",
+            "da" to "Danish", "fi" to "Finnish", "ro" to "Romanian", "hu" to "Hungarian", "cs" to "Czech",
+            "sk" to "Slovak", "el" to "Greek", "he" to "Hebrew", "fa" to "Persian", "uk" to "Ukrainian"
+        )
+
+        private val langMapAr = mapOf(
+            "ko" to "الكورية", "en" to "الإنجليزية", "es" to "الإسبانية", "ja" to "اليابانية", "zh" to "الصينية",
+            "fr" to "الفرنسية", "de" to "الألمانية", "pt" to "البرتغالية", "vi" to "الفيتنامية", "id" to "الإندونيسية",
+            "ru" to "الروسية", "th" to "التايلاندية", "it" to "الإيطالية", "tr" to "التركية", "hi" to "الهندية",
+            "ar" to "العربية", "pl" to "البولندية", "nl" to "الهولندية", "sv" to "السويدية", "no" to "النرويجية",
+            "da" to "الدانمركية", "fi" to "الفنلندية", "ro" to "الرومانية", "hu" to "المجرية", "cs" to "التشيكية",
+            "sk" to "السلوفاكية", "el" to "اليونانية", "he" to "العبرية", "fa" to "الفارسية", "uk" to "الأوكرانية"
+        )
     }
 
     override fun getExtractorUrl(id: String): String {
@@ -525,8 +554,6 @@ open class YoutubeExtractor : ExtractorApi() {
                     } else {
                         println("[TRACK] 🚨 SAFARI Request blocked/failed. Final JSON will remain null.")
                     }
-                } else {
-                    println("[TRACK] 🚨 SAFARI Request returned empty body.")
                 }
             } catch (e: Exception) { 
                 println("[TRACK] 🚨 SAFARI Request Exception: ${e.message}") 
@@ -604,8 +631,8 @@ open class YoutubeExtractor : ExtractorApi() {
             ?: context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
             
         val langCode = prefs?.getString("youtube_language", "ko") ?: "ko"
-        val downloaderType = sharedPref?.getString("downloader_app_type", "none") ?: "none"
-        val customPkg = sharedPref?.getString("downloader_custom_package", "") ?: ""
+        val downloaderType = prefs?.getString("downloader_app_type", "none") ?: "none"
+        val customPkg = prefs?.getString("downloader_custom_package", "") ?: ""
 
         val (pkgName, appName) = when (downloaderType) {
             "ytdlnis" -> Pair("com.deniscerri.ytdl", "YTDLnis")
@@ -643,7 +670,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     }
                 }
 
-                // M3U8 정밀 파싱 및 원본/중복제거 로직 탑재 (PipePipe 1:1 완벽 이식)
+                // HLS 복구 및 1:1 파싱 시작
                 val hlsStreamsParsedLocal = mutableListOf<HlsParsedStream>()
                 if (hlsUrl.isNotBlank()) {
                     println("[TRACK] -> PipePipe HLS Parser: parsing stream-inf tags.")
@@ -656,7 +683,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
                         val lines = m3u8Body.split("\n")
 
-                        // 💡 [중복 제거 핵심]: 오리지널 언어를 playerResponse에서 역추적하여 100% 신뢰성 보장
+                        // 💡 오리지널 언어를 playerResponse에서 역추적하여 100% 신뢰성 보장
                         var defaultHlsLang = ""
                         val adaptiveFormats = playerResponse.optJSONObject("streamingData")?.optJSONArray("adaptiveFormats")
                         if (adaptiveFormats != null) {
@@ -723,10 +750,10 @@ open class YoutubeExtractor : ExtractorApi() {
                                 locale = defaultHlsLang.ifEmpty { "und" }
                             }
 
-                            // 💡 [동적 번역 핵심]: 하드코딩 제거하고 안드로이드 내장 시스템 Locale 번역기 연동
+                            // 💡 안드로이드 시스템 로컬라이저 호출
                             val langLabel = if (locale != "und") getLanguageLabel(locale, langCode) else ""
                             
-                            // 💡 (원본) 표기를 요청하신대로 (Original)로 완벽 교체
+                            // 💡 (원본) 표기를 요청하신대로 (Original)로 고침
                             val suffix = if (isOriginal) {
                                 "Original"
                             } else {
@@ -756,7 +783,7 @@ open class YoutubeExtractor : ExtractorApi() {
                                     this@YoutubeExtractor.name,
                                     stream.labelName,
                                     stream.url,
-                                    type = ExtExtractorLinkType.M3U8
+                                    type = ExtractorLinkType.M3U8
                                 ) {
                                     this.referer = mainUrl
                                     this.quality = stream.height
@@ -813,7 +840,6 @@ open class YoutubeExtractor : ExtractorApi() {
                             streamUrl = params["url"] ?: ""
                             s = params["s"]
                             sp = params["sp"] ?: "sig"
-                            println("[TRACK] -> Extracted cipher for itag $itag. URL found: ${streamUrl.isNotEmpty()}, s: ${s?.take(10)}..., sp: $sp")
                         } else {
                             println("[TRACK] ⚠️ Skipped track (itag: $itag) - No url and no cipher found.")
                             continue
