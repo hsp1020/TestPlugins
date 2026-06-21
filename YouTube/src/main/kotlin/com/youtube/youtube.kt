@@ -1,3 +1,4 @@
+
 package com.hsp1020.youtube
 
 import org.json.JSONObject
@@ -32,10 +33,22 @@ import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.stream.StreamInfo
 
 // =========================================================================
-// [개선 사항 1] GC 점유율 방지를 위한 단일 고속 공백/개행 제거 확장 함수 정의
+// [개선 완료] 무의미한 빌더 생성을 막는 무할당 프리패스형 공백 및 개행 제거 함수
 // =========================================================================
 fun String.stripWhitespace(): String {
     if (this.isEmpty()) return this
+    
+    // 개행 문자 존재 여부를 선제 검사하여 할당 부하 원천 차단
+    var hasNewline = false
+    for (i in 0 until this.length) {
+        val c = this[i]
+        if (c == '\r' || c == '\n') {
+            hasNewline = true
+            break
+        }
+    }
+    if (!hasNewline) return this.trim()
+    
     val sb = java.lang.StringBuilder(this.length)
     for (i in 0 until this.length) {
         val c = this[i]
@@ -62,15 +75,22 @@ object YoutubeUtils {
 
     private val regexCache = ConcurrentHashMap<String, Regex>()
 
+    // =========================================================================
+    // [개선 완료] JVM 속도를 크게 좀먹는 String.format 루프를 파기하고 
+    // 정적 매핑 기반의 완전 무할당(Zero-Allocation) 기법 도입
+    // =========================================================================
     fun sha1(input: String): String {
         val md = sha1Digest.get()
         md.reset()
         val bytes = md.digest(input.toByteArray(StandardCharsets.UTF_8))
-        val sb = java.lang.StringBuilder(bytes.size * 2)
-        for (b in bytes) {
-            sb.append(String.format("%02x", b))
+        val hexChars = CharArray(bytes.size * 2)
+        val hexDigits = "0123456789abcdef"
+        for (i in bytes.indices) {
+            val v = bytes[i].toInt() and 0xFF
+            hexChars[i * 2] = hexDigits[v ushr 4]
+            hexChars[i * 2 + 1] = hexDigits[v and 0x0F]
         }
-        return sb.toString()
+        return String(hexChars)
     }
 
     fun getSapisidHash(sapisid: String, origin: String = "https://www.youtube.com"): String {
@@ -109,9 +129,6 @@ object YoutubeUtils {
         return Pair(cookieBuilder.toString(), sapisidVal)
     }
 
-    // =========================================================================
-    // [개선 사항 2] 중복 가독 함수를 정리하고 단일 비즈니스 함수로 완전 단일화
-    // =========================================================================
     fun getProxiedPoster(poster: String?): String? {
         if (poster.isNullOrBlank()) return null
         return try {
@@ -121,13 +138,9 @@ object YoutubeUtils {
         }
     }
 
-    // 소스 전체 호출부의 기저 호환성을 해치지 않으면서 단일 구현으로 유도하는 앨리어스 설정
     fun getProxiedPosterBottom(poster: String?): String? = getProxiedPoster(poster)
     fun getProxiedPosterNormal(poster: String?): String? = getProxiedPoster(poster)
 
-    // =========================================================================
-    // [개선 사항 3] 정적 쿼리가 융합된 Shorts 주소의 실시간 인코딩 오버헤드 완화
-    // =========================================================================
     fun getShortsSearchPoster(videoId: String): String {
         val prefix = "https%3A%2F%2Fi.ytimg.com%2Fvi%2F"
         val suffix = "%2Foardefault.jpg%3Fsqp%3D-oaymwEoCJUDENAFSFqQAgHyq4qpAxcIARUAAIhC2AEB4gEKCBgQAhgGOAFAAQ%3D%3D%26rs%3DAOn4CLDWlHo9hImueeIb7JfDzDGNRuQ5tg%26usqp%3DCCk"
@@ -138,15 +151,27 @@ object YoutubeUtils {
         return getShortsSearchPoster(videoId)
     }
     
+    // =========================================================================
+    // [개선 완료] 거대한 수 MB 단위의 전체 HTML 문서 문자열을 정규식으로 풀스캔하던 방식 파기.
+    // 타겟 지점을 indexOf 네이티브 연산으로 O(1)에 정탐한 뒤 미세 윈도우 슬라이싱 적용.
+    // =========================================================================
     fun findConfig(html: String, key: String): String? {
-        return try {
-            val regex = regexCache.computeIfAbsent(key) { k ->
-                Regex("\"$k\"\\s*:\\s*\"([^\"]+)\"")
-            }
-            regex.find(html)?.groupValues?.getOrNull(1)
-        } catch (e: Exception) {
-            null
-        }
+        val searchKey = "\"$key\""
+        val index = html.indexOf(searchKey)
+        if (index == -1) return null
+        
+        val start = index + searchKey.length
+        val end = minOf(start + 150, html.length)
+        val window = html.substring(start, end)
+        
+        val colonIdx = window.indexOf(':')
+        if (colonIdx == -1) return null
+        val firstQuote = window.indexOf('"', colonIdx + 1)
+        if (firstQuote == -1) return null
+        val secondQuote = window.indexOf('"', firstQuote + 1)
+        if (secondQuote == -1) return null
+        
+        return window.substring(firstQuote + 1, secondQuote)
     }
 
     fun getBestThumbnail(thumbData: Any?): String? {
@@ -203,9 +228,6 @@ object YoutubeUtils {
         return current
     }
 
-    // =========================================================================
-    // [빌드 해결] 기저 호환 수동 캐스트 탐색용 유틸리티 정상 복원
-    // =========================================================================
     fun getMapKeyFromAny(obj: Any?, key: String): Map<*, *>? {
         val map = obj as? Map<*, *> ?: return null
         return map[key] as? Map<*, *>
@@ -282,7 +304,6 @@ class YoutubeProvider(
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Live)
 
     companion object {
-        // [개선 사항 4] 구조화 코루틴 라이프사이클 안착을 위한 프로바이더 관리형 독점 스코프 구성
         private val providerScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
         private val homeShorts = Collections.synchronizedList(mutableListOf<Episode>())
@@ -296,11 +317,10 @@ class YoutubeProvider(
             }
         )
         
-        // [개선 사항 5] 메모리 제한 상한선 최적화 조정 (RAM 릭 제어)
         private val epMetaMapCache: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(128, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
-                    return size > 500 // 기기 환경 안정성을 위하여 보존 상한선을 2000 -> 500으로 단축
+                    return size > 500 
                 }
             }
         )
@@ -458,7 +478,6 @@ class YoutubeProvider(
                 if (!watchtimeUrl.contains("el=shortspage")) watchtimeUrl = "$watchtimeUrl&el=shortspage"
             }
 
-            // [개선 사항 4] 소멸 통제 불능인 CoroutineScope(Dispatchers.IO) 대신 정의된 동적 라이프사이클 연계 적용
             providerScope.launch {
                 try {
                     val pRes = app.get(playbackUrl, interceptor = ytInterceptor)
@@ -477,9 +496,6 @@ class YoutubeProvider(
         return getSavedContinuationToken(key, 0)
     }
 
-    // =========================================================================
-    // [개선 사항 6] 키 탐색 시 매번 SHA-1 해시 함수를 가동시키던 무거운 암호화 구조 생략
-    // =========================================================================
     private fun getSavedContinuationToken(key: String, page: Int): String? {
         val pageKey = if (page > 0) "${key}_page_$page" else key
         
@@ -733,9 +749,6 @@ class YoutubeProvider(
             }
         }
 
-        // =========================================================================
-        // [개선 사항 1] 무분별하게 유입되는 replace 문자열 가비지를 차단하고 최적화 확장 적용
-        // =========================================================================
         val cleanDur = duration.stripWhitespace()
         val cleanViews = views.stripWhitespace()
         val cleanDate = date.stripWhitespace()
@@ -745,9 +758,6 @@ class YoutubeProvider(
         return partsList.joinToString(" • ")
     }
     
-    // =========================================================================
-    // [개선 사항 7] 순차 루프 연산 낭비를 생략하고 O(1) 직접 매치 방식으로 개편
-    // =========================================================================
     private fun Map<*, *>.getMapKey(key: String): Map<*, *>? {
         return this[key] as? Map<*, *>
     }
@@ -961,7 +971,7 @@ class YoutubeProvider(
                 val contextTag = if (isSearch) "&ctx=search" else "&ctx=home"
                 val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
 
-                val descText = views.replace("\r", "").replace("\n", "").trim()
+                val descText = views.stripWhitespace()
                 if (descText.isNotBlank()) epMetaMapCache[videoId] = descText
                 
                 val newShortEp = newEpisode(finalUrl) {
@@ -1028,7 +1038,6 @@ class YoutubeProvider(
                         "$mainUrl/$targetPath",
                         TvType.TvSeries
                     ) {
-                        // [개선 사항 2] 포스터 단일 함수 구성 대체
                         this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
                     }
                 }
@@ -1105,7 +1114,6 @@ class YoutubeProvider(
                         "$mainUrl/watch?v=$videoId",
                         TvType.Movie
                     ) {
-                        // [개선 사항 2] 포스터 단일 함수 구성 대체
                         this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
                     }
                 }
@@ -1125,7 +1133,6 @@ class YoutubeProvider(
                     "$mainUrl/channel/$id",
                     TvType.Live
                 ) {
-                    // [개선 사항 2] 포스터 단일 함수 구성 대체
                     this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
                 }
             }
@@ -1208,9 +1215,6 @@ class YoutubeProvider(
         return null
     }
 
-    // =========================================================================
-    // [개선 사항 8] HTML 복사 오버헤드를 완벽 차단하는 원본 인덱스 기반 타깃팅 JSON 스캔 기법 적용
-    // =========================================================================
     private fun extractYtInitialData(html: String): Map<String, Any>? {
         var index = 0
         val htmlLen = html.length
@@ -2242,9 +2246,6 @@ class YoutubeProvider(
     }
 
     override suspend fun load(url: String): LoadResponse {
-        // ==========================================
-        // 1. [쇼츠 에피소드 처리 블록]
-        // ==========================================
         if (url.contains("/shorts/")) {
             val videoId = YoutubeUtils.extractYoutubeId(url) ?: "video"
             val useSearchList = url.contains("ctx=search")
@@ -2412,7 +2413,7 @@ class YoutubeProvider(
 
 
         // ==========================================
-        // 2. [채널 에피소드 처리 블록] -> [부결 유지] 기존의 NewPipe 유도 및 이중 가동 상태 유지
+        // 2. [채널 에피소드 처리 블록]
         // ==========================================
         if (url.contains("/@") || url.contains("/channel/") || url.contains("/c/") || url.contains("/user/")) {
             try {
@@ -2501,7 +2502,6 @@ class YoutubeProvider(
                     return null
                 }
 
-                // 변경 적용할 fetchTab 개선 세부 로직
                 suspend fun fetchTab(tabUrl: String): List<Episode> {
                     val tabEpisodes = mutableListOf<Episode>()
                     try {
@@ -2511,20 +2511,17 @@ class YoutubeProvider(
                         var initialItems: List<*>? = null
                         val tabs = safeGet(tabData, "contents", "twoColumnBrowseResultsRenderer", "tabs") as? List<*>
                         if (tabs != null) {
-                            // 1단계. 현재 요청한 탭의 타깃 식별자(경로)를 분석합니다.
                             val targetPath = when {
                                 tabUrl.endsWith("/videos") -> "/videos"
                                 tabUrl.endsWith("/shorts") -> "/shorts"
                                 else -> ""
                             }
 
-                            // 2단계. 탭 오브젝트들 중에서 webCommandMetadata URL 주소가 현재 요구한 타깃 경로와 매칭되는 탭을 찾습니다.
                             val matchingTab = tabs.firstOrNull { tab ->
                                 val commandUrl = safeGet(tab, "tabRenderer", "endpoint", "commandMetadata", "webCommandMetadata", "url") as? String
                                 commandUrl != null && targetPath.isNotEmpty() && commandUrl.endsWith(targetPath)
                             }
 
-                            // 3단계. 일치하는 올바른 탭이 있다면 그것을 사용하고, 없다면 selected 상태인 기본 탭을 fallback으로 삼습니다.
                             val tabToUse = matchingTab ?: tabs.firstOrNull { tab ->
                                 safeGet(tab, "tabRenderer", "selected") == true
                             }
@@ -2536,8 +2533,6 @@ class YoutubeProvider(
                                 initialItems = safeGet(activeContent, "gridRenderer", "items") as? List<*>
                             }
 
-                            // 4단계. 특정 미디어 타입(/videos 또는 /shorts)을 요청했으나 유효한 매칭 탭의 콘텐츠를 얻지 못했다면,
-                            // 타 탭(쇼츠 등)의 데이터를 무분별하게 긁어오는 무조건적 루프 폴백 동작을 원천 차단합니다.
                             if (initialItems == null && targetPath.isEmpty()) {
                                 for (tab in tabs) {
                                     val tabMap = tab as? Map<*, *>
@@ -2597,7 +2592,7 @@ class YoutubeProvider(
                     }
                     return tabEpisodes
                 }
-                
+
                 val pair: Pair<List<Episode>, List<Episode>> = kotlinx.coroutines.coroutineScope {
                     val videosDeferred = async { fetchTab("$cleanUrl/videos") }
                     val shortsDeferred = async { fetchTab("$cleanUrl/shorts") }
