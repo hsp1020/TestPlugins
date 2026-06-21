@@ -970,7 +970,7 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 }
             }
         }
-
+        
         // 웹뷰의 완벽한 생명주기 리소스 소멸을 구현하여 메모리 누수를 원천 방지합니다.
         override fun onDestroyView() {
             if (::webView.isInitialized) {
@@ -982,8 +982,7 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                     webView.stopLoading()
                     webView.clearHistory()
                     webView.removeAllViews()
-                    webView.webViewClient = null
-                    webView.webChromeClient = null
+                    // 💡 [빌드 에러 해결]: Kotlin NonNull 컴파일 제약으로 인해 null 대입 코드를 삭제합니다.
                     
                     // 3. Native 메모리 소멸자 실행
                     webView.destroy()
@@ -992,6 +991,7 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 }
             }
             super.onDestroyView()
-        }    
+        }
+
     }
 }
