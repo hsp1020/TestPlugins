@@ -902,7 +902,6 @@ class YoutubeProvider(
         return Triple(channel, views, date)
     }
 
-
     private fun collectFromRenderer(
         renderer: Map<*, *>?,
         seenIds: MutableSet<String>,
@@ -1192,7 +1191,7 @@ class YoutubeProvider(
         }
         return null
     }
-
+   
     private fun processRecursive(
         data: Any?,
         outList: MutableList<SearchResponse>,
@@ -2191,7 +2190,6 @@ class YoutubeProvider(
     }
 
 
-
     override suspend fun load(url: String): LoadResponse {
         // ==========================================
         // 💡 [개선1] 쇼츠 에피소드 처리 블록: 일반 영상처럼 넘버링 및 채널 UI 완벽 적용
@@ -2857,219 +2855,8 @@ class YoutubeProvider(
         }
     }
     
-        // ==========================================
-        // 💡 3. [기본 에피소드(단일 비디오) 처리 블록]
-        // ==========================================
-        val videoId = YoutubeUtils.extractYoutubeId(url) ?: throw ErrorLoadingException("Invalid YouTube URL")
 
-        epMetaMapCache.clear()
-
-        var npPlot = ""
-        var npTags = emptyList<String>()
-        var npActor: ActorData? = null
-
-        try {
-            val extractor = ServiceList.YouTube.getStreamExtractor(url)
-            extractor.fetchPage()
-            val info = StreamInfo.getInfo(extractor)
-
-            npPlot = info.description.content.toString()
-            // 💡 [수정됨] 단일 영상의 해시태그 한도를 기존 5개에서 10개로 확장했습니다.
-            npTags = info.tags?.take(10)?.toList() ?: emptyList()
-
-            info.uploaderName?.takeIf { it.isNotBlank() }?.let { uploader ->
-                npActor = ActorData(
-                    Actor(
-                        uploader,
-                        info.uploaderAvatars.lastOrNull()?.url ?: ""
-                    )
-                )
-            }
-        } catch (e: Exception) {
-            logError(e) 
-        }
-
-        val headers = mapOf("Referer" to "https://www.youtube.com/")
-        val response = app.get(url, headers = headers, interceptor = ytInterceptor)
-        val html = response.text
-        val data = extractYtInitialData(html)
-        
-        var title = "YouTube Video"
-        var plot = npPlot 
-        var poster = YoutubeUtils.buildThumbnailFromId(videoId)
-
-        var channelName = ""
-        var channelId = ""
-        var channelAvatar = ""
-        var subscriberCount = ""
-
-        val recommendations = mutableListOf<SearchResponse>()
-        val seenRecIds = mutableSetOf<String>()
-
-        if (data != null) {
-            val resultsContents = safeGet(data, "contents", "twoColumnWatchNextResults", "results", "results", "contents") as? List<*>
-
-            resultsContents?.forEach { item ->
-                val m = item as? Map<*, *>
-
-                val primary = m?.get("videoPrimaryInfoRenderer") as? Map<*, *>
-                if (primary != null) {
-                    val t = extractTitle(primary["title"] as? Map<*, *>)
-                    if (!t.isNullOrBlank()) title = t
-                }
-
-                val secondary = m?.get("videoSecondaryInfoRenderer") as? Map<*, *>
-                if (secondary != null) {
-                    val owner = safeGet(secondary, "owner", "videoOwnerRenderer") as? Map<*, *>
-                    if (owner != null) {
-                        channelName = extractTitle(owner["title"] as? Map<*, *>) ?: ""
-                        channelAvatar = YoutubeUtils.getBestThumbnail(owner["thumbnail"]) ?: ""
-                        channelId = safeGet(owner, "navigationEndpoint", "browseEndpoint", "browseId") as? String ?: ""
-                        if (channelId.isEmpty()) {
-                            val curl = safeGet(owner, "navigationEndpoint", "commandMetadata", "webCommandMetadata", "url") as? String
-                            if (!curl.isNullOrBlank()) channelId = curl.substringAfterLast("/")
-                        }
-                        
-                        subscriberCount = getText(owner["subscriberCountText"])
-                    }
-
-                    if (plot.isBlank()) {
-                        val descObj = secondary["attributedDescription"] as? Map<*, *>
-                            ?: secondary["description"] as? Map<*, *>
-                        val fullDesc = getText(descObj)
-                        if (fullDesc.isNotBlank()) {
-                            plot = fullDesc.trimStart() 
-                        }
-                    }
-                }
-            }
-
-            val secondaryResults = safeGet(data, "contents", "twoColumnWatchNextResults", "secondaryResults", "secondaryResults", "results")
-            if (secondaryResults != null) {
-                processRecursive(secondaryResults, recommendations, seenRecIds, false)
-            }
-
-        } else {
-            val doc = response.document
-            title = doc.selectFirst("meta[property=og:title]")?.attr("content") ?: title
-            poster = doc.selectFirst("meta[property=og:image]")?.attr("content") ?: poster
-            if (plot.isBlank()) {
-                plot = doc.selectFirst("meta[property=og:description]")?.attr("content") ?: plot
-            }
-        }
-
-        if (channelName.isNotBlank() && channelId.isNotBlank()) {
-            val channelUrlFull = if (channelId.startsWith("UC") || channelId.startsWith("@")) "$mainUrl/channel/$channelId" else "$mainUrl/$channelId"
-            val channelCard = newMovieSearchResponse(channelName, channelUrlFull, TvType.Live) {
-                this.posterUrl = channelAvatar
-            }
-            recommendations.add(0, channelCard)
-        }
-
-        val filteredRecs = recommendations.filter { !it.url.contains("/shorts/") }
-        val episodes = mutableListOf<Episode>()
-        
-        var ep1Dur = ""
-        val lengthMatch = LENGTH_SECONDS_REGEX.find(html)
-        if (lengthMatch != null) {
-            try {
-                val s = lengthMatch.groupValues[1].toLong()
-                ep1Dur = if (s >= 3600) String.format("%d:%02d:%02d", s/3600, (s%3600)/60, s%60) else String.format("%d:%02d", s/60, s%60)
-            } catch (e: Exception) {}
-        }
-        
-        var ep1Views = ""
-        val viewMatch = VIEW_COUNT_REGEX.find(html)
-        if (viewMatch != null) {
-            ep1Views = viewMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
-        }
-        
-        var ep1Date = ""
-        val dateMatch = PUBLISH_DATE_REGEX.find(html)
-        if (dateMatch != null) {
-            ep1Date = dateMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
-        }
-        
-        val resultsContentsForEp1 = safeGet(data, "contents", "twoColumnWatchNextResults", "results", "results", "contents") as? List<*>
-        resultsContentsForEp1?.forEach { item ->
-            val m = item as? Map<*, *>
-            val primary = m?.getMapKey("videoPrimaryInfoRenderer")
-            if (primary != null) {
-                val viewCountRenderer = primary.getMapKey("videoViewCountRenderer")
-                val vCount = if (viewCountRenderer != null) {
-                    getText(viewCountRenderer.getMapKey("extraShortViewCount") ?: viewCountRenderer.getMapKey("viewCount"))
-                } else {
-                    getText(primary.getMapKey("viewCount"))
-                }
-                
-                if (vCount.isNotBlank()) ep1Views = vCount.replace("\r", "").replace("\n", "").trim()
-                
-                val dText = extractTitle(primary.getMapKey("dateText") as? Map<*, *>) ?: getText(primary.getMapKey("dateText"))
-                if (dText.isNotBlank()) ep1Date = dText.replace("\r", "").replace("\n", "").trim()
-            }
-        }
-
-        val cDur = ep1Dur.replace("\r", "").replace("\n", "").trim()
-        val cViews = ep1Views.replace("\r", "").replace("\n", "").trim()
-        val cDate = ep1Date.replace("\r", "").replace("\n", "").trim()
-        val cChannel = channelName.replace("\r", "").replace("\n", "").trim()
-
-        val mainDescParts = listOf(cDur, cViews, cDate, cChannel).filter { it.isNotBlank() && it != "N/A" }
-        val mainDescStr = mainDescParts.joinToString(" • ")
-
-        episodes.add(newEpisode(url) {
-            this.name = title
-            this.posterUrl = poster
-            this.episode = 1
-            this.description = mainDescStr.ifBlank { cChannel.ifBlank { "Playing" } }
-        })
-
-        var epCount = 2
-        filteredRecs.forEach { rec ->
-            if (rec.url.contains("watch?v=") || rec.url.contains("/shorts/")) {
-                val recVidId = YoutubeUtils.extractYoutubeId(rec.url)
-                val extraMeta = if (recVidId != null) epMetaMapCache[recVidId] else ""
-                
-                var cleanName = rec.name.replaceFirst(Regex("^\\{.*?\\}\\s*"), "")
-
-                episodes.add(newEpisode(rec.url) {
-                    this.name = cleanName
-                    this.posterUrl = rec.posterUrl
-                    this.episode = epCount++
-                    if (!extraMeta.isNullOrBlank()) {
-                        this.description = extraMeta
-                    }
-                })
-            }
-        }
-
-        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-            this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
-            this.plot = plot
-            this.recommendations = filteredRecs 
-            
-            if (npTags.isNotEmpty()) {
-                this.tags = npTags
-            }
-
-            val actorList = mutableListOf<ActorData>()
-            if (npActor != null) {
-                actorList.add(npActor!!)
-            } else if (channelName.isNotBlank()) {
-                actorList.add(ActorData(Actor(channelName, channelAvatar)))
-            }
-
-            if (subscriberCount.isNotBlank()) {
-                actorList.add(ActorData(Actor(subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/YouTube/Subscribe.jpg")))
-            }
-
-            if (actorList.isNotEmpty()) {
-                this.actors = actorList
-            }
-        }
-    }
-
-
+    
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
