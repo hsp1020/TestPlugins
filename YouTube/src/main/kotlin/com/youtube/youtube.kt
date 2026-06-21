@@ -732,19 +732,42 @@ class YoutubeProvider(
 
         if (views.isBlank() || date.isBlank()) {
             val rows = videoData.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")?.getMapKey("metadata")?.getMapKey("contentMetadataViewModel")?.getListKey("metadataRows")
-            rows?.forEachIndexed { index, row ->
-                val parts = row.getListKey("metadataParts") ?: YoutubeUtils.getListKeyFromAny(row, "metadataParts") as? List<*>
-                parts?.forEachIndexed { pIndex, part ->
-                    if (part is Map<*, *>) {
-                        val t = getText(part.getMapKey("text"))
-                        if (t.isNotBlank() && t != duration && t != channel) {
-                            if (index == 0) {
-                                channel = t
-                            } else if (index == 1) {
-                                if (pIndex == 0) {
-                                    views = t
-                                } else {
-                                    date = t
+            if (rows != null && rows.isNotEmpty()) {
+                if (rows.size == 1) {
+                    val singleRow = rows.getOrNull(0)
+                    if (singleRow != null) {
+                        val parts = singleRow.getListKey("metadataParts") ?: YoutubeUtils.getListKeyFromAny(singleRow, "metadataParts") as? List<*>
+                        val firstPart = parts?.getOrNull(0) as? Map<*, *>
+                        if (firstPart != null) {
+                            val rawViews = getText(firstPart.getMapKey("text") ?: firstPart["text"])
+                            if (rawViews.isNotBlank() && rawViews != duration) {
+                                views = rawViews
+                            }
+                        }
+                        val secondPart = parts?.getOrNull(1) as? Map<*, *>
+                        if (secondPart != null) {
+                            val rawDate = getText(secondPart.getMapKey("text") ?: secondPart["text"])
+                            if (rawDate.isNotBlank() && rawDate != duration) {
+                                date = rawDate
+                            }
+                        }
+                    }
+                } else {
+                    rows.forEachIndexed { index, row ->
+                        val parts = row.getListKey("metadataParts") ?: YoutubeUtils.getListKeyFromAny(row, "metadataParts") as? List<*>
+                        parts?.forEachIndexed { pIndex, part ->
+                            if (part is Map<*, *>) {
+                                val t = getText(part.getMapKey("text"))
+                                if (t.isNotBlank() && t != duration && t != channel) {
+                                    if (index == 0) {
+                                        channel = t
+                                    } else if (index == 1) {
+                                        if (pIndex == 0) {
+                                            views = t
+                                        } else {
+                                            date = t
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -752,6 +775,7 @@ class YoutubeProvider(
                 }
             }
         }
+
 
         // 💡 모든 특수문자 버그 제거 및 [길이] • [조회수] • [날짜] • [채널] 순서 완벽 적용
         val cleanDur = duration.replace("\r", "").replace("\n", "").trim()
@@ -2292,8 +2316,26 @@ class YoutubeProvider(
             }
 
             var ep1Views = ""
-            val viewMatch = VIEW_COUNT_REGEX.find(html)
-            if (viewMatch != null) ep1Views = viewMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
+            val foundRenderers = mutableListOf<Map<*, *>>()
+            findAllRenderers(data, foundRenderers)
+            val primary = foundRenderers.firstOrNull { it.containsKey("viewCount") || it.containsKey("videoViewCountRenderer") }
+
+            if (primary != null) {
+                val viewCountRenderer = primary.getMapKey("videoViewCountRenderer")
+                val vCount = if (viewCountRenderer != null) {
+                    getText(viewCountRenderer.getMapKey("extraShortViewCount") ?: viewCountRenderer.getMapKey("viewCount"))
+                } else {
+                    getText(primary.getMapKey("viewCount"))
+                }
+                if (vCount.isNotBlank()) {
+                    ep1Views = vCount.replace("\r", "").replace("\n", "").trim()
+                }
+            }
+
+            if (ep1Views.isBlank()) {
+                val viewMatch = VIEW_COUNT_REGEX.find(html)
+                if (viewMatch != null) ep1Views = viewMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
+            }
             
             val cViews = ep1Views.ifBlank { "Playing" }
 
@@ -2303,7 +2345,7 @@ class YoutubeProvider(
             }
 
             val finalTitle = "#$currentEpIndex $shortTitle".replace("##", "#")
-            val finalPlot = "\u200b"
+            val finalPlot = npPlot.ifBlank { " " }
 
             val finalRecs = mutableListOf<SearchResponse>()
             if (channelName.isNotBlank() && channelId.isNotBlank()) {
@@ -2758,34 +2800,32 @@ class YoutubeProvider(
         }
         
         var ep1Views = ""
-        val viewMatch = VIEW_COUNT_REGEX.find(html)
-        if (viewMatch != null) {
-            ep1Views = viewMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
-        }
-        
         var ep1Date = ""
-        val dateMatch = PUBLISH_DATE_REGEX.find(html)
-        if (dateMatch != null) {
-            ep1Date = dateMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
-        }
-        
-        val resultsContentsForEp1 = safeGet(data, "contents", "twoColumnWatchNextResults", "results", "results", "contents") as? List<*>
-        resultsContentsForEp1?.forEach { item ->
-            val m = item as? Map<*, *>
-            val primary = m?.getMapKey("videoPrimaryInfoRenderer")
-            if (primary != null) {
-                val viewCountRenderer = primary.getMapKey("videoViewCountRenderer")
-                val vCount = if (viewCountRenderer != null) {
-                    getText(viewCountRenderer.getMapKey("extraShortViewCount") ?: viewCountRenderer.getMapKey("viewCount"))
-                } else {
-                    getText(primary.getMapKey("viewCount"))
-                }
-                
-                if (vCount.isNotBlank()) ep1Views = vCount.replace("\r", "").replace("\n", "").trim()
-                
-                val dText = extractTitle(primary.getMapKey("dateText") as? Map<*, *>) ?: getText(primary.getMapKey("dateText"))
-                if (dText.isNotBlank()) ep1Date = dText.replace("\r", "").replace("\n", "").trim()
+
+        val foundRenderers = mutableListOf<Map<*, *>>()
+        findAllRenderers(data, foundRenderers)
+        val primary = foundRenderers.firstOrNull { it.containsKey("viewCount") || it.containsKey("videoViewCountRenderer") }
+
+        if (primary != null) {
+            val viewCountRenderer = primary.getMapKey("videoViewCountRenderer")
+            val vCount = if (viewCountRenderer != null) {
+                getText(viewCountRenderer.getMapKey("extraShortViewCount") ?: viewCountRenderer.getMapKey("viewCount"))
+            } else {
+                getText(primary.getMapKey("viewCount"))
             }
+            if (vCount.isNotBlank()) ep1Views = vCount.replace("\r", "").replace("\n", "").trim()
+            
+            val dText = extractTitle(primary.getMapKey("dateText") as? Map<*, *>) ?: getText(primary.getMapKey("dateText"))
+            if (dText.isNotBlank()) ep1Date = dText.replace("\r", "").replace("\n", "").trim()
+        }
+
+        if (ep1Views.isBlank()) {
+            val viewMatch = VIEW_COUNT_REGEX.find(html)
+            if (viewMatch != null) ep1Views = viewMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
+        }
+        if (ep1Date.isBlank()) {
+            val dateMatch = PUBLISH_DATE_REGEX.find(html)
+            if (dateMatch != null) ep1Date = dateMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
         }
 
         val cDur = ep1Dur.replace("\r", "").replace("\n", "").trim()
