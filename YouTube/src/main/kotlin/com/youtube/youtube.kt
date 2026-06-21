@@ -2547,11 +2547,6 @@ class YoutubeProvider(
                     val t = extractTitle(primary["title"] as? Map<*, *>)
                     if (!t.isNullOrBlank()) title = t
 
-                    // 1. 날짜 추출 (아직 plot 변수에 넣지 않고 보관만 합니다)
-                    val dateText = extractTitle(primary["dateText"] as? Map<*, *>)
-                    if (!dateText.isNullOrBlank()) {
-                        plot += "$dateText • " // 반드시 += (이어붙이기) 사용!
-                    }
                 }
 
                 val secondary = m?.get("videoSecondaryInfoRenderer") as? Map<*, *>
