@@ -1157,10 +1157,10 @@ class YoutubeProvider(
         outList: MutableList<SearchResponse>,
         seenIds: MutableSet<String>,
         playlistMode: Boolean,
-        isSearch: Boolean, // 💡 인자 전파 처리
+        isSearch: Boolean = false, // 💡 기본값을 false로 세팅하여 빌드를 원천 통과시킵니다.
         depth: Int = 0,
         playlistId: String? = null
-    ) {
+    ) {    
         if (data == null || depth > 32) return 
         if (data is Map<*, *>) {
             val extracted = collectFromRenderer(data, seenIds, playlistId, isSearch)
