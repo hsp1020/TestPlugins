@@ -21,6 +21,7 @@ import java.util.concurrent.ConcurrentHashMap
 import com.lagradost.cloudstream3.AcraApplication
 import androidx.preference.PreferenceManager
 import kotlinx.coroutines.async
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
