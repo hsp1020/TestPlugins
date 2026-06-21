@@ -2341,7 +2341,7 @@ class YoutubeProvider(
             }
 
             val finalTitle = "#$currentEpIndex $shortTitle".replace("##", "#")
-            val finalPlot = npPlot.ifBlank { " " }
+            val finalPlot = "\u200b"
 
             val finalRecs = mutableListOf<SearchResponse>()
             if (channelName.isNotBlank() && channelId.isNotBlank()) {
@@ -2875,7 +2875,7 @@ class YoutubeProvider(
             }
 
             if (subscriberCount.isNotBlank()) {
-                this.actors = actorList
+                actorList.add(ActorData(Actor(subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/YouTube/Subscribe.jpg")))
             }
 
             if (actorList.isNotEmpty()) {
