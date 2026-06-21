@@ -499,19 +499,17 @@ open class YoutubeExtractor : ExtractorApi() {
     }
 
     // [Safari 단독 가동 구조 복원 및 폴백 흐름 최적화]
+
     private suspend fun fetchPlayerResponse(videoId: String): Triple<JSONObject?, Long, String> = withContext(Dispatchers.IO) {
-        val watchUrl = "https://www.youtube.com/watch?v=$videoId"
+        val context = com.lagradost.cloudstream3.AcraApplication.context
+        val provider = com.lagradost.cloudstream3.APIHolder.allProviders.find { it.name == "YouTube" }
+        val prefs = (provider as? com.hsp1020.youtube.YoutubeProvider)?.appPrefs 
+            ?: context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
         
-        println("[TRACK] 1. Initial HTML Fetch & Cached Metadata Config Retrieval")
-        
-        val watchHtmlDeferred = async {
-            try {
-                app.get(watchUrl, headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)).text
-            } catch (e: Exception) {
-                println("[TRACK] 🚨 HTML 다운로드 실패: ${e.message}")
-                ""
-            }
-        }
+        val langCode = prefs?.getString("youtube_language", "en") ?: "en"
+        val visitorData = prefs?.getString("yt_visitor_data", null) ?: "_Mk3UVhY40g"
+        val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(prefs, langCode, visitorData, false)
+        val isLoggedIn = !sapisidVal.isNullOrBlank()
 
         val pipePlayerDeferred = async {
             val now = System.currentTimeMillis()
@@ -537,36 +535,9 @@ open class YoutubeExtractor : ExtractorApi() {
                     } else null
                 }
             } catch (e: Exception) {
-                println("[TRACK] 🚨 플레이어 버전 스캔 실패: ${e.message}")
                 null
             }
         }
-
-        val html = watchHtmlDeferred.await()
-        val visitorData = VISITOR_DATA_REGEX.find(html)?.groupValues?.get(1) ?: ""
-
-        // 다국어 프리 스캔
-        var isDirectDubbed = false
-        try {
-            val audioTrackCount = html.split("\"audioTrack\"").size - 1
-            if (audioTrackCount > 3) {
-                val hasAutoDub = html.contains("\"isAutoDubbed\"\\s*:\\s*true".toRegex())
-                if (!hasAutoDub) {
-                    isDirectDubbed = true
-                }
-            }
-        } catch (e: Exception) {
-            println("[TRACK] 🚨 다국어 프리 스캔 예외: ${e.message}")
-        }
-
-        val context = com.lagradost.cloudstream3.AcraApplication.context
-        val provider = com.lagradost.cloudstream3.APIHolder.allProviders.find { it.name == "YouTube" }
-        val prefs = (provider as? com.hsp1020.youtube.YoutubeProvider)?.appPrefs 
-            ?: context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
-        
-        val langCode = prefs?.getString("youtube_language", "en") ?: "en"
-        val (cookies, sapisidVal) = YoutubeUtils.buildCookiesAndExtractSapisid(prefs, langCode, visitorData, false)
-        val isLoggedIn = !sapisidVal.isNullOrBlank()
 
         val pipeJson = pipePlayerDeferred.await()
         var sts = 20002
@@ -579,11 +550,7 @@ open class YoutubeExtractor : ExtractorApi() {
         var finalJson: JSONObject? = null
         var lengthSeconds = 3600L
 
-        val useSafariClient = isLoggedIn && isDirectDubbed
-
-        // 💡 [개정 완료]: 직접 더빙이 맞을 시, 처음부터 병렬로 수행되던 ANDROID_VR을 소거하고 오직 WEB_SAFARI 단독 호출만 전송
-        if (useSafariClient) {
-            println("[TRACK] 2. WEB_SAFARI 단독 호출 실행 (성우 수동 더빙 전용 추출)")
+        if (isLoggedIn) {
             val safariApiUrl = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
             val safariPayload = JSONObject(mapOf(
                 "context" to mapOf(
@@ -642,14 +609,12 @@ open class YoutubeExtractor : ExtractorApi() {
                         }
                     }
                 }
-            } catch (e: Exception) { 
-                println("[TRACK] ⚠️ SAFARI 단독 호출 제한 대기 한계 돌파. ANDROID_VR 가속 우회 상태로 전환합니다. 에러: ${e.message}") 
+            } catch (e: Exception) {
+                println("[TRACK] Safari player request error: ${e.message}")
             }
         }
 
-        // 💡 [폴백 흐름 구현]: Safari 요청 도중 실패 혹은 4초 대기 한계점 도달 시, 예외 캐치 블록을 거쳐 아래 조건식을 통해 ANDROID_VR로 폴백 전환
         if (finalJson == null) {
-            println("[TRACK] 3. ANDROID_VR API Request (단독 가속화 및 자동 더빙 회피 모드 가동)")
             val vrApiUrl = "https://youtubei.googleapis.com/youtubei/v1/player?prettyPrint=false&key=$VR_API_KEY"
             val vrHeaders = mapOf(
                 "Content-Type" to "application/json",
@@ -688,14 +653,14 @@ open class YoutubeExtractor : ExtractorApi() {
                     finalJson = json
                     lengthSeconds = json.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
                 }
-            } catch (e: Exception) { 
-                println("[TRACK] 🚨 ANDROID_VR API 단독 수집 에러: ${e.message}") 
+            } catch (e: Exception) {
+                println("[TRACK] VR player request error: ${e.message}")
             }
         }
 
         Triple(finalJson, lengthSeconds, playerId)
     }
-
+    
     private suspend fun parseHlsManifest(
         hlsUrl: String,
         playerId: String,
@@ -775,13 +740,11 @@ open class YoutubeExtractor : ExtractorApi() {
                 val suffix = if (isOriginal) {
                     when (langCode.lowercase()) {
                         "ko" -> "원본"
-                        "ar" -> "الأصلي"
                         else -> "OG"
                     }
                 } else {
                     when (langCode.lowercase()) {
                         "ko" -> "더빙"
-                        "ar" -> "دبلجة"
                         else -> "Dub"
                     }
                 }
