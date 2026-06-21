@@ -479,8 +479,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
         }
     }
 
-
-
     class CustomSectionsDialog(private val sharedPref: SharedPreferences) : DialogFragment() {
 
         private val mapper = jacksonObjectMapper()
@@ -574,7 +572,10 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
         }
 
         private fun loadSections() {
-            val json = sharedPref.getString("custom_homepages_v3", "[]") ?: "[]"
+            val ctx = requireContext()
+            // 💡 플러그인 개별 SharedPreferences 대신 호스트 앱 기본 SharedPreferences를 사용하도록 통일합니다.
+            val defaultPrefs = androidx.preference.PreferenceManager.getDefaultSharedPreferences(ctx)
+            val json = defaultPrefs.getString("custom_homepages_v3", "[]") ?: "[]"
             sectionsList = try {
                 mapper.readValue(json)
             } catch (e: Exception) {
@@ -582,9 +583,13 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
             }
         }
 
+
         private fun saveSections() {
+            val ctx = requireContext()
+            // 💡 정렬 정보를 저장할 때도 기본 SharedPreferences에 동일하게 기록합니다.
+            val defaultPrefs = androidx.preference.PreferenceManager.getDefaultSharedPreferences(ctx)
             val json = mapper.writeValueAsString(sectionsList)
-            sharedPref.edit().putString("custom_homepages_v3", json).apply()
+            defaultPrefs.edit().putString("custom_homepages_v3", json).apply()
         }
 
         private fun createSvgIcon(pathData: String, colorHex: String): android.graphics.drawable.Drawable {
