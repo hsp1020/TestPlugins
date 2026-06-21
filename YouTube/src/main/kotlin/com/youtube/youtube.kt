@@ -2546,9 +2546,8 @@ class YoutubeProvider(
                 if (primary != null) {
                     val t = extractTitle(primary["title"] as? Map<*, *>)
                     if (!t.isNullOrBlank()) title = t
-
-                    val dateText = extractTitle(primary["dateText"] as? Map<*, *>)
-                    if (!dateText.isNullOrBlank()) plot += "$dateText\n\n"
+                    
+                    // 💡 [수정됨] 이 위치에 있던 날짜(dateText)를 plot에 추가하는 로직을 제거했습니다.
                 }
 
                 val secondary = m?.get("videoSecondaryInfoRenderer") as? Map<*, *>
@@ -2588,7 +2587,7 @@ class YoutubeProvider(
             poster = doc.selectFirst("meta[property=og:image]")?.attr("content") ?: poster
             plot = doc.selectFirst("meta[property=og:description]")?.attr("content") ?: plot
         }
-
+                
         if (channelName.isNotBlank() && channelId.isNotBlank()) {
             val channelUrlFull = if (channelId.startsWith("UC") || channelId.startsWith("@")) "$mainUrl/channel/$channelId" else "$mainUrl/$channelId"
 
