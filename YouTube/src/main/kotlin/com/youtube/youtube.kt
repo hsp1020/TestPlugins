@@ -2185,6 +2185,10 @@ class YoutubeProvider(
         // ==========================================
         // 💡 1. [쇼츠 에피소드 처리 블록]
         // ==========================================
+
+        // ==========================================
+        // 💡 1. [쇼츠 에피소드 처리 블록]
+        // ==========================================
         if (url.contains("/shorts/")) {
             val videoId = YoutubeUtils.extractYoutubeId(url) ?: "video"
             val useSearchList = url.contains("ctx=search")
@@ -2204,6 +2208,7 @@ class YoutubeProvider(
             var npPlot = ""
             var npTags = emptyList<String>()
             var npActor: ActorData? = null
+            var ep1Views = ""
 
             val watchUrl = "https://www.youtube.com/watch?v=$videoId" 
             try {
@@ -2232,6 +2237,17 @@ class YoutubeProvider(
                     if (primary != null) {
                         val t = extractTitle(primary["title"] as? Map<*, *>)
                         if (!t.isNullOrBlank()) shortTitle = t
+
+                        // 💡 InnerTube API 데이터를 파싱하여 현지화 설정(Accept-Language)에 호환되는 조회수 문자열 추출
+                        val viewCountRenderer = primary["videoViewCountRenderer"] as? Map<*, *>
+                        val vCount = if (viewCountRenderer != null) {
+                            getText(viewCountRenderer["shortViewCount"] ?: viewCountRenderer["extraShortViewCount"] ?: viewCountRenderer["viewCount"])
+                        } else {
+                            getText(primary["viewCount"])
+                        }
+                        if (vCount.isNotBlank()) {
+                            ep1Views = vCount.replace("\r", "").replace("\n", "").trim()
+                        }
                     }
                     val secondary = m?.get("videoSecondaryInfoRenderer") as? Map<*, *>
                     if (secondary != null) {
@@ -2290,9 +2306,13 @@ class YoutubeProvider(
                 }
             }
 
-            var ep1Views = ""
-            val viewMatch = VIEW_COUNT_REGEX.find(html)
-            if (viewMatch != null) ep1Views = viewMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
+            // 💡 API 파싱 결과를 얻지 못한 경우에만 원시 숫자 텍스트 정규식 매칭 적용 (폴백 로직)
+            if (ep1Views.isBlank()) {
+                val viewMatch = VIEW_COUNT_REGEX.find(html)
+                if (viewMatch != null) {
+                    ep1Views = viewMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
+                }
+            }
             
             val cViews = ep1Views.ifBlank { "Playing" }
 
@@ -2302,13 +2322,14 @@ class YoutubeProvider(
             }
 
             val finalTitle = "#$currentEpIndex $shortTitle".replace("##", "#")
-            val finalPlot = "\u200b"
+
+            // 💡 데이터 없음으로 인한 앱 내 "플롯을 찾을 수 없음" 텍스트 노출 방지를 위해 제로 너비 공백 문자(\u200b) 전달
+            val finalPlot = npPlot.ifBlank { "\u200b" }
 
             val finalRecs = mutableListOf<SearchResponse>()
             if (channelName.isNotBlank() && channelId.isNotBlank()) {
                 val channelUrlFull = if (channelId.startsWith("UC") || channelId.startsWith("@")) "$mainUrl/channel/$channelId" else "$mainUrl/$channelId"
                 val channelCard = newMovieSearchResponse(channelName, channelUrlFull, TvType.Live) {
-                    // 💡 [수정] 쇼츠 채널 카드에 wsrv.nl 프록시 적용
                     this.posterUrl = YoutubeUtils.getProxiedPoster(channelAvatar) 
                 }
                 finalRecs.add(channelCard) 
@@ -2337,7 +2358,7 @@ class YoutubeProvider(
                 }
             }
         }
-
+        
         // ==========================================
         // 💡 2. [채널 에피소드 처리 블록]
         // ==========================================
