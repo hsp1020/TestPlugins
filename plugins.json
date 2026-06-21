@@ -300,10 +300,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/YouTube/Youtube_logo.png",
-        "fileHash": "sha256-46259b73a5ef74d301e9e2fa4d6757cfa557245afe5cdcd6bf42d7c6aabb536c",
+        "fileHash": "sha256-b3b7583be12c49c0e2a064cb72262dfe0486e80eedca8fee44d08c9294d50d85",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 196057,
+        "fileSize": 196688,
         "status": 1,
         "authors": [
             "hsp1020"
