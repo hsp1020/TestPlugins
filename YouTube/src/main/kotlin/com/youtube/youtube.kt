@@ -2547,8 +2547,11 @@ class YoutubeProvider(
                     val t = extractTitle(primary["title"] as? Map<*, *>)
                     if (!t.isNullOrBlank()) title = t
 
+                    // 1. 날짜 추출 (아직 plot 변수에 넣지 않고 보관만 합니다)
                     val dateText = extractTitle(primary["dateText"] as? Map<*, *>)
-                    if (!dateText.isNullOrBlank()) plot += "$dateText"
+                    if (!dateText.isNullOrBlank()) {
+                        plot += "$dateText • " // 반드시 += (이어붙이기) 사용!
+                    }
                 }
 
                 val secondary = m?.get("videoSecondaryInfoRenderer") as? Map<*, *>
@@ -2562,17 +2565,18 @@ class YoutubeProvider(
                             val curl = safeGet(owner, "navigationEndpoint", "commandMetadata", "webCommandMetadata", "url") as? String
                             if (!curl.isNullOrBlank()) channelId = curl.substringAfterLast("/")
                         }
-                        // 💡 단일 동영상 소유 채널의 다국어화된 구독자 수 정보를 획득합니다.
-                        subscriberCount = getText(owner.get("subscriberCountText"))
+                        subscriberCount = getText(owner["subscriberCountText"])
                     }
 
-                                
                     val descObj = secondary["attributedDescription"] as? Map<*, *>
                         ?: secondary["description"] as? Map<*, *>
 
+                    // 2. 유튜브 영상 본문(설명란) 텍스트 추출
                     val fullDesc = getText(descObj)
+                    
                     if (fullDesc.isNotBlank()) {
-                        plot += fullDesc
+                        // 💡 [핵심] trimStart()를 써서 유튜브 본문 맨 앞의 쓸데없는 엔터/공백을 모두 제거하고 날짜 바로 옆에 딱 붙입니다!
+                        plot += fullDesc.trimStart() 
                     }
                 }
             }
