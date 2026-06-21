@@ -2621,12 +2621,21 @@ class YoutubeProvider(
                 ep1Dur = if (s >= 3600) String.format("%d:%02d:%02d", s/3600, (s%3600)/60, s%60) else String.format("%d:%02d", s/60, s%60)
             } catch (e: Exception) {}
         }
+        // 길이 추출 실패 시 JSON 내부 microformat에서 확실하게 추출 (추출률 보완)
+        if (ep1Dur.isBlank() && data != null) {
+            val sText = safeGet(data, "microformat", "playerMicroformatRenderer", "lengthSeconds") as? String
+            if (!sText.isNullOrBlank()) {
+                try {
+                    val s = sText.toLong()
+                    ep1Dur = if (s >= 3600) String.format("%d:%02d:%02d", s/3600, (s%3600)/60, s%60) else String.format("%d:%02d", s/60, s%60)
+                } catch (e: Exception) {}
+            }
+        }
         
         var ep1Views = ""
         val viewMatch = VIEW_COUNT_REGEX.find(html)
         if (viewMatch != null) {
-            // 💡 에러 원인이었던 formatViews() 제거, 순수 텍스트 그대로 사용
-            ep1Views = viewMatch.groupValues[1]
+            ep1Views = viewMatch.groupValues[1] // 최후의 보루 (Raw 숫자)
         }
         
         var ep1Date = ""
@@ -2635,23 +2644,42 @@ class YoutubeProvider(
             ep1Date = dateMatch.groupValues[1]
         }
         
-        val resultsContentsForEp1 = safeGet(data, "contents", "twoColumnWatchNextResults", "results", "results", "contents") as? List<*>
-        resultsContentsForEp1?.forEach { item ->
-            val m = item as? Map<*, *>
-            val primary = m?.getMapKey("videoPrimaryInfoRenderer")
-            if (primary != null) {
-                val viewCountRenderer = primary.getMapKey("videoViewCountRenderer")
-                val vCount = if (viewCountRenderer != null) {
-                    getText(viewCountRenderer.getMapKey("extraShortViewCount") ?: viewCountRenderer.getMapKey("viewCount"))
-                } else {
-                    getText(primary.getMapKey("viewCount"))
+        // 💡 [핵심] API 구조를 완벽히 탐색하여 추천영상이 아닌 '본 영상'의 포맷팅된 조회수("조회수 48만회")를 가져옵니다.
+        fun findPrimaryInfo(obj: Any?, depth: Int = 0): Map<*, *>? {
+            if (obj == null || depth > 32) return null
+            if (obj is Map<*, *>) {
+                val primary = obj["videoPrimaryInfoRenderer"] as? Map<*, *>
+                if (primary != null) return primary
+                for (value in obj.values) {
+                    val r = findPrimaryInfo(value, depth + 1)
+                    if (r != null) return r
                 }
-                
-                // 💡 에러 원인이었던 formatViews() 제거
-                if (vCount.isNotBlank()) ep1Views = vCount
-                
-                val dText = extractTitle(primary.getMapKey("dateText") as? Map<*, *>) ?: getText(primary.getMapKey("dateText"))
-                if (dText.isNotBlank()) ep1Date = dText
+            } else if (obj is List<*>) {
+                for (item in obj) {
+                    val r = findPrimaryInfo(item, depth + 1)
+                    if (r != null) return r
+                }
+            }
+            return null
+        }
+
+        val primaryInfo = findPrimaryInfo(data)
+        if (primaryInfo != null) {
+            val vvr = primaryInfo["videoViewCountRenderer"] as? Map<*, *>
+            if (vvr != null) {
+                // ytdlp, NewPipe 등에서 사용하는 공식 InnerTube 포맷팅 태그인 shortViewCount 우선 확보
+                val vCount = getText(vvr["shortViewCount"] ?: vvr["shortViewCountText"] ?: vvr["viewCount"])
+                if (vCount.isNotBlank()) {
+                    ep1Views = vCount
+                }
+            } else {
+                val fallbackViews = getText(primaryInfo["viewCount"])
+                if (fallbackViews.isNotBlank()) ep1Views = fallbackViews
+            }
+
+            val dText = extractTitle(primaryInfo["dateText"] as? Map<*, *>) ?: getText(primaryInfo["dateText"] ?: primaryInfo["publishedTimeText"])
+            if (dText.isNotBlank()) {
+                ep1Date = dText
             }
         }
 
@@ -2670,6 +2698,7 @@ class YoutubeProvider(
             this.episode = 1
             this.description = mainDescStr.ifBlank { cChannel.ifBlank { "Playing" } }
         })
+
 
         var epCount = 2
         filteredRecs.forEach { rec ->
