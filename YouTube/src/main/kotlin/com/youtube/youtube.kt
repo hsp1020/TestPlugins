@@ -27,6 +27,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.stream.StreamInfo
+import org.schabi.newpipe.extractor.localization.Localization
+import java.util.Locale
 
 object YoutubeUtils {
     const val CHROME_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
@@ -2309,12 +2311,12 @@ class YoutubeProvider(
                 // 💡 [개선 완료] NewPipe API로 채널 플롯 가져오기 (줄바꿈 완벽 유지, 국가 하드코딩 삭제, lang 단일화)
                 var npChannelPlot = ""
                 try {
-                    val cExtractor = org.schabi.newpipe.extractor.ServiceList.YouTube.getChannelExtractor(cleanUrl)
-                    cExtractor.forceContentLanguage(org.schabi.newpipe.extractor.localization.ContentLanguage(lang))
+                    val cExtractor = ServiceList.YouTube.getChannelExtractor(cleanUrl)
+                    cExtractor.forceLocalization(Localization.fromLocale(Locale(lang)))
                     cExtractor.fetchPage()
                     npChannelPlot = cExtractor.description ?: ""
                 } catch(e: Exception) { logError(e) }
-
+                
                 val channelUrl = "$cleanUrl/videos"
                 var response = app.get(channelUrl, interceptor = ytInterceptor)
                 var html = response.text
@@ -2599,14 +2601,14 @@ class YoutubeProvider(
 
         // 💡 [개선 완료] 단일 비디오 플롯/태그 (국가 매핑 삭제, lang 단일화, 태그 10개)
         try {
-            val extractor = org.schabi.newpipe.extractor.ServiceList.YouTube.getStreamExtractor(url)
-            extractor.forceContentLanguage(org.schabi.newpipe.extractor.localization.ContentLanguage(lang))
+            val extractor = ServiceList.YouTube.getStreamExtractor(url)
+            extractor.forceLocalization(Localization.fromLocale(Locale(lang)))
             extractor.fetchPage()
             
-            val info = org.schabi.newpipe.extractor.stream.StreamInfo.getInfo(extractor)
+            val info = StreamInfo.getInfo(extractor)
 
             npPlot = info.description.content.toString()
-            npTags = info.tags?.take(10)?.toList() ?: emptyList() // 💡 10개로 증가
+            npTags = info.tags?.take(10)?.toList() ?: emptyList()
 
             info.uploaderName?.takeIf { it.isNotBlank() }?.let { uploader ->
                 npActor = ActorData(
@@ -2619,6 +2621,7 @@ class YoutubeProvider(
         } catch (e: Exception) {
             logError(e) 
         }
+        
 
         val headers = mapOf("Referer" to "https://www.youtube.com/")
         val response = app.get(url, headers = headers, interceptor = ytInterceptor)
