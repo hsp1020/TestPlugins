@@ -445,36 +445,37 @@ open class YoutubeExtractor : ExtractorApi() {
             Pair(sigResults, nResults)
         }
 
-        fun deobfuscateManifestUrl(manifestUrl: String, playerId: String): String {
+        // =========================================================================
+        // [데드락 완벽 해결] runBlocking 블록을 완전 파기하고 100% 비동기 suspend 방식으로 개편
+        // =========================================================================
+        suspend fun deobfuscateManifestUrl(
+            manifestUrl: String, 
+            playerId: String
+        ): String = withContext(Dispatchers.IO) {
             if (manifestUrl.isBlank() || playerId.isBlank()) {
-                return manifestUrl
+                return@withContext manifestUrl
             }
             try {
                 val match = Regex("""/n/([^/&?]+)""").find(manifestUrl)
                 if (match != null) {
                     val n = match.groupValues[1]
                     
-                    val decodedNs = run {
-                        var tempResult: Map<String, String>? = null
-                        kotlinx.coroutines.runBlocking {
-                            try {
-                                tempResult = decodeBatch(playerId, emptyList(), listOf(n)).second
-                            } catch (e: Exception) {
-                                tempResult = emptyMap()
-                            }
-                        }
-                        tempResult ?: emptyMap()
+                    // runBlocking 없이 직접 비동기 디코딩 순차 호출
+                    val decodedNs = try {
+                        decodeBatch(playerId, emptyList(), listOf(n)).second
+                    } catch (e: Exception) {
+                        emptyMap()
                     }
 
                     val decodedN = decodedNs[n]
                     if (!decodedN.isNullOrBlank()) {
-                        return manifestUrl.replace("/n/$n", "/n/$decodedN")
+                        return@withContext manifestUrl.replace("/n/$n", "/n/$decodedN")
                     }
                 }
             } catch (e: Exception) {
                 println("[TRACK] 🚨 deobfuscateManifestUrl 예외: ${e.message}")
             }
-            return manifestUrl
+            return@withContext manifestUrl
         }
 
         private fun extractHlsStringAttribute(line: String, attribute: String): String? {
@@ -736,6 +737,7 @@ open class YoutubeExtractor : ExtractorApi() {
         langCode: String,
         callback: (ExtractorLink) -> Unit
     ) {
+        // 동기에서 suspend 함수 규격으로 격상된 수선 사양 직접 대입 (데드락 없음)
         val finalHlsUrl = if (playerId.isNotBlank()) deobfuscateManifestUrl(hlsUrl, playerId) else hlsUrl
         if (finalHlsUrl.isBlank()) return
 
@@ -1152,6 +1154,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
 
                 if (dashUrl.isNotBlank()) {
+                    // 데드락 없이 안정된 100% 비동기 순차 suspend 실행
                     val finalDashUrl = if (playerId.isNotBlank()) deobfuscateManifestUrl(dashUrl, playerId) else dashUrl
                     callback(
                         newExtractorLink(
@@ -1285,4 +1288,3 @@ open class YoutubeExtractor : ExtractorApi() {
         return sb.toString()
     }
 }
-
