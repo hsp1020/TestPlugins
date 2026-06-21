@@ -2501,6 +2501,7 @@ class YoutubeProvider(
         }
 
         // ==========================================
+// ==========================================
         // 💡 2. [재생목록 에피소드 처리 블록]
         // ==========================================
         if (url.contains("list=")) {
@@ -2584,6 +2585,38 @@ class YoutubeProvider(
             } catch (e: Exception) {
                 logError(e)
             }
+        }
+
+        // ==========================================
+        // 💡 3. [기본 에피소드(단일 비디오) 처리 블록]
+        // ==========================================
+        val videoId = YoutubeUtils.extractYoutubeId(url) ?: throw ErrorLoadingException("Invalid YouTube URL")
+
+        epMetaMapCache.clear()
+
+        var npPlot = ""
+        var npTags = emptyList<String>()
+        var npActor: ActorData? = null
+
+        try {
+            val extractor = ServiceList.YouTube.getStreamExtractor(url)
+            extractor.fetchPage()
+            val info = StreamInfo.getInfo(extractor)
+
+            npPlot = info.description.content.toString()
+            // 💡 [수정됨] 단일 영상의 해시태그 한도를 기존 5개에서 10개로 확장했습니다.
+            npTags = info.tags?.take(10)?.toList() ?: emptyList()
+
+            info.uploaderName?.takeIf { it.isNotBlank() }?.let { uploader ->
+                npActor = ActorData(
+                    Actor(
+                        uploader,
+                        info.uploaderAvatars.lastOrNull()?.url ?: ""
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            logError(e) 
         }
 
         val headers = mapOf("Referer" to "https://www.youtube.com/")
