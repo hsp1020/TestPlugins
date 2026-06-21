@@ -25,6 +25,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import org.schabi.newpipe.extractor.ServiceList
+import org.schabi.newpipe.extractor.stream.StreamInfo
 
 object YoutubeUtils {
     const val CHROME_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36"
@@ -2521,23 +2523,48 @@ class YoutubeProvider(
             }
         }          
 
-        val videoId = YoutubeUtils.extractYoutubeId(url) ?: throw ErrorLoadingException("Invalid YouTube URL")
+    val videoId = YoutubeUtils.extractYoutubeId(url) ?: throw ErrorLoadingException("Invalid YouTube URL")
 
         epMetaMapCache.clear()
 
+        // 💡 [NewPipe 라이브러리 실제 차용] 다른 개발자와 완벽히 동일한 로직 적용
+        var npPlot = ""
+        var npTags = emptyList<String>()
+        var npActor: ActorData? = null
+
+        try {
+            val extractor = ServiceList.YouTube.getStreamExtractor(url)
+            extractor.fetchPage()
+            val info = StreamInfo.getInfo(extractor)
+
+            npPlot = info.description.content.toString()
+            npTags = info.tags?.take(5)?.toList() ?: emptyList()
+
+            info.uploaderName?.takeIf { it.isNotBlank() }?.let { uploader ->
+                npActor = ActorData(
+                    Actor(
+                        uploader,
+                        info.uploaderAvatars.lastOrNull()?.url ?: ""
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            logError(e) // 만약 NewPipe 파싱에 실패할 경우 앱이 죽지 않도록 방어
+        }
+
+        // --- 여기서부터는 회원님의 기존 에피소드 파싱(추천 목록 및 메타데이터) 로직입니다 ---
         val headers = mapOf("Referer" to "https://www.youtube.com/")
         val response = app.get(url, headers = headers, interceptor = ytInterceptor)
         val html = response.text
         val data = extractYtInitialData(html)
         
         var title = "YouTube Video"
-        var plot = ""
+        var plot = npPlot // NewPipe에서 가져온 완벽한 플롯을 기본으로 세팅
         var poster = YoutubeUtils.buildThumbnailFromId(videoId)
 
         var channelName = ""
         var channelId = ""
         var channelAvatar = ""
-        var subscriberCount = ""
 
         val recommendations = mutableListOf<SearchResponse>()
         val seenRecIds = mutableSetOf<String>()
@@ -2552,7 +2579,6 @@ class YoutubeProvider(
                 if (primary != null) {
                     val t = extractTitle(primary["title"] as? Map<*, *>)
                     if (!t.isNullOrBlank()) title = t
-
                 }
 
                 val secondary = m?.get("videoSecondaryInfoRenderer") as? Map<*, *>
@@ -2566,18 +2592,16 @@ class YoutubeProvider(
                             val curl = safeGet(owner, "navigationEndpoint", "commandMetadata", "webCommandMetadata", "url") as? String
                             if (!curl.isNullOrBlank()) channelId = curl.substringAfterLast("/")
                         }
-                        subscriberCount = getText(owner["subscriberCountText"])
                     }
 
-                    val descObj = secondary["attributedDescription"] as? Map<*, *>
-                        ?: secondary["description"] as? Map<*, *>
-
-                    // 2. 유튜브 영상 본문(설명란) 텍스트 추출
-                    val fullDesc = getText(descObj)
-                    
-                    if (fullDesc.isNotBlank()) {
-                        // 💡 [핵심] trimStart()를 써서 유튜브 본문 맨 앞의 쓸데없는 엔터/공백을 모두 제거하고 날짜 바로 옆에 딱 붙입니다!
-                        plot += fullDesc.trimStart() 
+                    // 만약 NewPipe 로드에 실패하여 plot이 비어있다면 기존 방식으로 플롯을 가져오는 예외 처리
+                    if (plot.isBlank()) {
+                        val descObj = secondary["attributedDescription"] as? Map<*, *>
+                            ?: secondary["description"] as? Map<*, *>
+                        val fullDesc = getText(descObj)
+                        if (fullDesc.isNotBlank()) {
+                            plot = fullDesc.trimStart() 
+                        }
                     }
                 }
             }
@@ -2591,26 +2615,20 @@ class YoutubeProvider(
             val doc = response.document
             title = doc.selectFirst("meta[property=og:title]")?.attr("content") ?: title
             poster = doc.selectFirst("meta[property=og:image]")?.attr("content") ?: poster
-            plot = doc.selectFirst("meta[property=og:description]")?.attr("content") ?: plot
+            if (plot.isBlank()) {
+                plot = doc.selectFirst("meta[property=og:description]")?.attr("content") ?: plot
+            }
         }
 
         if (channelName.isNotBlank() && channelId.isNotBlank()) {
             val channelUrlFull = if (channelId.startsWith("UC") || channelId.startsWith("@")) "$mainUrl/channel/$channelId" else "$mainUrl/$channelId"
-
-            val channelCard = newMovieSearchResponse(
-                channelName,
-                channelUrlFull,
-                TvType.Live
-            ) {
+            val channelCard = newMovieSearchResponse(channelName, channelUrlFull, TvType.Live) {
                 this.posterUrl = channelAvatar
             }
-
             recommendations.add(0, channelCard)
         }
 
-
         val filteredRecs = recommendations.filter { !it.url.contains("/shorts/") }
-
         val episodes = mutableListOf<Episode>()
         
         var ep1Dur = ""
@@ -2625,14 +2643,13 @@ class YoutubeProvider(
         var ep1Views = ""
         val viewMatch = VIEW_COUNT_REGEX.find(html)
         if (viewMatch != null) {
-            // 💡 에러 원인이었던 formatViews() 제거, 순수 텍스트 그대로 사용
-            ep1Views = viewMatch.groupValues[1]
+            ep1Views = viewMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
         }
         
         var ep1Date = ""
         val dateMatch = PUBLISH_DATE_REGEX.find(html)
         if (dateMatch != null) {
-            ep1Date = dateMatch.groupValues[1]
+            ep1Date = dateMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
         }
         
         val resultsContentsForEp1 = safeGet(data, "contents", "twoColumnWatchNextResults", "results", "results", "contents") as? List<*>
@@ -2647,15 +2664,13 @@ class YoutubeProvider(
                     getText(primary.getMapKey("viewCount"))
                 }
                 
-                // 💡 에러 원인이었던 formatViews() 제거
-                if (vCount.isNotBlank()) ep1Views = vCount
+                if (vCount.isNotBlank()) ep1Views = vCount.replace("\r", "").replace("\n", "").trim()
                 
                 val dText = extractTitle(primary.getMapKey("dateText") as? Map<*, *>) ?: getText(primary.getMapKey("dateText"))
-                if (dText.isNotBlank()) ep1Date = dText
+                if (dText.isNotBlank()) ep1Date = dText.replace("\r", "").replace("\n", "").trim()
             }
         }
 
-        // 💡 모든 특수문자(\r, \n) 강제 제거 및 [길이] • [조회수] • [날짜] • [채널] 순서 완벽 결합
         val cDur = ep1Dur.replace("\r", "").replace("\n", "").trim()
         val cViews = ep1Views.replace("\r", "").replace("\n", "").trim()
         val cDate = ep1Date.replace("\r", "").replace("\n", "").trim()
@@ -2690,16 +2705,18 @@ class YoutubeProvider(
             }
         }
 
-        
-        val metaTags = mutableListOf<String>()
-        if (channelName.isNotBlank()) metaTags.add(channelName)
-        if (subscriberCount.isNotBlank()) metaTags.add(subscriberCount)
-
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
             this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
             this.plot = plot
-            this.tags = metaTags
             this.recommendations = filteredRecs 
+            
+            // 💡 [NewPipe에서 가져온 속성들 장착]
+            if (npTags.isNotEmpty()) {
+                this.tags = npTags
+            }
+            if (npActor != null) {
+                this.actors = listOf(npActor!!)
+            }
         }
     }
 
