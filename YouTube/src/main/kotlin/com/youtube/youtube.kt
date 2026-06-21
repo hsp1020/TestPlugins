@@ -2782,7 +2782,10 @@ class YoutubeProvider(
 
         val html = response?.text ?: ""
         val data = extractYtInitialData(html)
-        
+
+    // 💡 이미 수신받은 HTML에서 수동 더빙 여부 검사 (추가 네트워크 비용 0)
+        val isDirectDubbed = html.split("\"audioTrack\"").size - 1 > 3 && !html.contains("\"isAutoDubbed\"\\s*:\\s*true".toRegex())
+
         var title = "YouTube Video"
         var plot = npPlot 
         var poster = YoutubeUtils.buildThumbnailFromId(videoId)
@@ -2835,7 +2838,6 @@ class YoutubeProvider(
 
             val secondaryResults = safeGet(data, "contents", "twoColumnWatchNextResults", "secondaryResults", "secondaryResults", "results")
             if (secondaryResults != null) {
-                // 💡 collectFromRenderer의 스레드 충돌을 피하기 위해 isSearch = false 인자 주입
                 processRecursive(secondaryResults, recommendations, seenRecIds, false, isSearch = false)
             }
 
@@ -2903,13 +2905,17 @@ class YoutubeProvider(
         val mainDescParts = listOf(cDur, cViews, cDate, cChannel).filter { it.isNotBlank() && it != "N/A" }
         val mainDescStr = mainDescParts.joinToString(" • ")
 
-        episodes.add(newEpisode(url) {
+        // 💡 쿼리 스트링으로 수동 더빙 정보 인입
+        val delimiter = if (url.contains("?")) "&" else "?"
+        val episodeUrl = "$url${delimiter}direct_dub=$isDirectDubbed"
+
+        episodes.add(newEpisode(episodeUrl) {
             this.name = title
             this.posterUrl = poster
             this.episode = 1
             this.description = mainDescStr.ifBlank { cChannel.ifBlank { "Playing" } }
         })
-
+        
         var epCount = 2
         filteredRecs.forEach { rec ->
             if (rec.url.contains("watch?v=") || rec.url.contains("/shorts/")) {
@@ -2955,15 +2961,21 @@ class YoutubeProvider(
         }
     }
     
-    override suspend fun loadLinks(
+    overrideoverride suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val videoId = YoutubeUtils.extractYoutubeId(data) ?: data
-        val fullUrl = "https://www.youtube.com/watch?v=$videoId"
         val isShort = data.contains("/shorts/")
+
+        // 💡 주입된 direct_dub 값을 쿼리 스트링에서 추출 후 보존 전송
+        val extraParams = if (data.contains("direct_dub=")) {
+            "&" + data.substringAfter("direct_dub=").substringBefore("&").let { "direct_dub=$it" }
+        } else ""
+
+        val fullUrl = "https://www.youtube.com/watch?v=$videoId$extraParams"
 
         var playerResponseJson: String? = null
         try {
@@ -3025,4 +3037,3 @@ class YoutubeProvider(
 
         return true
     }
-}
