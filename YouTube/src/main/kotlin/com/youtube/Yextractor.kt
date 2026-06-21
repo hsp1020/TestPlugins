@@ -1026,7 +1026,7 @@ open class YoutubeExtractor : ExtractorApi() {
             else -> Pair("", "")
         }
 
-        withContext(Dispatchers.IO) {
+withContext(Dispatchers.IO) {
             try {
                 val (playerResponse, durationSeconds, playerId) = fetchPlayerResponse(videoId)
 
@@ -1087,6 +1087,26 @@ open class YoutubeExtractor : ExtractorApi() {
                 val hlsUrl = streamingData.optString("hlsManifestUrl")
                 val dashUrl = streamingData.optString("dashManifestUrl")
 
+                // 💡 [핵심 수정] 구버전의 명확한 라이브 분기 로직 복원
+                val isLive = playerResponse.optJSONObject("videoDetails")?.optBoolean("isLive") ?: false
+                
+                if (isLive && hlsUrl.isNotBlank()) {
+                    println("[TRACK] 실시간 스트리밍(HLS) 발견: 직접 재생 분기 실행")
+                    callback(
+                        newExtractorLink(
+                            this@YoutubeExtractor.name,
+                            "YouTube Live",
+                            hlsUrl,
+                            type = ExtractorLinkType.M3U8
+                        ) {
+                            this.referer = mainUrl
+                            this.quality = Qualities.Unknown.value
+                            this.headers = mapOf("User-Agent" to YoutubeUtils.CHROME_USER_AGENT)
+                        }
+                    )
+                    return@withContext
+                }
+
                 println("[TRACK] 4. Executing Pure Coroutine Parallel Parsing")
 
                 val hlsJob = launch {
@@ -1139,7 +1159,6 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         }
     }
-
     private fun startServerIfNeeded() {
         synchronized(serverLock) {
             val server = activeServer
