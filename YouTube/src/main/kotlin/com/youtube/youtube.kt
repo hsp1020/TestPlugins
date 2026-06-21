@@ -2523,7 +2523,8 @@ class YoutubeProvider(
             }
         }          
 
-    val videoId = YoutubeUtils.extractYoutubeId(url) ?: throw ErrorLoadingException("Invalid YouTube URL")
+
+        val videoId = YoutubeUtils.extractYoutubeId(url) ?: throw ErrorLoadingException("Invalid YouTube URL")
 
         epMetaMapCache.clear()
 
