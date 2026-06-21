@@ -909,12 +909,11 @@ class YoutubeProvider(
     ): SearchResponse? {
         if (renderer == null) return null
 
-        // 💡 [수정] ?: 기호를 줄 맨 끝으로 이동하여 컴파일러 파싱 에러(Syntax error) 원천 차단
-        val videoData = renderer.getMapKey("videoRenderer") ?:
-            renderer.getMapKey("compactVideoRenderer") ?:
-            renderer.getMapKey("gridVideoRenderer") ?:
-            renderer.getMapKey("playlistVideoRenderer") ?:
-            renderer.getMapKey("playlistPanelVideoRenderer")
+        val videoData = renderer.getMapKey("videoRenderer")
+            ?: renderer.getMapKey("compactVideoRenderer")
+            ?: renderer.getMapKey("gridVideoRenderer")
+            ?: renderer.getMapKey("playlistVideoRenderer")       
+            ?: renderer.getMapKey("playlistPanelVideoRenderer")  
 
         if (videoData != null) {
             val videoId = videoData.getString("videoId")
@@ -962,15 +961,16 @@ class YoutubeProvider(
         }
 
         val richContent = renderer.getMapKey("richItemRenderer")?.getMapKey("content")
-        val shortsData = renderer.getMapKey("reelItemRenderer") ?:
-            renderer.getMapKey("shortsLockupViewModel") ?:
-            richContent?.getMapKey("shortsLockupViewModel")
+        val shortsData = renderer.getMapKey("reelItemRenderer")
+            ?: renderer.getMapKey("shortsLockupViewModel")
+            ?: richContent?.getMapKey("shortsLockupViewModel")
 
         if (shortsData != null) {
             val onTap = shortsData.getMapKey("onTap")
-            val videoId = onTap?.getMapKey("innertubeCommand")?.getMapKey("reelWatchEndpoint")?.getString("videoId") ?:
-                shortsData.getString("videoId") ?:
-                shortsData.getString("entityId")?.replace("shorts-shelf-item-", "")
+            val videoId = onTap?.getMapKey("innertubeCommand")?.getMapKey("reelWatchEndpoint")
+                ?.getString("videoId")
+                ?: shortsData.getString("videoId")
+                ?: shortsData.getString("entityId")?.replace("shorts-shelf-item-", "")
 
             if (!videoId.isNullOrBlank() && seenIds.add(videoId)) {
                 val overlay = shortsData.getMapKey("overlayMetadata")
@@ -978,12 +978,15 @@ class YoutubeProvider(
 
                 var title = overlay?.getMapKey("primaryText")?.getString("content")
                 if (title.isNullOrBlank()) title = getText(shortsData.getMapKey("headline"))
-                if (title.isNullOrBlank()) title = overlay?.getMapKey("primaryText")?.getString("simpleText")
-                if (title.isNullOrBlank() && accessibilityText.contains(",")) title = accessibilityText.substringBefore(",").trim()
+                if (title.isNullOrBlank()) title =
+                    overlay?.getMapKey("primaryText")?.getString("simpleText")
+                if (title.isNullOrBlank() && accessibilityText.contains(",")) title =
+                    accessibilityText.substringBefore(",").trim()
                 if (title.isNullOrBlank()) title = "Shorts Clip"
 
                 var viewRaw = overlay?.getMapKey("secondaryText")?.getString("content")
-                if (viewRaw.isNullOrBlank()) viewRaw = getText(shortsData.getMapKey("viewCountText"))
+                if (viewRaw.isNullOrBlank()) viewRaw =
+                    getText(shortsData.getMapKey("viewCountText"))
                 if (viewRaw.isNullOrBlank() && accessibilityText.isNotBlank()) {
                     val match = Regex(",\\s*(.*?)\\s*-").find(accessibilityText)
                     if (match != null) viewRaw = match.groupValues[1].trim()
@@ -996,6 +999,7 @@ class YoutubeProvider(
                 val contextTag = if (isSearchContext) "&ctx=search" else "&ctx=home"
                 val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
 
+                // 💡 [롤백] 보조 에피소드 리스트에서 쇼츠는 조회수만 나오도록 롤백
                 val descText = views.replace("\r", "").replace("\n", "").trim()
                 if (descText.isNotBlank()) epMetaMapCache[videoId] = descText
                 
@@ -1027,16 +1031,25 @@ class YoutubeProvider(
             if (contentType == "LOCKUP_CONTENT_TYPE_PLAYLIST") {
                 val playlistId = lockup.getString("contentId")
                 if (!playlistId.isNullOrBlank() && seenIds.add(playlistId)) {
-                    var title = lockup.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")?.getMapKey("title")?.getString("content") ?: "Playlist"
+                    var title = lockup.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")
+                        ?.getMapKey("title")?.getString("content") ?: "Playlist"
 
                     if (playlistId.startsWith("RD") || playlistId.startsWith("UL") || playlistId.startsWith("MM") || playlistId.startsWith("RDMM")) {
                         title = YoutubeUtils.cleanMixTitle(title)
                     }
 
                     val episodeCount =
-                        lockup.getMapKey("contentImage")?.getMapKey("collectionThumbnailViewModel")?.getMapKey("primaryThumbnail")?.getMapKey("thumbnailViewModel")?.getListKey("overlays")?.firstOrNull()?.getMapKey("thumbnailOverlayBadgeViewModel")?.getListKey("thumbnailBadges")?.firstOrNull()?.getMapKey("thumbnailBadgeViewModel")?.getString("text") ?: ""
+                        lockup.getMapKey("contentImage")?.getMapKey("collectionThumbnailViewModel")
+                            ?.getMapKey("primaryThumbnail")?.getMapKey("thumbnailViewModel")
+                            ?.getListKey("overlays")?.firstOrNull()
+                            ?.getMapKey("thumbnailOverlayBadgeViewModel")
+                            ?.getListKey("thumbnailBadges")?.firstOrNull()
+                            ?.getMapKey("thumbnailBadgeViewModel")?.getString("text") ?: ""
                     val poster =
-                        lockup.getMapKey("contentImage")?.getMapKey("collectionThumbnailViewModel")?.getMapKey("primaryThumbnail")?.getMapKey("thumbnailViewModel")?.getMapKey("image")?.getListKey("sources")?.lastOrNull()?.getString("url")
+                        lockup.getMapKey("contentImage")?.getMapKey("collectionThumbnailViewModel")
+                            ?.getMapKey("primaryThumbnail")?.getMapKey("thumbnailViewModel")
+                            ?.getMapKey("image")?.getListKey("sources")?.lastOrNull()
+                            ?.getString("url")
 
                     val extractedUrl = YoutubeUtils.extractUrlFromLockup(lockup)
                     val targetPath = if (!extractedUrl.isNullOrBlank()) {
@@ -1054,27 +1067,37 @@ class YoutubeProvider(
                         "$mainUrl/$targetPath",
                         TvType.TvSeries
                     ) {
-                        this.posterUrl = if (isSearchContext) YoutubeUtils.getProxiedPosterBottom(poster) else YoutubeUtils.getProxiedPosterNormal(poster)
+                        this.posterUrl = if (isSearchContext) {
+                            YoutubeUtils.getProxiedPosterBottom(poster)
+                        } else {
+                            YoutubeUtils.getProxiedPosterNormal(poster)
+                        }
                     }
                 }
             }
 
-            val videoId = lockup.getString("contentId") ?:
-                lockup.getMapKey("content")?.getString("videoId") ?:
-                (lockup.getMapKey("content")?.getMapKey("videoRenderer")?.getString("videoId"))
+            val videoId = lockup.getString("contentId")
+                ?: lockup.getMapKey("content")?.getString("videoId")
+                ?: (lockup.getMapKey("content")?.getMapKey("videoRenderer")?.getString("videoId"))
 
             if (!videoId.isNullOrBlank() && seenIds.add(videoId)) {
-                val title = getText(lockup.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")?.getMapKey("title"))
+                val title = getText(
+                    lockup.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")
+                        ?.getMapKey("title")
+                )
                 if (title.isBlank()) {
                     return null
                 }
                 var (channel, views, date) = extractLockupMetadata(lockup)     
                 if (channel.isBlank()) {
-                    val label = lockup.getMapKey("accessibility")?.getMapKey("accessibilityData")?.getString("label") ?: ""
+                    val label = lockup.getMapKey("accessibility")?.getMapKey("accessibilityData")
+                        ?.getString("label") ?: ""
                     val match = BY_CHANNEL_REGEX.find(label)
                     if (match != null) channel = match.groupValues[1].replace("Shorts", "").trim()
                 }
-                val isShorts = lockup.getMapKey("content")?.containsKey("shortsLockupViewModel") == true || lockup.toString().contains("reelWatchEndpoint")
+                val isShorts = lockup.getMapKey("content")
+                    ?.containsKey("shortsLockupViewModel") == true || lockup.toString()
+                    .contains("reelWatchEndpoint")
                 val finalTitle: String
                 val poster: String
 
@@ -1088,6 +1111,7 @@ class YoutubeProvider(
                     
                     poster = YoutubeUtils.getShortsSearchPoster(videoId)
                     
+                    // 💡 [롤백] 보조 에피소드 리스트에서 쇼츠는 조회수만 나오도록 롤백
                     val descText = views.replace("\r", "").replace("\n", "").trim()
                     if (descText.isNotBlank()) epMetaMapCache[videoId] = descText
                     
@@ -1116,37 +1140,24 @@ class YoutubeProvider(
                         views.isNotBlank() -> "{$views} $title"
                         else -> title
                     }
-                    poster = YoutubeUtils.getBestThumbnail(lockup.getMapKey("contentImage")?.getMapKey("image")?.getListKey("sources")) ?: "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
+                    poster = YoutubeUtils.getBestThumbnail(
+                        lockup.getMapKey("contentImage")?.getMapKey("image")?.getListKey("sources")
+                    ) ?: "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
                     return newMovieSearchResponse(
                         finalTitle,
                         "$mainUrl/watch?v=$videoId",
                         TvType.Movie
                     ) {
-                        this.posterUrl = if (isSearchContext) YoutubeUtils.getProxiedPosterBottom(poster) else YoutubeUtils.getProxiedPosterNormal(poster)
+                        this.posterUrl = if (isSearchContext) {
+                            YoutubeUtils.getProxiedPosterBottom(poster)
+                        } else {
+                            YoutubeUtils.getProxiedPosterNormal(poster)
+                        }
                     }
                 }
             }
         }
 
-        val channelData = renderer.getMapKey("channelRenderer")
-        if (channelData != null) {
-            val id = channelData.getString("channelId")
-            if (!id.isNullOrBlank() && seenIds.add(id)) {
-                val title = getText(channelData.getMapKey("title")) ?: "Channel"
-                val stats = (getText(channelData.getMapKey("videoCountText")) ?: getText(channelData.getMapKey("subscriberCountText"))) ?: ""
-                val poster = YoutubeUtils.getBestThumbnail(channelData.getMapKey("thumbnail"))
-                return newMovieSearchResponse(
-                    "$title ($stats)",
-                    "$mainUrl/channel/$id",
-                    TvType.Live
-                ) {
-                    this.posterUrl = if (isSearchContext) YoutubeUtils.getProxiedPosterBottom(poster) else YoutubeUtils.getProxiedPosterNormal(poster)
-                }
-            }
-        }
-        return null
-    }
-   
         val channelData = renderer.getMapKey("channelRenderer")
         if (channelData != null) {
             val id = channelData.getString("channelId")
