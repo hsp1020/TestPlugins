@@ -500,7 +500,12 @@ open class YoutubeExtractor : ExtractorApi() {
 
     // [Safari 단독 가동 구조 복원 및 폴백 흐름 최적화]
 
-    private suspend fun fetchPlayerResponse(videoId: String): Triple<JSONObject?, Long, String> = withContext(Dispatchers.IO) {
+    // 💡 더빙 정보 상태값 직접 수신
+    private suspend fun fetchPlayerResponse(videoId: String, isDirectDubbed: Boolean): Triple<JSONObject?, Long, String> = withContext(Dispatchers.IO) {
+        val watchUrl = "https://www.youtube.com/watch?v=$videoId"
+        
+        println("[TRACK] 1. Initial HTML Fetch & Cached Metadata Config Retrieval")
+        
         val context = com.lagradost.cloudstream3.AcraApplication.context
         val provider = com.lagradost.cloudstream3.APIHolder.allProviders.find { it.name == "YouTube" }
         val prefs = (provider as? com.hsp1020.youtube.YoutubeProvider)?.appPrefs 
@@ -535,6 +540,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     } else null
                 }
             } catch (e: Exception) {
+                println("[TRACK] 🚨 플레이어 버전 스캔 실패: ${e.message}")
                 null
             }
         }
@@ -550,7 +556,11 @@ open class YoutubeExtractor : ExtractorApi() {
         var finalJson: JSONObject? = null
         var lengthSeconds = 3600L
 
-        if (isLoggedIn) {
+        // 💡 로그인 되었고 실존하는 고품질 수동 더빙 영상에 대해서만 WEB_SAFARI 작동
+        val useSafariClient = isLoggedIn && isDirectDubbed
+
+        if (useSafariClient) {
+            println("[TRACK] 2. WEB_SAFARI 단독 호출 실행 (성우 수동 더빙 전용 추출)")
             val safariApiUrl = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
             val safariPayload = JSONObject(mapOf(
                 "context" to mapOf(
@@ -615,6 +625,7 @@ open class YoutubeExtractor : ExtractorApi() {
         }
 
         if (finalJson == null) {
+            println("[TRACK] 3. ANDROID_VR API Request (단독 가속화 및 자동 더빙 회피 모드 가동)")
             val vrApiUrl = "https://youtubei.googleapis.com/youtubei/v1/player?prettyPrint=false&key=$VR_API_KEY"
             val vrHeaders = mapOf(
                 "Content-Type" to "application/json",
@@ -653,8 +664,8 @@ open class YoutubeExtractor : ExtractorApi() {
                     finalJson = json
                     lengthSeconds = json.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
                 }
-            } catch (e: Exception) {
-                println("[TRACK] VR player request error: ${e.message}")
+            } catch (e: Exception) { 
+                println("[TRACK] 🚨 ANDROID_VR API 단독 수집 에러: ${e.message}") 
             }
         }
 
@@ -972,6 +983,9 @@ open class YoutubeExtractor : ExtractorApi() {
         val cleanedUrl = url.replace(schemaStripRegex, "")
         val videoId = YoutubeUtils.extractYoutubeId(cleanedUrl) ?: cleanedUrl
 
+        // 💡 데이터 속에 수동 더빙 플래그가 매핑되어 있는지 단번에 확인
+        val isDirectDubbed = url.contains("direct_dub=true")
+
         val context = com.lagradost.cloudstream3.AcraApplication.context
         val provider = com.lagradost.cloudstream3.APIHolder.allProviders.find { it.name == "YouTube" }
         val prefs = (provider as? com.hsp1020.youtube.YoutubeProvider)?.appPrefs 
@@ -991,8 +1005,9 @@ open class YoutubeExtractor : ExtractorApi() {
 
         withContext(Dispatchers.IO) {
             try {
-                val (playerResponse, durationSeconds, playerId) = fetchPlayerResponse(videoId)
-
+                // 💡 수동 더빙 판단 상태값 전파
+                val (playerResponse, durationSeconds, playerId) = fetchPlayerResponse(videoId, isDirectDubbed)
+                
                 if (playerResponse == null) {
                     println("[TRACK] 🚨 FATAL: 유효한 playerResponse 수집 실패")
                     return@withContext
