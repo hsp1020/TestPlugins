@@ -857,7 +857,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
             override fun getItemCount(): Int = sectionsList.size
         }
     }
-    
 
     class WebViewCaptureDialog(
         private val sharedPref: SharedPreferences,
@@ -866,6 +865,7 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
 
         private lateinit var webView: WebView
         private val targetCookies = listOf("VISITOR_INFO1_LIVE", "SID", "HSID", "SSID", "APISID", "SAPISID", "__Secure-1PSID", "__Secure-3PAPISID")
+        
         override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
             val ctx = requireContext()
 
@@ -970,5 +970,28 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 }
             }
         }
+
+        // 웹뷰의 완벽한 생명주기 리소스 소멸을 구현하여 메모리 누수를 원천 방지합니다.
+        override fun onDestroyView() {
+            if (::webView.isInitialized) {
+                try {
+                    // 1. 부모 레이아웃 컨테이너로부터 분리
+                    (webView.parent as? ViewGroup)?.removeView(webView)
+                    
+                    // 2. 바인딩된 자원 무효화 처리
+                    webView.stopLoading()
+                    webView.clearHistory()
+                    webView.removeAllViews()
+                    webView.webViewClient = null
+                    webView.webChromeClient = null
+                    
+                    // 3. Native 메모리 소멸자 실행
+                    webView.destroy()
+                } catch (e: Exception) {
+                    // 소멸 도중 발생할 수 있는 드문 예외 처리
+                }
+            }
+            super.onDestroyView()
+        }    
     }
 }
