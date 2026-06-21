@@ -2183,9 +2183,9 @@ class YoutubeProvider(
 
     override suspend fun load(url: String): LoadResponse {
         // ==========================================
-        // 💡 [개선1] 쇼츠 에피소드 처리 블록: 일반 영상처럼 넘버링 및 채널 UI 완벽 적용
+        // 💡 1. [쇼츠 에피소드 처리 블록]
         // ==========================================
-       if (url.contains("/shorts/")) {
+        if (url.contains("/shorts/")) {
             val videoId = YoutubeUtils.extractYoutubeId(url) ?: "video"
             val useSearchList = url.contains("ctx=search")
             val sourceList = if (useSearchList) searchShorts else homeShorts
@@ -2241,7 +2241,6 @@ class YoutubeProvider(
                             channelAvatar = YoutubeUtils.getBestThumbnail(owner["thumbnail"]) ?: ""
                             subscriberCount = getText(owner["subscriberCountText"])
                             
-                            // 💡 채널 ID 파싱 추가 (추천목록 채널카드 생성용)
                             channelId = safeGet(owner, "navigationEndpoint", "browseEndpoint", "browseId") as? String ?: ""
                             if (channelId.isEmpty()) {
                                 val curl = safeGet(owner, "navigationEndpoint", "commandMetadata", "webCommandMetadata", "url") as? String
@@ -2291,10 +2290,18 @@ class YoutubeProvider(
                 }
             }
 
-            // 💡 [롤백] 메인 타겟 에피소드도 상세 정보 없이 기존처럼 "조회수"만 표시하도록 롤백
+            // 💡 [수정1] 원시 데이터인 조회수를 '조회수 118만회' 형식으로 다른 쇼츠들과 똑같이 정제합니다.
             var ep1Views = ""
             val viewMatch = VIEW_COUNT_REGEX.find(html)
-            if (viewMatch != null) ep1Views = viewMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
+            if (viewMatch != null) {
+                val rawViews = viewMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
+                val formattedViews = formatRawViews(rawViews)
+                ep1Views = if (!formattedViews.contains("조회수") && formattedViews.isNotBlank() && formattedViews.any { it.isDigit() }) {
+                    "조회수 $formattedViews"
+                } else {
+                    formattedViews
+                }
+            }
             
             val cViews = ep1Views.ifBlank { "Playing" }
 
@@ -2306,23 +2313,22 @@ class YoutubeProvider(
             val finalTitle = "#$currentEpIndex $shortTitle".replace("##", "#")
             val finalPlot = npPlot.ifBlank { " " }
 
-            // 💡 [추가] 채널 정보를 앱 자체의 추천 목록(recommendations) 아이템으로 추가
             val finalRecs = mutableListOf<SearchResponse>()
             if (channelName.isNotBlank() && channelId.isNotBlank()) {
                 val channelUrlFull = if (channelId.startsWith("UC") || channelId.startsWith("@")) "$mainUrl/channel/$channelId" else "$mainUrl/$channelId"
                 val channelCard = newMovieSearchResponse(channelName, channelUrlFull, TvType.Live) {
-                    this.posterUrl = channelAvatar
+                    // 💡 [수정2] 쇼츠 추천목록 채널 로고에 wsrv.nl 프록시 필터를 씌워 고화질로 렌더링
+                    this.posterUrl = YoutubeUtils.getProxiedPoster(channelAvatar) ?: channelAvatar
                 }
-                finalRecs.add(channelCard) // 추천목록 최상단에 추가
+                finalRecs.add(channelCard)
             }
             
-            // 기존 추천 쇼츠/영상들 추가
             finalRecs.addAll(recs.filter { !it.url.contains("/shorts/") }) 
 
             return newTvSeriesLoadResponse(finalTitle, url, TvType.TvSeries, targetEpisodes) {
                 this.posterUrl = YoutubeUtils.getShortsSearchPoster(videoId)
                 this.plot = finalPlot
-                this.recommendations = finalRecs // 💡 추천 목록에 채널 아이템 적용 완료
+                this.recommendations = finalRecs 
                 
                 if (npTags.isNotEmpty()) this.tags = npTags
 
@@ -2340,8 +2346,9 @@ class YoutubeProvider(
                 }
             }
         }
+
         // ==========================================
-        // 💡 1. [채널 에피소드 처리 블록]
+        // 💡 2. [채널 에피소드 처리 블록]
         // ==========================================
         if (url.contains("/@") || url.contains("/channel/") || url.contains("/c/") || url.contains("/user/")) {
             try {
@@ -2552,7 +2559,7 @@ class YoutubeProvider(
         }
 
         // ==========================================
-        // 💡 2. [재생목록 에피소드 처리 블록]
+        // 💡 3. [재생목록 에피소드 처리 블록]
         // ==========================================
         if (url.contains("list=")) {
             try {
@@ -2605,7 +2612,7 @@ class YoutubeProvider(
                         channelUrlFull,
                         TvType.Live
                     ) {
-                        this.posterUrl = playlistMeta.channelAvatar
+                        this.posterUrl = playlistMeta.channelAvatar // 재생목록 추천 카드 화질은 썸네일 자체 화질을 쓰거나 원하면 프록시 추가 가능
                     }
                     recList.add(channelCard)
                 }
@@ -2637,7 +2644,7 @@ class YoutubeProvider(
         }          
 
         // ==========================================
-        // 💡 3. [기본 에피소드(단일 비디오) 처리 블록]
+        // 💡 4. [기본 에피소드(단일 비디오) 처리 블록]
         // ==========================================
         val videoId = YoutubeUtils.extractYoutubeId(url) ?: throw ErrorLoadingException("Invalid YouTube URL")
 
@@ -2739,7 +2746,8 @@ class YoutubeProvider(
         if (channelName.isNotBlank() && channelId.isNotBlank()) {
             val channelUrlFull = if (channelId.startsWith("UC") || channelId.startsWith("@")) "$mainUrl/channel/$channelId" else "$mainUrl/$channelId"
             val channelCard = newMovieSearchResponse(channelName, channelUrlFull, TvType.Live) {
-                this.posterUrl = channelAvatar
+                // 💡 [수정2] 기본 에피소드 추천목록 채널 로고에도 wsrv.nl 프록시 필터를 씌워 고화질 렌더링
+                this.posterUrl = YoutubeUtils.getProxiedPoster(channelAvatar) ?: channelAvatar
             }
             recommendations.add(0, channelCard)
         }
@@ -2796,8 +2804,16 @@ class YoutubeProvider(
             }
         }
 
+        // 💡 [수정1] 원시 데이터인 일반 영상 메인 에피소드 조회수에도 `formatRawViews` 헬퍼 함수 적용
+        var cViews = ep1Views
+        val formattedEp1Views = formatRawViews(ep1Views)
+        if (!formattedEp1Views.contains("조회수") && formattedEp1Views.isNotBlank() && formattedEp1Views.any { it.isDigit() }) {
+            cViews = "조회수 $formattedEp1Views"
+        } else {
+            cViews = formattedEp1Views
+        }
+
         val cDur = ep1Dur.replace("\r", "").replace("\n", "").trim()
-        val cViews = ep1Views.replace("\r", "").replace("\n", "").trim()
         val cDate = ep1Date.replace("\r", "").replace("\n", "").trim()
         val cChannel = channelName.replace("\r", "").replace("\n", "").trim()
 
@@ -2855,8 +2871,6 @@ class YoutubeProvider(
             }
         }
     }
-    
-
     
     override suspend fun loadLinks(
         data: String,
