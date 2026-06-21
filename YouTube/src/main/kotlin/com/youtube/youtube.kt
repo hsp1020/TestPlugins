@@ -536,7 +536,7 @@ class YoutubeProvider(
             appPrefs?.edit()?.remove("cont_token_$hashedKey")?.apply()
         }
     }
-    
+
     // ---------------- [CHIP_DEBUG] 칩 카테고리 보존 병합 전용 함수 ----------------
     private fun mergeAndSaveChips(newChips: List<CachedChip>) {
         val prefs = appPrefs ?: return
@@ -605,7 +605,8 @@ class YoutubeProvider(
         } catch (e: Exception) {
             logError(e)
         }
-    }        
+    }
+    // -----------------------------------------------------------------------------    
     // -----------------------------------------------------------------------------    
     
         // 💡 [실시간 동기화 추가] 설정 프래그먼트가 참조하는 custom_homepages_v3 캐시에도 수집된 즉시 추가합니다.
