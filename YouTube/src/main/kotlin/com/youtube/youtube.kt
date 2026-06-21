@@ -2180,6 +2180,55 @@ class YoutubeProvider(
         }
     }
 
+    // 💡 [추가] InnerTube API 결과(ytInitialData)에서 다국어로 포맷팅된 조회수 텍스트를 재귀적으로 정확히 스캔하여 반환합니다.
+    private fun findFormattedViewCount(obj: Any?, depth: Int = 0): String? {
+        if (obj == null || depth > 32) return null
+        if (obj is Map<*, *>) {
+            val renderer = obj["videoViewCountRenderer"] as? Map<*, *>
+                ?: obj.getMapKey("videoViewCountRenderer")
+            if (renderer != null) {
+                val shortViewCount = renderer["shortViewCount"] as? Map<*, *>
+                    ?: renderer.getMapKey("shortViewCount")
+                val shortText = shortViewCount?.let { getText(it) }
+                if (!shortText.isNullOrBlank()) {
+                    return shortText
+                }
+                val viewCount = renderer["viewCount"] as? Map<*, *>
+                    ?: renderer.getMapKey("viewCount")
+                val fullText = viewCount?.let { getText(it) }
+                if (!fullText.isNullOrBlank()) {
+                    return fullText
+                }
+            }
+            
+            val viewCountTextObj = obj["viewCountText"] ?: obj.getMapKey("viewCountText")
+            if (viewCountTextObj != null) {
+                val txt = getText(viewCountTextObj)
+                if (txt.isNotBlank() && (txt.contains("views") || txt.contains("조회수") || txt.contains("회") || txt.contains("view"))) {
+                    return txt
+                }
+            }
+            val shortViewCountTextObj = obj["shortViewCountText"] ?: obj.getMapKey("shortViewCountText")
+            if (shortViewCountTextObj != null) {
+                val txt = getText(shortViewCountTextObj)
+                if (txt.isNotBlank()) {
+                    return txt
+                }
+            }
+
+            for (value in obj.values) {
+                val res = findFormattedViewCount(value, depth + 1)
+                if (res != null) return res
+            }
+        } else if (obj is List<*>) {
+            for (item in obj) {
+                val res = findFormattedViewCount(item, depth + 1)
+                if (res != null) return res
+            }
+        }
+        return null
+    }
+
 
     override suspend fun load(url: String): LoadResponse {
         // ==========================================
@@ -2290,19 +2339,25 @@ class YoutubeProvider(
                 }
             }
 
-            var ep1Views = ""
-            val viewMatch = VIEW_COUNT_REGEX.find(html)
-            if (viewMatch != null) ep1Views = viewMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
+            // 💡 [수정] InnerTube 데이터에서 다국어로 포맷팅된 조회수 정보를 먼저 정확히 가져오며, 실패할 경우에만 하드폴백으로 원본 숫자 정규식 매칭을 시도합니다.
+            var ep1Views = findFormattedViewCount(data) ?: ""
+            if (ep1Views.isBlank()) {
+                val viewMatch = VIEW_COUNT_REGEX.find(html)
+                if (viewMatch != null) ep1Views = viewMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
+            }
             
             val cViews = ep1Views.ifBlank { "Playing" }
 
-            val mainTargetEp = targetEpisodes.find { it.episode == currentEpIndex }
+            // 💡 [수정] 타겟 에피소드 고유 ID를 비교하여 보조 에피소드 플롯 정보를 하드코딩되지 않은 다국어 포맷 조회수로 업데이트합니다.
+            val mainTargetEp = targetEpisodes.find { YoutubeUtils.extractYoutubeId(it.data) == videoId }
             if (mainTargetEp != null) {
                 mainTargetEp.description = cViews
             }
 
             val finalTitle = "#$currentEpIndex $shortTitle".replace("##", "#")
-            val finalPlot = npPlot.ifBlank { " " }
+            
+            // 💡 [수정] 메인 플롯이 공백일 때 "플롯을 찾을 수 없음" 폴백을 출력하는 안드로이드 앱 사양에 대응하기 위해, Zero-Width Space(제로 너비 공백 문자 `\u200b`)를 주입하여 빈 플롯으로 깔끔하게 우회합니다.
+            val finalPlot = "\u200b"
 
             val finalRecs = mutableListOf<SearchResponse>()
             if (channelName.isNotBlank() && channelId.isNotBlank()) {
@@ -2756,10 +2811,13 @@ class YoutubeProvider(
             } catch (e: Exception) {}
         }
         
-        var ep1Views = ""
-        val viewMatch = VIEW_COUNT_REGEX.find(html)
-        if (viewMatch != null) {
-            ep1Views = viewMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
+        // 💡 [수정] 단일 비디오 상세 페이지 로드 중에도, InnerTube API 조회수 텍스트 데이터를 우선적으로 동적 파싱합니다.
+        var ep1Views = findFormattedViewCount(data) ?: ""
+        if (ep1Views.isBlank()) {
+            val viewMatch = VIEW_COUNT_REGEX.find(html)
+            if (viewMatch != null) {
+                ep1Views = viewMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
+            }
         }
         
         var ep1Date = ""
@@ -2773,9 +2831,10 @@ class YoutubeProvider(
             val m = item as? Map<*, *>
             val primary = m?.getMapKey("videoPrimaryInfoRenderer")
             if (primary != null) {
-                val viewCountRenderer = primary.getMapKey("videoViewCountRenderer")
+                // 💡 [수정] 얕은 getMapKey 검색이 아니라 중첩된 구조(viewCount -> videoViewCountRenderer)를 올바르게 접근하여 파싱합니다.
+                val viewCountRenderer = primary.getMapKey("viewCount")?.getMapKey("videoViewCountRenderer")
                 val vCount = if (viewCountRenderer != null) {
-                    getText(viewCountRenderer.getMapKey("extraShortViewCount") ?: viewCountRenderer.getMapKey("viewCount"))
+                    getText(viewCountRenderer.getMapKey("shortViewCount") ?: viewCountRenderer.getMapKey("extraShortViewCount") ?: viewCountRenderer.getMapKey("viewCount"))
                 } else {
                     getText(primary.getMapKey("viewCount"))
                 }
