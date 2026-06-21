@@ -93,7 +93,7 @@ object YoutubeUtils {
         return Pair(cookieBuilder.toString(), sapisidVal)
     }
 
-    fun getProxiedPoster(poster: String?): String? {
+fun getProxiedPoster(poster: String?): String? {
         if (poster.isNullOrBlank()) return null
         return try {
             "https://wsrv.nl/?url=${URLEncoder.encode(poster, "UTF-8")}&w=800&h=1200&fit=contain&cbg=black"
@@ -103,21 +103,11 @@ object YoutubeUtils {
     }
 
     fun getProxiedPosterBottom(poster: String?): String? {
-        if (poster.isNullOrBlank()) return null
-        return try {
-            "https://wsrv.nl/?url=${URLEncoder.encode(poster, "UTF-8")}&w=800&h=1200&fit=contain&cbg=black"
-        } catch (e: Exception) {
-            poster
-        }
+        return getProxiedPoster(poster)
     }
 
     fun getProxiedPosterNormal(poster: String?): String? {
-        if (poster.isNullOrBlank()) return null
-        return try {
-            "https://wsrv.nl/?url=${URLEncoder.encode(poster, "UTF-8")}&w=800&h=1200&fit=contain&cbg=black"
-        } catch (e: Exception) {
-            poster
-        }
+        return getProxiedPoster(poster)
     }
 
     fun getShortsSearchPoster(videoId: String): String {
@@ -139,7 +129,7 @@ object YoutubeUtils {
             "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
         }
     }
-
+    
     fun findConfig(html: String, key: String): String? {
         return try {
             val regex = regexCache.computeIfAbsent(key) { k ->
@@ -207,45 +197,20 @@ object YoutubeUtils {
 
     fun getMapKeyFromAny(obj: Any?, key: String): Map<*, *>? {
         val map = obj as? Map<*, *> ?: return null
-        val direct = map[key]
-        if (direct is Map<*, *>) return direct
-        val entriesList = map.entries
-        for (entry in entriesList) {
-            if ((entry.key as? String) == key) {
-                return entry.value as? Map<*, *>
-            }
-        }
-        return null
+        return map[key] as? Map<*, *>
     }
 
     fun getListKeyFromAny(obj: Any?, key: String): List<*>? {
         val map = obj as? Map<*, *> ?: return null
-        val direct = map[key]
-        if (direct is List<*>) return direct as? List<Map<*, *>>
-        val entriesList = map.entries
-        for (entry in entriesList) {
-            if ((entry.key as? String) == key) {
-                return entry.value as? List<*>
-            }
-        }
-        return null
+        return map[key] as? List<*>
     }
 
     fun getStringFromAny(obj: Any?, key: String): String? {
         val map = obj as? Map<*, *> ?: return null
-        val direct = map[key]
-        if (direct != null) {
-            return if (direct is String) direct else direct.toString()
-        }
-        val entriesList = map.entries
-        for (entry in entriesList) {
-            if ((entry.key as? String) == key) {
-                val value = entry.value
-                return if (value is String) value else value?.toString()
-            }
-        }
-        return null
+        val value = map[key] ?: return null
+        return if (value is String) value else value.toString()
     }
+
 
     fun extractUrlFromLockup(lockup: Map<*, *>?): String? {
         if (lockup == null) return null
@@ -498,14 +463,7 @@ class YoutubeProvider(
             Log.d("YoutubeUtils", "[CHIP] getSavedContinuationToken - Page: $page, Key: $pageKey, HashedKey: $hashedKey")
         }
 
-        val cached = continuationTokenCache[hashedKey]
-        if (cached != null) return cached
-        
-        val token = appPrefs?.getString("cont_token_$hashedKey", null)
-        if (token != null) {
-            continuationTokenCache[hashedKey] = token
-        }
-        return token
+        return continuationTokenCache[hashedKey]
     }
 
     private fun saveContinuationToken(key: String, token: String?) {
@@ -521,25 +479,17 @@ class YoutubeProvider(
         }
 
         if (token.isNullOrBlank()) {
-            val removed = continuationTokenCache.remove(hashedKey)
-            if (removed != null) {
-                appPrefs?.edit()?.remove("cont_token_$hashedKey")?.apply()
-            }
+            continuationTokenCache.remove(hashedKey)
         } else {
-            val oldToken = continuationTokenCache.put(hashedKey, token)
-            if (oldToken != token) {
-                appPrefs?.edit()?.putString("cont_token_$hashedKey", token)?.apply()
-            }
+            continuationTokenCache[hashedKey] = token
         }
     }
-
 
     private fun clearContinuationTokens(key: String) {
         for (p in 0..100) {
             val pageKey = if (p > 0) "${key}_page_$p" else key
             val hashedKey = YoutubeUtils.sha1(pageKey)
             continuationTokenCache.remove(hashedKey)
-            appPrefs?.edit()?.remove("cont_token_$hashedKey")?.apply()
         }
     }
 
@@ -548,16 +498,10 @@ class YoutubeProvider(
         val prefs = appPrefs ?: return
         val existingJson = prefs.getString("yt_cached_chips", "[]") ?: "[]"
         
-        // 1. 구버전의 안전한 org.json 파싱 방식으로 복구 (타입 소거 에러 방지)
-        val existingChips = mutableListOf<CachedChip>()
-        try {
-            val jsonArray = org.json.JSONArray(existingJson)
-            for (i in 0 until jsonArray.length()) {
-                val obj = jsonArray.getJSONObject(i)
-                existingChips.add(CachedChip(obj.getString("name"), obj.getString("token")))
-            }
+        val existingChips = try {
+            mapper.readValue<List<CachedChip>>(existingJson)
         } catch (e: Exception) {
-            // 파싱 실패 시 빈 리스트 유지
+            emptyList()
         }
 
         val mergedMap = LinkedHashMap<String, CachedChip>()
@@ -570,22 +514,14 @@ class YoutubeProvider(
 
         val mergedList = mergedMap.values.toList()
         
-        // 2. 구버전의 안전한 org.json 저장 방식으로 복구
         try {
-            val outArray = org.json.JSONArray()
-            mergedList.forEach { chip ->
-                val obj = org.json.JSONObject()
-                obj.put("name", chip.name)
-                obj.put("token", chip.token)
-                outArray.put(obj)
-            }
-            prefs.edit().putString("yt_cached_chips", outArray.toString()).apply()
+            val outJson = mapper.writeValueAsString(mergedList)
+            prefs.edit().putString("yt_cached_chips", outJson).apply()
             Log.d("YoutubeUtils", "[CHIP_DEBUG] mergeAndSaveChips - Cached chips synchronized successfully. Size: ${mergedList.size}")
         } catch (e: Exception) {
             logError(e)
         }
 
-        // 💡 [실시간 동기화 추가] 설정 프래그먼트가 참조하는 custom_homepages_v3 캐시에도 즉시 추가
         try {
             val customJson = prefs.getString("custom_homepages_v3", "[]") ?: "[]"
             val currentList = try {
