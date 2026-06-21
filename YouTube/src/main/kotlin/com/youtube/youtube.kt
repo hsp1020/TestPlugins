@@ -2036,8 +2036,7 @@ class YoutubeProvider(
         }
     }
 
-    
-    
+
     private class PlaylistMetadata {
         var title: String = ""
         var author: String = ""
@@ -2046,6 +2045,7 @@ class YoutubeProvider(
         var channelId: String = ""
         var channelAvatar: String = ""
         var subscriberCount: String = ""
+        var videoCount: String = "" // 💡 동영상 수 속성 추가
     }
 
     private fun findPlaylistMetadataRecursive(obj: Any?, metadata: PlaylistMetadata, depth: Int = 0) {
@@ -2060,6 +2060,13 @@ class YoutubeProvider(
                 }
                 val d = getText(primary["description"] ?: YoutubeUtils.getMapKeyFromAny(primary, "description"))
                 if (d.isNotBlank()) metadata.description = d
+
+                // 💡 API의 stats 배열에서 동영상 수 텍스트 추출 (하드코딩 배제)
+                val stats = primary["stats"] as? List<*> ?: YoutubeUtils.getListKeyFromAny(primary, "stats")
+                if (stats != null && stats.isNotEmpty()) {
+                    val vCount = getText(stats[0])
+                    if (vCount.isNotBlank()) metadata.videoCount = vCount
+                }
             }
 
             val secondary = YoutubeUtils.getMapKeyFromAny(obj, "playlistSidebarSecondaryInfoRenderer")
@@ -2084,6 +2091,18 @@ class YoutubeProvider(
                 }
                 val d = getText(header["description"] ?: YoutubeUtils.getMapKeyFromAny(header, "description"))
                 if (d.isNotBlank()) metadata.description = d
+
+                // 💡 API의 stats 배열에서 동영상 수 텍스트 2차 추출
+                val stats = header["stats"] as? List<*> ?: header["briefStats"] as? List<*> ?: YoutubeUtils.getListKeyFromAny(header, "briefStats")
+                if (stats != null && stats.isNotEmpty()) {
+                    val vCount = getText(stats[0])
+                    if (vCount.isNotBlank() && metadata.videoCount.isBlank()) {
+                        metadata.videoCount = vCount
+                    }
+                }
+                
+                val numVideos = getText(header["numVideosText"] ?: YoutubeUtils.getMapKeyFromAny(header, "numVideosText"))
+                if (numVideos.isNotBlank() && metadata.videoCount.isBlank()) metadata.videoCount = numVideos
             }
 
             val panel = YoutubeUtils.getMapKeyFromAny(obj, "playlistPanelRenderer")
@@ -2097,7 +2116,7 @@ class YoutubeProvider(
                 val a = getText(panel["shortBylineText"] ?: YoutubeUtils.getMapKeyFromAny(panel, "shortBylineText"))
                     .ifBlank { getText(panel["longBylineText"] ?: YoutubeUtils.getMapKeyFromAny(panel, "longBylineText")) }
                     .ifBlank { getText(panel["ownerName"] ?: YoutubeUtils.getMapKeyFromAny(panel, "ownerName")) }
-                if (a.isNotBlank() && metadata.author.isBlank()) {
+                if (a.isNotBlank()) {
                     metadata.author = a
                 }
             }
@@ -2256,7 +2275,7 @@ class YoutubeProvider(
             val finalPlot = buildString {
                 append(shortTitle)
                 if (shortPlot.isNotBlank()) {
-                    append(" • $shortPlot")
+                    append("\n\n$shortPlot")
                 }
             }
 
@@ -2267,6 +2286,9 @@ class YoutubeProvider(
             }
         }
 
+        // ==========================================
+        // 💡 1. [채널 에피소드 처리 블록]
+        // ==========================================
         if (url.contains("/@") || url.contains("/channel/") || url.contains("/c/") || url.contains("/user/")) {
             try {
                 var cleanUrl = url.substringBefore("?").removeSuffix("/")
@@ -2323,6 +2345,12 @@ class YoutubeProvider(
                     ?: YoutubeUtils.getBestThumbnail(safeGet(header, "content", "pageHeaderViewModel", "image", "decoratedAvatarViewModel", "avatar", "avatarViewModel", "image"))
                     ?: response.document.selectFirst("meta[property=og:image]")?.attr("content")
 
+                // 💡 [요청] 채널 메인 정보(description)를 파싱하여 plot으로 사용
+                val channelDescription = response.document.selectFirst("meta[property=og:description]")?.attr("content") ?: ""
+
+                // 💡 API 배열 구조에서 구독자 수, 동영상 수 분리 추출
+                var subscriberCount = ""
+                var videoCount = ""
                 val metaParts = mutableListOf<String>()
 
                 val rows = safeGet(header, "content", "pageHeaderViewModel", "metadata", "contentMetadataViewModel", "metadataRows") as? List<*>
@@ -2338,16 +2366,20 @@ class YoutubeProvider(
                     }
                 }
 
-                if (metaParts.isEmpty()) {
-                    val subText = getText(safeGet(header, "subscriberCountText"))
-                    if (subText.isNotBlank()) metaParts.add(subText)
-                    
-                    val videoText = getText(safeGet(header, "videosCountText") ?: safeGet(header, "videoCountText"))
-                    if (videoText.isNotBlank()) metaParts.add(videoText)
+                if (metaParts.isNotEmpty()) {
+                    if (metaParts.size >= 3) {
+                        subscriberCount = metaParts[metaParts.size - 2]
+                        videoCount = metaParts[metaParts.size - 1]
+                    } else if (metaParts.size == 2) {
+                        subscriberCount = metaParts[0]
+                        videoCount = metaParts[1]
+                    }
+                } else {
+                    subscriberCount = getText(safeGet(header, "subscriberCountText"))
+                    videoCount = getText(safeGet(header, "videosCountText") ?: safeGet(header, "videoCountText"))
                 }
 
                 val allEpisodes = mutableListOf<Episode>()
-
 
                 var initialItems: List<*>? = null
                 val tabs = safeGet(data, "contents", "twoColumnBrowseResultsRenderer", "tabs") as? List<*>
@@ -2433,8 +2465,23 @@ class YoutubeProvider(
 
                 return newTvSeriesLoadResponse(title, url, TvType.TvSeries, allEpisodes) {
                     this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
-                    this.plot = metaParts.joinToString("•")
-                    this.tags = metaParts
+                    
+                    // 💡 [요청] 채널 플롯은 채널 메인 정보, 태그는 제거
+                    this.plot = channelDescription
+
+                    // 💡 [요청] 채널 아이콘, 구독자, 동영상 수를 ActorData UI로 배치
+                    val actorList = mutableListOf<ActorData>()
+                    actorList.add(ActorData(Actor(title, poster ?: "")))
+                    
+                    if (subscriberCount.isNotBlank()) {
+                        actorList.add(ActorData(Actor(subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/YouTube/Subscribe.jpg")))
+                    }
+                    if (videoCount.isNotBlank()) {
+                        actorList.add(ActorData(Actor(videoCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/YouTube/Videos.jpg")))
+                    }
+                    if (actorList.isNotEmpty()) {
+                        this.actors = actorList
+                    }
                 }
                 
             } catch (e: Exception) {
@@ -2442,6 +2489,9 @@ class YoutubeProvider(
             }
         }
 
+        // ==========================================
+        // 💡 2. [재생목록 에피소드 처리 블록]
+        // ==========================================
         if (url.contains("list=")) {
             try {
                 var targetUrl = url
@@ -2462,7 +2512,6 @@ class YoutubeProvider(
 
                 var author = playlistMeta.videoAuthor.ifBlank { playlistMeta.author }.ifBlank { "Unknown Channel" }
                 var title = playlistMeta.title.ifBlank { "YouTube Playlist" }
-                var description = playlistMeta.description
 
                 val seenPlaylistIds = mutableSetOf<String>()
                 val episodes = extractPlaylistEpisodes(data, seenPlaylistIds).toMutableList()
@@ -2499,36 +2548,40 @@ class YoutubeProvider(
                     recList.add(channelCard)
                 }
                 
-
                 return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
                     this.posterUrl = YoutubeUtils.getProxiedPoster(playlistPoster)
-                    
-                    val finalDescription = buildString {
-                        append(author)
-                        if (playlistMeta.subscriberCount.isNotBlank()) {
-                            append(" (${playlistMeta.subscriberCount})")
-                        }
-                        if (description.isNotBlank()) {
-                            append(" • $description")
-                        }
-                    }
-                    this.plot = finalDescription
-                    this.tags = listOf(author)
                     this.recommendations = recList
+
+                    // 💡 [요청] 재생목록에서는 플롯과 태그를 모두 제거
+                    
+                    // 💡 [요청] 채널 아이콘, 구독자, 동영상 수를 ActorData UI로 배치
+                    val actorList = mutableListOf<ActorData>()
+                    if (author.isNotBlank()) {
+                        actorList.add(ActorData(Actor(author, playlistMeta.channelAvatar)))
+                    }
+                    if (playlistMeta.subscriberCount.isNotBlank()) {
+                        actorList.add(ActorData(Actor(playlistMeta.subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/YouTube/Subscribe.jpg")))
+                    }
+                    if (playlistMeta.videoCount.isNotBlank()) {
+                        actorList.add(ActorData(Actor(playlistMeta.videoCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/YouTube/Videos.jpg")))
+                    }
+                    if (actorList.isNotEmpty()) {
+                        this.actors = actorList
+                    }
                 }
-                
                 
             } catch (e: Exception) {
                 logError(e)
             }
         }          
 
-
+        // ==========================================
+        // 💡 3. [기본 에피소드(단일 비디오) 처리 블록]
+        // ==========================================
         val videoId = YoutubeUtils.extractYoutubeId(url) ?: throw ErrorLoadingException("Invalid YouTube URL")
 
         epMetaMapCache.clear()
 
-        // 💡 [NewPipe 라이브러리 실제 차용] 다른 개발자와 완벽히 동일한 로직 적용
         var npPlot = ""
         var npTags = emptyList<String>()
         var npActor: ActorData? = null
@@ -2539,7 +2592,7 @@ class YoutubeProvider(
             val info = StreamInfo.getInfo(extractor)
 
             npPlot = info.description.content.toString()
-            npTags = info.tags?.take(10)?.toList() ?: emptyList()
+            npTags = info.tags?.take(5)?.toList() ?: emptyList()
 
             info.uploaderName?.takeIf { it.isNotBlank() }?.let { uploader ->
                 npActor = ActorData(
@@ -2550,22 +2603,22 @@ class YoutubeProvider(
                 )
             }
         } catch (e: Exception) {
-            logError(e) // 만약 NewPipe 파싱에 실패할 경우 앱이 죽지 않도록 방어
+            logError(e) 
         }
 
-        // --- 여기서부터는 회원님의 기존 에피소드 파싱(추천 목록 및 메타데이터) 로직입니다 ---
         val headers = mapOf("Referer" to "https://www.youtube.com/")
         val response = app.get(url, headers = headers, interceptor = ytInterceptor)
         val html = response.text
         val data = extractYtInitialData(html)
         
         var title = "YouTube Video"
-        var plot = npPlot // NewPipe에서 가져온 완벽한 플롯을 기본으로 세팅
+        var plot = npPlot 
         var poster = YoutubeUtils.buildThumbnailFromId(videoId)
 
         var channelName = ""
         var channelId = ""
         var channelAvatar = ""
+        var subscriberCount = ""
 
         val recommendations = mutableListOf<SearchResponse>()
         val seenRecIds = mutableSetOf<String>()
@@ -2593,9 +2646,11 @@ class YoutubeProvider(
                             val curl = safeGet(owner, "navigationEndpoint", "commandMetadata", "webCommandMetadata", "url") as? String
                             if (!curl.isNullOrBlank()) channelId = curl.substringAfterLast("/")
                         }
+                        
+                        // 💡 기본 에피소드 구독자 수 추출
+                        subscriberCount = getText(owner["subscriberCountText"])
                     }
 
-                    // 만약 NewPipe 로드에 실패하여 plot이 비어있다면 기존 방식으로 플롯을 가져오는 예외 처리
                     if (plot.isBlank()) {
                         val descObj = secondary["attributedDescription"] as? Map<*, *>
                             ?: secondary["description"] as? Map<*, *>
@@ -2711,15 +2766,28 @@ class YoutubeProvider(
             this.plot = plot
             this.recommendations = filteredRecs 
             
-            // 💡 [NewPipe에서 가져온 속성들 장착]
             if (npTags.isNotEmpty()) {
                 this.tags = npTags
             }
+
+            // 💡 [요청] 기본 에피소드: 채널 아이콘 및 구독자 수 ActorData UI 배치
+            val actorList = mutableListOf<ActorData>()
             if (npActor != null) {
-                this.actors = listOf(npActor!!)
+                actorList.add(npActor!!)
+            } else if (channelName.isNotBlank()) {
+                actorList.add(ActorData(Actor(channelName, channelAvatar)))
+            }
+
+            if (subscriberCount.isNotBlank()) {
+                actorList.add(ActorData(Actor(subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/YouTube/Subscribe.jpg")))
+            }
+
+            if (actorList.isNotEmpty()) {
+                this.actors = actorList
             }
         }
     }
+
 
     override suspend fun loadLinks(
         data: String,
