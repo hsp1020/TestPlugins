@@ -37,14 +37,12 @@ import androidx.appcompat.widget.SwitchCompat
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.*
 import com.lagradost.cloudstream3.app
-import org.jsoup.Jsoup
 
 data class CustomSection(
     @JsonProperty("name") var name: String = "",
     @JsonProperty("url") var url: String = "",
     @JsonProperty("isEnabled") var isEnabled: Boolean = true
 )
-
 
 class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : BottomSheetDialogFragment() {
 
@@ -79,8 +77,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
             YoutubeSettingsBottomSheet(sp).show(fm, "yt_settings")
         }
     }
-
-
 
     class PrefsFragment(private val sharedPref: SharedPreferences) : PreferenceFragmentCompat() {
 
@@ -133,7 +129,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 entryValues = Loc.availableLanguages.map { it.first }.toTypedArray()
                 entries = Loc.availableLanguages.map { "${it.third} (${it.second})" }.toTypedArray()
                 
-                // 💡 [컴파일러 쉴드]: defaultPrefs 인라인 선언 및 제네릭 타입 명시(null as String?)로 빌드 에러 차단
                 val defaultPrefs = PreferenceManager.getDefaultSharedPreferences(ctx)
                 val currentLang = if (sharedPref.contains(KEY_LANGUAGE)) {
                     sharedPref.getString(KEY_LANGUAGE, null as String?)
@@ -146,20 +141,16 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 setOnPreferenceChangeListener { _, newValue ->
                     val langVal = newValue as String
                     
-                    // 💡 [수정] 현재 언어와 동일하다면 초기화 로직을 실행하지 않고 즉시 종료 (방어 코드)
                     if (sharedPref.getString(KEY_LANGUAGE, "en") == langVal) {
                         return@setOnPreferenceChangeListener true
                     }
                     
-                    // 1. 양대 SharedPreferences 저장소에 새로운 언어 설정값 보관
                     sharedPref.edit().putString(KEY_LANGUAGE, langVal).apply()
                     defaultPrefs.edit().putString(KEY_LANGUAGE, langVal).apply()
 
-                    // 2. [추가 반영]: 언어 변경 즉시 기존 언어로 캐싱된 양대 저장소의 칩 프리퍼런스 파괴
                     sharedPref.edit().remove("yt_cached_chips").apply()
                     defaultPrefs.edit().remove("yt_cached_chips").apply()
 
-                    // 3. [추가 반영]: 언어 변경 즉시 기존 언어로 캐싱된 'Home' 및 모든 'chip_name_' 카테고리 일괄 제거 (로그아웃 로직과 동일)
                     val json = sharedPref.getString("custom_homepages_v3", "[]") ?: "[]"
                     try {
                         val mapper = jacksonObjectMapper()
@@ -181,7 +172,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
             }
             preferenceScreen.addPreference(languagePref)
 
-                        
             authCategory = PreferenceCategory(ctx)
             preferenceScreen.addPreference(authCategory)
 
@@ -222,7 +212,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                         .setTitle(Loc.getString(sharedPref, "logout_confirm_title"))
                         .setMessage(Loc.getString(sharedPref, "logout_confirm_msg"))
                         .setPositiveButton(Loc.getString(sharedPref, "delete")) { _, _ ->
-                            // 1. 모든 개인 계정 데이터 및 캐시 데이터 제거
                             sharedPref.edit().apply {
                                 remove(KEY_VISITOR)
                                 remove("VISITOR_INFO1_LIVE")
@@ -233,16 +222,14 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                                 remove("SAPISID")
                                 remove("__Secure-1PSID") 
                                 remove("__Secure-3PAPISID")
-                                remove("yt_cached_chips") // 칩 프리퍼런스 파괴
+                                remove("yt_cached_chips")
                             }.apply()
 
-                            // 2. custom_homepages_v3 내부에서 개인화된 'Home' 및 모든 'chip_name_' 카테고리 일괄 제거
                             val json = sharedPref.getString("custom_homepages_v3", "[]") ?: "[]"
                             try {
                                 val mapper = jacksonObjectMapper()
                                 val currentList = mapper.readValue<List<CustomSection>>(json)
                                 
-                                // 'Home'과 'chip_name_'으로 시작하는 개인화 항목들을 목록에서 모두 필터링하여 지웁니다.
                                 val filteredList = currentList.filterNot { 
                                     it.url == "Home" || it.url.startsWith("chip_name_") 
                                 }
@@ -260,7 +247,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                     true
                 }
             }
-
             authCategory.addPreference(clearPref)
 
             customCategory = PreferenceCategory(ctx)
@@ -327,12 +313,10 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                     }
 
                     if (isAppInstalled(ctx, packageName)) {
-                        // 패키지가 기기에 실제로 존재하는 것이 확인된 경우에만 최종 저장 및 승인
                         sharedPref.edit().putString(KEY_DOWNLOADER_TYPE, selectedValue).apply()
                         customPackagePref.isVisible = false
                         true
                     } else {
-                        // 미설치 상태라면 일단 저장을 완전히 차단(false 반환)하고 팝업을 노출시킵니다.
                         showInstallDialogAndHandle(ctx, selectedValue, appName, githubUrl, this)
                         false
                     }
@@ -401,7 +385,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 .setTitle(title)
                 .setMessage(message)
                 .setPositiveButton(btnDownload) { _, _ ->
-                    // 실제 설치 완료 전에는 저장을 하지 않고 브라우저 가이드 릴레이만 제공합니다.
                     val toastMsg = if (langCode == "ko") {
                         "다운로드 및 설치 완료 후 설정에서 다시 선택해 주세요."
                     } else {
@@ -418,7 +401,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                         Toast.makeText(context, "Error opening browser", Toast.LENGTH_SHORT).show()
                     }
 
-                    // 저장이 완전히 취소되었으므로 UI 라디오 선택 항목도 정상 저장되어 있던 이전 상태로 복구시킵니다.
                     downloaderPref.value = sharedPref.getString(KEY_DOWNLOADER_TYPE, "none")
                 }
                 .setNegativeButton(btnCancel) { _, _ ->
@@ -484,8 +466,6 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
         }
     }
 
-
-
     class CustomSectionsDialog(private val sharedPref: SharedPreferences) : DialogFragment() {
 
         private val mapper = jacksonObjectMapper()
@@ -493,12 +473,10 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
         private lateinit var adapter: CustomSectionsAdapter
         private var sectionsList = mutableListOf<CustomSection>()
 
-        // 1. 다이얼로그 라이프사이클에 바인딩된 관리형 코루틴 스코프 생성
         private val dialogScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
         override fun onDestroyView() {
             super.onDestroyView()
-            // 2. 다이얼로그 폐기 시 실행 중이던 모든 타이틀 파싱 Job을 강제로 해제하여 누수 방지
             dialogScope.cancel()
         }
 
@@ -656,15 +634,18 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
 
                     if (url.startsWith("http") && url.contains("youtube") && inputName.text.isBlank()) {
                         loadingIndicator.visibility = View.VISIBLE
-                        // GlobalScope를 dialogScope로 변경해 누수 우회 차단
                         fetchJob = dialogScope.launch {
                             try {
-                                val response = withContext(Dispatchers.IO) {
-                                    app.get(url).text
+                                // =========================================================================
+                                // [개선 완료] 무거운 HTML 구문 분석(Jsoup.parse)을 Dispatchers.IO 영역으로 
+                                // 완전 이관하여 대화상자 추가 시 UI 버벅임(Jank) 현상 소멸
+                                // =========================================================================
+                                val title = withContext(Dispatchers.IO) {
+                                    val response = app.get(url).text
+                                    val doc = org.jsoup.Jsoup.parse(response)
+                                    doc.selectFirst("meta[property=og:title]")?.attr("content")
+                                        ?.replace(" - YouTube", "")
                                 }
-                                val doc = Jsoup.parse(response)
-                                val title = doc.selectFirst("meta[property=og:title]")?.attr("content")
-                                    ?.replace(" - YouTube", "")
                                 if (!title.isNullOrBlank()) {
                                     inputName.setText(title)
                                 }
@@ -971,27 +952,18 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
             }
         }
         
-        // 웹뷰의 완벽한 생명주기 리소스 소멸을 구현하여 메모리 누수를 원천 방지합니다.
         override fun onDestroyView() {
             if (::webView.isInitialized) {
                 try {
-                    // 1. 부모 레이아웃 컨테이너로부터 분리
                     (webView.parent as? ViewGroup)?.removeView(webView)
-                    
-                    // 2. 바인딩된 자원 무효화 처리
                     webView.stopLoading()
                     webView.clearHistory()
                     webView.removeAllViews()
-                    // 💡 [빌드 에러 해결]: Kotlin NonNull 컴파일 제약으로 인해 null 대입 코드를 삭제합니다.
-                    
-                    // 3. Native 메모리 소멸자 실행
                     webView.destroy()
                 } catch (e: Exception) {
-                    // 소멸 도중 발생할 수 있는 드문 예외 처리
                 }
             }
             super.onDestroyView()
         }
-
     }
 }
