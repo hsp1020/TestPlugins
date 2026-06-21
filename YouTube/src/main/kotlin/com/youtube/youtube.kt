@@ -2209,7 +2209,8 @@ class YoutubeProvider(
         // ==========================================
         // 💡 [개선1] 쇼츠 에피소드 처리 블록: 일반 영상처럼 넘버링 및 채널 UI 완벽 적용
         // ==========================================
-    if (url.contains("/shorts/")) {
+
+        if (url.contains("/shorts/")) {
             val videoId = YoutubeUtils.extractYoutubeId(url) ?: "video"
             val useSearchList = url.contains("ctx=search")
             val sourceList = if (useSearchList) searchShorts else homeShorts
