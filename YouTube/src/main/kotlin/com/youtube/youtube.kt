@@ -20,7 +20,8 @@ import java.util.LinkedHashMap
 import java.util.concurrent.ConcurrentHashMap
 import com.lagradost.cloudstream3.AcraApplication
 import androidx.preference.PreferenceManager
-import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
@@ -2418,9 +2419,6 @@ class YoutubeProvider(
             }
         }
 
-        // ==========================================
-        // 💡 2. [채널 에피소드 처리 블록]
-        // ==========================================
 
         // ==========================================
         // 💡 2. [채널 에피소드 처리 블록]
@@ -2445,8 +2443,8 @@ class YoutubeProvider(
                     logError(e)
                 }
 
-                // ① 일반 영상(/videos)과 쇼츠(/shorts) 탭 데이터를 동시 병렬 요청
-                val (videosHtml, shortsHtml) = kotlinx.coroutines.coroutineScope {
+                // ① 일반 영상(/videos)과 쇼츠(/shorts) 탭 데이터를 동시 병렬 요청 (타입 명시로 추론 에러 방지)
+                val pair: Pair<String, String> = kotlinx.coroutines.coroutineScope {
                     val videosDeferred = async {
                         try {
                             app.get("$cleanUrl/videos", interceptor = ytInterceptor).text
@@ -2463,6 +2461,9 @@ class YoutubeProvider(
                     }
                     Pair(videosDeferred.await(), shortsDeferred.await())
                 }
+
+                val videosHtml = pair.first
+                val shortsHtml = pair.second
 
                 val videosData = extractYtInitialData(videosHtml)
                 val shortsData = extractYtInitialData(shortsHtml)
@@ -2569,7 +2570,6 @@ class YoutubeProvider(
                 logError(e)
             }
         }
-        
         // ==========================================
         // 💡 3. [재생목록 에피소드 처리 블록]
         // ==========================================
