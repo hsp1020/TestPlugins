@@ -2619,17 +2619,18 @@ class YoutubeProvider(
         var ep1Views = ""
         val viewMatch = VIEW_COUNT_REGEX.find(html)
         if (viewMatch != null) {
-            ep1Views = viewMatch.groupValues[1]
+            // 💡 [핵심] 보이지 않는 캐리지 리턴(\r)과 줄바꿈 문자를 완전히 삭제하여 글씨 덮어씌워짐 방지
+            ep1Views = viewMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
         }
         
         var ep1Date = ""
         val dateMatch = PUBLISH_DATE_REGEX.find(html)
         if (dateMatch != null) {
-            ep1Date = dateMatch.groupValues[1]
+            ep1Date = dateMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
         }
         
-        val resultsContents = safeGet(data, "contents", "twoColumnWatchNextResults", "results", "results", "contents") as? List<*>
-        resultsContents?.forEach { item ->
+        val resultsContentsForEp1 = safeGet(data, "contents", "twoColumnWatchNextResults", "results", "results", "contents") as? List<*>
+        resultsContentsForEp1?.forEach { item ->
             val m = item as? Map<*, *>
             val primary = m?.getMapKey("videoPrimaryInfoRenderer")
             if (primary != null) {
@@ -2640,21 +2641,31 @@ class YoutubeProvider(
                     getText(primary.getMapKey("viewCount"))
                 }
                 
-                if (vCount.isNotBlank()) ep1Views = vCount
-                val dText = getText(primary.getMapKey("dateText"))
-                if (dText.isNotBlank()) ep1Date = dText
+                if (vCount.isNotBlank()) {
+                    ep1Views = vCount.replace("\r", "").replace("\n", "").trim()
+                }
+                
+                val dText = extractTitle(primary.getMapKey("dateText") as? Map<*, *>) ?: getText(primary.getMapKey("dateText"))
+                if (dText.isNotBlank()) {
+                    ep1Date = dText.replace("\r", "").replace("\n", "").trim()
+                }
             }
         }
 
-        val mainDescParts = listOf(ep1Dur, channelName, ep1Views, ep1Date).filter { it.isNotBlank() && it != "N/A" }
+        // 💡 채널명에도 숨겨진 특수문자가 있을 수 있으므로 한 번 더 정제합니다.
+        val cleanChannelName = channelName.replace("\r", "").replace("\n", "").trim()
+
+        // 요청하신 [길이] • [조회수] • [날짜] • [채널] 순서 완벽 적용
+        val mainDescParts = listOf(ep1Dur, ep1Views, ep1Date, cleanChannelName).filter { it.isNotBlank() && it != "N/A" }
         val mainDescStr = mainDescParts.joinToString(" • ")
 
         episodes.add(newEpisode(url) {
             this.name = title
             this.posterUrl = poster
             this.episode = 1
-            this.description = mainDescStr.ifBlank { channelName.ifBlank { "Playing" } }
+            this.description = mainDescStr.ifBlank { cleanChannelName.ifBlank { "Playing" } }
         })
+
 
         var epCount = 2
         filteredRecs.forEach { rec ->
