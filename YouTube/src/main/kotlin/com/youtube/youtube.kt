@@ -729,26 +729,54 @@ class YoutubeProvider(
             views = rawViews
         }
 
-        if (views.isBlank() || date.isBlank()) {
-            val rows = videoData.getMapKey("metadata")?.getMapKey("lockupMetadataViewModel")?.getMapKey("metadata")?.getMapKey("contentMetadataViewModel")?.getListKey("metadataRows")
-            rows?.forEachIndexed { index, row ->
-                val parts = row.getListKey("metadataParts") ?: YoutubeUtils.getListKeyFromAny(row, "metadataParts") as? List<*>
-                parts?.forEachIndexed { pIndex, part ->
-                    if (part is Map<*, *>) {
-                        val t = getText(part.getMapKey("text"))
-                        if (t.isNotBlank() && t != duration && t != channel) {
-                            if (index == 0) {
-                                channel = t
-                            } else if (index == 1) {
-                                if (pIndex == 0) {
-                                    views = t
-                                } else {
-                                    date = t
-                                }
-                            }
-                        }
+        // 💡 [개선] lockupViewModel 등의 메타데이터 행 구조(metadataRows)를 행 개수와 요소 개수에 유연하게 대응하도록 리팩토링합니다.
+        // 채널 홈의 동영상 탭에서는 채널명이 누락되어 1개의 행(조회수, 날짜)만 내려오며, 추천 탭 등에서는 2개의 행(채널명 / 조회수, 날짜)이 반환됩니다.
+        val metaTexts = mutableListOf<String>()
+        val rows = videoData.getMapKey("metadata")
+            ?.getMapKey("lockupMetadataViewModel")
+            ?.getMapKey("metadata")
+            ?.getMapKey("contentMetadataViewModel")
+            ?.getListKey("metadataRows")
+
+        rows?.forEach { row ->
+            val parts = row.getListKey("metadataParts") ?: YoutubeUtils.getListKeyFromAny(row, "metadataParts") as? List<*>
+            parts?.forEach { part ->
+                if (part is Map<*, *>) {
+                    val t = getText(part.getMapKey("text") ?: part["text"]).trim()
+                    if (t.isNotBlank() && t != duration) {
+                        metaTexts.add(t)
                     }
                 }
+            }
+        }
+
+        var extractedChannel = ""
+        var extractedViews = ""
+        var extractedDate = ""
+
+        if (metaTexts.size == 1) {
+            val text = metaTexts[0]
+            if (text.contains("views", ignoreCase = true) || text.contains("조회수") || text.contains("회") || text.contains("view")) {
+                extractedViews = text
+            } else {
+                extractedDate = text
+            }
+        } else if (metaTexts.size == 2) {
+            // 채널 홈의 비디오 목록처럼 채널명이 생략된 2개 구성인 경우: [조회수, 날짜] 순서대로 분류
+            extractedViews = metaTexts[0]
+            extractedDate = metaTexts[1]
+        } else if (metaTexts.size >= 3) {
+            // 채널명이 포함된 구성인 경우: [채널, 조회수, 날짜] 순서대로 분류
+            extractedChannel = metaTexts[0]
+            extractedViews = metaTexts[1]
+            extractedDate = metaTexts[2]
+        }
+
+        if (views.isBlank() && date.isBlank()) {
+            if (extractedViews.isNotBlank()) views = extractedViews
+            if (extractedDate.isNotBlank()) date = extractedDate
+            if (channel.isBlank() && extractedChannel.isNotBlank()) {
+                channel = extractedChannel
             }
         }
 
