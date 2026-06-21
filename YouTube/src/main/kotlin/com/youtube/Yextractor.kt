@@ -1026,7 +1026,7 @@ open class YoutubeExtractor : ExtractorApi() {
             else -> Pair("", "")
         }
 
-withContext(Dispatchers.IO) {
+        withContext(Dispatchers.IO) {
             try {
                 val (playerResponse, durationSeconds, playerId) = fetchPlayerResponse(videoId)
 
