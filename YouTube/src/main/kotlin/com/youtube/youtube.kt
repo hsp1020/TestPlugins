@@ -2223,6 +2223,7 @@ class YoutubeProvider(
             val data = extractYtInitialData(html)
             
             val recs = mutableListOf<SearchResponse>()
+            var ep1Views = "" // 💡 하드코딩 제거! 순수하게 API에서 가져올 변수
 
             if (data != null) {
                 val resultsContents = safeGet(data, "contents", "twoColumnWatchNextResults", "results", "results", "contents") as? List<*>
@@ -2232,7 +2233,17 @@ class YoutubeProvider(
                     if (primary != null) {
                         val t = extractTitle(primary["title"] as? Map<*, *>)
                         if (!t.isNullOrBlank()) shortTitle = t
+                        
+                        // 💡 [핵심 해결] InnerTube API가 내려주는 "이미 다국어 처리된 공식 조회수 텍스트"를 그대로 꺼내옵니다.
+                        val viewCountRenderer = primary["videoViewCountRenderer"] as? Map<*, *>
+                        val vCount = if (viewCountRenderer != null) {
+                            getText(viewCountRenderer["extraShortViewCount"] ?: viewCountRenderer["viewCount"])
+                        } else {
+                            getText(primary["viewCount"])
+                        }
+                        if (vCount.isNotBlank()) ep1Views = vCount.replace("\r", "").replace("\n", "").trim()
                     }
+                    
                     val secondary = m?.get("videoSecondaryInfoRenderer") as? Map<*, *>
                     if (secondary != null) {
                         val owner = safeGet(secondary, "owner", "videoOwnerRenderer") as? Map<*, *>
@@ -2290,19 +2301,6 @@ class YoutubeProvider(
                 }
             }
 
-            // 💡 [수정1] 원시 데이터인 조회수를 '조회수 118만회' 형식으로 다른 쇼츠들과 똑같이 정제합니다.
-            var ep1Views = ""
-            val viewMatch = VIEW_COUNT_REGEX.find(html)
-            if (viewMatch != null) {
-                val rawViews = viewMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
-                val formattedViews = formatRawViews(rawViews)
-                ep1Views = if (!formattedViews.contains("조회수") && formattedViews.isNotBlank() && formattedViews.any { it.isDigit() }) {
-                    "조회수 $formattedViews"
-                } else {
-                    formattedViews
-                }
-            }
-            
             val cViews = ep1Views.ifBlank { "Playing" }
 
             val mainTargetEp = targetEpisodes.find { it.episode == currentEpIndex }
@@ -2317,7 +2315,6 @@ class YoutubeProvider(
             if (channelName.isNotBlank() && channelId.isNotBlank()) {
                 val channelUrlFull = if (channelId.startsWith("UC") || channelId.startsWith("@")) "$mainUrl/channel/$channelId" else "$mainUrl/$channelId"
                 val channelCard = newMovieSearchResponse(channelName, channelUrlFull, TvType.Live) {
-                    // 💡 [수정2] 쇼츠 추천목록 채널 로고에 wsrv.nl 프록시 필터를 씌워 고화질로 렌더링
                     this.posterUrl = YoutubeUtils.getProxiedPoster(channelAvatar) ?: channelAvatar
                 }
                 finalRecs.add(channelCard)
@@ -2612,7 +2609,7 @@ class YoutubeProvider(
                         channelUrlFull,
                         TvType.Live
                     ) {
-                        this.posterUrl = playlistMeta.channelAvatar // 재생목록 추천 카드 화질은 썸네일 자체 화질을 쓰거나 원하면 프록시 추가 가능
+                        this.posterUrl = playlistMeta.channelAvatar
                     }
                     recList.add(channelCard)
                 }
@@ -2690,6 +2687,9 @@ class YoutubeProvider(
 
         val recommendations = mutableListOf<SearchResponse>()
         val seenRecIds = mutableSetOf<String>()
+        
+        var ep1Views = "" // 💡 하드코딩 제거! 순수하게 API에서 가져올 변수
+        var ep1Date = ""
 
         if (data != null) {
             val resultsContents = safeGet(data, "contents", "twoColumnWatchNextResults", "results", "results", "contents") as? List<*>
@@ -2701,6 +2701,18 @@ class YoutubeProvider(
                 if (primary != null) {
                     val t = extractTitle(primary["title"] as? Map<*, *>)
                     if (!t.isNullOrBlank()) title = t
+                    
+                    // 💡 [핵심 해결] InnerTube API가 내려주는 "다국어 처리된 공식 텍스트" 추출!
+                    val viewCountRenderer = primary.getMapKey("videoViewCountRenderer")
+                    val vCount = if (viewCountRenderer != null) {
+                        getText(viewCountRenderer.getMapKey("extraShortViewCount") ?: viewCountRenderer.getMapKey("viewCount"))
+                    } else {
+                        getText(primary.getMapKey("viewCount"))
+                    }
+                    if (vCount.isNotBlank()) ep1Views = vCount.replace("\r", "").replace("\n", "").trim()
+                    
+                    val dText = extractTitle(primary.getMapKey("dateText") as? Map<*, *>) ?: getText(primary.getMapKey("dateText"))
+                    if (dText.isNotBlank()) ep1Date = dText.replace("\r", "").replace("\n", "").trim()
                 }
 
                 val secondary = m?.get("videoSecondaryInfoRenderer") as? Map<*, *>
@@ -2746,7 +2758,6 @@ class YoutubeProvider(
         if (channelName.isNotBlank() && channelId.isNotBlank()) {
             val channelUrlFull = if (channelId.startsWith("UC") || channelId.startsWith("@")) "$mainUrl/channel/$channelId" else "$mainUrl/$channelId"
             val channelCard = newMovieSearchResponse(channelName, channelUrlFull, TvType.Live) {
-                // 💡 [수정2] 기본 에피소드 추천목록 채널 로고에도 wsrv.nl 프록시 필터를 씌워 고화질 렌더링
                 this.posterUrl = YoutubeUtils.getProxiedPoster(channelAvatar) ?: channelAvatar
             }
             recommendations.add(0, channelCard)
@@ -2773,47 +2784,8 @@ class YoutubeProvider(
             }
         }
         
-        var ep1Views = ""
-        val viewMatch = VIEW_COUNT_REGEX.find(html)
-        if (viewMatch != null) {
-            ep1Views = viewMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
-        }
-        
-        var ep1Date = ""
-        val dateMatch = PUBLISH_DATE_REGEX.find(html)
-        if (dateMatch != null) {
-            ep1Date = dateMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
-        }
-        
-        val resultsContentsForEp1 = safeGet(data, "contents", "twoColumnWatchNextResults", "results", "results", "contents") as? List<*>
-        resultsContentsForEp1?.forEach { item ->
-            val m = item as? Map<*, *>
-            val primary = m?.getMapKey("videoPrimaryInfoRenderer")
-            if (primary != null) {
-                val viewCountRenderer = primary.getMapKey("videoViewCountRenderer")
-                val vCount = if (viewCountRenderer != null) {
-                    getText(viewCountRenderer.getMapKey("extraShortViewCount") ?: viewCountRenderer.getMapKey("viewCount"))
-                } else {
-                    getText(primary.getMapKey("viewCount"))
-                }
-                
-                if (vCount.isNotBlank()) ep1Views = vCount.replace("\r", "").replace("\n", "").trim()
-                
-                val dText = extractTitle(primary.getMapKey("dateText") as? Map<*, *>) ?: getText(primary.getMapKey("dateText"))
-                if (dText.isNotBlank()) ep1Date = dText.replace("\r", "").replace("\n", "").trim()
-            }
-        }
-
-        // 💡 [수정1] 원시 데이터인 일반 영상 메인 에피소드 조회수에도 `formatRawViews` 헬퍼 함수 적용
-        var cViews = ep1Views
-        val formattedEp1Views = formatRawViews(ep1Views)
-        if (!formattedEp1Views.contains("조회수") && formattedEp1Views.isNotBlank() && formattedEp1Views.any { it.isDigit() }) {
-            cViews = "조회수 $formattedEp1Views"
-        } else {
-            cViews = formattedEp1Views
-        }
-
         val cDur = ep1Dur.replace("\r", "").replace("\n", "").trim()
+        val cViews = ep1Views.replace("\r", "").replace("\n", "").trim()
         val cDate = ep1Date.replace("\r", "").replace("\n", "").trim()
         val cChannel = channelName.replace("\r", "").replace("\n", "").trim()
 
