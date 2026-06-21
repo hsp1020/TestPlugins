@@ -2548,7 +2548,7 @@ class YoutubeProvider(
                     if (!t.isNullOrBlank()) title = t
 
                     val dateText = extractTitle(primary["dateText"] as? Map<*, *>)
-                    if (!dateText.isNullOrBlank()) plot += "$dateText • "
+                    if (!dateText.isNullOrBlank()) plot += "$dateText"
                 }
 
                 val secondary = m?.get("videoSecondaryInfoRenderer") as? Map<*, *>
