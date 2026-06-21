@@ -1999,7 +1999,6 @@ class YoutubeProvider(
         return null
     }
 
-
     private fun extractVideosFromItems(items: List<*>, collectTo: MutableList<Episode>) {
         items.forEachIndexed { index, item ->
             try {
@@ -2079,7 +2078,7 @@ class YoutubeProvider(
             }
         }
     }
-  
+    
     private fun extractEpisodesFromData(data: Map<String, Any>?): List<Episode> {
         if (data == null) return emptyList()
         val episodes = mutableListOf<Episode>()
@@ -2689,6 +2688,92 @@ class YoutubeProvider(
                 logError(e)
             }
         }
+        // ==========================================
+        // 💡 3. [재생목록 에피소드 처리 블록]
+        // ==========================================
+        if (url.contains("list=")) {
+            try {
+                var targetUrl = url
+                if (url.contains("playlist?list=")) {
+                    val listId = url.substringAfter("list=").substringBefore("&")
+                    if (listId.startsWith("RD") || listId.startsWith("UL") || listId.startsWith("MM") || listId.startsWith("RDMM")) {
+                        targetUrl = "$mainUrl/watch?list=$listId"
+                    }
+                }
+
+                val response = app.get(targetUrl, interceptor = ytInterceptor)
+                val html = response.text
+                
+                val data = extractYtInitialData(html) ?: throw ErrorLoadingException("Failed to extract playlist data")
+
+                val playlistMeta = PlaylistMetadata()
+                findPlaylistMetadataRecursive(data, playlistMeta)
+
+                var author = playlistMeta.videoAuthor.ifBlank { playlistMeta.author }.ifBlank { "Unknown Channel" }
+                var title = playlistMeta.title.ifBlank { "YouTube Playlist" }
+
+                val seenPlaylistIds = mutableSetOf<String>()
+                val episodes = extractPlaylistEpisodes(data, seenPlaylistIds).toMutableList()
+
+                val isMix = url.contains("list=RD") || url.contains("list=MM") || url.contains("list=UL")
+                if (isMix) {
+                    val firstChannel = episodes.firstOrNull()?.description?.split("•")?.getOrNull(1)?.trim()
+                    if (!firstChannel.isNullOrBlank()) {
+                        title = "Mix - $firstChannel"
+                    } else if (title.contains("YouTube Mix") || title.contains("Mix")) {
+                        title = "YouTube Mix"
+                    }
+                }
+
+                title = YoutubeUtils.cleanMixTitle(title)
+
+                episodes.forEachIndexed { index, ep ->
+                    ep.episode = index + 1
+                }
+
+                val playlistPoster = episodes.firstOrNull()?.posterUrl ?: response.document.selectFirst("meta[property=og:image]")?.attr("content")
+
+                val recList = mutableListOf<SearchResponse>()
+                if (author.isNotBlank() && playlistMeta.channelId.isNotBlank()) {
+                    val cId = playlistMeta.channelId
+                    val channelUrlFull = if (cId.startsWith("UC") || cId.startsWith("@")) "$mainUrl/channel/$cId" else "$mainUrl/$cId"
+                    val channelCard = newMovieSearchResponse(
+                        author,
+                        channelUrlFull,
+                        TvType.Live
+                    ) {
+                        // 💡 [수정] 재생목록 추천 채널 카드에 wsrv.nl 프록시 적용
+                        this.posterUrl = YoutubeUtils.getProxiedPoster(playlistMeta.channelAvatar)
+                    }
+                    recList.add(channelCard)
+                }
+                
+                return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+                    this.posterUrl = YoutubeUtils.getProxiedPoster(playlistPoster)
+                    this.recommendations = recList
+                    
+                    this.plot = " "
+                    
+                    val actorList = mutableListOf<ActorData>()
+                    if (author.isNotBlank()) {
+                        actorList.add(ActorData(Actor(author, playlistMeta.channelAvatar)))
+                    }
+                    if (playlistMeta.subscriberCount.isNotBlank()) {
+                        actorList.add(ActorData(Actor(playlistMeta.subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/YouTube/Subscribe.jpg")))
+                    }
+                    if (playlistMeta.videoCount.isNotBlank()) {
+                        actorList.add(ActorData(Actor(playlistMeta.videoCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/YouTube/Videos.jpg")))
+                    }
+                    if (actorList.isNotEmpty()) {
+                        this.actors = actorList
+                    }
+                }
+                
+            } catch (e: Exception) {
+                logError(e)
+            }
+        }          
+
         // ==========================================
         // 💡 4. [기본 에피소드(단일 비디오) 처리 블록]
         // ==========================================
