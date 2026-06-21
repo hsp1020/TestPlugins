@@ -2647,7 +2647,7 @@ class YoutubeProvider(
             }
         }
 
-        val mainDescParts = listOf(ep1Dur, channelName, ep1Views, ep1Date).filter { it.isNotBlank() && it != "N/A" }
+        val mainDescParts = listOf(ep1Dur, ep1Views, ep1Date, channelName).filter { it.isNotBlank() && it != "N/A" }
         val mainDescStr = mainDescParts.joinToString(" • ")
 
         episodes.add(newEpisode(url) {
