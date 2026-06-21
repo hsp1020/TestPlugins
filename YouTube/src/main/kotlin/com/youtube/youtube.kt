@@ -1968,7 +1968,81 @@ class YoutubeProvider(
     }
 
 
-    private fun extractEpisodesFromData(data: Map<String, Any>?, isShorts: Boolean): List<Episode> {
+    // 💡 클래스 수준으로 분리하여 컴파일 스코프 버그를 해결합니다.
+    private fun findContinuationItemsRecursive(obj: Any?, depth: Int = 0): List<*>? {
+        if (obj == null || depth > 32) return null
+        when (obj) {
+            is Map<*, *> -> {
+                if (obj.containsKey("continuationItems")) return obj["continuationItems"] as? List<*>
+                val keysToTry = listOf("onResponseReceivedActions", "onResponseReceivedEndpoints", "onResponseReceivedCommands", "onResponseReceivedResults", "continuationContents")
+                val keysToTrySize = keysToTry.size
+                for (i in 0 until keysToTrySize) {
+                    val k = keysToTry[i]
+                    val v = obj[k]
+                    val r = findContinuationItemsRecursive(v, depth + 1)
+                    if (r != null) return r
+                }
+                for (v in obj.values) {
+                    val r = findContinuationItemsRecursive(v, depth + 1)
+                    if (r != null) return r
+                }
+            }
+            is List<*> -> {
+                for (i in obj) {
+                    val r = findContinuationItemsRecursive(i, depth + 1)
+                    if (r != null) return r
+                }
+            }
+        }
+        return null
+    }
+
+    private fun extractVideosFromItems(items: List<*>, collectTo: MutableList<Episode>) {
+        items.forEachIndexed { index, item ->
+            try {
+                val map = item as? Map<*, *>
+                if (map == null) return@forEachIndexed
+                if (map.containsKey("continuationItemRenderer")) return@forEachIndexed
+
+                val foundRenderers = mutableListOf<Map<*, *>>()
+                findAllRenderers(map, foundRenderers)
+
+                if (foundRenderers.isEmpty()) return@forEachIndexed
+
+                for (renderer in foundRenderers) {
+                    var vidId = renderer["videoId"] as? String
+                    if (vidId.isNullOrBlank() && renderer.containsKey("contentId")) {
+                        vidId = renderer["contentId"] as? String
+                    }
+                    if (vidId.isNullOrBlank()) {
+                        vidId = safeGet(renderer, "onTap", "innertubeCommand", "reelWatchEndpoint", "videoId") as? String
+                    }
+
+                    if (!vidId.isNullOrBlank()) {
+                        var vidTitle = getText(renderer["title"])
+                        if (vidTitle.isBlank()) vidTitle = getText(renderer["headline"])
+                        if (vidTitle.isBlank()) vidTitle = getText(renderer["shortBylineText"])
+                        if (vidTitle.isBlank()) vidTitle = getText(safeGet(renderer, "metadata", "lockupMetadataViewModel", "title"))
+                        if (vidTitle.isBlank()) vidTitle = "Video"
+
+                        val thumb = YoutubeUtils.getBestThumbnail(renderer["thumbnail"]) 
+                            ?: YoutubeUtils.getBestThumbnail(safeGet(renderer, "contentImage", "image", "sources")) 
+                            ?: YoutubeUtils.buildThumbnailFromId(vidId)
+
+                        collectTo.add(newEpisode("$mainUrl/watch?v=$vidId") {
+                            this.name = vidTitle
+                            this.posterUrl = thumb
+                            this.description = getEpisodeMetaString(renderer)
+                        })
+                        break 
+                    }
+                }
+            } catch (e: Exception) {
+            }
+        }
+    }
+
+    private fun extractEpisodesFromData(data: Map<String, Any>?): List<Episode> {
         if (data == null) return emptyList()
         val episodes = mutableListOf<Episode>()
         var initialItems: List<*>? = null
@@ -2004,94 +2078,11 @@ class YoutubeProvider(
         }
         
         if (initialItems != null) {
-            extractVideosFromItems(initialItems, episodes, isShorts)
+            extractVideosFromItems(initialItems, episodes)
         }
         return episodes
     }
 
-    // 💡 클래스 수준으로 분리하여 컴파일 스코프 버그를 해결합니다.
-    private fun findContinuationItemsRecursive(obj: Any?, depth: Int = 0): List<*>? {
-        if (obj == null || depth > 32) return null
-        when (obj) {
-            is Map<*, *> -> {
-                if (obj.containsKey("continuationItems")) return obj["continuationItems"] as? List<*>
-                val keysToTry = listOf("onResponseReceivedActions", "onResponseReceivedEndpoints", "onResponseReceivedCommands", "onResponseReceivedResults", "continuationContents")
-                val keysToTrySize = keysToTry.size
-                for (i in 0 until keysToTrySize) {
-                    val k = keysToTry[i]
-                    val v = obj[k]
-                    val r = findContinuationItemsRecursive(v, depth + 1)
-                    if (r != null) return r
-                }
-                for (v in obj.values) {
-                    val r = findContinuationItemsRecursive(v, depth + 1)
-                    if (r != null) return r
-                }
-            }
-            is List<*> -> {
-                for (i in obj) {
-                    val r = findContinuationItemsRecursive(i, depth + 1)
-                    if (r != null) return r
-                }
-            }
-        }
-        return null
-    }
-
-    private fun extractVideosFromItems(items: List<*>, collectTo: MutableList<Episode>, isShorts: Boolean) {
-        items.forEachIndexed { index, item ->
-            try {
-                val map = item as? Map<*, *>
-                if (map == null) return@forEachIndexed
-                if (map.containsKey("continuationItemRenderer")) return@forEachIndexed
-
-                val foundRenderers = mutableListOf<Map<*, *>>()
-                findAllRenderers(map, foundRenderers)
-
-                if (foundRenderers.isEmpty()) return@forEachIndexed
-
-                for (renderer in foundRenderers) {
-                    var vidId = renderer["videoId"] as? String
-                    if (vidId.isNullOrBlank() && renderer.containsKey("contentId")) {
-                        vidId = renderer["contentId"] as? String
-                    }
-                    if (vidId.isNullOrBlank()) {
-                        vidId = safeGet(renderer, "onTap", "innertubeCommand", "reelWatchEndpoint", "videoId") as? String
-                    }
-
-                    if (!vidId.isNullOrBlank()) {
-                        var vidTitle = getText(renderer["title"])
-                        if (vidTitle.isBlank()) vidTitle = getText(renderer["headline"])
-                        if (vidTitle.isBlank()) vidTitle = getText(renderer["shortBylineText"])
-                        if (vidTitle.isBlank()) vidTitle = getText(safeGet(renderer, "metadata", "lockupMetadataViewModel", "title"))
-                        if (vidTitle.isBlank()) vidTitle = "Video"
-
-                        val thumb = YoutubeUtils.getBestThumbnail(renderer["thumbnail"]) 
-                            ?: YoutubeUtils.getBestThumbnail(safeGet(renderer, "contentImage", "image", "sources")) 
-                            ?: YoutubeUtils.buildThumbnailFromId(vidId)
-
-                        // 💡 쇼츠 유무에 따라 재생 URL 분기 처리
-                        val videoUrl = if (isShorts) {
-                            "$mainUrl/shorts/$vidId"
-                        } else {
-                            "$mainUrl/watch?v=$vidId"
-                        }
-
-                        collectTo.add(newEpisode(videoUrl) {
-                            this.name = vidTitle
-                            this.posterUrl = thumb
-                            this.description = getEpisodeMetaString(renderer)
-                        })
-                        break 
-                    }
-                }
-            } catch (e: Exception) {
-            }
-        }
-    }
-
-    
-  
     private fun findAllRenderers(obj: Any?, outRenderers: MutableList<Map<*, *>>, depth: Int = 0) {
         if (obj == null || depth > 32) return
         when (obj) {
@@ -2427,7 +2418,10 @@ class YoutubeProvider(
             }
         }
 
-        
+        // ==========================================
+        // 💡 2. [채널 에피소드 처리 블록]
+        // ==========================================
+
         // ==========================================
         // 💡 2. [채널 에피소드 처리 블록]
         // ==========================================
@@ -2523,13 +2517,13 @@ class YoutubeProvider(
                     videoCount = getText(safeGet(header, "videosCountText") ?: safeGet(header, "videoCountText"))
                 }
 
-                // ② 각각의 데이터 소스로부터 에피소드 목록 추출
-                val videosEpisodes = extractEpisodesFromData(videosData, isShorts = false)
-                val shortsEpisodes = extractEpisodesFromData(shortsData, isShorts = true)
+                // ② 각각의 데이터 소스로부터 에피소드 목록 추출 (분기 없이 일괄 추출)
+                val videosEpisodes = extractEpisodesFromData(videosData)
+                val shortsEpisodes = extractEpisodesFromData(shortsData)
 
                 val allEpisodes = mutableListOf<Episode>()
 
-                // ③ 요청하신 유무 조건에 따른 동적 시즌 배정 수행
+                // ③ 조건에 따른 시즌 동적 배정 수행
                 if (videosEpisodes.isNotEmpty()) {
                     // 일반 영상이 존재하는 경우 -> Videos=시즌1, Shorts=시즌2
                     videosEpisodes.forEachIndexed { index, ep ->
@@ -2575,7 +2569,7 @@ class YoutubeProvider(
                 logError(e)
             }
         }
-
+        
         // ==========================================
         // 💡 3. [재생목록 에피소드 처리 블록]
         // ==========================================
