@@ -1,4 +1,4 @@
-package com.youtube
+package com.hsp1020.youtube
 
 import com.lagradost.cloudstream3.AcraApplication
 import com.lagradost.cloudstream3.SubtitleFile
