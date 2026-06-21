@@ -342,7 +342,8 @@ class YoutubeProvider(
         private val TARGET_RENDERER_KEYS = setOf(
             "videoRenderer", "gridVideoRenderer", "compactVideoRenderer",
             "shortsVideoRenderer", "reelItemRenderer", "shortsLockupViewModel",
-            "videoViewModel", "lockupViewModel"
+            "videoViewModel", "lockupViewModel",
+            "videoPrimaryInfoRenderer", "videoViewCountRenderer" // 💡 여기에 추가
         )
 
         private fun addToShortsList(list: MutableList<Episode>, ep: Episode) {
