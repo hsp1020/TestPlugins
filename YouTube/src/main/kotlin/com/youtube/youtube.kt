@@ -2299,15 +2299,6 @@ class YoutubeProvider(
                         break
                     }
                 }
-                // 💡 [개선 완료] NewPipe API로 채널 플롯 가져오기 (줄바꿈 완벽 유지, 국가 하드코딩 삭제, lang 단일화)
-                var npChannelPlot = ""
-                try {
-                    val cExtractor = ServiceList.YouTube.getChannelExtractor(cleanUrl)
-                    cExtractor.forceLocalization(Localization.fromLocale(Locale(lang)))
-                    cExtractor.fetchPage()
-                    npChannelPlot = cExtractor.description ?: ""
-                } catch(e: Exception) { logError(e) }
-                
                 val channelUrl = "$cleanUrl/videos"
                 var response = app.get(channelUrl, interceptor = ytInterceptor)
                 var html = response.text
@@ -2353,9 +2344,9 @@ class YoutubeProvider(
                 val poster = YoutubeUtils.getBestThumbnail(safeGet(header, "avatar"))
                     ?: YoutubeUtils.getBestThumbnail(safeGet(header, "content", "pageHeaderViewModel", "image", "decoratedAvatarViewModel", "avatar", "avatarViewModel", "image"))
                     ?: response.document.selectFirst("meta[property=og:image]")?.attr("content")
-         
-                // NewPipe 실패 시를 대비한 Fallback (og:description)
-                val fallbackChannelDescription = response.document.selectFirst("meta[property=og:description]")?.attr("content") ?: ""
+
+                // 💡 [요청] 채널 메인 정보(description)를 파싱하여 plot으로 사용
+                val channelDescription = response.document.selectFirst("meta[property=og:description]")?.attr("content") ?: ""
 
                 // 💡 API 배열 구조에서 구독자 수, 동영상 수 분리 추출
                 var subscriberCount = ""
@@ -2476,7 +2467,7 @@ class YoutubeProvider(
                     this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
                     
                     // 💡 [요청] 채널 플롯은 채널 메인 정보, 태그는 제거
-                    this.plot = npChannelPlot.ifBlank { fallbackChannelDescription }
+                    this.plot = channelDescription
 
                     // 💡 [요청] 채널 아이콘, 구독자, 동영상 수를 ActorData UI로 배치
                     val actorList = mutableListOf<ActorData>()
@@ -2601,7 +2592,7 @@ class YoutubeProvider(
             val info = StreamInfo.getInfo(extractor)
 
             npPlot = info.description.content.toString()
-            npTags = info.tags?.take(10)?.toList() ?: emptyList()
+            npTags = info.tags?.take(5)?.toList() ?: emptyList()
 
             info.uploaderName?.takeIf { it.isNotBlank() }?.let { uploader ->
                 npActor = ActorData(
