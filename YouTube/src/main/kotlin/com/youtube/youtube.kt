@@ -132,7 +132,7 @@ object YoutubeUtils {
         return try {
             val targetUrl = "https://i.ytimg.com/vi/$videoId/oardefault.jpg?sqp=-oaymwEoCJUDENAFSFqQAgHyq4qpAxcIARUAAIhC2AEB4gEKCBgQAhgGOAFAAQ==&rs=AOn4CLDWlHo9hImueeIb7JfDzDGNRuQ5tg&usqp=CCk"
             val encoded = URLEncoder.encode(targetUrl, "UTF-8")
-            "https://wsrv.nl/?url=$encoded&w=1280&h=720&fit=contain&cbg=black&a=right"
+            "https://wsrv.nl/?url=$encoded&w=800&h=1200&fit=contain&cbg=black"
         } catch (e: Exception) {
             "https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
         }
@@ -2184,9 +2184,6 @@ class YoutubeProvider(
     override suspend fun load(url: String): LoadResponse {
         // ==========================================
         // 💡 1. [쇼츠 에피소드 처리 블록]
-        // =========================================
-        // ==========================================
-        // 💡 1. [쇼츠 에피소드 처리 블록]
         // ==========================================
         if (url.contains("/shorts/")) {
             val videoId = YoutubeUtils.extractYoutubeId(url) ?: "video"
@@ -2293,15 +2290,25 @@ class YoutubeProvider(
                 }
             }
 
-            // 💡 [원인 분석 결과 반영] 생숫자를 긁어와서 메인 에피소드의 설명을 강제로 덮어씌우는
-            // 멍청한 로직을 전부 삭제했습니다. 이제 캐시에 있던 "조회수 306만회"가 그대로 노출됩니다.
+            var ep1Views = ""
+            val viewMatch = VIEW_COUNT_REGEX.find(html)
+            if (viewMatch != null) ep1Views = viewMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
+            
+            val cViews = ep1Views.ifBlank { "Playing" }
+
+            val mainTargetEp = targetEpisodes.find { it.episode == currentEpIndex }
+            if (mainTargetEp != null) {
+                mainTargetEp.description = cViews
+            }
 
             val finalTitle = "#$currentEpIndex $shortTitle".replace("##", "#")
+            val finalPlot = npPlot.ifBlank { " " }
 
             val finalRecs = mutableListOf<SearchResponse>()
             if (channelName.isNotBlank() && channelId.isNotBlank()) {
                 val channelUrlFull = if (channelId.startsWith("UC") || channelId.startsWith("@")) "$mainUrl/channel/$channelId" else "$mainUrl/$channelId"
                 val channelCard = newMovieSearchResponse(channelName, channelUrlFull, TvType.Live) {
+                    // 💡 [수정] 쇼츠 채널 카드에 wsrv.nl 프록시 적용
                     this.posterUrl = YoutubeUtils.getProxiedPoster(channelAvatar) 
                 }
                 finalRecs.add(channelCard) 
@@ -2311,10 +2318,7 @@ class YoutubeProvider(
 
             return newTvSeriesLoadResponse(finalTitle, url, TvType.TvSeries, targetEpisodes) {
                 this.posterUrl = YoutubeUtils.getShortsSearchPoster(videoId)
-                
-                // 💡 [요청2] "플롯을 찾을 수 없음" 메시지를 지우기 위한 강제 공백 처리
-                this.plot = npPlot.ifBlank { " " }
-                
+                this.plot = finalPlot
                 this.recommendations = finalRecs 
                 
                 if (npTags.isNotEmpty()) this.tags = npTags
@@ -2333,7 +2337,7 @@ class YoutubeProvider(
                 }
             }
         }
-        
+
         // ==========================================
         // 💡 2. [채널 에피소드 처리 블록]
         // ==========================================
