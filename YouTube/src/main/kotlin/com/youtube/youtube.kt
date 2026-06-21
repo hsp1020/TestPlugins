@@ -2539,7 +2539,7 @@ class YoutubeProvider(
             val info = StreamInfo.getInfo(extractor)
 
             npPlot = info.description.content.toString()
-            npTags = info.tags?.take(5)?.toList() ?: emptyList()
+            npTags = info.tags?.take(10)?.toList() ?: emptyList()
 
             info.uploaderName?.takeIf { it.isNotBlank() }?.let { uploader ->
                 npActor = ActorData(
