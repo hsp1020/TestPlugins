@@ -2625,7 +2625,8 @@ class YoutubeProvider(
         var ep1Views = ""
         val viewMatch = VIEW_COUNT_REGEX.find(html)
         if (viewMatch != null) {
-            ep1Views = formatViews(viewMatch.groupValues[1])
+            // 💡 에러 원인이었던 formatViews() 제거, 순수 텍스트 그대로 사용
+            ep1Views = viewMatch.groupValues[1]
         }
         
         var ep1Date = ""
@@ -2646,7 +2647,8 @@ class YoutubeProvider(
                     getText(primary.getMapKey("viewCount"))
                 }
                 
-                if (vCount.isNotBlank()) ep1Views = formatViews(vCount)
+                // 💡 에러 원인이었던 formatViews() 제거
+                if (vCount.isNotBlank()) ep1Views = vCount
                 
                 val dText = extractTitle(primary.getMapKey("dateText") as? Map<*, *>) ?: getText(primary.getMapKey("dateText"))
                 if (dText.isNotBlank()) ep1Date = dText
