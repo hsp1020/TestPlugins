@@ -2752,7 +2752,7 @@ class YoutubeProvider(
                     this.posterUrl = YoutubeUtils.getProxiedPoster(playlistPoster)
                     this.recommendations = recList
                     
-                    this.plot = " "
+                    this.plot = "\u200b" 
                     
                     val actorList = mutableListOf<ActorData>()
                     if (author.isNotBlank()) {
