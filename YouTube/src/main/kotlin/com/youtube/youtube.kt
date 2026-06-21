@@ -528,6 +528,7 @@ class YoutubeProvider(
         }
     }
 
+
     private fun clearContinuationTokens(key: String) {
         for (p in 0..100) {
             val pageKey = if (p > 0) "${key}_page_$p" else key
@@ -536,16 +537,22 @@ class YoutubeProvider(
             appPrefs?.edit()?.remove("cont_token_$hashedKey")?.apply()
         }
     }
-    
+
     // ---------------- [CHIP_DEBUG] 칩 카테고리 보존 병합 전용 함수 ----------------
     private fun mergeAndSaveChips(newChips: List<CachedChip>) {
         val prefs = appPrefs ?: return
         val existingJson = prefs.getString("yt_cached_chips", "[]") ?: "[]"
         
-        val existingChips = try {
-            mapper.readValue<List<CachedChip>>(existingJson)
+        // 1. 구버전의 안전한 org.json 파싱 방식으로 복구 (타입 소거 에러 방지)
+        val existingChips = mutableListOf<CachedChip>()
+        try {
+            val jsonArray = org.json.JSONArray(existingJson)
+            for (i in 0 until jsonArray.length()) {
+                val obj = jsonArray.getJSONObject(i)
+                existingChips.add(CachedChip(obj.getString("name"), obj.getString("token")))
+            }
         } catch (e: Exception) {
-            emptyList<CachedChip>()
+            // 파싱 실패 시 빈 리스트 유지
         }
 
         val mergedMap = LinkedHashMap<String, CachedChip>()
@@ -557,15 +564,23 @@ class YoutubeProvider(
         }
 
         val mergedList = mergedMap.values.toList()
+        
+        // 2. 구버전의 안전한 org.json 저장 방식으로 복구
         try {
-            val updatedJson = mapper.writeValueAsString(mergedList)
-            prefs.edit().putString("yt_cached_chips", updatedJson).apply()
+            val outArray = org.json.JSONArray()
+            mergedList.forEach { chip ->
+                val obj = org.json.JSONObject()
+                obj.put("name", chip.name)
+                obj.put("token", chip.token)
+                outArray.put(obj)
+            }
+            prefs.edit().putString("yt_cached_chips", outArray.toString()).apply()
             Log.d("YoutubeUtils", "[CHIP_DEBUG] mergeAndSaveChips - Cached chips synchronized successfully. Size: ${mergedList.size}")
         } catch (e: Exception) {
             logError(e)
         }
 
-        // 💡 [실시간 동기화 추가] 설정 프래그먼트가 참조하는 custom_homepages_v3 캐시에도 수집된 즉시 추가합니다.
+        // 💡 [실시간 동기화 추가] 설정 프래그먼트가 참조하는 custom_homepages_v3 캐시에도 즉시 추가
         try {
             val customJson = prefs.getString("custom_homepages_v3", "[]") ?: "[]"
             val currentList = try {
@@ -591,7 +606,7 @@ class YoutubeProvider(
         } catch (e: Exception) {
             logError(e)
         }
-    }        
+    }
     // -----------------------------------------------------------------------------
 
     private fun extractDurationFromOverlays(obj: Any?): String {
@@ -672,7 +687,6 @@ class YoutubeProvider(
         }
         return ""
     }
-    
 
     private fun getEpisodeMetaString(videoData: Map<*, *>?): String {
         if (videoData == null) return ""
