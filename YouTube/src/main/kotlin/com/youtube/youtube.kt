@@ -2299,6 +2299,17 @@ class YoutubeProvider(
                         break
                     }
                 }
+
+                // 💡 [개선 1] NewPipe API로 채널 플롯 다국어(앱 설정 언어) 및 줄바꿈 완벽하게 가져오기
+                var npChannelPlot = ""
+                try {
+                    val cExtractor = org.schabi.newpipe.extractor.ServiceList.YouTube.getChannelExtractor(cleanUrl)
+                    // 국가 매핑(ContentCountry) 삭제, 순수하게 언어(lang)만 심플하게 주입
+                    cExtractor.forceContentLanguage(org.schabi.newpipe.extractor.localization.ContentLanguage(lang))
+                    cExtractor.fetchPage()
+                    npChannelPlot = cExtractor.description ?: ""
+                } catch(e: Exception) { logError(e) }
+
                 val channelUrl = "$cleanUrl/videos"
                 var response = app.get(channelUrl, interceptor = ytInterceptor)
                 var html = response.text
@@ -2345,10 +2356,8 @@ class YoutubeProvider(
                     ?: YoutubeUtils.getBestThumbnail(safeGet(header, "content", "pageHeaderViewModel", "image", "decoratedAvatarViewModel", "avatar", "avatarViewModel", "image"))
                     ?: response.document.selectFirst("meta[property=og:image]")?.attr("content")
 
-                // 💡 [요청] 채널 메인 정보(description)를 파싱하여 plot으로 사용
                 val channelDescription = response.document.selectFirst("meta[property=og:description]")?.attr("content") ?: ""
 
-                // 💡 API 배열 구조에서 구독자 수, 동영상 수 분리 추출
                 var subscriberCount = ""
                 var videoCount = ""
                 val metaParts = mutableListOf<String>()
@@ -2466,10 +2475,9 @@ class YoutubeProvider(
                 return newTvSeriesLoadResponse(title, url, TvType.TvSeries, allEpisodes) {
                     this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
                     
-                    // 💡 [요청] 채널 플롯은 채널 메인 정보, 태그는 제거
-                    this.plot = channelDescription
+                    // 💡 [개선 1 반영] NewPipe에서 줄바꿈 채로 가져온 플롯 우선 적용
+                    this.plot = npChannelPlot.ifBlank { channelDescription }
 
-                    // 💡 [요청] 채널 아이콘, 구독자, 동영상 수를 ActorData UI로 배치
                     val actorList = mutableListOf<ActorData>()
                     actorList.add(ActorData(Actor(title, poster ?: "")))
                     
@@ -2552,9 +2560,6 @@ class YoutubeProvider(
                     this.posterUrl = YoutubeUtils.getProxiedPoster(playlistPoster)
                     this.recommendations = recList
 
-                    // 💡 [요청] 재생목록에서는 플롯과 태그를 모두 제거
-                    
-                    // 💡 [요청] 채널 아이콘, 구독자, 동영상 수를 ActorData UI로 배치
                     val actorList = mutableListOf<ActorData>()
                     if (author.isNotBlank()) {
                         actorList.add(ActorData(Actor(author, playlistMeta.channelAvatar)))
@@ -2587,12 +2592,17 @@ class YoutubeProvider(
         var npActor: ActorData? = null
 
         try {
-            val extractor = ServiceList.YouTube.getStreamExtractor(url)
+            val extractor = org.schabi.newpipe.extractor.ServiceList.YouTube.getStreamExtractor(url)
+            
+            // 💡 국가 설정 삭제 후 심플하게 언어(lang) 하나만 매핑
+            extractor.forceContentLanguage(org.schabi.newpipe.extractor.localization.ContentLanguage(lang))
             extractor.fetchPage()
-            val info = StreamInfo.getInfo(extractor)
+            val info = org.schabi.newpipe.extractor.stream.StreamInfo.getInfo(extractor)
 
             npPlot = info.description.content.toString()
-            npTags = info.tags?.take(5)?.toList() ?: emptyList()
+            
+            // 💡 [개선 2] 태그 10개로 증가
+            npTags = info.tags?.take(10)?.toList() ?: emptyList() 
 
             info.uploaderName?.takeIf { it.isNotBlank() }?.let { uploader ->
                 npActor = ActorData(
@@ -2647,7 +2657,6 @@ class YoutubeProvider(
                             if (!curl.isNullOrBlank()) channelId = curl.substringAfterLast("/")
                         }
                         
-                        // 💡 기본 에피소드 구독자 수 추출
                         subscriberCount = getText(owner["subscriberCountText"])
                     }
 
@@ -2770,7 +2779,6 @@ class YoutubeProvider(
                 this.tags = npTags
             }
 
-            // 💡 [요청] 기본 에피소드: 채널 아이콘 및 구독자 수 ActorData UI 배치
             val actorList = mutableListOf<ActorData>()
             if (npActor != null) {
                 actorList.add(npActor!!)
@@ -2860,3 +2868,5 @@ class YoutubeProvider(
         return true
     }
 }
+
+    
