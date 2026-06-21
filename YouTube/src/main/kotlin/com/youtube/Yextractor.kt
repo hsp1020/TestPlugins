@@ -498,7 +498,8 @@ open class YoutubeExtractor : ExtractorApi() {
         }
     }
 
-    // [Safari 단독 가동 구조 복원 및 폴백 흐름 최적화]
+
+    // 1. fetchPlayerResponse 수정 (TV HTML5 우회 수단 복구)
     private suspend fun fetchPlayerResponse(videoId: String): Triple<JSONObject?, Long, String> = withContext(Dispatchers.IO) {
         val watchUrl = "https://www.youtube.com/watch?v=$videoId"
         
@@ -581,7 +582,6 @@ open class YoutubeExtractor : ExtractorApi() {
 
         val useSafariClient = isLoggedIn && isDirectDubbed
 
-        // 💡 [개정 완료]: 직접 더빙이 맞을 시, 처음부터 병렬로 수행되던 ANDROID_VR을 소거하고 오직 WEB_SAFARI 단독 호출만 전송
         if (useSafariClient) {
             println("[TRACK] 2. WEB_SAFARI 단독 호출 실행 (성우 수동 더빙 전용 추출)")
             val safariApiUrl = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
@@ -647,7 +647,6 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         }
 
-        // 💡 [폴백 흐름 구현]: Safari 요청 도중 실패 혹은 4초 대기 한계점 도달 시, 예외 캐치 블록을 거쳐 아래 조건식을 통해 ANDROID_VR로 폴백 전환
         if (finalJson == null) {
             println("[TRACK] 3. ANDROID_VR API Request (단독 가속화 및 자동 더빙 회피 모드 가동)")
             val vrApiUrl = "https://youtubei.googleapis.com/youtubei/v1/player?prettyPrint=false&key=$VR_API_KEY"
@@ -687,6 +686,40 @@ open class YoutubeExtractor : ExtractorApi() {
                 if (status == "OK" || json.has("streamingData")) {
                     finalJson = json
                     lengthSeconds = json.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
+                } else if (status == "UNPLAYABLE" || status == "LOGIN_REQUIRED") {
+                    // 💡 [실시간 연령제한/비활성 라이브 스트림 복구]: TV HTML5 임베디드 웹 API 폴백을 가동합니다.
+                    println("[TRACK] ANDROID_VR 차단됨. TV_EMBEDDED로 연령 제한 및 라이브 우회 시도...")
+                    val WEB_API_KEY_REGEX = Regex(""""INNERTUBE_API_KEY":"([^"]+)"""")
+                    val webApiKey = WEB_API_KEY_REGEX.find(html)?.groupValues?.get(1)
+                    if (!webApiKey.isNullOrEmpty()) {
+                        val tvApiUrl = "https://www.youtube.com/youtubei/v1/player?key=$webApiKey"
+                        val tvPayload = mapOf(
+                            "videoId" to videoId,
+                            "context" to mapOf(
+                                "client" to mapOf(
+                                    "clientName" to "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
+                                    "clientVersion" to "2.0",
+                                    "hl" to langCode,
+                                    "gl" to if (langCode == "ko") "KR" else "US",
+                                    "visitorData" to visitorData
+                                ),
+                                "thirdParty" to mapOf("embedUrl" to "https://www.youtube.com")
+                            ),
+                            "playbackContext" to mapOf(
+                                "contentPlaybackContext" to mapOf(
+                                    "signatureTimestamp" to sts
+                                )
+                            )
+                        )
+                        val tvRes = app.post(tvApiUrl, json = tvPayload).text
+                        val tvJson = JSONObject(tvRes)
+                        val tvStatus = tvJson.optJSONObject("playabilityStatus")?.optString("status")
+                        if (tvStatus == "OK" || tvJson.has("streamingData")) {
+                            finalJson = tvJson
+                            lengthSeconds = tvJson.optJSONObject("videoDetails")?.optString("lengthSeconds")?.toLongOrNull() ?: 3600L
+                            println("[TRACK] ✅ TV HTML5 폴백 우회 성공!")
+                        }
+                    }
                 }
             } catch (e: Exception) { 
                 println("[TRACK] 🚨 ANDROID_VR API 단독 수집 에러: ${e.message}") 
@@ -695,6 +728,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
         Triple(finalJson, lengthSeconds, playerId)
     }
+
 
     private suspend fun parseHlsManifest(
         hlsUrl: String,
@@ -1036,6 +1070,127 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
 
                 // 자막(Captions) 파싱 코드
+                val captions = playerResponse.optJSONObject("captions")?.optJSONObject("playerCaptionsTracklistRenderer")?.optJSONArray("captionTracks")
+                if (captions != null) {
+                    for (i in 0 until captions.length()) {
+                        val track = captions.getJSONObject(i)
+                        var subUrl = track.optString("baseUrl")
+                        val lang = track.optString("languageCode")
+                        
+                        val kind = track.optString("kind", "")
+                        val vssId = track.optString("vssId", "")
+                        if (kind == "asr" || vssId.startsWith("a.")) {
+                            continue
+                        }
+
+                        val nameObj = track.optJSONObject("name")
+                        var displayName = nameObj?.optString("simpleText") ?: ""
+                        if (displayName.isBlank()) {
+                            val runs = nameObj?.optJSONArray("runs")
+                            if (runs != null && runs.length() > 0) {
+                                displayName = runs.optJSONObject(0)?.optString("text") ?: ""
+                            }
+                        }
+                        if (displayName.isBlank()) {
+                            displayName = lang.uppercase()
+                        }
+
+                        if (displayName.contains("auto-generated", ignoreCase = true) || 
+                            displayName.contains("자동 생성", ignoreCase = true)) {
+                            continue
+                        }
+
+                        if (subUrl.isNotEmpty() && lang.isNotEmpty()) {
+                            if (subUrl.startsWith("http")) {
+                                subUrl = subUrl.replace(FMT_REPLACE_REGEX, "")
+                                if (!subUrl.contains("fmt=srt")) {
+                                    subUrl = "$subUrl&fmt=srt"
+                                }
+                            }
+                            subtitleCallback(SubtitleFile(displayName, subUrl))
+                        }
+                    }
+                }
+
+                val streamingData = playerResponse.optJSONObject("streamingData")
+                if (streamingData == null) {
+                    println("[TRACK] 🚨 FATAL: streamingData 누락")
+                    return@withContext
+                }
+
+                // ---------------- [실시간 스트리밍(HLS) 예외 분기 처리 추가] ----------------
+                val hlsUrl = streamingData.optString("hlsManifestUrl")
+                if (!hlsUrl.isNullOrBlank()) {
+                    println("[TRACK] 실시간 스트리밍(HLS) 발견: $hlsUrl")
+                    callback(
+                        newExtractorLink(
+                            this@YoutubeExtractor.name,
+                            "YouTube Live",
+                            hlsUrl,
+                            type = ExtractorLinkType.M3U8
+                        ) {
+                            this.referer = mainUrl
+                            this.quality = Qualities.Unknown.value
+                        }
+                    )
+                    return@withContext // VOD 전용 병렬 Coroutine 파싱 과정을 수행하지 않고 즉시 종료합니다.
+                }
+                // -------------------------------------------------------------------------
+
+                val dashUrl = streamingData.optString("dashManifestUrl")
+
+                println("[TRACK] 4. Executing Pure Coroutine Parallel Parsing")
+
+                val hlsJob = launch {
+                    if (hlsUrl.isNotBlank()) {
+                        parseHlsManifest(hlsUrl, playerId, langCode, callback)
+                    }
+                }
+
+                val adaptiveJob = launch {
+                    parseAdaptiveFormats(streamingData, playerId, durationSeconds, langCode, callback)
+                }
+
+                if (dashUrl.isNotBlank()) {
+                    val finalDashUrl = if (playerId.isNotBlank()) deobfuscateManifestUrl(dashUrl, playerId) else dashUrl
+                    callback(
+    // 2. getUrl 수정 (실시간 라이브 감지 즉시 안전 반환)
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val cleanedUrl = url.replace(schemaStripRegex, "")
+        val videoId = YoutubeUtils.extractYoutubeId(cleanedUrl) ?: cleanedUrl
+
+        val context = com.lagradost.cloudstream3.AcraApplication.context
+        val provider = com.lagradost.cloudstream3.APIHolder.allProviders.find { it.name == "YouTube" }
+        val prefs = (provider as? com.hsp1020.youtube.YoutubeProvider)?.appPrefs 
+            ?: context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
+            
+        val langCode = prefs?.getString("youtube_language", "en") ?: "en"
+        val downloaderType = prefs?.getString("downloader_app_type", "none") ?: "none"
+        val customPkg = prefs?.getString("downloader_custom_package", "") ?: ""
+
+        val (pkgName, appName) = when (downloaderType) {
+            "ytdlnis" -> Pair("com.deniscerri.ytdl", "YTDLnis")
+            "seal" -> Pair("com.junkfood.seal", "Seal")
+            "seal_plus" -> Pair("com.maheshtechnicals.sealplus", "Seal Plus")
+            "custom" -> Pair(customPkg, "Custom Downloader")
+            else -> Pair("", "")
+        }
+
+        withContext(Dispatchers.IO) {
+            try {
+                val (playerResponse, durationSeconds, playerId) = fetchPlayerResponse(videoId)
+
+                if (playerResponse == null) {
+                    println("[TRACK] 🚨 FATAL: 유효한 playerResponse 수집 실패")
+                    return@withContext
+                }
+
+                // 자막(Captions) 추출
                 val captions = playerResponse.optJSONObject("captions")?.optJSONObject("playerCaptionsTracklistRenderer")?.optJSONArray("captionTracks")
                 if (captions != null) {
                     for (i in 0 until captions.length()) {
