@@ -2899,7 +2899,7 @@ class YoutubeProvider(
             
             if (playerResponseJson == null) {
                 val androidApiKey = "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
-                val apiUrl = "https://www.youtube.com/player?key=$androidApiKey"
+                val apiUrl = "https://www.youtube.com/youtubei/v1/player?key=$androidApiKey"
                 val payload = mapOf(
                     "videoId" to videoId,
                     "context" to mapOf(
