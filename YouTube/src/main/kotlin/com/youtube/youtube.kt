@@ -902,6 +902,7 @@ class YoutubeProvider(
         return Triple(channel, views, date)
     }
 
+
     private fun collectFromRenderer(
         renderer: Map<*, *>?,
         seenIds: MutableSet<String>,
@@ -996,21 +997,29 @@ class YoutubeProvider(
                 val poster = YoutubeUtils.getShortsSearchPoster(videoId)
 
                 val currentList = if (isSearchContext) searchShorts else homeShorts
-                val episodeNum = synchronized(currentList) { currentList.size } + 1
                 val contextTag = if (isSearchContext) "&ctx=search" else "&ctx=home"
                 val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
 
-                val descText = if (views.isNotBlank()) "$views" else ""
+                // 💡 [개선2] 쇼츠도 보조 플롯에 길이/날짜/채널이 나오도록 캐시 데이터 생성 및 저장
+                var descText = getEpisodeMetaString(shortsData)
+                if (descText.isBlank()) {
+                    descText = views.replace("\r", "").replace("\n", "").trim()
+                }
+                if (descText.isNotBlank()) epMetaMapCache[videoId] = descText
                 
                 val newShortEp = newEpisode(finalUrl) {
                     this.name = title
                     this.posterUrl = YoutubeUtils.getShortsEpisodeThumbnail(videoId)
-                    this.episode = episodeNum
                     this.description = descText
                 }
                 addToShortsList(currentList, newShortEp)
 
-                val finalTitle = "#$episodeNum {Short | $views} $title"
+                // 💡 [개선3] 엉망이던 넘버링 중복/불일치 해결: 리스트에 추가 후 '실제 인덱스'를 역추적하여 부여
+                val actualIndex = synchronized(currentList) { currentList.indexOfFirst { it.data == finalUrl } + 1 }
+                if (actualIndex > 0) currentList[actualIndex - 1].episode = actualIndex
+                val displayIndex = if (actualIndex > 0) actualIndex else currentList.size
+
+                val finalTitle = "#$displayIndex {Short | $views} $title"
                 return newMovieSearchResponse(finalTitle, finalUrl, TvType.Movie) {
                     this.posterUrl = poster
                 }
@@ -1102,29 +1111,33 @@ class YoutubeProvider(
 
                 if (isShorts) {
                     val currentList = if (isSearchContext) searchShorts else homeShorts
-                    val episodeNum = synchronized(currentList) { currentList.size } + 1
                     val contextTag = if (isSearchContext) "&ctx=search" else "&ctx=home"
                     val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
                     
                     poster = YoutubeUtils.getShortsSearchPoster(videoId)
                     
-                    val descText = buildString {
-                        if (channel.isNotBlank()) append("Channel: $channel")
-                        if (views.isNotBlank()) {
-                            if (isNotEmpty()) append(" • ")
-                            append("$views")
-                        }
+                    var descText = getEpisodeMetaString(lockup.getMapKey("content") ?: lockup)
+                    if (descText.isBlank()) {
+                        val descParts = mutableListOf<String>()
+                        if (channel.isNotBlank()) descParts.add(channel)
+                        if (views.isNotBlank()) descParts.add(views)
+                        if (date.isNotBlank()) descParts.add(date)
+                        descText = descParts.joinToString(" • ")
                     }
+                    if (descText.isNotBlank()) epMetaMapCache[videoId] = descText
                     
                     val newShortEp2 = newEpisode(finalUrl) {
                         this.name = title
                         this.posterUrl = YoutubeUtils.getShortsEpisodeThumbnail(videoId)
-                        this.episode = episodeNum
                         this.description = descText
                     }
                     addToShortsList(currentList, newShortEp2)
 
-                    finalTitle = "#$episodeNum [Shorts] {Short | $views} $title"
+                    val actualIndex = synchronized(currentList) { currentList.indexOfFirst { it.data == finalUrl } + 1 }
+                    if (actualIndex > 0) currentList[actualIndex - 1].episode = actualIndex
+                    val displayIndex = if (actualIndex > 0) actualIndex else currentList.size
+
+                    finalTitle = "#$displayIndex [Shorts] {Short | $views} $title"
                     return newMovieSearchResponse(
                         finalTitle,
                         finalUrl,
@@ -2178,112 +2191,153 @@ class YoutubeProvider(
     }
 
 
+
     override suspend fun load(url: String): LoadResponse {
+        // ==========================================
+        // 💡 [개선1] 쇼츠 에피소드 처리 블록: 일반 영상처럼 넘버링 및 채널 UI 완벽 적용
+        // ==========================================
         if (url.contains("/shorts/")) {
             val videoId = YoutubeUtils.extractYoutubeId(url) ?: "video"
             val useSearchList = url.contains("ctx=search")
             val sourceList = if (useSearchList) searchShorts else homeShorts
             var targetEpisodes = synchronized(sourceList) { sourceList.toMutableList() }
+            
+            // 인덱스 꼬임 방지를 위해 진입 시점 기준으로 넘버링 강제 동기화
+            targetEpisodes.forEachIndexed { index, ep -> ep.episode = index + 1 }
+            
             val currentEp = targetEpisodes.find { YoutubeUtils.extractYoutubeId(it.data) == videoId }
+            val currentEpIndex = currentEp?.episode ?: 1
 
             var shortTitle = currentEp?.name ?: "Shorts Video"
-            val poster = YoutubeUtils.getShortsSearchPoster(videoId)
-            var shortPlot = currentEp?.description ?: ""
+            var channelName = ""
+            var channelAvatar = ""
+            var subscriberCount = ""
+            var npPlot = ""
+            var npTags = emptyList<String>()
+            var npActor: ActorData? = null
 
-            if (currentEp == null || targetEpisodes.size <= 1) {
-                try {
-                    val apiKey = savedApiKey ?: appPrefs?.getString("yt_api_key", null)
-                    val cVersion = savedClientVersion ?: appPrefs?.getString("yt_client_version", YoutubeUtils.DEFAULT_CLIENT_VERSION) ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
-                    
-                    val playerUrl = "https://www.youtube.com/youtubei/v1/player?key=$apiKey"
-                    val playerPayload = mapOf(
-                        "context" to mapOf(
-                            "client" to mapOf(
-                                "clientName" to "WEB", 
-                                "clientVersion" to cVersion, 
-                                "hl" to lang
-                            )
-                        ),
-                        "videoId" to videoId
-                    )
-                    val pResponse = app.post(playerUrl, json = playerPayload, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
-                    if (pResponse != null) {
-                        val details = pResponse["videoDetails"] as? Map<*, *>
-                        val fetchedTitle = details?.getString("title")
-                        val channelName = details?.getString("author")
-                        if (!fetchedTitle.isNullOrBlank()) {
-                            shortTitle = fetchedTitle
-                            shortPlot = if (!channelName.isNullOrBlank()) "Channel: $channelName" else ""
+            // 💡 1. 일반 영상처럼 NewPipe를 통한 완벽한 쇼츠 메타데이터 수집
+            val watchUrl = "https://www.youtube.com/watch?v=$videoId" // 쇼츠 ID도 watch 주소로 변환하여 수집
+            try {
+                val extractor = ServiceList.YouTube.getStreamExtractor(watchUrl)
+                extractor.fetchPage()
+                val info = StreamInfo.getInfo(extractor)
+                
+                npPlot = info.description.content.toString()
+                npTags = info.tags?.take(10)?.toList() ?: emptyList()
+                info.uploaderName?.takeIf { it.isNotBlank() }?.let { uploader ->
+                    npActor = ActorData(Actor(uploader, info.uploaderAvatars.lastOrNull()?.url ?: ""))
+                }
+            } catch (e: Exception) {}
+
+            // 💡 2. 구독자 수를 위한 HTML(ytInitialData) 파싱 (일반 영상 로직과 동일하게 적용)
+            val response = app.get(watchUrl, headers = mapOf("Referer" to "https://www.youtube.com/"), interceptor = ytInterceptor)
+            val html = response.text
+            val data = extractYtInitialData(html)
+
+            if (data != null) {
+                val resultsContents = safeGet(data, "contents", "twoColumnWatchNextResults", "results", "results", "contents") as? List<*>
+                resultsContents?.forEach { item ->
+                    val m = item as? Map<*, *>
+                    val primary = m?.get("videoPrimaryInfoRenderer") as? Map<*, *>
+                    if (primary != null) {
+                        val t = extractTitle(primary["title"] as? Map<*, *>)
+                        if (!t.isNullOrBlank()) shortTitle = t
+                    }
+                    val secondary = m?.get("videoSecondaryInfoRenderer") as? Map<*, *>
+                    if (secondary != null) {
+                        val owner = safeGet(secondary, "owner", "videoOwnerRenderer") as? Map<*, *>
+                        if (owner != null) {
+                            channelName = extractTitle(owner["title"] as? Map<*, *>) ?: ""
+                            channelAvatar = YoutubeUtils.getBestThumbnail(owner["thumbnail"]) ?: ""
+                            subscriberCount = getText(owner["subscriberCountText"])
                         }
                     }
-
-                    val nextUrl = "https://www.youtube.com/youtubei/v1/next?key=$apiKey"
-                    val nextPayload = mapOf(
-                        "context" to mapOf(
-                            "client" to mapOf(
-                                "clientName" to "WEB", 
-                                "clientVersion" to cVersion, 
-                                "hl" to lang
-                            )
-                        ),
-                        "videoId" to videoId
-                    )
-                    val nResponse = app.post(nextUrl, json = nextPayload, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>()
+                }
+                
+                // 타겟 에피소드가 비어있거나 단일인 경우 추천 목록(/next 대체)으로 채움
+                if (targetEpisodes.size <= 1) {
+                    val secondaryResults = safeGet(data, "contents", "twoColumnWatchNextResults", "secondaryResults", "secondaryResults", "results")
+                    val recs = mutableListOf<SearchResponse>()
+                    if (secondaryResults != null) {
+                        processRecursive(secondaryResults, recs, mutableSetOf(videoId), false)
+                    }
                     val recEpisodes = mutableListOf<Episode>()
-                    
                     recEpisodes.add(newEpisode(url) {
                         this.name = shortTitle
                         this.posterUrl = YoutubeUtils.getShortsEpisodeThumbnail(videoId)
                         this.episode = 1
-                        this.description = shortPlot
                     })
-
-                    if (nResponse != null) {
-                        val recs = mutableListOf<SearchResponse>()
-                        val seenRecIds = mutableSetOf<String>().apply { add(videoId) }
-                        val secondaryResults = safeGet(nResponse, "contents", "twoColumnWatchNextResults", "secondaryResults", "secondaryResults", "results")
-                        if (secondaryResults != null) {
-                            processRecursive(secondaryResults, recs, seenRecIds, false)
-                        }
-                        
-                        var epCount = 2
-                        recs.forEach { rec ->
-                            if (rec.url.contains("watch?v=") || rec.url.contains("/shorts/")) {
-                                val recVidId = YoutubeUtils.extractYoutubeId(rec.url)
-                                val cleanName = rec.name.replaceFirst(Regex("^\\{.*?\\}\\s*"), "")
-                                val recUrl = "$mainUrl/shorts/$recVidId?ctx=home"
-                                recEpisodes.add(newEpisode(recUrl) {
-                                    this.name = cleanName
-                                    this.posterUrl = recVidId?.let { YoutubeUtils.getShortsEpisodeThumbnail(it) } ?: rec.posterUrl
-                                    this.episode = epCount++
-                                })
-                            }
+                    var epCount = 2
+                    recs.forEach { rec ->
+                        if (rec.url.contains("watch?v=") || rec.url.contains("/shorts/")) {
+                            val recVidId = YoutubeUtils.extractYoutubeId(rec.url)
+                            val cleanName = rec.name.replaceFirst(Regex("^\\{.*?\\}\\s*"), "")
+                            val recUrl = "$mainUrl/shorts/$recVidId?ctx=home"
+                            recEpisodes.add(newEpisode(recUrl) {
+                                this.name = cleanName
+                                this.posterUrl = recVidId?.let { YoutubeUtils.getShortsEpisodeThumbnail(it) } ?: rec.posterUrl
+                                this.episode = epCount++
+                                val extraMeta = if (recVidId != null) epMetaMapCache[recVidId] else ""
+                                this.description = extraMeta
+                            })
                         }
                     }
                     targetEpisodes = recEpisodes
-                } catch (e: Exception) {
-                    logError(e)
                 }
             } else {
                 targetEpisodes.forEach { ep ->
                     val epVidId = YoutubeUtils.extractYoutubeId(ep.data)
                     if (epVidId != null) {
                         ep.posterUrl = YoutubeUtils.getShortsEpisodeThumbnail(epVidId)
+                        val cachedMeta = epMetaMapCache[epVidId]
+                        if (!cachedMeta.isNullOrBlank()) ep.description = cachedMeta
                     }
                 }
             }
 
-            val finalPlot = buildString {
-                append(shortTitle)
-                if (shortPlot.isNotBlank()) {
-                    append("\n\n$shortPlot")
-                }
+            // 쇼츠도 일반 영상과 동일한 [길이] • [조회수] • [날짜] • [채널] 구성 적용
+            var ep1Views = ""
+            var ep1Date = ""
+            val viewMatch = VIEW_COUNT_REGEX.find(html)
+            if (viewMatch != null) ep1Views = viewMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
+            val dateMatch = PUBLISH_DATE_REGEX.find(html)
+            if (dateMatch != null) ep1Date = dateMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
+            
+            val cViews = ep1Views.replace("\r", "").replace("\n", "").trim()
+            val cDate = ep1Date.replace("\r", "").replace("\n", "").trim()
+            val cChannel = channelName.replace("\r", "").replace("\n", "").trim()
+            
+            val mainDescParts = listOf(cViews, cDate, cChannel).filter { it.isNotBlank() && it != "N/A" }
+            val mainDescStr = mainDescParts.joinToString(" • ")
+
+            val mainTargetEp = targetEpisodes.find { it.episode == currentEpIndex }
+            if (mainTargetEp != null) {
+                mainTargetEp.description = mainDescStr.ifBlank { cChannel.ifBlank { "Playing" } }
             }
 
-            return newTvSeriesLoadResponse(shortTitle, url, TvType.TvSeries, targetEpisodes) {
-                this.posterUrl = poster
+            // 💡 상세페이지 타이틀에 홈 화면과 완벽하게 매칭되는 넘버링 부착
+            val finalTitle = "#$currentEpIndex $shortTitle".replace("##", "#")
+            val finalPlot = npPlot.ifBlank { " " }
+
+            return newTvSeriesLoadResponse(finalTitle, url, TvType.TvSeries, targetEpisodes) {
+                this.posterUrl = YoutubeUtils.getShortsSearchPoster(videoId)
                 this.plot = finalPlot
-                this.tags = listOf("Shorts")
+                
+                if (npTags.isNotEmpty()) this.tags = npTags
+
+                val actorList = mutableListOf<ActorData>()
+                if (npActor != null) {
+                    actorList.add(npActor!!)
+                } else if (channelName.isNotBlank()) {
+                    actorList.add(ActorData(Actor(channelName, channelAvatar)))
+                }
+                if (subscriberCount.isNotBlank()) {
+                    actorList.add(ActorData(Actor(subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/YouTube/Subscribe.jpg")))
+                }
+                if (actorList.isNotEmpty()) {
+                    this.actors = actorList
+                }
             }
         }
 
@@ -2301,7 +2355,6 @@ class YoutubeProvider(
                     }
                 }
 
-                // 💡 [수정됨] NewPipe API를 차용하여 채널 플롯(설명)을 줄바꿈 유지 상태로 완벽히 추출합니다.
                 var channelDescription = ""
                 try {
                     val channelExtractor = ServiceList.YouTube.getChannelExtractor(cleanUrl)
@@ -2357,7 +2410,6 @@ class YoutubeProvider(
                     ?: YoutubeUtils.getBestThumbnail(safeGet(header, "content", "pageHeaderViewModel", "image", "decoratedAvatarViewModel", "avatar", "avatarViewModel", "image"))
                     ?: response.document.selectFirst("meta[property=og:image]")?.attr("content")
 
-                // 💡 [수정됨] 만약 NewPipe 파싱에 실패했다면 기존처럼 HTML 메타 태그로 폴백합니다.
                 if (channelDescription.isBlank()) {
                     channelDescription = response.document.selectFirst("meta[property=og:description]")?.attr("content") ?: ""
                 }
@@ -2501,7 +2553,6 @@ class YoutubeProvider(
         }
 
         // ==========================================
-// ==========================================
         // 💡 2. [재생목록 에피소드 처리 블록]
         // ==========================================
         if (url.contains("list=")) {
@@ -2564,7 +2615,6 @@ class YoutubeProvider(
                     this.posterUrl = YoutubeUtils.getProxiedPoster(playlistPoster)
                     this.recommendations = recList
                     
-                    // 💡 [요청 반영] "플롯을 찾을 수 없음" 메시지를 숨기기 위해 명시적으로 빈 문자열(보이지 않는 공백) 처리
                     this.plot = " "
                     
                     val actorList = mutableListOf<ActorData>()
@@ -2585,8 +2635,228 @@ class YoutubeProvider(
             } catch (e: Exception) {
                 logError(e)
             }
+        }          
+
+        // ==========================================
+        // 💡 3. [기본 에피소드(단일 비디오) 처리 블록]
+        // ==========================================
+        val videoId = YoutubeUtils.extractYoutubeId(url) ?: throw ErrorLoadingException("Invalid YouTube URL")
+
+        epMetaMapCache.clear()
+
+        var npPlot = ""
+        var npTags = emptyList<String>()
+        var npActor: ActorData? = null
+
+        try {
+            val extractor = ServiceList.YouTube.getStreamExtractor(url)
+            extractor.fetchPage()
+            val info = StreamInfo.getInfo(extractor)
+
+            npPlot = info.description.content.toString()
+            npTags = info.tags?.take(10)?.toList() ?: emptyList()
+
+            info.uploaderName?.takeIf { it.isNotBlank() }?.let { uploader ->
+                npActor = ActorData(
+                    Actor(
+                        uploader,
+                        info.uploaderAvatars.lastOrNull()?.url ?: ""
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            logError(e) 
         }
 
+        val headers = mapOf("Referer" to "https://www.youtube.com/")
+        val response = app.get(url, headers = headers, interceptor = ytInterceptor)
+        val html = response.text
+        val data = extractYtInitialData(html)
+        
+        var title = "YouTube Video"
+        var plot = npPlot 
+        var poster = YoutubeUtils.buildThumbnailFromId(videoId)
+
+        var channelName = ""
+        var channelId = ""
+        var channelAvatar = ""
+        var subscriberCount = ""
+
+        val recommendations = mutableListOf<SearchResponse>()
+        val seenRecIds = mutableSetOf<String>()
+
+        if (data != null) {
+            val resultsContents = safeGet(data, "contents", "twoColumnWatchNextResults", "results", "results", "contents") as? List<*>
+
+            resultsContents?.forEach { item ->
+                val m = item as? Map<*, *>
+
+                val primary = m?.get("videoPrimaryInfoRenderer") as? Map<*, *>
+                if (primary != null) {
+                    val t = extractTitle(primary["title"] as? Map<*, *>)
+                    if (!t.isNullOrBlank()) title = t
+                }
+
+                val secondary = m?.get("videoSecondaryInfoRenderer") as? Map<*, *>
+                if (secondary != null) {
+                    val owner = safeGet(secondary, "owner", "videoOwnerRenderer") as? Map<*, *>
+                    if (owner != null) {
+                        channelName = extractTitle(owner["title"] as? Map<*, *>) ?: ""
+                        channelAvatar = YoutubeUtils.getBestThumbnail(owner["thumbnail"]) ?: ""
+                        channelId = safeGet(owner, "navigationEndpoint", "browseEndpoint", "browseId") as? String ?: ""
+                        if (channelId.isEmpty()) {
+                            val curl = safeGet(owner, "navigationEndpoint", "commandMetadata", "webCommandMetadata", "url") as? String
+                            if (!curl.isNullOrBlank()) channelId = curl.substringAfterLast("/")
+                        }
+                        
+                        subscriberCount = getText(owner["subscriberCountText"])
+                    }
+
+                    if (plot.isBlank()) {
+                        val descObj = secondary["attributedDescription"] as? Map<*, *>
+                            ?: secondary["description"] as? Map<*, *>
+                        val fullDesc = getText(descObj)
+                        if (fullDesc.isNotBlank()) {
+                            plot = fullDesc.trimStart() 
+                        }
+                    }
+                }
+            }
+
+            val secondaryResults = safeGet(data, "contents", "twoColumnWatchNextResults", "secondaryResults", "secondaryResults", "results")
+            if (secondaryResults != null) {
+                processRecursive(secondaryResults, recommendations, seenRecIds, false)
+            }
+
+        } else {
+            val doc = response.document
+            title = doc.selectFirst("meta[property=og:title]")?.attr("content") ?: title
+            poster = doc.selectFirst("meta[property=og:image]")?.attr("content") ?: poster
+            if (plot.isBlank()) {
+                plot = doc.selectFirst("meta[property=og:description]")?.attr("content") ?: plot
+            }
+        }
+
+        if (channelName.isNotBlank() && channelId.isNotBlank()) {
+            val channelUrlFull = if (channelId.startsWith("UC") || channelId.startsWith("@")) "$mainUrl/channel/$channelId" else "$mainUrl/$channelId"
+            val channelCard = newMovieSearchResponse(channelName, channelUrlFull, TvType.Live) {
+                this.posterUrl = channelAvatar
+            }
+            recommendations.add(0, channelCard)
+        }
+
+        val filteredRecs = recommendations.filter { !it.url.contains("/shorts/") }
+        val episodes = mutableListOf<Episode>()
+        
+        var ep1Dur = ""
+        val lengthMatch = LENGTH_SECONDS_REGEX.find(html)
+        if (lengthMatch != null) {
+            try {
+                val s = lengthMatch.groupValues[1].toLong()
+                ep1Dur = if (s >= 3600) String.format("%d:%02d:%02d", s/3600, (s%3600)/60, s%60) else String.format("%d:%02d", s/60, s%60)
+            } catch (e: Exception) {}
+        }
+        if (ep1Dur.isBlank() && data != null) {
+            val sText = safeGet(data, "microformat", "playerMicroformatRenderer", "lengthSeconds") as? String
+            if (!sText.isNullOrBlank()) {
+                try {
+                    val s = sText.toLong()
+                    ep1Dur = if (s >= 3600) String.format("%d:%02d:%02d", s/3600, (s%3600)/60, s%60) else String.format("%d:%02d", s/60, s%60)
+                } catch (e: Exception) {}
+            }
+        }
+        
+        var ep1Views = ""
+        val viewMatch = VIEW_COUNT_REGEX.find(html)
+        if (viewMatch != null) {
+            ep1Views = viewMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
+        }
+        
+        var ep1Date = ""
+        val dateMatch = PUBLISH_DATE_REGEX.find(html)
+        if (dateMatch != null) {
+            ep1Date = dateMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
+        }
+        
+        val resultsContentsForEp1 = safeGet(data, "contents", "twoColumnWatchNextResults", "results", "results", "contents") as? List<*>
+        resultsContentsForEp1?.forEach { item ->
+            val m = item as? Map<*, *>
+            val primary = m?.getMapKey("videoPrimaryInfoRenderer")
+            if (primary != null) {
+                val viewCountRenderer = primary.getMapKey("videoViewCountRenderer")
+                val vCount = if (viewCountRenderer != null) {
+                    getText(viewCountRenderer.getMapKey("extraShortViewCount") ?: viewCountRenderer.getMapKey("viewCount"))
+                } else {
+                    getText(primary.getMapKey("viewCount"))
+                }
+                
+                if (vCount.isNotBlank()) ep1Views = vCount.replace("\r", "").replace("\n", "").trim()
+                
+                val dText = extractTitle(primary.getMapKey("dateText") as? Map<*, *>) ?: getText(primary.getMapKey("dateText"))
+                if (dText.isNotBlank()) ep1Date = dText.replace("\r", "").replace("\n", "").trim()
+            }
+        }
+
+        val cDur = ep1Dur.replace("\r", "").replace("\n", "").trim()
+        val cViews = ep1Views.replace("\r", "").replace("\n", "").trim()
+        val cDate = ep1Date.replace("\r", "").replace("\n", "").trim()
+        val cChannel = channelName.replace("\r", "").replace("\n", "").trim()
+
+        val mainDescParts = listOf(cDur, cViews, cDate, cChannel).filter { it.isNotBlank() && it != "N/A" }
+        val mainDescStr = mainDescParts.joinToString(" • ")
+
+        episodes.add(newEpisode(url) {
+            this.name = title
+            this.posterUrl = poster
+            this.episode = 1
+            this.description = mainDescStr.ifBlank { cChannel.ifBlank { "Playing" } }
+        })
+
+        var epCount = 2
+        filteredRecs.forEach { rec ->
+            if (rec.url.contains("watch?v=") || rec.url.contains("/shorts/")) {
+                val recVidId = YoutubeUtils.extractYoutubeId(rec.url)
+                val extraMeta = if (recVidId != null) epMetaMapCache[recVidId] else ""
+                
+                var cleanName = rec.name.replaceFirst(Regex("^\\{.*?\\}\\s*"), "")
+
+                episodes.add(newEpisode(rec.url) {
+                    this.name = cleanName
+                    this.posterUrl = rec.posterUrl
+                    this.episode = epCount++
+                    if (!extraMeta.isNullOrBlank()) {
+                        this.description = extraMeta
+                    }
+                })
+            }
+        }
+
+        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+            this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
+            this.plot = plot
+            this.recommendations = filteredRecs 
+            
+            if (npTags.isNotEmpty()) {
+                this.tags = npTags
+            }
+
+            val actorList = mutableListOf<ActorData>()
+            if (npActor != null) {
+                actorList.add(npActor!!)
+            } else if (channelName.isNotBlank()) {
+                actorList.add(ActorData(Actor(channelName, channelAvatar)))
+            }
+
+            if (subscriberCount.isNotBlank()) {
+                actorList.add(ActorData(Actor(subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/YouTube/Subscribe.jpg")))
+            }
+
+            if (actorList.isNotEmpty()) {
+                this.actors = actorList
+            }
+        }
+    }
+    
         // ==========================================
         // 💡 3. [기본 에피소드(단일 비디오) 처리 블록]
         // ==========================================
