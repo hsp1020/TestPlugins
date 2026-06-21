@@ -2183,9 +2183,9 @@ class YoutubeProvider(
 
     override suspend fun load(url: String): LoadResponse {
         // ==========================================
-        // 💡 1. [쇼츠 에피소드 처리 블록]
+        // 💡 [개선1] 쇼츠 에피소드 처리 블록: 일반 영상처럼 넘버링 및 채널 UI 완벽 적용
         // ==========================================
-        if (url.contains("/shorts/")) {
+       if (url.contains("/shorts/")) {
             val videoId = YoutubeUtils.extractYoutubeId(url) ?: "video"
             val useSearchList = url.contains("ctx=search")
             val sourceList = if (useSearchList) searchShorts else homeShorts
@@ -2223,7 +2223,6 @@ class YoutubeProvider(
             val data = extractYtInitialData(html)
             
             val recs = mutableListOf<SearchResponse>()
-            var ep1Views = "" // 💡 하드코딩 제거! 순수하게 API에서 가져올 변수
 
             if (data != null) {
                 val resultsContents = safeGet(data, "contents", "twoColumnWatchNextResults", "results", "results", "contents") as? List<*>
@@ -2233,17 +2232,7 @@ class YoutubeProvider(
                     if (primary != null) {
                         val t = extractTitle(primary["title"] as? Map<*, *>)
                         if (!t.isNullOrBlank()) shortTitle = t
-                        
-                        // 💡 [핵심 해결] InnerTube API가 내려주는 "이미 다국어 처리된 공식 조회수 텍스트"를 그대로 꺼내옵니다.
-                        val viewCountRenderer = primary["videoViewCountRenderer"] as? Map<*, *>
-                        val vCount = if (viewCountRenderer != null) {
-                            getText(viewCountRenderer["extraShortViewCount"] ?: viewCountRenderer["viewCount"])
-                        } else {
-                            getText(primary["viewCount"])
-                        }
-                        if (vCount.isNotBlank()) ep1Views = vCount.replace("\r", "").replace("\n", "").trim()
                     }
-                    
                     val secondary = m?.get("videoSecondaryInfoRenderer") as? Map<*, *>
                     if (secondary != null) {
                         val owner = safeGet(secondary, "owner", "videoOwnerRenderer") as? Map<*, *>
@@ -2252,6 +2241,7 @@ class YoutubeProvider(
                             channelAvatar = YoutubeUtils.getBestThumbnail(owner["thumbnail"]) ?: ""
                             subscriberCount = getText(owner["subscriberCountText"])
                             
+                            // 💡 채널 ID 파싱 추가 (추천목록 채널카드 생성용)
                             channelId = safeGet(owner, "navigationEndpoint", "browseEndpoint", "browseId") as? String ?: ""
                             if (channelId.isEmpty()) {
                                 val curl = safeGet(owner, "navigationEndpoint", "commandMetadata", "webCommandMetadata", "url") as? String
@@ -2301,6 +2291,11 @@ class YoutubeProvider(
                 }
             }
 
+            // 💡 [롤백] 메인 타겟 에피소드도 상세 정보 없이 기존처럼 "조회수"만 표시하도록 롤백
+            var ep1Views = ""
+            val viewMatch = VIEW_COUNT_REGEX.find(html)
+            if (viewMatch != null) ep1Views = viewMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
+            
             val cViews = ep1Views.ifBlank { "Playing" }
 
             val mainTargetEp = targetEpisodes.find { it.episode == currentEpIndex }
@@ -2311,21 +2306,23 @@ class YoutubeProvider(
             val finalTitle = "#$currentEpIndex $shortTitle".replace("##", "#")
             val finalPlot = npPlot.ifBlank { " " }
 
+            // 💡 [추가] 채널 정보를 앱 자체의 추천 목록(recommendations) 아이템으로 추가
             val finalRecs = mutableListOf<SearchResponse>()
             if (channelName.isNotBlank() && channelId.isNotBlank()) {
                 val channelUrlFull = if (channelId.startsWith("UC") || channelId.startsWith("@")) "$mainUrl/channel/$channelId" else "$mainUrl/$channelId"
                 val channelCard = newMovieSearchResponse(channelName, channelUrlFull, TvType.Live) {
-                    this.posterUrl = YoutubeUtils.getProxiedPoster(channelAvatar) ?: channelAvatar
+                    this.posterUrl = channelAvatar
                 }
-                finalRecs.add(channelCard)
+                finalRecs.add(channelCard) // 추천목록 최상단에 추가
             }
             
+            // 기존 추천 쇼츠/영상들 추가
             finalRecs.addAll(recs.filter { !it.url.contains("/shorts/") }) 
 
             return newTvSeriesLoadResponse(finalTitle, url, TvType.TvSeries, targetEpisodes) {
                 this.posterUrl = YoutubeUtils.getShortsSearchPoster(videoId)
                 this.plot = finalPlot
-                this.recommendations = finalRecs 
+                this.recommendations = finalRecs // 💡 추천 목록에 채널 아이템 적용 완료
                 
                 if (npTags.isNotEmpty()) this.tags = npTags
 
@@ -2343,9 +2340,8 @@ class YoutubeProvider(
                 }
             }
         }
-
         // ==========================================
-        // 💡 2. [채널 에피소드 처리 블록]
+        // 💡 1. [채널 에피소드 처리 블록]
         // ==========================================
         if (url.contains("/@") || url.contains("/channel/") || url.contains("/c/") || url.contains("/user/")) {
             try {
@@ -2556,7 +2552,7 @@ class YoutubeProvider(
         }
 
         // ==========================================
-        // 💡 3. [재생목록 에피소드 처리 블록]
+        // 💡 2. [재생목록 에피소드 처리 블록]
         // ==========================================
         if (url.contains("list=")) {
             try {
@@ -2641,7 +2637,7 @@ class YoutubeProvider(
         }          
 
         // ==========================================
-        // 💡 4. [기본 에피소드(단일 비디오) 처리 블록]
+        // 💡 3. [기본 에피소드(단일 비디오) 처리 블록]
         // ==========================================
         val videoId = YoutubeUtils.extractYoutubeId(url) ?: throw ErrorLoadingException("Invalid YouTube URL")
 
@@ -2687,9 +2683,6 @@ class YoutubeProvider(
 
         val recommendations = mutableListOf<SearchResponse>()
         val seenRecIds = mutableSetOf<String>()
-        
-        var ep1Views = "" // 💡 하드코딩 제거! 순수하게 API에서 가져올 변수
-        var ep1Date = ""
 
         if (data != null) {
             val resultsContents = safeGet(data, "contents", "twoColumnWatchNextResults", "results", "results", "contents") as? List<*>
@@ -2701,18 +2694,6 @@ class YoutubeProvider(
                 if (primary != null) {
                     val t = extractTitle(primary["title"] as? Map<*, *>)
                     if (!t.isNullOrBlank()) title = t
-                    
-                    // 💡 [핵심 해결] InnerTube API가 내려주는 "다국어 처리된 공식 텍스트" 추출!
-                    val viewCountRenderer = primary.getMapKey("videoViewCountRenderer")
-                    val vCount = if (viewCountRenderer != null) {
-                        getText(viewCountRenderer.getMapKey("extraShortViewCount") ?: viewCountRenderer.getMapKey("viewCount"))
-                    } else {
-                        getText(primary.getMapKey("viewCount"))
-                    }
-                    if (vCount.isNotBlank()) ep1Views = vCount.replace("\r", "").replace("\n", "").trim()
-                    
-                    val dText = extractTitle(primary.getMapKey("dateText") as? Map<*, *>) ?: getText(primary.getMapKey("dateText"))
-                    if (dText.isNotBlank()) ep1Date = dText.replace("\r", "").replace("\n", "").trim()
                 }
 
                 val secondary = m?.get("videoSecondaryInfoRenderer") as? Map<*, *>
@@ -2758,7 +2739,7 @@ class YoutubeProvider(
         if (channelName.isNotBlank() && channelId.isNotBlank()) {
             val channelUrlFull = if (channelId.startsWith("UC") || channelId.startsWith("@")) "$mainUrl/channel/$channelId" else "$mainUrl/$channelId"
             val channelCard = newMovieSearchResponse(channelName, channelUrlFull, TvType.Live) {
-                this.posterUrl = YoutubeUtils.getProxiedPoster(channelAvatar) ?: channelAvatar
+                this.posterUrl = channelAvatar
             }
             recommendations.add(0, channelCard)
         }
@@ -2784,6 +2765,37 @@ class YoutubeProvider(
             }
         }
         
+        var ep1Views = ""
+        val viewMatch = VIEW_COUNT_REGEX.find(html)
+        if (viewMatch != null) {
+            ep1Views = viewMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
+        }
+        
+        var ep1Date = ""
+        val dateMatch = PUBLISH_DATE_REGEX.find(html)
+        if (dateMatch != null) {
+            ep1Date = dateMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
+        }
+        
+        val resultsContentsForEp1 = safeGet(data, "contents", "twoColumnWatchNextResults", "results", "results", "contents") as? List<*>
+        resultsContentsForEp1?.forEach { item ->
+            val m = item as? Map<*, *>
+            val primary = m?.getMapKey("videoPrimaryInfoRenderer")
+            if (primary != null) {
+                val viewCountRenderer = primary.getMapKey("videoViewCountRenderer")
+                val vCount = if (viewCountRenderer != null) {
+                    getText(viewCountRenderer.getMapKey("extraShortViewCount") ?: viewCountRenderer.getMapKey("viewCount"))
+                } else {
+                    getText(primary.getMapKey("viewCount"))
+                }
+                
+                if (vCount.isNotBlank()) ep1Views = vCount.replace("\r", "").replace("\n", "").trim()
+                
+                val dText = extractTitle(primary.getMapKey("dateText") as? Map<*, *>) ?: getText(primary.getMapKey("dateText"))
+                if (dText.isNotBlank()) ep1Date = dText.replace("\r", "").replace("\n", "").trim()
+            }
+        }
+
         val cDur = ep1Dur.replace("\r", "").replace("\n", "").trim()
         val cViews = ep1Views.replace("\r", "").replace("\n", "").trim()
         val cDate = ep1Date.replace("\r", "").replace("\n", "").trim()
@@ -2843,6 +2855,8 @@ class YoutubeProvider(
             }
         }
     }
+    
+
     
     override suspend fun loadLinks(
         data: String,
