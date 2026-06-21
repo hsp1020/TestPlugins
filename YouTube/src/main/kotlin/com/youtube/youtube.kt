@@ -110,7 +110,7 @@ object YoutubeUtils {
     }
 
     // =========================================================================
-    // [개선 사항 2] 중복 가독 함수를 정리하고 프록시 변환 기능으로 완전 단일화
+    // [개선 사항 2] 중복 가독 함수를 정리하고 단일 비즈니스 함수로 완전 단일화
     // =========================================================================
     fun getProxiedPoster(poster: String?): String? {
         if (poster.isNullOrBlank()) return null
@@ -120,6 +120,10 @@ object YoutubeUtils {
             poster
         }
     }
+
+    // 소스 전체 호출부의 기저 호환성을 해치지 않으면서 단일 구현으로 유도하는 앨리어스 설정
+    fun getProxiedPosterBottom(poster: String?): String? = getProxiedPoster(poster)
+    fun getProxiedPosterNormal(poster: String?): String? = getProxiedPoster(poster)
 
     // =========================================================================
     // [개선 사항 3] 정적 쿼리가 융합된 Shorts 주소의 실시간 인코딩 오버헤드 완화
@@ -197,6 +201,48 @@ object YoutubeUtils {
             decodeCount++
         }
         return current
+    }
+
+    // =========================================================================
+    // [빌드 해결] 기저 호환 수동 캐스트 탐색용 유틸리티 정상 복원
+    // =========================================================================
+    fun getMapKeyFromAny(obj: Any?, key: String): Map<*, *>? {
+        val map = obj as? Map<*, *> ?: return null
+        return map[key] as? Map<*, *>
+    }
+
+    fun getListKeyFromAny(obj: Any?, key: String): List<*>? {
+        val map = obj as? Map<*, *> ?: return null
+        return map[key] as? List<*>
+    }
+
+    fun getStringFromAny(obj: Any?, key: String): String? {
+        val map = obj as? Map<*, *> ?: return null
+        val value = map[key] ?: return null
+        return if (value is String) value else value.toString()
+    }
+
+    fun extractUrlFromLockup(lockup: Map<*, *>?): String? {
+        if (lockup == null) return null
+        val command = getMapKeyFromAny(lockup, "onTap")?.let { getMapKeyFromAny(it, "innertubeCommand") }
+            ?: getMapKeyFromAny(lockup, "rendererContext")?.let { getMapKeyFromAny(it, "commandContext") }?.let { getMapKeyFromAny(it, "onTap") }?.let { getMapKeyFromAny(it, "innertubeCommand") }
+            ?: getMapKeyFromAny(lockup, "itemPlayback")?.let { getMapKeyFromAny(it, "inlinePlayerData") }?.let { getMapKeyFromAny(it, "onSelect") }?.let { getMapKeyFromAny(it, "innertubeCommand") }
+            ?: getMapKeyFromAny(lockup, "navigationEndpoint")
+        
+        val webCommandUrl = getMapKeyFromAny(command, "commandMetadata")?.let { getMapKeyFromAny(it, "webCommandMetadata") }?.let { getStringFromAny(it, "url") }
+        if (!webCommandUrl.isNullOrBlank()) return webCommandUrl
+
+        val watch = getMapKeyFromAny(command, "watchEndpoint") ?: command
+        val videoId = getStringFromAny(watch, "videoId")
+        val playlistId = getStringFromAny(watch, "playlistId")
+        if (!playlistId.isNullOrBlank()) {
+            return if (!videoId.isNullOrBlank()) {
+                "/watch?v=$videoId&list=$playlistId"
+            } else {
+                "/watch?list=$playlistId"
+            }
+        }
+        return null
     }
 }
 
@@ -915,7 +961,7 @@ class YoutubeProvider(
                 val contextTag = if (isSearch) "&ctx=search" else "&ctx=home"
                 val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
 
-                val descText = views.stripWhitespace()
+                val descText = views.replace("\r", "").replace("\n", "").trim()
                 if (descText.isNotBlank()) epMetaMapCache[videoId] = descText
                 
                 val newShortEp = newEpisode(finalUrl) {
@@ -982,7 +1028,7 @@ class YoutubeProvider(
                         "$mainUrl/$targetPath",
                         TvType.TvSeries
                     ) {
-                        // [개선 사항 2] 프록시 단일 함수로 중합화 완료
+                        // [개선 사항 2] 포스터 단일 함수 구성 대체
                         this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
                     }
                 }
@@ -1079,7 +1125,7 @@ class YoutubeProvider(
                     "$mainUrl/channel/$id",
                     TvType.Live
                 ) {
-                    // [개선 사항 2] 포스터 단일화
+                    // [개선 사항 2] 포스터 단일 함수 구성 대체
                     this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
                 }
             }
