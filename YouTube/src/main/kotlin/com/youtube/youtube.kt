@@ -2183,9 +2183,9 @@ class YoutubeProvider(
 
     override suspend fun load(url: String): LoadResponse {
         // ==========================================
-        // 💡 [개선1] 쇼츠 에피소드 처리 블록: 일반 영상처럼 넘버링 및 채널 UI 완벽 적용
+        // 💡 1. [쇼츠 에피소드 처리 블록]
         // ==========================================
-       if (url.contains("/shorts/")) {
+        if (url.contains("/shorts/")) {
             val videoId = YoutubeUtils.extractYoutubeId(url) ?: "video"
             val useSearchList = url.contains("ctx=search")
             val sourceList = if (useSearchList) searchShorts else homeShorts
@@ -2241,7 +2241,6 @@ class YoutubeProvider(
                             channelAvatar = YoutubeUtils.getBestThumbnail(owner["thumbnail"]) ?: ""
                             subscriberCount = getText(owner["subscriberCountText"])
                             
-                            // 💡 채널 ID 파싱 추가 (추천목록 채널카드 생성용)
                             channelId = safeGet(owner, "navigationEndpoint", "browseEndpoint", "browseId") as? String ?: ""
                             if (channelId.isEmpty()) {
                                 val curl = safeGet(owner, "navigationEndpoint", "commandMetadata", "webCommandMetadata", "url") as? String
@@ -2291,7 +2290,6 @@ class YoutubeProvider(
                 }
             }
 
-            // 💡 [롤백] 메인 타겟 에피소드도 상세 정보 없이 기존처럼 "조회수"만 표시하도록 롤백
             var ep1Views = ""
             val viewMatch = VIEW_COUNT_REGEX.find(html)
             if (viewMatch != null) ep1Views = viewMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
@@ -2306,23 +2304,22 @@ class YoutubeProvider(
             val finalTitle = "#$currentEpIndex $shortTitle".replace("##", "#")
             val finalPlot = npPlot.ifBlank { " " }
 
-            // 💡 [추가] 채널 정보를 앱 자체의 추천 목록(recommendations) 아이템으로 추가
             val finalRecs = mutableListOf<SearchResponse>()
             if (channelName.isNotBlank() && channelId.isNotBlank()) {
                 val channelUrlFull = if (channelId.startsWith("UC") || channelId.startsWith("@")) "$mainUrl/channel/$channelId" else "$mainUrl/$channelId"
                 val channelCard = newMovieSearchResponse(channelName, channelUrlFull, TvType.Live) {
-                    this.posterUrl = channelAvatar
+                    // 💡 [수정] 쇼츠 채널 카드에 wsrv.nl 프록시 적용
+                    this.posterUrl = YoutubeUtils.getProxiedPoster(channelAvatar) 
                 }
-                finalRecs.add(channelCard) // 추천목록 최상단에 추가
+                finalRecs.add(channelCard) 
             }
             
-            // 기존 추천 쇼츠/영상들 추가
             finalRecs.addAll(recs.filter { !it.url.contains("/shorts/") }) 
 
             return newTvSeriesLoadResponse(finalTitle, url, TvType.TvSeries, targetEpisodes) {
                 this.posterUrl = YoutubeUtils.getShortsSearchPoster(videoId)
                 this.plot = finalPlot
-                this.recommendations = finalRecs // 💡 추천 목록에 채널 아이템 적용 완료
+                this.recommendations = finalRecs 
                 
                 if (npTags.isNotEmpty()) this.tags = npTags
 
@@ -2340,8 +2337,9 @@ class YoutubeProvider(
                 }
             }
         }
+
         // ==========================================
-        // 💡 1. [채널 에피소드 처리 블록]
+        // 💡 2. [채널 에피소드 처리 블록]
         // ==========================================
         if (url.contains("/@") || url.contains("/channel/") || url.contains("/c/") || url.contains("/user/")) {
             try {
@@ -2552,7 +2550,7 @@ class YoutubeProvider(
         }
 
         // ==========================================
-        // 💡 2. [재생목록 에피소드 처리 블록]
+        // 💡 3. [재생목록 에피소드 처리 블록]
         // ==========================================
         if (url.contains("list=")) {
             try {
@@ -2605,7 +2603,8 @@ class YoutubeProvider(
                         channelUrlFull,
                         TvType.Live
                     ) {
-                        this.posterUrl = playlistMeta.channelAvatar
+                        // 💡 [수정] 재생목록 추천 채널 카드에 wsrv.nl 프록시 적용
+                        this.posterUrl = YoutubeUtils.getProxiedPoster(playlistMeta.channelAvatar)
                     }
                     recList.add(channelCard)
                 }
@@ -2637,7 +2636,7 @@ class YoutubeProvider(
         }          
 
         // ==========================================
-        // 💡 3. [기본 에피소드(단일 비디오) 처리 블록]
+        // 💡 4. [기본 에피소드(단일 비디오) 처리 블록]
         // ==========================================
         val videoId = YoutubeUtils.extractYoutubeId(url) ?: throw ErrorLoadingException("Invalid YouTube URL")
 
@@ -2739,7 +2738,8 @@ class YoutubeProvider(
         if (channelName.isNotBlank() && channelId.isNotBlank()) {
             val channelUrlFull = if (channelId.startsWith("UC") || channelId.startsWith("@")) "$mainUrl/channel/$channelId" else "$mainUrl/$channelId"
             val channelCard = newMovieSearchResponse(channelName, channelUrlFull, TvType.Live) {
-                this.posterUrl = channelAvatar
+                // 💡 [수정] 기본 영상 추천 채널 카드에 wsrv.nl 프록시 적용
+                this.posterUrl = YoutubeUtils.getProxiedPoster(channelAvatar) 
             }
             recommendations.add(0, channelCard)
         }
@@ -2754,15 +2754,6 @@ class YoutubeProvider(
                 val s = lengthMatch.groupValues[1].toLong()
                 ep1Dur = if (s >= 3600) String.format("%d:%02d:%02d", s/3600, (s%3600)/60, s%60) else String.format("%d:%02d", s/60, s%60)
             } catch (e: Exception) {}
-        }
-        if (ep1Dur.isBlank() && data != null) {
-            val sText = safeGet(data, "microformat", "playerMicroformatRenderer", "lengthSeconds") as? String
-            if (!sText.isNullOrBlank()) {
-                try {
-                    val s = sText.toLong()
-                    ep1Dur = if (s >= 3600) String.format("%d:%02d:%02d", s/3600, (s%3600)/60, s%60) else String.format("%d:%02d", s/60, s%60)
-                } catch (e: Exception) {}
-            }
         }
         
         var ep1Views = ""
@@ -2855,8 +2846,6 @@ class YoutubeProvider(
             }
         }
     }
-    
-
     
     override suspend fun loadLinks(
         data: String,
