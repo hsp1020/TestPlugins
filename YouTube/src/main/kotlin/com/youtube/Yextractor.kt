@@ -1035,7 +1035,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     return@withContext
                 }
 
-                // 💡 [자막(Captions) 누락 현상 완벽 해결]: 구버전의 정교한 자막 추출 메커니즘 통합 완료
+                // 자막(Captions) 파싱 코드
                 val captions = playerResponse.optJSONObject("captions")?.optJSONObject("playerCaptionsTracklistRenderer")?.optJSONArray("captionTracks")
                 if (captions != null) {
                     for (i in 0 until captions.length()) {
@@ -1084,7 +1084,25 @@ open class YoutubeExtractor : ExtractorApi() {
                     return@withContext
                 }
 
+                // ---------------- [실시간 스트리밍(HLS) 예외 분기 처리 추가] ----------------
                 val hlsUrl = streamingData.optString("hlsManifestUrl")
+                if (!hlsUrl.isNullOrBlank()) {
+                    println("[TRACK] 실시간 스트리밍(HLS) 발견: $hlsUrl")
+                    callback(
+                        newExtractorLink(
+                            this@YoutubeExtractor.name,
+                            "YouTube Live",
+                            hlsUrl,
+                            type = ExtractorLinkType.M3U8
+                        ) {
+                            this.referer = mainUrl
+                            this.quality = Qualities.Unknown.value
+                        }
+                    )
+                    return@withContext // VOD 전용 병렬 Coroutine 파싱 과정을 수행하지 않고 즉시 종료합니다.
+                }
+                // -------------------------------------------------------------------------
+
                 val dashUrl = streamingData.optString("dashManifestUrl")
 
                 println("[TRACK] 4. Executing Pure Coroutine Parallel Parsing")
@@ -1139,6 +1157,7 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         }
     }
+
 
     private fun startServerIfNeeded() {
         synchronized(serverLock) {
