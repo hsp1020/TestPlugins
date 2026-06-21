@@ -2741,7 +2741,7 @@ class YoutubeProvider(
             }
         }
 
-        com.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback, callback)
+        com.hsp1020.youtube.YoutubeExtractor().getUrl(fullUrl, null, subtitleCallback, callback)
 
         return true
     }
