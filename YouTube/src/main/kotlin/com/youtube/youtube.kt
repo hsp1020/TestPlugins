@@ -2302,7 +2302,7 @@ class YoutubeProvider(
             }
 
             val finalTitle = "#$currentEpIndex $shortTitle".replace("##", "#")
-            val finalPlot = npPlot.ifBlank { " " }
+            val finalPlot = " "
 
             val finalRecs = mutableListOf<SearchResponse>()
             if (channelName.isNotBlank() && channelId.isNotBlank()) {
