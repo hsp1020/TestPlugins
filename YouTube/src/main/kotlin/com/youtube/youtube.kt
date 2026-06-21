@@ -999,11 +999,8 @@ class YoutubeProvider(
                 val contextTag = if (isSearchContext) "&ctx=search" else "&ctx=home"
                 val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
 
-                // 💡 [개선2] 쇼츠도 보조 플롯에 길이/날짜/채널이 나오도록 캐시 데이터 생성 및 저장
-                var descText = getEpisodeMetaString(shortsData)
-                if (descText.isBlank()) {
-                    descText = views.replace("\r", "").replace("\n", "").trim()
-                }
+                // 💡 [롤백] 쇼츠 에피소드 하단 플롯을 다시 조회수만 나오도록 롤백
+                val descText = views.replace("\r", "").replace("\n", "").trim()
                 if (descText.isNotBlank()) epMetaMapCache[videoId] = descText
                 
                 val newShortEp = newEpisode(finalUrl) {
@@ -1013,7 +1010,6 @@ class YoutubeProvider(
                 }
                 addToShortsList(currentList, newShortEp)
 
-                // 💡 [개선3] 엉망이던 넘버링 중복/불일치 해결: 리스트에 추가 후 '실제 인덱스'를 역추적하여 부여
                 val actualIndex = synchronized(currentList) { currentList.indexOfFirst { it.data == finalUrl } + 1 }
                 if (actualIndex > 0) currentList[actualIndex - 1].episode = actualIndex
                 val displayIndex = if (actualIndex > 0) actualIndex else currentList.size
@@ -1115,14 +1111,8 @@ class YoutubeProvider(
                     
                     poster = YoutubeUtils.getShortsSearchPoster(videoId)
                     
-                    var descText = getEpisodeMetaString(lockup.getMapKey("content") ?: lockup)
-                    if (descText.isBlank()) {
-                        val descParts = mutableListOf<String>()
-                        if (channel.isNotBlank()) descParts.add(channel)
-                        if (views.isNotBlank()) descParts.add(views)
-                        if (date.isNotBlank()) descParts.add(date)
-                        descText = descParts.joinToString(" • ")
-                    }
+                    // 💡 [롤백] 쇼츠 에피소드 하단 플롯을 다시 조회수만 나오도록 롤백
+                    val descText = views.replace("\r", "").replace("\n", "").trim()
                     if (descText.isNotBlank()) epMetaMapCache[videoId] = descText
                     
                     val newShortEp2 = newEpisode(finalUrl) {
@@ -1191,6 +1181,7 @@ class YoutubeProvider(
         }
         return null
     }
+    
    
     private fun processRecursive(
         data: Any?,
@@ -2194,13 +2185,12 @@ class YoutubeProvider(
         // ==========================================
         // 💡 [개선1] 쇼츠 에피소드 처리 블록: 일반 영상처럼 넘버링 및 채널 UI 완벽 적용
         // ==========================================
-        if (url.contains("/shorts/")) {
+       if (url.contains("/shorts/")) {
             val videoId = YoutubeUtils.extractYoutubeId(url) ?: "video"
             val useSearchList = url.contains("ctx=search")
             val sourceList = if (useSearchList) searchShorts else homeShorts
             var targetEpisodes = synchronized(sourceList) { sourceList.toMutableList() }
             
-            // 인덱스 꼬임 방지를 위해 진입 시점 기준으로 넘버링 강제 동기화
             targetEpisodes.forEachIndexed { index, ep -> ep.episode = index + 1 }
             
             val currentEp = targetEpisodes.find { YoutubeUtils.extractYoutubeId(it.data) == videoId }
@@ -2208,14 +2198,14 @@ class YoutubeProvider(
 
             var shortTitle = currentEp?.name ?: "Shorts Video"
             var channelName = ""
+            var channelId = ""
             var channelAvatar = ""
             var subscriberCount = ""
             var npPlot = ""
             var npTags = emptyList<String>()
             var npActor: ActorData? = null
 
-            // 💡 1. 일반 영상처럼 NewPipe를 통한 완벽한 쇼츠 메타데이터 수집
-            val watchUrl = "https://www.youtube.com/watch?v=$videoId" // 쇼츠 ID도 watch 주소로 변환하여 수집
+            val watchUrl = "https://www.youtube.com/watch?v=$videoId" 
             try {
                 val extractor = ServiceList.YouTube.getStreamExtractor(watchUrl)
                 extractor.fetchPage()
@@ -2228,10 +2218,11 @@ class YoutubeProvider(
                 }
             } catch (e: Exception) {}
 
-            // 💡 2. 구독자 수를 위한 HTML(ytInitialData) 파싱 (일반 영상 로직과 동일하게 적용)
             val response = app.get(watchUrl, headers = mapOf("Referer" to "https://www.youtube.com/"), interceptor = ytInterceptor)
             val html = response.text
             val data = extractYtInitialData(html)
+            
+            val recs = mutableListOf<SearchResponse>()
 
             if (data != null) {
                 val resultsContents = safeGet(data, "contents", "twoColumnWatchNextResults", "results", "results", "contents") as? List<*>
@@ -2249,17 +2240,23 @@ class YoutubeProvider(
                             channelName = extractTitle(owner["title"] as? Map<*, *>) ?: ""
                             channelAvatar = YoutubeUtils.getBestThumbnail(owner["thumbnail"]) ?: ""
                             subscriberCount = getText(owner["subscriberCountText"])
+                            
+                            // 💡 채널 ID 파싱 추가 (추천목록 채널카드 생성용)
+                            channelId = safeGet(owner, "navigationEndpoint", "browseEndpoint", "browseId") as? String ?: ""
+                            if (channelId.isEmpty()) {
+                                val curl = safeGet(owner, "navigationEndpoint", "commandMetadata", "webCommandMetadata", "url") as? String
+                                if (!curl.isNullOrBlank()) channelId = curl.substringAfterLast("/")
+                            }
                         }
                     }
                 }
                 
-                // 타겟 에피소드가 비어있거나 단일인 경우 추천 목록(/next 대체)으로 채움
+                val secondaryResults = safeGet(data, "contents", "twoColumnWatchNextResults", "secondaryResults", "secondaryResults", "results")
+                if (secondaryResults != null) {
+                    processRecursive(secondaryResults, recs, mutableSetOf(videoId), false)
+                }
+                
                 if (targetEpisodes.size <= 1) {
-                    val secondaryResults = safeGet(data, "contents", "twoColumnWatchNextResults", "secondaryResults", "secondaryResults", "results")
-                    val recs = mutableListOf<SearchResponse>()
-                    if (secondaryResults != null) {
-                        processRecursive(secondaryResults, recs, mutableSetOf(videoId), false)
-                    }
                     val recEpisodes = mutableListOf<Episode>()
                     recEpisodes.add(newEpisode(url) {
                         this.name = shortTitle
@@ -2294,33 +2291,38 @@ class YoutubeProvider(
                 }
             }
 
-            // 쇼츠도 일반 영상과 동일한 [길이] • [조회수] • [날짜] • [채널] 구성 적용
+            // 💡 [롤백] 메인 타겟 에피소드도 상세 정보 없이 기존처럼 "조회수"만 표시하도록 롤백
             var ep1Views = ""
-            var ep1Date = ""
             val viewMatch = VIEW_COUNT_REGEX.find(html)
             if (viewMatch != null) ep1Views = viewMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
-            val dateMatch = PUBLISH_DATE_REGEX.find(html)
-            if (dateMatch != null) ep1Date = dateMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
             
-            val cViews = ep1Views.replace("\r", "").replace("\n", "").trim()
-            val cDate = ep1Date.replace("\r", "").replace("\n", "").trim()
-            val cChannel = channelName.replace("\r", "").replace("\n", "").trim()
-            
-            val mainDescParts = listOf(cViews, cDate, cChannel).filter { it.isNotBlank() && it != "N/A" }
-            val mainDescStr = mainDescParts.joinToString(" • ")
+            val cViews = ep1Views.ifBlank { "Playing" }
 
             val mainTargetEp = targetEpisodes.find { it.episode == currentEpIndex }
             if (mainTargetEp != null) {
-                mainTargetEp.description = mainDescStr.ifBlank { cChannel.ifBlank { "Playing" } }
+                mainTargetEp.description = cViews
             }
 
-            // 💡 상세페이지 타이틀에 홈 화면과 완벽하게 매칭되는 넘버링 부착
             val finalTitle = "#$currentEpIndex $shortTitle".replace("##", "#")
             val finalPlot = npPlot.ifBlank { " " }
+
+            // 💡 [추가] 채널 정보를 앱 자체의 추천 목록(recommendations) 아이템으로 추가
+            val finalRecs = mutableListOf<SearchResponse>()
+            if (channelName.isNotBlank() && channelId.isNotBlank()) {
+                val channelUrlFull = if (channelId.startsWith("UC") || channelId.startsWith("@")) "$mainUrl/channel/$channelId" else "$mainUrl/$channelId"
+                val channelCard = newMovieSearchResponse(channelName, channelUrlFull, TvType.Live) {
+                    this.posterUrl = channelAvatar
+                }
+                finalRecs.add(channelCard) // 추천목록 최상단에 추가
+            }
+            
+            // 기존 추천 쇼츠/영상들 추가
+            finalRecs.addAll(recs.filter { !it.url.contains("/shorts/") }) 
 
             return newTvSeriesLoadResponse(finalTitle, url, TvType.TvSeries, targetEpisodes) {
                 this.posterUrl = YoutubeUtils.getShortsSearchPoster(videoId)
                 this.plot = finalPlot
+                this.recommendations = finalRecs // 💡 추천 목록에 채널 아이템 적용 완료
                 
                 if (npTags.isNotEmpty()) this.tags = npTags
 
@@ -2338,7 +2340,6 @@ class YoutubeProvider(
                 }
             }
         }
-
         // ==========================================
         // 💡 1. [채널 에피소드 처리 블록]
         // ==========================================
