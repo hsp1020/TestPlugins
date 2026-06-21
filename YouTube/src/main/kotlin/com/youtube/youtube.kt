@@ -1968,6 +1968,47 @@ class YoutubeProvider(
     }
 
 
+    private fun extractEpisodesFromData(data: Map<String, Any>?, isShorts: Boolean): List<Episode> {
+        if (data == null) return emptyList()
+        val episodes = mutableListOf<Episode>()
+        var initialItems: List<*>? = null
+        val tabs = safeGet(data, "contents", "twoColumnBrowseResultsRenderer", "tabs") as? List<*>
+        if (tabs != null) {
+            val actualActiveTab = tabs.firstOrNull { tab ->
+                safeGet(tab, "tabRenderer", "selected") == true
+            }
+
+            val activeContent = safeGet(actualActiveTab, "tabRenderer", "content") as? Map<*, *>
+
+            if (activeContent?.containsKey("richGridRenderer") == true) {
+                initialItems = safeGet(activeContent, "richGridRenderer", "contents") as? List<*>
+            } else if (activeContent?.containsKey("gridRenderer") == true) {
+                initialItems = safeGet(activeContent, "gridRenderer", "items") as? List<*>
+            }
+
+            if (initialItems == null) {
+                for (tab in tabs) {
+                    val tabMap = tab as? Map<*, *>
+                    val tabRenderer = tabMap?.get("tabRenderer") as? Map<*, *>
+                    val tabContent = tabRenderer?.get("content") as? Map<*, *>
+                    if (tabContent?.containsKey("richGridRenderer") == true) {
+                        initialItems = safeGet(tabContent, "richGridRenderer", "contents") as? List<*>
+                        break
+                    }
+                    if (tabContent?.containsKey("gridRenderer") == true) {
+                        initialItems = safeGet(tabContent, "gridRenderer", "items") as? List<*>
+                        break
+                    }
+                }
+            }
+        }
+        
+        if (initialItems != null) {
+            extractVideosFromItems(initialItems, episodes, isShorts)
+        }
+        return episodes
+    }
+
     // 💡 클래스 수준으로 분리하여 컴파일 스코프 버그를 해결합니다.
     private fun findContinuationItemsRecursive(obj: Any?, depth: Int = 0): List<*>? {
         if (obj == null || depth > 32) return null
@@ -1997,7 +2038,7 @@ class YoutubeProvider(
         return null
     }
 
-    private fun extractVideosFromItems(items: List<*>, collectTo: MutableList<Episode>) {
+    private fun extractVideosFromItems(items: List<*>, collectTo: MutableList<Episode>, isShorts: Boolean) {
         items.forEachIndexed { index, item ->
             try {
                 val map = item as? Map<*, *>
@@ -2029,7 +2070,14 @@ class YoutubeProvider(
                             ?: YoutubeUtils.getBestThumbnail(safeGet(renderer, "contentImage", "image", "sources")) 
                             ?: YoutubeUtils.buildThumbnailFromId(vidId)
 
-                        collectTo.add(newEpisode("$mainUrl/watch?v=$vidId") {
+                        // 💡 쇼츠 유무에 따라 재생 URL 분기 처리
+                        val videoUrl = if (isShorts) {
+                            "$mainUrl/shorts/$vidId"
+                        } else {
+                            "$mainUrl/watch?v=$vidId"
+                        }
+
+                        collectTo.add(newEpisode(videoUrl) {
                             this.name = vidTitle
                             this.posterUrl = thumb
                             this.description = getEpisodeMetaString(renderer)
@@ -2042,6 +2090,8 @@ class YoutubeProvider(
         }
     }
 
+    
+  
     private fun findAllRenderers(obj: Any?, outRenderers: MutableList<Map<*, *>>, depth: Int = 0) {
         if (obj == null || depth > 32) return
         when (obj) {
@@ -2377,6 +2427,7 @@ class YoutubeProvider(
             }
         }
 
+        
         // ==========================================
         // 💡 2. [채널 에피소드 처리 블록]
         // ==========================================
@@ -2400,38 +2451,30 @@ class YoutubeProvider(
                     logError(e)
                 }
 
-                val channelUrl = "$cleanUrl/videos"
-                var response = app.get(channelUrl, interceptor = ytInterceptor)
-                var html = response.text
-                var data = extractYtInitialData(html)
-                    ?: throw ErrorLoadingException("Failed to extract channel data")
-
-                val tabsCheck = safeGet(data, "contents", "twoColumnBrowseResultsRenderer", "tabs") as? List<*>
-                val activeTab = tabsCheck?.firstOrNull { tab ->
-                    safeGet(tab, "tabRenderer", "selected") == true
-                }
-                
-                val endpointUrl = safeGet(activeTab, "tabRenderer", "endpoint", "commandMetadata", "webCommandMetadata", "url") as? String
-
-                if (endpointUrl != null && !endpointUrl.endsWith("/videos")) {
-                    val canonicalUrl = response.document.selectFirst("link[rel=canonical]")?.attr("href")
-                    if (!canonicalUrl.isNullOrBlank()) {
-                        val cleanCanonical = canonicalUrl.substringBefore("?").removeSuffix("/")
-                        if (!cleanCanonical.endsWith("/videos")) {
-                            val targetUrl = "$cleanCanonical/videos"
-                            response = app.get(targetUrl, interceptor = ytInterceptor)
-                            html = response.text
-                            val newData = extractYtInitialData(html)
-                            if (newData != null) {
-                                data = newData
-                            }
+                // ① 일반 영상(/videos)과 쇼츠(/shorts) 탭 데이터를 동시 병렬 요청
+                val (videosHtml, shortsHtml) = kotlinx.coroutines.coroutineScope {
+                    val videosDeferred = async {
+                        try {
+                            app.get("$cleanUrl/videos", interceptor = ytInterceptor).text
+                        } catch (e: Exception) {
+                            ""
                         }
                     }
+                    val shortsDeferred = async {
+                        try {
+                            app.get("$cleanUrl/shorts", interceptor = ytInterceptor).text
+                        } catch (e: Exception) {
+                            ""
+                        }
+                    }
+                    Pair(videosDeferred.await(), shortsDeferred.await())
                 }
 
-                val apiKey = YoutubeUtils.findConfig(html, "INNERTUBE_API_KEY")
-                val clientVersion = YoutubeUtils.findConfig(html, "INNERTUBE_CLIENT_VERSION") ?: YoutubeUtils.DEFAULT_CLIENT_VERSION
-                val visitorData = YoutubeUtils.findConfig(html, "VISITOR_DATA")
+                val videosData = extractYtInitialData(videosHtml)
+                val shortsData = extractYtInitialData(shortsHtml)
+
+                val data = videosData ?: shortsData ?: throw ErrorLoadingException("Failed to extract channel data")
+                val doc = org.jsoup.Jsoup.parse(videosHtml.ifBlank { shortsHtml })
 
                 val header = safeGet(data, "header", "c4TabbedHeaderRenderer")
                     ?: safeGet(data, "header", "pageHeaderRenderer")
@@ -2439,15 +2482,15 @@ class YoutubeProvider(
                 val title = extractTitle(safeGet(header, "title") as? Map<*, *>)
                     ?: extractTitle(safeGet(header, "pageTitle") as? Map<*, *>)
                     ?: safeGet(header, "content", "pageHeaderViewModel", "title", "dynamicTextViewModel", "text", "content") as? String
-                    ?: response.document.selectFirst("meta[property=og:title]")?.attr("content")
+                    ?: doc.selectFirst("meta[property=og:title]")?.attr("content")
                     ?: "YouTube Channel"
 
                 val poster = YoutubeUtils.getBestThumbnail(safeGet(header, "avatar"))
                     ?: YoutubeUtils.getBestThumbnail(safeGet(header, "content", "pageHeaderViewModel", "image", "decoratedAvatarViewModel", "avatar", "avatarViewModel", "image"))
-                    ?: response.document.selectFirst("meta[property=og:image]")?.attr("content")
+                    ?: doc.selectFirst("meta[property=og:image]")?.attr("content")
 
                 if (channelDescription.isBlank()) {
-                    channelDescription = response.document.selectFirst("meta[property=og:description]")?.attr("content") ?: ""
+                    channelDescription = doc.selectFirst("meta[property=og:description]")?.attr("content") ?: ""
                 }
 
                 var subscriberCount = ""
@@ -2480,93 +2523,38 @@ class YoutubeProvider(
                     videoCount = getText(safeGet(header, "videosCountText") ?: safeGet(header, "videoCountText"))
                 }
 
+                // ② 각각의 데이터 소스로부터 에피소드 목록 추출
+                val videosEpisodes = extractEpisodesFromData(videosData, isShorts = false)
+                val shortsEpisodes = extractEpisodesFromData(shortsData, isShorts = true)
+
                 val allEpisodes = mutableListOf<Episode>()
 
-                var initialItems: List<*>? = null
-                val tabs = safeGet(data, "contents", "twoColumnBrowseResultsRenderer", "tabs") as? List<*>
-                if (tabs != null) {
-                    val actualActiveTab = tabs.firstOrNull { tab ->
-                        safeGet(tab, "tabRenderer", "selected") == true
+                // ③ 요청하신 유무 조건에 따른 동적 시즌 배정 수행
+                if (videosEpisodes.isNotEmpty()) {
+                    // 일반 영상이 존재하는 경우 -> Videos=시즌1, Shorts=시즌2
+                    videosEpisodes.forEachIndexed { index, ep ->
+                        ep.season = 1
+                        ep.episode = index + 1
+                        allEpisodes.add(ep)
                     }
-
-                    val activeContent = safeGet(actualActiveTab, "tabRenderer", "content") as? Map<*, *>
-
-                    if (activeContent?.containsKey("richGridRenderer") == true) {
-                        initialItems = safeGet(activeContent, "richGridRenderer", "contents") as? List<*>
-                    } else if (activeContent?.containsKey("gridRenderer") == true) {
-                        initialItems = safeGet(activeContent, "gridRenderer", "items") as? List<*>
-                    }
-
-                    if (initialItems == null) {
-                        for (tab in tabs) {
-                            val tabMap = tab as? Map<*, *>
-                            val tabRenderer = tabMap?.get("tabRenderer") as? Map<*, *>
-                            val tabContent = tabRenderer?.get("content") as? Map<*, *>
-                            if (tabContent?.containsKey("richGridRenderer") == true) {
-                                initialItems = safeGet(tabContent, "richGridRenderer", "contents") as? List<*>
-                                break
-                            }
-                            if (tabContent?.containsKey("gridRenderer") == true) {
-                                initialItems = safeGet(tabContent, "gridRenderer", "items") as? List<*>
-                                break
-                            }
+                    if (shortsEpisodes.isNotEmpty()) {
+                        shortsEpisodes.forEachIndexed { index, ep ->
+                            ep.season = 2
+                            ep.episode = index + 1
+                            allEpisodes.add(ep)
                         }
                     }
-                }
-                
-                if (initialItems != null) {
-                    extractVideosFromItems(initialItems, allEpisodes)
-                }
-
-                fun findContinuationFromItems(items: List<*>?): String? {
-                    if (items == null) return null
-                    for (it in items) {
-                        val m = it as? Map<*, *> ?: continue
-                        val token = findTokenRecursive(m)
-                        if (!token.isNullOrBlank()) return token
-                    }
-                    return null
-                }
-
-                var currentToken: String? = findContinuationFromItems(initialItems)
-                if (currentToken.isNullOrBlank()) {
-                    val conts = findContinuationItemsRecursive(data)
-                    currentToken = findContinuationFromItems(conts)
-                }
-
-                var pagesFetchedLocal = 1
-                val maxPagesLimit = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
-
-                while (!currentToken.isNullOrBlank() && pagesFetchedLocal < maxPagesLimit && !apiKey.isNullOrBlank()) {
-                    try {
-                        pagesFetchedLocal += 1
-                        val apiUrl = "$mainUrl/youtubei/v1/browse?key=$apiKey"
-                        val payload = mapOf(
-                            "context" to mapOf(
-                                "client" to mapOf(
-                                    "clientName" to "WEB",
-                                    "clientVersion" to clientVersion,
-                                    "hl" to lang,
-                                    "gl" to "US",
-                                    "visitorData" to (visitorData ?: ""),
-                                    "platform" to "DESKTOP"
-                                )
-                            ),
-                            "continuation" to currentToken
-                        )
-                        val headers = mapOf("X-Youtube-Client-Name" to "WEB", "X-Youtube-Client-Version" to clientVersion)
-                        val jsonResponse = app.post(apiUrl, json = payload, headers = headers, interceptor = ytInterceptor).parsedSafe<Map<String, Any>>() ?: break
-                        val continuationItems = findContinuationItemsRecursive(jsonResponse) ?: break
-                        extractVideosFromItems(continuationItems, allEpisodes)
-                        currentToken = findContinuationFromItems(continuationItems)
-                    } catch (e: Exception) {
-                        break
+                } else if (shortsEpisodes.isNotEmpty()) {
+                    // 일반 영상이 없고 쇼츠만 존재하는 경우 -> Shorts=시즌1
+                    shortsEpisodes.forEachIndexed { index, ep ->
+                        ep.season = 1
+                        ep.episode = index + 1
+                        allEpisodes.add(ep)
                     }
                 }
 
                 return newTvSeriesLoadResponse(title, url, TvType.TvSeries, allEpisodes) {
                     this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
-                    
                     this.plot = channelDescription
 
                     val actorList = mutableListOf<ActorData>()
