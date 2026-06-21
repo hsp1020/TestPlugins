@@ -20,7 +20,7 @@ class YoutubeTokenPlugin: Plugin() {
 
             if (activity != null) {
 
-                com.youtube.YoutubeSettingsBottomSheet.show(activity.supportFragmentManager, sharedPref)
+                com.hsp1020.youtube.YoutubeSettingsBottomSheet.show(activity.supportFragmentManager, sharedPref)
             }
         }
     }
