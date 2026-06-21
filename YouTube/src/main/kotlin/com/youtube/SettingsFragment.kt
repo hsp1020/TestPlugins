@@ -146,6 +146,11 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
                 setOnPreferenceChangeListener { _, newValue ->
                     val langVal = newValue as String
                     
+                    // 💡 [수정] 현재 언어와 동일하다면 초기화 로직을 실행하지 않고 즉시 종료 (방어 코드)
+                    if (sharedPref.getString(KEY_LANGUAGE, "en") == langVal) {
+                        return@setOnPreferenceChangeListener true
+                    }
+                    
                     // 1. 양대 SharedPreferences 저장소에 새로운 언어 설정값 보관
                     sharedPref.edit().putString(KEY_LANGUAGE, langVal).apply()
                     defaultPrefs.edit().putString(KEY_LANGUAGE, langVal).apply()
