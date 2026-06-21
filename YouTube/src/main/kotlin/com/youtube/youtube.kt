@@ -2302,7 +2302,7 @@ class YoutubeProvider(
             }
 
             val finalTitle = "#$currentEpIndex $shortTitle".replace("##", "#")
-            val finalPlot = " "
+            val finalPlot = ""
 
             val finalRecs = mutableListOf<SearchResponse>()
             if (channelName.isNotBlank() && channelId.isNotBlank()) {
@@ -2318,7 +2318,7 @@ class YoutubeProvider(
 
             return newTvSeriesLoadResponse(finalTitle, url, TvType.TvSeries, targetEpisodes) {
                 this.posterUrl = YoutubeUtils.getShortsSearchPoster(videoId)
-                this.plot = finalPlot
+                this.plot = ""
                 this.recommendations = finalRecs 
                 
                 if (npTags.isNotEmpty()) this.tags = npTags
