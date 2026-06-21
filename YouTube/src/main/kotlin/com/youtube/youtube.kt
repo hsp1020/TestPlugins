@@ -2205,7 +2205,6 @@ class YoutubeProvider(
         }
     }
 
-
     override suspend fun load(url: String): LoadResponse {
         // ==========================================
         // 💡 1. [쇼츠 에피소드 처리 블록]
@@ -2289,7 +2288,8 @@ class YoutubeProvider(
                     })
                     var epCount = 2
                     recs.forEach { rec ->
-                        if (rec.url.contains("watch?v=") || rec.url.contains("/shorts/")) {
+                        // 💡 일반 동영상이 쇼츠 에피소드 목록에 유입되어 강제 재생되는 부작용을 막기 위해 오직 쇼츠(/shorts/)만 에피소드로 추가합니다.
+                        if (rec.url.contains("/shorts/")) {
                             val recVidId = YoutubeUtils.extractYoutubeId(rec.url)
                             val cleanName = rec.name.replaceFirst(Regex("^\\{.*?\\}\\s*"), "")
                             val recUrl = "$mainUrl/shorts/$recVidId?ctx=home"
@@ -2318,15 +2318,11 @@ class YoutubeProvider(
             var ep1Views = ""
             val foundRenderers = mutableListOf<Map<*, *>>()
             findAllRenderers(data, foundRenderers)
-            val primary = foundRenderers.firstOrNull { it.containsKey("viewCount") || it.containsKey("videoViewCountRenderer") }
-
-            if (primary != null) {
-                val viewCountRenderer = primary.getMapKey("videoViewCountRenderer")
-                val vCount = if (viewCountRenderer != null) {
-                    getText(viewCountRenderer.getMapKey("extraShortViewCount") ?: viewCountRenderer.getMapKey("viewCount"))
-                } else {
-                    getText(primary.getMapKey("viewCount"))
-                }
+            
+            // 💡 "shortViewCount" 키를 가진 노드를 식별하여 다국어 조회수 정보를 추출합니다.
+            val viewCountRenderer = foundRenderers.firstOrNull { it.containsKey("shortViewCount") }
+            if (viewCountRenderer != null) {
+                val vCount = getText(viewCountRenderer["shortViewCount"] ?: viewCountRenderer["viewCount"])
                 if (vCount.isNotBlank()) {
                     ep1Views = vCount.replace("\r", "").replace("\n", "").trim()
                 }
@@ -2345,7 +2341,7 @@ class YoutubeProvider(
             }
 
             val finalTitle = "#$currentEpIndex $shortTitle".replace("##", "#")
-            val finalPlot = "\u200b"
+            val finalPlot = npPlot.ifBlank { " " }
 
             val finalRecs = mutableListOf<SearchResponse>()
             if (channelName.isNotBlank() && channelId.isNotBlank()) {
@@ -2804,18 +2800,18 @@ class YoutubeProvider(
 
         val foundRenderers = mutableListOf<Map<*, *>>()
         findAllRenderers(data, foundRenderers)
-        val primary = foundRenderers.firstOrNull { it.containsKey("viewCount") || it.containsKey("videoViewCountRenderer") }
-
-        if (primary != null) {
-            val viewCountRenderer = primary.getMapKey("videoViewCountRenderer")
-            val vCount = if (viewCountRenderer != null) {
-                getText(viewCountRenderer.getMapKey("extraShortViewCount") ?: viewCountRenderer.getMapKey("viewCount"))
-            } else {
-                getText(primary.getMapKey("viewCount"))
-            }
+        
+        // 💡 "shortViewCount" 키를 가지고 있는 videoViewCountRenderer 맵을 식별하여 다국어 가공 조회수를 추출합니다.
+        val viewCountRenderer = foundRenderers.firstOrNull { it.containsKey("shortViewCount") }
+        if (viewCountRenderer != null) {
+            val vCount = getText(viewCountRenderer["shortViewCount"] ?: viewCountRenderer["viewCount"])
             if (vCount.isNotBlank()) ep1Views = vCount.replace("\r", "").replace("\n", "").trim()
-            
-            val dText = extractTitle(primary.getMapKey("dateText") as? Map<*, *>) ?: getText(primary.getMapKey("dateText"))
+        }
+
+        // 💡 "dateText" 키를 가지고 있는 videoPrimaryInfoRenderer 맵을 식별하여 다국어 가공 날짜를 추출합니다.
+        val primary = foundRenderers.firstOrNull { it.containsKey("dateText") }
+        if (primary != null) {
+            val dText = getText(primary["dateText"])
             if (dText.isNotBlank()) ep1Date = dText.replace("\r", "").replace("\n", "").trim()
         }
 
@@ -2879,7 +2875,7 @@ class YoutubeProvider(
             }
 
             if (subscriberCount.isNotBlank()) {
-                actorList.add(ActorData(Actor(subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/YouTube/Subscribe.jpg")))
+                this.actors = actorList
             }
 
             if (actorList.isNotEmpty()) {
@@ -2887,6 +2883,7 @@ class YoutubeProvider(
             }
         }
     }
+
     
     override suspend fun loadLinks(
         data: String,
