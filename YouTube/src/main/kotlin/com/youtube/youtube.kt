@@ -254,6 +254,14 @@ class YoutubeProvider(
         @JsonProperty("token") val token: String
     )
 
+    // 💡 [개선 사항 5] mainPage 동적 메모리 캐싱을 위한 휘발성 백필드 필드 구성
+    @Volatile
+    private var cachedMainPageList: List<MainPageData>? = null
+    @Volatile
+    private var lastLang: String? = null
+    @Volatile
+    private var lastCustomSectionsJson: String? = null
+
     override var mainUrl = "https://www.youtube.com"
     override var name = "YouTube"
     override val hasMainPage = true
@@ -275,7 +283,7 @@ class YoutubeProvider(
                 }
             }
         )
-
+        
         private val epMetaMapCache: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(128, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
@@ -868,7 +876,8 @@ class YoutubeProvider(
     private fun collectFromRenderer(
         renderer: Map<*, *>?,
         seenIds: MutableSet<String>,
-        playlistId: String? = null
+        playlistId: String? = null,
+        isSearch: Boolean // 💡 스레드 전용 보존 인자 추가
     ): SearchResponse? {
         if (renderer == null) return null
 
@@ -917,7 +926,7 @@ class YoutubeProvider(
                     watchUrl,
                     TvType.Movie
                 ) {
-                    this.posterUrl = if (isSearchContext) YoutubeUtils.getProxiedPoster(poster) else poster
+                    this.posterUrl = if (isSearch) YoutubeUtils.getProxiedPoster(poster) else poster
                 }
             }
             return null
@@ -958,11 +967,10 @@ class YoutubeProvider(
 
                 val poster = YoutubeUtils.getShortsSearchPoster(videoId)
 
-                val currentList = if (isSearchContext) searchShorts else homeShorts
-                val contextTag = if (isSearchContext) "&ctx=search" else "&ctx=home"
+                val currentList = if (isSearch) searchShorts else homeShorts
+                val contextTag = if (isSearch) "&ctx=search" else "&ctx=home"
                 val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
 
-                // 💡 [롤백] 쇼츠 에피소드 하단 플롯을 다시 조회수만 나오도록 롤백
                 val descText = views.replace("\r", "").replace("\n", "").trim()
                 if (descText.isNotBlank()) epMetaMapCache[videoId] = descText
                 
@@ -1030,7 +1038,7 @@ class YoutubeProvider(
                         "$mainUrl/$targetPath",
                         TvType.TvSeries
                     ) {
-                        this.posterUrl = if (isSearchContext) {
+                        this.posterUrl = if (isSearch) {
                             YoutubeUtils.getProxiedPosterBottom(poster)
                         } else {
                             YoutubeUtils.getProxiedPosterNormal(poster)
@@ -1068,13 +1076,12 @@ class YoutubeProvider(
                 if (metaString.isNotBlank()) epMetaMapCache[videoId] = metaString
 
                 if (isShorts) {
-                    val currentList = if (isSearchContext) searchShorts else homeShorts
-                    val contextTag = if (isSearchContext) "&ctx=search" else "&ctx=home"
+                    val currentList = if (isSearch) searchShorts else homeShorts
+                    val contextTag = if (isSearch) "&ctx=search" else "&ctx=home"
                     val finalUrl = "$mainUrl/shorts/$videoId$contextTag"
                     
                     poster = YoutubeUtils.getShortsSearchPoster(videoId)
                     
-                    // 💡 [롤백] 쇼츠 에피소드 하단 플롯을 다시 조회수만 나오도록 롤백
                     val descText = views.replace("\r", "").replace("\n", "").trim()
                     if (descText.isNotBlank()) epMetaMapCache[videoId] = descText
                     
@@ -1111,7 +1118,7 @@ class YoutubeProvider(
                         "$mainUrl/watch?v=$videoId",
                         TvType.Movie
                     ) {
-                        this.posterUrl = if (isSearchContext) {
+                        this.posterUrl = if (isSearch) {
                             YoutubeUtils.getProxiedPosterBottom(poster)
                         } else {
                             YoutubeUtils.getProxiedPosterNormal(poster)
@@ -1134,7 +1141,7 @@ class YoutubeProvider(
                     "$mainUrl/channel/$id",
                     TvType.Live
                 ) {
-                    this.posterUrl = if (isSearchContext) {
+                    this.posterUrl = if (isSearch) {
                         YoutubeUtils.getProxiedPosterBottom(poster)
                     } else {
                         YoutubeUtils.getProxiedPosterNormal(poster)
@@ -1144,19 +1151,19 @@ class YoutubeProvider(
         }
         return null
     }
-    
-   
+
     private fun processRecursive(
         data: Any?,
         outList: MutableList<SearchResponse>,
         seenIds: MutableSet<String>,
         playlistMode: Boolean,
+        isSearch: Boolean, // 💡 인자 전파 처리
         depth: Int = 0,
         playlistId: String? = null
     ) {
         if (data == null || depth > 32) return 
         if (data is Map<*, *>) {
-            val extracted = collectFromRenderer(data, seenIds, playlistId)
+            val extracted = collectFromRenderer(data, seenIds, playlistId, isSearch)
             if (extracted != null) {
                 if (!playlistMode || extracted.type == TvType.TvSeries) {
                     outList.add(extracted)
@@ -1169,24 +1176,25 @@ class YoutubeProvider(
             for (i in 0 until keysSize) {
                 val key = KEYS_TO_CHECK[i]
                 if (data.containsKey(key)) {
-                    processRecursive(data[key], outList, seenIds, playlistMode, depth + 1, playlistId)
+                    processRecursive(data[key], outList, seenIds, playlistMode, isSearch, depth + 1, playlistId)
                     foundContainer = true
                 }
             }
             if (!foundContainer) {
                 for (value in data.values) {
                     if (value is Map<*, *> || value is List<*>) {
-                        processRecursive(value, outList, seenIds, playlistMode, depth + 1, playlistId)
+                        processRecursive(value, outList, seenIds, playlistMode, isSearch, depth + 1, playlistId)
                     }
                 }
             }
         } else if (data is List<*>) {
             for (item in data) {
-                processRecursive(item, outList, seenIds, playlistMode, depth + 1, playlistId)
+                processRecursive(item, outList, seenIds, playlistMode, isSearch, depth + 1, playlistId)
             }
         }
     }
 
+    
     private fun extractBalancedJson(input: String): String? {
         var braceCount = 0
         var inString = false
@@ -1316,7 +1324,16 @@ class YoutubeProvider(
 
     override val mainPage: List<MainPageData>
         get() {
-            Log.d("YoutubeUtils", "[CHIP_DEBUG] mainPage - Invoked.")
+            val currentLang = lang
+            val currentCustomSectionsJson = appPrefs?.getString("custom_homepages_v3", "[]") ?: "[]"
+            val cached = cachedMainPageList
+            
+            // 캐시가 유효하고 언어 설정 및 섹션 설정 구성이 동일한 경우 인메모리 데이터를 즉각 반환 (O(1))
+            if (cached != null && currentLang == lastLang && currentCustomSectionsJson == lastCustomSectionsJson) {
+                return cached
+            }
+
+            Log.d("YoutubeUtils", "[CHIP_DEBUG] mainPage - Cache miss or config changed. Rebuilding MainPageData list.")
             val customSections = getCustomHomepages()
             val list = mutableListOf<MainPageData>()
 
@@ -1352,9 +1369,13 @@ class YoutubeProvider(
                 }
             }
 
+            // 동기화 시점 갱신 후 캐시에 보관
+            lastLang = currentLang
+            lastCustomSectionsJson = currentCustomSectionsJson
+            cachedMainPageList = list
             return list
         }
-
+        
     private fun getCustomHomepages(): List<CustomSection> {
         val json = appPrefs?.getString("custom_homepages_v3", "[]") ?: "[]"
         Log.d("YoutubeUtils", "[CHIP_DEBUG] getCustomHomepages - Raw custom_homepages_v3 JSON: $json")
@@ -1416,7 +1437,6 @@ class YoutubeProvider(
 
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        isSearchContext = false
         val rawRequestData = request.data
         val requestData = YoutubeUtils.urlDecode(rawRequestData)
         val maxPages = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
@@ -1444,7 +1464,6 @@ class YoutubeProvider(
                     val chipName: String?
                     var tokenToUse: String?
 
-                    // 💡 [해결책 1] 명칭 기반 칩 요청과 레거시 토큰 칩 요청 분기를 안전하게 처리하여Fallback 및 TokenToUse를 확보합니다.
                     if (requestData.startsWith("chip_name_")) {
                         chipName = requestData.removePrefix("chip_name_")
                         tokenToUse = cachedChips.find { it.name == chipName }?.token
@@ -1456,7 +1475,6 @@ class YoutubeProvider(
                         Log.d("YoutubeUtils", "[CHIP_DEBUG] token-based legacy chip request: oldToken = $oldToken, reverse-lookup name = $chipName")
                     }
 
-                    // 3. [실시간 칩 토큰 갱신] 식별에 성공했다면, 무캐시로 메인 페이지를 새로 긁어와 최신 토큰 정보를 매핑합니다.
                     if (!chipName.isNullOrBlank()) {
                         try {
                             val html = app.get(mainUrl, interceptor = ytInterceptor, headers = mapOf("Cache-Control" to "no-cache", "Pragma" to "no-cache")).text
@@ -1486,7 +1504,6 @@ class YoutubeProvider(
                                         }
                                     }
                                     
-                                    // 💡 [해결책 2] 오버라이트 코드 전량 제거 -> mergeAndSaveChips 메서드로 기존 칩 캐시를 보존 병합합니다.
                                     if (incomingChips.isNotEmpty()) {
                                         Log.d("YoutubeUtils", "[CHIP_DEBUG] merge and save chips on token-refresh block")
                                         mergeAndSaveChips(incomingChips)
@@ -1534,7 +1551,7 @@ class YoutubeProvider(
                                 ?: response["onResponseReceivedEndpoints"]
                                 ?: response["onResponseReceivedCommands"] 
                                 ?: response
-                            processRecursive(actions, results, seenIds, playlistMode = false)
+                            processRecursive(actions, results, seenIds, playlistMode = false, isSearch = false) // 💡 isSearch = false 전달
                             nextContinuation = findTokenRecursive(response)
                         }
                     }
@@ -1569,7 +1586,6 @@ class YoutubeProvider(
                                     }
                                 }
                                 
-                                // 💡 [해결책 3] 홈 새로고침 마스터 캐시 덮어쓰기 코드 전량 제거 -> mergeAndSaveChips로 안전하게 수렴합니다.
                                 if (incomingChips.isNotEmpty()) {
                                     Log.d("YoutubeUtils", "[CHIP_DEBUG] merge and save chips on main Home feed loading")
                                     mergeAndSaveChips(incomingChips)
@@ -1581,7 +1597,7 @@ class YoutubeProvider(
                             requestData.substringAfter("list=", "").substringBefore("&")
                         } else null
 
-                        processRecursive(initialData, results, seenIds, playlistMode = false, playlistId = playlistId)
+                        processRecursive(initialData, results, seenIds, playlistMode = false, isSearch = false, playlistId = playlistId) // 💡 isSearch = false 전달
                         nextContinuation = findTokenRecursive(initialData)
                     }
                 }
@@ -1600,7 +1616,6 @@ class YoutubeProvider(
                             emptyList<CachedChip>()
                         }
 
-                        // 💡 [해결책 4] 명칭 기반과 레거시 토큰 기반을 올바르게 판별하여 rawToken 정보를 정확하게 획득합니다.
                         val rawToken = if (requestData.startsWith("chip_name_")) {
                             val chipName = requestData.removePrefix("chip_name_")
                             cachedChips.find { it.name == chipName }?.token
@@ -1654,7 +1669,7 @@ class YoutubeProvider(
                                             requestData.substringAfter("list=", "").substringBefore("&")
                                         } else null
 
-                                        processRecursive(actions, results, seenIds, playlistMode = false, playlistId = playlistId)
+                                        processRecursive(actions, results, seenIds, playlistMode = false, isSearch = false, playlistId = playlistId) // 💡 isSearch = false 전달
                                         nextContinuation = findTokenRecursive(innerResponse)
                                     }
                                 }
@@ -1691,7 +1706,7 @@ class YoutubeProvider(
                             requestData.substringAfter("list=", "").substringBefore("&")
                         } else null
 
-                        processRecursive(actions, results, seenIds, playlistMode = false, playlistId = playlistId)
+                        processRecursive(actions, results, seenIds, playlistMode = false, isSearch = false, playlistId = playlistId) // 💡 isSearch = false 전달
                         nextContinuation = findTokenRecursive(response)
                     }
                 }
@@ -1732,10 +1747,12 @@ class YoutubeProvider(
 
         return newHomePageResponse(request, results, hasNext = !nextContinuation.isNullOrBlank())
     }
-
+    
+ 
     override suspend fun search(query: String): List<SearchResponse> {
         return search(query, 1)?.items ?: emptyList()
     }
+
 
     override suspend fun search(query: String, page: Int): SearchResponseList? {
         val maxPages = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
@@ -1744,7 +1761,6 @@ class YoutubeProvider(
         }
 
         val results = mutableListOf<SearchResponse>()
-        isSearchContext = true
         if (page == 1) {
             searchShorts.clear()
         }
@@ -1778,7 +1794,7 @@ class YoutubeProvider(
 
                 val initialData = extractYtInitialData(html)
                 if (initialData != null) {
-                    processRecursive(initialData, results, seenIds, playlistMode)
+                    processRecursive(initialData, results, seenIds, playlistMode, isSearch = true) // 💡 isSearch = true 전달
                     val localContToken = findTokenRecursive(initialData)
                     saveContinuationToken("search_token_$lang", localContToken)
                 }
@@ -1808,7 +1824,7 @@ class YoutubeProvider(
                             ?: response["onResponseReceivedEndpoints"]
                             ?: response["onResponseReceivedCommands"] 
                             ?: response
-                        processRecursive(actions, results, seenIds, playlistMode)
+                        processRecursive(actions, results, seenIds, playlistMode, isSearch = true) // 💡 isSearch = true 전달
                         val localContToken = findTokenRecursive(response)
                         saveContinuationToken("search_token_$lang", localContToken)
                     }
@@ -1819,7 +1835,7 @@ class YoutubeProvider(
             return newSearchResponseList(emptyList(), false)
         }
     }
-
+    
     private val collectedShorts = mutableListOf<Episode>()
 
     private fun addShortToCache(title: String, url: String, poster: String?) {
@@ -2713,6 +2729,7 @@ class YoutubeProvider(
         // ==========================================
         // 💡 4. [기본 에피소드(단일 비디오) 처리 블록]
         // ==========================================
+
         val videoId = YoutubeUtils.extractYoutubeId(url) ?: throw ErrorLoadingException("Invalid YouTube URL")
 
         epMetaMapCache.clear()
@@ -2721,11 +2738,35 @@ class YoutubeProvider(
         var npTags = emptyList<String>()
         var npActor: ActorData? = null
 
-        try {
-            val extractor = ServiceList.YouTube.getStreamExtractor(url)
-            extractor.fetchPage()
-            val info = StreamInfo.getInfo(extractor)
+        // 💡 비동기 coroutineScope 정의 및 두 무거운 대형 네트워크 요청을 동시 기동 (Parallel)
+        val pairResult = coroutineScope {
+            val npDeferred = async(Dispatchers.IO) {
+                try {
+                    val extractor = ServiceList.YouTube.getStreamExtractor(url)
+                    extractor.fetchPage()
+                    StreamInfo.getInfo(extractor)
+                } catch (e: Exception) {
+                    logError(e)
+                    null
+                }
+            }
 
+            val htmlDeferred = async(Dispatchers.IO) {
+                try {
+                    val headers = mapOf("Referer" to "https://www.youtube.com/")
+                    app.get(url, headers = headers, interceptor = ytInterceptor)
+                } catch (e: Exception) {
+                    logError(e)
+                    null
+                }
+            }
+            Pair(npDeferred.await(), htmlDeferred.await())
+        }
+
+        val info = pairResult.first
+        val response = pairResult.second
+
+        if (info != null) {
             npPlot = info.description.content.toString()
             npTags = info.tags?.take(10)?.toList() ?: emptyList()
 
@@ -2737,13 +2778,9 @@ class YoutubeProvider(
                     )
                 )
             }
-        } catch (e: Exception) {
-            logError(e) 
         }
 
-        val headers = mapOf("Referer" to "https://www.youtube.com/")
-        val response = app.get(url, headers = headers, interceptor = ytInterceptor)
-        val html = response.text
+        val html = response?.text ?: ""
         val data = extractYtInitialData(html)
         
         var title = "YouTube Video"
@@ -2798,10 +2835,11 @@ class YoutubeProvider(
 
             val secondaryResults = safeGet(data, "contents", "twoColumnWatchNextResults", "secondaryResults", "secondaryResults", "results")
             if (secondaryResults != null) {
-                processRecursive(secondaryResults, recommendations, seenRecIds, false)
+                // 💡 collectFromRenderer의 스레드 충돌을 피하기 위해 isSearch = false 인자 주입
+                processRecursive(secondaryResults, recommendations, seenRecIds, false, isSearch = false)
             }
 
-        } else {
+        } else if (response != null) {
             val doc = response.document
             title = doc.selectFirst("meta[property=og:title]")?.attr("content") ?: title
             poster = doc.selectFirst("meta[property=og:image]")?.attr("content") ?: poster
@@ -2813,7 +2851,6 @@ class YoutubeProvider(
         if (channelName.isNotBlank() && channelId.isNotBlank()) {
             val channelUrlFull = if (channelId.startsWith("UC") || channelId.startsWith("@")) "$mainUrl/channel/$channelId" else "$mainUrl/$channelId"
             val channelCard = newMovieSearchResponse(channelName, channelUrlFull, TvType.Live) {
-                // 💡 [수정] 기본 영상 추천 채널 카드에 wsrv.nl 프록시 적용
                 this.posterUrl = YoutubeUtils.getProxiedPoster(channelAvatar) 
             }
             recommendations.add(0, channelCard)
@@ -2837,25 +2874,23 @@ class YoutubeProvider(
         val foundRenderers = mutableListOf<Map<*, *>>()
         findAllRenderers(data, foundRenderers)
         
-        // 💡 "shortViewCount" 키를 가지고 있는 videoViewCountRenderer 맵을 식별하여 다국어 가공 조회수를 추출합니다.
         val viewCountRenderer = foundRenderers.firstOrNull { it.containsKey("shortViewCount") }
         if (viewCountRenderer != null) {
             val vCount = getText(viewCountRenderer["shortViewCount"] ?: viewCountRenderer["viewCount"])
             if (vCount.isNotBlank()) ep1Views = vCount.replace("\r", "").replace("\n", "").trim()
         }
 
-        // 💡 "dateText" 키를 가지고 있는 videoPrimaryInfoRenderer 맵을 식별하여 다국어 가공 날짜를 추출합니다.
         val primary = foundRenderers.firstOrNull { it.containsKey("dateText") }
         if (primary != null) {
             val dText = getText(primary["dateText"])
             if (dText.isNotBlank()) ep1Date = dText.replace("\r", "").replace("\n", "").trim()
         }
 
-        if (ep1Views.isBlank()) {
+        if (ep1Views.isBlank() && html.isNotEmpty()) {
             val viewMatch = VIEW_COUNT_REGEX.find(html)
             if (viewMatch != null) ep1Views = viewMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
         }
-        if (ep1Date.isBlank()) {
+        if (ep1Date.isBlank() && html.isNotEmpty()) {
             val dateMatch = PUBLISH_DATE_REGEX.find(html)
             if (dateMatch != null) ep1Date = dateMatch.groupValues[1].replace("\r", "").replace("\n", "").trim()
         }
@@ -2919,7 +2954,6 @@ class YoutubeProvider(
             }
         }
     }
-
     
     override suspend fun loadLinks(
         data: String,
