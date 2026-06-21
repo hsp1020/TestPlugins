@@ -2501,6 +2501,7 @@ class YoutubeProvider(
                     return null
                 }
 
+                // 변경 적용할 fetchTab 개선 세부 로직
                 suspend fun fetchTab(tabUrl: String): List<Episode> {
                     val tabEpisodes = mutableListOf<Episode>()
                     try {
@@ -2510,16 +2511,34 @@ class YoutubeProvider(
                         var initialItems: List<*>? = null
                         val tabs = safeGet(tabData, "contents", "twoColumnBrowseResultsRenderer", "tabs") as? List<*>
                         if (tabs != null) {
-                            val actualActiveTab = tabs.firstOrNull { tab ->
+                            // 1단계. 현재 요청한 탭의 타깃 식별자(경로)를 분석합니다.
+                            val targetPath = when {
+                                tabUrl.endsWith("/videos") -> "/videos"
+                                tabUrl.endsWith("/shorts") -> "/shorts"
+                                else -> ""
+                            }
+
+                            // 2단계. 탭 오브젝트들 중에서 webCommandMetadata URL 주소가 현재 요구한 타깃 경로와 매칭되는 탭을 찾습니다.
+                            val matchingTab = tabs.firstOrNull { tab ->
+                                val commandUrl = safeGet(tab, "tabRenderer", "endpoint", "commandMetadata", "webCommandMetadata", "url") as? String
+                                commandUrl != null && targetPath.isNotEmpty() && commandUrl.endsWith(targetPath)
+                            }
+
+                            // 3단계. 일치하는 올바른 탭이 있다면 그것을 사용하고, 없다면 selected 상태인 기본 탭을 fallback으로 삼습니다.
+                            val tabToUse = matchingTab ?: tabs.firstOrNull { tab ->
                                 safeGet(tab, "tabRenderer", "selected") == true
                             }
-                            val activeContent = safeGet(actualActiveTab, "tabRenderer", "content") as? Map<*, *>
+
+                            val activeContent = safeGet(tabToUse, "tabRenderer", "content") as? Map<*, *>
                             if (activeContent?.containsKey("richGridRenderer") == true) {
                                 initialItems = safeGet(activeContent, "richGridRenderer", "contents") as? List<*>
                             } else if (activeContent?.containsKey("gridRenderer") == true) {
                                 initialItems = safeGet(activeContent, "gridRenderer", "items") as? List<*>
                             }
-                            if (initialItems == null) {
+
+                            // 4단계. 특정 미디어 타입(/videos 또는 /shorts)을 요청했으나 유효한 매칭 탭의 콘텐츠를 얻지 못했다면,
+                            // 타 탭(쇼츠 등)의 데이터를 무분별하게 긁어오는 무조건적 루프 폴백 동작을 원천 차단합니다.
+                            if (initialItems == null && targetPath.isEmpty()) {
                                 for (tab in tabs) {
                                     val tabMap = tab as? Map<*, *>
                                     val tabRenderer = tabMap?.get("tabRenderer") as? Map<*, *>
@@ -2578,7 +2597,7 @@ class YoutubeProvider(
                     }
                     return tabEpisodes
                 }
-
+                
                 val pair: Pair<List<Episode>, List<Episode>> = kotlinx.coroutines.coroutineScope {
                     val videosDeferred = async { fetchTab("$cleanUrl/videos") }
                     val shortsDeferred = async { fetchTab("$cleanUrl/shorts") }
