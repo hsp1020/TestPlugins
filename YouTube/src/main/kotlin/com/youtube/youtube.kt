@@ -2300,12 +2300,10 @@ class YoutubeProvider(
                     }
                 }
 
-                // 💡 [개선 1] NewPipe API로 채널 플롯 다국어(앱 설정 언어) 및 줄바꿈 완벽하게 가져오기
+                // 💡 [수정] 불필요한 다국어 주입을 완전히 제거하고 순수하게 줄바꿈 복원용으로만 사용
                 var npChannelPlot = ""
                 try {
                     val cExtractor = org.schabi.newpipe.extractor.ServiceList.YouTube.getChannelExtractor(cleanUrl)
-                    // 국가 매핑(ContentCountry) 삭제, 순수하게 언어(lang)만 심플하게 주입
-                    cExtractor.forceContentLanguage(org.schabi.newpipe.extractor.localization.ContentLanguage(lang))
                     cExtractor.fetchPage()
                     npChannelPlot = cExtractor.description ?: ""
                 } catch(e: Exception) { logError(e) }
@@ -2475,7 +2473,6 @@ class YoutubeProvider(
                 return newTvSeriesLoadResponse(title, url, TvType.TvSeries, allEpisodes) {
                     this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
                     
-                    // 💡 [개선 1 반영] NewPipe에서 줄바꿈 채로 가져온 플롯 우선 적용
                     this.plot = npChannelPlot.ifBlank { channelDescription }
 
                     val actorList = mutableListOf<ActorData>()
@@ -2594,14 +2591,12 @@ class YoutubeProvider(
         try {
             val extractor = org.schabi.newpipe.extractor.ServiceList.YouTube.getStreamExtractor(url)
             
-            // 💡 국가 설정 삭제 후 심플하게 언어(lang) 하나만 매핑
             extractor.forceContentLanguage(org.schabi.newpipe.extractor.localization.ContentLanguage(lang))
             extractor.fetchPage()
             val info = org.schabi.newpipe.extractor.stream.StreamInfo.getInfo(extractor)
 
             npPlot = info.description.content.toString()
             
-            // 💡 [개선 2] 태그 10개로 증가
             npTags = info.tags?.take(10)?.toList() ?: emptyList() 
 
             info.uploaderName?.takeIf { it.isNotBlank() }?.let { uploader ->
@@ -2796,7 +2791,6 @@ class YoutubeProvider(
         }
     }
 
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -2868,5 +2862,6 @@ class YoutubeProvider(
         return true
     }
 }
+
 
     
