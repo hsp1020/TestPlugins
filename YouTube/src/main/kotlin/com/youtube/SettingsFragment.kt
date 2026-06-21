@@ -493,6 +493,15 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
         private lateinit var adapter: CustomSectionsAdapter
         private var sectionsList = mutableListOf<CustomSection>()
 
+        // 1. 다이얼로그 라이프사이클에 바인딩된 관리형 코루틴 스코프 생성
+        private val dialogScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+
+        override fun onDestroyView() {
+            super.onDestroyView()
+            // 2. 다이얼로그 폐기 시 실행 중이던 모든 타이틀 파싱 Job을 강제로 해제하여 누수 방지
+            dialogScope.cancel()
+        }
+
         override fun onCreateView(
             inflater: LayoutInflater,
             container: ViewGroup?,
@@ -637,7 +646,7 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
 
             val inputUrl = createInput(Loc.getString(sharedPref, "url_hint"), existingItem?.url ?: "")
 
-            var fetchJob: kotlinx.coroutines.Job? = null
+            var fetchJob: Job? = null
             inputUrl.addTextChangedListener(object : android.text.TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
@@ -647,22 +656,22 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
 
                     if (url.startsWith("http") && url.contains("youtube") && inputName.text.isBlank()) {
                         loadingIndicator.visibility = View.VISIBLE
-                        fetchJob = kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                        // GlobalScope를 dialogScope로 변경해 누수 우회 차단
+                        fetchJob = dialogScope.launch {
                             try {
-                                val response = com.lagradost.cloudstream3.app.get(url).text
-                                val doc = org.jsoup.Jsoup.parse(response)
-                                var title = doc.selectFirst("meta[property=og:title]")?.attr("content")
+                                val response = withContext(Dispatchers.IO) {
+                                    app.get(url).text
+                                }
+                                val doc = Jsoup.parse(response)
+                                val title = doc.selectFirst("meta[property=og:title]")?.attr("content")
                                     ?.replace(" - YouTube", "")
-                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                                    if (!title.isNullOrBlank()) {
-                                        inputName.setText(title)
-                                    }
-                                    loadingIndicator.visibility = View.GONE
+                                if (!title.isNullOrBlank()) {
+                                    inputName.setText(title)
                                 }
                             } catch (e: Exception) {
-                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                                    loadingIndicator.visibility = View.GONE
-                                }
+                                // Task 취소 또는 통신 장애 대응
+                            } finally {
+                                loadingIndicator.visibility = View.GONE
                             }
                         }
                     }
@@ -848,8 +857,7 @@ class YoutubeSettingsBottomSheet(private val sharedPref: SharedPreferences) : Bo
             override fun getItemCount(): Int = sectionsList.size
         }
     }
-
-
+    
 
     class WebViewCaptureDialog(
         private val sharedPref: SharedPreferences,
