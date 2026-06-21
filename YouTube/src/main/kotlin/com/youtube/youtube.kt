@@ -2248,7 +2248,7 @@ class YoutubeProvider(
             val finalPlot = buildString {
                 append(shortTitle)
                 if (shortPlot.isNotBlank()) {
-                    append("\n\n$shortPlot")
+                    append(" • $shortPlot")
                 }
             }
 
@@ -2501,7 +2501,7 @@ class YoutubeProvider(
                             append(" (${playlistMeta.subscriberCount})")
                         }
                         if (description.isNotBlank()) {
-                            append("\n\n$description")
+                            append(" • $description")
                         }
                     }
                     this.plot = finalDescription
@@ -2548,7 +2548,7 @@ class YoutubeProvider(
                     if (!t.isNullOrBlank()) title = t
 
                     val dateText = extractTitle(primary["dateText"] as? Map<*, *>)
-                    if (!dateText.isNullOrBlank()) plot += "$dateText\n\n"
+                    if (!dateText.isNullOrBlank()) plot += "$dateText • "
                 }
 
                 val secondary = m?.get("videoSecondaryInfoRenderer") as? Map<*, *>
