@@ -2768,18 +2768,9 @@ class YoutubeProvider(
                 val seenPlaylistIds = mutableSetOf<String>()
                 val episodes = extractPlaylistEpisodes(data, seenPlaylistIds).toMutableList()
 
-                val isMix = url.contains("list=RD") || url.contains("list=MM") || url.contains("list=UL")
-                if (isMix) {
-                    val firstChannel = episodes.firstOrNull()?.description?.split("•")?.getOrNull(1)?.trim()
-                    if (!firstChannel.isNullOrBlank()) {
-                        title = "Mix - $firstChannel"
-                    } else if (title.contains("YouTube Mix") || title.contains("Mix")) {
-                        title = "YouTube Mix"
-                    }
-                }
-
+                // 원래 제목을 그대로 사용하되, 뒤에 붙은 너저분한 (Mix Playlist) 문자열만 정리해 줍니다.
                 title = YoutubeUtils.cleanMixTitle(title)
-
+                
                 episodes.forEachIndexed { index, ep ->
                     ep.episode = index + 1
                 }
