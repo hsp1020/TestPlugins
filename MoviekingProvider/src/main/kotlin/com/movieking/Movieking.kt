@@ -18,7 +18,7 @@ class MovieKing : MainAPI() {
         private val domainMutex = Mutex()
         private const val PREFS_NAME = "MovieKing_Domain_Cache"
         private const val PREF_KEY = "current_domain"
-        private const val PORTAL_URL = "https://xn--2z1bw8g20f.com" 
+        private const val PORTAL_URL = "https://linkroom.top" 
 
         fun saveDomain(newDomain: String) {
             currentMainUrl = newDomain
@@ -86,20 +86,37 @@ class MovieKing : MainAPI() {
             } catch (e: Exception) {}
 
             try {
-                println("[MovieKing DBG] 🕵️ 대피소 포털 스크래핑 시도")
-                val portalDoc = app.get(PORTAL_URL, timeout = 10L).document
-                val latestUrl = portalDoc.select("a").firstOrNull { 
-                    it.text().contains("무비킹") || it.attr("href").contains("mvking") || it.attr("href").contains("movieking")
-                }?.attr("href")?.trimEnd('/')
+                println("[MovieKing DBG] 🕵️ 링크룸 대피소 포털 스크래핑 시도")
+                // 1단계: 링크룸 메인페이지 호출
+                val mainDoc = app.get(PORTAL_URL, timeout = 10L).document
+                
+                // 2단계: 정확히 "무비킹" 텍스트를 가진 상세페이지 상대 경로 탐색
+                val relativePath = mainDoc.select("a").firstOrNull { 
+                    it.text().trim() == "무비킹" 
+                }?.attr("href")
 
-                if (!latestUrl.isNullOrBlank()) {
-                    val newTarget = if (latestUrl.startsWith("http")) latestUrl else "https://$latestUrl"
-                    println("[MovieKing DBG] ✨ 대피소 파싱 성공: $newTarget")
-                    saveDomain(newTarget)
-                    mainUrl = currentMainUrl
-                    isDomainChecked = true; return@withLock
+                if (!relativePath.isNullOrBlank()) {
+                    val detailUrl = if (relativePath.startsWith("http")) relativePath else "$PORTAL_URL$relativePath"
+                    println("[MovieKing DBG] 📂 무비킹 상세페이지 주소 발견: $detailUrl")
+                    
+                    // 3단계: 상세페이지 호출
+                    val detailDoc = app.get(detailUrl, timeout = 10L).document
+                    
+                    // 4단계: 상세페이지 리스트 중 최신주소에 할당된 최종 도메인 추출
+                    val latestUrl = detailDoc.selectFirst("ul.paybody-zbinfo span.data a")?.attr("href")?.trimEnd('/')
+                        ?: detailDoc.selectFirst("ul.paybody-zbinfo a")?.attr("href")?.trimEnd('/')
+
+                    if (!latestUrl.isNullOrBlank()) {
+                        val newTarget = if (latestUrl.startsWith("http")) latestUrl else "https://$latestUrl"
+                        println("[MovieKing DBG] ✨ 링크룸 대피소 최종 도메인 파싱 성공: $newTarget")
+                        saveDomain(newTarget)
+                        mainUrl = currentMainUrl
+                        isDomainChecked = true; return@withLock
+                    }
                 }
-            } catch (e: Exception) { println("[MovieKing DBG] ❌ 대피소 파싱 실패") }
+            } catch (e: Exception) { 
+                println("[MovieKing DBG] ❌ 링크룸 대피소 파싱 실패: ${e.message}") 
+            }
             
             isDomainChecked = true 
         }
@@ -159,15 +176,15 @@ class MovieKing : MainAPI() {
             val decodedRequestData = URLDecoder.decode(request.data, "UTF-8").substringBefore("?")
             val decodedFinalUrl = URLDecoder.decode(finalUrl, "UTF-8")
 
-            if (redirectedDomain != mainUrl || !decodedFinalUrl.contains(decodedRequestData)) {
-                if (redirectedDomain != mainUrl) {
-                    println("[MovieKing DBG] 🔄 메인페이지 로드 중 리다이렉트 감지: $redirectedDomain")
-                    saveDomain(redirectedDomain)
-                    mainUrl = currentMainUrl
+                if (redirectedDomain != mainUrl || !decodedFinalUrl.contains(decodedRequestData)) {
+                    if (redirectedDomain != mainUrl) {
+                        println("[MovieKing DBG] 🔄 메인페이지 로드 중 리다이렉트 감지: $redirectedDomain")
+                        saveDomain(redirectedDomain)
+                        mainUrl = currentMainUrl
+                    }
+                    url = "$mainUrl${request.data}${separator}page=$page"
+                    res = app.get(url, headers = commonHeaders)
                 }
-                url = "$mainUrl${request.data}${separator}page=$page"
-                res = app.get(url, headers = commonHeaders)
-            }
 
             val doc = res.document
             val list = doc.select(".video-card").mapNotNull { it.toSearchResponse(request.name) }
