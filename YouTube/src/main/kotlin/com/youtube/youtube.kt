@@ -2768,16 +2768,7 @@ class YoutubeProvider(
                 val seenPlaylistIds = mutableSetOf<String>()
                 val episodes = extractPlaylistEpisodes(data, seenPlaylistIds).toMutableList()
 
-                val isMix = url.contains("list=RD") || url.contains("list=MM") || url.contains("list=UL")
-                if (isMix) {
-                    val firstChannel = episodes.firstOrNull()?.description?.split("•")?.getOrNull(1)?.trim()
-                    if (!firstChannel.isNullOrBlank()) {
-                        title = "Mix - $firstChannel"
-                    } else if (title.contains("YouTube Mix") || title.contains("Mix")) {
-                        title = "YouTube Mix"
-                    }
-                }
-
+                
                 title = YoutubeUtils.cleanMixTitle(title)
 
                 episodes.forEachIndexed { index, ep ->
