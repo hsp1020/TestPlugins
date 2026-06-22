@@ -221,7 +221,7 @@ class Streamed() : MainAPI() {
 
         val sourcesCount = match.sources?.size ?: 0
         val finalDescription = if (sourcesCount > 1) {
-            "$description<br>Available sources: $sourcesCount"
+            "$description<br><br>Available sources: $sourcesCount"
         } else {
             description
         }
