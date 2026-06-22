@@ -1045,8 +1045,8 @@ open class YoutubeExtractor : ExtractorApi() {
 
         val context = com.lagradost.cloudstream3.AcraApplication.context
         val provider = com.lagradost.cloudstream3.APIHolder.allProviders.find { it.name == "YouTube" }
-        val prefs = (provider as? com.hsp1020.youtube.YoutubeProvider)?.appPrefs 
-            ?: context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
+        
+        val prefs = context?.let { androidx.preference.PreferenceManager.getDefaultSharedPreferences(it) }
             
         val langCode = prefs?.getString("youtube_language", "en") ?: "en"
         val downloaderType = prefs?.getString("downloader_app_type", "none") ?: "none"
