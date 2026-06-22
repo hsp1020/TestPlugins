@@ -631,7 +631,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         "utcOffsetMinutes" to 0,
                         "timeZone" to "UTC",
                         "hl" to langCode,
-                        "gl" to if (langCode == "ko") "KR" else "US",
                         "userAgent" to SAFARI_USER_AGENT,
                         "clientName" to "WEB",
                         "clientVersion" to SAFARI_CLIENT_VERSION
@@ -702,7 +701,6 @@ open class YoutubeExtractor : ExtractorApi() {
                         "deviceMake" to "Oculus",
                         "deviceModel" to "Quest 3",
                         "hl" to langCode,
-                        "gl" to if (langCode == "ko") "KR" else "US",
                         "visitorData" to visitorData
                     )
                 ),
