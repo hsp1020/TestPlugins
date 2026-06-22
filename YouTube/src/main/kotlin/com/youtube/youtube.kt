@@ -2012,28 +2012,34 @@ class YoutubeProvider(
 
                         var metaString = getEpisodeMetaString(renderer)
                         if (metaString.isBlank()) {
+                            // 1단계: 쇼츠 오버레이 메타데이터 텍스트에서 조회수 추출 시도
                             var viewRaw = getText(safeGet(renderer, "overlayMetadata", "secondaryText"))
+                            
+                            // 2단계: 표준 뷰카운트 필드들에서 조회수 추출 시도
                             if (viewRaw.isBlank()) {
                                 viewRaw = getText(renderer["viewCountText"] ?: renderer["shortViewCountText"])
                             }
+                            
+                            // 3단계: 락업 메타데이터 뷰카운트 전용 데이터에서 추출 시도
                             if (viewRaw.isBlank()) {
-                                val accessibilityText = renderer["accessibilityText"] as? String ?: ""
-                                if (accessibilityText.isNotBlank()) {
-                                    val segments = accessibilityText.split(",")
-                                    for (seg in segments) {
-                                        val trimmed = seg.trim()
-                                        if (trimmed.contains("views", ignoreCase = true) || 
-                                            trimmed.contains("조회", ignoreCase = true) || 
-                                            trimmed.contains("회", ignoreCase = true)) {
-                                            viewRaw = trimmed.replace("– play Short", "", ignoreCase = true)
-                                                             .replace("- play Short", "", ignoreCase = true)
-                                                             .trim()
-                                            break
-                                        }
-                                    }
-                                }
+                                viewRaw = getText(safeGet(renderer, "metadata", "lockupMetadataViewModel", "viewCount"))
                             }
-                            metaString = viewRaw.ifBlank { "N/A" }
+                            
+                            // 4단계: 구조화된 메타데이터 행(metadataRows)에서 조회수 조각 추출 시도
+                            if (viewRaw.isBlank()) {
+                                try {
+                                    val rows = safeGet(renderer, "metadata", "lockupMetadataViewModel", "metadata", "contentMetadataViewModel", "metadataRows") as? List<*>
+                                    val firstRow = rows?.firstOrNull()
+                                    val parts = safeGet(firstRow, "metadataParts") as? List<*>
+                                    val firstPart = parts?.firstOrNull()
+                                    if (firstPart != null) {
+                                        viewRaw = getText(safeGet(firstPart, "text"))
+                                    }
+                                } catch (_: Exception) {}
+                            }
+                            
+                            // [개선] 지저분한 "N/A" 대신, 데이터 수집 실패 시 완전히 빈 칸("")을 내려보내 UI 설명란을 숨깁니다.
+                            metaString = viewRaw.stripWhitespace().ifBlank { "\u200b" }
                         }
 
                         collectTo.add(newEpisode("$mainUrl/watch?v=$vidId") {
