@@ -2475,12 +2475,11 @@ class YoutubeProvider(
                     val rawDesc = (channelExtractor.description ?: "").replace("\n", "<br>")
                     
                     // 설명이 존재하는 경우에만 앞에 [NewPipe] 태그를 붙여 저장합니다.
-                    channelDescription = if (rawDesc.isNotBlank()) "[NewPipe] $rawDesc" else "\u200b"
+                    channelDescription = channelExtractor.description ?: "\u200b"
                 } catch (e: Exception) {
                     logError(e)
                 }
-                
-                
+
                 val header = safeGet(data, "header", "c4TabbedHeaderRenderer")
                     ?: safeGet(data, "header", "pageHeaderRenderer")
 
@@ -2494,11 +2493,10 @@ class YoutubeProvider(
                     ?: YoutubeUtils.getBestThumbnail(safeGet(header, "content", "pageHeaderViewModel", "image", "decoratedAvatarViewModel", "avatar", "avatarViewModel", "image"))
                     ?: response.document.selectFirst("meta[property=og:image]")?.attr("content")
 
-                // 예외 상황 등으로 인해 문자열이 비어있는 상태라면 빈 공간 폭(\u200b) 문자로 최종 치환합니다.
                 if (channelDescription.isBlank()) {
                     channelDescription = "\u200b"
                 }
-                
+
                 var subscriberCount = ""
                 var videoCount = ""
                 val metaParts = mutableListOf<String>()
