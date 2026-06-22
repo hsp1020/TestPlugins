@@ -893,12 +893,12 @@ class YoutubeProvider(
                     .ifBlank { getText(videoData.getMapKey("longBylineText")) }
 
                 val views = viewText.ifBlank { "N/A" }
-                
+
                 val finalTitle = when {
-                    channel.isNotBlank() && views.isNotBlank() && views != "N/A" -> "{$channel | $views} $title"
-                    channel.isNotBlank() -> "{$channel} $title"
-                    views.isNotBlank() && views != "N/A" && dateText.isNotBlank() -> "{$views | $dateText} $title"
-                    views.isNotBlank() && views != "N/A" -> "{$views} $title"
+                    channel.isNotBlank() && views.isNotBlank() && views != "N/A" -> "[$channel | $views] $title"
+                    channel.isNotBlank() -> "[$channel] $title"
+                    views.isNotBlank() && views != "N/A" && dateText.isNotBlank() -> "[$views | $dateText] $title"
+                    views.isNotBlank() && views != "N/A" -> "[$views] $title"
                     else -> title
                 }
                 
@@ -975,7 +975,8 @@ class YoutubeProvider(
                 if (actualIndex > 0) currentList[actualIndex - 1].episode = actualIndex
                 val displayIndex = if (actualIndex > 0) actualIndex else currentList.size
 
-                val finalTitle = "#$displayIndex {Short | $views} $title"
+                val finalTitle = "#$displayIndex [Short | $views] $title"
+                
                 return newMovieSearchResponse(finalTitle, finalUrl, TvType.Movie) {
                     this.posterUrl = poster
                 }
@@ -1083,7 +1084,7 @@ class YoutubeProvider(
                     if (actualIndex > 0) currentList[actualIndex - 1].episode = actualIndex
                     val displayIndex = if (actualIndex > 0) actualIndex else currentList.size
 
-                    finalTitle = "#$displayIndex [Shorts] {Short | $views} $title"
+                    finalTitle = "#$displayIndex [Shorts] [Short | $views] $title"
                     return newMovieSearchResponse(
                         finalTitle,
                         finalUrl,
@@ -1091,10 +1092,10 @@ class YoutubeProvider(
                     ) { this.posterUrl = poster }
                 } else {
                     finalTitle = when {
-                        channel.isNotBlank() && views.isNotBlank() -> "{$channel | $views} $title"
-                        channel.isNotBlank() -> "{$channel} $title"
-                        views.isNotBlank() && date.isNotBlank() -> "{$views | $date} $title"
-                        views.isNotBlank() -> "{$views} $title"
+                        channel.isNotBlank() && views.isNotBlank() -> "[$channel | $views] $title"
+                        channel.isNotBlank() -> "[$channel] $title"
+                        views.isNotBlank() && date.isNotBlank() -> "[$views | $date] $title"
+                        views.isNotBlank() -> "[$views] $title"
                         else -> title
                     }
                     poster = YoutubeUtils.getBestThumbnail(
@@ -2326,7 +2327,7 @@ class YoutubeProvider(
                     recs.forEach { rec ->
                         if (rec.url.contains("/shorts/")) {
                             val recVidId = YoutubeUtils.extractYoutubeId(rec.url)
-                            val cleanName = rec.name.replaceFirst(Regex("^\\{.*?\\}\\s*"), "")
+                            val cleanName = rec.name.replaceFirst(Regex("^\\[.*?\\]\\s*"), "")
                             val recUrl = "$mainUrl/shorts/$recVidId?ctx=home"
                             recEpisodes.add(newEpisode(recUrl) {
                                 this.name = cleanName
@@ -2395,7 +2396,7 @@ class YoutubeProvider(
             val episodeResponses = targetEpisodes.map { ep ->
                 val desc = ep.description ?: ""
                 val formattedTitle = if (desc.isNotBlank() && desc != "N/A" && !desc.contains("Playing")) {
-                    "#${ep.episode} {Short | $desc} ${ep.name}"
+                    "#${ep.episode} [Short | $desc] ${ep.name}"
                 } else {
                     "#${ep.episode} ${ep.name}"
                 }
@@ -2403,7 +2404,8 @@ class YoutubeProvider(
                 newMovieSearchResponse(formattedTitle, ep.data, TvType.Movie) {
                     this.posterUrl = ep.posterUrl
                 }
-            }
+            }            
+            
             finalRecs.addAll(episodeResponses)
 
             return newTvSeriesLoadResponse(finalTitle, url, TvType.TvSeries, targetEpisodes) {
@@ -2948,8 +2950,7 @@ class YoutubeProvider(
             if (rec.url.contains("watch?v=") || rec.url.contains("/shorts/")) {
                 val recVidId = YoutubeUtils.extractYoutubeId(rec.url)
                 val extraMeta = if (recVidId != null) epMetaMapCache[recVidId] else ""
-                
-                var cleanName = rec.name.replaceFirst(Regex("^\\{.*?\\}\\s*"), "")
+                var cleanName = rec.name.replaceFirst(Regex("^\\[.*?\\]\\s*"), "")
 
                 episodes.add(newEpisode(rec.url) {
                     this.name = cleanName
