@@ -984,7 +984,7 @@ class YoutubeProvider(
                 if (actualIndex > 0) currentList[actualIndex - 1].episode = actualIndex
                 val displayIndex = if (actualIndex > 0) actualIndex else currentList.size
 
-                val finalTitle = "#$displayIndex [Short | $views] $title"
+                val finalTitle = "#$displayIndex [Shorts | $views] $title"
                 
                 return newMovieSearchResponse(finalTitle, finalUrl, TvType.Movie) {
                     this.posterUrl = poster
@@ -1093,7 +1093,7 @@ class YoutubeProvider(
                     if (actualIndex > 0) currentList[actualIndex - 1].episode = actualIndex
                     val displayIndex = if (actualIndex > 0) actualIndex else currentList.size
 
-                    finalTitle = "#$displayIndex [Shorts] [Short | $views] $title"
+                    finalTitle = "#$displayIndex [Shorts | $views] $title"
                     return newMovieSearchResponse(
                         finalTitle,
                         finalUrl,
@@ -2430,7 +2430,7 @@ class YoutubeProvider(
             val episodeResponses = targetEpisodes.map { ep ->
                 val desc = ep.description ?: ""
                 val formattedTitle = if (desc.isNotBlank() && desc != "N/A" && !desc.contains("Playing")) {
-                    "#${ep.episode} [Short | $desc] ${ep.name}"
+                    "#${ep.episode} [Shorts | $desc] ${ep.name}"
                 } else {
                     "#${ep.episode} ${ep.name}"
                 }
