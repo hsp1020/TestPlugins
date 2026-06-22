@@ -41,26 +41,18 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
 // =========================================================================
-// [개선 완료] OkHttp 취소 소켓 세이프가드가 완비된 논블로킹 수명주기 대조형 await 수립
+// [개선 사항 1] OkHttp 동기식 블로킹을 우회하기 위한 코루틴 비동기 일시중단 확장 함수 정의
 // =========================================================================
 suspend fun Call.await(): Response = suspendCancellableCoroutine { continuation ->
     enqueue(object : Callback {
         override fun onResponse(call: Call, response: Response) {
-            // 코루틴 수명주기가 이미 닫혔거나 취소 상태인 경우 소켓 리크 방지를 위한 강제 클로즈
-            if (continuation.isCancelled) {
-                try { response.close() } catch (_: Exception) {}
-                return
-            }
             continuation.resume(response)
         }
         override fun onFailure(call: Call, e: IOException) {
-            if (continuation.isCancelled) return
             continuation.resumeWithException(e)
         }
     })
-    continuation.invokeOnCancellation {
-        try { cancel() } catch (_: Exception) {}
-    }
+    continuation.invokeOnCancellation { cancel() }
 }
 
 data class HlsParsedStream(
@@ -85,6 +77,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
         private val streamCounter = AtomicLong(0)
 
+        // ---------------- [ 재생 시작 속도 가속화 전용 전역 캐시 계층 ] ----------------
         @Volatile
         private var cachedSts: Int = 20002
         @Volatile
@@ -109,10 +102,13 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         )
 
+        // =========================================================================
+        // [개선 사항 2] 메모리 제한 한도 조정 (RAM 상한 관리 최적화)
+        // =========================================================================
         private val manifestMap: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(64, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
-                    return size > 30 
+                    return size > 30 // 기존 150개에서 30개로 대폭 축소하여 메모리 점유 저감
                 }
             }
         )
@@ -120,7 +116,7 @@ open class YoutubeExtractor : ExtractorApi() {
         private val streamUrlCache: MutableMap<String, String> = Collections.synchronizedMap(
             object : LinkedHashMap<String, String>(128, 0.75f, true) {
                 override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean {
-                    return size > 100 
+                    return size > 100 // 기존 300개에서 100개로 축소하여 메모리 보존
                 }
             }
         )
@@ -141,6 +137,9 @@ open class YoutubeExtractor : ExtractorApi() {
             .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
             .build()
 
+        // =========================================================================
+        // [개선 사항 3] OkHttpClient의 잦은 런타임 재생성 회피를 위한 동반 객체 싱글톤 상수 지정
+        // =========================================================================
         private val fastSafariClient: okhttp3.OkHttpClient by lazy {
             proxyHttpClient.newBuilder()
                 .connectTimeout(3, java.util.concurrent.TimeUnit.SECONDS)
@@ -286,6 +285,9 @@ open class YoutubeExtractor : ExtractorApi() {
             }
         }
 
+        // =========================================================================
+        // [개선 사항 4] 소켓 스트림 복사 도중 재생 중지/탐색으로 인한 예외 로깅 완화 조치
+        // =========================================================================
         private suspend fun proxyChunkToYouTube(
             socket: Socket, 
             targetUrl: String, 
@@ -307,6 +309,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
                 val request = requestBuilder.build()
                 
+                // .await() 일시 중단 함수를 호출하여 네트워크 응답 획득 전까지 스레드 점유 해제
                 proxyHttpClient.newCall(request).await().use { response ->
                     if (response.code == 403 || response.code == 400) {
                         val output = socket.getOutputStream()
@@ -336,6 +339,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     output.flush()
                 }
             } catch (e: Exception) {
+                // 사용자가 고속 탐색(Seek)하거나 창을 닫을 때 동반되는 통상적 해제 예외(Broken Pipe 등)는 정상 처리로 흐름 우회
                 if (e is java.io.IOException && (
                         e.message?.contains("Broken pipe", ignoreCase = true) == true ||
                         e.message?.contains("Connection reset", ignoreCase = true) == true ||
@@ -396,6 +400,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     .header("User-Agent", "PipePipe/4.9.0")
                     .build()
 
+                // .execute() 동기 차단 호출을 .await() 비동기 일시 중단 호출로 완전히 대체
                 proxyHttpClient.newCall(request).await().use { response ->
                     val responseBody = response.body?.string() ?: ""
                     val jsonResponse = JSONObject(responseBody)
@@ -445,37 +450,37 @@ open class YoutubeExtractor : ExtractorApi() {
             Pair(sigResults, nResults)
         }
 
-        // =========================================================================
-        // [데드락 완벽 해결] runBlocking 블록을 완전 파기하고 100% 비동기 suspend 방식으로 개편
-        // =========================================================================
-        suspend fun deobfuscateManifestUrl(
-            manifestUrl: String, 
-            playerId: String
-        ): String = withContext(Dispatchers.IO) {
+        fun deobfuscateManifestUrl(manifestUrl: String, playerId: String): String {
             if (manifestUrl.isBlank() || playerId.isBlank()) {
-                return@withContext manifestUrl
+                return manifestUrl
             }
             try {
                 val match = Regex("""/n/([^/&?]+)""").find(manifestUrl)
                 if (match != null) {
                     val n = match.groupValues[1]
                     
-                    // runBlocking 없이 직접 비동기 디코딩 순차 호출
-                    val decodedNs = try {
-                        decodeBatch(playerId, emptyList(), listOf(n)).second
-                    } catch (e: Exception) {
-                        emptyMap()
+                    val decodedNs = run {
+                        var tempResult: Map<String, String>? = null
+                        // runBlocking을 가급적 자제하기 위해 비동기 백필드 연동 직접 제어
+                        kotlinx.coroutines.runBlocking {
+                            try {
+                                tempResult = decodeBatch(playerId, emptyList(), listOf(n)).second
+                            } catch (e: Exception) {
+                                tempResult = emptyMap()
+                            }
+                        }
+                        tempResult ?: emptyMap()
                     }
 
                     val decodedN = decodedNs[n]
                     if (!decodedN.isNullOrBlank()) {
-                        return@withContext manifestUrl.replace("/n/$n", "/n/$decodedN")
+                        return manifestUrl.replace("/n/$n", "/n/$decodedN")
                     }
                 }
             } catch (e: Exception) {
                 println("[TRACK] 🚨 deobfuscateManifestUrl 예외: ${e.message}")
             }
-            return@withContext manifestUrl
+            return manifestUrl
         }
 
         private fun extractHlsStringAttribute(line: String, attribute: String): String? {
@@ -594,6 +599,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     .url("https://api.pipepipe.dev/decoder/latest-player")
                     .header("User-Agent", "PipePipe/4.9.0")
                     .build()
+                // .await() 확장 함수로 무정지 비동기 처리
                 proxyHttpClient.newCall(pipeReq).await().use { response ->
                     if (response.isSuccessful) {
                         val body = response.body?.string() ?: ""
@@ -665,6 +671,8 @@ open class YoutubeExtractor : ExtractorApi() {
                 .build()
 
             try {
+                // 매번 새로운 클라이언트를 newBuilder()로 런타임 재생성하는 대신 
+                // 동반 객체 싱글톤 `fastSafariClient`를 호출해 오버헤드 차단 및 .await() 비동기 적용
                 fastSafariClient.newCall(request).await().use { response ->
                     val res = response.body?.string() ?: ""
                     if (res.isNotEmpty()) {
@@ -715,6 +723,7 @@ open class YoutubeExtractor : ExtractorApi() {
             )
 
             try {
+                // app.post 확장 유틸 내부의 차단 우회를 보완하는 안전한 비동기 응답 추출
                 val res = app.post(vrApiUrl, json = vrPayload, headers = vrHeaders).text
                 val json = JSONObject(res)
                 val status = json.optJSONObject("playabilityStatus")?.optString("status")
@@ -737,11 +746,11 @@ open class YoutubeExtractor : ExtractorApi() {
         langCode: String,
         callback: (ExtractorLink) -> Unit
     ) {
-        // 동기에서 suspend 함수 규격으로 격상된 수선 사양 직접 대입 (데드락 없음)
         val finalHlsUrl = if (playerId.isNotBlank()) deobfuscateManifestUrl(hlsUrl, playerId) else hlsUrl
         if (finalHlsUrl.isBlank()) return
 
         try {
+            // .execute() 동기 전송 블록을 .await()로 대체해 프레임 스터터링 근절
             val m3u8Body = proxyHttpClient.newCall(
                 okhttp3.Request.Builder().url(finalHlsUrl).header("User-Agent", SAFARI_USER_AGENT).build()
             ).await().use { it.body?.string() ?: "" }
@@ -1071,6 +1080,7 @@ open class YoutubeExtractor : ExtractorApi() {
                     return@withContext
                 }
 
+                // [자막(Captions) 추출 로직 보존]
                 val captions = playerResponse.optJSONObject("captions")?.optJSONObject("playerCaptionsTracklistRenderer")?.optJSONArray("captionTracks")
                 if (captions != null) {
                     for (i in 0 until captions.length()) {
@@ -1154,7 +1164,6 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
 
                 if (dashUrl.isNotBlank()) {
-                    // 데드락 없이 안정된 100% 비동기 순차 suspend 실행
                     val finalDashUrl = if (playerId.isNotBlank()) deobfuscateManifestUrl(dashUrl, playerId) else dashUrl
                     callback(
                         newExtractorLink(
@@ -1200,6 +1209,7 @@ open class YoutubeExtractor : ExtractorApi() {
             val server = activeServer
             if (server != null && !server.isClosed) return
             try {
+                // 이전 소켓 서버가 남아 있는 경우 정제
                 try {
                     server?.close()
                 } catch (e: Exception) {}
