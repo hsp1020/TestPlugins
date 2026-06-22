@@ -67,8 +67,10 @@ data class HlsParsedStream(
     val labelName: String,
     val url: String,
     val height: Int,
-    val isOriginal: Boolean
+    val isOriginal: Boolean,
+    val locale: String
 )
+
 
 open class YoutubeExtractor : ExtractorApi() {
     override val mainUrl = "https://www.youtube.com"
@@ -811,13 +813,16 @@ open class YoutubeExtractor : ExtractorApi() {
                 val displayName = if (langLabel.isNotEmpty()) "$langLabel($suffix)" else ""
                 val labelName = if (displayName.isNotEmpty()) "YouTube ${height}p [$displayName]" else "YouTube ${height}p"
 
-                hlsStreamsParsedLocal.add(HlsParsedStream(labelName, streamUrl, height, isOriginal))
+                hlsStreamsParsedLocal.add(HlsParsedStream(labelName, streamUrl, height, isOriginal, locale))
             }
+
 
             val sortedStreams = hlsStreamsParsedLocal.sortedWith(
                 compareByDescending<HlsParsedStream> { it.height }
+                .thenByDescending { it.locale == langCode }
                 .thenByDescending { it.isOriginal }
             )
+            
 
             sortedStreams.forEach { stream ->
                 callback(
@@ -1002,8 +1007,13 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
             }
 
+            val sortedAudioList = bestAudioList.sortedWith(
+                compareByDescending<AudioInfo> { it.locale == langCode }
+                .thenByDescending { it.displayName.contains("Original", ignoreCase = true) }
+            )
+
             for (video in videoOnlyList.distinctBy { it.height }) {
-                val dashXml = buildDashManifestXml(video, bestAudioList, durationSeconds)
+                val dashXml = buildDashManifestXml(video, sortedAudioList, durationSeconds)
                 val localLink = registerManifestAndGetUrl(dashXml)
 
                 if (localLink != null) {
