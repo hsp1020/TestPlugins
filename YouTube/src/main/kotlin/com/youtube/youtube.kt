@@ -2470,7 +2470,7 @@ class YoutubeProvider(
                     val channelExtractor = ServiceList.YouTube.getChannelExtractor(cleanUrl)
                     configureExtractorLocalization(channelExtractor)
                     channelExtractor.fetchPage()
-                    channelDescription = channelExtractor.description ?: ""
+                    channelDescription = channelExtractor.description ?: "\u200b"
 
                 } catch (e: Exception) {
                     logError(e)
@@ -2490,7 +2490,7 @@ class YoutubeProvider(
                     ?: response.document.selectFirst("meta[property=og:image]")?.attr("content")
 
                 if (channelDescription.isBlank()) {
-                    channelDescription = response.document.selectFirst("meta[property=og:description]")?.attr("content") ?: ""
+                    channelDescription = "\u200b"
                 }
 
                 var subscriberCount = ""
