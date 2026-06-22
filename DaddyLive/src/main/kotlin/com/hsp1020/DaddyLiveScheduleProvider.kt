@@ -179,6 +179,7 @@ class DaddyLiveScheduleProvider : MainAPI() {
                 debugLog("load SUCCESS: Built dynamic channel payload: $channelsJson")
                 return newLiveStreamLoadResponse(eventTitle, url, dataUrl = channelsJson) {
                     this.posterUrl = Companion.posterUrl
+                    this.plot = "\u200b"
                 }
             }
 
@@ -222,6 +223,7 @@ class DaddyLiveScheduleProvider : MainAPI() {
             
             newLiveStreamLoadResponse("$formattedTime - $eventTitle", url, dataUrl = channelsJson){
                 this.posterUrl = Companion.posterUrl
+                this.plot = "\u200b"
             }
         } catch (e: Exception) {
             debugLog("load FAILED for URL: $url", e)
