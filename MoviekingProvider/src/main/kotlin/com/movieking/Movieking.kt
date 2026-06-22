@@ -90,21 +90,34 @@ class MovieKing : MainAPI() {
                 // 1단계: 링크룸 메인페이지 호출
                 val mainDoc = app.get(PORTAL_URL, timeout = 10L).document
                 
-                // 2단계: 정확히 "무비킹" 텍스트를 가진 상세페이지 상대 경로 탐색
-                val relativePath = mainDoc.select("a").firstOrNull { 
-                    it.text().trim() == "무비킹" 
+                // 2단계: 제목에 "다시보기"가 들어간 구체적인 카테고리 박스(.link-box)만 타깃팅합니다.
+                val categoryBox = mainDoc.select(".link-box").firstOrNull { box ->
+                    box.select(".link-head").text().contains("다시보기")
+                }
+                
+                // 3단계: 해당 다시보기 박스 안에서만 "무비킹" 링크를 추출합니다.
+                var channelHref = categoryBox?.select("a")?.firstOrNull { 
+                    it.text().contains("무비킹") || it.attr("href").contains("mvking") || it.attr("href").contains("movieking")
                 }?.attr("href")
 
-                if (!relativePath.isNullOrBlank()) {
-                    val detailUrl = if (relativePath.startsWith("http")) relativePath else "$PORTAL_URL$relativePath"
+                // 4단계 (이중 안전장치): 만약 카테고리명 변경 등으로 실패할 경우, 다른 메뉴를 제외한 전체 사이트 그리드(.link-box a) 내에서 차선책 검색
+                if (channelHref.isNullOrBlank()) {
+                    channelHref = mainDoc.select(".link-box a").firstOrNull { 
+                        it.text().trim() == "무비킹" 
+                    }?.attr("href")
+                }
+
+                if (!channelHref.isNullOrBlank()) {
+                    val detailUrl = if (channelHref.startsWith("http")) channelHref else "$PORTAL_URL$channelHref"
                     println("[MovieKing DBG] 📂 무비킹 상세페이지 주소 발견: $detailUrl")
                     
-                    // 3단계: 상세페이지 호출
+                    // 5단계: 상세페이지 호출
                     val detailDoc = app.get(detailUrl, timeout = 10L).document
                     
-                    // 4단계: 상세페이지 리스트 중 최신주소에 할당된 최종 도메인 추출
-                    val latestUrl = detailDoc.selectFirst("ul.paybody-zbinfo span.data a")?.attr("href")?.trimEnd('/')
-                        ?: detailDoc.selectFirst("ul.paybody-zbinfo a")?.attr("href")?.trimEnd('/')
+                    // 6단계: 상세페이지 테이블 안의 최신주소 주입
+                    val latestUrl = detailDoc.select(".paybody-zbinfo a").firstOrNull {
+                        it.attr("href").contains("mvking") || it.attr("href").contains("movieking")
+                    }?.attr("href")?.trimEnd('/') ?: detailDoc.selectFirst("ul.paybody-zbinfo span.data a")?.attr("href")?.trimEnd('/')
 
                     if (!latestUrl.isNullOrBlank()) {
                         val newTarget = if (latestUrl.startsWith("http")) latestUrl else "https://$latestUrl"
@@ -176,15 +189,15 @@ class MovieKing : MainAPI() {
             val decodedRequestData = URLDecoder.decode(request.data, "UTF-8").substringBefore("?")
             val decodedFinalUrl = URLDecoder.decode(finalUrl, "UTF-8")
 
-                if (redirectedDomain != mainUrl || !decodedFinalUrl.contains(decodedRequestData)) {
-                    if (redirectedDomain != mainUrl) {
-                        println("[MovieKing DBG] 🔄 메인페이지 로드 중 리다이렉트 감지: $redirectedDomain")
-                        saveDomain(redirectedDomain)
-                        mainUrl = currentMainUrl
-                    }
-                    url = "$mainUrl${request.data}${separator}page=$page"
-                    res = app.get(url, headers = commonHeaders)
+            if (redirectedDomain != mainUrl || !decodedFinalUrl.contains(decodedRequestData)) {
+                if (redirectedDomain != mainUrl) {
+                    println("[MovieKing DBG] 🔄 메인페이지 로드 중 리다이렉트 감지: $redirectedDomain")
+                    saveDomain(redirectedDomain)
+                    mainUrl = currentMainUrl
                 }
+                url = "$mainUrl${request.data}${separator}page=$page"
+                res = app.get(url, headers = commonHeaders)
+            }
 
             val doc = res.document
             val list = doc.select(".video-card").mapNotNull { it.toSearchResponse(request.name) }
