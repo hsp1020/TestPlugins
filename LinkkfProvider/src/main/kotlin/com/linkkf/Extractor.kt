@@ -65,7 +65,7 @@ class LinkkfExtractor {
 }
 
 /**
- * [표준 순수 소켓 버전 - 디버그 로그 탑재] com.sun 의존성 없이 표준 네트워킹으로 구동되는 실시간 추적 프록시 서버
+ * [표준 순수 소켓 버전 - 데드락 해결] com.sun 의존성 없이 멀티스레드 격리 소켓 루프로 작동하는 실시간 프록시 서버
  */
 object SubtitleProxy {
     private var serverSocket: ServerSocket? = null
@@ -102,6 +102,7 @@ object SubtitleProxy {
                 isRunning = true
                 println("[Linkkf-SubtitleProxy] [ensureServerRunning] ServerSocket 성공적으로 바인딩됨. 할당 포트: $port")
 
+                // 자막 요청 처리 및 유휴 종료 타이머 전담 워커 스레드 풀 (블로킹 루프에서 분리되어 완전히 자유로움)
                 val exec = Executors.newScheduledThreadPool(1) { runnable ->
                     Thread(runnable, "Linkkf-SubtitleProxy-Worker").apply {
                         isDaemon = true
@@ -109,12 +110,14 @@ object SubtitleProxy {
                 }
                 executor = exec
 
-                exec.execute {
-                    println("[Linkkf-SubtitleProxy] [ServerLoop] 소켓 Accept 루프가 시작되었습니다.")
+                // [데드락 해결] 소켓 수신 대기(Accept)를 담당하는 별도의 독립 데몬 스레드 구동
+                Thread({
+                    println("[Linkkf-SubtitleProxy] [ServerLoop] 전용 수신 스레드 구동을 시작합니다.")
                     while (isRunning) {
                         try {
                             val clientSocket = ss.accept()
                             println("[Linkkf-SubtitleProxy] [ServerLoop] 클라이언트 연결 수립됨: ${clientSocket.remoteSocketAddress}")
+                            // 수립된 소켓 처리를 워커 스레드 풀에 즉각 위임하여 대기 스레드는 즉시 다음 수신 대기로 복귀
                             exec.execute {
                                 handleClient(clientSocket)
                             }
@@ -123,6 +126,9 @@ object SubtitleProxy {
                             break
                         }
                     }
+                }, "Linkkf-SubtitleProxy-Acceptor").apply {
+                    isDaemon = true
+                    start()
                 }
             } catch (e: Exception) {
                 println("[Linkkf-SubtitleProxy] [ensureServerRunning] 서버 시작 실패: ${e.message}")
