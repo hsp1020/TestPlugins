@@ -30,6 +30,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.SupervisorJob
 import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.stream.StreamInfo
+import org.schabi.newpipe.extractor.localization.Localization
 
 // =========================================================================
 // [개선 사항 1] GC 점유율 방지를 위한 단일 고속 공백/개행 제거 확장 함수 정의
@@ -280,6 +281,14 @@ class YoutubeProvider(
         set(value) {}
         
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Live)
+
+    private fun configureExtractorLocalization(extractor: org.schabi.newpipe.extractor.Extractor) {
+        try {
+            extractor.forceLocalization(Localization(lang))
+        } catch (e: Exception) {
+            logError(e)
+        }
+    }
 
     companion object {
         // [개선 사항 4] 구조화 코루틴 라이프사이클 안착을 위한 프로바이더 관리형 독점 스코프 구성
@@ -2269,6 +2278,7 @@ class YoutubeProvider(
             val watchUrl = "https://www.youtube.com/watch?v=$videoId" 
             try {
                 val extractor = ServiceList.YouTube.getStreamExtractor(watchUrl)
+                configureExtractorLocalization(extractor)
                 extractor.fetchPage()
                 val info = StreamInfo.getInfo(extractor)
                 
@@ -2458,8 +2468,10 @@ class YoutubeProvider(
                 var channelDescription = ""
                 try {
                     val channelExtractor = ServiceList.YouTube.getChannelExtractor(cleanUrl)
+                    configureExtractorLocalization(channelExtractor)
                     channelExtractor.fetchPage()
                     channelDescription = channelExtractor.description ?: ""
+
                 } catch (e: Exception) {
                     logError(e)
                 }
@@ -2774,6 +2786,7 @@ class YoutubeProvider(
             val npDeferred = async(Dispatchers.IO) {
                 try {
                     val extractor = ServiceList.YouTube.getStreamExtractor(url)
+                    configureExtractorLocalization(extractor)
                     extractor.fetchPage()
                     StreamInfo.getInfo(extractor)
                 } catch (e: Exception) {
