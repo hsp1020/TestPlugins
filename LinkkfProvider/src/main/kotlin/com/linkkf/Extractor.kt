@@ -4,8 +4,18 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.core.type.TypeReference
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mapper
-import org.jsoup.Jsoup
+import com.sun.net.httpserver.HttpServer
+import com.sun.net.httpserver.HttpHandler
+import com.sun.net.httpserver.HttpExchange
+import java.net.InetSocketAddress
+import java.net.URLDecoder
+import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
+import org.jsoup.Jsoup
 
 class LinkkfExtractor {
     private val SUBTITLE_BASE_URL = "https://k1.sub1.top/s"
@@ -28,25 +38,9 @@ class LinkkfExtractor {
             val actualUrl = playerData.actualUrl ?: return null
             val rawSubUrl = if (playerData.url != null) "$SUBTITLE_BASE_URL/${playerData.url}.vtt" else ""
 
-            // [초고속 가공 로직] 리소스 점유율을 제로에 가깝게 최적화하여 자막을 정제합니다.
+            // [로컬 프록시 적용] 플레이어(OkHttp)가 정상 처리할 수 있는 로컬 http 주소로 가공하여 전달
             val finalSubtitleUrl = if (rawSubUrl.isNotEmpty()) {
-                try {
-                    val rawVtt = app.get(rawSubUrl).text
-                    val sanitizedVtt = sanitizeWebVtt(rawVtt, rawSubUrl)
-                    
-                    // 가공이 필요 없어 원본 URL이 그대로 반환된 경우, 불필요한 Base64 인코딩을 생략하고 즉시 통과
-                    if (sanitizedVtt == rawSubUrl) {
-                        rawSubUrl
-                    } else {
-                        val base64Vtt = android.util.Base64.encodeToString(
-                            sanitizedVtt.toByteArray(StandardCharsets.UTF_8),
-                            android.util.Base64.NO_WRAP
-                        )
-                        "data:text/vtt;charset=utf-8;base64,$base64Vtt"
-                    }
-                } catch (e: Exception) {
-                    rawSubUrl
-                }
+                SubtitleProxy.getProxyUrl(rawSubUrl)
             } else {
                 ""
             }
@@ -56,19 +50,160 @@ class LinkkfExtractor {
         } catch (e: Exception) { return null }
     }
 
+    private data class PlayerData(
+        @JsonProperty("url") val url: String?,
+        @JsonProperty("actual_url") val actualUrl: String?
+    )
+}
+
+/**
+ * [프로덕션 등급] 자막 처리를 위한 자율 제어식 백그라운드 로컬 루프백 프록시 서버
+ */
+object SubtitleProxy {
+    private var server: HttpServer? = null
+    private var executor: ScheduledExecutorService? = null
+    private var port: Int = 0
+    private var shutdownTask: ScheduledFuture<*>? = null
+    private val lock = Any()
+
+    // 2분(120초) 동안 아무런 자막 요청이 없으면 서버와 스레드 풀을 완전히 파괴하여 메모리를 회수합니다.
+    private const val IDLE_TIMEOUT_SEC = 120L
+
     /**
-     * 무거운 메모리 할당을 최소화하고 CPU 연산을 극도로 절약하는 고속 자막 필터링 엔진입니다.
+     * 원본 VTT 자막 주소를 로컬 프록시 주소로 변환하며, 서버가 꺼져 있을 시 안전하게 재기동합니다.
+     */
+    fun getProxyUrl(originalUrl: String): String {
+        synchronized(lock) {
+            ensureServerRunning()
+            resetShutdownTimer()
+        }
+        val encodedUrl = URLEncoder.encode(originalUrl, "UTF-8")
+        return "http://127.0.0.1:$port/sub?url=$encodedUrl"
+    }
+
+    /**
+     * 동기화 블록 내에서 소켓 서버와 데몬 스레드 풀을 안전하게 초기화합니다.
+     */
+    private fun ensureServerRunning() {
+        if (server == null) {
+            try {
+                val s = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
+                
+                // 안드로이드 VM 종료를 방해하지 않는 '데몬 스레드' 기반의 싱글 워커 스레드 풀 생성
+                val exec = Executors.newScheduledThreadPool(1) { runnable ->
+                    Thread(runnable, "Linkkf-SubtitleProxy-Worker").apply {
+                        isDaemon = true // 데몬 스레드로 지정하여 리소스 누수 및 앱 강제 종료 지연 방지
+                    }
+                }
+                
+                s.createContext("/sub", SubtitleHandler())
+                s.executor = exec
+                s.start()
+
+                server = s
+                executor = exec
+                port = s.address.port
+            } catch (e: Exception) {
+                // 예외 처리 폴백
+            }
+        }
+    }
+
+    /**
+     * 무활동 감지 타이머를 리셋합니다. 자막 전송이나 가공이 이루어지면 타이머가 뒤로 미뤄집니다.
+     */
+    private fun resetShutdownTimer() {
+        shutdownTask?.cancel(false)
+        shutdownTask = executor?.schedule({
+            synchronized(lock) {
+                stopServer()
+            }
+        }, IDLE_TIMEOUT_SEC, TimeUnit.SECONDS)
+    }
+
+    /**
+     * 소켓을 닫고, 스레드 풀을 완전 파괴하며, 정적 메모리 참조를 해제하여 가비지 컬렉터(GC)가 모든 메모리를 회수하게 유도합니다.
+     */
+    private fun stopServer() {
+        try {
+            server?.stop(0)
+        } catch (e: Exception) {}
+        try {
+            executor?.shutdownNow()
+        } catch (e: Exception) {}
+        
+        server = null
+        executor = null
+        port = 0
+        shutdownTask = null
+    }
+
+    /**
+     * 플레이어 및 다운로더의 실제 HTTP 호출을 전담하여 가공 전송하는 핸들러
+     */
+    private class SubtitleHandler : HttpHandler {
+        override fun handle(exchange: HttpExchange) {
+            synchronized(lock) {
+                resetShutdownTimer() // 요청이 인입되었으므로 유휴 종료 타이머 즉시 연장
+            }
+
+            try {
+                val query = exchange.requestURI.query ?: ""
+                var originalUrl = ""
+
+                // 쿼리 파라미터 파싱 (?url=...)
+                val pairs = query.split("&")
+                for (pair in pairs) {
+                    val idx = pair.indexOf("=")
+                    if (idx > 0 && URLDecoder.decode(pair.substring(0, idx), "UTF-8") == "url") {
+                        originalUrl = URLDecoder.decode(pair.substring(idx + 1), "UTF-8")
+                        break
+                    }
+                }
+
+                if (originalUrl.isEmpty()) {
+                    exchange.sendResponseHeaders(400, 0)
+                    exchange.close()
+                    return
+                }
+
+                // 워커 스레드 풀 내부에서 원격 VTT 자막을 동기식으로 호출
+                val rawVtt = kotlinx.coroutines.runBlocking {
+                    app.get(originalUrl).text
+                }
+
+                val sanitizedVtt = sanitizeWebVtt(rawVtt, originalUrl)
+                val responseBytes = sanitizedVtt.toByteArray(StandardCharsets.UTF_8)
+
+                // CORS 허용 및 올바른 VTT 자막 헤더를 전송하여 재생기와 다운로더가 온전히 처리할 수 있게 보장
+                exchange.responseHeaders.set("Content-Type", "text/vtt; charset=utf-8")
+                exchange.responseHeaders.set("Access-Control-Allow-Origin", "*")
+                
+                exchange.sendResponseHeaders(200, responseBytes.size.toLong())
+                
+                val os = exchange.responseBody
+                os.write(responseBytes)
+                os.close()
+            } catch (e: Exception) {
+                try {
+                    exchange.sendResponseHeaders(500, 0)
+                    exchange.close()
+                } catch (ex: Exception) {}
+            }
+        }
+    }
+
+    /**
+     * 극도의 연산 압축 가공 엔진 (무활동 시 Jsoup 빌드조차 거치지 않음)
      */
     private fun sanitizeWebVtt(rawVtt: String, fallbackUrl: String): String {
-        // [1단계 초고속 패스] 루비 문자나 화자 태그가 전체 자막에 단 하나도 없다면, 즉시 가공을 종료하고 원본 URL 반환 (연산량 0)
         if (!rawVtt.contains("ruby", ignoreCase = true) && 
             !rawVtt.contains("rt", ignoreCase = true) && 
             !rawVtt.contains("<v", ignoreCase = true)) {
-            return fallbackUrl
+            return rawVtt
         }
 
         return rawVtt.lineSequence().map { line ->
-            // [2단계 라인 패스] 꺾쇠 괄호가 없거나, 핵심 타겟 태그가 없는 대다수의 라인(타임스탬프, 일반 텍스트 등 98%의 라인)은 가공 없이 즉시 통과
             if (!line.contains("<") || 
                 (!line.contains("ruby", ignoreCase = true) && 
                  !line.contains("rt", ignoreCase = true) && 
@@ -79,21 +214,20 @@ class LinkkfExtractor {
             try {
                 var processedLine = line
 
-                // 1. 화자 태그 처리 (정규식 기반 고속 스트링 치환 - DOM 객체를 만들지 않아 매우 가볍습니다)
+                // 1. 화자 태그 고속 치환
                 if (processedLine.contains("<v", ignoreCase = true)) {
                     processedLine = processedLine.replace(Regex("<v\\s+([^>]+)>(.*?)(</v>)?"), "[$1] $2")
                 }
 
-                // 2. 다국어 태그 제거 (정규식 고속 치환)
+                // 2. 다국어 태그 고속 치환
                 if (processedLine.contains("lang", ignoreCase = true)) {
                     processedLine = processedLine.replace(Regex("</?lang[^>]*>"), "")
                 }
 
-                // 3. 루비 태그가 포함된 라인(에피소드 전체 중 극소수)에 한해서만 Jsoup 파서를 극히 제한적으로 호출
+                // 3. 루비 및 rt 문법 보정
                 if (processedLine.contains("ruby", ignoreCase = true) || processedLine.contains("rt", ignoreCase = true)) {
                     val doc = Jsoup.parseBodyFragment(processedLine)
                     
-                    // 표준 루비 태그 변환
                     doc.select("ruby").forEach { ruby ->
                         val baseText = ruby.ownText()
                         val rtText = ruby.select("rt").text()
@@ -104,7 +238,6 @@ class LinkkfExtractor {
                         }
                     }
 
-                    // 독립형 rt 태그 보정
                     doc.select("rt").forEach { rt ->
                         if (rt.parent()?.normalName() != "ruby") {
                             val rtText = rt.text()
@@ -116,7 +249,6 @@ class LinkkfExtractor {
                         }
                     }
 
-                    // 미지원 태그는 ExoPlayer가 자체적으로 무시하므로, 무거운 Jsoup.clean()을 호출하지 않고 경량화된 html 텍스트만 추출
                     processedLine = doc.body().html()
                 }
 
@@ -126,9 +258,4 @@ class LinkkfExtractor {
             }
         }.joinToString("\n")
     }
-
-    private data class PlayerData(
-        @JsonProperty("url") val url: String?,
-        @JsonProperty("actual_url") val actualUrl: String?
-    )
 }
