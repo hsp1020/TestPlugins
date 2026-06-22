@@ -4,10 +4,12 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.core.type.TypeReference
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mapper
-import com.sun.net.httpserver.HttpServer
-import com.sun.net.httpserver.HttpHandler
-import com.sun.net.httpserver.HttpExchange
-import java.net.InetSocketAddress
+import org.jsoup.Jsoup
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.io.OutputStream
+import java.net.ServerSocket
+import java.net.Socket
 import java.net.URLDecoder
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
@@ -15,7 +17,6 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
-import org.jsoup.Jsoup
 
 class LinkkfExtractor {
     private val SUBTITLE_BASE_URL = "https://k1.sub1.top/s"
@@ -57,14 +58,15 @@ class LinkkfExtractor {
 }
 
 /**
- * [프로덕션 등급] 자막 처리를 위한 자율 제어식 백그라운드 로컬 루프백 프록시 서버
+ * [표준 순수 소켓 버전] 외부 라이브러리 및 com.sun 의존성이 없는 완전 순수 자막 프록시 서버
  */
 object SubtitleProxy {
-    private var server: HttpServer? = null
+    private var serverSocket: ServerSocket? = null
     private var executor: ScheduledExecutorService? = null
     private var port: Int = 0
     private var shutdownTask: ScheduledFuture<*>? = null
     private val lock = Any()
+    private var isRunning = false
 
     // 2분(120초) 동안 아무런 자막 요청이 없으면 서버와 스레드 풀을 완전히 파괴하여 메모리를 회수합니다.
     private const val IDLE_TIMEOUT_SEC = 120L
@@ -82,27 +84,39 @@ object SubtitleProxy {
     }
 
     /**
-     * 동기화 블록 내에서 소켓 서버와 데몬 스레드 풀을 안전하게 초기화합니다.
+     * 동기화 블록 내에서 순수 자바 ServerSocket과 데몬 스레드 풀을 안전하게 기동합니다.
      */
     private fun ensureServerRunning() {
-        if (server == null) {
+        if (serverSocket == null || !isRunning) {
             try {
-                val s = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-                
-                // 안드로이드 VM 종료를 방해하지 않는 '데몬 스레드' 기반의 싱글 워커 스레드 풀 생성
+                // OS가 제공하는 안전한 무작위 포트 점유 (127.0.0.1 로컬 루프백에만 제한 바인딩)
+                val ss = ServerSocket(0, 50, java.net.InetAddress.getByName("127.0.0.1"))
+                serverSocket = ss
+                port = ss.localPort
+                isRunning = true
+
+                // 데몬 스레드 풀 생성
                 val exec = Executors.newScheduledThreadPool(1) { runnable ->
                     Thread(runnable, "Linkkf-SubtitleProxy-Worker").apply {
-                        isDaemon = true // 데몬 스레드로 지정하여 리소스 누수 및 앱 강제 종료 지연 방지
+                        isDaemon = true
                     }
                 }
-                
-                s.createContext("/sub", SubtitleHandler())
-                s.executor = exec
-                s.start()
-
-                server = s
                 executor = exec
-                port = s.address.port
+
+                // 소켓 수신 대기 루프 백그라운드 구동
+                exec.execute {
+                    while (isRunning) {
+                        try {
+                            val clientSocket = ss.accept()
+                            exec.execute {
+                                handleClient(clientSocket)
+                            }
+                        } catch (e: Exception) {
+                            // 소켓이 외부에서 강제 Close되면 예외와 함께 루프가 안전하게 종료됩니다.
+                            break
+                        }
+                    }
+                }
             } catch (e: Exception) {
                 // 예외 처리 폴백
             }
@@ -110,8 +124,107 @@ object SubtitleProxy {
     }
 
     /**
-     * 무활동 감지 타이머를 리셋합니다. 자막 전송이나 가공이 이루어지면 타이머가 뒤로 미뤄집니다.
+     * 유입된 소켓 HTTP 연결을 비동기로 안전하게 받아 요청을 분석하고 가공 자막을 전송합니다.
      */
+    private fun handleClient(socket: Socket) {
+        synchronized(lock) {
+            resetShutdownTimer() // 요청 인입 시 소멸 시간 재설정
+        }
+
+        var reader: BufferedReader? = null
+        var output: OutputStream? = null
+        try {
+            socket.soTimeout = 5000 // 소켓 고정 타임아웃 5초 설정 (네트워크 불완전 락 방지)
+            reader = BufferedReader(InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8))
+            output = socket.getOutputStream()
+
+            val firstLine = reader.readLine() ?: return
+            
+            // HTTP Request 라인 검증 (예: GET /sub?url=... HTTP/1.1)
+            val parts = firstLine.split(" ")
+            if (parts.size < 2 || parts[0] != "GET") {
+                sendErrorResponse(output, 400, "Bad Request")
+                return
+            }
+
+            val pathWithQuery = parts[1]
+            if (!pathWithQuery.startsWith("/sub")) {
+                sendErrorResponse(output, 404, "Not Found")
+                return
+            }
+
+            val queryIdx = pathWithQuery.indexOf("?")
+            if (queryIdx == -1) {
+                sendErrorResponse(output, 400, "Missing URL Parameter")
+                return
+            }
+
+            val query = pathWithQuery.substring(queryIdx + 1)
+            var originalUrl = ""
+            val pairs = query.split("&")
+            for (pair in pairs) {
+                val idx = pair.indexOf("=")
+                if (idx > 0 && URLDecoder.decode(pair.substring(0, idx), "UTF-8") == "url") {
+                    originalUrl = URLDecoder.decode(pair.substring(idx + 1), "UTF-8")
+                    break
+                }
+            }
+
+            if (originalUrl.isEmpty()) {
+                sendErrorResponse(output, 400, "Empty URL")
+                return
+            }
+
+            // 원격 원본 VTT를 백그라운드 스레드에서 안전히 동기 다운로드
+            val rawVtt = kotlinx.coroutines.runBlocking {
+                app.get(originalUrl).text
+            }
+
+            val sanitizedVtt = sanitizeWebVtt(rawVtt, originalUrl)
+            val responseBytes = sanitizedVtt.toByteArray(StandardCharsets.UTF_8)
+
+            // HTTP/1.1 규격에 맞춘 성공 헤더와 바이트 버퍼 직접 전송 (CORS 완전 지원)
+            val headerBuilder = StringBuilder()
+            headerBuilder.append("HTTP/1.1 200 OK\r\n")
+            headerBuilder.append("Content-Type: text/vtt; charset=utf-8\r\n")
+            headerBuilder.append("Content-Length: ${responseBytes.size}\r\n")
+            headerBuilder.append("Access-Control-Allow-Origin: *\r\n")
+            headerBuilder.append("Connection: close\r\n")
+            headerBuilder.append("\r\n")
+
+            output.write(headerBuilder.toString().toByteArray(StandardCharsets.UTF_8))
+            output.write(responseBytes)
+            output.flush()
+        } catch (e: Exception) {
+            try {
+                output?.let { sendErrorResponse(it, 500, "Internal Server Error") }
+            } catch (ex: Exception) {}
+        } finally {
+            try { reader?.close() } catch (e: Exception) {}
+            try { output?.close() } catch (e: Exception) {}
+            try { socket.close() } catch (e: Exception) {}
+        }
+    }
+
+    /**
+     * 예외 상황 발생 시 표준 HTTP 본문 형태로 헤더와 데이터를 송출합니다.
+     */
+    private fun sendErrorResponse(output: OutputStream, statusCode: Int, message: String) {
+        try {
+            val responseBytes = message.toByteArray(StandardCharsets.UTF_8)
+            val headerBuilder = StringBuilder()
+            headerBuilder.append("HTTP/1.1 $statusCode\r\n")
+            headerBuilder.append("Content-Type: text/plain; charset=utf-8\r\n")
+            headerBuilder.append("Content-Length: ${responseBytes.size}\r\n")
+            headerBuilder.append("Connection: close\r\n")
+            headerBuilder.append("\r\n")
+
+            output.write(headerBuilder.toString().toByteArray(StandardCharsets.UTF_8))
+            output.write(responseBytes)
+            output.flush()
+        } catch (e: Exception) {}
+    }
+
     private fun resetShutdownTimer() {
         shutdownTask?.cancel(false)
         shutdownTask = executor?.schedule({
@@ -121,80 +234,23 @@ object SubtitleProxy {
         }, IDLE_TIMEOUT_SEC, TimeUnit.SECONDS)
     }
 
-    /**
-     * 소켓을 닫고, 스레드 풀을 완전 파괴하며, 정적 메모리 참조를 해제하여 가비지 컬렉터(GC)가 모든 메모리를 회수하게 유도합니다.
-     */
     private fun stopServer() {
+        isRunning = false
         try {
-            server?.stop(0)
+            serverSocket?.close()
         } catch (e: Exception) {}
         try {
             executor?.shutdownNow()
         } catch (e: Exception) {}
         
-        server = null
+        serverSocket = null
         executor = null
         port = 0
         shutdownTask = null
     }
 
     /**
-     * 플레이어 및 다운로더의 실제 HTTP 호출을 전담하여 가공 전송하는 핸들러
-     */
-    private class SubtitleHandler : HttpHandler {
-        override fun handle(exchange: HttpExchange) {
-            synchronized(lock) {
-                resetShutdownTimer() // 요청이 인입되었으므로 유휴 종료 타이머 즉시 연장
-            }
-
-            try {
-                val query = exchange.requestURI.query ?: ""
-                var originalUrl = ""
-
-                // 쿼리 파라미터 파싱 (?url=...)
-                val pairs = query.split("&")
-                for (pair in pairs) {
-                    val idx = pair.indexOf("=")
-                    if (idx > 0 && URLDecoder.decode(pair.substring(0, idx), "UTF-8") == "url") {
-                        originalUrl = URLDecoder.decode(pair.substring(idx + 1), "UTF-8")
-                        break
-                    }
-                }
-
-                if (originalUrl.isEmpty()) {
-                    exchange.sendResponseHeaders(400, 0)
-                    exchange.close()
-                    return
-                }
-
-                // 워커 스레드 풀 내부에서 원격 VTT 자막을 동기식으로 호출
-                val rawVtt = kotlinx.coroutines.runBlocking {
-                    app.get(originalUrl).text
-                }
-
-                val sanitizedVtt = sanitizeWebVtt(rawVtt, originalUrl)
-                val responseBytes = sanitizedVtt.toByteArray(StandardCharsets.UTF_8)
-
-                // CORS 허용 및 올바른 VTT 자막 헤더를 전송하여 재생기와 다운로더가 온전히 처리할 수 있게 보장
-                exchange.responseHeaders.set("Content-Type", "text/vtt; charset=utf-8")
-                exchange.responseHeaders.set("Access-Control-Allow-Origin", "*")
-                
-                exchange.sendResponseHeaders(200, responseBytes.size.toLong())
-                
-                val os = exchange.responseBody
-                os.write(responseBytes)
-                os.close()
-            } catch (e: Exception) {
-                try {
-                    exchange.sendResponseHeaders(500, 0)
-                    exchange.close()
-                } catch (ex: Exception) {}
-            }
-        }
-    }
-
-    /**
-     * 극도의 연산 압축 가공 엔진 (무활동 시 Jsoup 빌드조차 거치지 않음)
+     * 초고속 저전력 VTT 자막 가공 및 정밀 필터링 엔진 (무활동 시 Jsoup 빌드 생략)
      */
     private fun sanitizeWebVtt(rawVtt: String, fallbackUrl: String): String {
         if (!rawVtt.contains("ruby", ignoreCase = true) && 
@@ -228,6 +284,7 @@ object SubtitleProxy {
                 if (processedLine.contains("ruby", ignoreCase = true) || processedLine.contains("rt", ignoreCase = true)) {
                     val doc = Jsoup.parseBodyFragment(processedLine)
                     
+                    // 표준 루비 태그 변환
                     doc.select("ruby").forEach { ruby ->
                         val baseText = ruby.ownText()
                         val rtText = ruby.select("rt").text()
@@ -238,6 +295,7 @@ object SubtitleProxy {
                         }
                     }
 
+                    // 독립형 rt 태그 보정
                     doc.select("rt").forEach { rt ->
                         if (rt.parent()?.normalName() != "ruby") {
                             val rtText = rt.text()
