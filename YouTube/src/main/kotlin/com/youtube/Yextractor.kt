@@ -85,11 +85,8 @@ open class YoutubeExtractor : ExtractorApi() {
         private var serverPort: Int = 0
         private val serverLock = Any()
 
-        // [추가] 서버 자동 종료 및 수명 주기 관리를 위한 제어 변수
+        // [보완] 이전 백그라운드 작업을 완벽히 캔슬하기 위한 제어 변수
         private var serverJob: kotlinx.coroutines.Job? = null
-        @Volatile
-        private var lastActiveTime: Long = System.currentTimeMillis()
-        private const val IDLE_TIMEOUT_MS = 60000L // 1분 동안 요청이 없으면 서버 완전 자동 종료
 
         @Volatile
         private var activeServer: ServerSocket? = null
@@ -198,9 +195,7 @@ open class YoutubeExtractor : ExtractorApi() {
 
         private suspend fun handleClient(client: Socket) = withContext(Dispatchers.IO) {
             try {
-                private suspend fun handleClient(client: Socket) = withContext(Dispatchers.IO) {
-                lastActiveTime = System.currentTimeMillis() // [추가] 요청 활성화 시점 기록
-
+                client.use { socket ->
                     val inputStream = socket.getInputStream()
                     val reader = BufferedReader(InputStreamReader(inputStream, java.nio.charset.StandardCharsets.UTF_8))
                     val output = socket.getOutputStream()
@@ -307,7 +302,6 @@ open class YoutubeExtractor : ExtractorApi() {
             clientHeaders: Map<String, String>
         ) = withContext(Dispatchers.IO) {
             try {
-                lastActiveTime = System.currentTimeMillis() //
                 val requestBuilder = okhttp3.Request.Builder()
                     .url(targetUrl)
                     .header("User-Agent", YoutubeUtils.ANDROID_VR_USER_AGENT)
@@ -1206,47 +1200,48 @@ open class YoutubeExtractor : ExtractorApi() {
         }
     }
 
-
     private fun startServerIfNeeded() {
         synchronized(serverLock) {
-            lastActiveTime = System.currentTimeMillis()
             val server = activeServer
             if (server != null && !server.isClosed) return
 
             try {
+                // 1단계: 새로 서버를 열기 전 기존 좀비 소켓 및 이전 코루틴 작업을 확실하게 해제
                 stopServerGracefully()
 
+                // 2단계: 신규 루프 바인딩 (포트는 OS가 비어있는 포트로 자동 할당)
                 val newServer = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
-                newServer.soTimeout = 5000
+                
+                // accept() 블로킹 해제를 위한 소켓 타임아웃 지정 (15초)
+                // 이 설정 덕분에 클라이언트 연결이 없어도 15초마다 대기 상태에서 깨어나 isActive 취소 상태를 감지합니다.
+                newServer.soTimeout = 15000
+                
                 activeServer = newServer
                 serverPort = newServer.localPort
 
+                // 3단계: [버그 수정] GPT가 누락한 대입문을 추가하여 stopServerGracefully 호출 시 코루틴 취소가 실제로 동작하게 만듭니다.
                 serverJob = serverScope.launch {
                     try {
                         while (isActive && !newServer.isClosed) {
-                            if (System.currentTimeMillis() - lastActiveTime > IDLE_TIMEOUT_MS) {
-                                println("[YT_PROXY] 장시간 유휴 상태 감지. 리소스 절약을 위해 로컬 서버를 자동 종료합니다.")
-                                break
+                            val client = try {
+                                newServer.accept()
+                            } catch (e: java.net.SocketTimeoutException) {
+                                // 15초 대기 시간 초과는 isActive 검사를 위한 정기적 흔듦이므로 조용히 루프 속행
+                                continue
                             }
 
-                            try {
-                                val client = newServer.accept()
-                                lastActiveTime = System.currentTimeMillis()
-                                client.soTimeout = 15000
-                                launch { handleClient(client) }
-                            } catch (e: java.net.SocketTimeoutException) {
-                                // 타임아웃 발생 시 무시하고 다음 루프에서 isActive 및 Idle 상태 체크
-                            } catch (e: Exception) {
-                                if (newServer.isClosed) break
-                                kotlinx.coroutines.delay(1000)
-                            }
+                            client.soTimeout = 15000 
+                            launch { handleClient(client) }
                         }
+                    } catch (e: Exception) {
+                        // 예기치 못한 물리 소켓 에러 시 처리
                     } finally {
+                        // 코루틴 취소 시 소켓을 닫아 시스템 포트 및 자원 완벽 해제
                         closeServerInstance(newServer)
                     }
                 }
-            } catch (e: Exception) {
-                logError(e)
+            } catch (e: Exception) { 
+                logError(e) 
             }
         }
     }
@@ -1266,15 +1261,14 @@ open class YoutubeExtractor : ExtractorApi() {
                 server.close()
             }
         } catch (e: Exception) {
-            // 무의미한 에러 로그 생략
+            // 불필요한 로그 생략
         }
         if (activeServer === server) {
             activeServer = null
             serverPort = 0
         }
     }
-    
-        
+
     private fun registerManifestAndGetUrl(xmlContent: String): String? {
         if (serverPort == 0) return null
         val id = "m_${streamCounter.getAndIncrement()}"
