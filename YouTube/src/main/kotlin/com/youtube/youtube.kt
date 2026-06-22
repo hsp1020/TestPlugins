@@ -889,7 +889,7 @@ class YoutubeProvider(
                 val dateText = getText(videoData.getMapKey("publishedTimeText"))
 
                 val channel = getText(videoData.getMapKey("ownerText"))
-                    .ifBlank { getText(videoData.getMapKey("shortBylineText")) }
+                    . { getText(videoData.getMapKey("shortBylineText")) }
                     .ifBlank { getText(videoData.getMapKey("longBylineText")) }
 
                 val views = viewText.ifBlank { "N/A" }
@@ -2632,7 +2632,7 @@ class YoutubeProvider(
 
                 return newTvSeriesLoadResponse(title, url, TvType.TvSeries, allEpisodes) {
                     this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
-                    this.plot = channelDescription
+                    this.plot = channelDescription.ifBlank { "\u200b" }
 
                     val actorList = mutableListOf<ActorData>()
                     actorList.add(ActorData(Actor(title, poster ?: "")))
@@ -2946,7 +2946,7 @@ class YoutubeProvider(
 
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
             this.posterUrl = YoutubeUtils.getProxiedPoster(poster)
-            this.plot = plot
+            this.plot = plot.ifBlank { "\u200b" }
             this.recommendations = filteredRecs 
             
             if (npTags.isNotEmpty()) {
