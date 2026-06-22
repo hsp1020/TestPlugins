@@ -41,14 +41,21 @@ class LinkkfExtractor {
 
             // [로컬 프록시 적용] 플레이어(OkHttp)가 정상 처리할 수 있는 로컬 http 주소로 가공하여 전달
             val finalSubtitleUrl = if (rawSubUrl.isNotEmpty()) {
-                SubtitleProxy.getProxyUrl(rawSubUrl)
+                println("[Linkkf-SubtitleProxy] [extract] 원본 자막 발견됨: $rawSubUrl")
+                val proxyUrl = SubtitleProxy.getProxyUrl(rawSubUrl)
+                println("[Linkkf-SubtitleProxy] [extract] 생성된 프록시 로컬 자막 URL: $proxyUrl")
+                proxyUrl
             } else {
+                println("[Linkkf-SubtitleProxy] [extract] 발견된 자막 파일이 없습니다.")
                 ""
             }
 
             if (actualUrl.contains(".m3u8")) return LinkkfResult(actualUrl, finalSubtitleUrl, needsWebView = false)
             return LinkkfResult(actualUrl, finalSubtitleUrl, needsWebView = true)
-        } catch (e: Exception) { return null }
+        } catch (e: Exception) { 
+            println("[Linkkf-SubtitleProxy] [extract] 추출 단계 예외 발생: ${e.message}")
+            return null 
+        }
     }
 
     private data class PlayerData(
@@ -58,7 +65,7 @@ class LinkkfExtractor {
 }
 
 /**
- * [표준 순수 소켓 버전] 외부 라이브러리 및 com.sun 의존성이 없는 완전 순수 자막 프록시 서버
+ * [표준 순수 소켓 버전 - 디버그 로그 탑재] com.sun 의존성 없이 표준 네트워킹으로 구동되는 실시간 추적 프록시 서버
  */
 object SubtitleProxy {
     private var serverSocket: ServerSocket? = null
@@ -68,14 +75,16 @@ object SubtitleProxy {
     private val lock = Any()
     private var isRunning = false
 
-    // 2분(120초) 동안 아무런 자막 요청이 없으면 서버와 스레드 풀을 완전히 파괴하여 메모리를 회수합니다.
     private const val IDLE_TIMEOUT_SEC = 120L
 
-    /**
-     * 원본 VTT 자막 주소를 로컬 프록시 주소로 변환하며, 서버가 꺼져 있을 시 안전하게 재기동합니다.
-     */
+    private val headers = mapOf(
+        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Referer" to "https://linkkf.tv/"
+    )
+
     fun getProxyUrl(originalUrl: String): String {
         synchronized(lock) {
+            println("[Linkkf-SubtitleProxy] [getProxyUrl] 요청 수신됨. 원본 URL: $originalUrl")
             ensureServerRunning()
             resetShutdownTimer()
         }
@@ -83,19 +92,16 @@ object SubtitleProxy {
         return "http://127.0.0.1:$port/sub?url=$encodedUrl"
     }
 
-    /**
-     * 동기화 블록 내에서 순수 자바 ServerSocket과 데몬 스레드 풀을 안전하게 기동합니다.
-     */
     private fun ensureServerRunning() {
         if (serverSocket == null || !isRunning) {
+            println("[Linkkf-SubtitleProxy] [ensureServerRunning] 소켓 서버가 꺼져 있습니다. 기동을 시작합니다...")
             try {
-                // OS가 제공하는 안전한 무작위 포트 점유 (127.0.0.1 로컬 루프백에만 제한 바인딩)
                 val ss = ServerSocket(0, 50, java.net.InetAddress.getByName("127.0.0.1"))
                 serverSocket = ss
                 port = ss.localPort
                 isRunning = true
+                println("[Linkkf-SubtitleProxy] [ensureServerRunning] ServerSocket 성공적으로 바인딩됨. 할당 포트: $port")
 
-                // 데몬 스레드 풀 생성
                 val exec = Executors.newScheduledThreadPool(1) { runnable ->
                     Thread(runnable, "Linkkf-SubtitleProxy-Worker").apply {
                         isDaemon = true
@@ -103,58 +109,63 @@ object SubtitleProxy {
                 }
                 executor = exec
 
-                // 소켓 수신 대기 루프 백그라운드 구동
                 exec.execute {
+                    println("[Linkkf-SubtitleProxy] [ServerLoop] 소켓 Accept 루프가 시작되었습니다.")
                     while (isRunning) {
                         try {
                             val clientSocket = ss.accept()
+                            println("[Linkkf-SubtitleProxy] [ServerLoop] 클라이언트 연결 수립됨: ${clientSocket.remoteSocketAddress}")
                             exec.execute {
                                 handleClient(clientSocket)
                             }
                         } catch (e: Exception) {
-                            // 소켓이 외부에서 강제 Close되면 예외와 함께 루프가 안전하게 종료됩니다.
+                            println("[Linkkf-SubtitleProxy] [ServerLoop] Accept 중단됨 (서버 종료 혹은 소켓 해제): ${e.message}")
                             break
                         }
                     }
                 }
             } catch (e: Exception) {
-                // 예외 처리 폴백
+                println("[Linkkf-SubtitleProxy] [ensureServerRunning] 서버 시작 실패: ${e.message}")
             }
+        } else {
+            println("[Linkkf-SubtitleProxy] [ensureServerRunning] 서버가 이미 가동 중입니다. (포트: $port)")
         }
     }
 
-    /**
-     * 유입된 소켓 HTTP 연결을 비동기로 안전하게 받아 요청을 분석하고 가공 자막을 전송합니다.
-     */
     private fun handleClient(socket: Socket) {
         synchronized(lock) {
-            resetShutdownTimer() // 요청 인입 시 소멸 시간 재설정
+            resetShutdownTimer() 
         }
 
+        println("[Linkkf-SubtitleProxy] [handleClient] 클라이언트 요청 처리 시작. 스레드: ${Thread.currentThread().name}")
         var reader: BufferedReader? = null
         var output: OutputStream? = null
         try {
-            socket.soTimeout = 5000 // 소켓 고정 타임아웃 5초 설정 (네트워크 불완전 락 방지)
+            socket.soTimeout = 5000 
             reader = BufferedReader(InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8))
             output = socket.getOutputStream()
 
-            val firstLine = reader.readLine() ?: return
+            val firstLine = reader.readLine()
+            println("[Linkkf-SubtitleProxy] [handleClient] HTTP 요청 라인: $firstLine")
+            if (firstLine == null) return
             
-            // HTTP Request 라인 검증 (예: GET /sub?url=... HTTP/1.1)
             val parts = firstLine.split(" ")
             if (parts.size < 2 || parts[0] != "GET") {
+                println("[Linkkf-SubtitleProxy] [handleClient] 잘못된 요청 타입 (GET 아님): $firstLine")
                 sendErrorResponse(output, 400, "Bad Request")
                 return
             }
 
             val pathWithQuery = parts[1]
             if (!pathWithQuery.startsWith("/sub")) {
+                println("[Linkkf-SubtitleProxy] [handleClient] 잘못된 엔드포인트 접근: $pathWithQuery")
                 sendErrorResponse(output, 404, "Not Found")
                 return
             }
 
             val queryIdx = pathWithQuery.indexOf("?")
             if (queryIdx == -1) {
+                println("[Linkkf-SubtitleProxy] [handleClient] 파라미터가 누락되었습니다: $pathWithQuery")
                 sendErrorResponse(output, 400, "Missing URL Parameter")
                 return
             }
@@ -171,19 +182,25 @@ object SubtitleProxy {
             }
 
             if (originalUrl.isEmpty()) {
+                println("[Linkkf-SubtitleProxy] [handleClient] 디코딩된 원본 자막 URL이 비어있습니다.")
                 sendErrorResponse(output, 400, "Empty URL")
                 return
             }
 
-            // 원격 원본 VTT를 백그라운드 스레드에서 안전히 동기 다운로드
+            println("[Linkkf-SubtitleProxy] [handleClient] 원본 자막 다운로드 시도 중... URL: $originalUrl")
+            
             val rawVtt = kotlinx.coroutines.runBlocking {
-                app.get(originalUrl).text
+                val res = app.get(url = originalUrl, headers = headers)
+                println("[Linkkf-SubtitleProxy] [handleClient] 자막 원격 서버 응답 완료. HTTP 상태 코드: ${res.code}")
+                res.text
             }
 
+            println("[Linkkf-SubtitleProxy] [handleClient] 자막 다운로드 성공. 원본 크기: ${rawVtt.length} 글자")
+            println("[Linkkf-SubtitleProxy] [handleClient] 실시간 자막 가공(Sanitization) 엔진을 구동합니다...")
             val sanitizedVtt = sanitizeWebVtt(rawVtt, originalUrl)
             val responseBytes = sanitizedVtt.toByteArray(StandardCharsets.UTF_8)
+            println("[Linkkf-SubtitleProxy] [handleClient] 가공 완료. 최종 전송 크기: ${responseBytes.size} 바이트")
 
-            // HTTP/1.1 규격에 맞춘 성공 헤더와 바이트 버퍼 직접 전송 (CORS 완전 지원)
             val headerBuilder = StringBuilder()
             headerBuilder.append("HTTP/1.1 200 OK\r\n")
             headerBuilder.append("Content-Type: text/vtt; charset=utf-8\r\n")
@@ -192,10 +209,14 @@ object SubtitleProxy {
             headerBuilder.append("Connection: close\r\n")
             headerBuilder.append("\r\n")
 
+            println("[Linkkf-SubtitleProxy] [handleClient] 클라이언트 소켓에 HTTP 200 응답 쓰기 시작...")
             output.write(headerBuilder.toString().toByteArray(StandardCharsets.UTF_8))
             output.write(responseBytes)
             output.flush()
+            println("[Linkkf-SubtitleProxy] [handleClient] 클라이언트 소켓 전송 성공 및 연결 종료 완료.")
         } catch (e: Exception) {
+            println("[Linkkf-SubtitleProxy] [handleClient] 요청 처리 중 치명적 예외 발생: ${e.message}")
+            e.printStackTrace()
             try {
                 output?.let { sendErrorResponse(it, 500, "Internal Server Error") }
             } catch (ex: Exception) {}
@@ -206,9 +227,6 @@ object SubtitleProxy {
         }
     }
 
-    /**
-     * 예외 상황 발생 시 표준 HTTP 본문 형태로 헤더와 데이터를 송출합니다.
-     */
     private fun sendErrorResponse(output: OutputStream, statusCode: Int, message: String) {
         try {
             val responseBytes = message.toByteArray(StandardCharsets.UTF_8)
@@ -222,6 +240,7 @@ object SubtitleProxy {
             output.write(headerBuilder.toString().toByteArray(StandardCharsets.UTF_8))
             output.write(responseBytes)
             output.flush()
+            println("[Linkkf-SubtitleProxy] [sendErrorResponse] 에러 전송 완료 ($statusCode: $message)")
         } catch (e: Exception) {}
     }
 
@@ -229,37 +248,45 @@ object SubtitleProxy {
         shutdownTask?.cancel(false)
         shutdownTask = executor?.schedule({
             synchronized(lock) {
+                println("[Linkkf-SubtitleProxy] [Timer] 120초 동안 무활동이 감지되어 자동 서버 종료 절차를 시작합니다.")
                 stopServer()
             }
         }, IDLE_TIMEOUT_SEC, TimeUnit.SECONDS)
+        println("[Linkkf-SubtitleProxy] [Timer] 자동 종료 타이머 리셋 완료. (유휴 제한 시간: $IDLE_TIMEOUT_SEC 초)")
     }
 
     private fun stopServer() {
+        println("[Linkkf-SubtitleProxy] [stopServer] 프록시 서버 리소스 완전히 정리 시작...")
         isRunning = false
         try {
             serverSocket?.close()
+            println("[Linkkf-SubtitleProxy] [stopServer] ServerSocket 성공적으로 닫힘.")
         } catch (e: Exception) {}
         try {
             executor?.shutdownNow()
+            println("[Linkkf-SubtitleProxy] [stopServer] 데몬 스레드 풀 강제 폐기됨.")
         } catch (e: Exception) {}
         
         serverSocket = null
         executor = null
         port = 0
         shutdownTask = null
+        println("[Linkkf-SubtitleProxy] [stopServer] 리소스 정리 절차 완료.")
     }
 
-    /**
-     * 초고속 저전력 VTT 자막 가공 및 정밀 필터링 엔진 (무활동 시 Jsoup 빌드 생략)
-     */
     private fun sanitizeWebVtt(rawVtt: String, fallbackUrl: String): String {
         if (!rawVtt.contains("ruby", ignoreCase = true) && 
             !rawVtt.contains("rt", ignoreCase = true) && 
             !rawVtt.contains("<v", ignoreCase = true)) {
+            println("[Linkkf-SubtitleProxy] [sanitizeWebVtt] 루비 및 화자 태그가 본문에 없음. 무삭제 고속 패스 발동.")
             return rawVtt
         }
 
-        return rawVtt.lineSequence().map { line ->
+        var rubyCount = 0
+        var rtCount = 0
+        var vCount = 0
+
+        val processedResult = rawVtt.lineSequence().map { line ->
             if (!line.contains("<") || 
                 (!line.contains("ruby", ignoreCase = true) && 
                  !line.contains("rt", ignoreCase = true) && 
@@ -272,6 +299,7 @@ object SubtitleProxy {
 
                 // 1. 화자 태그 고속 치환
                 if (processedLine.contains("<v", ignoreCase = true)) {
+                    vCount++
                     processedLine = processedLine.replace(Regex("<v\\s+([^>]+)>(.*?)(</v>)?"), "[$1] $2")
                 }
 
@@ -286,6 +314,7 @@ object SubtitleProxy {
                     
                     // 표준 루비 태그 변환
                     doc.select("ruby").forEach { ruby ->
+                        rubyCount++
                         val baseText = ruby.ownText()
                         val rtText = ruby.select("rt").text()
                         if (baseText.isNotEmpty() && rtText.isNotEmpty()) {
@@ -298,6 +327,7 @@ object SubtitleProxy {
                     // 독립형 rt 태그 보정
                     doc.select("rt").forEach { rt ->
                         if (rt.parent()?.normalName() != "ruby") {
+                            rtCount++
                             val rtText = rt.text()
                             if (rtText.isNotEmpty()) {
                                 rt.replaceWith(org.jsoup.nodes.TextNode("($rtText)"))
@@ -315,5 +345,8 @@ object SubtitleProxy {
                 line
             }
         }.joinToString("\n")
+
+        println("[Linkkf-SubtitleProxy] [sanitizeWebVtt] 필터링 요약 -> 변환된 <ruby>: $rubyCount, 독립 <rt>: $rtCount, 화자 <v>: $vCount")
+        return processedResult
     }
 }
