@@ -1643,7 +1643,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             }
             
             if (finalType == "other") {
-                finalDescription = if (finalDescription.isNullOrBlank()) originalName else "$finalDescription | $originalName"
+                finalDescription = if (finalDescription.isNullOrBlank()) originalName else "$finalDescription<br>$originalName"
             }
 
             val movieId = this@CatalogEntry.kitsuIdExt?.let { "kitsu:$it" } ?: this@CatalogEntry.id ?: ""
