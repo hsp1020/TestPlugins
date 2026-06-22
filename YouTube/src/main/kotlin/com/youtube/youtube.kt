@@ -2378,52 +2378,56 @@ class YoutubeProvider(
             val finalPlot = "\u200b"
 
             val finalRecs = mutableListOf<SearchResponse>()
-                if (channelName.isNotBlank() && channelId.isNotBlank()) {
-                    val channelUrlFull = if (channelId.startsWith("UC") || channelId.startsWith("@")) "$mainUrl/channel/$channelId" else "$mainUrl/$channelId"
-                    val channelCard = newMovieSearchResponse(channelName, channelUrlFull, TvType.Live) {
-                        this.posterUrl = YoutubeUtils.getProxiedPoster(channelAvatar) 
-                    }
-                    finalRecs.add(channelCard) 
+            
+            // 1. [채널 카드] 추가
+            if (channelName.isNotBlank() && channelId.isNotBlank()) {
+                val channelUrlFull = if (channelId.startsWith("UC") || channelId.startsWith("@")) "$mainUrl/channel/$channelId" else "$mainUrl/$channelId"
+                val channelCard = newMovieSearchResponse(channelName, channelUrlFull, TvType.Live) {
+                    this.posterUrl = YoutubeUtils.getProxiedPoster(channelAvatar) 
+                }
+                finalRecs.add(channelCard) 
+            }
+            
+            // 2. [숏츠 추천 영상 (유튜브 알고리즘 추천)] 추가
+            finalRecs.addAll(recs.filter { it.url.contains("/shorts/") }) 
+            
+            // 3. [에피소드 목록 (#1 ~ #n)] 데이터를 미디어 카드로 변환하여 최하단에 덧붙여 추가
+            val episodeResponses = targetEpisodes.map { ep ->
+                val desc = ep.description ?: ""
+                val formattedTitle = if (desc.isNotBlank() && desc != "N/A" && !desc.contains("Playing")) {
+                    "#${ep.episode} {Short | $desc} ${ep.name}"
+                } else {
+                    "#${ep.episode} ${ep.name}"
                 }
                 
-                // 유튜브가 추천해 주는 관련 숏츠 영상만 수집하여 필터링
-                finalRecs.addAll(recs.filter { it.url.contains("/shorts/") }) 
-
-                // 현재 에피소드 전체 묶음(#1 ~ #68)을 미디어 카드로 가공하여 추천 목록 하단에 병합
-                val episodeResponses = targetEpisodes.map { ep ->
-                    val desc = ep.description ?: ""
-                    val formattedTitle = if (desc.isNotBlank() && desc != "N/A" && !desc.contains("Playing")) {
-                        "#${ep.episode} {Short | $desc} ${ep.name}"
-                    } else {
-                        "#${ep.episode} ${ep.name}"
-                    }
-                    
-                    newMovieSearchResponse(formattedTitle, ep.data, TvType.Movie) {
-                        this.posterUrl = ep.posterUrl
-                    }
+                newMovieSearchResponse(formattedTitle, ep.data, TvType.Movie) {
+                    this.posterUrl = ep.posterUrl
                 }
-                finalRecs.addAll(episodeResponses)
+            }
+            finalRecs.addAll(episodeResponses)
 
-                return newTvSeriesLoadResponse(finalTitle, url, TvType.TvSeries, targetEpisodes) {
-                    this.posterUrl = YoutubeUtils.getShortsSearchPoster(videoId)
-                    this.plot = finalPlot
-                    this.recommendations = finalRecs 
+            return newTvSeriesLoadResponse(finalTitle, url, TvType.TvSeries, targetEpisodes) {
+                this.posterUrl = YoutubeUtils.getShortsSearchPoster(videoId)
+                this.plot = finalPlot
+                this.recommendations = finalRecs
 
-                    if (npTags.isNotEmpty()) this.tags = npTags
+                if (npTags.isNotEmpty()) this.tags = npTags
 
-                    val actorList = mutableListOf<ActorData>()
-                    if (npActor != null) {
-                        actorList.add(npActor!!)
-                    } else if (channelName.isNotBlank()) {
-                        actorList.add(ActorData(Actor(channelName, channelAvatar)))
-                    }
-                    if (subscriberCount.isNotBlank()) {
-                        actorList.add(ActorData(Actor(subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/YouTube/Subscribe.jpg")))
-                    }
-                    if (actorList.isNotEmpty()) {
-                        this.actors = actorList
-                    }
-                }              
+                val actorList = mutableListOf<ActorData>()
+                if (npActor != null) {
+                    actorList.add(npActor!!)
+                } else if (channelName.isNotBlank()) {
+                    actorList.add(ActorData(Actor(channelName, channelAvatar)))
+                }
+                if (subscriberCount.isNotBlank()) {
+                    actorList.add(ActorData(Actor(subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/YouTube/Subscribe.jpg")))
+                }
+                if (actorList.isNotEmpty()) {
+                    this.actors = actorList
+                }
+            }
+        }
+
 
         // ==========================================
         // 2. [채널 에피소드 처리 블록] -> [부결 유지] 기존의 NewPipe 유도 및 이중 가동 상태 유지
