@@ -88,11 +88,6 @@ open class YoutubeExtractor : ExtractorApi() {
         // [보완] 이전 백그라운드 작업을 완벽히 캔슬하기 위한 제어 변수
         private var serverJob: kotlinx.coroutines.Job? = null
 
-        @Volatile
-        private var activeServer: ServerSocket? = null
-        private var serverPort: Int = 0
-        private val serverLock = Any()
-
         private val streamCounter = AtomicLong(0)
 
         @Volatile
