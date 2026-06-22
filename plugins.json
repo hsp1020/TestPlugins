@@ -83,10 +83,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/LinkkfProvider/linktv.png",
-        "fileHash": "sha256-be448d6c4e4ee70b535a9e12c7268d7bb90b041cdb908664ec396d05ad542c7d",
+        "fileHash": "sha256-6eac0cd94085ec27eb47276bc06fc0ba5159c455667e6b9b6eefc188567bfb1f",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 18342,
+        "fileSize": 20902,
         "status": 1,
         "language": "ko",
         "authors": [
