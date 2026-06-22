@@ -2276,22 +2276,46 @@ class YoutubeProvider(
             var npActor: ActorData? = null
 
             val watchUrl = "https://www.youtube.com/watch?v=$videoId" 
-            try {
-                val extractor = ServiceList.YouTube.getStreamExtractor(watchUrl)
-                configureExtractorLocalization(extractor)
-                extractor.fetchPage()
-                val info = StreamInfo.getInfo(extractor)
-                
+            
+            // [수정] 코루틴 병렬 파싱 기법 적용 (HTML 수집과 NewPipe 상세 파싱 동시 진행)
+            val pairResult = coroutineScope {
+                val npDeferred = async(Dispatchers.IO) {
+                    try {
+                        val extractor = ServiceList.YouTube.getStreamExtractor(watchUrl)
+                        configureExtractorLocalization(extractor)
+                        extractor.fetchPage()
+                        StreamInfo.getInfo(extractor)
+                    } catch (e: Exception) {
+                        logError(e)
+                        null
+                    }
+                }
+
+                val htmlDeferred = async(Dispatchers.IO) {
+                    try {
+                        app.get(watchUrl, headers = mapOf("Referer" to "https://www.youtube.com/"), interceptor = ytInterceptor)
+                    } catch (e: Exception) {
+                        logError(e)
+                        null
+                    }
+                }
+                Pair(npDeferred.await(), htmlDeferred.await())
+            }
+
+            val info = pairResult.first
+            val response = pairResult.second
+            
+            if (info != null) {
                 npPlot = info.description.content.toString()
                 npTags = info.tags?.take(10)?.toList() ?: emptyList()
                 info.uploaderName?.takeIf { it.isNotBlank() }?.let { uploader ->
                     npActor = ActorData(Actor(uploader, info.uploaderAvatars.lastOrNull()?.url ?: ""))
                 }
-            } catch (e: Exception) {}
+            }
 
-            val response = app.get(watchUrl, headers = mapOf("Referer" to "https://www.youtube.com/"), interceptor = ytInterceptor)
-            val html = response.text
+            val html = response?.text ?: ""
             val data = extractYtInitialData(html)
+
             
             val recs = mutableListOf<SearchResponse>()
 
@@ -2456,7 +2480,35 @@ class YoutubeProvider(
                 }
 
                 val channelUrl = "$cleanUrl/videos"
-                val response = app.get(channelUrl, interceptor = ytInterceptor)
+                
+                // [수정] 코루틴 병렬 파싱 기법 적용 (채널 HTML 수집과 NewPipe 채널 정보 파싱 동시 가동)
+                val channelPairResult = coroutineScope {
+                    val htmlDeferred = async(Dispatchers.IO) {
+                        try {
+                            app.get(channelUrl, interceptor = ytInterceptor)
+                        } catch (e: Exception) {
+                            logError(e)
+                            null
+                        }
+                    }
+
+                    val extractorDeferred = async(Dispatchers.IO) {
+                        try {
+                            val channelExtractor = ServiceList.YouTube.getChannelExtractor(cleanUrl)
+                            configureExtractorLocalization(channelExtractor)
+                            channelExtractor.fetchPage()
+                            channelExtractor
+                        } catch (e: Exception) {
+                            logError(e)
+                            null
+                        }
+                    }
+                    Pair(htmlDeferred.await(), extractorDeferred.await())
+                }
+
+                val response = channelPairResult.first ?: throw ErrorLoadingException("Failed to load channel page")
+                val channelExtractor = channelPairResult.second
+
                 val html = response.text
                 val data = extractYtInitialData(html) ?: throw ErrorLoadingException("Failed to extract channel data")
 
@@ -2466,20 +2518,14 @@ class YoutubeProvider(
                 val maxPagesLimit = appPrefs?.getInt("channel_pages_limit", 36) ?: 36
 
                 var channelDescription = ""
-                try {
-                    val channelExtractor = ServiceList.YouTube.getChannelExtractor(cleanUrl)
-                    configureExtractorLocalization(channelExtractor)
-                    channelExtractor.fetchPage()
-                    
-                    // [수정] 원본 텍스트의 \n 줄바꿈을 HTML 태그 <br>로 강제 변환합니다.
+                if (channelExtractor != null) {
                     val rawDesc = (channelExtractor.description ?: "").replace("\n", "<br>")
-                    
                     // 설명이 존재하는 경우에만 앞에 [NewPipe] 태그를 붙여 저장합니다.
                     channelDescription = if (rawDesc.isNotBlank()) "$rawDesc" else "\u200b"
-                } catch (e: Exception) {
-                    logError(e)
+                } else {
+                    channelDescription = "\u200b"
                 }
-
+                
                 val header = safeGet(data, "header", "c4TabbedHeaderRenderer")
                     ?: safeGet(data, "header", "pageHeaderRenderer")
 
