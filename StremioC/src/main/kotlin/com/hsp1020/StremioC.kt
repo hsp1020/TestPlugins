@@ -832,7 +832,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             val ratingStr = mdbRatings.joinToString("  ")
             val currentPlot = loadRes.plot 
             
-            loadRes.plot = if (!currentPlot.isNullOrBlank()) "$ratingStr | $currentPlot" else ratingStr
+            loadRes.plot = if (!currentPlot.isNullOrBlank()) "$ratingStr<br>$currentPlot" else ratingStr
             loadRes.score = null 
         }
         
