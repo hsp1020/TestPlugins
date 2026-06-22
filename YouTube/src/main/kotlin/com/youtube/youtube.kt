@@ -889,7 +889,7 @@ class YoutubeProvider(
                 val dateText = getText(videoData.getMapKey("publishedTimeText"))
 
                 val channel = getText(videoData.getMapKey("ownerText"))
-                    . { getText(videoData.getMapKey("shortBylineText")) }
+                    .ifBlank { getText(videoData.getMapKey("shortBylineText")) }
                     .ifBlank { getText(videoData.getMapKey("longBylineText")) }
 
                 val views = viewText.ifBlank { "N/A" }
