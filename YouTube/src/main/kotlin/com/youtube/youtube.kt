@@ -2386,7 +2386,7 @@ class YoutubeProvider(
                 finalRecs.add(channelCard) 
             }
             
-            finalRecs.addAll(recs.filter { !it.url.contains("/shorts/") }) 
+            finalRecs.addAll(recs.filter { it.url.contains("/shorts/") }) 
 
             return newTvSeriesLoadResponse(finalTitle, url, TvType.TvSeries, targetEpisodes) {
                 this.posterUrl = YoutubeUtils.getShortsSearchPoster(videoId)
