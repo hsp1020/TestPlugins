@@ -4,7 +4,6 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.core.type.TypeReference
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.mapper
-import org.jsoup.Jsoup
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStream
@@ -65,7 +64,7 @@ class LinkkfExtractor {
 }
 
 /**
- * [표준 순수 소켓 버전 - 데드락 해결] com.sun 의존성 없이 멀티스레드 격리 소켓 루프로 작동하는 실시간 프록시 서버
+ * [표준 순수 소켓 버전 - 정밀 정규식] 외부 라이브러리 및 com.sun 의존성이 없는 완전 순수 자막 프록시 서버
  */
 object SubtitleProxy {
     private var serverSocket: ServerSocket? = null
@@ -102,7 +101,6 @@ object SubtitleProxy {
                 isRunning = true
                 println("[Linkkf-SubtitleProxy] [ensureServerRunning] ServerSocket 성공적으로 바인딩됨. 할당 포트: $port")
 
-                // 자막 요청 처리 및 유휴 종료 타이머 전담 워커 스레드 풀 (블로킹 루프에서 분리되어 완전히 자유로움)
                 val exec = Executors.newScheduledThreadPool(1) { runnable ->
                     Thread(runnable, "Linkkf-SubtitleProxy-Worker").apply {
                         isDaemon = true
@@ -110,14 +108,13 @@ object SubtitleProxy {
                 }
                 executor = exec
 
-                // [데드락 해결] 소켓 수신 대기(Accept)를 담당하는 별도의 독립 데몬 스레드 구동
+                // [데드락 해결] 소켓 수신 대기를 담당하는 별도의 독립 데몬 스레드 구동
                 Thread({
                     println("[Linkkf-SubtitleProxy] [ServerLoop] 전용 수신 스레드 구동을 시작합니다.")
                     while (isRunning) {
                         try {
                             val clientSocket = ss.accept()
                             println("[Linkkf-SubtitleProxy] [ServerLoop] 클라이언트 연결 수립됨: ${clientSocket.remoteSocketAddress}")
-                            // 수립된 소켓 처리를 워커 스레드 풀에 즉각 위임하여 대기 스레드는 즉시 다음 수신 대기로 복귀
                             exec.execute {
                                 handleClient(clientSocket)
                             }
@@ -281,18 +278,23 @@ object SubtitleProxy {
     }
 
     private fun sanitizeWebVtt(rawVtt: String, fallbackUrl: String): String {
-        if (!rawVtt.contains("ruby", ignoreCase = true) && 
-            !rawVtt.contains("rt", ignoreCase = true) && 
-            !rawVtt.contains("<v", ignoreCase = true)) {
+        // [치명적 인코딩 치료] 시작태그만 &lt;rt&gt;로 이스케이프 처리된 비표준 문법을 치료합니다.
+        var processed = rawVtt
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+
+        if (!processed.contains("ruby", ignoreCase = true) && 
+            !processed.contains("rt", ignoreCase = true) && 
+            !processed.contains("<v", ignoreCase = true)) {
             println("[Linkkf-SubtitleProxy] [sanitizeWebVtt] 루비 및 화자 태그가 본문에 없음. 무삭제 고속 패스 발동.")
-            return rawVtt
+            return processed
         }
 
         var rubyCount = 0
         var rtCount = 0
         var vCount = 0
 
-        val processedResult = rawVtt.lineSequence().map { line ->
+        val processedResult = processed.lineSequence().map { line ->
             if (!line.contains("<") || 
                 (!line.contains("ruby", ignoreCase = true) && 
                  !line.contains("rt", ignoreCase = true) && 
@@ -303,47 +305,65 @@ object SubtitleProxy {
             try {
                 var processedLine = line
 
-                // 1. 화자 태그 고속 치환
+                // 1. 화자 태그 고속 치환: <v Host>안녕하세요 -> [Host] 안녕하세요
                 if (processedLine.contains("<v", ignoreCase = true)) {
                     vCount++
-                    processedLine = processedLine.replace(Regex("<v\\s+([^>]+)>(.*?)(</v>)?"), "[$1] $2")
+                    processedLine = processedLine.replace(Regex("(?i)<v\\s+([^>]+)>(.*?)(</v>)?"), "[$1] $2")
                 }
 
-                // 2. 다국어 태그 고속 치환
+                // 2. 다국어 태그 고속 치환: </?lang> 제거
                 if (processedLine.contains("lang", ignoreCase = true)) {
-                    processedLine = processedLine.replace(Regex("</?lang[^>]*>"), "")
+                    processedLine = processedLine.replace(Regex("(?i)</?lang[^>]*>"), "")
                 }
 
-                // 3. 루비 및 rt 문법 보정
+                // 3. 루비 태그 변환 (정규식 기반 4단계 빌드 - 원본 내장 중복 괄호 완전 처리)
                 if (processedLine.contains("ruby", ignoreCase = true) || processedLine.contains("rt", ignoreCase = true)) {
-                    val doc = Jsoup.parseBodyFragment(processedLine)
-                    
-                    // 표준 루비 태그 변환
-                    doc.select("ruby").forEach { ruby ->
-                        rubyCount++
-                        val baseText = ruby.ownText()
-                        val rtText = ruby.select("rt").text()
-                        if (baseText.isNotEmpty() && rtText.isNotEmpty()) {
-                            ruby.replaceWith(org.jsoup.nodes.TextNode("$baseText($rtText)"))
-                        } else if (rtText.isNotEmpty()) {
-                            ruby.replaceWith(org.jsoup.nodes.TextNode(rtText))
-                        }
+                    // 3-1. 표준 규격 치환: <ruby>A<rt>B</rt></ruby> -> A(B)
+                    val before1 = processedLine
+                    processedLine = processedLine.replace(Regex("(?i)<ruby[^>]*>(.*?)<rt[^>]*>(.*?)</rt></ruby>")) { match ->
+                        val base = match.groupValues[1]
+                        val rt = match.groupValues[2].trim()
+                            .removeSurrounding("(").removeSurrounding(")")
+                            .removeSurrounding("（").removeSurrounding("）")
+                        "$base($rt)"
                     }
+                    if (processedLine != before1) rubyCount++
 
-                    // 독립형 rt 태그 보정
-                    doc.select("rt").forEach { rt ->
-                        if (rt.parent()?.normalName() != "ruby") {
-                            rtCount++
-                            val rtText = rt.text()
-                            if (rtText.isNotEmpty()) {
-                                rt.replaceWith(org.jsoup.nodes.TextNode("($rtText)"))
-                            } else {
-                                rt.remove()
-                            }
-                        }
+                    // 3-2. 변형 규격 치환: <ruby>A<rt>B</ruby> -> A(B)
+                    val before2 = processedLine
+                    processedLine = processedLine.replace(Regex("(?i)<ruby[^>]*>(.*?)<rt[^>]*>(.*?)</ruby>")) { match ->
+                        val base = match.groupValues[1]
+                        val rt = match.groupValues[2].trim()
+                            .removeSurrounding("(").removeSurrounding(")")
+                            .removeSurrounding("（").removeSurrounding("）")
+                        "$base($rt)"
                     }
+                    if (processedLine != before2) rubyCount++
 
-                    processedLine = doc.body().html()
+                    // 3-3. 루비 없이 rt만 단독 사용된 경우: A<rt>B</rt> -> A(B)
+                    val before3 = processedLine
+                    processedLine = processedLine.replace(Regex("(?i)([^<\\s]+)<rt[^>]*>(.*?)</rt>")) { match ->
+                        val base = match.groupValues[1]
+                        val rt = match.groupValues[2].trim()
+                            .removeSurrounding("(").removeSurrounding(")")
+                            .removeSurrounding("（").removeSurrounding("）")
+                        "$base($rt)"
+                    }
+                    if (processedLine != before3) rtCount++
+
+                    // 3-4. 루비 없이 rt만 단독 사용되었으나 닫는 태그가 유실된 최악의 경우: 문<rt>게이트』 -> 문(게이트)』
+                    val before4 = processedLine
+                    processedLine = processedLine.replace(Regex("(?i)([^<\\s]+)<rt[^>]*>([^<』\\s]+)")) { match ->
+                        val base = match.groupValues[1]
+                        val rt = match.groupValues[2].trim()
+                            .removeSurrounding("(").removeSurrounding(")")
+                            .removeSurrounding("（").removeSurrounding("）")
+                        "$base($rt)"
+                    }
+                    if (processedLine != before4) rtCount++
+
+                    // 3-5. 혹시 남아있을 수 있는 잔여 쓰레기 태그 일괄 정리
+                    processedLine = processedLine.replace(Regex("(?i)</?(ruby|rt|rp)[^>]*>"), "")
                 }
 
                 processedLine
