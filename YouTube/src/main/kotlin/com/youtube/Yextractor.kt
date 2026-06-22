@@ -806,17 +806,7 @@ open class YoutubeExtractor : ExtractorApi() {
                 }
 
                 val langLabel = if (locale != "und") getLanguageLabel(locale, langCode) else ""
-                val suffix = if (isOriginal) {
-                    when (langCode.lowercase()) {
-                        "ko" -> "원본"
-                        else -> "OG"
-                    }
-                } else {
-                    when (langCode.lowercase()) {
-                        "ko" -> "더빙"
-                        else -> "Dub"
-                    }
-                }
+                val suffix = if (isOriginal) "Original" else "Dubbed"
                 
                 val displayName = if (langLabel.isNotEmpty()) "$langLabel($suffix)" else ""
                 val labelName = if (displayName.isNotEmpty()) "YouTube ${height}p [$displayName]" else "YouTube ${height}p"
