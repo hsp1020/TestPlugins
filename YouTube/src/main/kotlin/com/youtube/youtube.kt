@@ -2791,6 +2791,22 @@ class YoutubeProvider(
                     recList.add(channelCard)
                 }
                 
+                // [추가] 파싱된 재생목록 에피소드(영상들)를 미디어 카드로 매핑하여 추천 리스트 하단에 덧붙입니다.
+                // 텍스트가 없는 투명 문자("\u200b")일 경우 대괄호가 텅 비는 오류를 방지하는 조건문 처리를 포함합니다.
+                val episodeResponses = episodes.map { ep ->
+                    val desc = ep.description ?: ""
+                    val formattedTitle = if (desc.isNotBlank() && desc != "\u200b") {
+                        "#${ep.episode} [$desc] ${ep.name}"
+                    } else {
+                        "#${ep.episode} ${ep.name}"
+                    }
+                    
+                    newMovieSearchResponse(formattedTitle, ep.data, TvType.Movie) {
+                        this.posterUrl = ep.posterUrl
+                    }
+                }
+                recList.addAll(episodeResponses)
+                
                 return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
                     this.posterUrl = YoutubeUtils.getProxiedPoster(playlistPoster)
                     this.recommendations = recList
