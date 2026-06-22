@@ -2471,13 +2471,16 @@ class YoutubeProvider(
                     configureExtractorLocalization(channelExtractor)
                     channelExtractor.fetchPage()
                     
-                    val rawDesc = channelExtractor.description ?: ""
+                    // [수정] 원본 텍스트의 \n 줄바꿈을 HTML 태그 <br>로 강제 변환합니다.
+                    val rawDesc = (channelExtractor.description ?: "").replace("\n", "<br>")
+                    
                     // 설명이 존재하는 경우에만 앞에 [NewPipe] 태그를 붙여 저장합니다.
                     channelDescription = if (rawDesc.isNotBlank()) "[NewPipe] $rawDesc" else "\u200b"
                 } catch (e: Exception) {
                     logError(e)
                 }
-
+                
+                
                 val header = safeGet(data, "header", "c4TabbedHeaderRenderer")
                     ?: safeGet(data, "header", "pageHeaderRenderer")
 
