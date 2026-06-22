@@ -2378,38 +2378,52 @@ class YoutubeProvider(
             val finalPlot = "\u200b"
 
             val finalRecs = mutableListOf<SearchResponse>()
-            if (channelName.isNotBlank() && channelId.isNotBlank()) {
-                val channelUrlFull = if (channelId.startsWith("UC") || channelId.startsWith("@")) "$mainUrl/channel/$channelId" else "$mainUrl/$channelId"
-                val channelCard = newMovieSearchResponse(channelName, channelUrlFull, TvType.Live) {
-                    this.posterUrl = YoutubeUtils.getProxiedPoster(channelAvatar) 
+                if (channelName.isNotBlank() && channelId.isNotBlank()) {
+                    val channelUrlFull = if (channelId.startsWith("UC") || channelId.startsWith("@")) "$mainUrl/channel/$channelId" else "$mainUrl/$channelId"
+                    val channelCard = newMovieSearchResponse(channelName, channelUrlFull, TvType.Live) {
+                        this.posterUrl = YoutubeUtils.getProxiedPoster(channelAvatar) 
+                    }
+                    finalRecs.add(channelCard) 
                 }
-                finalRecs.add(channelCard) 
-            }
-            
-            finalRecs.addAll(recs.filter { it.url.contains("/shorts/") }) 
-
-            return newTvSeriesLoadResponse(finalTitle, url, TvType.TvSeries, targetEpisodes) {
-                this.posterUrl = YoutubeUtils.getShortsSearchPoster(videoId)
-                this.plot = finalPlot
-                this.recommendations = finalRecs 
                 
-                if (npTags.isNotEmpty()) this.tags = npTags
+                // 유튜브가 추천해 주는 관련 숏츠 영상만 수집하여 필터링
+                finalRecs.addAll(recs.filter { it.url.contains("/shorts/") }) 
 
-                val actorList = mutableListOf<ActorData>()
-                if (npActor != null) {
-                    actorList.add(npActor!!)
-                } else if (channelName.isNotBlank()) {
-                    actorList.add(ActorData(Actor(channelName, channelAvatar)))
+                // 현재 에피소드 전체 묶음(#1 ~ #68)을 미디어 카드로 가공하여 추천 목록 하단에 병합
+                val episodeResponses = targetEpisodes.map { ep ->
+                    val desc = ep.description ?: ""
+                    val formattedTitle = if (desc.isNotBlank() && desc != "N/A" && !desc.contains("Playing")) {
+                        "#${ep.episode} {Short | $desc} ${ep.name}"
+                    } else {
+                        "#${ep.episode} ${ep.name}"
+                    }
+                    
+                    newMovieSearchResponse(formattedTitle, ep.data, TvType.Movie) {
+                        this.posterUrl = ep.posterUrl
+                    }
                 }
-                if (subscriberCount.isNotBlank()) {
-                    actorList.add(ActorData(Actor(subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/YouTube/Subscribe.jpg")))
-                }
-                if (actorList.isNotEmpty()) {
-                    this.actors = actorList
-                }
-            }
-        }
+                finalRecs.addAll(episodeResponses)
 
+                return newTvSeriesLoadResponse(finalTitle, url, TvType.TvSeries, targetEpisodes) {
+                    this.posterUrl = YoutubeUtils.getShortsSearchPoster(videoId)
+                    this.plot = finalPlot
+                    this.recommendations = finalRecs 
+
+                    if (npTags.isNotEmpty()) this.tags = npTags
+
+                    val actorList = mutableListOf<ActorData>()
+                    if (npActor != null) {
+                        actorList.add(npActor!!)
+                    } else if (channelName.isNotBlank()) {
+                        actorList.add(ActorData(Actor(channelName, channelAvatar)))
+                    }
+                    if (subscriberCount.isNotBlank()) {
+                        actorList.add(ActorData(Actor(subscriberCount, "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/YouTube/Subscribe.jpg")))
+                    }
+                    if (actorList.isNotEmpty()) {
+                        this.actors = actorList
+                    }
+                }              
 
         // ==========================================
         // 2. [채널 에피소드 처리 블록] -> [부결 유지] 기존의 NewPipe 유도 및 이중 가동 상태 유지
