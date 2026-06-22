@@ -85,6 +85,17 @@ open class YoutubeExtractor : ExtractorApi() {
         private var serverPort: Int = 0
         private val serverLock = Any()
 
+        // [추가] 서버 자동 종료 및 수명 주기 관리를 위한 제어 변수
+        private var serverJob: kotlinx.coroutines.Job? = null
+        @Volatile
+        private var lastActiveTime: Long = System.currentTimeMillis()
+        private const val IDLE_TIMEOUT_MS = 60000L // 1분 동안 요청이 없으면 서버 완전 자동 종료
+
+        @Volatile
+        private var activeServer: ServerSocket? = null
+        private var serverPort: Int = 0
+        private val serverLock = Any()
+
         private val streamCounter = AtomicLong(0)
 
         @Volatile
@@ -187,7 +198,9 @@ open class YoutubeExtractor : ExtractorApi() {
 
         private suspend fun handleClient(client: Socket) = withContext(Dispatchers.IO) {
             try {
-                client.use { socket ->
+                private suspend fun handleClient(client: Socket) = withContext(Dispatchers.IO) {
+                lastActiveTime = System.currentTimeMillis() // [추가] 요청 활성화 시점 기록
+
                     val inputStream = socket.getInputStream()
                     val reader = BufferedReader(InputStreamReader(inputStream, java.nio.charset.StandardCharsets.UTF_8))
                     val output = socket.getOutputStream()
@@ -294,6 +307,7 @@ open class YoutubeExtractor : ExtractorApi() {
             clientHeaders: Map<String, String>
         ) = withContext(Dispatchers.IO) {
             try {
+                lastActiveTime = System.currentTimeMillis() //
                 val requestBuilder = okhttp3.Request.Builder()
                     .url(targetUrl)
                     .header("User-Agent", YoutubeUtils.ANDROID_VR_USER_AGENT)
@@ -1192,35 +1206,75 @@ open class YoutubeExtractor : ExtractorApi() {
         }
     }
 
+
     private fun startServerIfNeeded() {
         synchronized(serverLock) {
+            lastActiveTime = System.currentTimeMillis()
             val server = activeServer
             if (server != null && !server.isClosed) return
+
             try {
-                try {
-                    server?.close()
-                } catch (e: Exception) {}
+                stopServerGracefully()
 
                 val newServer = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
+                newServer.soTimeout = 5000
                 activeServer = newServer
                 serverPort = newServer.localPort
-                
-                serverScope.launch {
+
+                serverJob = serverScope.launch {
                     try {
                         while (isActive && !newServer.isClosed) {
-                            val client = newServer.accept()
-                            client.soTimeout = 15000 
-                            launch { handleClient(client) }
+                            if (System.currentTimeMillis() - lastActiveTime > IDLE_TIMEOUT_MS) {
+                                println("[YT_PROXY] 장시간 유휴 상태 감지. 리소스 절약을 위해 로컬 서버를 자동 종료합니다.")
+                                break
+                            }
+
+                            try {
+                                val client = newServer.accept()
+                                lastActiveTime = System.currentTimeMillis()
+                                client.soTimeout = 15000
+                                launch { handleClient(client) }
+                            } catch (e: java.net.SocketTimeoutException) {
+                                // 타임아웃 발생 시 무시하고 다음 루프에서 isActive 및 Idle 상태 체크
+                            } catch (e: Exception) {
+                                if (newServer.isClosed) break
+                                kotlinx.coroutines.delay(1000)
+                            }
                         }
-                    } catch (e: Exception) {
+                    } finally {
+                        closeServerInstance(newServer)
                     }
                 }
-            } catch (e: Exception) { 
-                logError(e) 
+            } catch (e: Exception) {
+                logError(e)
             }
         }
     }
 
+    private fun stopServerGracefully() {
+        serverJob?.cancel()
+        serverJob = null
+        val server = activeServer
+        if (server != null) {
+            closeServerInstance(server)
+        }
+    }
+
+    private fun closeServerInstance(server: ServerSocket) {
+        try {
+            if (!server.isClosed) {
+                server.close()
+            }
+        } catch (e: Exception) {
+            // 무의미한 에러 로그 생략
+        }
+        if (activeServer === server) {
+            activeServer = null
+            serverPort = 0
+        }
+    }
+    
+        
     private fun registerManifestAndGetUrl(xmlContent: String): String? {
         if (serverPort == 0) return null
         val id = "m_${streamCounter.getAndIncrement()}"
