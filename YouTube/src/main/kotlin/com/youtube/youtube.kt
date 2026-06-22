@@ -2475,7 +2475,7 @@ class YoutubeProvider(
                     val rawDesc = (channelExtractor.description ?: "").replace("\n", "<br>")
                     
                     // 설명이 존재하는 경우에만 앞에 [NewPipe] 태그를 붙여 저장합니다.
-                    channelDescription = channelExtractor.description ?: "\u200b"
+                    channelDescription = if (rawDesc.isNotBlank()) "$rawDesc" else "\u200b"
                 } catch (e: Exception) {
                     logError(e)
                 }
