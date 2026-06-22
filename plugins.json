@@ -148,10 +148,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/Streamed/faviconV2.png",
-        "fileHash": "sha256-650a02060ba859c0988df47555f0cbab22923aa588ddde7aafa421f24a4de9e5",
+        "fileHash": "sha256-841115431b9fbcb75a95393d7b239c04ece8a96226e0feca6beec3bd85b604c5",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 32265,
+        "fileSize": 32261,
         "status": 1,
         "language": "en",
         "authors": [
