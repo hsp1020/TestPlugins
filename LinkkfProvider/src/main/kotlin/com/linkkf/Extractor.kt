@@ -64,7 +64,7 @@ class LinkkfExtractor {
 }
 
 /**
- * [표준 순수 소켓 버전 - 정밀 정규식] 외부 라이브러리 및 com.sun 의존성이 없는 완전 순수 자막 프록시 서버
+ * [표준 순수 소켓 버전 - 구조적 토큰 파서 탑재] com.sun 의존성 없이 멀티스레드 소켓 루프 및 상태 기계로 구동되는 안정 버전
  */
 object SubtitleProxy {
     private var serverSocket: ServerSocket? = null
@@ -108,7 +108,6 @@ object SubtitleProxy {
                 }
                 executor = exec
 
-                // [데드락 해결] 소켓 수신 대기를 담당하는 별도의 독립 데몬 스레드 구동
                 Thread({
                     println("[Linkkf-SubtitleProxy] [ServerLoop] 전용 수신 스레드 구동을 시작합니다.")
                     while (isRunning) {
@@ -199,7 +198,7 @@ object SubtitleProxy {
             }
 
             println("[Linkkf-SubtitleProxy] [handleClient] 자막 다운로드 성공. 원본 크기: ${rawVtt.length} 글자")
-            println("[Linkkf-SubtitleProxy] [handleClient] 실시간 자막 가공(Sanitization) 엔진을 구동합니다...")
+            println("[Linkkf-SubtitleProxy] [handleClient] 실시간 구조적 자막 가공(Token-based Parser) 엔진을 구동합니다...")
             val sanitizedVtt = sanitizeWebVtt(rawVtt, originalUrl)
             val responseBytes = sanitizedVtt.toByteArray(StandardCharsets.UTF_8)
             println("[Linkkf-SubtitleProxy] [handleClient] 가공 완료. 최종 전송 크기: ${responseBytes.size} 바이트")
@@ -277,102 +276,175 @@ object SubtitleProxy {
         println("[Linkkf-SubtitleProxy] [stopServer] 리소스 정리 절차 완료.")
     }
 
-    private fun sanitizeWebVtt(rawVtt: String, fallbackUrl: String): String {
-        // [치명적 인코딩 치료] 시작태그만 &lt;rt&gt;로 이스케이프 처리된 비표준 문법을 치료합니다.
-        var processed = rawVtt
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
+    // 어휘 파싱을 위한 토큰 객체
+    private class VttToken(val isTag: Boolean, val content: String)
 
-        if (!processed.contains("ruby", ignoreCase = true) && 
-            !processed.contains("rt", ignoreCase = true) && 
-            !processed.contains("<v", ignoreCase = true)) {
-            println("[Linkkf-SubtitleProxy] [sanitizeWebVtt] 루비 및 화자 태그가 본문에 없음. 무삭제 고속 패스 발동.")
-            return processed
+    /**
+     * 문맥과 구조를 완벽하게 인지하는 컴파일러 기법의 자막 파서 엔진
+     */
+    private fun sanitizeWebVtt(rawVtt: String, fallbackUrl: String): String {
+        // 루비, 화자, 이스케이프 패턴이 아예 없는 평범한 자막은 그대로 패스 (초고속 성능 보장)
+        if (!rawVtt.contains("ruby", ignoreCase = true) && 
+            !rawVtt.contains("rt", ignoreCase = true) && 
+            !rawVtt.contains("<v", ignoreCase = true) && 
+            !rawVtt.contains("&lt;", ignoreCase = true)) {
+            println("[Linkkf-SubtitleProxy] [sanitizeWebVtt] 원본에 루비/화자/인코딩 패턴이 전혀 없음. 무가공 초고속 패스.")
+            return rawVtt
         }
 
         var rubyCount = 0
-        var rtCount = 0
         var vCount = 0
 
-        val processedResult = processed.lineSequence().map { line ->
-            if (!line.contains("<") || 
-                (!line.contains("ruby", ignoreCase = true) && 
-                 !line.contains("rt", ignoreCase = true) && 
-                 !line.contains("<v", ignoreCase = true))) {
+        val processedResult = rawVtt.lineSequence().map { line ->
+            // 가공이 필요 없는 대사는 일절 건드리지 않고 그대로 보존
+            if (!line.contains("<") && !line.contains("&lt;")) {
                 return@map line
             }
 
             try {
-                var processedLine = line
+                // 1. 해당 라인을 표준 태그 영역과 일반 텍스트 영역으로 완전하게 분리 (토큰 어휘 분석)
+                val tokens = tokenizeVttLine(line)
+                
+                // 2. 상태 머신 구동하여 태그 조립 및 가공 시작
+                val resultBuilder = StringBuilder()
+                var insideRt = false
+                val rtContent = StringBuilder()
 
-                // 1. 화자 태그 고속 치환: <v Host>안녕하세요 -> [Host] 안녕하세요
-                if (processedLine.contains("<v", ignoreCase = true)) {
-                    vCount++
-                    processedLine = processedLine.replace(Regex("(?i)<v\\s+([^>]+)>(.*?)(</v>)?"), "[$1] $2")
+                for (token in tokens) {
+                    if (token.isTag) {
+                        val tagLower = token.content.lowercase()
+                        
+                        // 루비, rt 태그의 진입 및 탈출 분기점 분석
+                        val isRubyStart = tagLower.startsWith("<ruby") || tagLower.startsWith("&lt;ruby")
+                        val isRubyEnd = tagLower == "</ruby>" || tagLower == "&lt;/ruby&gt;"
+                        val isRtStart = tagLower.startsWith("<rt") || tagLower.startsWith("&lt;rt")
+                        val isRtEnd = tagLower == "</rt>" || tagLower == "&lt;/rt&gt;"
+
+                        // 화자(Voice) 태그 처리 분기점
+                        val isVoiceStart = tagLower.startsWith("<v ") || tagLower.startsWith("&lt;v ")
+                        val isVoiceEnd = tagLower == "</v>" || tagLower == "&lt;/v&gt;"
+
+                        when {
+                            isRubyStart || isRubyEnd -> {
+                                // 루비 마크업 태그 자체는 출력 텍스트에서 완전히 제거합니다.
+                                if (isRubyStart) rubyCount++
+                            }
+                            isRtStart -> {
+                                insideRt = true
+                                rtContent.setLength(0) // 버퍼 클리어
+                            }
+                            isRtEnd -> {
+                                insideRt = false
+                                val annotation = rtContent.toString().trim()
+                                    .removeSurrounding("(").removeSurrounding(")")
+                                    .removeSurrounding("（").removeSurrounding("）")
+                                if (annotation.isNotEmpty()) {
+                                    resultBuilder.append("($annotation)")
+                                }
+                            }
+                            isVoiceStart -> {
+                                vCount++
+                                // <v Host> 에서 'Host' 만 추출하여 [Host] 형태로 전방에 강제 주입
+                                val speaker = if (tagLower.startsWith("<v")) {
+                                    token.content.substring(2, token.content.length - 1).trim()
+                                } else {
+                                    token.content.substring(5, token.content.length - 4).trim()
+                                }
+                                if (speaker.isNotEmpty()) {
+                                    resultBuilder.append("[$speaker] ")
+                                }
+                            }
+                            isVoiceEnd -> {
+                                // 화자 닫는 태그는 단순 폐기
+                            }
+                            else -> {
+                                // b, i, u, c 등 ExoPlayer 가 자체 지원하는 표준 서체 효과 태그는
+                                // 가공하지 않고 원본 토큰 그대로 흘려보내 시각 효과를 온전히 유지시킵니다.
+                                if (!insideRt) {
+                                    resultBuilder.append(token.content)
+                                }
+                            }
+                        }
+                    } else {
+                        // 텍스트 토큰인 경우
+                        if (insideRt) {
+                            rtContent.append(token.content) // rt 영역 내부라면 괄호 처리 버퍼에 적재
+                        } else {
+                            resultBuilder.append(token.content) // 일반 텍스트면 최종 출력 스트림에 적재
+                        }
+                    }
                 }
 
-                // 2. 다국어 태그 고속 치환: </?lang> 제거
-                if (processedLine.contains("lang", ignoreCase = true)) {
-                    processedLine = processedLine.replace(Regex("(?i)</?lang[^>]*>"), "")
+                // 혹시나 닫는 rt 태그가 소실된 비표준 자막 행의 경우에 대비한 자동 회수 예외 처리
+                if (insideRt && rtContent.isNotEmpty()) {
+                    val annotation = rtContent.toString().trim()
+                        .removeSurrounding("(").removeSurrounding(")")
+                        .removeSurrounding("（").removeSurrounding("）")
+                    if (annotation.isNotEmpty()) {
+                        resultBuilder.append("($annotation)")
+                    }
                 }
 
-                // 3. 루비 태그 변환 (정규식 기반 4단계 빌드 - 원본 내장 중복 괄호 완전 처리)
-                if (processedLine.contains("ruby", ignoreCase = true) || processedLine.contains("rt", ignoreCase = true)) {
-                    // 3-1. 표준 규격 치환: <ruby>A<rt>B</rt></ruby> -> A(B)
-                    val before1 = processedLine
-                    processedLine = processedLine.replace(Regex("(?i)<ruby[^>]*>(.*?)<rt[^>]*>(.*?)</rt></ruby>")) { match ->
-                        val base = match.groupValues[1]
-                        val rt = match.groupValues[2].trim()
-                            .removeSurrounding("(").removeSurrounding(")")
-                            .removeSurrounding("（").removeSurrounding("）")
-                        "$base($rt)"
-                    }
-                    if (processedLine != before1) rubyCount++
-
-                    // 3-2. 변형 규격 치환: <ruby>A<rt>B</ruby> -> A(B)
-                    val before2 = processedLine
-                    processedLine = processedLine.replace(Regex("(?i)<ruby[^>]*>(.*?)<rt[^>]*>(.*?)</ruby>")) { match ->
-                        val base = match.groupValues[1]
-                        val rt = match.groupValues[2].trim()
-                            .removeSurrounding("(").removeSurrounding(")")
-                            .removeSurrounding("（").removeSurrounding("）")
-                        "$base($rt)"
-                    }
-                    if (processedLine != before2) rubyCount++
-
-                    // 3-3. 루비 없이 rt만 단독 사용된 경우: A<rt>B</rt> -> A(B)
-                    val before3 = processedLine
-                    processedLine = processedLine.replace(Regex("(?i)([^<\\s]+)<rt[^>]*>(.*?)</rt>")) { match ->
-                        val base = match.groupValues[1]
-                        val rt = match.groupValues[2].trim()
-                            .removeSurrounding("(").removeSurrounding(")")
-                            .removeSurrounding("（").removeSurrounding("）")
-                        "$base($rt)"
-                    }
-                    if (processedLine != before3) rtCount++
-
-                    // 3-4. 루비 없이 rt만 단독 사용되었으나 닫는 태그가 유실된 최악의 경우: 문<rt>게이트』 -> 문(게이트)』
-                    val before4 = processedLine
-                    processedLine = processedLine.replace(Regex("(?i)([^<\\s]+)<rt[^>]*>([^<』\\s]+)")) { match ->
-                        val base = match.groupValues[1]
-                        val rt = match.groupValues[2].trim()
-                            .removeSurrounding("(").removeSurrounding(")")
-                            .removeSurrounding("（").removeSurrounding("）")
-                        "$base($rt)"
-                    }
-                    if (processedLine != before4) rtCount++
-
-                    // 3-5. 혹시 남아있을 수 있는 잔여 쓰레기 태그 일괄 정리
-                    processedLine = processedLine.replace(Regex("(?i)</?(ruby|rt|rp)[^>]*>"), "")
-                }
-
-                processedLine
+                resultBuilder.toString()
             } catch (e: Exception) {
-                line
+                line // 혹시 모를 내부 구조 변환 중 에러 발생 시 원본 라인 안전 보존
             }
         }.joinToString("\n")
 
-        println("[Linkkf-SubtitleProxy] [sanitizeWebVtt] 필터링 요약 -> 변환된 <ruby>: $rubyCount, 독립 <rt>: $rtCount, 화자 <v>: $vCount")
+        println("[Linkkf-SubtitleProxy] [sanitizeWebVtt] 구조 분석 요약 -> 변환된 <ruby>: $rubyCount, 화자 <v>: $vCount")
         return processedResult
+    }
+
+    /**
+     * VTT 한 줄의 모든 문자열을 순방향 $O(N)$으로 훑으며 태그와 일반 문자로 분해하는 고성능 토크나이저
+     */
+    private fun tokenizeVttLine(line: String): List<VttToken> {
+        val tokens = mutableListOf<VttToken>()
+        var i = 0
+        val n = line.length
+        val sb = StringBuilder()
+
+        while (i < n) {
+            // 표준 꺾쇠 < 형태의 태그 추출
+            if (line.startsWith("<", i)) {
+                if (sb.isNotEmpty()) {
+                    tokens.add(VttToken(false, sb.toString()))
+                    sb.setLength(0)
+                }
+                val endIdx = line.indexOf(">", i)
+                if (endIdx != -1) {
+                    tokens.add(VttToken(true, line.substring(i, endIdx + 1)))
+                    i = endIdx + 1
+                } else {
+                    sb.append(line[i])
+                    i++
+                }
+            } 
+            // 이스케이프 &lt; 형태의 태그 추출
+            else if (line.startsWith("&lt;", i)) {
+                if (sb.isNotEmpty()) {
+                    tokens.add(VttToken(false, sb.toString()))
+                    sb.setLength(0)
+                }
+                val endIdx = line.indexOf("&gt;", i)
+                if (endIdx != -1) {
+                    tokens.add(VttToken(true, line.substring(i, endIdx + 4)))
+                    i = endIdx + 4
+                } else {
+                    sb.append(line[i])
+                    i++
+                }
+            } 
+            // 일반 텍스트 누적
+            else {
+                sb.append(line[i])
+                i++
+            }
+        }
+        
+        if (sb.isNotEmpty()) {
+            tokens.add(VttToken(false, sb.toString()))
+        }
+        return tokens
     }
 }
