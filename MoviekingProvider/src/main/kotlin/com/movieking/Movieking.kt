@@ -13,7 +13,7 @@ import kotlinx.coroutines.sync.withLock
 
 class MovieKing : MainAPI() {
     companion object {
-        var currentMainUrl = "https://movieking.net"
+        var currentMainUrl = "https://mvking.top"
         var isDomainChecked = false 
         private val domainMutex = Mutex()
         private const val PREFS_NAME = "MovieKing_Domain_Cache"
@@ -74,8 +74,8 @@ class MovieKing : MainAPI() {
             } catch (e: Exception) { println("[MovieKing DBG] ❌ 현재 도메인 접속 실패") }
 
             try {
-                println("[MovieKing DBG] 🌐 베이스 도메인(movieking.net) 폴백 시도")
-                val baseRes = app.get("https://movieking.net", headers = commonHeaders, timeout = 5L)
+                println("[MovieKing DBG] 🌐 베이스 도메인(mvking.top) 폴백 시도")
+                val baseRes = app.get("https://mvking.top", headers = commonHeaders, timeout = 5L)
                 val baseFinalUrl = baseRes.url.trimEnd('/')
                 if (baseRes.isSuccessful && baseRes.text.contains("video-card")) {
                     println("[MovieKing DBG] ✨ 베이스 도메인 폴백 성공: $baseFinalUrl")
