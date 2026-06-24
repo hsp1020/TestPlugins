@@ -1,13 +1,6 @@
 package com.lagradost.cloudstream3.plugins.tvchak
 
 import android.content.Context
-import android.os.Handler
-import android.os.Looper
-import android.webkit.CookieManager
-import android.webkit.WebView
-import android.webkit.WebViewClient
-import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -18,15 +11,12 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.jsoup.nodes.Element
 import java.net.URLDecoder
 import java.net.URLEncoder
 import kotlin.coroutines.resume
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 
 class TvchakProvider : MainAPI() {
     companion object {
@@ -104,7 +94,7 @@ class TvchakProvider : MainAPI() {
         println("[ChakPlay] 🛡️ Cloudflare 우회 웹뷰 기동 -> URL: $url")
 
         try {
-            val cookieManager = CookieManager.getInstance()
+            val cookieManager = android.webkit.CookieManager.getInstance()
             cookieManager.removeAllCookies(null)
             cookieManager.flush()
             println("[ChakPlay] 🧹 우회용 웹뷰 기존 캐시 쿠키 제거 완료")
@@ -113,16 +103,16 @@ class TvchakProvider : MainAPI() {
         }
 
         suspendCancellableCoroutine<Pair<String, String>?> { continuation ->
-            val webView = WebView(context)
+            val webView = android.webkit.WebView(context)
             webView.settings.javaScriptEnabled = true
             webView.settings.domStorageEnabled = true
             webView.settings.databaseEnabled = true
             webView.settings.userAgentString = userAgent
             
-            webView.webViewClient = object : WebViewClient() {
+            webView.webViewClient = object : android.webkit.WebViewClient() {
                 var solved = false
 
-                override fun onPageFinished(view: WebView?, url: String?) {
+                override fun onPageFinished(view: android.webkit.WebView?, url: String?) {
                     super.onPageFinished(view, url)
                     if (url == null) return
                     checkCookies(url)
@@ -130,7 +120,7 @@ class TvchakProvider : MainAPI() {
 
                 fun checkCookies(currentUrl: String) {
                     if (solved) return
-                    val cookieManager = CookieManager.getInstance()
+                    val cookieManager = android.webkit.CookieManager.getInstance()
                     val cookies = cookieManager.getCookie(currentUrl) ?: ""
                     println("[ChakPlay] 🍪 실시간 쿠키 수집 중... (길이: ${cookies.length})")
 
@@ -150,11 +140,11 @@ class TvchakProvider : MainAPI() {
 
             webView.loadUrl(url)
 
-            val handler = Handler(Looper.getMainLooper())
+            val handler = android.os.Handler(android.os.Looper.getMainLooper())
             val timeoutRunnable = Runnable {
                 if (continuation.isActive) {
                     println("[ChakPlay] ⏰ CF 우회 웹뷰 15초 타임아웃 발생")
-                    val cookieManager = CookieManager.getInstance()
+                    val cookieManager = android.webkit.CookieManager.getInstance()
                     val cookies = cookieManager.getCookie(url) ?: ""
                     if (cookies.contains("cf_clearance")) {
                         println("[ChakPlay] 🍀 타임아웃 도달 직전 수집된 쿠키 반환 시도")
@@ -174,7 +164,7 @@ class TvchakProvider : MainAPI() {
                 override fun run() {
                     if (continuation.isActive) {
                         webView.url?.let { currentUrl ->
-                            val cookieManager = CookieManager.getInstance()
+                            val cookieManager = android.webkit.CookieManager.getInstance()
                             val cookies = cookieManager.getCookie(currentUrl) ?: ""
                             if (cookies.contains("cf_clearance")) {
                                 println("[ChakPlay] ✅ 성공 (인터벌 체크): cf_clearance 검출 완료")
@@ -424,185 +414,99 @@ class TvchakProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         checkAndUpdateDomain()
-        println("[ChakPlay] [loadLinks] 비디오 링크 탐색 개시: $data")
+        println("[ChakPlay] [loadLinks] 정적 무음 핸드쉐이크 기반 탐색 개시: $data")
         
-        // 메인 쓰레드 백그라운드 웹뷰를 기동하여 최종 서명이 결합된 링크를 가로챕니다.
-        val interceptResult = interceptVideoUrlWithWebView(data)
-
-        if (interceptResult != null) {
-            val interceptedVideoUrl = interceptResult.first
-            val dynamicReferer = interceptResult.second ?: "https://ckp.wiselife.blog/"
-            
-            println("[ChakPlay] [loadLinks] 🎉 최종 실재 영상 주소 가로채기 성공: $interceptedVideoUrl")
-            println("[ChakPlay] [loadLinks] 📡 동적 매핑할 Referer 헤더: $dynamicReferer")
-            
-            val type = if (interceptedVideoUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-            
-            // [ChakPlay] 웹뷰가 검증 과정에서 확보한 실시간 쿠키 값을 획득합니다. (동적 도메인 타겟)
-            val cookieManager = CookieManager.getInstance()
-            val webViewCookies = cookieManager.getCookie(dynamicReferer) ?: ""
-            println("[ChakPlay] [loadLinks] ExoPlayer에 주입할 실시간 수집 쿠키: $webViewCookies")
-
-            callback.invoke(
-                newExtractorLink(
-                    this.name,
-                    this.name,
-                    url = interceptedVideoUrl,
-                    type = type
-                ) {
-                    this.referer = dynamicReferer // [ChakPlay] 중요: 리다이렉트 서버(wiselife.blog)로 레퍼러 덮어쓰기
-                    this.quality = Qualities.P1080.value
-                    
-                    // [ChakPlay] 웹뷰의 User-Agent와 가로챈 실시간 쿠키/레퍼러 세션을 ExoPlayer 헤더에 강제 바인딩
-                    this.headers = mapOf(
-                        "User-Agent" to (cfUserAgent ?: userAgent),
-                        "Referer" to dynamicReferer,
-                        "Cookie" to webViewCookies
-                    )
-                }
-            )
-            println("[ChakPlay] [loadLinks] ExoPlayer로 가로챈 비디오 주소 반환 완료")
-            return true
-        } else {
-            println("[ChakPlay] [loadLinks] ❌ 웹뷰 탐색 도중 최종 링크 추출 실패")
+        // 1. 디테일 페이지 획득 및 player_aaaa 파싱
+        val document = safeGet(data).document
+        val scriptContent = document.select("script").find { it.data().contains("player_aaaa") }?.data()
+        
+        if (scriptContent == null) {
+            println("[ChakPlay] [loadLinks] ❌ 에러: player_aaaa 스크립트를 찾지 못했습니다.")
             return false
         }
-    }
 
-    /**
-     * [ChakPlay] 중간 검증 및 리다이렉트 페이지(.php, wiselife.blog)를 우회 추적하며 
-     * 미디어 파일 주소와 검증 서버의 도메인(Referer)을 페어로 반환하는 백그라운드 웹뷰 인터셉터
-     */
-    private suspend fun interceptVideoUrlWithWebView(pageUrl: String): Pair<String, String?>? = withContext(Dispatchers.Main) {
-        println("[ChakPlay] [WebView] 0단계: 비동기 작업 메인 스레드 진입")
+        val jsonString = scriptContent.substringAfter("player_aaaa=").substringBefore("</script>").trim().removeSuffix(";")
         
-        val context = try {
-            Class.forName("android.app.ActivityThread")
-                .getMethod("currentApplication")
-                .invoke(null) as? android.content.Context
-        } catch (e: Exception) {
-            println("[ChakPlay] [WebView] ❌ 에러: Context 로딩 실패: ${e.message}")
-            null
-        } ?: return@withContext null
+        val urlRegex = Regex(""""url"\s*:\s*"([^"]+)"""")
+        val matchUrl = urlRegex.find(jsonString)
+        val rawUrl = matchUrl?.groupValues?.get(1)?.replace("\\/", "/") 
+        
+        if (rawUrl == null) {
+            println("[ChakPlay] [loadLinks] ❌ 에러: JSON에서 원본 url 추출 실패")
+            return false
+        }
 
-        println("[ChakPlay] [WebView] 1단계: Context 확보 성공. WebView 인스턴스 초기화")
+        println("[ChakPlay] [loadLinks] 🔍 스크립트 추출 원본 주소: $rawUrl")
 
-        suspendCancellableCoroutine<Pair<String, String?>?> { continuation ->
-            val webView = WebView(context)
+        var videoUrl = rawUrl
+        var refererUrl = mainUrl // 기본 레퍼러 지정
+
+        // 2. 만약 주소가 검증 페이지(.php / wiselife.blog)를 우회하는 중계 주소인 경우
+        if (rawUrl.contains("chaktt.php?url=")) {
+            // 중계 주소 뒤에 숨겨진 실제 CDN 주소 추출
+            val realEncodedUrl = rawUrl.substringAfter("url=")
+            videoUrl = URLDecoder.decode(realEncodedUrl, "UTF-8")
             
-            webView.settings.javaScriptEnabled = true
-            webView.settings.domStorageEnabled = true
-            webView.settings.mediaPlaybackRequiresUserGesture = false // 오토 재생 허용
-            webView.settings.userAgentString = cfUserAgent ?: userAgent
-
-            println("[ChakPlay] [WebView] 2단계: 웹뷰 환경 설정 완비 (UA: ${webView.settings.userAgentString})")
-
-            var isResumed = false
-            var detectedReferer: String? = "https://ckp.wiselife.blog/" // 기본 감지값 초기화
-
-            webView.webViewClient = object : WebViewClient() {
-                override fun shouldInterceptRequest(
-                    view: WebView?,
-                    request: WebResourceRequest?
-                ): WebResourceResponse? {
-                    val url = request?.url?.toString() ?: return super.shouldInterceptRequest(view, request)
-                    
-                    // [ChakPlay] .php 파일이나 특정 중계 서버(wiselife.blog) 도메인은 실제 소스가 아닌 검증 레이어이므로 스킵 처리합니다.
-                    val isMediaUrl = (url.contains("b-cdn.net") || url.contains(".mp4") || url.contains(".m3u8"))
-                    val isIntermediateWrapper = url.contains(".php") || url.contains("wiselife.blog")
-
-                    // [ChakPlay] 중계 서버를 통과할 때 해당 도메인을 정식 레퍼러(Referer) 후보로 자동 보관합니다.
-                    if (isIntermediateWrapper) {
-                        try {
-                            val uri = request.url
-                            detectedReferer = "${uri.scheme}://${uri.host}/"
-                            println("[ChakPlay] [WebView-Skip] 중간 검증 서버 도메인 추출: $detectedReferer")
-                        } catch (e: Exception) {
-                            println("[ChakPlay] [WebView-Skip] 도메인 파싱 실패 스킵 처리: $url")
-                        }
-                    }
-
-                    if (isMediaUrl && !isIntermediateWrapper) {
-                        println("[ChakPlay] [WebView-Intercept] 🎯 타겟 실제 미디어 링크 검출 성공!")
-                        println("[ChakPlay] [WebView-Intercept] 🔗 최종 스트리밍 주소: $url")
-                        
-                        if (!isResumed) {
-                            isResumed = true
-                            println("[ChakPlay] [WebView-Intercept] 코루틴 재개 요청")
-                            continuation.resume(Pair(url, detectedReferer))
-                            
-                            view?.post {
-                                try {
-                                    println("[ChakPlay] [WebView-Intercept] 사용이 끝난 웹뷰 리소스 제거")
-                                    view.stopLoading()
-                                    view.destroy()
-                                } catch (e: Exception) {
-                                    println("[ChakPlay] [WebView-Intercept] 웹뷰 제거 예외: ${e.message}")
-                                }
-                            }
-                        }
-                    }
-                    return super.shouldInterceptRequest(view, request)
-                }
-
-                override fun onPageFinished(view: WebView?, url: String?) {
-                    super.onPageFinished(view, url)
-                    println("[ChakPlay] [WebView] 3단계: 재생 페이지 로드 종료 -> $url")
-                    println("[ChakPlay] [WebView] 4단계: 비디오 재생 동작 수동 트리거용 자바스크립트 주입")
-                    
-                    view?.evaluateJavascript(
-                        """
-                        (function() {
-                            try {
-                                var videoElement = document.querySelector('video');
-                                var playBtn = document.querySelector('.vjs-big-play-button') || document.querySelector('.jw-display-icon-container') || document.querySelector('button');
-                                if (playBtn) { 
-                                    playBtn.click(); 
-                                    return 'Play Button Clicked';
-                                }
-                                if (videoElement) { 
-                                    videoElement.play(); 
-                                    return 'Video Forced Play';
-                                }
-                                return 'No Player Found Yet';
-                            } catch(e) {
-                                return 'JS Error: ' + e.message;
-                            }
-                        })();
-                        """.trimIndent()
-                    ) { result ->
-                        println("[ChakPlay] [WebView-JS] 자바스크립트 주입 평가 결과: $result")
-                    }
-                }
+            // 검증 서버의 도메인을 동적으로 감지하여 올바른 Referer 지정 (핫링크 해제용)
+            try {
+                val parsedUri = java.net.URL(rawUrl)
+                refererUrl = "${parsedUri.protocol}://${parsedUri.host}/"
+                println("[ChakPlay] [loadLinks] 🎯 중계 서버 감지 -> 동적 Referer 수립: $refererUrl")
+            } catch (e: Exception) {
+                refererUrl = "https://ckp.wiselife.blog/"
             }
 
-            println("[ChakPlay] [WebView] 5단계: 웹뷰 데이터 주소 호출 시작")
-            webView.loadUrl(pageUrl)
-
-            // 타임아웃 15초 바인딩
-            val handler = Handler(Looper.getMainLooper())
-            val timeoutRunnable = Runnable {
-                if (!isResumed) {
-                    isResumed = true
-                    println("[ChakPlay] [WebView] ⏰ 15초 검색 한계 시간 도달 (미확보 종료)")
-                    continuation.resume(null)
-                    try {
-                        webView.stopLoading()
-                        webView.destroy()
-                    } catch (e: Exception) {}
-                }
-            }
-            handler.postDelayed(timeoutRunnable, 15000)
-
-            continuation.invokeOnCancellation {
-                println("[ChakPlay] [WebView] 🛑 취소 호출 수신. 리소스 반환 절차 가동")
-                handler.removeCallbacks(timeoutRunnable)
-                try {
-                    webView.stopLoading()
-                    webView.destroy()
-                } catch (e: Exception) {}
+            // [ChakPlay] 중요: 백엔드 IP 자동 승인을 위한 무음 사전 노크 (Silent Handshake)
+            // 웹뷰를 켜지 않고 가벼운 정적 백그라운드 HTTP 요청만으로 세션을 활성화합니다.
+            println("[ChakPlay] [loadLinks] 🔓 백엔드 IP 승인을 유도하기 위해 중계 서버 사전 접속 시도 (Silent Handshake)")
+            try {
+                val handshakeResponse = safeGet(rawUrl, referer = mainUrl)
+                println("[ChakPlay] [loadLinks] 🟢 사전 접속 승인 성공 (상태코드: ${handshakeResponse.code})")
+            } catch (e: Exception) {
+                println("[ChakPlay] [loadLinks] ⚠️ 사전 접속 중 에러 발생 (재생 시도 지속): ${e.message}")
             }
         }
+
+        // 자막 분리 처리
+        var subUrl: String? = null
+        val subRegex = Regex("""\?(srt|vtt)(https?://.*)""")
+        val subMatch = subRegex.find(videoUrl)
+        if (subMatch != null) {
+            videoUrl = videoUrl.substring(0, subMatch.range.first)
+            subUrl = subMatch.groupValues[2]
+            println("[ChakPlay] [loadLinks] 📝 내장 자막 감지: $subUrl")
+        }
+
+        println("[ChakPlay] [loadLinks] 🎬 최종 비디오 주소: $videoUrl")
+        println("[ChakPlay] [loadLinks] 📡 최종 헤더 Referer: $refererUrl")
+
+        val type = if (videoUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+
+        callback.invoke(
+            newExtractorLink(
+                this.name,
+                this.name,
+                url = videoUrl,
+                type = type
+            ) {
+                this.referer = refererUrl
+                this.quality = Qualities.P1080.value
+                
+                // CDN 방화벽 패스용 헤더 구성 (동적 Referer 및 User-Agent 매칭)
+                this.headers = mapOf(
+                    "User-Agent" to (cfUserAgent ?: userAgent),
+                    "Referer" to refererUrl
+                )
+            }
+        )
+
+        if (!subUrl.isNullOrBlank()) {
+            subtitleCallback.invoke(
+                newSubtitleFile("Korean", subUrl)
+            )
+        }
+
+        return true
     }
 
     private fun parseItem(element: Element, isMovie: Boolean): SearchResponse? {
