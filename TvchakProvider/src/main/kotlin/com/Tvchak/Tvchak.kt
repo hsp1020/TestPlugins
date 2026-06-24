@@ -499,6 +499,7 @@ class TvchakProvider : MainAPI() {
                 this.headers = mapOf(
                     "User-Agent" to (cfUserAgent ?: userAgent),
                     "Referer" to mainUrl
+                    )
                 this.quality = Qualities.P1080.value
             }
         )
