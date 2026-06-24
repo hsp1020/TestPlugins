@@ -434,6 +434,11 @@ class TvchakProvider : MainAPI() {
             
             val type = if (interceptedVideoUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
             
+            // [ChakPlay] 웹뷰가 검증 완료된 실시간 쿠키 값을 획득합니다.
+            val cookieManager = CookieManager.getInstance()
+            val webViewCookies = cookieManager.getCookie(interceptedVideoUrl) ?: ""
+            println("[ChakPlay] [loadLinks] ExoPlayer에 주입할 실시간 수집 쿠키: $webViewCookies")
+
             callback.invoke(
                 newExtractorLink(
                     this.name,
@@ -443,8 +448,12 @@ class TvchakProvider : MainAPI() {
                 ) {
                     this.referer = mainUrl
                     this.quality = Qualities.P1080.value
-                    // 웹뷰의 세션과 맞추기 위해 획득했던 User-Agent를 넘겨줍니다.
-                    this.headers = mapOf("User-Agent" to (cfUserAgent ?: userAgent))
+                    
+                    // [ChakPlay] 웹뷰의 User-Agent와 가로챈 실시간 쿠키 세션을 ExoPlayer 헤더에 매핑합니다.
+                    this.headers = mapOf(
+                        "User-Agent" to (cfUserAgent ?: userAgent),
+                        "Cookie" to webViewCookies
+                    )
                 }
             )
             println("[ChakPlay] [loadLinks] ExoPlayer로 가로챈 비디오 주소 반환 완료")
@@ -456,7 +465,7 @@ class TvchakProvider : MainAPI() {
     }
 
     /**
-     * [ChakPlay] 전용 디버깅 로그가 완비된 백그라운드 웹뷰 주소 검출 모듈
+     * [ChakPlay] 중간 검증 및 리다이렉트 페이지(.php, wiselife.blog)를 차단 필터링하는 백그라운드 웹뷰 인터셉터
      */
     private suspend fun interceptVideoUrlWithWebView(pageUrl: String): String? = withContext(Dispatchers.Main) {
         println("[ChakPlay] [WebView] 0단계: 비동기 작업 메인 스레드 진입")
@@ -491,10 +500,13 @@ class TvchakProvider : MainAPI() {
                 ): WebResourceResponse? {
                     val url = request?.url?.toString() ?: return super.shouldInterceptRequest(view, request)
                     
-                    // 웹페이지 내부에서 발생하는 모든 주소 중 타겟 패턴과 비교 분석
-                    if (url.contains("b-cdn.net") || url.contains(".mp4") || url.contains(".m3u8")) {
-                        println("[ChakPlay] [WebView-Intercept] 🎯 타겟 미디어 링크 인터셉트 감지!")
-                        println("[ChakPlay] [WebView-Intercept] 🔗 추출된 비디오 세션 주소: $url")
+                    // [ChakPlay] .php 파일이나 특정 중계 서버(wiselife.blog) 도메인은 실제 소스가 아닌 검증 레이어이므로 스킵 처리합니다.
+                    val isMediaUrl = (url.contains("b-cdn.net") || url.contains(".mp4") || url.contains(".m3u8"))
+                    val isIntermediateWrapper = url.contains(".php") || url.contains("wiselife.blog")
+
+                    if (isMediaUrl && !isIntermediateWrapper) {
+                        println("[ChakPlay] [WebView-Intercept] 🎯 타겟 실제 미디어 링크 검출 성공!")
+                        println("[ChakPlay] [WebView-Intercept] 🔗 최종 스트리밍 주소: $url")
                         
                         if (!isResumed) {
                             isResumed = true
@@ -511,9 +523,9 @@ class TvchakProvider : MainAPI() {
                                 }
                             }
                         }
-                    } else {
-                        // 불필요한 이미지나 기타 외부 스크립트 도메인 요청 필터 로그 (필요 시 주석 해제하여 분석 가능)
-                        // println("[ChakPlay] [WebView-Skip] 로드 대상: $url")
+                    } else if (isIntermediateWrapper) {
+                        // 중간 필터링 스킵 디버깅용 로그
+                        println("[ChakPlay] [WebView-Skip] 중간 검증 레이어 스킵 처리: $url")
                     }
                     return super.shouldInterceptRequest(view, request)
                 }
