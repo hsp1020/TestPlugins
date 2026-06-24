@@ -427,16 +427,20 @@ class TvchakProvider : MainAPI() {
         println("[ChakPlay] [loadLinks] 비디오 링크 탐색 개시: $data")
         
         // 메인 쓰레드 백그라운드 웹뷰를 기동하여 최종 서명이 결합된 링크를 가로챕니다.
-        val interceptedVideoUrl = interceptVideoUrlWithWebView(data)
+        val interceptResult = interceptVideoUrlWithWebView(data)
 
-        if (interceptedVideoUrl != null) {
+        if (interceptResult != null) {
+            val interceptedVideoUrl = interceptResult.first
+            val dynamicReferer = interceptResult.second ?: "https://ckp.wiselife.blog/"
+            
             println("[ChakPlay] [loadLinks] 🎉 최종 실재 영상 주소 가로채기 성공: $interceptedVideoUrl")
+            println("[ChakPlay] [loadLinks] 📡 동적 매핑할 Referer 헤더: $dynamicReferer")
             
             val type = if (interceptedVideoUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
             
-            // [ChakPlay] 웹뷰가 검증 완료된 실시간 쿠키 값을 획득합니다.
+            // [ChakPlay] 웹뷰가 검증 과정에서 확보한 실시간 쿠키 값을 획득합니다. (동적 도메인 타겟)
             val cookieManager = CookieManager.getInstance()
-            val webViewCookies = cookieManager.getCookie(interceptedVideoUrl) ?: ""
+            val webViewCookies = cookieManager.getCookie(dynamicReferer) ?: ""
             println("[ChakPlay] [loadLinks] ExoPlayer에 주입할 실시간 수집 쿠키: $webViewCookies")
 
             callback.invoke(
@@ -446,12 +450,13 @@ class TvchakProvider : MainAPI() {
                     url = interceptedVideoUrl,
                     type = type
                 ) {
-                    this.referer = mainUrl
+                    this.referer = dynamicReferer // [ChakPlay] 중요: 리다이렉트 서버(wiselife.blog)로 레퍼러 덮어쓰기
                     this.quality = Qualities.P1080.value
                     
-                    // [ChakPlay] 웹뷰의 User-Agent와 가로챈 실시간 쿠키 세션을 ExoPlayer 헤더에 매핑합니다.
+                    // [ChakPlay] 웹뷰의 User-Agent와 가로챈 실시간 쿠키/레퍼러 세션을 ExoPlayer 헤더에 강제 바인딩
                     this.headers = mapOf(
                         "User-Agent" to (cfUserAgent ?: userAgent),
+                        "Referer" to dynamicReferer,
                         "Cookie" to webViewCookies
                     )
                 }
@@ -465,9 +470,10 @@ class TvchakProvider : MainAPI() {
     }
 
     /**
-     * [ChakPlay] 중간 검증 및 리다이렉트 페이지(.php, wiselife.blog)를 차단 필터링하는 백그라운드 웹뷰 인터셉터
+     * [ChakPlay] 중간 검증 및 리다이렉트 페이지(.php, wiselife.blog)를 우회 추적하며 
+     * 미디어 파일 주소와 검증 서버의 도메인(Referer)을 페어로 반환하는 백그라운드 웹뷰 인터셉터
      */
-    private suspend fun interceptVideoUrlWithWebView(pageUrl: String): String? = withContext(Dispatchers.Main) {
+    private suspend fun interceptVideoUrlWithWebView(pageUrl: String): Pair<String, String?>? = withContext(Dispatchers.Main) {
         println("[ChakPlay] [WebView] 0단계: 비동기 작업 메인 스레드 진입")
         
         val context = try {
@@ -481,7 +487,7 @@ class TvchakProvider : MainAPI() {
 
         println("[ChakPlay] [WebView] 1단계: Context 확보 성공. WebView 인스턴스 초기화")
 
-        suspendCancellableCoroutine<String?> { continuation ->
+        suspendCancellableCoroutine<Pair<String, String?>?> { continuation ->
             val webView = WebView(context)
             
             webView.settings.javaScriptEnabled = true
@@ -492,6 +498,7 @@ class TvchakProvider : MainAPI() {
             println("[ChakPlay] [WebView] 2단계: 웹뷰 환경 설정 완비 (UA: ${webView.settings.userAgentString})")
 
             var isResumed = false
+            var detectedReferer: String? = "https://ckp.wiselife.blog/" // 기본 감지값 초기화
 
             webView.webViewClient = object : WebViewClient() {
                 override fun shouldInterceptRequest(
@@ -504,6 +511,17 @@ class TvchakProvider : MainAPI() {
                     val isMediaUrl = (url.contains("b-cdn.net") || url.contains(".mp4") || url.contains(".m3u8"))
                     val isIntermediateWrapper = url.contains(".php") || url.contains("wiselife.blog")
 
+                    // [ChakPlay] 중계 서버를 통과할 때 해당 도메인을 정식 레퍼러(Referer) 후보로 자동 보관합니다.
+                    if (isIntermediateWrapper) {
+                        try {
+                            val uri = request.url
+                            detectedReferer = "${uri.scheme}://${uri.host}/"
+                            println("[ChakPlay] [WebView-Skip] 중간 검증 서버 도메인 추출: $detectedReferer")
+                        } catch (e: Exception) {
+                            println("[ChakPlay] [WebView-Skip] 도메인 파싱 실패 스킵 처리: $url")
+                        }
+                    }
+
                     if (isMediaUrl && !isIntermediateWrapper) {
                         println("[ChakPlay] [WebView-Intercept] 🎯 타겟 실제 미디어 링크 검출 성공!")
                         println("[ChakPlay] [WebView-Intercept] 🔗 최종 스트리밍 주소: $url")
@@ -511,7 +529,7 @@ class TvchakProvider : MainAPI() {
                         if (!isResumed) {
                             isResumed = true
                             println("[ChakPlay] [WebView-Intercept] 코루틴 재개 요청")
-                            continuation.resume(url)
+                            continuation.resume(Pair(url, detectedReferer))
                             
                             view?.post {
                                 try {
@@ -523,9 +541,6 @@ class TvchakProvider : MainAPI() {
                                 }
                             }
                         }
-                    } else if (isIntermediateWrapper) {
-                        // 중간 필터링 스킵 디버깅용 로그
-                        println("[ChakPlay] [WebView-Skip] 중간 검증 레이어 스킵 처리: $url")
                     }
                     return super.shouldInterceptRequest(view, request)
                 }
