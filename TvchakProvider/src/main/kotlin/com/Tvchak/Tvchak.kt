@@ -494,11 +494,11 @@ class TvchakProvider : MainAPI() {
                 url = videoUrl,
                 type = type
             ) {
-                this.referer = data
+                // 끝에 슬래시(/)가 포함된 도메인 주소로만 설정
+                this.referer = "$mainUrl/" 
                 this.headers = mapOf(
-                    "User-Agent" to (cfUserAgent ?: userAgent),
-                    "Referer" to data
-                    )
+                    "Referer" to "$mainUrl/"
+                )
                 this.quality = Qualities.P1080.value
             }
         )
