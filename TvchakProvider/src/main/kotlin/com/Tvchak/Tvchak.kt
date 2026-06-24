@@ -496,14 +496,20 @@ class TvchakProvider : MainAPI() {
             ) {
                 this.referer = "$mainUrl/"
                 this.headers = mapOf(
-                    // 이미 플러그인 내에 선언된 진짜 '모바일 크롬 브라우저' UA를 그대로 사용하여 우회합니다.
                     "User-Agent" to (cfUserAgent ?: userAgent),
-                    "Referer" to "$mainUrl/"
+                    "Referer" to "$mainUrl/",
+                    "Accept" to "*/*",
+                    "Accept-Encoding" to "identity;q=1, *;q=0",
+                    // 브라우저 핵심 보안 인증 헤더 동기화
+                    "Sec-Fetch-Site" to "cross-site",
+                    "Sec-Fetch-Mode" to "no-cors",
+                    "Sec-Fetch-Dest" to "video",
+                    "sec-ch-ua-mobile" to "?1"
                 )
                 this.quality = Qualities.P1080.value
             }
         )
-
+                
         if (!subUrl.isNullOrBlank()) {
             subtitleCallback.invoke(
                 newSubtitleFile("Korean", subUrl)
