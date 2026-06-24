@@ -413,7 +413,7 @@ class TvchakProvider : MainAPI() {
         checkAndUpdateDomain()
         println("[ChakPlay] [loadLinks] 정적 무음 핸드쉐이크 기반 탐색 개시: $data")
         
-        // 1. 디테일 페이지 획득 및 player_aaaa 파싱
+        // 1. 디테일 플레이 페이지 획득 및 player_aaaa 파싱
         val document = safeGet(data).document
         val scriptContent = document.select("script").find { it.data().contains("player_aaaa") }?.data()
         
@@ -438,26 +438,64 @@ class TvchakProvider : MainAPI() {
         var videoUrl = rawUrl
         var refererUrl = mainUrl // 기본 레퍼러 지정
 
-        // 2. 만약 주소가 검증 페이지(.php / wiselife.blog)를 우회하는 중계 주소인 경우
-        if (rawUrl.contains("chaktt.php?url=")) {
-            // 중계 주소 뒤에 숨겨진 실제 CDN 주소 추출
-            val realEncodedUrl = rawUrl.substringAfter("url=")
-            videoUrl = URLDecoder.decode(realEncodedUrl, "UTF-8")
-            
-            // 검증 서버의 도메인을 동적으로 감지하여 올바른 Referer 지정 (핫링크 해제용)
-            try {
-                val parsedUri = java.net.URL(rawUrl)
-                refererUrl = "${parsedUri.protocol}://${parsedUri.host}/"
-                println("[ChakPlay] [loadLinks] 🎯 중계 서버 감지 -> 동적 Referer 수립: $refererUrl")
-            } catch (e: Exception) {
-                refererUrl = "https://ckp.wiselife.blog/"
+        // [ChakPlay] 2. 중요: 하드코딩 완전 배제 및 동적 검증 도메인(Referer) 수립 로직
+        val isChakttWrapper = rawUrl.contains("chaktt.php?url=")
+        val isDirectBcdn = rawUrl.contains("b-cdn.net")
+
+        if (isChakttWrapper || isDirectBcdn) {
+            // [A] 최적의 우회 검증 서버 도메인을 수집합니다. (기본값 설정)
+            var detectDomain = "https://ckp.wiselife.blog" 
+
+            // 1단계: 원본 주소 자체에 검증 페이지 도메인이 들어가 있는 경우 바로 추출
+            if (rawUrl.contains("chaktt.php") || rawUrl.contains("wiselife")) {
+                try {
+                    val parsedUri = java.net.URL(rawUrl)
+                    detectDomain = "${parsedUri.protocol}://${parsedUri.host}"
+                    println("[ChakPlay] [loadLinks] 🌐 원본 URL 파싱으로 동적 중계 도메인 감지 성공: $detectDomain")
+                } catch (e: Exception) {}
+            } else {
+                // 2단계: 하드코딩 직링크인 경우, HTML Jsoup 내 iframe에서 검증서버 주소 동적 탐색
+                val iframeSrc = document.select("iframe").map { it.attr("src") }
+                    .firstOrNull { it.contains("chaktt.php") || it.contains("wiselife") }
+                
+                if (iframeSrc != null) {
+                    try {
+                        val parsedUri = java.net.URL(iframeSrc)
+                        detectDomain = "${parsedUri.protocol}://${parsedUri.host}"
+                        println("[ChakPlay] [loadLinks] 🌐 HTML iframe 분석으로 동적 중계 도메인 감지 성공: $detectDomain")
+                    } catch (e: Exception) {}
+                } else {
+                    // 3단계: iframe이 없는 예외 케이스의 경우 script 영역 내 텍스트 매칭
+                    val scriptWithWiselife = document.select("script").map { it.html() }
+                        .firstOrNull { it.contains("wiselife") || it.contains("chaktt.php") }
+                    if (scriptWithWiselife != null) {
+                        val match = Regex("""https://[a-zA-Z0-9.-]+""").find(scriptWithWiselife)
+                        if (match != null) {
+                            detectDomain = match.value
+                            println("[ChakPlay] [loadLinks] 🌐 HTML script 분석으로 동적 중계 도메인 감지 성공: $detectDomain")
+                        }
+                    }
+                }
             }
 
-            // [ChakPlay] 중요: 백엔드 IP 자동 승인을 위한 무음 사전 노크 (Silent Handshake)
-            // 웹뷰를 켜지 않고 가벼운 정적 백그라운드 HTTP 요청만으로 세션을 활성화합니다.
-            println("[ChakPlay] [loadLinks] 🔓 백엔드 IP 승인을 유도하기 위해 중계 서버 사전 접속 시도 (Silent Handshake)")
+            // [B] 수립된 동적 도메인을 기준으로 핸드쉐이크 URL 가공 및 Referer 설정
+            val handshakeUrl = if (isChakttWrapper) {
+                // 우회 경로가 적용된 경우 재생에 쓸 리얼 비디오 주소 추출
+                val realEncodedUrl = rawUrl.substringAfter("url=")
+                videoUrl = URLDecoder.decode(realEncodedUrl, "UTF-8")
+                rawUrl
+            } else {
+                // 하드코딩 직링크인 경우 획득한 동적 도메인 주소와 합성하여 가상 핸드쉐이크 URL 수립
+                val encodedVideoUrl = URLEncoder.encode(rawUrl, "UTF-8")
+                "$detectDomain/chak/chaktt.php?url=$encodedVideoUrl"
+            }
+
+            refererUrl = "$detectDomain/" // 최종 재생 요청에 실어 보낼 Referer 헤더
+
+            // [C] 백엔드 IP 자동 승인을 획득하기 위해 무음 사전 접속 (Silent Handshake) 실행
+            println("[ChakPlay] [loadLinks] 🔓 백엔드 IP 승인을 위해 중계 서버 사전 접속 시도 (Silent Handshake) -> $handshakeUrl")
             try {
-                val handshakeResponse = safeGet(rawUrl, referer = mainUrl)
+                val handshakeResponse = safeGet(handshakeUrl, referer = mainUrl)
                 println("[ChakPlay] [loadLinks] 🟢 사전 접속 승인 성공 (상태코드: ${handshakeResponse.code})")
             } catch (e: Exception) {
                 println("[ChakPlay] [loadLinks] ⚠️ 사전 접속 중 에러 발생 (재생 시도 지속): ${e.message}")
