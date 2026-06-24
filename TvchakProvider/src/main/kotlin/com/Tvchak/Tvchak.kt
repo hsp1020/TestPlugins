@@ -494,17 +494,9 @@ class TvchakProvider : MainAPI() {
                 url = videoUrl,
                 type = type
             ) {
-                this.referer = "$mainUrl/"
+                this.referer = "" 
                 this.headers = mapOf(
-                    "User-Agent" to (cfUserAgent ?: userAgent),
-                    "Referer" to "$mainUrl/",
-                    "Accept" to "*/*",
-                    "Accept-Encoding" to "identity;q=1, *;q=0",
-                    // 브라우저 핵심 보안 인증 헤더 동기화
-                    "Sec-Fetch-Site" to "cross-site",
-                    "Sec-Fetch-Mode" to "no-cors",
-                    "Sec-Fetch-Dest" to "video",
-                    "sec-ch-ua-mobile" to "?1"
+                    "User-Agent" to (cfUserAgent ?: userAgent)
                 )
                 this.quality = Qualities.P1080.value
             }
