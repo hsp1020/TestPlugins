@@ -444,7 +444,7 @@ class TvchakProvider : MainAPI() {
 
         if (isChakttWrapper || isDirectBcdn) {
             // [A] 최적의 우회 검증 서버 도메인을 수집합니다. (기본값 설정)
-            var detectDomain = "https://ckp.wiselife.blog" 
+            var detectDomain = "ckp.newdomain.com" 
 
             // 1단계: 원본 주소 자체에 검증 페이지 도메인이 들어가 있는 경우 바로 추출
             if (rawUrl.contains("chaktt.php") || rawUrl.contains("wiselife")) {
