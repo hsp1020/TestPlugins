@@ -494,9 +494,10 @@ class TvchakProvider : MainAPI() {
                 url = videoUrl,
                 type = type
             ) {
-                // 끝에 슬래시(/)가 포함된 도메인 주소로만 설정
-                this.referer = "$mainUrl/" 
+                this.referer = "$mainUrl/"
                 this.headers = mapOf(
+                    // 이미 플러그인 내에 선언된 진짜 '모바일 크롬 브라우저' UA를 그대로 사용하여 우회합니다.
+                    "User-Agent" to (cfUserAgent ?: userAgent),
                     "Referer" to "$mainUrl/"
                 )
                 this.quality = Qualities.P1080.value
