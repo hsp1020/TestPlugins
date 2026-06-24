@@ -2612,10 +2612,26 @@ class YoutubeProvider(
                                 commandUrl != null && targetPath.isNotEmpty() && commandUrl.endsWith(targetPath)
                             }
 
-                            // 3단계. 일치하는 올바른 탭이 있다면 그것을 사용하고, 없다면 selected 상태인 기본 탭을 fallback으로 삼습니다.
-                            val tabToUse = matchingTab ?: tabs.firstOrNull { tab ->
-                                safeGet(tab, "tabRenderer", "selected") == true
+                            // 3단계. 요청한 특정 타깃(예: /videos)이 있을 때는 정확히 일치하는 탭만 사용하며,
+                            // 일치하지 않는 다른 타입의 탭(예: 쇼츠 탭)으로 잘못 우회하는 폴백을 차단합니다.
+                            val selectedTab = tabs.firstOrNull { safeGet(it, "tabRenderer", "selected") == true }
+                            val selectedTabUrl = selectedTab?.let { safeGet(it, "tabRenderer", "endpoint", "commandMetadata", "webCommandMetadata", "url") as? String }
+
+                            val tabToUse = if (targetPath.isNotEmpty()) {
+                                if (matchingTab != null) {
+                                    matchingTab
+                                } else if (selectedTabUrl != null && selectedTabUrl.endsWith(targetPath)) {
+                                    selectedTab
+                                } else {
+                                    null
+                                }
+                            } else {
+                                selectedTab
                             }
+
+                            if (tabToUse == null) return emptyList()
+
+               
 
                             val activeContent = safeGet(tabToUse, "tabRenderer", "content") as? Map<*, *>
                             if (activeContent?.containsKey("richGridRenderer") == true) {
