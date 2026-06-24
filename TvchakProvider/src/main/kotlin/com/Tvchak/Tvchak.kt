@@ -494,16 +494,13 @@ class TvchakProvider : MainAPI() {
                 url = videoUrl,
                 type = type
             ) {
-                this.referer = "$mainUrl/" 
-                this.headers = mapOf(
-                    // 2. 절대 차단되지 않는 안전한 대기업 PC 크롬 UA 전송 (봇 탐지 필터 통과)
-                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                    "Referer" to "$mainUrl/"
-                )
+                // 비디오 플레이어 요청 시에도 우회된 헤더(User-Agent 등)를 넘겨주면 안정성이 올라갑니다.
+                this.referer = mainUrl
+                this.headers = getHeaders(mainUrl)
                 this.quality = Qualities.P1080.value
             }
         )
-                
+
         if (!subUrl.isNullOrBlank()) {
             subtitleCallback.invoke(
                 newSubtitleFile("Korean", subUrl)
