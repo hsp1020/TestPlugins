@@ -2474,10 +2474,6 @@ class YoutubeProvider(
         // ==========================================
         // 2. [채널 에피소드 처리 블록] -> [부결 유지] 기존의 NewPipe 유도 및 이중 가동 상태 유지
         // ==========================================
-
-        // ==========================================
-        // 2. [채널 에피소드 처리 블록] -> [부결 유지] 기존의 NewPipe 유도 및 이중 가동 상태 유지
-        // ==========================================
         if (url.contains("/@") || url.contains("/channel/") || url.contains("/c/") || url.contains("/user/")) {
             try {
                 var cleanUrl = url.substringBefore("?").removeSuffix("/")
@@ -2593,13 +2589,13 @@ class YoutubeProvider(
                     return null
                 }
 
-                // [개선] 로드된 실제 탭의 실제 주소 경로를 식별할 수 있도록 Pair<List<Episode>, String>을 반환합니다.
-                suspend fun fetchTab(tabUrl: String): Pair<List<Episode>, String> {
+                // 변경 적용할 fetchTab 개선 세부 로직
+                // 변경 적용할 fetchTab 개선 세부 로직
+                suspend fun fetchTab(tabUrl: String): List<Episode> {
                     val tabEpisodes = mutableListOf<Episode>()
-                    var actualPath = ""
                     try {
                         val tabHtml = app.get(tabUrl, interceptor = ytInterceptor).text
-                        val tabData = extractYtInitialData(tabHtml) ?: return Pair(emptyList(), "")
+                        val tabData = extractYtInitialData(tabHtml) ?: return emptyList()
 
                         var initialItems: List<*>? = null
                         val tabs = safeGet(tabData, "contents", "twoColumnBrowseResultsRenderer", "tabs") as? List<*>
@@ -2617,13 +2613,21 @@ class YoutubeProvider(
                                 commandUrl != null && targetPath.isNotEmpty() && commandUrl.endsWith(targetPath)
                             }
 
-                            // 3단계. 일치하는 올바른 탭이 있다면 그것을 사용하고, 없다면 selected 상태인 기본 탭을 fallback으로 삼습니다.
-                            val tabToUse = matchingTab ?: tabs.firstOrNull { tab ->
-                                safeGet(tab, "tabRenderer", "selected") == true
-                            }
+                            // 3단계. 매칭되는 탭이 없고, 유튜브가 대체 화면으로 준 탭이 요구 타깃과 어긋나는 경우(예: 비디오 요청에 숏츠 대체) 블랙리스트 처리합니다.
+                            val tabToUse = matchingTab ?: run {
+                                val selectedTab = tabs.firstOrNull { tab ->
+                                    safeGet(tab, "tabRenderer", "selected") == true
+                                }
+                                val selectedUrl = safeGet(selectedTab, "tabRenderer", "endpoint", "commandMetadata", "webCommandMetadata", "url") as? String
 
-                            // 파싱 대상이 된 실제 탭의 내부 URL 경로를 수집합니다. (예: "/@ChannelName/shorts" 또는 "/@ChannelName/videos")
-                            actualPath = tabToUse?.let { safeGet(it, "tabRenderer", "endpoint", "commandMetadata", "webCommandMetadata", "url") as? String } ?: ""
+                                if (targetPath == "/videos" && selectedUrl?.endsWith("/shorts") == true) {
+                                    return emptyList()
+                                }
+                                if (targetPath == "/shorts" && selectedUrl?.endsWith("/videos") == true) {
+                                    return emptyList()
+                                }
+                                selectedTab
+                            }
 
                             val activeContent = safeGet(tabToUse, "tabRenderer", "content") as? Map<*, *>
                             if (activeContent?.containsKey("richGridRenderer") == true) {
@@ -2691,32 +2695,18 @@ class YoutubeProvider(
                     } catch (e: Exception) {
                         logError(e)
                     }
-                    return Pair(tabEpisodes, actualPath)
+                    return tabEpisodes
                 }
                 
-                val pair: Pair<Pair<List<Episode>, String>, Pair<List<Episode>, String>> = kotlinx.coroutines.coroutineScope {
+  
+                val pair: Pair<List<Episode>, List<Episode>> = kotlinx.coroutines.coroutineScope {
                     val videosDeferred = async { fetchTab("$cleanUrl/videos") }
                     val shortsDeferred = async { fetchTab("$cleanUrl/shorts") }
                     Pair(videosDeferred.await(), shortsDeferred.await())
                 }
 
-                var videosEpisodes = pair.first.first
-                val videosPath = pair.first.second
-
-                var shortsEpisodes = pair.second.first
-                val shortsPath = pair.second.second
-
-                // 만약 일반 동영상(/videos)을 요청했는데 실제 반환된 탭의 타깃이 쇼츠(/shorts)라면
-                // 이는 동영상 탭이 존재하지 않아 쇼츠로 리다이렉트 및 중복 폴백된 것이므로 비워줍니다.
-                if (videosPath.contains("/shorts") || videosPath.endsWith("/shorts")) {
-                    videosEpisodes = emptyList()
-                }
-
-                // 반대로 쇼츠(/shorts)를 요청했는데 실제 반환된 탭이 일반 동영상(/videos)이나 홈(/featured) 관련 탭인 경우
-                // 쇼츠 탭이 존재하지 않아 일반 영상으로 중복 폴백된 것이므로 비워줍니다.
-                if (shortsPath.contains("/videos") || shortsPath.contains("/featured") || shortsPath.isEmpty() || !shortsPath.contains("/shorts")) {
-                    shortsEpisodes = emptyList()
-                }
+                val videosEpisodes = pair.first
+                val shortsEpisodes = pair.second
 
                 val allEpisodes = mutableListOf<Episode>()
 
@@ -2763,7 +2753,7 @@ class YoutubeProvider(
                 logError(e)
             }
         }
-        
+
         // ==========================================
         // 3. [재생목록 에피소드 처리 블록]
         // ==========================================
