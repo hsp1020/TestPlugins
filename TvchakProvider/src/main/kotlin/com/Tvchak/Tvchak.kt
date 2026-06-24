@@ -494,11 +494,10 @@ class TvchakProvider : MainAPI() {
                 url = videoUrl,
                 type = type
             ) {
-                // 비디오 플레이어 요청 시에도 우회된 헤더(User-Agent 등)를 넘겨주면 안정성이 올라갑니다.
-                this.referer = mainUrl
+                this.referer = data
                 this.headers = mapOf(
                     "User-Agent" to (cfUserAgent ?: userAgent),
-                    "Referer" to mainUrl
+                    "Referer" to data
                     )
                 this.quality = Qualities.P1080.value
             }
