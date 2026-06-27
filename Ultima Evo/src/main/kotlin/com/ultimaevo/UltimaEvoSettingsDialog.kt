@@ -191,6 +191,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                             for ((key, value) in prefs.all) {
                                 json.put(key, value)
                             }
+                            json.put("plugin_name", "UltimaEvo")
                             val bos = ByteArrayOutputStream()
                             GZIPOutputStream(bos).use { it.write(json.toString().toByteArray(Charsets.UTF_8)) }
                             Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)
@@ -260,6 +261,10 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                                 GZIPInputStream(bais).bufferedReader(Charsets.UTF_8).readText()
                             } catch (e: Exception) { String(decodedBytes, Charsets.UTF_8) }
                             JSONObject(jsonString)
+                        }
+
+                        if (parsedJson.optString("plugin_name") != "UltimaEvo") {
+                            throw Exception("Plugin mismatch")
                         }
 
                         if (parsedJson.length() == 0) throw Exception("Empty Data")
