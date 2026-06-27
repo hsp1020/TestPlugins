@@ -334,6 +334,7 @@ class SettingsBottomFragment(
                     val backupStr = withContext(Dispatchers.IO) {
                         val json = JSONObject()
                         sharedPref.all.forEach { (key, value) -> json.put(key, value) }
+                        json.put("plugin_name", "StremioC") // 👈 이 줄만 추가
                         val jsonString = json.toString()
                         val bos = java.io.ByteArrayOutputStream()
                         java.util.zip.GZIPOutputStream(bos).use { it.write(jsonString.toByteArray(Charsets.UTF_8)) }
@@ -411,6 +412,10 @@ class SettingsBottomFragment(
 
                     if (parsedJson.length() == 0) throw Exception("Empty JSON Data")
 
+                    if (parsedJson.optString("plugin_name") != "StremioC") {
+                        throw Exception("Plugin mismatch")
+                    }
+                    
                     val cancelBtn = Button(ctx).apply {
                         text = "Cancel"
                         setTextColor(Color.WHITE)
