@@ -707,6 +707,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val allCatalogList = mutableListOf<CatalogData>()
         val visibleCatalogList = mutableListOf<CatalogData>()
 
+        // ... 생략 ...
+
         for (provider in allProviders) {
             val staticCats = provider.mainPage.map { it.name }
             val dynamicCats = prefs.getString("dynamic_catalogs_${provider.name}", "")?.split("|||") ?: emptyList()
@@ -720,6 +722,9 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 allCatalogList.add(CatalogData(provider.name, cName, isChecked, customName, orderIndex))
             }
         }
+
+        // 🚨 [수정 및 추가] 데이터 로드 직후, 마스터 리스트를 기존에 저장된 순서(orderIndex) 기준으로 먼저 정렬합니다.
+        allCatalogList.sortBy { it.orderIndex }
 
         val rvCatalogs = RecyclerView(ctx).apply { 
             layoutManager = LinearLayoutManager(ctx)
