@@ -826,17 +826,14 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             resolvedTmdbId = resolvedTmdbId,
             kitsuVideos = kitsuVideos
         )
-
+        
         val mdbRatings = mdbDeferred?.await() ?: emptyList()
         if (mdbRatings.isNotEmpty()) {
             val ratingStr = mdbRatings.joinToString("  ")
             val currentPlot = loadRes.plot 
             
             loadRes.plot = if (!currentPlot.isNullOrBlank()) "$ratingStr<br>$currentPlot" else ratingStr
-            
-            // 🔥 Cloudstream UI에서 별점 텍스트(8.5/10.0)를 완전히 날리기 위한 처리
-            try { loadRes.rating = null } catch (e: Exception) {} 
-            try { loadRes.score = null } catch (e: Exception) {} 
+            loadRes.score = null 
         }
         
         return@coroutineScope loadRes
