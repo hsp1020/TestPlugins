@@ -71,7 +71,7 @@ class TVWiki : MainAPI() {
     )
 
     override val mainPage = mainPageOf(
-        "/bbs/popular.php?sb=popular" to "인기순위",
+        "/bbs/popular.php?" to "인기순위",
         "/bbs/popular.php?sb=kor_movie" to "영화",
         "/bbs/popular.php?sb=drama" to "드라마",
         "/bbs/popular.php?sb=ent" to "예능",
