@@ -255,10 +255,10 @@
     },
     {
         "iconUrl": "https://raw.githubusercontent.com/hsp1020/TestPlugins/refs/heads/master/TVWikiProvider/logo.png",
-        "fileHash": "sha256-3a817c2c61112932580d6316bb083d0710086b767aa5df8b24dc2d7409004df8",
+        "fileHash": "sha256-35c4dd184a05ca3be4214652b153a0dc789c2d7fbeaf78800b5249f97016f060",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/hsp1020/TestPlugins",
-        "fileSize": 52665,
+        "fileSize": 52212,
         "status": 1,
         "language": "ko",
         "authors": [
