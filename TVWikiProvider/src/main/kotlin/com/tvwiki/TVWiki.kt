@@ -23,7 +23,7 @@ import kotlinx.coroutines.coroutineScope
 
 class TVWiki : MainAPI() {
     companion object {
-        var currentMainUrl = "https://tvwiki30.net" 
+        var currentMainUrl = "https://tvwiki35.net" 
         var isDomainChecked = false 
         private val domainMutex = Mutex()
         private const val PREFS_NAME = "TVWiki_Domain_Cache"
@@ -71,18 +71,18 @@ class TVWiki : MainAPI() {
     )
 
     override val mainPage = mainPageOf(
-        "/bbs/popular.php?" to "인기순위",
-        "/bbs/popular.php?sb=kor_movie" to "영화",
-        "/bbs/popular.php?sb=drama" to "드라마",
-        "/bbs/popular.php?sb=ent" to "예능",
-        "/bbs/popular.php?sb=sisa" to "시사/다큐",
-        "/bbs/popular.php?sb=movie" to "해외영화",
-        "/bbs/popular.php?sb=world" to "해외드라마",
-        "/bbs/popular.php?sb=ott_ent" to "해외예능/다큐",
-        "/bbs/popular.php?sb=animation" to "일반 애니메이션",
-        "/bbs/popular.php?sb=ani_movie" to "극장판 애니",
-        "/bbs/popular.php?sb=old_ent" to "추억의 예능",
-        "/bbs/popular.php?sb=old_drama" to "추억의 드라마"
+        "/popular" to "인기순위",
+        "/kor_movie" to "영화",
+        "/drama" to "드라마",
+        "/ent" to "예능",
+        "/sisa" to "시사/다큐",
+        "/movie" to "해외영화",
+        "/world" to "해외드라마",
+        "/ott_ent" to "해외예능/다큐",
+        "/animation" to "일반 애니메이션",
+        "/ani_movie" to "극장판 애니",
+        "/old_ent" to "추억의 예능",
+        "/old_drama" to "추억의 드라마"
     )
 
     private suspend fun checkAndUpdateDomain() {
@@ -102,69 +102,60 @@ class TVWiki : MainAPI() {
 
             val testPath = "/popular"
             
-            // 1. 현재 도메인 1차 검증
             try {
-                val res = app.get("$currentMainUrl$testPath", headers = commonHeaders, timeout = 2L)
+                val res = app.get("$currentMainUrl$testPath", headers = commonHeaders, timeout = 3L)
+                val extractedUrl = Regex("^https?://[^/]+").find(res.url)?.value ?: currentMainUrl
+                val finalUrl = extractedUrl.replace("http://", "https://")
+                
                 if (res.isSuccessful && res.text.contains("list_type")) {
+                    if (currentMainUrl != finalUrl) {
+                        println("[TVWiki DBG] 🔄 리다이렉트 감지됨: $currentMainUrl -> $finalUrl")
+                        saveDomain(finalUrl)
+                        mainUrl = currentMainUrl
+                    }
                     isDomainChecked = true
                     return@withLock
                 }
-            } catch (e: Exception) {
-                println("[TVWiki DBG] ❌ 캐시 도메인($currentMainUrl) 접속 실패: ${e.message}")
-            }
+            } catch (e: Exception) { println("[TVWiki DBG] ❌ 현재 도메인 접속 실패") }
 
-            // 2. 브루트포스 탐색 시작
             val match = Regex("tvwiki(\\d+)").find(currentMainUrl)
-            val startNum = match?.groupValues?.get(1)?.toIntOrNull() ?: 32
+            val startNum = match?.groupValues?.get(1)?.toIntOrNull() ?: 7
             println("[TVWiki DBG] 🚀 브루트포스 탐색 시작 (시작번호: $startNum)")
             
-            var foundActiveDomain: String? = null
-
-            try {
-                coroutineScope {
-                    // 탐색 범위 조정 (-3 ~ +30)
-                    val candidates = ((startNum - 3)..(startNum + 30)).map { "https://tvwiki$it.net" }
-                    val chunks = candidates.chunked(10) // 10개씩 병렬 진행
-                    
-                    for (chunk in chunks) {
-                        val deferreds = chunk.map { testDomain ->
-                            async {
-                                val testUrl = "$testDomain$testPath"
-                                try {
-                                    val res = app.get(testUrl, headers = commonHeaders, timeout = 2L)
-                                    if (res.isSuccessful && res.text.contains("list_type")) {
-                                        return@async testDomain
-                                    }
-                                } catch (e: Exception) {
-                                    println("[TVWiki DBG] -> $testDomain 연결 실패: ${e.message}")
+            coroutineScope {
+                val candidates = (startNum..startNum + 100).map { "https://tvwiki$it.net" }
+                val chunks = candidates.chunked(5) 
+                
+                for (chunk in chunks) {
+                    val deferreds = chunk.map { testDomain ->
+                        async {
+                            val testUrl = "$testDomain$testPath"
+                            try {
+                                val res = app.get(testUrl, headers = commonHeaders, timeout = 3L)
+                                val extractedTestUrl = Regex("^https?://[^/]+").find(res.url)?.value ?: testDomain
+                                val testFinalUrl = extractedTestUrl.replace("http://", "https://")
+                                
+                                if (res.isSuccessful && res.text.contains("list_type")) {
+                                    return@async testFinalUrl
                                 }
-                                null
-                            }
-                        }
-                        
-                        val found = deferreds.awaitAll().firstOrNull { it != null }
-                        if (found != null) {
-                            foundActiveDomain = found
-                            break
+                            } catch (e: Exception) {}
+                            null
                         }
                     }
+                    
+                    val foundDomain = deferreds.awaitAll().firstOrNull { it != null }
+                    if (foundDomain != null) {
+                        println("[TVWiki DBG] ✨ 브루트포스 성공: $foundDomain")
+                        saveDomain(foundDomain)
+                        mainUrl = currentMainUrl
+                        isDomainChecked = true
+                        return@coroutineScope
+                    }
                 }
-            } catch (e: Exception) {
-                println("[TVWiki DBG] ❌ 브루트포스 도중 에러 발생: ${e.message}")
             }
-
-            // 3. 탐색 결과 반영 (성공했을 때만 플래그를 true로 세팅)
-            if (foundActiveDomain != null) {
-                println("[TVWiki DBG] ✨ 브루트포스 성공: $foundActiveDomain")
-                saveDomain(foundActiveDomain!!)
-                mainUrl = currentMainUrl
-                isDomainChecked = true
-            } else {
-                println("[TVWiki DBG] ⚠️ 경고: 유효한 도메인을 찾지 못했습니다. 다음 요청 시 재시도합니다.")
-                isDomainChecked = false
-            }
+            isDomainChecked = true 
         }
-    }    
+    }
 
     override suspend fun search(query: String): List<SearchResponse> {
         val qLower = query.lowercase()
