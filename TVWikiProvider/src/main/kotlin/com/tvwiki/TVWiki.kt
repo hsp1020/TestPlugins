@@ -131,7 +131,7 @@ class TVWiki : MainAPI() {
                             async {
                                 val testUrl = "$testDomain$testPath"
                                 try {
-                                    val res = app.get(testUrl, headers = commonHeaders, timeout = 1.5L)
+                                    val res = app.get(testUrl, headers = commonHeaders, timeout = 2L)
                                     if (res.isSuccessful && res.text.contains("list_type")) {
                                         return@async testDomain
                                     }
