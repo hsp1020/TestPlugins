@@ -97,6 +97,7 @@ class TVWiki : MainAPI() {
             if (cachedDomain != null) {
                 currentMainUrl = cachedDomain
                 mainUrl = currentMainUrl
+                println("[TVWiki DBG] 📂 캐시된 도메인 로드: $currentMainUrl")
             }
 
             val testPath = "/popular"
