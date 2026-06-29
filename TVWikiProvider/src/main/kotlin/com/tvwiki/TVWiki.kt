@@ -23,7 +23,7 @@ import kotlinx.coroutines.coroutineScope
 
 class TVWiki : MainAPI() {
     companion object {
-        var currentMainUrl = "https://tvwiki7.net" 
+        var currentMainUrl = "https://tvwiki30.net" 
         var isDomainChecked = false 
         private val domainMutex = Mutex()
         private const val PREFS_NAME = "TVWiki_Domain_Cache"
@@ -71,18 +71,18 @@ class TVWiki : MainAPI() {
     )
 
     override val mainPage = mainPageOf(
-        "/popular" to "인기순위",
-        "/kor_movie" to "영화",
-        "/drama" to "드라마",
-        "/ent" to "예능",
-        "/sisa" to "시사/다큐",
-        "/movie" to "해외영화",
-        "/world" to "해외드라마",
-        "/ott_ent" to "해외예능/다큐",
-        "/animation" to "일반 애니메이션",
-        "/ani_movie" to "극장판 애니",
-        "/old_ent" to "추억의 예능",
-        "/old_drama" to "추억의 드라마"
+        "/bbs/popular.php?sb=popular" to "인기순위",
+        "/bbs/popular.php?sb=kor_movie" to "영화",
+        "/bbs/popular.php?sb=drama" to "드라마",
+        "/bbs/popular.php?sb=ent" to "예능",
+        "/bbs/popular.php?sb=sisa" to "시사/다큐",
+        "/bbs/popular.php?sb=movie" to "해외영화",
+        "/bbs/popular.php?sb=world" to "해외드라마",
+        "/bbs/popular.php?sb=ott_ent" to "해외예능/다큐",
+        "/bbs/popular.php?sb=animation" to "일반 애니메이션",
+        "/bbs/popular.php?sb=ani_movie" to "극장판 애니",
+        "/bbs/popular.php?sb=old_ent" to "추억의 예능",
+        "/bbs/popular.php?sb=old_drama" to "추억의 드라마"
     )
 
     private suspend fun checkAndUpdateDomain() {
