@@ -103,7 +103,7 @@ class TVWiki : MainAPI() {
             val testPath = "/popular"
             
             try {
-                val res = app.get("$currentMainUrl$testPath", headers = commonHeaders, timeout = 3L)
+                val res = app.get("$currentMainUrl$testPath", headers = commonHeaders, timeout = 5L)
                 val extractedUrl = Regex("^https?://[^/]+").find(res.url)?.value ?: currentMainUrl
                 val finalUrl = extractedUrl.replace("http://", "https://")
                 
