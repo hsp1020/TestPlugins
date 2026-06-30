@@ -87,7 +87,7 @@ subprojects {
         val implementation by configurations
 
         // Stubs for all cloudstream classes
-        cloudstream("com.github.recloudstream:cloudstream:pre-release")
+        cloudstream("com.github.recloudstream:cloudstream:master-SNAPSHOT")
 
         // UI 컴파일 에러 해결을 위한 AndroidX 및 Material 라이브러리 추가
         implementation("androidx.core:core-ktx:1.12.0")
