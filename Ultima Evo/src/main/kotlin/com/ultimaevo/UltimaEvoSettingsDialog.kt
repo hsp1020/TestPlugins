@@ -42,6 +42,7 @@ import java.util.Collections
 import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 import kotlin.text.Charsets
+import com.lagradost.cloudstream3.CloudStreamApp
 
 class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
 
