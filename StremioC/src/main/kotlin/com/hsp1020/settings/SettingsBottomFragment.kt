@@ -327,12 +327,12 @@ class SettingsBottomFragment(
     }
 
     private fun isCineStreamInstalled(): Boolean {
-        return APIHolder.allProviders.any { it.name.equals("CineStream", true) } ||
+        return getSafeAllProviders().any { it.name.equals("CineStream", true) } ||
                StremioC.loadProviderDynamically("megix", "com.megix.CineStreamProvider") != null
     }
 
     private fun isStreamPlayInstalled(): Boolean {
-        return APIHolder.allProviders.any { it.name.equals("StreamPlay", true) } ||
+        return getSafeAllProviders().any { it.name.equals("StreamPlay", true) } ||
                StremioC.loadProviderDynamically("phisher", "com.phisher98.StreamPlay") != null
     }
 
@@ -1735,5 +1735,20 @@ class SettingsBottomFragment(
                 notifyItemChanged(position)
             }
         }
+    }
+}
+
+fun getSafeAllProviders(): List<MainAPI> {
+    return try {
+        val method = APIHolder::class.java.methods.find { it.name == "getAllProviders" }
+        val obj = method?.invoke(APIHolder)
+        when (obj) {
+            is Iterable<*> -> obj.filterIsInstance<MainAPI>()
+            is Array<*> -> obj.filterIsInstance<MainAPI>()
+            else -> emptyList()
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+        emptyList()
     }
 }
