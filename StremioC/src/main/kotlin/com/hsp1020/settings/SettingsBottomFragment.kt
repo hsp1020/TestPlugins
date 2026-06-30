@@ -52,6 +52,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Collections
+import com.lagradost.cloudstream3.MainAPI
 
 data class LinkItem(
     val id: Long = System.currentTimeMillis(),
@@ -1738,17 +1739,3 @@ class SettingsBottomFragment(
     }
 }
 
-fun getSafeAllProviders(): List<MainAPI> {
-    return try {
-        val method = APIHolder::class.java.methods.find { it.name == "getAllProviders" }
-        val obj = method?.invoke(APIHolder)
-        when (obj) {
-            is Iterable<*> -> obj.filterIsInstance<MainAPI>()
-            is Array<*> -> obj.filterIsInstance<MainAPI>()
-            else -> emptyList()
-        }
-    } catch (e: Exception) {
-        e.printStackTrace()
-        emptyList()
-    }
-}
