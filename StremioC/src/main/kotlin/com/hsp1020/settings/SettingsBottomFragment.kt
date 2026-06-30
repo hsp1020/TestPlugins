@@ -1095,7 +1095,6 @@ class SettingsBottomFragment(
             sharedPref.edit { putString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, code) }
             val langName = languages.find { it.second == code }?.first ?: code
             Toast.makeText(context, "Language set to $code ($langName)", Toast.LENGTH_SHORT).show()
-            langDialog.dismiss()
         }
         rv.adapter = adapter
 
@@ -1116,6 +1115,13 @@ class SettingsBottomFragment(
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, 30, 0, 0)
         }
+        val applyBtn = Button(context).apply {
+            text = "Apply"
+            setTextColor(Color.WHITE)
+            isAllCaps = false
+            background = getButtonBg()
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) }
+        }
         val cancelBtn = Button(context).apply {
             text = "Cancel"
             setTextColor(Color.WHITE)
@@ -1124,11 +1130,20 @@ class SettingsBottomFragment(
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) }
         }
         footer.addView(cancelBtn)
+        footer.addView(applyBtn)
         container.addView(footer)
 
+        // 🚨 [순서 교정] 다이얼로그를 먼저 생성하여 아래 클릭 리스너 람다식 내에서 정상 참조되도록 수정
         val langDialog = AlertDialog.Builder(context).setView(container).create()
         setupCustomDialog(langDialog, container)
 
+        applyBtn.setOnClickListener {
+            val code = selectedCode
+            val langName = selectedLangName
+            sharedPref.edit { putString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, code) }
+            Toast.makeText(context, "Language set to $code ($langName)", Toast.LENGTH_SHORT).show()
+            langDialog.dismiss()
+        }
         cancelBtn.setOnClickListener { langDialog.dismiss() }
         langDialog.show()
     }
