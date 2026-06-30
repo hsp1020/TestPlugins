@@ -134,7 +134,6 @@ class SettingsBottomFragment(
         }
     }
 
-    // 🚨 [인메모리 매핑 보완] 임시 탭 활성화 여부(isChecked)와 장르 활성화 여부(isGenresEnabled) 속성 도입
     private data class ConfigFlatTab(
         val key: String, 
         val displayName: String, 
@@ -151,9 +150,34 @@ class SettingsBottomFragment(
     private fun getCardBg() = GradientDrawable().apply { setColor(Color.parseColor("#0C0C0C")); setStroke(2, Color.parseColor("#1A1A1A")); cornerRadius = 18f }
     private fun getButtonBg() = GradientDrawable().apply { setColor(Color.parseColor("#151515")); cornerRadius = 12f }
 
+    // ── CineStream 전용 SharedPreferences 수집 헬퍼 ──
+    private fun getCineStreamPrefs(ctx: Context): SharedPreferences? {
+        val possibleNames = listOf(
+            "CineStream", "CineStream_preferences", "plugin_CineStream", "plugin_CineStream_preferences", 
+            "com.megix", "com.megix_preferences", ctx.packageName + "_preferences"
+        )
+        for (name in possibleNames) {
+            val p = ctx.getSharedPreferences(name, Context.MODE_PRIVATE)
+            if (p.contains("seen_providers") || p.contains("provider_order") || p.contains("ScrapeConcurrency")) {
+                return p
+            }
+        }
+        return ctx.getSharedPreferences("${ctx.packageName}_preferences", Context.MODE_PRIVATE)
+    }
+
+    // ── CineStream 키 정밀 필터링 검사기 ──
+    private fun isCineStreamKey(key: String): Boolean {
+        val staticKeys = setOf(
+            "ScrapeConcurrency", "DownloadEnable", "ProviderCineStream", "ProviderSimkl", 
+            "ProviderTmdb", "showbox_ui_token", "wyzie_subs_api_key", "gramcinema_bearer_token", 
+            "stremio_addons", "new_provider_default_on", "seen_providers", "provider_order"
+        )
+        return key in staticKeys || key.startsWith("p_") || key.startsWith("stremio_")
+    }
+
     private fun setupCustomDialog(dialog: AlertDialog, contentView: View) {
         activeSubDialog = dialog
-        dialog.setCanceledOnTouchOutside(false) // 🚨 [수정] 팝업창 바깥 터치 시 강제 꺼짐 방지
+        dialog.setCanceledOnTouchOutside(false)
         dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         dialog.setOnShowListener {
             dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
@@ -304,8 +328,8 @@ class SettingsBottomFragment(
         inflater: LayoutInflater, container: ViewGroup?,
         savedInstanceState: Bundle?
     ): View {
-        isCancelable = true // 🚨 [수정] 설정메인창 뒤로가기 버튼 허용
-        dialog?.setCanceledOnTouchOutside(false) // 🚨 [수정] 설정메인창 바깥 터치 꺼짐 방지
+        isCancelable = true
+        dialog?.setCanceledOnTouchOutside(false)
         
         val view = getLayout("bottom_sheet_layout", inflater, container)
 
@@ -329,12 +353,43 @@ class SettingsBottomFragment(
 
         tvExport.setOnClickListener {
             val ctx = requireContext()
+            // 🚨 [Export 시점 획득] 클릭 순간 스위치의 ON/OFF 상태를 획득하여 조건부 백업을 구성
+            val isStreamPlayExportActive = try { view.findView<Switch>("switchStreamPlay").isChecked } catch (_: Throwable) { false }
+            val isCineStreamExportActive = try { view.findView<Switch>("switchCineStream").isChecked } catch (_: Throwable) { false }
+
             viewLifecycleOwner.lifecycleScope.launch {
                 try {
                     val backupStr = withContext(Dispatchers.IO) {
                         val json = JSONObject()
-                        sharedPref.all.forEach { (key, value) -> json.put(key, value) }
-                        json.put("plugin_name", "StremioC") // 👈 이 줄만 추가
+                        
+                        // 1. StremioC 설정 수집
+                        val stremioCJson = JSONObject()
+                        sharedPref.all.forEach { (key, value) -> stremioCJson.put(key, value) }
+                        json.put("stremio_c_data", stremioCJson)
+                        json.put("plugin_name", "StremioC_Bundle")
+                        
+                        // 2. StreamPlay 설정 수집 (토글이 켜져 있을 때만 포함)
+                        json.put("stream_play_enabled", isStreamPlayExportActive)
+                        if (isStreamPlayExportActive) {
+                            val streamPlayPrefs = ctx.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
+                            val streamPlayJson = JSONObject()
+                            streamPlayPrefs.all.forEach { (key, value) -> streamPlayJson.put(key, value) }
+                            json.put("stream_play_data", streamPlayJson)
+                        }
+
+                        // 3. CineStream 설정 수집 (토글이 켜져 있을 때만 포함 및 키 필터링)
+                        json.put("cine_stream_enabled", isCineStreamExportActive)
+                        if (isCineStreamExportActive) {
+                            val cineStreamJson = JSONObject()
+                            val cineStreamPrefs = getCineStreamPrefs(ctx)
+                            cineStreamPrefs?.all?.forEach { (key, value) ->
+                                if (isCineStreamKey(key)) {
+                                    cineStreamJson.put(key, value)
+                                }
+                            }
+                            json.put("cine_stream_data", cineStreamJson)
+                        }
+
                         val jsonString = json.toString()
                         val bos = java.io.ByteArrayOutputStream()
                         java.util.zip.GZIPOutputStream(bos).use { it.write(jsonString.toByteArray(Charsets.UTF_8)) }
@@ -342,7 +397,7 @@ class SettingsBottomFragment(
                     }
 
                     val clipboard = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    val clip = ClipData.newPlainText("StremioC Backup", backupStr)
+                    val clip = ClipData.newPlainText("StremioC Backup Bundle", backupStr)
                     clipboard.setPrimaryClip(clip)
 
                     val container = LinearLayout(ctx).apply {
@@ -357,8 +412,13 @@ class SettingsBottomFragment(
                             setPadding(0, 0, 0, 20)
                             gravity = android.view.Gravity.CENTER
                         })
+                        val descBuilder = StringBuilder("StremioC settings copied successfully.")
+                        if (isStreamPlayExportActive) descBuilder.append("\n+ StreamPlay settings included.")
+                        if (isCineStreamExportActive) descBuilder.append("\n+ CineStream settings included.")
+                        descBuilder.append("\n\nPlease paste it somewhere safe (e.g., Notes).")
+
                         addView(TextView(ctx).apply {
-                            text = "Compressed backup data has been successfully copied to your clipboard.\n\nPlease paste it somewhere safe (e.g., Notes, Messenger)."
+                            text = descBuilder.toString()
                             setTextColor(Color.LTGRAY)
                             textSize = 14f
                             setPadding(0, 0, 0, 30)
@@ -412,7 +472,8 @@ class SettingsBottomFragment(
 
                     if (parsedJson.length() == 0) throw Exception("Empty JSON Data")
 
-                    if (parsedJson.optString("plugin_name") != "StremioC") {
+                    val pluginName = parsedJson.optString("plugin_name")
+                    if (pluginName != "StremioC_Bundle" && pluginName != "StremioC") {
                         throw Exception("Plugin mismatch")
                     }
                     
@@ -443,8 +504,20 @@ class SettingsBottomFragment(
                             setPadding(0, 0, 0, 20)
                             gravity = android.view.Gravity.CENTER
                         })
+                        
+                        val msgBuilder = StringBuilder("Valid backup data found in clipboard!\n")
+                        if (pluginName == "StremioC_Bundle") {
+                            val isSPAvailable = parsedJson.optBoolean("stream_play_enabled", false)
+                            val isCSAvailable = parsedJson.optBoolean("cine_stream_enabled", false)
+                            msgBuilder.append("\nDetected packages:")
+                            msgBuilder.append("\n• StremioC: Ready")
+                            if (isSPAvailable) msgBuilder.append("\n• StreamPlay: Ready (Will restore only if integration toggle is ON)")
+                            if (isCSAvailable) msgBuilder.append("\n• CineStream: Ready (Will restore only if integration toggle is ON)")
+                        }
+                        msgBuilder.append("\n\nAre you sure you want to proceed? Existing unrelated settings will be kept safely.")
+
                         addView(TextView(ctx).apply {
-                            text = "Valid backup data found in clipboard!\n\nAre you sure you want to proceed? (Existing unrelated settings will be kept safely)"
+                            text = msgBuilder.toString()
                             setTextColor(Color.LTGRAY)
                             textSize = 14f
                             setPadding(0, 0, 0, 30)
@@ -463,16 +536,92 @@ class SettingsBottomFragment(
                     cancelBtn.setOnClickListener { dlg.dismiss() }
                     restoreBtn.setOnClickListener {
                         val editor = sharedPref.edit()
-                        val keys = parsedJson.keys()
-                        while (keys.hasNext()) {
-                            val key = keys.next()
-                            when (val value = parsedJson.get(key)) {
-                                is Boolean -> editor.putBoolean(key, value)
-                                is String -> editor.putString(key, value)
-                                is Int -> editor.putInt(key, value)
+                        
+                        if (pluginName == "StremioC_Bundle") {
+                            // 1. StremioC 데이터 전면 복구
+                            val stremioCData = parsedJson.optJSONObject("stremio_c_data")
+                            if (stremioCData != null) {
+                                val sKeys = stremioCData.keys()
+                                while (sKeys.hasNext()) {
+                                    val key = sKeys.next()
+                                    when (val value = stremioCData.get(key)) {
+                                        is Boolean -> editor.putBoolean(key, value)
+                                        is String -> editor.putString(key, value)
+                                        is Int -> editor.putInt(key, value)
+                                        is Long -> editor.putLong(key, value)
+                                        is Double -> editor.putFloat(key, value.toFloat())
+                                    }
+                                }
+                            }
+
+                            // 2. StreamPlay 조건부 복구 (백업본 데이터가 존재하고, 복원 대상 토글 설정이 ON인 경우만)
+                            val isStreamPlayInBackup = parsedJson.optBoolean("stream_play_enabled", false)
+                            val isStreamPlayEnabledInConfig = stremioCData?.optBoolean(SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, false) ?: false
+                            val hasStreamPlayData = parsedJson.has("stream_play_data")
+
+                            if (hasStreamPlayData && (isStreamPlayInBackup || isStreamPlayEnabledInConfig)) {
+                                val streamPlayData = parsedJson.optJSONObject("stream_play_data")
+                                if (streamPlayData != null) {
+                                    val streamPlayPrefs = ctx.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
+                                    val editorSP = streamPlayPrefs.edit()
+                                    val spKeys = streamPlayData.keys()
+                                    while (spKeys.hasNext()) {
+                                        val key = spKeys.next()
+                                        when (val value = streamPlayData.get(key)) {
+                                            is Boolean -> editorSP.putBoolean(key, value)
+                                            is String -> editorSP.putString(key, value)
+                                            is Int -> editorSP.putInt(key, value)
+                                            is Long -> editorSP.putLong(key, value)
+                                            is Double -> editorSP.putFloat(key, value.toFloat())
+                                        }
+                                    }
+                                    editorSP.commit()
+                                }
+                            }
+
+                            // 3. CineStream 조건부 복구 (백업본 데이터가 존재하고, 복원 대상 토글 설정이 ON인 경우만)
+                            val isCineStreamInBackup = parsedJson.optBoolean("cine_stream_enabled", false)
+                            val isCineStreamEnabledInConfig = stremioCData?.optBoolean(SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, false) ?: false
+                            val hasCineStreamData = parsedJson.has("cine_stream_data")
+
+                            if (hasCineStreamData && (isCineStreamInBackup || isCineStreamEnabledInConfig)) {
+                                val cineStreamData = parsedJson.optJSONObject("cine_stream_data")
+                                if (cineStreamData != null) {
+                                    val cineStreamPrefs = getCineStreamPrefs(ctx)
+                                    if (cineStreamPrefs != null) {
+                                        val editorCS = cineStreamPrefs.edit()
+                                        val csKeys = cineStreamData.keys()
+                                        while (csKeys.hasNext()) {
+                                            val key = csKeys.next()
+                                            when (val value = cineStreamData.get(key)) {
+                                                is Boolean -> editorCS.putBoolean(key, value)
+                                                is String -> editorCS.putString(key, value)
+                                                is Int -> editorCS.putInt(key, value)
+                                                is Long -> editorCS.putLong(key, value)
+                                                is Double -> editorCS.putFloat(key, value.toFloat())
+                                            }
+                                        }
+                                        editorCS.commit()
+                                    }
+                                }
+                            }
+                        } else {
+                            // 구버전(StremioC 단일) 복원 하위호환성 유지
+                            val keys = parsedJson.keys()
+                            while (keys.hasNext()) {
+                                val key = keys.next()
+                                if (key != "plugin_name") {
+                                    when (val value = parsedJson.get(key)) {
+                                        is Boolean -> editor.putBoolean(key, value)
+                                        is String -> editor.putString(key, value)
+                                        is Int -> editor.putInt(key, value)
+                                        is Long -> editor.putLong(key, value)
+                                        is Double -> editor.putFloat(key, value.toFloat())
+                                    }
+                                }
                             }
                         }
-                        // 🚨 [수정] 즉시 물리 디스크에 플러시하고 팝업창 우회하여 바로 재부팅 실행
+                        
                         editor.commit()
                         dlg.dismiss()
                         dismiss()
@@ -528,11 +677,8 @@ class SettingsBottomFragment(
         etHistorySyncUrl.setText(sharedPref.getString(SettingsRepository.PREF_KEY_HISTORY_SYNC_URL, ""))
 
         switchHistorySync.setOnCheckedChangeListener { _, isChecked ->
-            // 🚨 [동기화 누수 수정] 뒤로가기 시 무시하도록 setOnCheckedChangeListener의 실시간 SharedPreferences 저장을 전면 제거
             layoutHistorySyncUrl.visibility = if (isChecked) View.VISIBLE else View.GONE
         }
-
-        // 🚨 [동기화 누수 수정] 포커스를 잃었을 때 강제 실시간 저장되던 etHistorySyncUrl 리스너 원천 제거
 
         setupToggle(view, "switchCineStream", SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, isCineStreamInstalled(), "CineStream")
         setupToggle(view, "switchStreamPlay", SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, isStreamPlayInstalled(), "StreamPlay")
@@ -552,7 +698,6 @@ class SettingsBottomFragment(
         etCustomPosterUrl.setText(sharedPref.getString(SettingsRepository.PREF_KEY_CUSTOM_POSTER_URL, ""))
 
         switchCustomPoster.setOnCheckedChangeListener { _, isChecked ->
-            // 🚨 [동기화 누수 수정] 뒤로가기 시 무시하도록 setOnCheckedChangeListener의 실시간 저장을 전면 제거
             layoutCustomPosterUrl.visibility = if (isChecked) View.VISIBLE else View.GONE
         }
 
@@ -560,15 +705,12 @@ class SettingsBottomFragment(
             showLanguageSelectDialog()
         }
 
-        // 🚨 [동기화 누수 수정] 포커스를 잃었을 때 강제 실시간 저장되던 etCustomPosterUrl 리스너 원천 제거
-
         val etTmdbApiKey: EditText = try { view.findView("etTmdbApiKey") } catch (e: Throwable) { throw Exception("etTmdbApiKey EditText not found", e) }
         val switchMdbList: Switch = try { view.findView("switchMdbList") } catch (e: Throwable) { throw Exception("switchMdbList Switch not found", e) }
         val layoutMdbList: View = try { view.findView("layoutMdbList") } catch (e: Throwable) { throw Exception("layoutMdbList View not found", e) }
         val etMdbListApiKey: EditText = try { view.findView("etMdbListApiKey") } catch (e: Throwable) { throw Exception("etMdbListApiKey EditText not found", e) }
 
         etTmdbApiKey.setText(sharedPref.getString(SettingsRepository.PREF_KEY_TMDB_API_KEY, ""))
-        // 🚨 [동기화 누수 수정] 포커스를 잃었을 때 강제 실시간 저장되던 etTmdbApiKey 리스너 원천 제거
 
         val isMdbListEnabled = sharedPref.getBoolean(SettingsRepository.PREF_KEY_MDBLIST_ENABLED, false)
         switchMdbList.isChecked = isMdbListEnabled
@@ -576,11 +718,8 @@ class SettingsBottomFragment(
         etMdbListApiKey.setText(sharedPref.getString(SettingsRepository.PREF_KEY_MDBLIST_API_KEY, ""))
 
         switchMdbList.setOnCheckedChangeListener { _, isChecked ->
-            // 🚨 [동기화 누수 수정] 뒤로가기 시 무시하도록 setOnCheckedChangeListener의 실시간 저장을 전면 제거
             layoutMdbList.visibility = if (isChecked) View.VISIBLE else View.GONE
         }
-
-        // 🚨 [동기화 누수 수정] 포커스를 잃었을 때 강제 실시간 저장되던 etMdbListApiKey 리스너 원천 제거
 
         addlinks.setOnClickListener {
             showLinkEditorDialog(false, null, -1, null)
@@ -702,12 +841,10 @@ class SettingsBottomFragment(
                 return@setOnClickListener
             }
 
-            // 🚨 [동기화 누수 수정] 사용하지 않던 통합 스위치 리소스를 찾아 일괄 취합
             val switchCineStream = view.findView<Switch>("switchCineStream")
             val switchStreamPlay = view.findView<Switch>("switchStreamPlay")
             val switchVixSrc = view.findView<Switch>("switchVixSrc")
 
-            // 🚨 [동기화 누수 수정] 저장 버튼을 누르는 물리적 시점에만 전체 상태를 수집하여 디스크 동기 쓰기(commit=true) 처리
             sharedPref.edit(commit = true) {
                 putString(SettingsRepository.PREF_KEY_TMDB_API_KEY, tmdbApiKeyVal)
                 putString(SettingsRepository.PREF_KEY_MDBLIST_API_KEY, etMdbListApiKey.text.toString().trim())
@@ -884,8 +1021,7 @@ class SettingsBottomFragment(
             text = "Select TMDB Language"
             textSize = 20f
             typeface = android.graphics.Typeface.DEFAULT_BOLD
-            setTextColor(Color.WHITE)
-            setPadding(0, 0, 0, 30)
+            setPadding(0, 0, 0, 20)
             gravity = android.view.Gravity.CENTER
         })
 
@@ -1007,7 +1143,7 @@ class SettingsBottomFragment(
 
     private fun showCatalogConfigDialog(item: LinkItem) {
         val context = requireContext()
-        val uniqueId = item.link.toUniqueKeyLocal() // 🚨 [수정] 고유 해시키 획득
+        val uniqueId = item.link.toUniqueKeyLocal() 
         
         val progressContainer = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
@@ -1062,7 +1198,6 @@ class SettingsBottomFragment(
                             found
                         } ?: false
 
-                        // 🚨 [동기화 누수 수정] 초기 생성 시 SharedPreferences의 값을 모델 필드로 끌고 옴
                         flatTabs.add(ConfigFlatTab(
                             key = "${id}_${type}_default", 
                             displayName = "$name - $displayType", 
@@ -1091,7 +1226,6 @@ class SettingsBottomFragment(
 
                         genres.forEach { genre ->
                             val capitalizedGenre = genre.capitalizeFirstLocal()
-                            // 🚨 [동기화 누수 수정] 초기 생성 시 SharedPreferences의 값을 모델 필드로 끌고 옴
                             flatTabs.add(ConfigFlatTab(
                                 key = "${id}_${type}_genre_$genre", 
                                 displayName = "$name : $capitalizedGenre  - $displayType", 
@@ -1163,7 +1297,6 @@ class SettingsBottomFragment(
             
             fun updateVisibleTabs() {
                 visibleTabs = masterTabs.filter { tab ->
-                    // 🚨 [동기화 누수 수정] 인메모리 필드(isGenresEnabled) 상태에 의존하여 토글 분기
                     if (tab.isGenre) {
                         val parentTab = masterTabs.find { !it.isGenre && it.catalogKey == tab.catalogKey }
                         parentTab?.isGenresEnabled ?: true
@@ -1234,10 +1367,10 @@ class SettingsBottomFragment(
                 val tab = visibleTabs[position]
                 
                 holder.checkbox.setOnCheckedChangeListener(null)
-                holder.checkbox.isChecked = tab.isChecked // 🚨 [동기화 누수 수정] 인메모리 필드 바인딩
+                holder.checkbox.isChecked = tab.isChecked 
                 holder.checkbox.text = tab.displayName
                 holder.checkbox.setOnCheckedChangeListener { _, isChecked ->
-                    tab.isChecked = isChecked // 🚨 [동기화 누수 수정] 즉시 디스크 저장을 제거하고 임시 필드만 업데이트
+                    tab.isChecked = isChecked 
                     
                     val checkedTabs = masterTabs.filter { it.isChecked }
                     val uncheckedTabs = masterTabs.filter { !it.isChecked }
@@ -1250,9 +1383,9 @@ class SettingsBottomFragment(
                 if (!tab.isGenre && masterTabs.any { it.isGenre && it.catalogKey == tab.catalogKey }) {
                     holder.genreSwitch.visibility = View.VISIBLE
                     holder.genreSwitch.setOnCheckedChangeListener(null)
-                    holder.genreSwitch.isChecked = tab.isGenresEnabled // 🚨 [동기화 누수 수정] 인메모리 필드 바인딩
+                    holder.genreSwitch.isChecked = tab.isGenresEnabled 
                     holder.genreSwitch.setOnCheckedChangeListener { _, isChecked ->
-                        tab.isGenresEnabled = isChecked // 🚨 [동기화 누수 수정] 즉시 디스크 저장을 제거하고 임시 필드만 업데이트
+                        tab.isGenresEnabled = isChecked 
                         updateVisibleTabs()
                     }
                 } else {
@@ -1298,8 +1431,8 @@ class SettingsBottomFragment(
                     if (oldPos !in visibleTabs.indices) return@post
                     val item = visibleTabs[oldPos]
                     
-                    val isEnabled = item.isChecked // 🚨 [동기화 누수 수정] 인메모리 플래그 참조
-                    val checkedCount = visibleTabs.count { it.isChecked } // 🚨 [동기화 누수 수정] 인메모리 플래그 참조
+                    val isEnabled = item.isChecked 
+                    val checkedCount = visibleTabs.count { it.isChecked } 
                     
                     val groupMin = if (isEnabled) 1 else checkedCount + 1
                     val groupMax = if (isEnabled) checkedCount else visibleTabs.size
@@ -1318,14 +1451,10 @@ class SettingsBottomFragment(
                             val referenceTab = if (newPos + 1 in visibleTabs.indices) visibleTabs[newPos + 1] else if (newPos - 1 in visibleTabs.indices) visibleTabs[newPos - 1] else null
                             var masterTo = if (referenceTab != null) masterTabs.indexOf(referenceTab) else -1
                             
-                            if (masterTo != -1) {
-                                if (referenceTab == visibleTabs.getOrNull(newPos - 1)) {
-                                    masterTo += 1
-                                }
-                                masterTabs.add(masterTo.coerceIn(0, masterTabs.size), item)
-                            } else {
-                                masterTabs.add(item)
+                            if (referenceTab == visibleTabs.getOrNull(newPos - 1)) {
+                                masterTo += 1
                             }
+                            masterTabs.add(masterTo.coerceIn(0, masterTabs.size), item)
                         }
                         
                         notifyItemMoved(oldPos, newPos)
@@ -1407,7 +1536,6 @@ class SettingsBottomFragment(
             val editor = prefs.edit()
             val keysToSave = JSONArray()
             
-            // 🚨 [동기화 누수 수정] 오직 세이브 버튼을 누를 때만 보관해두었던 인메모리 임시값들을 SharedPreferences에 최종 일괄 기록
             masterTabs.forEach { 
                 keysToSave.put(it.key) 
                 editor.putBoolean("tab_enabled_${uniqueId}_${it.key}", it.isChecked)
@@ -1416,7 +1544,7 @@ class SettingsBottomFragment(
                 }
             }
             editor.putString(orderKey, keysToSave.toString())
-            editor.commit() // 🚨 동기 디스크 플러시 강제
+            editor.commit() 
             
             dialog.dismiss()
             showSavedPopup(context, "Catalog Settings", "Catalog settings saved. Reload to apply.")
@@ -1445,7 +1573,6 @@ class SettingsBottomFragment(
                 switchView.isChecked = SettingsRepository.isIntegrationEnabled(sharedPref, prefKey)
             }
             switchView.setOnCheckedChangeListener { _, isChecked ->
-                // 🚨 [동기화 누수 수정] 뒤로가기 누출 방지를 위해 체크 체인지 리스너 안의 실시간 SharedPreferences 물리 저장 코드(setIntegrationEnabled) 삭제
                 showToast("$displayName Integration " + if (isChecked) "Enabled" else "Disabled")
             }
         } catch (e: Throwable) { e.printStackTrace() }
