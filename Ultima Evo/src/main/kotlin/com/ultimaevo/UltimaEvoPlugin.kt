@@ -58,26 +58,34 @@ class UltimaEvoPlugin : Plugin() {
         }
     }
 
+    // ── [최적화된 순정 백업 연동 엔진] 자동 동기화 로직 ──
     private fun autoSyncNativeBackup(context: Context) {
-        try {
-            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            val nativeBackup = CloudStreamApp.getKey<String>("native_backup_ultimaevo")
-            val localHasData = prefs.all.isNotEmpty()
+        val appContext = context.applicationContext
+        
+        // 🚨 [최적화] 메인 스레드 렉(프리징) 방지를 위해 백그라운드 IO 스레드로 완전히 격리
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val prefs = appContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                val localHasData = prefs.all.isNotEmpty()
 
-            if (!localHasData && !nativeBackup.isNullOrEmpty()) {
-                val editor = prefs.edit()
-                jsonToPrefs(JSONObject(nativeBackup), editor)
-                editor.commit()
-                println("[UltimaEvo-AutoSync] 순정 백업에서 UltimaEvo 데이터 복원 완료")
-            } else if (localHasData) {
-                CloudStreamApp.setKey("native_backup_ultimaevo", prefsToJson(prefs).toString())
-                println("[UltimaEvo-AutoSync] UltimaEvo 데이터를 순정 백업(DataStore)에 저장 완료")
+                // 로컬 데이터가 비어있을 때만 DataStore에서 꺼내와서 복원함
+                if (!localHasData) {
+                    val nativeBackup = try { CloudStreamApp.getKey<String>("native_backup_ultimaevo") } catch (e: Exception) { null }
+                    if (!nativeBackup.isNullOrEmpty()) {
+                        val editor = prefs.edit()
+                        jsonToPrefs(JSONObject(nativeBackup), editor)
+                        editor.commit()
+                        println("[UltimaEvo-AutoSync] 순정 백업에서 UltimaEvo 데이터 복원 완료")
+                    }
+                }
+                // (주의: 앱 구동 시의 무의미한 덮어쓰기 백업 로직은 리소스 낭비 방지를 위해 삭제함. 백업은 설정창 Save 시에만 작동)
+                
+            } catch (e: Exception) {
+                println("[UltimaEvo-AutoSync] 동기화 중 오류 발생: ${e.message}")
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
         }
     }
-
+    
     override fun load(context: Context) {
         gson = com.google.gson.Gson()
         pluginContext = context
