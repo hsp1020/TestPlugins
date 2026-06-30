@@ -2027,7 +2027,7 @@ private fun String.urlEncodeLocal(): String = try {
     this
 }
 
-private fun getSafeAllProviders(): List<MainAPI> {
+fun getSafeAllProviders(): List<MainAPI> {
     return try {
         val method = APIHolder::class.java.methods.find { it.name == "getAllProviders" }
         val obj = method?.invoke(APIHolder)
