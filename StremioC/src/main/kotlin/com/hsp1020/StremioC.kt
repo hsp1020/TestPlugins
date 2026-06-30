@@ -125,7 +125,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             if (cachedCineStreamProvider != null) return cachedCustomCineStreamProvider()
             hasSearchedCineStream = true
 
-            val provider = APIHolder.allProviders.find { it.name.equals("CineStream", true) }
+            val provider = getSafeAllProviders().find { it.name.equals("CineStream", true) }
                 ?: loadProviderDynamically("megix", "com.megix.CineStreamProvider")
             
             if (provider != null) cachedCineStreamProvider = provider
@@ -143,7 +143,7 @@ open class StremioC(override var mainUrl: String, override var name: String) : M
             if (cachedStreamPlayProvider != null) return cachedCustomStreamPlayProvider()
             hasSearchedStreamPlay = true
 
-            val provider = APIHolder.allProviders.find { it.name.equals("StreamPlay", true) }
+            val provider = getSafeAllProviders().find { it.name.equals("StreamPlay", true) }
                 ?: loadProviderDynamically("phisher", "com.phisher98.StreamPlay")
             
             if (provider != null) cachedStreamPlayProvider = provider
@@ -2025,6 +2025,21 @@ private fun String.urlEncodeLocal(): String = try {
     java.net.URLEncoder.encode(this, "UTF-8").replace("+", "%20")
 } catch (e: Exception) {
     this
+}
+
+private fun getSafeAllProviders(): List<MainAPI> {
+    return try {
+        val method = APIHolder::class.java.methods.find { it.name == "getAllProviders" }
+        val obj = method?.invoke(APIHolder)
+        when (obj) {
+            is Iterable<*> -> obj.filterIsInstance<MainAPI>()
+            is Array<*> -> obj.filterIsInstance<MainAPI>()
+            else -> emptyList()
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+        emptyList()
+    }
 }
 
 private data class FlatTab(val key: String, val displayName: String, val urlPath: String)
