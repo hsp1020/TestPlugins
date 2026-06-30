@@ -62,43 +62,49 @@ class StremioCPlugin : Plugin() {
         }
     }
 
-    // ── [순정 백업 연동 엔진] 자동 동기화 로직 ──
+    // ── [최적화된 순정 백업 연동 엔진] 자동 동기화 로직 ──
     private fun autoSyncNativeBackup(context: Context) {
-        try {
-            // 1. StremioC 순정 백업 연동
-            val stremioCPrefs = context.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
-            val nativeStremioC = CloudStreamApp.getKey<String>("native_backup_stremioc")
-            val localStremioCHasData = stremioCPrefs.all.isNotEmpty()
+        val appContext = context.applicationContext
+        
+        // 🚨 [최적화] 메인 스레드 렉(프리징) 방지를 위해 백그라운드 IO 스레드로 완전히 격리
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                // 1. StremioC 순정 백업 연동 (복원만 수행)
+                val stremioCPrefs = appContext.getSharedPreferences(PREF_FILE, Context.MODE_PRIVATE)
+                val localStremioCHasData = stremioCPrefs.all.isNotEmpty()
 
-            if (!localStremioCHasData && !nativeStremioC.isNullOrEmpty()) {
-                val editor = stremioCPrefs.edit()
-                jsonToPrefs(JSONObject(nativeStremioC), editor)
-                editor.commit()
-                println("[StremioC-AutoSync] 순정 백업에서 StremioC 데이터 복원 완료")
-            } else if (localStremioCHasData) {
-                CloudStreamApp.setKey("native_backup_stremioc", prefsToJson(stremioCPrefs).toString())
-                println("[StremioC-AutoSync] StremioC 데이터를 순정 백업(DataStore)에 기생 저장 완료")
+                // 로컬 데이터가 비어있을 때만(새 폰 초기화 상태 등) DataStore에서 꺼내와서 복원함
+                if (!localStremioCHasData) {
+                    val nativeStremioC = try { CloudStreamApp.getKey<String>("native_backup_stremioc") } catch (e: Exception) { null }
+                    if (!nativeStremioC.isNullOrEmpty()) {
+                        val editor = stremioCPrefs.edit()
+                        jsonToPrefs(JSONObject(nativeStremioC), editor)
+                        editor.commit()
+                        println("[StremioC-AutoSync] 순정 백업에서 StremioC 데이터 복원 완료")
+                    }
+                }
+                // (주의: 앱 구동 시의 무의미한 덮어쓰기 백업 로직은 리소스 낭비 방지를 위해 삭제함. 백업은 설정창 Save 시에만 작동)
+
+                // 2. StreamPlay 순정 백업 기생 연동 (복원만 수행)
+                val streamPlayPrefs = appContext.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
+                val localStreamPlayHasData = streamPlayPrefs.all.isNotEmpty()
+
+                if (!localStreamPlayHasData) {
+                    val nativeStreamPlay = try { CloudStreamApp.getKey<String>("native_backup_streamplay") } catch (e: Exception) { null }
+                    if (!nativeStreamPlay.isNullOrEmpty()) {
+                        val editor = streamPlayPrefs.edit()
+                        jsonToPrefs(JSONObject(nativeStreamPlay), editor)
+                        editor.commit()
+                        println("[StremioC-AutoSync] 순정 백업에서 StreamPlay 데이터 복원 완료")
+                    }
+                }
+            } catch (e: Exception) {
+                println("[StremioC-AutoSync] 동기화 중 오류 발생: ${e.message}")
             }
-
-            // 2. StreamPlay 순정 백업 기생 연동
-            val streamPlayPrefs = context.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
-            val nativeStreamPlay = CloudStreamApp.getKey<String>("native_backup_streamplay")
-            val localStreamPlayHasData = streamPlayPrefs.all.isNotEmpty()
-
-            if (!localStreamPlayHasData && !nativeStreamPlay.isNullOrEmpty()) {
-                val editor = streamPlayPrefs.edit()
-                jsonToPrefs(JSONObject(nativeStreamPlay), editor)
-                editor.commit()
-                println("[StremioC-AutoSync] 순정 백업에서 StreamPlay 데이터 복원 완료")
-            } else if (localStreamPlayHasData) {
-                CloudStreamApp.setKey("native_backup_streamplay", prefsToJson(streamPlayPrefs).toString())
-                println("[StremioC-AutoSync] StreamPlay 데이터를 순정 백업(DataStore)에 기생 저장 완료")
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
         }
     }
 
+    
     override fun load(context: Context) {
         println("[StremioCPlugin v3.0-TRACKING] load() 함수 호출됨")
         
