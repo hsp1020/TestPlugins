@@ -26,15 +26,6 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
-data class EvoCatalogConfig(
-    val providerName: String,
-    val originalCatalogName: String,
-    val customCatalogName: String,
-    val originalData: String,
-    val orderIndex: Int
-)
-
-
 object UltimaEvoSyncManager {
     private var isSyncing = false
     private const val SYNC_THROTTLE_MS = 6 * 60 * 60 * 1000L 
