@@ -336,6 +336,44 @@ class SettingsBottomFragment(
                StremioC.loadProviderDynamically("phisher", "com.phisher98.StreamPlay") != null
     }
 
+    private fun showSavedPopup(ctx: Context, title: String, message: String, onConfirm: () -> Unit = {}) {
+        val container = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(40, 40, 40, 40)
+            background = getDarkThemeBg()
+            addView(TextView(ctx).apply {
+                text = title
+                textSize = 18f
+                setTextColor(Color.WHITE)
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+                setPadding(0, 0, 0, 20)
+                gravity = android.view.Gravity.CENTER
+            })
+            addView(TextView(ctx).apply {
+                text = message
+                setTextColor(Color.LTGRAY)
+                textSize = 14f
+                setPadding(0, 0, 0, 30)
+            })
+        }
+        val okBtn = Button(ctx).apply {
+            text = "OK"
+            setTextColor(Color.WHITE)
+            isAllCaps = false
+            background = getButtonBg()
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        }
+        container.addView(okBtn)
+
+        val dlg = AlertDialog.Builder(ctx).setView(container).create()
+        setupCustomDialog(dlg, container)
+        okBtn.setOnClickListener {
+            dlg.dismiss()
+            onConfirm()
+        }
+        dlg.show()
+    }
+    
     @SuppressLint("DiscouragedApi")
     override fun onCreateView(
         inflater: LayoutInflater, container: ViewGroup?,
