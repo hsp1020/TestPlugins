@@ -30,6 +30,8 @@ import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.lagradost.cloudstream3.APIHolder
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -210,7 +212,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                             setTextColor(Color.WHITE)
                             typeface = android.graphics.Typeface.DEFAULT_BOLD
                             setPadding(0, 0, 0, 20)
-                            gravity = android.view.Gravity.CENTER
+                            gravity = Gravity.CENTER
                         })
                         container.addView(TextView(ctx).apply {
                             text = "Compressed backup data has been successfully copied to your clipboard.\n\nPlease paste it somewhere safe (e.g., Notes, Messenger)."
@@ -280,7 +282,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                             setTextColor(Color.WHITE)
                             typeface = android.graphics.Typeface.DEFAULT_BOLD
                             setPadding(0, 0, 0, 20)
-                            gravity = android.view.Gravity.CENTER
+                            gravity = Gravity.CENTER
                         })
                         container.addView(TextView(ctx).apply {
                             text = "Valid compressed backup data found in clipboard!\n\nWarning: Restoring will overwrite settings.\nAre you sure you want to proceed?"
@@ -310,24 +312,65 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         val dlg = AlertDialog.Builder(ctx).setView(container).create()
                         setupCustomDialog(dlg, container)
 
-
                         cancelBtn.setOnClickListener { dlg.dismiss() }
+                        
                         restoreBtn.setOnClickListener {
-                            val editor = prefs.edit()
-                            val keys = parsedJson.keys()
-                            while (keys.hasNext()) {
-                                val key = keys.next()
-                                when (val value = parsedJson.get(key)) {
-                                    is Boolean -> editor.putBoolean(key, value)
-                                    is String -> editor.putString(key, value)
-                                    is Int -> editor.putInt(key, value)
+                            dlg.dismiss() // 기존 확인창 닫기
+                            
+                            // ── [UI 통일성 개선] 앱 테마와 통일된 로딩 팝업 표시 ──
+                            val loadingContainer = LinearLayout(ctx).apply {
+                                orientation = LinearLayout.VERTICAL
+                                setPadding(40, 40, 40, 40)
+                                background = getDarkThemeBg()
+                                addView(TextView(ctx).apply {
+                                    text = "Restoring Data"
+                                    textSize = 18f
+                                    setTextColor(Color.WHITE)
+                                    typeface = android.graphics.Typeface.DEFAULT_BOLD
+                                    setPadding(0, 0, 0, 20)
+                                    gravity = Gravity.CENTER
+                                })
+                                addView(TextView(ctx).apply {
+                                    text = "Please wait while settings are being applied...\nApp will restart automatically."
+                                    setTextColor(Color.LTGRAY)
+                                    textSize = 14f
+                                    gravity = Gravity.CENTER
+                                    setPadding(0, 0, 0, 10)
+                                })
+                            }
+                            val loadingDlg = AlertDialog.Builder(ctx).setView(loadingContainer).setCancelable(false).create()
+                            setupCustomDialog(loadingDlg, loadingContainer)
+                            loadingDlg.show()
+
+                            viewLifecycleOwner.lifecycleScope.launch {
+                                withContext(Dispatchers.IO) {
+                                    val editor = prefs.edit()
+                                    // 🚨 [최적화 1] 고스트 데이터 방지: 기존 설정을 완전히 초기화
+                                    editor.clear() 
+                                    
+                                    val keys = parsedJson.keys()
+                                    while (keys.hasNext()) {
+                                        val key = keys.next()
+                                        when (val value = parsedJson.get(key)) {
+                                            is Boolean -> editor.putBoolean(key, value)
+                                            is String -> editor.putString(key, value)
+                                            is Int -> editor.putInt(key, value)
+                                            is Long -> editor.putLong(key, value)
+                                            is Double -> editor.putFloat(key, value.toFloat())
+                                        }
+                                    }
+                                    // 🚨 [최적화 2] 백그라운드 스레드에서 디스크 쓰기 진행
+                                    editor.commit()
+                                }
+                                
+                                // 🚨 [최적화 3] 1.5초 대기 후 안전하게 앱 재시작
+                                delay(1500)
+                                if (isActive && isAdded) {
+                                    loadingDlg.dismiss()
+                                    dismiss()
+                                    restartApp()
                                 }
                             }
-                            // 🚨 [수정] 즉시 물리 디스크에 플러시하고 팝업창 우회하여 바로 재부팅 실행
-                            editor.commit()
-                            dlg.dismiss()
-                            dismiss()
-                            restartApp()
                         }
                         dlg.show()
                     } catch (e: Exception) {
@@ -343,7 +386,7 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                             setTextColor(Color.WHITE)
                             typeface = android.graphics.Typeface.DEFAULT_BOLD
                             setPadding(0, 0, 0, 20)
-                            gravity = android.view.Gravity.CENTER
+                            gravity = Gravity.CENTER
                         })
                         errContainer.addView(TextView(ctx).apply {
                             text = "No valid backup data found in your clipboard.\n\nPlease copy the exact backup text and try again."
@@ -588,10 +631,8 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                     editor.commit()
                     
                     withContext(Dispatchers.Main) {
-                        // 🚨 [수정] 캐시 무효화 작업을 메인 UI 스레드로 격리하여 홈 화면 갱신 스레드와 겹치는 현상 차단
                         APIHolder.allProviders.forEach { p -> if (p is UltimaEvoProvider) p.invalidateCache() }
                     
-                        // 🚨 [수정] 괄호 짝을 깨뜨리던 중복 withContext 블록 제거 및 통합 완료
                         val cancelBtn = Button(ctx).apply {
                             text = "No"
                             setTextColor(Color.WHITE)
@@ -636,13 +677,11 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                         val dlg = AlertDialog.Builder(ctx).setView(container).create()
                         setupCustomDialog(dlg, container)
 
-                        // No 클릭 시: 단순히 설정을 종료하고 화면을 닫음
                         cancelBtn.setOnClickListener { 
                             dlg.dismiss()
                             dismiss() 
                         }
                         
-                        // Yes 클릭 시: 다이얼로그 전체를 닫고 앱을 완전 재시작 처리
                         restartBtn.setOnClickListener { 
                             dlg.dismiss()
                             dismiss() 
@@ -712,8 +751,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
         val allCatalogList = mutableListOf<CatalogData>()
         val visibleCatalogList = mutableListOf<CatalogData>()
 
-        // ... 생략 ...
-
         for (provider in allProviders) {
             val staticCats = provider.mainPage.map { it.name }
             val dynamicCats = prefs.getString("dynamic_catalogs_${provider.name}", "")?.split("|||") ?: emptyList()
@@ -728,7 +765,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
             }
         }
 
-        // 🚨 [수정 및 추가] 데이터 로드 직후, 마스터 리스트를 기존에 저장된 순서(orderIndex) 기준으로 먼저 정렬합니다.
         allCatalogList.sortBy { it.orderIndex }
 
         val rvCatalogs = RecyclerView(ctx).apply { 
@@ -1094,7 +1130,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 editor.commit()
 
                 withContext(Dispatchers.Main) { 
-                    // 🚨 [수정] 캐시 무효화 작업을 메인 UI 스레드로 격리하여 데이터 정합성 보장
                     APIHolder.allProviders.forEach { p -> if (p is UltimaEvoProvider) p.invalidateCache() }
                     
                     dialog.dismiss() 
