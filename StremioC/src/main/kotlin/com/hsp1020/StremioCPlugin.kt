@@ -23,52 +23,6 @@ class StremioCPlugin : Plugin() {
     override fun load(context: Context) {
         println("[StremioCPlugin v3.0-TRACKING] load() 함수 호출됨")
         
-        // 🚨 [긴급 자가 복구 엔진 주입] 앱 구동 시 StremioC가 먼저 돌면서 StreamPlay의 오염된 데이터를 복구합니다.
-        try {
-            val streamPlayPrefs = context.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
-            val corruptedKeys = mutableListOf<String>()
-            
-            // 타입 오염 여부 전수 검사
-            streamPlayPrefs.all.forEach { (key, value) ->
-                if (key == "enabled_plugins_saved" || key == "disabled_providers" || key == "provider_profiles") {
-                    if (value is String) {
-                        corruptedKeys.add(key)
-                    }
-                }
-            }
-            
-            if (corruptedKeys.isNotEmpty()) {
-                val editorSP = streamPlayPrefs.edit()
-                corruptedKeys.forEach { key ->
-                    val strValue = streamPlayPrefs.getString(key, "") ?: ""
-                    editorSP.remove(key) // 오염된 String 타입 데이터 제거
-                    
-                    val cleanedSet = mutableSetOf<String>()
-                    var cleanStr = strValue.trim()
-                    
-                    if (cleanStr.startsWith("[") && cleanStr.endsWith("]")) {
-                        cleanStr = cleanStr.substring(1, cleanStr.length - 1)
-                    }
-                    
-                    // JSON 포맷 흔적을 말끔히 제거하고 List/Set 형태로 파싱
-                    cleanStr.split(",").forEach {
-                        val trimmed = it.trim().removeSurrounding("\"").removeSurrounding("'")
-                        if (trimmed.isNotEmpty()) {
-                            cleanedSet.add(trimmed)
-                        }
-                    }
-                    
-                    if (cleanedSet.isNotEmpty()) {
-                        editorSP.putStringSet(key, cleanedSet) // 올바른 StringSet 규격으로 복구 후 이관
-                    }
-                }
-                editorSP.commit() // 동기식 영구 저장 강제 진행
-                println("[StremioCPlugin-Healing] StreamPlay SharedPreferences의 오염된 StringSet 복구 성공: $corruptedKeys")
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-
         try {
             registerMainAPI(StremioC("", "StremioC"))
         } catch (e: Throwable) {
