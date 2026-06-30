@@ -2,53 +2,105 @@
 package com.ultimaevo
 
 import android.content.Context
-import androidx.fragment.app.FragmentActivity
-import com.google.gson.Gson
-import com.google.gson.annotations.SerializedName
+import android.content.SharedPreferences
+import androidx.appcompat.app.AppCompatActivity
+import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
-
-// 🔥 [V2 패치] 시한폭탄 텍스트 파싱을 대체할 견고한 네이티브 Gson 데이터 클래스
-data class EvoCatalogConfig(
-    @SerializedName("providerName") val providerName: String,
-    @SerializedName("originalCatalogName") val originalCatalogName: String,
-    @SerializedName("customCatalogName") val customCatalogName: String,
-    @SerializedName("originalData") val originalData: String,
-    @SerializedName("orderIndex") val orderIndex: Int
-)
+import org.json.JSONArray
+import org.json.JSONObject
 
 @CloudstreamPlugin
 class UltimaEvoPlugin : Plugin() {
+
     companion object {
+        const val PREFS_NAME = "UltimaEvo"
+        lateinit var gson: com.google.gson.Gson
         var pluginContext: Context? = null
-        const val PREFS_NAME = "ultima_evo_settings"
-        val gson = Gson() // 전역 Gson 인스턴스
     }
 
-    override fun load(context: Context) {
-        println("[UltimaEvo-Debug] [Plugin] load() 함수 진입.")
-        pluginContext = context.applicationContext
-        
-        try {
-            val prefs = pluginContext!!.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            val instanceCountStr = prefs.getString("evo_instance_count", "1") ?: "1"
-            val instanceCount = instanceCountStr.toIntOrNull() ?: 1
-            println("[UltimaEvo-Debug] [Plugin] 생성할 카탈로그 인스턴스 수: $instanceCount")
-
-            for (i in 1..instanceCount) {
-                val providerName = prefs.getString("evo_name_$i", "Ultima Evo $i") ?: "Ultima Evo $i"
-                registerMainAPI(UltimaEvoProvider(i, providerName))
-            }
-
-            openSettings = { ctx ->
-                val act = ctx as? FragmentActivity
-                if (act != null && !act.isFinishing && !act.isDestroyed) {
-                    val dialog = UltimaEvoSettingsDialog()
-                    dialog.show(act.supportFragmentManager, "UltimaEvoSettingsDialog")
+    // ── [순정 백업 연동 엔진] ──
+    private fun prefsToJson(prefs: SharedPreferences): JSONObject {
+        val json = JSONObject()
+        prefs.all.forEach { (key, value) ->
+            if (value != null) {
+                if (value is Set<*>) {
+                    val arr = JSONArray()
+                    value.forEach { item -> if (item != null) arr.put(item) }
+                    json.put(key, arr)
+                } else {
+                    json.put(key, value)
                 }
+            }
+        }
+        return json
+    }
+
+    private fun jsonToPrefs(json: JSONObject, editor: SharedPreferences.Editor) {
+        val keys = json.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            when (val value = json.get(key)) {
+                is Boolean -> editor.putBoolean(key, value)
+                is String -> editor.putString(key, value)
+                is Int -> editor.putInt(key, value)
+                is Long -> editor.putLong(key, value)
+                is Double -> editor.putFloat(key, value.toFloat())
+                is JSONArray -> {
+                    val set = mutableSetOf<String>()
+                    for (i in 0 until value.length()) {
+                        val item = value.optString(i)
+                        if (item != null) set.add(item)
+                    }
+                    editor.putStringSet(key, set)
+                }
+            }
+        }
+    }
+
+    private fun autoSyncNativeBackup(context: Context) {
+        try {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val nativeBackup = CloudStreamApp.getKey<String>("native_backup_ultimaevo")
+            val localHasData = prefs.all.isNotEmpty()
+
+            if (!localHasData && !nativeBackup.isNullOrEmpty()) {
+                val editor = prefs.edit()
+                jsonToPrefs(JSONObject(nativeBackup), editor)
+                editor.commit()
+                println("[UltimaEvo-AutoSync] 순정 백업에서 UltimaEvo 데이터 복원 완료")
+            } else if (localHasData) {
+                CloudStreamApp.setKey("native_backup_ultimaevo", prefsToJson(prefs).toString())
+                println("[UltimaEvo-AutoSync] UltimaEvo 데이터를 순정 백업(DataStore)에 저장 완료")
             }
         } catch (e: Exception) {
             e.printStackTrace()
+        }
+    }
+
+    override fun load(context: Context) {
+        gson = com.google.gson.Gson()
+        pluginContext = context
+        
+        // 🚨 앱 구동 시 순정 백업 연동 엔진 실행
+        autoSyncNativeBackup(context)
+
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val instanceCount = prefs.getString("evo_instance_count", "1")?.toIntOrNull() ?: 1
+
+        for (i in 1..instanceCount) {
+            val isVisible = prefs.getBoolean("evo_visibility_enabled_$i", true)
+            val customName = prefs.getString("evo_name_$i", "Ultima Evo $i") ?: "Ultima Evo $i"
+            
+            if (isVisible) {
+                registerMainAPI(UltimaEvoProvider(i, customName))
+            }
+        }
+
+        val activity = context as? AppCompatActivity
+        openSettings = {
+            val frag = UltimaEvoSettingsDialog()
+            activity?.supportFragmentManager?.let { fm -> frag.show(fm, "UltimaEvoSettings") }
         }
     }
 }
