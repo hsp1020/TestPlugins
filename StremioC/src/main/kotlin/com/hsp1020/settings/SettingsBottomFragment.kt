@@ -151,7 +151,6 @@ class SettingsBottomFragment(
     private fun getCardBg() = GradientDrawable().apply { setColor(Color.parseColor("#0C0C0C")); setStroke(2, Color.parseColor("#1A1A1A")); cornerRadius = 18f }
     private fun getButtonBg() = GradientDrawable().apply { setColor(Color.parseColor("#151515")); cornerRadius = 12f }
 
-    // ── [동적 엔진 1] CineStream 플러그인의 메모리(ClassLoader) 역추적 ──
     private fun getCineStreamClassLoader(): ClassLoader? {
         try {
             val pmClass = Class.forName("com.lagradost.cloudstream3.plugins.PluginManager")
@@ -178,14 +177,14 @@ class SettingsBottomFragment(
         return null
     }
 
-    // ── [동적 엔진 2] 하드코딩 없이 DataStore 및 Reflection을 통해 설정 키 자동 스크래핑 ──
     private fun getCineStreamDynamicKeys(): Set<String> {
         val keys = mutableSetOf<String>()
+        println("[CineData] Dynamic Scanner Started")
         
-        // 1. Reflection 스캐너: Settings.kt 안의 모든 String 상수 자동 수집 (새로운 API 키가 생겨도 자동 대응)
         try {
             val loader = getCineStreamClassLoader()
             if (loader != null) {
+                println("[CineData] ClassLoader Found, scanning Settings...")
                 val settingsClass = Class.forName("com.megix.settings.Settings", true, loader)
                 settingsClass.declaredFields.forEach { field ->
                     if (field.type == String::class.java) {
@@ -193,44 +192,57 @@ class SettingsBottomFragment(
                         val keyName = field.get(null) as? String
                         if (!keyName.isNullOrBlank()) {
                             keys.add(keyName)
+                            println("[CineData] Found Setting Key via Reflection: $keyName")
                         }
                     }
                 }
+            } else {
+                println("[CineData] ClassLoader is NULL")
             }
-        } catch (e: Exception) { e.printStackTrace() }
+        } catch (e: Exception) { 
+            println("[CineData] Reflection Error: ${e.message}")
+        }
 
-        // 2. State 스캐너: seen_providers 및 provider_order 읽기 (모든 프로바이더 키 자동 획득)
         try {
-            CloudStreamApp.getKey<String>("seen_providers")?.split(",")?.forEach {
+            val seenProviders = CloudStreamApp.getKey<String>("seen_providers")
+            println("[CineData] seen_providers from DataStore: $seenProviders")
+            seenProviders?.split(",")?.forEach {
                 if (it.isNotBlank()) keys.add(it.trim())
             }
-            CloudStreamApp.getKey<String>("provider_order")?.split(",")?.forEach {
+            val providerOrder = CloudStreamApp.getKey<String>("provider_order")
+            println("[CineData] provider_order from DataStore: $providerOrder")
+            providerOrder?.split(",")?.forEach {
                 if (it.isNotBlank()) keys.add(it.trim())
             }
-        } catch (e: Exception) { e.printStackTrace() }
+        } catch (e: Exception) { 
+            println("[CineData] State Scanner Error: ${e.message}")
+        }
 
-        // 3. Addon 스캐너: stremio_addons 파싱하여 동적 키 획득
         try {
-            CloudStreamApp.getKey<String>("stremio_addons")?.lines()?.forEach { line ->
+            val addons = CloudStreamApp.getKey<String>("stremio_addons")
+            println("[CineData] stremio_addons from DataStore: $addons")
+            addons?.lines()?.forEach { line ->
                 val name = line.split("|").firstOrNull()?.trim()
                 if (!name.isNullOrBlank()) {
                     val formatted = name.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')
                     keys.add("stremio_$formatted")
                 }
             }
-        } catch (e: Exception) { e.printStackTrace() }
+        } catch (e: Exception) { 
+            println("[CineData] Addon Scanner Error: ${e.message}")
+        }
 
-        // 4. 최소한의 안전장치 (Reflection 실패 대비 코어 키)
-        keys.addAll(listOf(
+        val hardcoded = listOf(
             "ScrapeConcurrency", "DownloadEnable", "ProviderCineStream", "ProviderSimkl", 
             "ProviderTmdb", "showbox_ui_token", "wyzie_subs_api_key", "gramcinema_bearer_token", 
             "stremio_addons", "new_provider_default_on", "seen_providers", "provider_order"
-        ))
-
+        )
+        keys.addAll(hardcoded)
+        
+        println("[CineData] Final Combined Keys to Scan: $keys")
         return keys
     }
 
-    // ── StreamPlay용 SharedPreferences -> JSON 변환 ──
     private fun prefsToJson(prefs: SharedPreferences, filterBlock: ((String) -> Boolean)? = null): JSONObject {
         val json = JSONObject()
         prefs.all.forEach { (key, value) ->
@@ -247,7 +259,6 @@ class SettingsBottomFragment(
         return json
     }
 
-    // ── StreamPlay용 JSON -> SharedPreferences 복원 ──
     private fun jsonToPrefs(json: JSONObject, editor: SharedPreferences.Editor) {
         val keys = json.keys()
         while (keys.hasNext()) {
@@ -452,49 +463,69 @@ class SettingsBottomFragment(
             val isStreamPlayExportActive = try { view.findView<Switch>("switchStreamPlay").isChecked } catch (_: Throwable) { false }
             val isCineStreamExportActive = try { view.findView<Switch>("switchCineStream").isChecked } catch (_: Throwable) { false }
 
+            println("[CineData] EXPORT TRIGGERED. CineStream Active: $isCineStreamExportActive")
+
             viewLifecycleOwner.lifecycleScope.launch {
                 try {
                     val backupStr = withContext(Dispatchers.IO) {
                         val json = JSONObject()
                         
-                        // 1. StremioC 데이터 인코딩
                         json.put("stremio_c_data", prefsToJson(sharedPref))
                         json.put("plugin_name", "StremioC_Bundle")
                         
-                        // 2. StreamPlay 데이터 인코딩
                         json.put("stream_play_enabled", isStreamPlayExportActive)
                         if (isStreamPlayExportActive) {
                             val streamPlayPrefs = ctx.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
                             json.put("stream_play_data", prefsToJson(streamPlayPrefs))
                         }
 
-                        // 3. CineStream 데이터 인코딩 (DataStore 직접 타격 + 동적 스마트 스캐너)
                         json.put("cine_stream_enabled", isCineStreamExportActive)
                         if (isCineStreamExportActive) {
                             val cineStreamJson = JSONObject()
-                            val dynamicKeys = getCineStreamDynamicKeys() // 하드코딩 완전 폐기
+                            val dynamicKeys = getCineStreamDynamicKeys()
                             
                             dynamicKeys.forEach { cKey ->
                                 var found = false
-                                val strVal = try { CloudStreamApp.getKey<String>(cKey) } catch (_: Throwable) { null }
-                                if (strVal != null) {
-                                    cineStreamJson.put(cKey, strVal)
-                                    found = true
-                                }
-                                if (!found) {
-                                    val boolVal = try { CloudStreamApp.getKey<Boolean>(cKey) } catch (_: Throwable) { null }
-                                    if (boolVal != null) {
-                                        cineStreamJson.put(cKey, boolVal)
+                                var finalValue: Any? = null
+                                
+                                try { 
+                                    val strVal = CloudStreamApp.getKey<String>(cKey)
+                                    if (strVal != null) {
+                                        cineStreamJson.put(cKey, strVal)
+                                        finalValue = strVal
                                         found = true
                                     }
-                                }
+                                } catch (_: Throwable) {}
+                                
                                 if (!found) {
-                                    val intVal = try { CloudStreamApp.getKey<Int>(cKey) } catch (_: Throwable) { null }
-                                    if (intVal != null) {
-                                        cineStreamJson.put(cKey, intVal)
-                                    }
+                                    try {
+                                        val boolVal = CloudStreamApp.getKey<Boolean>(cKey)
+                                        if (boolVal != null) {
+                                            cineStreamJson.put(cKey, boolVal)
+                                            finalValue = boolVal
+                                            found = true
+                                        }
+                                    } catch (_: Throwable) {}
+                                }
+                                
+                                if (!found) {
+                                    try {
+                                        val intVal = CloudStreamApp.getKey<Int>(cKey)
+                                        if (intVal != null) {
+                                            cineStreamJson.put(cKey, intVal)
+                                            finalValue = intVal
+                                            found = true
+                                        }
+                                    } catch (_: Throwable) {}
+                                }
+                                
+                                if (found) {
+                                    println("[CineData] EXPORT - Extracted Key: $cKey => Value: $finalValue")
+                                } else {
+                                    println("[CineData] EXPORT - Key Not Found or Null: $cKey")
                                 }
                             }
+                            println("[CineData] EXPORT - Final CineStream JSON: ${cineStreamJson.toString()}")
                             json.put("cine_stream_data", cineStreamJson)
                         }
 
@@ -580,6 +611,7 @@ class SettingsBottomFragment(
                     if (parsedJson.length() == 0) throw Exception("Empty JSON Data")
 
                     val pluginName = parsedJson.optString("plugin_name")
+                    println("[CineData] IMPORT TRIGGERED. Parsed Plugin Name: $pluginName")
                     if (pluginName != "StremioC_Bundle" && pluginName != "StremioC") {
                         throw Exception("Plugin mismatch")
                     }
@@ -645,13 +677,11 @@ class SettingsBottomFragment(
                         val editor = sharedPref.edit()
                         
                         if (pluginName == "StremioC_Bundle") {
-                            // 1. StremioC 설정 복원
                             val stremioCData = parsedJson.optJSONObject("stremio_c_data")
                             if (stremioCData != null) {
                                 jsonToPrefs(stremioCData, editor)
                             }
 
-                            // 2. StreamPlay 조건부 복구 (XML 기록)
                             val isStreamPlayInBackup = parsedJson.optBoolean("stream_play_enabled", false)
                             val isStreamPlayEnabledInConfig = stremioCData?.optBoolean(SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, false) ?: false
                             if (parsedJson.has("stream_play_data") && (isStreamPlayInBackup || isStreamPlayEnabledInConfig)) {
@@ -664,19 +694,30 @@ class SettingsBottomFragment(
                                 }
                             }
 
-                            // 3. CineStream 조건부 복구 (DataStore 강제 주입)
                             val isCineStreamInBackup = parsedJson.optBoolean("cine_stream_enabled", false)
                             val isCineStreamEnabledInConfig = stremioCData?.optBoolean(SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, false) ?: false
-                            if (parsedJson.has("cine_stream_data") && (isCineStreamInBackup || isCineStreamEnabledInConfig)) {
+                            val hasCineStreamData = parsedJson.has("cine_stream_data")
+                            
+                            println("[CineData] IMPORT - Backup has cine_stream_data: $hasCineStreamData, isCineStreamInBackup: $isCineStreamInBackup, isCineStreamEnabledInConfig: $isCineStreamEnabledInConfig")
+
+                            if (hasCineStreamData && (isCineStreamInBackup || isCineStreamEnabledInConfig)) {
                                 val cineStreamData = parsedJson.optJSONObject("cine_stream_data")
+                                println("[CineData] IMPORT - Restoring CineStream Data: ${cineStreamData?.toString()}")
                                 if (cineStreamData != null) {
                                     val csKeys = cineStreamData.keys()
                                     while (csKeys.hasNext()) {
                                         val cKey = csKeys.next()
-                                        when (val cValue = cineStreamData.get(cKey)) {
-                                            is Boolean -> try { CloudStreamApp.setKey(cKey, cValue) } catch (_: Throwable) {}
-                                            is String -> try { CloudStreamApp.setKey(cKey, cValue) } catch (_: Throwable) {}
-                                            is Int -> try { CloudStreamApp.setKey(cKey, cValue) } catch (_: Throwable) {}
+                                        val cValue = cineStreamData.get(cKey)
+                                        println("[CineData] IMPORT - Restoring Key: $cKey => Value: $cValue (Type: ${cValue?.javaClass?.simpleName})")
+                                        try {
+                                            when (cValue) {
+                                                is Boolean -> CloudStreamApp.setKey(cKey, cValue)
+                                                is String -> CloudStreamApp.setKey(cKey, cValue)
+                                                is Int -> CloudStreamApp.setKey(cKey, cValue)
+                                            }
+                                            println("[CineData] IMPORT - Successfully Restored Key: $cKey")
+                                        } catch (e: Throwable) {
+                                            println("[CineData] IMPORT - Error Restoring Key: $cKey => ${e.message}")
                                         }
                                     }
                                 }
@@ -789,7 +830,6 @@ class SettingsBottomFragment(
         }
 
         showlinks.setOnClickListener {
-            val ctx = requireContext()
             val inflater = LayoutInflater.from(ctx)
             val dialogView = getLayout("dialog_list_links", inflater, null) as LinearLayout
             
