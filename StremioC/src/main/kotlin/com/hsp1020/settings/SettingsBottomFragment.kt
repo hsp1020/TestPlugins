@@ -184,7 +184,6 @@ class SettingsBottomFragment(
         try {
             val loader = getCineStreamClassLoader()
             if (loader != null) {
-                println("[CineData] ClassLoader Found, scanning Settings...")
                 val settingsClass = Class.forName("com.megix.settings.Settings", true, loader)
                 settingsClass.declaredFields.forEach { field ->
                     if (field.type == String::class.java) {
@@ -192,12 +191,9 @@ class SettingsBottomFragment(
                         val keyName = field.get(null) as? String
                         if (!keyName.isNullOrBlank()) {
                             keys.add(keyName)
-                            println("[CineData] Found Setting Key via Reflection: $keyName")
                         }
                     }
                 }
-            } else {
-                println("[CineData] ClassLoader is NULL")
             }
         } catch (e: Exception) { 
             println("[CineData] Reflection Error: ${e.message}")
@@ -205,12 +201,10 @@ class SettingsBottomFragment(
 
         try {
             val seenProviders = CloudStreamApp.getKey<String>("seen_providers")
-            println("[CineData] seen_providers from DataStore: $seenProviders")
             seenProviders?.split(",")?.forEach {
                 if (it.isNotBlank()) keys.add(it.trim())
             }
             val providerOrder = CloudStreamApp.getKey<String>("provider_order")
-            println("[CineData] provider_order from DataStore: $providerOrder")
             providerOrder?.split(",")?.forEach {
                 if (it.isNotBlank()) keys.add(it.trim())
             }
@@ -220,7 +214,6 @@ class SettingsBottomFragment(
 
         try {
             val addons = CloudStreamApp.getKey<String>("stremio_addons")
-            println("[CineData] stremio_addons from DataStore: $addons")
             addons?.lines()?.forEach { line ->
                 val name = line.split("|").firstOrNull()?.trim()
                 if (!name.isNullOrBlank()) {
@@ -239,7 +232,6 @@ class SettingsBottomFragment(
         )
         keys.addAll(hardcoded)
         
-        println("[CineData] Final Combined Keys to Scan: $keys")
         return keys
     }
 
@@ -470,59 +462,43 @@ class SettingsBottomFragment(
                     val backupStr = withContext(Dispatchers.IO) {
                         val json = JSONObject()
                         
+                        // 1. StremioC 데이터 인코딩
                         json.put("stremio_c_data", prefsToJson(sharedPref))
                         json.put("plugin_name", "StremioC_Bundle")
                         
+                        // 2. StreamPlay 데이터 인코딩
                         json.put("stream_play_enabled", isStreamPlayExportActive)
                         if (isStreamPlayExportActive) {
                             val streamPlayPrefs = ctx.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
                             json.put("stream_play_data", prefsToJson(streamPlayPrefs))
                         }
 
+                        // 3. CineStream 데이터 인코딩 (타입 오염 방지를 위한 정밀 추출)
                         json.put("cine_stream_enabled", isCineStreamExportActive)
                         if (isCineStreamExportActive) {
                             val cineStreamJson = JSONObject()
                             val dynamicKeys = getCineStreamDynamicKeys()
                             
                             dynamicKeys.forEach { cKey ->
-                                var found = false
-                                var finalValue: Any? = null
-                                
-                                try { 
-                                    val strVal = CloudStreamApp.getKey<String>(cKey)
-                                    if (strVal != null) {
-                                        cineStreamJson.put(cKey, strVal)
-                                        finalValue = strVal
-                                        found = true
+                                try {
+                                    // 🚨 타입 보존 로직: DataStore에서 각 키의 명확한 타입으로 핀포인트 추출
+                                    when {
+                                        cKey == "ScrapeConcurrency" -> {
+                                            val intVal = CloudStreamApp.getKey<Int>(cKey)
+                                            if (intVal != null) cineStreamJson.put(cKey, intVal)
+                                        }
+                                        cKey in listOf("showbox_ui_token", "wyzie_subs_api_key", "gramcinema_bearer_token", "stremio_addons", "seen_providers", "provider_order") -> {
+                                            val strVal = CloudStreamApp.getKey<String>(cKey)
+                                            if (strVal != null) cineStreamJson.put(cKey, strVal)
+                                        }
+                                        else -> {
+                                            // 나머지 모든 동적 키(p_*, stremio_*, Provider*, DownloadEnable 등)는 Boolean 임
+                                            val boolVal = CloudStreamApp.getKey<Boolean>(cKey)
+                                            if (boolVal != null) cineStreamJson.put(cKey, boolVal)
+                                        }
                                     }
-                                } catch (_: Throwable) {}
-                                
-                                if (!found) {
-                                    try {
-                                        val boolVal = CloudStreamApp.getKey<Boolean>(cKey)
-                                        if (boolVal != null) {
-                                            cineStreamJson.put(cKey, boolVal)
-                                            finalValue = boolVal
-                                            found = true
-                                        }
-                                    } catch (_: Throwable) {}
-                                }
-                                
-                                if (!found) {
-                                    try {
-                                        val intVal = CloudStreamApp.getKey<Int>(cKey)
-                                        if (intVal != null) {
-                                            cineStreamJson.put(cKey, intVal)
-                                            finalValue = intVal
-                                            found = true
-                                        }
-                                    } catch (_: Throwable) {}
-                                }
-                                
-                                if (found) {
-                                    println("[CineData] EXPORT - Extracted Key: $cKey => Value: $finalValue")
-                                } else {
-                                    println("[CineData] EXPORT - Key Not Found or Null: $cKey")
+                                } catch (e: Throwable) {
+                                    println("[CineData] EXPORT - Error reading key: $cKey => ${e.message}")
                                 }
                             }
                             println("[CineData] EXPORT - Final CineStream JSON: ${cineStreamJson.toString()}")
@@ -677,11 +653,13 @@ class SettingsBottomFragment(
                         val editor = sharedPref.edit()
                         
                         if (pluginName == "StremioC_Bundle") {
+                            // 1. StremioC 설정 복원
                             val stremioCData = parsedJson.optJSONObject("stremio_c_data")
                             if (stremioCData != null) {
                                 jsonToPrefs(stremioCData, editor)
                             }
 
+                            // 2. StreamPlay 조건부 복구 (XML 기록)
                             val isStreamPlayInBackup = parsedJson.optBoolean("stream_play_enabled", false)
                             val isStreamPlayEnabledInConfig = stremioCData?.optBoolean(SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, false) ?: false
                             if (parsedJson.has("stream_play_data") && (isStreamPlayInBackup || isStreamPlayEnabledInConfig)) {
@@ -694,6 +672,7 @@ class SettingsBottomFragment(
                                 }
                             }
 
+                            // 3. CineStream 조건부 복구 (DataStore 강제 주입)
                             val isCineStreamInBackup = parsedJson.optBoolean("cine_stream_enabled", false)
                             val isCineStreamEnabledInConfig = stremioCData?.optBoolean(SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, false) ?: false
                             val hasCineStreamData = parsedJson.has("cine_stream_data")
@@ -728,8 +707,14 @@ class SettingsBottomFragment(
                         
                         editor.commit()
                         dlg.dismiss()
-                        dismiss()
-                        restartApp()
+                        
+                        // 🚨 DataStore 비동기 쓰기가 디스크에 반영될 수 있도록 앱 종료 전 1.5초 대기
+                        viewLifecycleOwner.lifecycleScope.launch {
+                            Toast.makeText(ctx, "Restoring data... Please wait.", Toast.LENGTH_SHORT).show()
+                            delay(2000)
+                            dismiss()
+                            restartApp()
+                        }
                     }
                     dlg.show()
 
@@ -1004,7 +989,7 @@ class SettingsBottomFragment(
                 addView(btnRow)
             }
 
-            val dlg = AlertDialog.Builder(context).setView(container).create()
+            val dlg = AlertDialog.Builder(ctx).setView(container).create()
             setupCustomDialog(dlg, container)
 
             cancelBtn.setOnClickListener { dlg.dismiss() }
