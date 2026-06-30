@@ -40,6 +40,7 @@ import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.ItemTouchHelper
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.APIHolder
+import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.CommonActivity.showToast
 import org.json.JSONArray
 import org.json.JSONObject
@@ -150,37 +151,30 @@ class SettingsBottomFragment(
     private fun getCardBg() = GradientDrawable().apply { setColor(Color.parseColor("#0C0C0C")); setStroke(2, Color.parseColor("#1A1A1A")); cornerRadius = 18f }
     private fun getButtonBg() = GradientDrawable().apply { setColor(Color.parseColor("#151515")); cornerRadius = 12f }
 
-    // ── CineStream의 실질적 SharedPreferences 파일 특정 (ctx.applicationContext.packageName 활용) ──
-    private fun getCineStreamPrefs(ctx: Context): SharedPreferences? {
-        val hostPackageName = ctx.applicationContext.packageName
-        val possibleNames = listOf(
-            "CineStream", "CineStream_preferences", "plugin_CineStream", "plugin_CineStream_preferences", 
-            "com.megix", "com.megix_preferences", "${hostPackageName}_preferences"
-        )
-        for (name in possibleNames) {
-            val p = ctx.getSharedPreferences(name, Context.MODE_PRIVATE)
-            if (p.contains("seen_providers") || p.contains("provider_order") || p.contains("ScrapeConcurrency")) {
-                return p
-            }
-        }
-        return ctx.getSharedPreferences("${hostPackageName}_preferences", Context.MODE_PRIVATE)
-    }
+    // ── [신규 설계] DataStore 타격용 CineStream 고정 화이트리스트 키 ──
+    private val cineStreamStaticKeys = listOf(
+        "ScrapeConcurrency", "DownloadEnable", "ProviderCineStream", "ProviderSimkl", 
+        "ProviderTmdb", "showbox_ui_token", "wyzie_subs_api_key", "gramcinema_bearer_token", 
+        "stremio_addons", "new_provider_default_on", "seen_providers", "provider_order",
+        "p_torrentio", "p_torrentsdb", "p_animetosho", "p_streamvix", "p_notorrent", "p_wyziesubs", 
+        "p_stremiosubs", "p_showbox", "p_vidrock", "p_moviebox", "p_mkvbase", "p_allmovieland", 
+        "p_hexa", "p_xpass", "p_playsrc", "p_lordflix", "p_videasy", "p_vicsrcwtf", "p_vidlink", 
+        "p_playimdb", "p_vidzee", "p_peachify", "p_vidfastpro", "p_vidcore", "p_av1encodes", 
+        "p_reanime", "p_zinkmovies", "p_netflix", "p_primevideo", "p_disney", "p_bollywood", 
+        "p_vegamovies", "p_rogmovies", "p_bollyflix", "p_topmovies", "p_moviesmod", "p_movies4u", 
+        "p_dudefilms", "p_uhdmovies", "p_moviesdrive", "p_hindmoviez", "p_4khdhub", "p_primesrc", 
+        "p_projectfreetv", "p_mlsbd", "p_levidia", "p_dahmermovies", "p_animesalt", "p_m4ufree", 
+        "p_multimovies", "p_akwam", "p_rtally", "p_asiaflix", "p_skymovies", "p_hdmovie2", 
+        "p_mostraguarda", "p_kisskh", "p_onetouchtv", "p_toonstream", "p_animedao", "p_anikage", 
+        "p_anidb", "p_animepahe", "p_animetoshohttp", "p_allanime", "p_tokyoinsider", "p_anizone", 
+        "p_animes", "p_gojo", "p_animekizz"
+    )
 
-    // ── CineStream 전용 키 필터링 식별 조건 ──
-    private fun isCineStreamKey(key: String): Boolean {
-        val staticKeys = setOf(
-            "ScrapeConcurrency", "DownloadEnable", "ProviderCineStream", "ProviderSimkl", 
-            "ProviderTmdb", "showbox_ui_token", "wyzie_subs_api_key", "gramcinema_bearer_token", 
-            "stremio_addons", "new_provider_default_on", "seen_providers", "provider_order"
-        )
-        return key in staticKeys || key.startsWith("p_") || key.startsWith("stremio_")
-    }
-
-    // ── SharedPreferences 정보를 StringSet 유실 없이 JSONObject로 직렬화하는 범용 도구 ──
-    private fun prefsToJson(prefs: SharedPreferences, filterBlock: ((String) -> Boolean)? = null): JSONObject {
+    // ── StreamPlay용 SharedPreferences -> JSON 변환 ──
+    private fun prefsToJson(prefs: SharedPreferences): JSONObject {
         val json = JSONObject()
         prefs.all.forEach { (key, value) ->
-            if (value != null && (filterBlock == null || filterBlock(key))) {
+            if (value != null) {
                 if (value is Set<*>) {
                     val arr = JSONArray()
                     value.forEach { item -> if (item != null) arr.put(item) }
@@ -193,7 +187,7 @@ class SettingsBottomFragment(
         return json
     }
 
-    // ── JSONObject 정보를 복원하여 StringSet 구조를 보존한 채 SharedPreferences에 기록하는 범용 도구 ──
+    // ── StreamPlay용 JSON -> SharedPreferences 복원 ──
     private fun jsonToPrefs(json: JSONObject, editor: SharedPreferences.Editor) {
         val keys = json.keys()
         while (keys.hasNext()) {
@@ -407,20 +401,53 @@ class SettingsBottomFragment(
                         json.put("stremio_c_data", prefsToJson(sharedPref))
                         json.put("plugin_name", "StremioC_Bundle")
                         
-                        // 2. StreamPlay 데이터 인코딩
+                        // 2. StreamPlay 데이터 인코딩 (XML 파일 통째 백업)
                         json.put("stream_play_enabled", isStreamPlayExportActive)
                         if (isStreamPlayExportActive) {
                             val streamPlayPrefs = ctx.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
                             json.put("stream_play_data", prefsToJson(streamPlayPrefs))
                         }
 
-                        // 3. CineStream 데이터 인코딩 (호스트 패키지 명칭을 dynamic하게 역추적하여 수집)
+                        // 3. CineStream 데이터 인코딩 (Cloudstream DataStore 직접 타격)
                         json.put("cine_stream_enabled", isCineStreamExportActive)
                         if (isCineStreamExportActive) {
-                            val cineStreamPrefs = getCineStreamPrefs(ctx)
-                            if (cineStreamPrefs != null) {
-                                json.put("cine_stream_data", prefsToJson(cineStreamPrefs) { isCineStreamKey(it) })
+                            val cineStreamJson = JSONObject()
+                            val allCineKeys = mutableListOf<String>()
+                            allCineKeys.addAll(cineStreamStaticKeys)
+                            
+                            // Stremio 애드온 리스트에서 동적 키 추출
+                            val stremioAddons = try { CloudStreamApp.getKey<String>("stremio_addons") } catch (_: Throwable) { null }
+                            if (stremioAddons != null) {
+                                val sKeys = stremioAddons.lines().filter { it.isNotBlank() }.mapNotNull { line ->
+                                    val name = line.split("|").firstOrNull() ?: return@mapNotNull null
+                                    "stremio_${name.trim().lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')}"
+                                }
+                                allCineKeys.addAll(sKeys)
                             }
+                            
+                            // 타입 소거 한계를 우회하여 각 타입별로 DataStore에서 직접 추출
+                            allCineKeys.forEach { cKey ->
+                                var found = false
+                                val strVal = try { CloudStreamApp.getKey<String>(cKey) } catch (_: Throwable) { null }
+                                if (strVal != null) {
+                                    cineStreamJson.put(cKey, strVal)
+                                    found = true
+                                }
+                                if (!found) {
+                                    val boolVal = try { CloudStreamApp.getKey<Boolean>(cKey) } catch (_: Throwable) { null }
+                                    if (boolVal != null) {
+                                        cineStreamJson.put(cKey, boolVal)
+                                        found = true
+                                    }
+                                }
+                                if (!found) {
+                                    val intVal = try { CloudStreamApp.getKey<Int>(cKey) } catch (_: Throwable) { null }
+                                    if (intVal != null) {
+                                        cineStreamJson.put(cKey, intVal)
+                                    }
+                                }
+                            }
+                            json.put("cine_stream_data", cineStreamJson)
                         }
 
                         val jsonString = json.toString()
@@ -447,7 +474,7 @@ class SettingsBottomFragment(
                         })
                         val descBuilder = StringBuilder("StremioC settings copied successfully.")
                         if (isStreamPlayExportActive) descBuilder.append("\n+ StreamPlay settings included.")
-                        if (isCineStreamExportActive) descBuilder.append("\n+ CineStream settings included.")
+                        if (isCineStreamExportActive) descBuilder.append("\n+ CineStream settings included (via DataStore).")
                         descBuilder.append("\n\nPlease paste it somewhere safe (e.g., Notes).")
 
                         addView(TextView(ctx).apply {
@@ -543,10 +570,10 @@ class SettingsBottomFragment(
                             val isCSAvailable = parsedJson.optBoolean("cine_stream_enabled", false)
                             msgBuilder.append("\nDetected packages:")
                             msgBuilder.append("\n• StremioC: Ready")
-                            if (isSPAvailable) msgBuilder.append("\n• StreamPlay: Ready (Will restore only if integration toggle is ON)")
-                            if (isCSAvailable) msgBuilder.append("\n• CineStream: Ready (Will restore only if integration toggle is ON)")
+                            if (isSPAvailable) msgBuilder.append("\n• StreamPlay: Ready (Will restore if toggle is ON)")
+                            if (isCSAvailable) msgBuilder.append("\n• CineStream: Ready (Will restore directly via DataStore)")
                         }
-                        msgBuilder.append("\n\nAre you sure you want to proceed? Existing unrelated settings will be kept safely.")
+                        msgBuilder.append("\n\nAre you sure you want to proceed?")
 
                         addView(TextView(ctx).apply {
                             text = msgBuilder.toString()
@@ -570,18 +597,16 @@ class SettingsBottomFragment(
                         val editor = sharedPref.edit()
                         
                         if (pluginName == "StremioC_Bundle") {
-                            // 1. StremioC 설정 전원 복원
+                            // 1. StremioC 설정 복원
                             val stremioCData = parsedJson.optJSONObject("stremio_c_data")
                             if (stremioCData != null) {
                                 jsonToPrefs(stremioCData, editor)
                             }
 
-                            // 2. StreamPlay 조건부 복구
+                            // 2. StreamPlay 조건부 복구 (XML 기록)
                             val isStreamPlayInBackup = parsedJson.optBoolean("stream_play_enabled", false)
                             val isStreamPlayEnabledInConfig = stremioCData?.optBoolean(SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, false) ?: false
-                            val hasStreamPlayData = parsedJson.has("stream_play_data")
-
-                            if (hasStreamPlayData && (isStreamPlayInBackup || isStreamPlayEnabledInConfig)) {
+                            if (parsedJson.has("stream_play_data") && (isStreamPlayInBackup || isStreamPlayEnabledInConfig)) {
                                 val streamPlayData = parsedJson.optJSONObject("stream_play_data")
                                 if (streamPlayData != null) {
                                     val streamPlayPrefs = ctx.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
@@ -591,24 +616,24 @@ class SettingsBottomFragment(
                                 }
                             }
 
-                            // 3. CineStream 조건부 복구
+                            // 3. CineStream 조건부 복구 (DataStore 강제 주입)
                             val isCineStreamInBackup = parsedJson.optBoolean("cine_stream_enabled", false)
                             val isCineStreamEnabledInConfig = stremioCData?.optBoolean(SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, false) ?: false
-                            val hasCineStreamData = parsedJson.has("cine_stream_data")
-
-                            if (hasCineStreamData && (isCineStreamInBackup || isCineStreamEnabledInConfig)) {
+                            if (parsedJson.has("cine_stream_data") && (isCineStreamInBackup || isCineStreamEnabledInConfig)) {
                                 val cineStreamData = parsedJson.optJSONObject("cine_stream_data")
                                 if (cineStreamData != null) {
-                                    val cineStreamPrefs = getCineStreamPrefs(ctx)
-                                    if (cineStreamPrefs != null) {
-                                        val editorCS = cineStreamPrefs.edit()
-                                        jsonToPrefs(cineStreamData, editorCS)
-                                        editorCS.commit()
+                                    val csKeys = cineStreamData.keys()
+                                    while (csKeys.hasNext()) {
+                                        val cKey = csKeys.next()
+                                        when (val cValue = cineStreamData.get(cKey)) {
+                                            is Boolean -> try { CloudStreamApp.setKey(cKey, cValue) } catch (_: Throwable) {}
+                                            is String -> try { CloudStreamApp.setKey(cKey, cValue) } catch (_: Throwable) {}
+                                            is Int -> try { CloudStreamApp.setKey(cKey, cValue) } catch (_: Throwable) {}
+                                        }
                                     }
                                 }
                             }
                         } else {
-                            // 구버전 단일 백업 하위호환 복구
                             jsonToPrefs(parsedJson, editor)
                         }
                         
@@ -1095,6 +1120,7 @@ class SettingsBottomFragment(
             sharedPref.edit { putString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, code) }
             val langName = languages.find { it.second == code }?.first ?: code
             Toast.makeText(context, "Language set to $code ($langName)", Toast.LENGTH_SHORT).show()
+            activeSubDialog?.dismiss()
         }
         rv.adapter = adapter
 
@@ -1133,7 +1159,6 @@ class SettingsBottomFragment(
         footer.addView(applyBtn)
         container.addView(footer)
 
-        // 🚨 [순서 교정] 다이얼로그를 먼저 생성하여 아래 클릭 리스너 람다식 내에서 정상 참조되도록 수정
         val langDialog = AlertDialog.Builder(context).setView(container).create()
         setupCustomDialog(langDialog, container)
 
