@@ -150,13 +150,23 @@ class SettingsBottomFragment(
     private fun getCardBg() = GradientDrawable().apply { setColor(Color.parseColor("#0C0C0C")); setStroke(2, Color.parseColor("#1A1A1A")); cornerRadius = 18f }
     private fun getButtonBg() = GradientDrawable().apply { setColor(Color.parseColor("#151515")); cornerRadius = 12f }
 
-    // 🚨 [핵심 수정] 호스트 앱(Cloudstream)의 진짜 패키지명을 찾아 기본 설정 파일에 완벽하게 접근합니다.
-    private fun getCineStreamPrefs(ctx: Context): SharedPreferences {
+    // ── CineStream의 실질적 SharedPreferences 파일 특정 (ctx.applicationContext.packageName 활용) ──
+    private fun getCineStreamPrefs(ctx: Context): SharedPreferences? {
         val hostPackageName = ctx.applicationContext.packageName
+        val possibleNames = listOf(
+            "CineStream", "CineStream_preferences", "plugin_CineStream", "plugin_CineStream_preferences", 
+            "com.megix", "com.megix_preferences", "${hostPackageName}_preferences"
+        )
+        for (name in possibleNames) {
+            val p = ctx.getSharedPreferences(name, Context.MODE_PRIVATE)
+            if (p.contains("seen_providers") || p.contains("provider_order") || p.contains("ScrapeConcurrency")) {
+                return p
+            }
+        }
         return ctx.getSharedPreferences("${hostPackageName}_preferences", Context.MODE_PRIVATE)
     }
 
-    // 🚨 CineStream 전용 키 정밀 필터링 (완벽 검증됨)
+    // ── CineStream 전용 키 필터링 식별 조건 ──
     private fun isCineStreamKey(key: String): Boolean {
         val staticKeys = setOf(
             "ScrapeConcurrency", "DownloadEnable", "ProviderCineStream", "ProviderSimkl", 
@@ -166,6 +176,7 @@ class SettingsBottomFragment(
         return key in staticKeys || key.startsWith("p_") || key.startsWith("stremio_")
     }
 
+    // ── SharedPreferences 정보를 StringSet 유실 없이 JSONObject로 직렬화하는 범용 도구 ──
     private fun prefsToJson(prefs: SharedPreferences, filterBlock: ((String) -> Boolean)? = null): JSONObject {
         val json = JSONObject()
         prefs.all.forEach { (key, value) ->
@@ -182,6 +193,7 @@ class SettingsBottomFragment(
         return json
     }
 
+    // ── JSONObject 정보를 복원하여 StringSet 구조를 보존한 채 SharedPreferences에 기록하는 범용 도구 ──
     private fun jsonToPrefs(json: JSONObject, editor: SharedPreferences.Editor) {
         val keys = json.keys()
         while (keys.hasNext()) {
@@ -402,11 +414,13 @@ class SettingsBottomFragment(
                             json.put("stream_play_data", prefsToJson(streamPlayPrefs))
                         }
 
-                        // 3. CineStream 데이터 인코딩 (호스트 앱 패키지명 기반으로 완벽 추출)
+                        // 3. CineStream 데이터 인코딩 (호스트 패키지 명칭을 dynamic하게 역추적하여 수집)
                         json.put("cine_stream_enabled", isCineStreamExportActive)
                         if (isCineStreamExportActive) {
                             val cineStreamPrefs = getCineStreamPrefs(ctx)
-                            json.put("cine_stream_data", prefsToJson(cineStreamPrefs) { isCineStreamKey(it) })
+                            if (cineStreamPrefs != null) {
+                                json.put("cine_stream_data", prefsToJson(cineStreamPrefs) { isCineStreamKey(it) })
+                            }
                         }
 
                         val jsonString = json.toString()
@@ -586,9 +600,11 @@ class SettingsBottomFragment(
                                 val cineStreamData = parsedJson.optJSONObject("cine_stream_data")
                                 if (cineStreamData != null) {
                                     val cineStreamPrefs = getCineStreamPrefs(ctx)
-                                    val editorCS = cineStreamPrefs.edit()
-                                    jsonToPrefs(cineStreamData, editorCS)
-                                    editorCS.commit()
+                                    if (cineStreamPrefs != null) {
+                                        val editorCS = cineStreamPrefs.edit()
+                                        jsonToPrefs(cineStreamData, editorCS)
+                                        editorCS.commit()
+                                    }
                                 }
                             }
                         } else {
@@ -700,7 +716,6 @@ class SettingsBottomFragment(
         }
 
         showlinks.setOnClickListener {
-            val ctx = requireContext()
             val inflater = LayoutInflater.from(ctx)
             val dialogView = getLayout("dialog_list_links", inflater, null) as LinearLayout
             
@@ -899,7 +914,7 @@ class SettingsBottomFragment(
             titleTv.text = if (isEdit) "Edit Link" else "Add Link"
             titleTv.setTextColor(Color.WHITE)
             titleTv.textSize = 20f
-            typeface = android.graphics.Typeface.DEFAULT_BOLD
+            titleTv.typeface = android.graphics.Typeface.DEFAULT_BOLD
             titleTv.gravity = android.view.Gravity.CENTER
         }
         
@@ -1018,8 +1033,13 @@ class SettingsBottomFragment(
         }
         container.addView(rv)
 
-        class LangAdapter : RecyclerView.Adapter<LangAdapter.VH>() {
-            var filteredList = languages
+        class LangAdapter(
+            private val originalList: List<Pair<String, String>>,
+            private val selectedCode: String,
+            private val onClick: (String) -> Unit
+        ) : RecyclerView.Adapter<LangAdapter.VH>() {
+
+            private var filteredList = originalList.toMutableList()
 
             inner class VH(val view: LinearLayout, val tvName: TextView, val tvCheck: TextView) : RecyclerView.ViewHolder(view)
 
@@ -1049,22 +1069,34 @@ class SettingsBottomFragment(
 
             override fun onBindViewHolder(holder: VH, position: Int) {
                 val (langName, code) = filteredList[position]
-                
                 val isSelected = code == selectedCode
                 holder.tvName.text = langName
                 holder.tvName.setTextColor(if (isSelected) Color.parseColor("#FF5555") else Color.WHITE) 
                 holder.tvCheck.visibility = if (isSelected) View.VISIBLE else View.GONE
                 
                 holder.view.setOnClickListener {
-                    selectedCode = code
-                    selectedLangName = langName
-                    notifyDataSetChanged()
+                    onClick(code)
                 }
             }
             override fun getItemCount() = filteredList.size
+
+            @SuppressLint("NotifyDataSetChanged")
+            fun filter(query: String) {
+                filteredList = if (query.isBlank()) {
+                    originalList.toMutableList()
+                } else {
+                    originalList.filter { it.first.contains(query, ignoreCase = true) }.toMutableList()
+                }
+                notifyDataSetChanged()
+            }
         }
 
-        val adapter = LangAdapter()
+        val adapter = LangAdapter(languages, selectedCode) { code ->
+            sharedPref.edit { putString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, code) }
+            val langName = languages.find { it.second == code }?.first ?: code
+            Toast.makeText(context, "Language set to $code ($langName)", Toast.LENGTH_SHORT).show()
+            langDialog.dismiss()
+        }
         rv.adapter = adapter
 
         searchBar.addTextChangedListener(object : android.text.TextWatcher {
@@ -1074,8 +1106,7 @@ class SettingsBottomFragment(
                 searchJob = viewLifecycleOwner.lifecycleScope.launch {
                     delay(150) 
                     val query = s.toString().trim().lowercase()
-                    adapter.filteredList = if (query.isEmpty()) languages else languages.filter { it.first.lowercase().contains(query) }
-                    adapter.notifyDataSetChanged()
+                    adapter.filter(query)
                 }
             }
             override fun afterTextChanged(s: android.text.Editable?) {}
@@ -1085,13 +1116,6 @@ class SettingsBottomFragment(
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, 30, 0, 0)
         }
-        val applyBtn = Button(context).apply {
-            text = "Apply"
-            setTextColor(Color.WHITE)
-            isAllCaps = false
-            background = getButtonBg()
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(15, 0, 0, 0) }
-        }
         val cancelBtn = Button(context).apply {
             text = "Cancel"
             setTextColor(Color.WHITE)
@@ -1100,17 +1124,11 @@ class SettingsBottomFragment(
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0, 0, 15, 0) }
         }
         footer.addView(cancelBtn)
-        footer.addView(applyBtn)
         container.addView(footer)
 
         val langDialog = AlertDialog.Builder(context).setView(container).create()
         setupCustomDialog(langDialog, container)
 
-        applyBtn.setOnClickListener {
-            sharedPref.edit { putString(SettingsRepository.PREF_KEY_TMDB_LANG_CODE, selectedCode) }
-            Toast.makeText(context, "Language set to $selectedCode ($selectedLangName)", Toast.LENGTH_SHORT).show()
-            langDialog.dismiss()
-        }
         cancelBtn.setOnClickListener { langDialog.dismiss() }
         langDialog.show()
     }
@@ -1425,10 +1443,14 @@ class SettingsBottomFragment(
                             val referenceTab = if (newPos + 1 in visibleTabs.indices) visibleTabs[newPos + 1] else if (newPos - 1 in visibleTabs.indices) visibleTabs[newPos - 1] else null
                             var masterTo = if (referenceTab != null) masterTabs.indexOf(referenceTab) else -1
                             
-                            if (referenceTab == visibleTabs.getOrNull(newPos - 1)) {
-                                masterTo += 1
+                            if (masterTo != -1) {
+                                if (referenceTab == visibleTabs.getOrNull(newPos - 1)) {
+                                    masterTo += 1
+                                }
+                                masterTabs.add(masterTo.coerceIn(0, masterTabs.size), item)
+                            } else {
+                                masterTabs.add(item)
                             }
-                            masterTabs.add(masterTo.coerceIn(0, masterTabs.size), item)
                         }
                         
                         notifyItemMoved(oldPos, newPos)
