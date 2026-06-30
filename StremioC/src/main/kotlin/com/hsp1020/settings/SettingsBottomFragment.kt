@@ -369,43 +369,6 @@ class SettingsBottomFragment(
         dialog?.setCanceledOnTouchOutside(false)
         
         val ctx = requireContext()
-
-        // 🚨 [가장 중요 - 자가 복구(Self-Healing) 엔진] 
-        // 이전에 잘못 기록된 오염 데이터(String)가 SharedPreferences상에 실존할 경우 강제 인지 및 자가 치유 수행
-        try {
-            val streamPlayPrefs = ctx.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
-            val corruptedKeys = mutableListOf<String>()
-            streamPlayPrefs.all.forEach { (key, value) ->
-                if (key == "enabled_plugins_saved" || key == "disabled_providers" || key == "provider_profiles") {
-                    if (value is String) {
-                        corruptedKeys.add(key)
-                    }
-                }
-            }
-            if (corruptedKeys.isNotEmpty()) {
-                val editorSP = streamPlayPrefs.edit()
-                corruptedKeys.forEach { key ->
-                    val strValue = streamPlayPrefs.getString(key, "") ?: ""
-                    editorSP.remove(key) // 잘못된 String 형태의 데이터를 DB상에서 즉각 삭제
-                    
-                    val cleanedSet = mutableSetOf<String>()
-                    // "[StreamPlay, StreamPlay-Anime]" 같은 직렬화 깨진 텍스트를 Set 구조로 긴급 분리
-                    if (strValue.startsWith("[") && strValue.endsWith("]")) {
-                        strValue.substring(1, strValue.length - 1).split(",").forEach {
-                            val trimmed = it.trim()
-                            if (trimmed.isNotEmpty()) cleanedSet.add(trimmed)
-                        }
-                    }
-                    if (cleanedSet.isNotEmpty()) {
-                        editorSP.putStringSet(key, cleanedSet)
-                    }
-                }
-                editorSP.commit() // 디스크에 강제 커밋하여 안드로이드 메모리 캐시를 초기화
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-        
         val view = getLayout("bottom_sheet_layout", inflater, container)
 
         val addlinks: ImageView = try { view.findView("addlinks") } catch (e: Throwable) { throw Exception("addlinks ImageView not found", e) }
