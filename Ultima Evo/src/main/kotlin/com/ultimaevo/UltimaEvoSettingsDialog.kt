@@ -1155,6 +1155,11 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 val jsonStr = UltimaEvoPlugin.gson.toJson(activeCatsForGson)
                 editor.putString("evo_active_cats_json_$instanceId", jsonStr)
                 editor.commit()
+                
+                // 🚨 [순정 백업 연동] 설정이 저장될 때 즉시 Cloudstream DataStore에 기생 업데이트
+                try {
+                    CloudStreamApp.setKey("native_backup_ultimaevo", prefsToJson(prefs).toString())
+                } catch (e: Exception) { e.printStackTrace() }
 
                 withContext(Dispatchers.Main) { 
                     APIHolder.allProviders.forEach { p -> if (p is UltimaEvoProvider) p.invalidateCache() }
@@ -1164,7 +1169,6 @@ class UltimaEvoSettingsDialog : BottomSheetDialogFragment() {
                 }
             }
         }
-
         cancelBtn.setOnClickListener { dialog.dismiss() }
         dialog.show()
     }
