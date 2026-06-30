@@ -179,7 +179,6 @@ class SettingsBottomFragment(
 
     private fun getCineStreamDynamicKeys(): Set<String> {
         val keys = mutableSetOf<String>()
-        println("[CineData] Dynamic Scanner Started")
         
         try {
             val loader = getCineStreamClassLoader()
@@ -195,35 +194,26 @@ class SettingsBottomFragment(
                     }
                 }
             }
-        } catch (e: Exception) { 
-            println("[CineData] Reflection Error: ${e.message}")
-        }
+        } catch (e: Exception) { }
 
         try {
-            val seenProviders = CloudStreamApp.getKey<String>("seen_providers")
-            seenProviders?.split(",")?.forEach {
+            CloudStreamApp.getKey<String>("seen_providers")?.split(",")?.forEach {
                 if (it.isNotBlank()) keys.add(it.trim())
             }
-            val providerOrder = CloudStreamApp.getKey<String>("provider_order")
-            providerOrder?.split(",")?.forEach {
+            CloudStreamApp.getKey<String>("provider_order")?.split(",")?.forEach {
                 if (it.isNotBlank()) keys.add(it.trim())
             }
-        } catch (e: Exception) { 
-            println("[CineData] State Scanner Error: ${e.message}")
-        }
+        } catch (e: Exception) { }
 
         try {
-            val addons = CloudStreamApp.getKey<String>("stremio_addons")
-            addons?.lines()?.forEach { line ->
+            CloudStreamApp.getKey<String>("stremio_addons")?.lines()?.forEach { line ->
                 val name = line.split("|").firstOrNull()?.trim()
                 if (!name.isNullOrBlank()) {
                     val formatted = name.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')
                     keys.add("stremio_$formatted")
                 }
             }
-        } catch (e: Exception) { 
-            println("[CineData] Addon Scanner Error: ${e.message}")
-        }
+        } catch (e: Exception) { }
 
         val hardcoded = listOf(
             "ScrapeConcurrency", "DownloadEnable", "ProviderCineStream", "ProviderSimkl", 
@@ -455,8 +445,6 @@ class SettingsBottomFragment(
             val isStreamPlayExportActive = try { view.findView<Switch>("switchStreamPlay").isChecked } catch (_: Throwable) { false }
             val isCineStreamExportActive = try { view.findView<Switch>("switchCineStream").isChecked } catch (_: Throwable) { false }
 
-            println("[CineData] EXPORT TRIGGERED. CineStream Active: $isCineStreamExportActive")
-
             viewLifecycleOwner.lifecycleScope.launch {
                 try {
                     val backupStr = withContext(Dispatchers.IO) {
@@ -473,35 +461,41 @@ class SettingsBottomFragment(
                             json.put("stream_play_data", prefsToJson(streamPlayPrefs))
                         }
 
-                        // 3. CineStream 데이터 인코딩 (타입 오염 방지를 위한 정밀 추출)
+                        // 3. CineStream 데이터 인코딩
                         json.put("cine_stream_enabled", isCineStreamExportActive)
                         if (isCineStreamExportActive) {
                             val cineStreamJson = JSONObject()
                             val dynamicKeys = getCineStreamDynamicKeys()
                             
                             dynamicKeys.forEach { cKey ->
-                                try {
-                                    // 🚨 타입 보존 로직: DataStore에서 각 키의 명확한 타입으로 핀포인트 추출
-                                    when {
-                                        cKey == "ScrapeConcurrency" -> {
-                                            val intVal = CloudStreamApp.getKey<Int>(cKey)
-                                            if (intVal != null) cineStreamJson.put(cKey, intVal)
-                                        }
-                                        cKey in listOf("showbox_ui_token", "wyzie_subs_api_key", "gramcinema_bearer_token", "stremio_addons", "seen_providers", "provider_order") -> {
-                                            val strVal = CloudStreamApp.getKey<String>(cKey)
-                                            if (strVal != null) cineStreamJson.put(cKey, strVal)
-                                        }
-                                        else -> {
-                                            // 나머지 모든 동적 키(p_*, stremio_*, Provider*, DownloadEnable 등)는 Boolean 임
-                                            val boolVal = CloudStreamApp.getKey<Boolean>(cKey)
-                                            if (boolVal != null) cineStreamJson.put(cKey, boolVal)
-                                        }
+                                var found = false
+                                try { 
+                                    val strVal = CloudStreamApp.getKey<String>(cKey)
+                                    if (strVal != null) {
+                                        cineStreamJson.put(cKey, strVal)
+                                        found = true
                                     }
-                                } catch (e: Throwable) {
-                                    println("[CineData] EXPORT - Error reading key: $cKey => ${e.message}")
+                                } catch (_: Throwable) {}
+                                
+                                if (!found) {
+                                    try {
+                                        val boolVal = CloudStreamApp.getKey<Boolean>(cKey)
+                                        if (boolVal != null) {
+                                            cineStreamJson.put(cKey, boolVal)
+                                            found = true
+                                        }
+                                    } catch (_: Throwable) {}
+                                }
+                                
+                                if (!found) {
+                                    try {
+                                        val intVal = CloudStreamApp.getKey<Int>(cKey)
+                                        if (intVal != null) {
+                                            cineStreamJson.put(cKey, intVal)
+                                        }
+                                    } catch (_: Throwable) {}
                                 }
                             }
-                            println("[CineData] EXPORT - Final CineStream JSON: ${cineStreamJson.toString()}")
                             json.put("cine_stream_data", cineStreamJson)
                         }
 
@@ -529,7 +523,7 @@ class SettingsBottomFragment(
                         })
                         val descBuilder = StringBuilder("StremioC settings copied successfully.")
                         if (isStreamPlayExportActive) descBuilder.append("\n+ StreamPlay settings included.")
-                        if (isCineStreamExportActive) descBuilder.append("\n+ CineStream settings included (via Smart Scanner).")
+                        if (isCineStreamExportActive) descBuilder.append("\n+ CineStream settings included.")
                         descBuilder.append("\n\nPlease paste it somewhere safe (e.g., Notes).")
 
                         addView(TextView(ctx).apply {
@@ -587,7 +581,6 @@ class SettingsBottomFragment(
                     if (parsedJson.length() == 0) throw Exception("Empty JSON Data")
 
                     val pluginName = parsedJson.optString("plugin_name")
-                    println("[CineData] IMPORT TRIGGERED. Parsed Plugin Name: $pluginName")
                     if (pluginName != "StremioC_Bundle" && pluginName != "StremioC") {
                         throw Exception("Plugin mismatch")
                     }
@@ -627,7 +620,7 @@ class SettingsBottomFragment(
                             msgBuilder.append("\nDetected packages:")
                             msgBuilder.append("\n• StremioC: Ready")
                             if (isSPAvailable) msgBuilder.append("\n• StreamPlay: Ready")
-                            if (isCSAvailable) msgBuilder.append("\n• CineStream: Ready (Will restore directly via DataStore)")
+                            if (isCSAvailable) msgBuilder.append("\n• CineStream: Ready")
                         }
                         msgBuilder.append("\n\nAre you sure you want to proceed?")
 
@@ -653,13 +646,14 @@ class SettingsBottomFragment(
                         val editor = sharedPref.edit()
                         
                         if (pluginName == "StremioC_Bundle") {
-                            // 1. StremioC 설정 복원
+                            // 1. StremioC 설정 복원 (기존 설정 완전 초기화하여 빈 값 적용 보장)
                             val stremioCData = parsedJson.optJSONObject("stremio_c_data")
                             if (stremioCData != null) {
+                                editor.clear()
                                 jsonToPrefs(stremioCData, editor)
                             }
 
-                            // 2. StreamPlay 조건부 복구 (XML 기록)
+                            // 2. StreamPlay 조건부 복구
                             val isStreamPlayInBackup = parsedJson.optBoolean("stream_play_enabled", false)
                             val isStreamPlayEnabledInConfig = stremioCData?.optBoolean(SettingsRepository.PREF_KEY_STREAMPLAY_ENABLED, false) ?: false
                             if (parsedJson.has("stream_play_data") && (isStreamPlayInBackup || isStreamPlayEnabledInConfig)) {
@@ -667,51 +661,73 @@ class SettingsBottomFragment(
                                 if (streamPlayData != null) {
                                     val streamPlayPrefs = ctx.getSharedPreferences("StreamPlay", Context.MODE_PRIVATE)
                                     val editorSP = streamPlayPrefs.edit()
+                                    editorSP.clear() // 빈 값 복원을 위한 완전 초기화
                                     jsonToPrefs(streamPlayData, editorSP)
                                     editorSP.commit()
                                 }
                             }
 
-                            // 3. CineStream 조건부 복구 (DataStore 강제 주입)
+                            // 3. CineStream 조건부 복구 (DataStore 강제 주입 및 빈 값 삭제)
                             val isCineStreamInBackup = parsedJson.optBoolean("cine_stream_enabled", false)
                             val isCineStreamEnabledInConfig = stremioCData?.optBoolean(SettingsRepository.PREF_KEY_CINESTREAM_ENABLED, false) ?: false
-                            val hasCineStreamData = parsedJson.has("cine_stream_data")
-                            
-                            println("[CineData] IMPORT - Backup has cine_stream_data: $hasCineStreamData, isCineStreamInBackup: $isCineStreamInBackup, isCineStreamEnabledInConfig: $isCineStreamEnabledInConfig")
-
-                            if (hasCineStreamData && (isCineStreamInBackup || isCineStreamEnabledInConfig)) {
+                            if (parsedJson.has("cine_stream_data") && (isCineStreamInBackup || isCineStreamEnabledInConfig)) {
                                 val cineStreamData = parsedJson.optJSONObject("cine_stream_data")
-                                println("[CineData] IMPORT - Restoring CineStream Data: ${cineStreamData?.toString()}")
                                 if (cineStreamData != null) {
-                                    val csKeys = cineStreamData.keys()
-                                    while (csKeys.hasNext()) {
-                                        val cKey = csKeys.next()
-                                        val cValue = cineStreamData.get(cKey)
-                                        println("[CineData] IMPORT - Restoring Key: $cKey => Value: $cValue (Type: ${cValue?.javaClass?.simpleName})")
-                                        try {
-                                            when (cValue) {
-                                                is Boolean -> CloudStreamApp.setKey(cKey, cValue)
-                                                is String -> CloudStreamApp.setKey(cKey, cValue)
-                                                is Int -> CloudStreamApp.setKey(cKey, cValue)
-                                            }
-                                            println("[CineData] IMPORT - Successfully Restored Key: $cKey")
-                                        } catch (e: Throwable) {
-                                            println("[CineData] IMPORT - Error Restoring Key: $cKey => ${e.message}")
+                                    val dynamicKeys = getCineStreamDynamicKeys()
+                                    dynamicKeys.forEach { cKey ->
+                                        if (cineStreamData.has(cKey)) {
+                                            val cValue = cineStreamData.get(cKey)
+                                            try {
+                                                when (cValue) {
+                                                    is Boolean -> CloudStreamApp.setKey(cKey, cValue)
+                                                    is String -> CloudStreamApp.setKey(cKey, cValue)
+                                                    is Int -> CloudStreamApp.setKey(cKey, cValue)
+                                                }
+                                            } catch (_: Throwable) {}
+                                        } else {
+                                            // 백업본에 없는 키는 빈 값(Null) 처리하여 DataStore에서 강제 삭제
+                                            try { CloudStreamApp.setKey(cKey, null as String?) } catch (_: Throwable) {}
                                         }
                                     }
                                 }
                             }
                         } else {
+                            editor.clear()
                             jsonToPrefs(parsedJson, editor)
                         }
                         
                         editor.commit()
-                        dlg.dismiss()
                         
-                        // 🚨 DataStore 비동기 쓰기가 디스크에 반영될 수 있도록 앱 종료 전 1.5초 대기
+                        // 팝업 테마가 적용된 로딩 다이얼로그 표시
+                        val loadingContainer = LinearLayout(ctx).apply {
+                            orientation = LinearLayout.VERTICAL
+                            setPadding(40, 40, 40, 40)
+                            background = getDarkThemeBg()
+                            addView(TextView(ctx).apply {
+                                text = "Restoring Data"
+                                textSize = 18f
+                                setTextColor(Color.WHITE)
+                                typeface = android.graphics.Typeface.DEFAULT_BOLD
+                                setPadding(0, 0, 0, 20)
+                                gravity = android.view.Gravity.CENTER
+                            })
+                            addView(TextView(ctx).apply {
+                                text = "Please wait while settings are being applied...\nApp will restart automatically."
+                                setTextColor(Color.LTGRAY)
+                                textSize = 14f
+                                gravity = android.view.Gravity.CENTER
+                                setPadding(0, 0, 0, 10)
+                            })
+                        }
+                        val loadingDlg = AlertDialog.Builder(ctx).setView(loadingContainer).setCancelable(false).create()
+                        setupCustomDialog(loadingDlg, loadingContainer)
+                        loadingDlg.show()
+
                         viewLifecycleOwner.lifecycleScope.launch {
-                            Toast.makeText(ctx, "Restoring data... Please wait.", Toast.LENGTH_SHORT).show()
-                            delay(2000)
+                            // DataStore 비동기 쓰기가 디스크에 반영될 수 있도록 1.5초 대기
+                            delay(1500)
+                            loadingDlg.dismiss()
+                            dlg.dismiss()
                             dismiss()
                             restartApp()
                         }
@@ -815,6 +831,7 @@ class SettingsBottomFragment(
         }
 
         showlinks.setOnClickListener {
+            val ctx = requireContext()
             val inflater = LayoutInflater.from(ctx)
             val dialogView = getLayout("dialog_list_links", inflater, null) as LinearLayout
             
