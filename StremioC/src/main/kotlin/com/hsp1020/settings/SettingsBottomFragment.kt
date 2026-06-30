@@ -173,6 +173,7 @@ class SettingsBottomFragment(
         return key in staticKeys || key.startsWith("p_") || key.startsWith("stremio_")
     }
 
+    // ── SharedPreferences를 JSONObject로 변환 ──
     private fun prefsToJson(prefs: SharedPreferences, filterBlock: ((String) -> Boolean)? = null): JSONObject {
         val json = JSONObject()
         prefs.all.forEach { (key, value) ->
@@ -189,6 +190,7 @@ class SettingsBottomFragment(
         return json
     }
 
+    // ── JSONObject를 SharedPreferences에 복원 ──
     private fun jsonToPrefs(json: JSONObject, editor: SharedPreferences.Editor) {
         val keys = json.keys()
         while (keys.hasNext()) {
